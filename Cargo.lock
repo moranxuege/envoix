@@ -90,11 +90,14 @@ dependencies = [
 name = "envoix-transfer"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "envoix-crypto",
  "envoix-error",
+ "envoix-protocol",
  "envoix-storage",
  "envoix-transport",
  "envoix-types",
+ "tokio",
 ]
 
 [[package]]
