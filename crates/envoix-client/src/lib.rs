@@ -4,7 +4,9 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use envoix_error::CoreError;
-pub use envoix_session::{EventSink, NoopEventSink, TransferEvent, TransferSummary};
+pub use envoix_session::{
+    EventSink, NoopEventSink, TransferDirection, TransferEvent, TransferSummary,
+};
 use envoix_session::{SessionConfig, receive_file_ipv6, send_file_manual_ipv6};
 
 pub type PublicError = CoreError;

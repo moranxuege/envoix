@@ -12,6 +12,7 @@ pub use envoix_transfer::{
 };
 use envoix_transport::{TransportDialer, TransportListener};
 use envoix_transport_tcp::{TcpIpv6Dialer, TcpIpv6Listener};
+pub use envoix_types::TransferDirection;
 
 pub type SessionError = CoreError;
 
