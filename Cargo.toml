@@ -32,3 +32,4 @@ envoix-storage = { path = "crates/envoix-storage" }
 envoix-crypto = { path = "crates/envoix-crypto" }
 envoix-types = { path = "crates/envoix-types" }
 envoix-error = { path = "crates/envoix-error" }
+thiserror = "2"
