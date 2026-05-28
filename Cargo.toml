@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "apps/envoix-cli",
+    "crates/envoix-auth",
     "crates/envoix-client",
     "crates/envoix-session",
     "crates/envoix-transfer",
@@ -20,6 +21,7 @@ edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
+envoix-auth = { path = "crates/envoix-auth" }
 envoix-client = { path = "crates/envoix-client" }
 envoix-session = { path = "crates/envoix-session" }
 envoix-transfer = { path = "crates/envoix-transfer" }

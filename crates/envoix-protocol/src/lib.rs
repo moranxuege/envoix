@@ -14,6 +14,8 @@ pub type ProtocolError = CoreError;
 /// A single wire message exchanged between sender and receiver.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum Frame {
+    /// Carries pairing-authentication messages before transfer frames.
+    Auth(AuthFrame),
     /// Opens the protocol conversation and declares the peer role.
     Hello(Hello),
     /// Confirms that the receiver is ready for file metadata.
@@ -30,6 +32,46 @@ pub enum Frame {
     CompleteAck(CompleteAck),
     /// Carries a protocol-level error message.
     Error(ErrorFrame),
+}
+
+/// Authentication handshake frame exchanged before transfer metadata.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum AuthFrame {
+    /// First SPAKE2 message from the sender.
+    Spake2Start(Spake2Start),
+    /// SPAKE2 response message from the receiver.
+    Spake2Message(Spake2Message),
+    /// Role-separated confirmation proof for the derived key.
+    Spake2Confirm(Spake2Confirm),
+}
+
+/// Sender's initial SPAKE2 frame.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Spake2Start {
+    /// Auth protocol version expected by the sender.
+    pub protocol_version: u32,
+    /// Sender role bound into the authentication transcript.
+    pub role: PeerRole,
+    /// Sender-generated nonce.
+    pub nonce: Vec<u8>,
+    /// SPAKE2 outbound message bytes.
+    pub message: Vec<u8>,
+}
+
+/// Receiver's SPAKE2 response frame.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Spake2Message {
+    /// Receiver-generated nonce.
+    pub nonce: Vec<u8>,
+    /// SPAKE2 outbound message bytes.
+    pub message: Vec<u8>,
+}
+
+/// SPAKE2 key confirmation frame.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Spake2Confirm {
+    /// MAC proving possession of the SPAKE2 key for this transcript.
+    pub proof: Vec<u8>,
 }
 
 /// Initial handshake frame sent before file metadata.
@@ -177,6 +219,19 @@ mod tests {
     #[tokio::test]
     async fn resumable_v1_frames_round_trip() {
         let frames = [
+            Frame::Auth(AuthFrame::Spake2Start(Spake2Start {
+                protocol_version: PROTOCOL_VERSION,
+                role: PeerRole::Sender,
+                nonce: b"sender nonce".to_vec(),
+                message: b"sender spake2 message".to_vec(),
+            })),
+            Frame::Auth(AuthFrame::Spake2Message(Spake2Message {
+                nonce: b"receiver nonce".to_vec(),
+                message: b"receiver spake2 message".to_vec(),
+            })),
+            Frame::Auth(AuthFrame::Spake2Confirm(Spake2Confirm {
+                proof: b"confirmation proof".to_vec(),
+            })),
             Frame::ResumeStatus(ResumeStatus {
                 transfer_id: TransferId::new("transfer-1"),
                 next_chunk_index: 2,
