@@ -20,6 +20,8 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 
+const STREAM_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[derive(Clone, Debug, Default)]
 /// QUIC dialer that opens one bidirectional stream per transfer.
 pub struct QuicDialer;
@@ -141,7 +143,7 @@ impl FrameConnection for QuicFrameConnection {
         self.send
             .finish()
             .map_err(|error| CoreError::Transport(error.to_string()))?;
-        let _ = tokio::time::timeout(Duration::from_millis(250), self.send.stopped()).await;
+        let _ = tokio::time::timeout(STREAM_DRAIN_TIMEOUT, self.send.stopped()).await;
         Ok(())
     }
 }
