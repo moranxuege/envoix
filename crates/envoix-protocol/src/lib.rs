@@ -122,7 +122,7 @@ pub struct Chunk {
     pub index: u64,
     /// Plaintext byte offset for the first byte in `bytes`.
     pub offset: u64,
-    /// Chunk payload bytes after the configured crypto provider is applied.
+    /// Plaintext chunk payload bytes; transport encryption provided by QUIC
     pub bytes: Vec<u8>,
 }
 
