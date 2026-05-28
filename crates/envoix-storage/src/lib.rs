@@ -3,12 +3,25 @@
 use std::path::{Component, Path, PathBuf};
 
 use envoix_error::CoreError;
+use envoix_types::TransferId;
+use serde::{Deserialize, Serialize};
 use tokio::fs::{self, File, OpenOptions};
 
 pub type StorageError = CoreError;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LocalFileStorage;
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TransferResumeState {
+    pub transfer_id: TransferId,
+    pub file_name: String,
+    pub file_size: u64,
+    pub chunk_size: u64,
+    pub expected_file_hash: String,
+    pub bytes_received: u64,
+    pub next_chunk_index: u64,
+}
 
 impl LocalFileStorage {
     pub async fn open_source(path: &Path) -> Result<File, StorageError> {
@@ -37,6 +50,23 @@ impl LocalFileStorage {
         Ok((temp_path, file))
     }
 
+    pub async fn open_resumable_destination(
+        output_dir: &Path,
+        state: &TransferResumeState,
+    ) -> Result<(PathBuf, File), StorageError> {
+        validate_resume_state_name(state)?;
+        fs::create_dir_all(output_dir).await?;
+
+        let temp_path = resumable_temp_path(output_dir, &state.file_name, &state.transfer_id);
+        let file = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&temp_path)
+            .await?;
+
+        Ok((temp_path, file))
+    }
+
     pub async fn finalize_temp_file(
         temp_path: &Path,
         final_path: &Path,
@@ -51,11 +81,94 @@ impl LocalFileStorage {
         fs::rename(temp_path, final_path).await?;
         Ok(())
     }
+
+    pub async fn read_resume_state(
+        output_dir: &Path,
+        file_name: &str,
+        transfer_id: &TransferId,
+    ) -> Result<Option<TransferResumeState>, StorageError> {
+        validate_resume_path_parts(file_name, transfer_id)?;
+        let state_path = resumable_state_path(output_dir, file_name, transfer_id);
+
+        if !fs::try_exists(&state_path).await? {
+            return Ok(None);
+        }
+
+        let bytes = fs::read(&state_path).await?;
+        let state = serde_json::from_slice(&bytes)
+            .map_err(|error| CoreError::Storage(format!("invalid resume state: {error}")))?;
+        Ok(Some(state))
+    }
+
+    pub async fn write_resume_state(
+        output_dir: &Path,
+        state: &TransferResumeState,
+    ) -> Result<(), StorageError> {
+        validate_resume_state_name(state)?;
+        fs::create_dir_all(output_dir).await?;
+
+        let state_path = resumable_state_path(output_dir, &state.file_name, &state.transfer_id);
+        let bytes = serde_json::to_vec_pretty(state)
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        fs::write(state_path, bytes).await?;
+        Ok(())
+    }
+
+    pub async fn delete_resume_state(
+        output_dir: &Path,
+        file_name: &str,
+        transfer_id: &TransferId,
+    ) -> Result<(), StorageError> {
+        validate_resume_path_parts(file_name, transfer_id)?;
+        let state_path = resumable_state_path(output_dir, file_name, transfer_id);
+        if fs::try_exists(&state_path).await? {
+            fs::remove_file(state_path).await?;
+        }
+        Ok(())
+    }
+
+    pub fn resumable_temp_path(
+        output_dir: &Path,
+        file_name: &str,
+        transfer_id: &TransferId,
+    ) -> Result<PathBuf, StorageError> {
+        validate_resume_path_parts(file_name, transfer_id)?;
+        Ok(resumable_temp_path(output_dir, file_name, transfer_id))
+    }
 }
 
 fn is_plain_file_name(file_name: &str) -> bool {
     let mut components = Path::new(file_name).components();
     matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
+}
+
+fn validate_resume_state_name(state: &TransferResumeState) -> Result<(), StorageError> {
+    validate_resume_path_parts(&state.file_name, &state.transfer_id)
+}
+
+fn validate_resume_path_parts(
+    file_name: &str,
+    transfer_id: &TransferId,
+) -> Result<(), StorageError> {
+    if !is_plain_file_name(file_name) {
+        return Err(CoreError::Storage(format!(
+            "invalid output file name: {file_name}"
+        )));
+    }
+    if !is_plain_file_name(&transfer_id.0) {
+        return Err(CoreError::Storage(format!(
+            "invalid transfer id: {transfer_id}"
+        )));
+    }
+    Ok(())
+}
+
+fn resumable_temp_path(output_dir: &Path, file_name: &str, transfer_id: &TransferId) -> PathBuf {
+    output_dir.join(format!(".{file_name}.{transfer_id}.part"))
+}
+
+fn resumable_state_path(output_dir: &Path, file_name: &str, transfer_id: &TransferId) -> PathBuf {
+    output_dir.join(format!(".{file_name}.{transfer_id}.json"))
 }
 
 #[cfg(test)]
@@ -93,6 +206,87 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, CoreError::Storage(_)));
+    }
+
+    #[tokio::test]
+    async fn writes_reads_updates_and_deletes_resume_state() {
+        let dir = unique_test_dir();
+        let state = TransferResumeState {
+            transfer_id: TransferId::new("transfer-1"),
+            file_name: "hello.txt".into(),
+            file_size: 11,
+            chunk_size: 4,
+            expected_file_hash: "abc123".into(),
+            bytes_received: 4,
+            next_chunk_index: 1,
+        };
+
+        LocalFileStorage::write_resume_state(&dir, &state)
+            .await
+            .unwrap();
+        assert_eq!(
+            LocalFileStorage::read_resume_state(&dir, "hello.txt", &state.transfer_id)
+                .await
+                .unwrap(),
+            Some(state.clone())
+        );
+
+        let mut updated = state.clone();
+        updated.bytes_received = 8;
+        updated.next_chunk_index = 2;
+        LocalFileStorage::write_resume_state(&dir, &updated)
+            .await
+            .unwrap();
+        assert_eq!(
+            LocalFileStorage::read_resume_state(&dir, "hello.txt", &state.transfer_id)
+                .await
+                .unwrap(),
+            Some(updated.clone())
+        );
+
+        LocalFileStorage::delete_resume_state(&dir, "hello.txt", &state.transfer_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            LocalFileStorage::read_resume_state(&dir, "hello.txt", &state.transfer_id)
+                .await
+                .unwrap(),
+            None
+        );
+
+        fs::remove_dir_all(&dir).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn opens_deterministic_resume_temp_for_append() {
+        let dir = unique_test_dir();
+        let state = TransferResumeState {
+            transfer_id: TransferId::new("transfer-1"),
+            file_name: "hello.txt".into(),
+            file_size: 11,
+            chunk_size: 4,
+            expected_file_hash: "abc123".into(),
+            bytes_received: 0,
+            next_chunk_index: 0,
+        };
+
+        let (temp_path, mut file) = LocalFileStorage::open_resumable_destination(&dir, &state)
+            .await
+            .unwrap();
+        file.write_all(b"hello").await.unwrap();
+        drop(file);
+
+        let (second_temp_path, mut file) =
+            LocalFileStorage::open_resumable_destination(&dir, &state)
+                .await
+                .unwrap();
+        file.write_all(b" world").await.unwrap();
+        file.flush().await.unwrap();
+        drop(file);
+
+        assert_eq!(second_temp_path, temp_path);
+        assert_eq!(fs::read(temp_path).await.unwrap(), b"hello world");
+        fs::remove_dir_all(&dir).await.unwrap();
     }
 
     fn unique_test_dir() -> PathBuf {
