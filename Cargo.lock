@@ -343,6 +343,7 @@ dependencies = [
  "envoix-error",
  "envoix-transfer",
  "envoix-transport",
+ "envoix-transport-quic",
  "envoix-transport-tcp",
  "envoix-types",
 ]

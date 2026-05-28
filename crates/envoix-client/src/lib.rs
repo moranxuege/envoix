@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use envoix_error::CoreError;
 pub use envoix_session::{
-    EventSink, NoopEventSink, TransferDirection, TransferEvent, TransferSummary,
+    EventSink, NoopEventSink, TransferDirection, TransferEvent, TransferSummary, TransportProtocol,
 };
 use envoix_session::{SessionConfig, receive_file_ipv6, send_file_manual_ipv6};
 
@@ -14,12 +14,14 @@ pub type PublicError = CoreError;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ClientConfig {
     pub chunk_size: usize,
+    pub protocol: TransportProtocol,
 }
 
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
             chunk_size: envoix_session::DEFAULT_CHUNK_SIZE,
+            protocol: TransportProtocol::Quic,
         }
     }
 }
@@ -89,6 +91,7 @@ impl EnvoixClient {
     fn session_config(&self) -> SessionConfig {
         SessionConfig {
             chunk_size: self.config.chunk_size,
+            protocol: self.config.protocol,
         }
     }
 }
@@ -105,7 +108,10 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_zero_chunk_size() {
-        let client = EnvoixClient::new(ClientConfig { chunk_size: 0 });
+        let client = EnvoixClient::new(ClientConfig {
+            chunk_size: 0,
+            ..ClientConfig::default()
+        });
 
         let error = client
             .send_file(

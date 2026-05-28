@@ -1,13 +1,22 @@
 use std::fs;
 use std::io::Read;
-use std::net::TcpListener;
+use std::net::{TcpListener, UdpSocket};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[test]
-fn cli_transfers_file_over_ipv6_loopback() {
+fn cli_transfers_file_over_default_quic_loopback() {
+    run_cli_loopback(None, free_udp_loopback_addr());
+}
+
+#[test]
+fn cli_transfers_file_over_tcp_loopback() {
+    run_cli_loopback(Some("tcp"), free_tcp_loopback_addr());
+}
+
+fn run_cli_loopback(protocol: Option<&str>, listen_addr: std::net::SocketAddr) {
     let root = unique_test_dir();
     let source_dir = root.join("source");
     let output_dir = root.join("received");
@@ -17,13 +26,17 @@ fn cli_transfers_file_over_ipv6_loopback() {
     let source_text = b"hello from the cli";
     fs::write(&source_path, source_text).unwrap();
 
-    let listen_addr = free_ipv6_loopback_addr();
-    let mut receiver = Command::new(env!("CARGO_BIN_EXE_envoix"))
+    let mut receiver_command = Command::new(env!("CARGO_BIN_EXE_envoix"));
+    receiver_command
         .arg("receive")
         .arg("--listen")
         .arg(listen_addr.to_string())
         .arg("--output")
-        .arg(&output_dir)
+        .arg(&output_dir);
+    if let Some(protocol) = protocol {
+        receiver_command.arg("--protocol").arg(protocol);
+    }
+    let mut receiver = receiver_command
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -33,13 +46,15 @@ fn cli_transfers_file_over_ipv6_loopback() {
     // but this is not easy to solve.
     thread::sleep(Duration::from_millis(200));
 
-    let send_output = Command::new(env!("CARGO_BIN_EXE_envoix"))
+    let mut send_command = Command::new(env!("CARGO_BIN_EXE_envoix"));
+    send_command
         .arg("send")
         .arg("--peer")
-        .arg(listen_addr.to_string())
-        .arg(&source_path)
-        .output()
-        .unwrap();
+        .arg(listen_addr.to_string());
+    if let Some(protocol) = protocol {
+        send_command.arg("--protocol").arg(protocol);
+    }
+    let send_output = send_command.arg(&source_path).output().unwrap();
 
     if !send_output.status.success() {
         let _ = receiver.kill();
@@ -66,8 +81,13 @@ fn cli_transfers_file_over_ipv6_loopback() {
     fs::remove_dir_all(root).unwrap();
 }
 
-fn free_ipv6_loopback_addr() -> std::net::SocketAddr {
-    let listener = TcpListener::bind("[::1]:0").unwrap();
+fn free_tcp_loopback_addr() -> std::net::SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap()
+}
+
+fn free_udp_loopback_addr() -> std::net::SocketAddr {
+    let listener = UdpSocket::bind("127.0.0.1:0").unwrap();
     listener.local_addr().unwrap()
 }
 

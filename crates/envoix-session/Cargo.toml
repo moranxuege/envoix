@@ -10,5 +10,6 @@ envoix-discovery.workspace = true
 envoix-error.workspace = true
 envoix-transfer.workspace = true
 envoix-transport.workspace = true
+envoix-transport-quic.workspace = true
 envoix-transport-tcp.workspace = true
 envoix-types.workspace = true
