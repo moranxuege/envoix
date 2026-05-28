@@ -50,16 +50,6 @@ pub async fn send_file_manual(
     Ok(summary)
 }
 
-/// Receives one file on a manually supplied listen address.
-pub async fn receive_file(
-    listen_addr: SocketAddr,
-    output_dir: PathBuf,
-    config: SessionConfig,
-    events: Box<dyn EventSink>,
-) -> Result<TransferSummary, SessionError> {
-    receive_file_with_bound_addr(listen_addr, output_dir, config, events, |_| {}).await
-}
-
 /// Receives one file and reports the concrete bound address before accepting.
 pub async fn receive_file_with_bound_addr<F>(
     listen_addr: SocketAddr,

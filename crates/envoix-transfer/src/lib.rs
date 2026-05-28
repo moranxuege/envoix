@@ -587,7 +587,7 @@ fn next_chunk_index(bytes_received: u64, chunk_size: u64) -> u64 {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::sync::mpsc;
 
@@ -915,12 +915,15 @@ mod tests {
     }
 
     fn unique_test_dir() -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
+        let counter = COUNTER.fetch_add(1, Ordering::SeqCst);
         std::env::temp_dir().join(format!(
-            "envoix-transfer-test-{}-{nanos}",
+            "envoix-transfer-test-{}-{nanos}-{counter}",
             std::process::id()
         ))
     }

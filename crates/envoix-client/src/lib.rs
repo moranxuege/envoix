@@ -8,7 +8,7 @@ use envoix_error::CoreError;
 pub use envoix_session::{
     EventSink, NoopEventSink, TransferDirection, TransferEvent, TransferSummary,
 };
-use envoix_session::{SessionConfig, receive_file, receive_file_with_bound_addr, send_file_manual};
+use envoix_session::{SessionConfig, receive_file_with_bound_addr, send_file_manual};
 
 /// Error type exposed by the public client facade.
 pub type PublicError = CoreError;
@@ -72,22 +72,6 @@ impl EnvoixClient {
         send_file_manual(
             request.peer_addr,
             request.file_path,
-            self.session_config(),
-            events,
-        )
-        .await
-    }
-
-    /// Receives one file according to `request`.
-    pub async fn receive_file(
-        &self,
-        request: ReceiveFileRequest,
-        events: Box<dyn EventSink>,
-    ) -> Result<TransferSummary, PublicError> {
-        self.validate_config()?;
-        receive_file(
-            request.listen_addr,
-            request.output_dir,
             self.session_config(),
             events,
         )
