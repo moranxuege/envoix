@@ -7,27 +7,39 @@ use envoix_types::TransferId;
 use serde::{Deserialize, Serialize};
 use tokio::fs::{self, File, OpenOptions};
 
+/// Error type returned by local storage operations.
 pub type StorageError = CoreError;
 
+/// Filesystem-backed storage used by the current transfer engine.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LocalFileStorage;
 
+/// Durable receiver-side state used to resume an interrupted transfer.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TransferResumeState {
+    /// Transfer identifier derived from the expected file hash.
     pub transfer_id: TransferId,
+    /// Plain destination file name, without path components.
     pub file_name: String,
+    /// Expected final file length in bytes.
     pub file_size: u64,
+    /// Chunk size declared by the sender for this transfer.
     pub chunk_size: u64,
+    /// Expected BLAKE3 hash of the complete plaintext file, hex-encoded.
     pub expected_file_hash: String,
+    /// Number of plaintext bytes already persisted in the temp file.
     pub bytes_received: u64,
+    /// Next sequential chunk index expected from the sender.
     pub next_chunk_index: u64,
 }
 
 impl LocalFileStorage {
+    /// Opens a source file for reading.
     pub async fn open_source(path: &Path) -> Result<File, StorageError> {
         File::open(path).await.map_err(CoreError::from)
     }
 
+    /// Creates a non-resumable temp destination for a new file.
     pub async fn create_temp_destination(
         output_dir: &Path,
         file_name: &str,
@@ -50,6 +62,7 @@ impl LocalFileStorage {
         Ok((temp_path, file))
     }
 
+    /// Opens the deterministic resumable temp file in append mode.
     pub async fn open_resumable_destination(
         output_dir: &Path,
         state: &TransferResumeState,
@@ -67,6 +80,7 @@ impl LocalFileStorage {
         Ok((temp_path, file))
     }
 
+    /// Renames a verified temp file to its final destination.
     pub async fn finalize_temp_file(
         temp_path: &Path,
         final_path: &Path,
@@ -82,6 +96,7 @@ impl LocalFileStorage {
         Ok(())
     }
 
+    /// Reads the JSON sidecar state for a resumable transfer, if present.
     pub async fn read_resume_state(
         output_dir: &Path,
         file_name: &str,
@@ -100,6 +115,7 @@ impl LocalFileStorage {
         Ok(Some(state))
     }
 
+    /// Writes or replaces the JSON sidecar state for a resumable transfer.
     pub async fn write_resume_state(
         output_dir: &Path,
         state: &TransferResumeState,
@@ -114,6 +130,7 @@ impl LocalFileStorage {
         Ok(())
     }
 
+    /// Deletes the JSON sidecar state after a transfer is finalized.
     pub async fn delete_resume_state(
         output_dir: &Path,
         file_name: &str,
@@ -127,6 +144,7 @@ impl LocalFileStorage {
         Ok(())
     }
 
+    /// Returns the deterministic temp path for a resumable transfer.
     pub fn resumable_temp_path(
         output_dir: &Path,
         file_name: &str,

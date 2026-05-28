@@ -5,71 +5,109 @@ use envoix_types::{PeerRole, TransferId};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+/// Maximum encoded frame payload accepted by the length-prefixed codec.
 pub const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
 
+/// Error type returned by protocol encoding and decoding.
 pub type ProtocolError = CoreError;
 
+/// A single wire message exchanged between sender and receiver.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum Frame {
+    /// Opens the protocol conversation and declares the peer role.
     Hello(Hello),
+    /// Confirms that the receiver is ready for file metadata.
     Ready(Ready),
+    /// Describes the file and its expected whole-file hash.
     FileHeader(FileHeader),
+    /// Tells the sender where this receiver can resume from.
     ResumeStatus(ResumeStatus),
+    /// Carries one sequential data chunk.
     Chunk(Chunk),
+    /// Marks the sender's end of data for a transfer.
     Complete(Complete),
+    /// Confirms that the receiver verified and finalized the file.
     CompleteAck(CompleteAck),
+    /// Carries a protocol-level error message.
     Error(ErrorFrame),
 }
 
+/// Initial handshake frame sent before file metadata.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Hello {
+    /// Wire protocol version expected by the sender.
     pub protocol_version: u32,
+    /// Peer role for this connection.
     pub role: PeerRole,
 }
 
+/// Receiver readiness marker sent after a valid sender `Hello`.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Ready;
 
+/// File metadata sent before chunks.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FileHeader {
+    /// Transfer identifier used by chunks, resume state, and completion frames.
     pub transfer_id: TransferId,
+    /// Plain destination file name, without path components.
     pub file_name: String,
+    /// Expected file length in bytes.
     pub file_size: u64,
+    /// Sender chunk size in bytes.
     pub chunk_size: u64,
+    /// Expected BLAKE3 hash of the complete plaintext file, hex-encoded.
     pub file_hash: String,
 }
 
+/// Receiver resume position for a transfer.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ResumeStatus {
+    /// Transfer this status applies to.
     pub transfer_id: TransferId,
+    /// Next sequential chunk index the sender should transmit.
     pub next_chunk_index: u64,
+    /// Number of plaintext bytes already stored by the receiver.
     pub bytes_received: u64,
 }
 
+/// Sequential file data frame.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Chunk {
+    /// Transfer this chunk belongs to.
     pub transfer_id: TransferId,
+    /// Zero-based sequential chunk index.
     pub index: u64,
+    /// Plaintext byte offset for the first byte in `bytes`.
     pub offset: u64,
+    /// Chunk payload bytes after the configured crypto provider is applied.
     pub bytes: Vec<u8>,
 }
 
+/// Sender completion marker.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Complete {
+    /// Transfer being completed.
     pub transfer_id: TransferId,
+    /// BLAKE3 hash the sender expects the receiver to verify.
     pub file_hash: String,
 }
 
+/// Receiver acknowledgement sent only after verified finalization.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CompleteAck {
+    /// Transfer that was verified and finalized.
     pub transfer_id: TransferId,
 }
 
+/// Protocol error frame for failures that can be represented on the wire.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ErrorFrame {
+    /// Human-readable error description.
     pub message: String,
 }
 
+/// Reads one length-prefixed JSON frame from `reader`.
 pub async fn read_frame<R>(reader: &mut R) -> Result<Frame, ProtocolError>
 where
     R: AsyncRead + Unpin,
@@ -90,6 +128,7 @@ where
     serde_json::from_slice(&payload).map_err(|error| CoreError::Protocol(error.to_string()))
 }
 
+/// Writes one length-prefixed JSON frame to `writer`.
 pub async fn write_frame<W>(writer: &mut W, frame: &Frame) -> Result<(), ProtocolError>
 where
     W: AsyncWrite + Unpin,

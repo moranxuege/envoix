@@ -14,17 +14,24 @@ use envoix_transport_quic::{QuicDialer, QuicListener};
 use envoix_transport_tcp::{TcpIpv6Dialer, TcpIpv6Listener};
 pub use envoix_types::TransferDirection;
 
+/// Error type returned by session orchestration.
 pub type SessionError = CoreError;
 
+/// Runtime options used when wiring transports into the transfer engine.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SessionConfig {
+    /// Maximum chunk payload size sent by the transfer engine.
     pub chunk_size: usize,
+    /// Transport used for the peer connection.
     pub protocol: TransportProtocol,
 }
 
+/// Transport selected for a send or receive session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransportProtocol {
+    /// QUIC over UDP. This is the default for new sessions.
     Quic,
+    /// Plain TCP fallback.
     Tcp,
 }
 
@@ -37,6 +44,7 @@ impl Default for SessionConfig {
     }
 }
 
+/// Sends one file to a manually supplied peer address.
 pub async fn send_file_manual_ipv6(
     peer_addr: SocketAddr,
     file_path: PathBuf,
@@ -64,6 +72,7 @@ pub async fn send_file_manual_ipv6(
         .await
 }
 
+/// Receives one file on a manually supplied listen address.
 pub async fn receive_file_ipv6(
     listen_addr: SocketAddr,
     output_dir: PathBuf,

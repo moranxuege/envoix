@@ -20,6 +20,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, Serve
 use rustls::{DigitallySignedStruct, SignatureScheme};
 
 #[derive(Clone, Debug, Default)]
+/// QUIC dialer that opens one bidirectional stream per transfer.
 pub struct QuicDialer;
 
 #[async_trait]
@@ -63,17 +64,20 @@ impl TransportDialer for QuicDialer {
 }
 
 #[derive(Debug)]
+/// QUIC listener that accepts one bidirectional stream per connection.
 pub struct QuicListener {
     endpoint: Endpoint,
 }
 
 impl QuicListener {
+    /// Binds a QUIC endpoint to `addr` using the insecure no-auth skeleton config.
     pub fn bind(addr: SocketAddr) -> Result<Self, TransportError> {
         let endpoint = Endpoint::server(insecure_no_auth_server_config()?, addr)
             .map_err(|error| CoreError::Transport(error.to_string()))?;
         Ok(Self { endpoint })
     }
 
+    /// Returns the operating system assigned local address.
     pub fn local_addr(&self) -> Result<SocketAddr, TransportError> {
         self.endpoint
             .local_addr()

@@ -12,6 +12,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 
 #[derive(Clone, Copy, Debug, Default)]
+/// TCP dialer for direct peer connections.
 pub struct TcpIpv6Dialer;
 
 #[async_trait]
@@ -31,16 +32,19 @@ impl TransportDialer for TcpIpv6Dialer {
 }
 
 #[derive(Debug)]
+/// TCP listener for accepting one direct peer connection.
 pub struct TcpIpv6Listener {
     listener: TcpListener,
 }
 
 impl TcpIpv6Listener {
+    /// Binds a TCP listener to `addr`.
     pub async fn bind(addr: SocketAddr) -> Result<Self, TransportError> {
         let listener = TcpListener::bind(addr).await?;
         Ok(Self { listener })
     }
 
+    /// Returns the operating system assigned local address.
     pub fn local_addr(&self) -> Result<SocketAddr, TransportError> {
         self.listener.local_addr().map_err(CoreError::from)
     }

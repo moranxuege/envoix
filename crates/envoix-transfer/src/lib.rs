@@ -14,14 +14,19 @@ use envoix_types::{PROTOCOL_VERSION, PeerRole, TransferDirection, TransferId};
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
+/// Default sequential chunk size used by clients that do not override it.
 pub const DEFAULT_CHUNK_SIZE: usize = 64 * 1024;
 
+/// Error type returned by the transfer state machine.
 pub type TransferError = CoreError;
 
+/// Observer for transfer lifecycle and progress events.
 pub trait EventSink: Send + Sync {
+    /// Handles one transfer event.
     fn on_event(&self, event: TransferEvent);
 }
 
+/// Event sink that ignores all transfer events.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoopEventSink;
 
@@ -29,32 +34,50 @@ impl EventSink for NoopEventSink {
     fn on_event(&self, _event: TransferEvent) {}
 }
 
+/// User-visible transfer lifecycle event.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TransferEvent {
+    /// A send or receive operation has started.
     Started {
+        /// Transfer identifier for correlating events.
         transfer_id: TransferId,
+        /// Direction of this local operation.
         direction: TransferDirection,
+        /// File name being transferred.
         file_name: String,
+        /// Total expected plaintext bytes.
         total_bytes: u64,
     },
+    /// More plaintext bytes have been sent or persisted.
     Progress {
+        /// Transfer identifier for correlating events.
         transfer_id: TransferId,
+        /// Plaintext bytes transferred so far.
         bytes_transferred: u64,
+        /// Total expected plaintext bytes.
         total_bytes: u64,
     },
+    /// Transfer completed and, on receive, the file was finalized.
     Completed {
+        /// Transfer identifier for correlating events.
         transfer_id: TransferId,
+        /// Final plaintext byte count.
         bytes_transferred: u64,
     },
 }
 
+/// Summary returned after a successful send or receive operation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TransferSummary {
+    /// Transfer identifier for the completed transfer.
     pub transfer_id: TransferId,
+    /// File name used for the transfer.
     pub file_name: String,
+    /// Plaintext bytes transferred.
     pub bytes_transferred: u64,
 }
 
+/// Sequential single-file transfer engine.
 #[derive(Clone, Debug)]
 pub struct TransferEngine<C> {
     crypto: C,
@@ -65,10 +88,12 @@ impl<C> TransferEngine<C>
 where
     C: CryptoProvider,
 {
+    /// Creates a transfer engine using `crypto` and a fixed chunk size.
     pub fn new(crypto: C, chunk_size: usize) -> Self {
         Self { crypto, chunk_size }
     }
 
+    /// Sends one file over an established frame connection.
     pub async fn send_file(
         &self,
         connection: &mut dyn FrameConnection,
@@ -205,6 +230,7 @@ where
         })
     }
 
+    /// Receives one file over an established frame connection.
     pub async fn receive_file(
         &self,
         connection: &mut dyn FrameConnection,

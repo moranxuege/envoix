@@ -9,11 +9,15 @@ pub use envoix_session::{
 };
 use envoix_session::{SessionConfig, receive_file_ipv6, send_file_manual_ipv6};
 
+/// Error type exposed by the public client facade.
 pub type PublicError = CoreError;
 
+/// Public client configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ClientConfig {
+    /// Maximum chunk payload size used for transfers.
     pub chunk_size: usize,
+    /// Transport used for send and receive requests.
     pub protocol: TransportProtocol,
 }
 
@@ -26,28 +30,37 @@ impl Default for ClientConfig {
     }
 }
 
+/// Request to send one local file to a peer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SendFileRequest {
+    /// Peer socket address to connect to.
     pub peer_addr: SocketAddr,
+    /// Local file path to send.
     pub file_path: PathBuf,
 }
 
+/// Request to receive one file into a local directory.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReceiveFileRequest {
+    /// Local socket address to listen on.
     pub listen_addr: SocketAddr,
+    /// Directory where the received file and resume state are stored.
     pub output_dir: PathBuf,
 }
 
+/// Public facade for sending and receiving files.
 #[derive(Clone, Debug)]
 pub struct EnvoixClient {
     config: ClientConfig,
 }
 
 impl EnvoixClient {
+    /// Creates a client with explicit configuration.
     pub fn new(config: ClientConfig) -> Self {
         Self { config }
     }
 
+    /// Sends one file according to `request`.
     pub async fn send_file(
         &self,
         request: SendFileRequest,
@@ -63,6 +76,7 @@ impl EnvoixClient {
         .await
     }
 
+    /// Receives one file according to `request`.
     pub async fn receive_file(
         &self,
         request: ReceiveFileRequest,
