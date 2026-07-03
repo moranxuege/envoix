@@ -32,7 +32,9 @@ use envoix_session::{
     send_file_via_room_with_cancel,
 };
 
-use crate::{IdentityConfig, PairingConfig, PeerDescriptor, PublicError};
+use envoix_auth::PairingConfig;
+
+use crate::{IdentityConfig, PeerDescriptor, PublicError};
 use transfer::{EventSender, SessionEventAdapter};
 
 /// Placeholder pairing for room transfers: the room flow derives the real
@@ -375,6 +377,22 @@ mod tests {
                 .unwrap_err();
             assert!(matches!(error, PublicError::InvalidInput(_)));
         }
+    }
+
+    #[test]
+    fn send_rejects_invalid_chunk_size() {
+        let mut client = Client::new();
+        client.chunk_size = 0;
+        let error = client
+            .send(
+                "f.txt".into(),
+                PeerSource::Mdns {
+                    token: Some("abcdefghijkl".into()),
+                },
+                TransferOptions::default(),
+            )
+            .unwrap_err();
+        assert!(matches!(error, PublicError::InvalidInput(_)));
     }
 
     #[test]
