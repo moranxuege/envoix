@@ -14,6 +14,7 @@ mod options;
 mod source;
 mod transfer;
 
+pub use envoix_types::DataPath;
 pub use event::TransferEvent;
 pub use options::{PathPolicy, TransferOptions};
 pub use source::PeerSource;

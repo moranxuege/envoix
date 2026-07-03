@@ -15,6 +15,36 @@ pub fn is_valid_shared_token(token: &str) -> bool {
     token.is_ascii() && token.len() >= MIN_SHARED_TOKEN_LEN
 }
 
+/// The network path a transfer's connection is currently using.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum DataPath {
+    /// A direct (possibly hole-punched) UDP path to the peer.
+    Direct {
+        /// The peer's remote socket address.
+        addr: std::net::SocketAddr,
+    },
+    /// Forwarded through a relay server.
+    Relay {
+        /// The relay's URL.
+        url: String,
+    },
+    /// A transport this build cannot classify.
+    Other {
+        /// Debug description of the transport address.
+        description: String,
+    },
+}
+
+impl fmt::Display for DataPath {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Direct { addr } => write!(formatter, "direct ({addr})"),
+            Self::Relay { url } => write!(formatter, "relay ({url})"),
+            Self::Other { description } => formatter.write_str(description),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Hash, Serialize)]
 pub struct TransferId(pub String);
 

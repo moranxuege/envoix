@@ -6,6 +6,7 @@ mod identity;
 mod room;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 pub use envoix_auth::{PairingConfig, authenticate_receiver, authenticate_sender};
@@ -140,6 +141,8 @@ pub async fn send_file_manual_with_cancel(
     let local_endpoint =
         build_dial_endpoint(&config.identity, &config.data_relay(), config.relay_only).await?;
     let mut connection = dial(local_endpoint.clone(), &peer).await?;
+    let events: Arc<dyn EventSink> = Arc::from(events);
+    connection.watch_path(events.clone());
     let engine = TransferEngine::new(config.chunk_size);
 
     if let Err(error) = authenticate_sender(&mut connection, &config.pairing).await {
@@ -193,6 +196,8 @@ pub async fn send_file_to_endpoint_addr_with_cancel(
             return Err(error);
         }
     };
+    let events: Arc<dyn EventSink> = Arc::from(events);
+    connection.watch_path(events.clone());
     let engine = TransferEngine::new(config.chunk_size);
     if let Err(error) = authenticate_sender(&mut connection, &config.pairing).await {
         let _ = connection.close().await;
@@ -226,6 +231,7 @@ pub async fn send_file_enable_mdns_with_cancel(
     events: Box<dyn EventSink>,
     cancel: TransferCancelToken,
 ) -> Result<TransferSummary, SessionError> {
+    let events: Arc<dyn EventSink> = Arc::from(events);
     let local_endpoint =
         build_dial_endpoint(&config.identity, &config.data_relay(), config.relay_only).await?;
     let mdns = MdnsAddressLookup::builder()
@@ -284,7 +290,7 @@ pub async fn send_file_enable_mdns_with_cancel(
             file_path.clone(),
             resume,
             config.clone(),
-            events.as_ref(),
+            events.clone(),
             &cancel,
         )
         .await
@@ -389,6 +395,8 @@ pub async fn receive_one_authenticated_with_cancel(
             return Err(error);
         }
     };
+    let events: Arc<dyn EventSink> = Arc::from(events);
+    connection.watch_path(events.clone());
     let engine = TransferEngine::new(config.chunk_size);
 
     if let Err(error) = authenticate_receiver(&mut connection, &config.pairing).await {
@@ -431,6 +439,8 @@ pub async fn receive_with_auth_retries_with_cancel(
                 return Err(error);
             }
         };
+    let events: Arc<dyn EventSink> = Arc::from(events);
+    connection.watch_path(events.clone());
     let engine = TransferEngine::new(config.chunk_size);
     let result = engine
         .receive_file_with_cancel(&mut connection, output_dir, events.as_ref(), &cancel)
@@ -513,17 +523,18 @@ async fn send_file_to_peer_addr(
     file_path: PathBuf,
     resume: bool,
     config: SessionConfig,
-    events: &dyn EventSink,
+    events: Arc<dyn EventSink>,
     cancel: &TransferCancelToken,
 ) -> Result<TransferSummary, SessionError> {
     let mut connection = dial_peer_addr(local_endpoint, peer_addr).await?;
+    connection.watch_path(events.clone());
     let engine = TransferEngine::new(config.chunk_size);
     if let Err(error) = authenticate_sender(&mut connection, &config.pairing).await {
         let _ = connection.close().await;
         return Err(error);
     }
     let result = engine
-        .send_file_with_cancel(&mut connection, file_path, resume, events, cancel)
+        .send_file_with_cancel(&mut connection, file_path, resume, events.as_ref(), cancel)
         .await;
     let _ = connection.close().await;
     result

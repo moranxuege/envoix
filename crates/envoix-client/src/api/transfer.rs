@@ -140,6 +140,8 @@ impl envoix_session::EventSink for SessionEventAdapter {
             SessionEvent::Failed { direction, reason } => {
                 TransferEvent::Failed { direction, reason }
             }
+            SessionEvent::Connected { path } => TransferEvent::Connected { path },
+            SessionEvent::PathChanged { path } => TransferEvent::PathChanged { path },
         });
     }
 }

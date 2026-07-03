@@ -146,10 +146,10 @@ async fn main() -> ExitCode {
 }
 
 /// Initialize the tracing subscriber.  Honors `RUST_LOG`, defaulting to `info`
-/// for the `envoix` target (so the per-transfer "data path: direct/relay" line
-/// is shown without a flag) and `warn` for everything else, so library warnings
-/// reach the terminal and iroh internals stay quiet without flooding it.
-/// Output goes to stderr to keep stdout clean for future machine-consumable
+/// for the `envoix` target and `warn` for everything else, so library warnings
+/// reach the terminal and iroh internals stay quiet without flooding it. The
+/// per-transfer "data path" line is rendered from Connected/PathChanged events,
+/// not tracing. Output goes to stderr to keep stdout clean for machine-readable
 /// formats.
 fn init_tracing() {
     use tracing_subscriber::{EnvFilter, fmt};
@@ -391,6 +391,9 @@ impl Renderer {
             // Contextual lines (which mode, which broker) are printed by the
             // dispatch site that knows the arguments.
             E::Binding { .. } | E::Pairing => {}
+            E::Connected { path } | E::PathChanged { path } => {
+                eprintln!("data path: {path}");
+            }
             E::Advertised {
                 peer,
                 token,
