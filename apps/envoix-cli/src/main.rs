@@ -10,8 +10,8 @@ use envoix_client::api;
 use envoix_client::{
     BindAddrs, ClientConfig, ClientEvent, ConnectionPolicy, EnvoixClient, EventSink,
     IdentityConfig, PairingConfig, PeerDescriptor, ReceiveRequest, RoomReceiveRequest,
-    RoomSendRequest, SPAKE2_EXPERIMENTAL_WARNING, SendFileRequest, SendRequest,
-    TransferCancelToken, TransferDirection, TransferEvent, TransferSummary,
+    RoomSendRequest, SPAKE2_EXPERIMENTAL_WARNING, TransferCancelToken, TransferDirection,
+    TransferEvent, TransferSummary,
 };
 use envoix_qr::{QrInvitePayload, generate_token, render_terminal_qr};
 
@@ -209,28 +209,13 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                 )
                 .await?
             } else if let Some(invite_str) = invite {
-                let resolved = resolve_invite(&invite_str)?;
-                eprintln!(
-                    "connecting to {} (invite expires in {})",
-                    resolved.peer,
-                    format_duration(Duration::from_secs(resolved.expires_in))
-                );
-                let client =
-                    client_for_token(resolved.token, config.as_deref(), identity_config(identity))?;
-                let cancel = TransferCancelToken::new();
-                run_interruptible(
-                    client.send_file_with_cancel(
-                        SendFileRequest {
-                            peer: resolved.peer,
-                            file_path: file,
-                            resume,
-                        },
-                        Box::new(ConsoleEventSink::new()),
-                        cancel.clone(),
-                    ),
-                    cancel,
-                )
-                .await?
+                let client = api_client(config.as_deref(), identity_config(identity))?;
+                let transfer = client.send(
+                    file,
+                    api::PeerSource::Invite { invite: invite_str },
+                    send_options(resume),
+                )?;
+                run_transfer(transfer).await?
             } else if enable_mdns {
                 if peer.is_some() {
                     return Err(envoix_client::PublicError::InvalidInput(
@@ -238,22 +223,14 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                     ));
                 }
                 let token = token.expect("clap ensures --token is present with --enable-mdns");
-                let client = client_for_token(token, config.as_deref(), identity_config(identity))?;
-                let cancel = TransferCancelToken::new();
-                run_interruptible(
-                    client.send_with_cancel(
-                        SendRequest {
-                            file_path: file,
-                            connection_policy: ConnectionPolicy::EnableMdns,
-                            resume,
-                        },
-                        Box::new(ConsoleClientEventSink),
-                        Box::new(ConsoleEventSink::new()),
-                        cancel.clone(),
-                    ),
-                    cancel,
-                )
-                .await?
+                let client = api_client(config.as_deref(), identity_config(identity))?;
+                eprintln!("discovering receiver over mDNS...");
+                let transfer = client.send(
+                    file,
+                    api::PeerSource::Mdns { token: Some(token) },
+                    send_options(resume),
+                )?;
+                run_transfer(transfer).await?
             } else {
                 let peer = peer.ok_or_else(|| {
                     envoix_client::PublicError::InvalidInput(
@@ -597,32 +574,6 @@ fn receive_addrs_for(ip_version: IpVersion) -> BindAddrs {
                 .expect("default IPv6 address is valid"),
         ),
     }
-}
-
-/// Resolved fields extracted from a validated QR invite.
-struct ResolvedInvite {
-    peer: PeerDescriptor,
-    token: String,
-    expires_in: u64,
-}
-
-/// Decodes and validates an invite string, returning the fields the sender needs.
-///
-/// Validation (including expiry and version checks) runs before any connection
-/// is attempted, so a stale or incompatible invite fails fast.
-fn resolve_invite(invite: &str) -> Result<ResolvedInvite, envoix_client::PublicError> {
-    let to_err = |e| envoix_client::PublicError::InvalidInput(format!("invalid invite: {e}"));
-
-    let payload = QrInvitePayload::decode(invite).map_err(to_err)?;
-    let now = unix_now();
-    payload.validate(now).map_err(to_err)?;
-    let peer = payload.peer_descriptor().map_err(to_err)?;
-
-    Ok(ResolvedInvite {
-        peer,
-        token: payload.token,
-        expires_in: payload.expires_at.saturating_sub(now),
-    })
 }
 
 /// Current Unix time in whole seconds.
