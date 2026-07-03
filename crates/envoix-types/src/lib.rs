@@ -17,6 +17,7 @@ pub fn is_valid_shared_token(token: &str) -> bool {
 
 /// The network path a transfer's connection is currently using.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum DataPath {
     /// A direct (possibly hole-punched) UDP path to the peer.
     Direct {
