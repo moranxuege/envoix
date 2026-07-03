@@ -1,11 +1,56 @@
 //! The transfer handle and the adapters that feed its event stream.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
+
 use envoix_session::{TransferCancelToken, TransferEvent as SessionEvent, TransferSummary};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use super::TransferEvent;
+use super::error::{Phase, TransferError};
 use crate::PublicError;
+
+/// Lock-free cell holding the phase the transfer has reached, updated as
+/// lifecycle events flow through the [`EventSender`].
+#[derive(Debug)]
+pub(crate) struct PhaseCell(AtomicU8);
+
+impl PhaseCell {
+    fn new() -> Arc<Self> {
+        Arc::new(Self(AtomicU8::new(Phase::Setup as u8)))
+    }
+
+    fn store(&self, phase: Phase) {
+        self.0.store(phase as u8, Ordering::Relaxed);
+    }
+
+    fn load(&self) -> Phase {
+        match self.0.load(Ordering::Relaxed) {
+            x if x == Phase::Waiting as u8 => Phase::Waiting,
+            x if x == Phase::Pairing as u8 => Phase::Pairing,
+            x if x == Phase::Connecting as u8 => Phase::Connecting,
+            x if x == Phase::Transfer as u8 => Phase::Transfer,
+            _ => Phase::Setup,
+        }
+    }
+}
+
+/// The phase a transfer is in once `event` has been observed.
+fn phase_of(event: &TransferEvent) -> Phase {
+    match event {
+        TransferEvent::Binding { .. } => Phase::Setup,
+        TransferEvent::Advertised { .. } => Phase::Waiting,
+        TransferEvent::Pairing => Phase::Pairing,
+        TransferEvent::Connected { .. } | TransferEvent::PathChanged { .. } => Phase::Connecting,
+        TransferEvent::Started { .. }
+        | TransferEvent::Progress { .. }
+        | TransferEvent::Verifying { .. }
+        | TransferEvent::Verified { .. }
+        | TransferEvent::Completed { .. }
+        | TransferEvent::Failed { .. } => Phase::Transfer,
+    }
+}
 
 /// A running transfer: observe it through [`Transfer::next_event`], stop it
 /// with [`Transfer::cancel`], and take its result with [`Transfer::wait`].
@@ -16,6 +61,7 @@ use crate::PublicError;
 pub struct Transfer {
     events: mpsc::UnboundedReceiver<TransferEvent>,
     cancel: TransferCancelToken,
+    phase: Arc<PhaseCell>,
     // Option only so `wait(self)` can move it out despite the Drop impl.
     task: Option<JoinHandle<Result<TransferSummary, PublicError>>>,
 }
@@ -24,13 +70,20 @@ impl Transfer {
     pub(crate) fn new(
         events: mpsc::UnboundedReceiver<TransferEvent>,
         cancel: TransferCancelToken,
+        phase: Arc<PhaseCell>,
         task: JoinHandle<Result<TransferSummary, PublicError>>,
     ) -> Self {
         Self {
             events,
             cancel,
+            phase,
             task: Some(task),
         }
+    }
+
+    /// The phase this transfer has reached (per its last lifecycle event).
+    pub fn phase(&self) -> Phase {
+        self.phase.load()
     }
 
     /// The next lifecycle event, or `None` once the transfer has ended and
@@ -46,14 +99,15 @@ impl Transfer {
 
     /// Waits for the transfer to finish and returns its outcome. Events not
     /// yet consumed are discarded.
-    pub async fn wait(mut self) -> Result<TransferSummary, PublicError> {
+    pub async fn wait(mut self) -> Result<TransferSummary, TransferError> {
         let task = self.task.take().expect("wait consumes the handle");
-        match task.await {
+        let result = match task.await {
             Ok(result) => result,
             Err(error) => Err(PublicError::Transfer(format!(
                 "transfer task failed: {error}"
             ))),
-        }
+        };
+        result.map_err(|error| TransferError::from_core(error, self.phase.load()))
     }
 }
 
@@ -66,17 +120,33 @@ impl Drop for Transfer {
 /// Emits lifecycle events the legacy layers have no hook for (binding,
 /// advertising, pairing), and is cloned into the adapter sinks.
 #[derive(Clone, Debug)]
-pub(crate) struct EventSender(mpsc::UnboundedSender<TransferEvent>);
+pub(crate) struct EventSender {
+    sender: mpsc::UnboundedSender<TransferEvent>,
+    phase: Arc<PhaseCell>,
+}
 
 impl EventSender {
     pub(crate) fn channel() -> (Self, mpsc::UnboundedReceiver<TransferEvent>) {
         let (sender, receiver) = mpsc::unbounded_channel();
-        (Self(sender), receiver)
+        (
+            Self {
+                sender,
+                phase: PhaseCell::new(),
+            },
+            receiver,
+        )
     }
 
-    /// Sends one event; silently dropped when the handle is gone.
+    /// The cell tracking the phase implied by the events sent so far.
+    pub(crate) fn phase_cell(&self) -> Arc<PhaseCell> {
+        self.phase.clone()
+    }
+
+    /// Sends one event, advancing the tracked phase; silently dropped when
+    /// the handle is gone.
     pub(crate) fn emit(&self, event: TransferEvent) {
-        let _ = self.0.send(event);
+        self.phase.store(phase_of(&event));
+        let _ = self.sender.send(event);
     }
 }
 

@@ -23,8 +23,9 @@ pub const MIN_CHUNK_SIZE: usize = 16 * 1024;
 /// Maximum accepted transfer chunk size.
 pub const MAX_CHUNK_SIZE: usize = 16 * 1024 * 1024;
 
-/// Error type exposed by the public client facade.
-pub type PublicError = CoreError;
+/// Internal alias for the error type shared with the lower layers; the
+/// public API surfaces [`api::TransferError`] instead.
+pub(crate) type PublicError = CoreError;
 
 /// The recognized contents of the optional TOML config file.
 #[derive(Debug, Deserialize)]
