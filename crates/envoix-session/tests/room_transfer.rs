@@ -8,7 +8,7 @@ use envoix_rendezvous::RoomRegistry;
 use envoix_rendezvous_iroh::{build_endpoint, endpoint_addr, serve_endpoint};
 use envoix_session::{
     DEFAULT_CHUNK_SIZE, IdentityConfig, NoopEventSink, PairingConfig, SessionConfig,
-    receive_file_via_room, send_file_via_room,
+    TransferCancelToken, receive_file_via_room, send_file_via_room,
 };
 use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 use tempfile::tempdir;
@@ -71,6 +71,7 @@ async fn file_transfers_through_the_rendezvous() {
             out_dir,
             config(),
             Box::new(NoopEventSink),
+            TransferCancelToken::new(),
         )
         .await
     });
@@ -84,6 +85,7 @@ async fn file_transfers_through_the_rendezvous() {
             false,
             config(),
             Box::new(NoopEventSink),
+            TransferCancelToken::new(),
         )
         .await
     });

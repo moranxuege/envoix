@@ -29,10 +29,7 @@ use endpoint::{
     peer_addr_from_descriptor,
 };
 pub use identity::IdentityConfig;
-pub use room::{
-    receive_file_via_room, receive_file_via_room_with_cancel, send_file_via_room,
-    send_file_via_room_with_cancel,
-};
+pub use room::{receive_file_via_room, send_file_via_room};
 
 const ALPN: &[u8] = b"envoix/1";
 const MAX_AUTH_FAILURES: u32 = 50;
@@ -78,15 +75,7 @@ impl SessionConfig {
     }
 }
 
-/// Bind an iroh endpoint (listen addr) that can accept one incoming connection.
-pub async fn bind_iroh_endpoint(
-    listen_addrs: impl Into<BindAddrs>,
-    identity: &IdentityConfig,
-) -> Result<BoundEndpoint, SessionError> {
-    bind_iroh_endpoint_with_relay(listen_addrs, identity, &None, false).await
-}
-
-/// Like [`bind_iroh_endpoint`], but routes through `relay` (a relay URL) when
+/// Bind an accepting iroh endpoint, routed through `relay` (a relay URL) when
 /// set, so the bound endpoint stays reachable from behind NAT. With `relay_only`
 /// it binds no IP transport, forcing the relay data path.
 pub(crate) async fn bind_iroh_endpoint_with_relay(
@@ -117,20 +106,8 @@ pub async fn bind_iroh_endpoint_enable_mdns(
     })
 }
 
-/// Sends one file to a manually supplied peer descriptor.
-pub async fn send_file_manual(
-    peer: PeerDescriptor,
-    file_path: PathBuf,
-    resume: bool,
-    config: SessionConfig,
-    events: Box<dyn EventSink>,
-) -> Result<TransferSummary, SessionError> {
-    let cancel = TransferCancelToken::new();
-    send_file_manual_with_cancel(peer, file_path, resume, config, events, cancel).await
-}
-
 /// Sends one file to a manually supplied peer descriptor, stopping on cancellation.
-pub async fn send_file_manual_with_cancel(
+pub async fn send_file_manual(
     peer: PeerDescriptor,
     file_path: PathBuf,
     resume: bool,
@@ -158,28 +135,10 @@ pub async fn send_file_manual_with_cancel(
     result
 }
 
-/// Sends one file to a peer addressed by its full iroh `EndpointAddr` (which may
-/// carry a relay home), dialing through the configured relay when set.
+/// Sends one file to a peer addressed by its full iroh `EndpointAddr` (which
+/// may carry a relay home), dialing through the configured relay when set and
+/// stopping the data transfer on cancellation.
 pub async fn send_file_to_endpoint_addr(
-    peer_addr: EndpointAddr,
-    file_path: PathBuf,
-    resume: bool,
-    config: SessionConfig,
-    events: Box<dyn EventSink>,
-) -> Result<TransferSummary, SessionError> {
-    send_file_to_endpoint_addr_with_cancel(
-        peer_addr,
-        file_path,
-        resume,
-        config,
-        events,
-        TransferCancelToken::new(),
-    )
-    .await
-}
-
-/// Like [`send_file_to_endpoint_addr`], stopping the data transfer on cancellation.
-pub async fn send_file_to_endpoint_addr_with_cancel(
     peer_addr: EndpointAddr,
     file_path: PathBuf,
     resume: bool,
@@ -212,19 +171,9 @@ pub async fn send_file_to_endpoint_addr_with_cancel(
     result
 }
 
-/// Sends one file to the first mDNS-discovered iroh endpoint that authenticates.
+/// Sends one file to the first mDNS-discovered iroh endpoint that
+/// authenticates, stopping on cancellation.
 pub async fn send_file_enable_mdns(
-    file_path: PathBuf,
-    resume: bool,
-    config: SessionConfig,
-    events: Box<dyn EventSink>,
-) -> Result<TransferSummary, SessionError> {
-    let cancel = TransferCancelToken::new();
-    send_file_enable_mdns_with_cancel(file_path, resume, config, events, cancel).await
-}
-
-/// Sends one file to the first mDNS-discovered iroh endpoint, stopping on cancellation.
-pub async fn send_file_enable_mdns_with_cancel(
     file_path: PathBuf,
     resume: bool,
     config: SessionConfig,
@@ -322,31 +271,9 @@ pub async fn send_file_enable_mdns_with_cancel(
     }))
 }
 
-/// Receives one file and reports the concrete peer descriptor before accepting.
+/// Receives one file, reporting the concrete bound peer descriptor before
+/// accepting; stops while waiting or transferring if cancelled.
 pub async fn receive_file_with_bound_peer<F>(
-    listen_addrs: impl Into<BindAddrs>,
-    output_dir: PathBuf,
-    config: SessionConfig,
-    events: Box<dyn EventSink>,
-    on_bound_peer: F,
-) -> Result<TransferSummary, SessionError>
-where
-    F: FnOnce(PeerDescriptor) + Send,
-{
-    let cancel = TransferCancelToken::new();
-    receive_file_with_bound_peer_with_cancel(
-        listen_addrs,
-        output_dir,
-        config,
-        events,
-        on_bound_peer,
-        cancel,
-    )
-    .await
-}
-
-/// Receives one file and stops while waiting or transferring if cancelled.
-pub async fn receive_file_with_bound_peer_with_cancel<F>(
     listen_addrs: impl Into<BindAddrs>,
     output_dir: PathBuf,
     config: SessionConfig,
@@ -366,22 +293,11 @@ where
     .await?;
     let peer = bound_endpoint.peer_descriptor()?;
     on_bound_peer(peer);
-    receive_one_authenticated_with_cancel(bound_endpoint, output_dir, config, events, cancel).await
-}
-
-/// Receives one file on an already-bound endpoint.
-pub async fn receive_one_authenticated(
-    bound_endpoint: BoundEndpoint,
-    output_dir: PathBuf,
-    config: SessionConfig,
-    events: Box<dyn EventSink>,
-) -> Result<TransferSummary, SessionError> {
-    let cancel = TransferCancelToken::new();
-    receive_one_authenticated_with_cancel(bound_endpoint, output_dir, config, events, cancel).await
+    receive_one_authenticated(bound_endpoint, output_dir, config, events, cancel).await
 }
 
 /// Receives one file on an already-bound endpoint, stopping on cancellation.
-pub async fn receive_one_authenticated_with_cancel(
+pub async fn receive_one_authenticated(
     bound_endpoint: BoundEndpoint,
     output_dir: PathBuf,
     config: SessionConfig,
@@ -412,19 +328,9 @@ pub async fn receive_one_authenticated_with_cancel(
     result
 }
 
-/// Receives one file, ignoring failed pairing attempts until one peer authenticates.
+/// Receives one file, ignoring failed pairing attempts until one peer
+/// authenticates; stops on cancellation.
 pub async fn receive_with_auth_retries(
-    bound_endpoint: BoundEndpoint,
-    output_dir: PathBuf,
-    config: SessionConfig,
-    events: Box<dyn EventSink>,
-) -> Result<TransferSummary, SessionError> {
-    let cancel = TransferCancelToken::new();
-    receive_with_auth_retries_with_cancel(bound_endpoint, output_dir, config, events, cancel).await
-}
-
-/// Receives one file with pairing retries, stopping on cancellation.
-pub async fn receive_with_auth_retries_with_cancel(
     bound_endpoint: BoundEndpoint,
     output_dir: PathBuf,
     config: SessionConfig,
