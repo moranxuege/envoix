@@ -22,9 +22,11 @@ pub use transfer::Transfer;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use envoix_qr::QrInvitePayload;
+use envoix_qr::{QrInvitePayload, generate_token};
 use envoix_session::{
-    DEFAULT_CHUNK_SIZE, SessionConfig, TransferCancelToken, TransferDirection, parse_broker_addr,
+    BindAddrs, DEFAULT_CHUNK_SIZE, SessionConfig, TransferCancelToken, TransferDirection,
+    bind_iroh_endpoint_enable_mdns, parse_broker_addr, receive_file_via_room_with_cancel,
+    receive_file_with_bound_peer_with_cancel, receive_with_auth_retries_with_cancel,
     send_file_enable_mdns_with_cancel, send_file_manual_with_cancel,
     send_file_via_room_with_cancel,
 };
@@ -36,6 +38,10 @@ use transfer::{EventSender, SessionEventAdapter};
 /// token from the SPAKE2 exchange and overrides this before authentication;
 /// it exists only because `SessionConfig` requires a pairing.
 const ROOM_PLACEHOLDER_TOKEN: &str = "envoix-room-unused-placeholder";
+
+/// Invite lifetime when the source does not specify one (mDNS listener with
+/// a generated token).
+const DEFAULT_INVITE_TTL_SECS: u64 = 300;
 
 /// The client: local policy (identity, chunk size) shared by transfers.
 ///
@@ -147,6 +153,123 @@ impl Client {
         Ok(Transfer::new(event_receiver, cancel, task))
     }
 
+    /// Receives one file into the `into` directory from the peer described
+    /// by `from`.
+    ///
+    /// Listening sources report our address (and token/invite) through a
+    /// [`TransferEvent::Advertised`] event for the user to hand to the peer.
+    /// Fails fast on invalid input or a peer source that cannot be received
+    /// from yet.
+    pub fn receive(
+        &self,
+        into: PathBuf,
+        from: PeerSource,
+        options: TransferOptions,
+    ) -> Result<Transfer, PublicError> {
+        crate::validate_chunk_size(self.chunk_size)?;
+        validate_path_policy(&options)?;
+        let (events, event_receiver) = EventSender::channel();
+        let cancel = TransferCancelToken::new();
+        let sink = Box::new(SessionEventAdapter(events.clone()));
+        let listen = options
+            .listen_addrs
+            .clone()
+            .unwrap_or_else(|| BindAddrs::dual_stack(0));
+
+        let task = match from {
+            PeerSource::ShowManual { token } => {
+                let token = token.map_or_else(new_token, Ok)?;
+                let config = self.session_config(shared_token(&token)?, &options);
+                let cancel = cancel.clone();
+                let on_bound = {
+                    let events = events.clone();
+                    move |peer: PeerDescriptor| {
+                        events.emit(TransferEvent::Advertised {
+                            peer,
+                            token: Some(token),
+                            invite: None,
+                        });
+                    }
+                };
+                tokio::spawn(async move {
+                    events.emit(TransferEvent::Binding {
+                        direction: TransferDirection::Receive,
+                    });
+                    receive_file_with_bound_peer_with_cancel(
+                        listen, into, config, sink, on_bound, cancel,
+                    )
+                    .await
+                })
+            }
+            PeerSource::ShowInvite { ttl_secs } => {
+                let token = new_token()?;
+                let config = self.session_config(shared_token(&token)?, &options);
+                let cancel = cancel.clone();
+                let on_bound = advertise_with_invite(events.clone(), token, ttl_secs);
+                tokio::spawn(async move {
+                    events.emit(TransferEvent::Binding {
+                        direction: TransferDirection::Receive,
+                    });
+                    receive_file_with_bound_peer_with_cancel(
+                        listen, into, config, sink, on_bound, cancel,
+                    )
+                    .await
+                })
+            }
+            PeerSource::Mdns { token } => {
+                // A provided token is only displayed; a generated one also
+                // yields an invite so the sender can be handed a QR.
+                let (token, invite_ttl) = match token {
+                    Some(token) => (token, None),
+                    None => (new_token()?, Some(DEFAULT_INVITE_TTL_SECS)),
+                };
+                let config = self.session_config(shared_token(&token)?, &options);
+                let identity = self.identity.clone();
+                let cancel = cancel.clone();
+                tokio::spawn(async move {
+                    events.emit(TransferEvent::Binding {
+                        direction: TransferDirection::Receive,
+                    });
+                    let endpoint = bind_iroh_endpoint_enable_mdns(listen, &identity).await?;
+                    let peer = endpoint.peer_descriptor()?;
+                    let invite = invite_ttl.map(|ttl| {
+                        QrInvitePayload::new(token.clone(), peer.clone(), unix_now() + ttl).encode()
+                    });
+                    events.emit(TransferEvent::Advertised {
+                        peer,
+                        token: Some(token),
+                        invite,
+                    });
+                    receive_with_auth_retries_with_cancel(endpoint, into, config, sink, cancel)
+                        .await
+                })
+            }
+            PeerSource::Room { code, broker } => {
+                let broker = parse_broker_addr(&broker, options.relay.as_deref())?;
+                let config = self.session_config(shared_token(ROOM_PLACEHOLDER_TOKEN)?, &options);
+                let cancel = cancel.clone();
+                tokio::spawn(async move {
+                    events.emit(TransferEvent::Binding {
+                        direction: TransferDirection::Receive,
+                    });
+                    events.emit(TransferEvent::Pairing);
+                    receive_file_via_room_with_cancel(
+                        broker, &code, listen, into, config, sink, cancel,
+                    )
+                    .await
+                })
+            }
+            PeerSource::Manual { .. } | PeerSource::Invite { .. } => {
+                return Err(PublicError::InvalidInput(
+                    "this peer source dials a listener; receiving from it needs \
+                     protocol role negotiation and is not supported yet"
+                        .into(),
+                ));
+            }
+        };
+        Ok(Transfer::new(event_receiver, cancel, task))
+    }
+
     fn session_config(&self, pairing: PairingConfig, options: &TransferOptions) -> SessionConfig {
         SessionConfig {
             chunk_size: self.chunk_size,
@@ -161,6 +284,29 @@ impl Client {
 
 fn shared_token(token: &str) -> Result<PairingConfig, PublicError> {
     PairingConfig::spake2_shared_token(token)
+}
+
+/// Generates a fresh pairing token for listening sources given none.
+fn new_token() -> Result<String, PublicError> {
+    generate_token().map_err(|e| PublicError::Crypto(format!("failed to generate token: {e}")))
+}
+
+/// An `on_bound` callback that advertises the peer together with an encoded
+/// invite expiring after `ttl_secs`.
+fn advertise_with_invite(
+    events: EventSender,
+    token: String,
+    ttl_secs: u64,
+) -> impl FnOnce(PeerDescriptor) + Send {
+    move |peer: PeerDescriptor| {
+        let invite =
+            QrInvitePayload::new(token.clone(), peer.clone(), unix_now() + ttl_secs).encode();
+        events.emit(TransferEvent::Advertised {
+            peer,
+            token: Some(token),
+            invite: Some(invite),
+        });
+    }
 }
 
 fn validate_path_policy(options: &TransferOptions) -> Result<(), PublicError> {
@@ -239,6 +385,25 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(error, PublicError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn receive_rejects_consumer_sources() {
+        let peer = PeerDescriptor::new("peer", vec!["[::1]:9000".parse().unwrap()]).unwrap();
+        for source in [
+            PeerSource::Manual {
+                peer,
+                token: "abcdefghijkl".into(),
+            },
+            PeerSource::Invite {
+                invite: "envoix:whatever".into(),
+            },
+        ] {
+            let error = client()
+                .receive("out".into(), source, TransferOptions::default())
+                .unwrap_err();
+            assert!(matches!(error, PublicError::InvalidInput(_)));
+        }
     }
 
     #[test]
