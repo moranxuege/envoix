@@ -1,5 +1,4 @@
-//! The unified client API (new surface, being built alongside the legacy
-//! methods; see `docs/design/client-api.md`).
+//! The unified client API (see `docs/design/client-api.md`).
 //!
 //! One entry point per operation: a transfer is described by *what* to move,
 //! *who* to move it with ([`PeerSource`]), and *how* to connect
@@ -26,15 +25,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use envoix_qr::{QrInvitePayload, generate_token};
 use envoix_session::{
     BindAddrs, DEFAULT_CHUNK_SIZE, SessionConfig, TransferCancelToken, TransferDirection,
-    bind_iroh_endpoint_enable_mdns, parse_broker_addr, receive_file_via_room_with_cancel,
-    receive_file_with_bound_peer_with_cancel, receive_with_auth_retries_with_cancel,
-    send_file_enable_mdns_with_cancel, send_file_manual_with_cancel,
-    send_file_via_room_with_cancel,
+    bind_iroh_endpoint_enable_mdns, parse_broker_addr, receive_file_via_room,
+    receive_file_with_bound_peer, receive_with_auth_retries, send_file_enable_mdns,
+    send_file_manual, send_file_via_room,
 };
 
-use envoix_auth::PairingConfig;
-
 use crate::{IdentityConfig, PeerDescriptor, PublicError};
+use envoix_auth::PairingConfig;
 use transfer::{EventSender, SessionEventAdapter};
 
 /// Placeholder pairing for room transfers: the room flow derives the real
@@ -121,7 +118,7 @@ impl Client {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Send,
                     });
-                    send_file_manual_with_cancel(peer, file, resume, config, sink, cancel).await
+                    send_file_manual(peer, file, resume, config, sink, cancel).await
                 })
             }
             PeerSource::Invite { invite } => {
@@ -132,7 +129,7 @@ impl Client {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Send,
                     });
-                    send_file_manual_with_cancel(peer, file, resume, config, sink, cancel).await
+                    send_file_manual(peer, file, resume, config, sink, cancel).await
                 })
             }
             PeerSource::Mdns { token: Some(token) } => {
@@ -142,7 +139,7 @@ impl Client {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Send,
                     });
-                    send_file_enable_mdns_with_cancel(file, resume, config, sink, cancel).await
+                    send_file_enable_mdns(file, resume, config, sink, cancel).await
                 })
             }
             PeerSource::Mdns { token: None } => {
@@ -159,10 +156,7 @@ impl Client {
                         direction: TransferDirection::Send,
                     });
                     events.emit(TransferEvent::Pairing);
-                    send_file_via_room_with_cancel(
-                        broker, &code, file, resume, config, sink, cancel,
-                    )
-                    .await
+                    send_file_via_room(broker, &code, file, resume, config, sink, cancel).await
                 })
             }
             PeerSource::ShowManual { .. } | PeerSource::ShowInvite { .. } => {
@@ -218,10 +212,7 @@ impl Client {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Receive,
                     });
-                    receive_file_with_bound_peer_with_cancel(
-                        listen, into, config, sink, on_bound, cancel,
-                    )
-                    .await
+                    receive_file_with_bound_peer(listen, into, config, sink, on_bound, cancel).await
                 })
             }
             PeerSource::ShowInvite { ttl_secs } => {
@@ -233,10 +224,7 @@ impl Client {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Receive,
                     });
-                    receive_file_with_bound_peer_with_cancel(
-                        listen, into, config, sink, on_bound, cancel,
-                    )
-                    .await
+                    receive_file_with_bound_peer(listen, into, config, sink, on_bound, cancel).await
                 })
             }
             PeerSource::Mdns { token } => {
@@ -263,8 +251,7 @@ impl Client {
                         token: Some(token),
                         invite,
                     });
-                    receive_with_auth_retries_with_cancel(endpoint, into, config, sink, cancel)
-                        .await
+                    receive_with_auth_retries(endpoint, into, config, sink, cancel).await
                 })
             }
             PeerSource::Room { code, broker } => {
@@ -276,10 +263,7 @@ impl Client {
                         direction: TransferDirection::Receive,
                     });
                     events.emit(TransferEvent::Pairing);
-                    receive_file_via_room_with_cancel(
-                        broker, &code, listen, into, config, sink, cancel,
-                    )
-                    .await
+                    receive_file_via_room(broker, &code, listen, into, config, sink, cancel).await
                 })
             }
             PeerSource::Manual { .. } | PeerSource::Invite { .. } => {

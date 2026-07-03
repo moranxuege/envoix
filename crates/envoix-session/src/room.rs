@@ -15,8 +15,8 @@ use iroh::{Endpoint, EndpointAddr, SecretKey};
 
 use crate::{
     BindAddrs, BoundEndpoint, EventSink, PairingConfig, SessionConfig, SessionError,
-    TransferCancelToken, TransferSummary, bind_iroh_endpoint_with_relay,
-    receive_with_auth_retries_with_cancel, send_file_to_endpoint_addr_with_cancel,
+    TransferCancelToken, TransferSummary, bind_iroh_endpoint_with_relay, receive_with_auth_retries,
+    send_file_to_endpoint_addr,
 };
 
 /// An ephemeral iroh endpoint used only to reach the rendezvous broker, routed
@@ -142,27 +142,6 @@ pub async fn receive_file_via_room(
     output_dir: PathBuf,
     config: SessionConfig,
     events: Box<dyn EventSink>,
-) -> Result<TransferSummary, SessionError> {
-    receive_file_via_room_with_cancel(
-        broker,
-        code,
-        listen_addrs,
-        output_dir,
-        config,
-        events,
-        TransferCancelToken::new(),
-    )
-    .await
-}
-
-/// Like [`receive_file_via_room`], stopping on cancellation.
-pub async fn receive_file_via_room_with_cancel(
-    broker: EndpointAddr,
-    code: &str,
-    listen_addrs: impl Into<BindAddrs>,
-    output_dir: PathBuf,
-    config: SessionConfig,
-    events: Box<dyn EventSink>,
     cancel: TransferCancelToken,
 ) -> Result<TransferSummary, SessionError> {
     let (room_id, password) = split_code(code);
@@ -193,7 +172,7 @@ pub async fn receive_file_via_room_with_cancel(
 
     // Accept with retries: a stray or wrong-token dial must not kill the
     // transfer before the legitimate sender connects.
-    receive_with_auth_retries_with_cancel(
+    receive_with_auth_retries(
         bound,
         output_dir,
         with_room_token(config, pairing.token),
@@ -213,27 +192,6 @@ pub async fn send_file_via_room(
     resume: bool,
     config: SessionConfig,
     events: Box<dyn EventSink>,
-) -> Result<TransferSummary, SessionError> {
-    send_file_via_room_with_cancel(
-        broker,
-        code,
-        file_path,
-        resume,
-        config,
-        events,
-        TransferCancelToken::new(),
-    )
-    .await
-}
-
-/// Like [`send_file_via_room`], stopping on cancellation.
-pub async fn send_file_via_room_with_cancel(
-    broker: EndpointAddr,
-    code: &str,
-    file_path: PathBuf,
-    resume: bool,
-    config: SessionConfig,
-    events: Box<dyn EventSink>,
     cancel: TransferCancelToken,
 ) -> Result<TransferSummary, SessionError> {
     let (room_id, password) = split_code(code);
@@ -247,7 +205,7 @@ pub async fn send_file_via_room_with_cancel(
     // so it does not linger (and log) while the data transfer runs.
     rdz.close().await;
 
-    send_file_to_endpoint_addr_with_cancel(
+    send_file_to_endpoint_addr(
         pairing.peer,
         file_path,
         resume,
