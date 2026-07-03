@@ -19,7 +19,7 @@ pub use options::{PathPolicy, TransferOptions};
 pub use source::PeerSource;
 pub use transfer::Transfer;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use envoix_qr::{QrInvitePayload, generate_token};
@@ -70,6 +70,26 @@ impl Client {
     /// A client with the default chunk size and an ephemeral identity.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A client configured from an optional TOML config file and environment
+    /// overrides (`ENVOIX_CHUNK_SIZE`) - the runtime sources the CLI reads,
+    /// without the legacy requirement of supplying a pairing up front.
+    pub fn from_runtime_sources(config_path: Option<&Path>) -> Result<Self, PublicError> {
+        let mut client = Self::new();
+        if let Some(path) = config_path
+            && let Some(chunk_size) = crate::RuntimeConfig::read(path)?.chunk_size
+        {
+            client.chunk_size = crate::parse_chunk_size(&chunk_size)?;
+        }
+        if let Some(value) = std::env::var_os(crate::ENVOIX_CHUNK_SIZE) {
+            let value = value.into_string().map_err(|_| {
+                PublicError::InvalidInput(format!("{} is not UTF-8", crate::ENVOIX_CHUNK_SIZE))
+            })?;
+            client.chunk_size = crate::parse_chunk_size(&value)?;
+        }
+        crate::validate_chunk_size(client.chunk_size)?;
+        Ok(client)
     }
 
     /// Sends `file` to the peer described by `to`.
@@ -404,6 +424,20 @@ mod tests {
                 .unwrap_err();
             assert!(matches!(error, PublicError::InvalidInput(_)));
         }
+    }
+
+    #[test]
+    fn runtime_sources_read_chunk_size_from_config_file() {
+        let path = std::env::temp_dir().join(format!(
+            "envoix-api-config-{}-chunk.toml",
+            std::process::id()
+        ));
+        std::fs::write(&path, "chunk_size = \"1M\"\n").unwrap();
+
+        let client = Client::from_runtime_sources(Some(&path)).unwrap();
+
+        assert_eq!(client.chunk_size, 1024 * 1024);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
