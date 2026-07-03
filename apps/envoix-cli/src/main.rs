@@ -6,10 +6,11 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
+use envoix_client::api;
 use envoix_client::{
     BindAddrs, ClientConfig, ClientEvent, ConnectionPolicy, EnvoixClient, EventSink,
-    IdentityConfig, PairingConfig, PeerDescriptor, ReceiveFileRequest, ReceiveRequest,
-    RoomReceiveRequest, RoomSendRequest, SPAKE2_EXPERIMENTAL_WARNING, SendFileRequest, SendRequest,
+    IdentityConfig, PairingConfig, PeerDescriptor, ReceiveRequest, RoomReceiveRequest,
+    RoomSendRequest, SPAKE2_EXPERIMENTAL_WARNING, SendFileRequest, SendRequest,
     TransferCancelToken, TransferDirection, TransferEvent, TransferSummary,
 };
 use envoix_qr::{QrInvitePayload, generate_token, render_terminal_qr};
@@ -260,21 +261,13 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                     )
                 })?;
                 let token = token.expect("clap ensures --token is present without --invite");
-                let client = client_for_token(token, config.as_deref(), identity_config(identity))?;
-                let cancel = TransferCancelToken::new();
-                run_interruptible(
-                    client.send_file_with_cancel(
-                        SendFileRequest {
-                            peer,
-                            file_path: file,
-                            resume,
-                        },
-                        Box::new(ConsoleEventSink::new()),
-                        cancel.clone(),
-                    ),
-                    cancel,
-                )
-                .await?
+                let client = api_client(config.as_deref(), identity_config(identity))?;
+                let transfer = client.send(
+                    file,
+                    api::PeerSource::Manual { peer, token },
+                    send_options(resume),
+                )?;
+                run_transfer(transfer).await?
             };
             eprintln!(
                 "sent {} bytes from {}",
@@ -387,25 +380,13 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                 }
             } else {
                 let token = token.expect("clap requires --token unless --enable-mdns is set");
-                let token_for_print = token.clone();
-                let client = client_for_token(token, config.as_deref(), identity)?;
-                let cancel = TransferCancelToken::new();
-                run_interruptible(
-                    client.receive_file_with_bound_peer_with_cancel(
-                        ReceiveFileRequest {
-                            listen_addrs,
-                            output_dir: output,
-                        },
-                        Box::new(ConsoleEventSink::new()),
-                        move |peer| {
-                            eprintln!("peer: {peer}");
-                            eprintln!("token: {token_for_print}");
-                        },
-                        cancel.clone(),
-                    ),
-                    cancel,
-                )
-                .await?
+                let client = api_client(config.as_deref(), identity)?;
+                let transfer = client.receive(
+                    output,
+                    api::PeerSource::ShowManual { token: Some(token) },
+                    receive_options(listen_addrs),
+                )?;
+                run_transfer(transfer).await?
             };
             eprintln!(
                 "received {} bytes into {}",
@@ -455,6 +436,151 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 /// Error used when an interrupt forces exit before the operation finished.
 fn interrupted_error() -> envoix_client::PublicError {
     envoix_client::PublicError::Transfer("interrupted before completion".into())
+}
+
+/// Builds the new-API client from the CLI's config/identity arguments.
+fn api_client(
+    config_path: Option<&std::path::Path>,
+    identity: IdentityConfig,
+) -> Result<api::Client, envoix_client::PublicError> {
+    eprintln!("{SPAKE2_EXPERIMENTAL_WARNING}");
+    let mut client = api::Client::from_runtime_sources(config_path)?;
+    client.identity = identity;
+    Ok(client)
+}
+
+fn send_options(resume: bool) -> api::TransferOptions {
+    let mut options = api::TransferOptions::default();
+    options.resume = resume;
+    options
+}
+
+fn receive_options(listen_addrs: BindAddrs) -> api::TransferOptions {
+    let mut options = api::TransferOptions::default();
+    options.listen_addrs = Some(listen_addrs);
+    options
+}
+
+/// Drives a new-API transfer to completion: renders its event stream and
+/// handles Ctrl-C (first press cancels gracefully; a second press or the
+/// grace period elapsing forces exit).
+async fn run_transfer(
+    mut transfer: api::Transfer,
+) -> Result<TransferSummary, envoix_client::PublicError> {
+    let mut renderer = Renderer::default();
+    let interrupted = tokio::select! {
+        _ = drain_events(&mut transfer, &mut renderer) => false,
+        signal = tokio::signal::ctrl_c() => {
+            signal.map_err(|error| {
+                envoix_client::PublicError::Transfer(format!(
+                    "failed to listen for interrupt signal: {error}"
+                ))
+            })?;
+            true
+        }
+    };
+    if interrupted {
+        eprintln!("interrupt received; shutting down (Ctrl-C again to force)...");
+        transfer.cancel();
+        tokio::select! {
+            _ = drain_events(&mut transfer, &mut renderer) => {}
+            _ = tokio::signal::ctrl_c() => return Err(interrupted_error()),
+            _ = tokio::time::sleep(SHUTDOWN_GRACE) => return Err(interrupted_error()),
+        }
+    }
+    transfer.wait().await
+}
+
+async fn drain_events(transfer: &mut api::Transfer, renderer: &mut Renderer) {
+    while let Some(event) = transfer.next_event().await {
+        renderer.render(event);
+    }
+}
+
+/// Renders the unified event stream to the terminal. Single-task use, so no
+/// locking - unlike the legacy sink, which was called from library threads.
+#[derive(Debug, Default)]
+struct Renderer {
+    progress: Option<ProgressState>,
+}
+
+impl Renderer {
+    fn render(&mut self, event: api::TransferEvent) {
+        use api::TransferEvent as E;
+        match event {
+            // Contextual lines (which mode, which broker) are printed by the
+            // dispatch site that knows the arguments.
+            E::Binding { .. } | E::Pairing => {}
+            E::Advertised {
+                peer,
+                token,
+                invite,
+            } => {
+                eprintln!("peer: {peer}");
+                if let Some(invite) = invite {
+                    eprintln!("\ninvite: {invite}");
+                    if let Some(qr) = render_terminal_qr(&invite) {
+                        eprintln!("{qr}");
+                    }
+                } else if let Some(token) = token {
+                    eprintln!("token: {token}");
+                }
+            }
+            E::Started {
+                direction,
+                file_name,
+                total_bytes,
+                bytes_resumed,
+                ..
+            } => {
+                let state = ProgressState {
+                    file_name,
+                    direction,
+                    total_bytes,
+                    bytes_resumed,
+                    started_at: Instant::now(),
+                    last_rendered_at: Instant::now(),
+                };
+                render_progress_line(&state, bytes_resumed, false);
+                self.progress = Some(state);
+            }
+            E::Progress {
+                bytes_transferred, ..
+            } => {
+                if let Some(state) = self.progress.as_mut()
+                    && state.last_rendered_at.elapsed() >= PROGRESS_RENDER_INTERVAL
+                {
+                    render_progress_line(state, bytes_transferred, false);
+                    state.last_rendered_at = Instant::now();
+                }
+            }
+            E::Verifying {
+                direction,
+                file_name,
+                bytes_to_hash,
+                ..
+            } => render_hash_line(direction, &file_name, bytes_to_hash, false),
+            E::Verified {
+                direction,
+                file_name,
+                bytes_hashed,
+                ..
+            } => render_hash_line(direction, &file_name, bytes_hashed, true),
+            E::Completed {
+                bytes_transferred, ..
+            } => match self.progress.take() {
+                Some(state) => render_progress_line(&state, bytes_transferred, true),
+                None => eprintln!("completed {bytes_transferred} bytes"),
+            },
+            E::Failed { direction, reason } => match self.progress.take() {
+                Some(state) => render_transfer_failure_line(&state, &reason),
+                None => render_attempt_failure_line(direction, &reason),
+            },
+            // The event enum is non_exhaustive; render nothing for variants
+            // this build does not know.
+            _ => {}
+        }
+    }
 }
 
 fn receive_addrs_for(ip_version: IpVersion) -> BindAddrs {
