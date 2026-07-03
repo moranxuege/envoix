@@ -1,5 +1,7 @@
 //! Public application-facing facade for envoix clients.
 
+pub mod api;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
