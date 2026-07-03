@@ -1,16 +1,13 @@
-use std::future::Future;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use envoix_client::api;
 use envoix_client::{
-    BindAddrs, ClientConfig, EnvoixClient, EventSink, IdentityConfig, PairingConfig,
-    PeerDescriptor, RoomReceiveRequest, RoomSendRequest, SPAKE2_EXPERIMENTAL_WARNING,
-    TransferCancelToken, TransferDirection, TransferEvent, TransferSummary,
+    BindAddrs, IdentityConfig, PeerDescriptor, SPAKE2_EXPERIMENTAL_WARNING, TransferDirection,
+    TransferSummary,
 };
 use envoix_qr::render_terminal_qr;
 
@@ -185,26 +182,20 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
         } => {
             let summary = if let Some(code) = room {
                 let rendezvous = rendezvous.expect("clap requires --rendezvous with --room");
-                let client = client_for_room(config.as_deref(), identity_config(identity))?;
+                let client = api_client(config.as_deref(), identity_config(identity))?;
                 eprintln!("pairing in room via {rendezvous}...");
-                let cancel = TransferCancelToken::new();
-                run_interruptible(
-                    client.send_file_via_room_with_cancel(
-                        RoomSendRequest {
-                            broker: rendezvous,
-                            relay,
-                            relay_only,
-                            direct_only,
-                            code,
-                            file_path: file,
-                            resume,
-                        },
-                        Box::new(ConsoleEventSink::new()),
-                        cancel.clone(),
-                    ),
-                    cancel,
-                )
-                .await?
+                let mut options = send_options(resume);
+                options.relay = relay;
+                options.path = path_policy(relay_only, direct_only);
+                let transfer = client.send(
+                    file,
+                    api::PeerSource::Room {
+                        code,
+                        broker: rendezvous,
+                    },
+                    options,
+                )?;
+                run_transfer(transfer).await?
             } else if let Some(invite_str) = invite {
                 let client = api_client(config.as_deref(), identity_config(identity))?;
                 let transfer = client.send(
@@ -266,26 +257,20 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
             let identity = identity_config(identity);
             let summary = if let Some(code) = room {
                 let rendezvous = rendezvous.expect("clap requires --rendezvous with --room");
-                let client = client_for_room(config.as_deref(), identity)?;
+                let client = api_client(config.as_deref(), identity)?;
                 eprintln!("waiting for sender via rendezvous {rendezvous}...");
-                let cancel = TransferCancelToken::new();
-                run_interruptible(
-                    client.receive_file_via_room_with_cancel(
-                        RoomReceiveRequest {
-                            broker: rendezvous,
-                            relay,
-                            relay_only,
-                            direct_only,
-                            code,
-                            output_dir: output,
-                            listen_addrs,
-                        },
-                        Box::new(ConsoleEventSink::new()),
-                        cancel.clone(),
-                    ),
-                    cancel,
-                )
-                .await?
+                let mut options = receive_options(listen_addrs);
+                options.relay = relay;
+                options.path = path_policy(relay_only, direct_only);
+                let transfer = client.receive(
+                    output,
+                    api::PeerSource::Room {
+                        code,
+                        broker: rendezvous,
+                    },
+                    options,
+                )?;
+                run_transfer(transfer).await?
             } else if enable_mdns {
                 let client = api_client(config.as_deref(), identity)?;
                 eprintln!("waiting for sender...");
@@ -313,38 +298,6 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
     }
 
     Ok(())
-}
-
-async fn run_interruptible<F>(
-    operation: F,
-    cancel: TransferCancelToken,
-) -> Result<TransferSummary, envoix_client::PublicError>
-where
-    F: Future<Output = Result<TransferSummary, envoix_client::PublicError>>,
-{
-    tokio::pin!(operation);
-
-    tokio::select! {
-        result = &mut operation => result,
-        signal = tokio::signal::ctrl_c() => {
-            signal.map_err(|error| {
-                envoix_client::PublicError::Transfer(format!(
-                    "failed to listen for interrupt signal: {error}"
-                ))
-            })?;
-            eprintln!("interrupt received; shutting down (Ctrl-C again to force)...");
-            cancel.cancel();
-            // Give the operation a moment to observe the cancel and shut down
-            // cleanly (e.g. notify the peer mid-transfer). But some phases - like
-            // waiting in a room for a partner - don't watch the token, so never
-            // block forever: a second Ctrl-C or a short grace period forces exit.
-            tokio::select! {
-                result = &mut operation => result,
-                _ = tokio::signal::ctrl_c() => Err(interrupted_error()),
-                _ = tokio::time::sleep(SHUTDOWN_GRACE) => Err(interrupted_error()),
-            }
-        }
-    }
 }
 
 /// How long a first Ctrl-C waits for a clean shutdown before forcing exit.
@@ -376,6 +329,16 @@ fn receive_options(listen_addrs: BindAddrs) -> api::TransferOptions {
     let mut options = api::TransferOptions::default();
     options.listen_addrs = Some(listen_addrs);
     options
+}
+
+fn path_policy(relay_only: bool, direct_only: bool) -> api::PathPolicy {
+    if relay_only {
+        api::PathPolicy::RelayOnly
+    } else if direct_only {
+        api::PathPolicy::DirectOnly
+    } else {
+        api::PathPolicy::Auto
+    }
 }
 
 /// Drives a new-API transfer to completion: renders its event stream and
@@ -521,31 +484,6 @@ fn identity_config(path: Option<PathBuf>) -> IdentityConfig {
         .unwrap_or(IdentityConfig::Ephemeral)
 }
 
-/// Builds a client for a rendezvous-room transfer. The pairing is derived from
-/// the SPAKE2 exchange in the room, so the config's pairing token is an inert
-/// placeholder that is never used to authenticate the transfer.
-fn client_for_room(
-    config_path: Option<&std::path::Path>,
-    identity: IdentityConfig,
-) -> Result<EnvoixClient, envoix_client::PublicError> {
-    eprintln!("{SPAKE2_EXPERIMENTAL_WARNING}");
-    let pairing = PairingConfig::spake2_shared_token("envoix-room-unused-placeholder")?;
-    let mut config = ClientConfig::from_runtime_sources(pairing, config_path)?;
-    config.identity = identity;
-    Ok(EnvoixClient::new(config))
-}
-
-#[derive(Debug, Default)]
-struct ConsoleEventSink {
-    progress: Mutex<Option<ProgressState>>,
-}
-
-impl ConsoleEventSink {
-    fn new() -> Self {
-        Self::default()
-    }
-}
-
 #[derive(Debug)]
 struct ProgressState {
     file_name: String,
@@ -554,75 +492,6 @@ struct ProgressState {
     bytes_resumed: u64,
     started_at: Instant,
     last_rendered_at: Instant,
-}
-
-impl EventSink for ConsoleEventSink {
-    fn on_event(&self, event: TransferEvent) {
-        match event {
-            TransferEvent::Started {
-                direction,
-                file_name,
-                total_bytes,
-                bytes_resumed,
-                ..
-            } => {
-                let state = ProgressState {
-                    file_name,
-                    direction,
-                    total_bytes,
-                    bytes_resumed,
-                    started_at: Instant::now(),
-                    last_rendered_at: Instant::now(),
-                };
-                render_progress_line(&state, bytes_resumed, false);
-                *self.progress.lock().unwrap() = Some(state);
-            }
-            TransferEvent::Progress {
-                bytes_transferred, ..
-            } => {
-                if let Some(state) = self.progress.lock().unwrap().as_mut()
-                    && state.last_rendered_at.elapsed() >= PROGRESS_RENDER_INTERVAL
-                {
-                    render_progress_line(state, bytes_transferred, false);
-                    state.last_rendered_at = Instant::now();
-                }
-            }
-            TransferEvent::HashStarted {
-                direction,
-                file_name,
-                bytes_to_hash,
-                ..
-            } => {
-                render_hash_line(direction, &file_name, bytes_to_hash, false);
-            }
-            TransferEvent::HashCompleted {
-                direction,
-                file_name,
-                bytes_hashed,
-                ..
-            } => {
-                render_hash_line(direction, &file_name, bytes_hashed, true);
-            }
-            TransferEvent::Completed {
-                bytes_transferred, ..
-            } => {
-                let state = self.progress.lock().unwrap().take();
-                if let Some(state) = state {
-                    render_progress_line(&state, bytes_transferred, true);
-                } else {
-                    eprintln!("completed {bytes_transferred} bytes");
-                }
-            }
-            TransferEvent::Failed { direction, reason } => {
-                let state = self.progress.lock().unwrap().take();
-                if let Some(state) = state {
-                    render_transfer_failure_line(&state, &reason);
-                } else {
-                    render_attempt_failure_line(direction, &reason);
-                }
-            }
-        }
-    }
 }
 
 fn render_hash_line(direction: TransferDirection, file_name: &str, bytes_hashed: u64, done: bool) {
