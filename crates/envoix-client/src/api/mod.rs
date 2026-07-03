@@ -8,12 +8,14 @@
 //! Binding-friendly by construction: no generics, closures, or lifetimes in
 //! public signatures, so the surface can be exposed through UniFFI later.
 
+mod error;
 mod event;
 mod options;
 mod source;
 mod transfer;
 
 pub use envoix_types::DataPath;
+pub use error::{ErrorKind, Phase, TransferError};
 pub use event::TransferEvent;
 pub use options::{PathPolicy, TransferOptions};
 pub use source::PeerSource;
@@ -75,20 +77,22 @@ impl Client {
     /// A client configured from an optional TOML config file and environment
     /// overrides (`ENVOIX_CHUNK_SIZE`) - the runtime sources the CLI reads,
     /// without the legacy requirement of supplying a pairing up front.
-    pub fn from_runtime_sources(config_path: Option<&Path>) -> Result<Self, PublicError> {
+    pub fn from_runtime_sources(config_path: Option<&Path>) -> Result<Self, TransferError> {
         let mut client = Self::new();
         if let Some(path) = config_path
-            && let Some(chunk_size) = crate::RuntimeConfig::read(path)?.chunk_size
+            && let Some(chunk_size) = crate::RuntimeConfig::read(path)
+                .map_err(setup_error)?
+                .chunk_size
         {
-            client.chunk_size = crate::parse_chunk_size(&chunk_size)?;
+            client.chunk_size = crate::parse_chunk_size(&chunk_size).map_err(setup_error)?;
         }
         if let Some(value) = std::env::var_os(crate::ENVOIX_CHUNK_SIZE) {
             let value = value.into_string().map_err(|_| {
-                PublicError::InvalidInput(format!("{} is not UTF-8", crate::ENVOIX_CHUNK_SIZE))
+                TransferError::input(format!("{} is not UTF-8", crate::ENVOIX_CHUNK_SIZE))
             })?;
-            client.chunk_size = crate::parse_chunk_size(&value)?;
+            client.chunk_size = crate::parse_chunk_size(&value).map_err(setup_error)?;
         }
-        crate::validate_chunk_size(client.chunk_size)?;
+        crate::validate_chunk_size(client.chunk_size).map_err(setup_error)?;
         Ok(client)
     }
 
@@ -102,10 +106,11 @@ impl Client {
         file: PathBuf,
         to: PeerSource,
         options: TransferOptions,
-    ) -> Result<Transfer, PublicError> {
-        crate::validate_chunk_size(self.chunk_size)?;
+    ) -> Result<Transfer, TransferError> {
+        crate::validate_chunk_size(self.chunk_size).map_err(setup_error)?;
         validate_path_policy(&options)?;
         let (events, event_receiver) = EventSender::channel();
+        let events_phase = events.phase_cell();
         let cancel = TransferCancelToken::new();
         let sink = Box::new(SessionEventAdapter(events.clone()));
         let resume = options.resume;
@@ -143,12 +148,11 @@ impl Client {
                 })
             }
             PeerSource::Mdns { token: None } => {
-                return Err(PublicError::InvalidInput(
-                    "sending over mDNS requires a token".into(),
-                ));
+                return Err(TransferError::input("sending over mDNS requires a token"));
             }
             PeerSource::Room { code, broker } => {
-                let broker = parse_broker_addr(&broker, options.relay.as_deref())?;
+                let broker =
+                    parse_broker_addr(&broker, options.relay.as_deref()).map_err(setup_error)?;
                 let config = self.session_config(shared_token(ROOM_PLACEHOLDER_TOKEN)?, &options);
                 let cancel = cancel.clone();
                 tokio::spawn(async move {
@@ -160,14 +164,13 @@ impl Client {
                 })
             }
             PeerSource::ShowManual { .. } | PeerSource::ShowInvite { .. } => {
-                return Err(PublicError::InvalidInput(
+                return Err(TransferError::input(
                     "this peer source listens for a dialer; sending toward it needs \
-                     protocol role negotiation and is not supported yet"
-                        .into(),
+                     protocol role negotiation and is not supported yet",
                 ));
             }
         };
-        Ok(Transfer::new(event_receiver, cancel, task))
+        Ok(Transfer::new(event_receiver, cancel, events_phase, task))
     }
 
     /// Receives one file into the `into` directory from the peer described
@@ -182,10 +185,11 @@ impl Client {
         into: PathBuf,
         from: PeerSource,
         options: TransferOptions,
-    ) -> Result<Transfer, PublicError> {
-        crate::validate_chunk_size(self.chunk_size)?;
+    ) -> Result<Transfer, TransferError> {
+        crate::validate_chunk_size(self.chunk_size).map_err(setup_error)?;
         validate_path_policy(&options)?;
         let (events, event_receiver) = EventSender::channel();
+        let events_phase = events.phase_cell();
         let cancel = TransferCancelToken::new();
         let sink = Box::new(SessionEventAdapter(events.clone()));
         let listen = options
@@ -255,7 +259,8 @@ impl Client {
                 })
             }
             PeerSource::Room { code, broker } => {
-                let broker = parse_broker_addr(&broker, options.relay.as_deref())?;
+                let broker =
+                    parse_broker_addr(&broker, options.relay.as_deref()).map_err(setup_error)?;
                 let config = self.session_config(shared_token(ROOM_PLACEHOLDER_TOKEN)?, &options);
                 let cancel = cancel.clone();
                 tokio::spawn(async move {
@@ -267,14 +272,13 @@ impl Client {
                 })
             }
             PeerSource::Manual { .. } | PeerSource::Invite { .. } => {
-                return Err(PublicError::InvalidInput(
+                return Err(TransferError::input(
                     "this peer source dials a listener; receiving from it needs \
-                     protocol role negotiation and is not supported yet"
-                        .into(),
+                     protocol role negotiation and is not supported yet",
                 ));
             }
         };
-        Ok(Transfer::new(event_receiver, cancel, task))
+        Ok(Transfer::new(event_receiver, cancel, events_phase, task))
     }
 
     fn session_config(&self, pairing: PairingConfig, options: &TransferOptions) -> SessionConfig {
@@ -289,13 +293,22 @@ impl Client {
     }
 }
 
-fn shared_token(token: &str) -> Result<PairingConfig, PublicError> {
-    PairingConfig::spake2_shared_token(token)
+fn shared_token(token: &str) -> Result<PairingConfig, TransferError> {
+    PairingConfig::spake2_shared_token(token).map_err(setup_error)
+}
+
+/// Classifies an internal error that happened before the transfer started.
+fn setup_error(error: PublicError) -> TransferError {
+    TransferError::from_core(error, Phase::Setup)
 }
 
 /// Generates a fresh pairing token for listening sources given none.
-fn new_token() -> Result<String, PublicError> {
-    generate_token().map_err(|e| PublicError::Crypto(format!("failed to generate token: {e}")))
+fn new_token() -> Result<String, TransferError> {
+    generate_token().map_err(|e| {
+        setup_error(PublicError::Crypto(format!(
+            "failed to generate token: {e}"
+        )))
+    })
 }
 
 /// An `on_bound` callback that advertises the peer together with an encoded
@@ -316,18 +329,18 @@ fn advertise_with_invite(
     }
 }
 
-fn validate_path_policy(options: &TransferOptions) -> Result<(), PublicError> {
+fn validate_path_policy(options: &TransferOptions) -> Result<(), TransferError> {
     if options.path == PathPolicy::RelayOnly && options.relay.is_none() {
-        return Err(PublicError::InvalidInput(
-            "PathPolicy::RelayOnly requires a relay".into(),
+        return Err(TransferError::input(
+            "PathPolicy::RelayOnly requires a relay",
         ));
     }
     Ok(())
 }
 
 /// Decodes and validates an invite, returning the peer to dial and the token.
-fn resolve_invite(invite: &str) -> Result<(PeerDescriptor, String), PublicError> {
-    let to_err = |e| PublicError::InvalidInput(format!("invalid invite: {e}"));
+fn resolve_invite(invite: &str) -> Result<(PeerDescriptor, String), TransferError> {
+    let to_err = |e| TransferError::input(format!("invalid invite: {e}"));
     let payload = QrInvitePayload::decode(invite).map_err(to_err)?;
     payload.validate(unix_now()).map_err(to_err)?;
     let peer = payload.peer_descriptor().map_err(to_err)?;
@@ -359,7 +372,7 @@ mod tests {
             let error = client()
                 .send("f.txt".into(), source, TransferOptions::default())
                 .unwrap_err();
-            assert!(matches!(error, PublicError::InvalidInput(_)));
+            assert_eq!(error.kind, ErrorKind::Input);
         }
     }
 
@@ -376,7 +389,7 @@ mod tests {
                 TransferOptions::default(),
             )
             .unwrap_err();
-        assert!(matches!(error, PublicError::InvalidInput(_)));
+        assert_eq!(error.kind, ErrorKind::Input);
     }
 
     #[test]
@@ -388,7 +401,7 @@ mod tests {
                 TransferOptions::default(),
             )
             .unwrap_err();
-        assert!(matches!(error, PublicError::InvalidInput(_)));
+        assert_eq!(error.kind, ErrorKind::Input);
     }
 
     #[test]
@@ -407,7 +420,7 @@ mod tests {
                 options,
             )
             .unwrap_err();
-        assert!(matches!(error, PublicError::InvalidInput(_)));
+        assert_eq!(error.kind, ErrorKind::Input);
     }
 
     #[test]
@@ -425,7 +438,7 @@ mod tests {
             let error = client()
                 .receive("out".into(), source, TransferOptions::default())
                 .unwrap_err();
-            assert!(matches!(error, PublicError::InvalidInput(_)));
+            assert_eq!(error.kind, ErrorKind::Input);
         }
     }
 
@@ -454,6 +467,6 @@ mod tests {
                 TransferOptions::default(),
             )
             .unwrap_err();
-        assert!(matches!(error, PublicError::InvalidInput(_)));
+        assert_eq!(error.kind, ErrorKind::Input);
     }
 }

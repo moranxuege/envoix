@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use envoix_client::api;
+use envoix_client::api::TransferError;
 use envoix_client::{
     BindAddrs, IdentityConfig, PeerDescriptor, SPAKE2_EXPERIMENTAL_WARNING, TransferDirection,
     TransferSummary,
@@ -166,7 +167,7 @@ fn init_tracing() {
         .init();
 }
 
-async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
+async fn run(cli: Cli) -> Result<(), TransferError> {
     let event_output = EventOutput::new(cli.json);
     match cli.command {
         Command::Send {
@@ -211,8 +212,8 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                 run_transfer(transfer, event_output.clone()).await?
             } else if enable_mdns {
                 if peer.is_some() {
-                    return Err(envoix_client::PublicError::InvalidInput(
-                        "use either --enable-mdns or --peer, not both".into(),
+                    return Err(TransferError::input(
+                        "use either --enable-mdns or --peer, not both",
                     ));
                 }
                 let token = token.expect("clap ensures --token is present with --enable-mdns");
@@ -226,8 +227,8 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                 run_transfer(transfer, event_output.clone()).await?
             } else {
                 let peer = peer.ok_or_else(|| {
-                    envoix_client::PublicError::InvalidInput(
-                        "send requires --peer unless --enable-mdns or --invite is set".into(),
+                    TransferError::input(
+                        "send requires --peer unless --enable-mdns or --invite is set",
                     )
                 })?;
                 let token = token.expect("clap ensures --token is present without --invite");
@@ -308,16 +309,11 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
 /// How long a first Ctrl-C waits for a clean shutdown before forcing exit.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 
-/// Error used when an interrupt forces exit before the operation finished.
-fn interrupted_error() -> envoix_client::PublicError {
-    envoix_client::PublicError::Transfer("interrupted before completion".into())
-}
-
 /// Builds the new-API client from the CLI's config/identity arguments.
 fn api_client(
     config_path: Option<&std::path::Path>,
     identity: IdentityConfig,
-) -> Result<api::Client, envoix_client::PublicError> {
+) -> Result<api::Client, TransferError> {
     eprintln!("{SPAKE2_EXPERIMENTAL_WARNING}");
     let mut client = api::Client::from_runtime_sources(config_path)?;
     client.identity = identity;
@@ -352,14 +348,12 @@ fn path_policy(relay_only: bool, direct_only: bool) -> api::PathPolicy {
 async fn run_transfer(
     mut transfer: api::Transfer,
     mut renderer: EventOutput,
-) -> Result<TransferSummary, envoix_client::PublicError> {
+) -> Result<TransferSummary, TransferError> {
     let interrupted = tokio::select! {
         _ = drain_events(&mut transfer, &mut renderer) => false,
         signal = tokio::signal::ctrl_c() => {
             signal.map_err(|error| {
-                envoix_client::PublicError::Transfer(format!(
-                    "failed to listen for interrupt signal: {error}"
-                ))
+                TransferError::input(format!("failed to listen for interrupt signal: {error}"))
             })?;
             true
         }
@@ -369,8 +363,8 @@ async fn run_transfer(
         transfer.cancel();
         tokio::select! {
             _ = drain_events(&mut transfer, &mut renderer) => {}
-            _ = tokio::signal::ctrl_c() => return Err(interrupted_error()),
-            _ = tokio::time::sleep(SHUTDOWN_GRACE) => return Err(interrupted_error()),
+            _ = tokio::signal::ctrl_c() => return Err(TransferError::cancelled(transfer.phase())),
+            _ = tokio::time::sleep(SHUTDOWN_GRACE) => return Err(TransferError::cancelled(transfer.phase())),
         }
     }
     transfer.wait().await
