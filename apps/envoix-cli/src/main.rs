@@ -3,23 +3,20 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Mutex;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use envoix_client::api;
 use envoix_client::{
-    BindAddrs, ClientConfig, ClientEvent, ConnectionPolicy, EnvoixClient, EventSink,
-    IdentityConfig, PairingConfig, PeerDescriptor, ReceiveRequest, RoomReceiveRequest,
-    RoomSendRequest, SPAKE2_EXPERIMENTAL_WARNING, TransferCancelToken, TransferDirection,
-    TransferEvent, TransferSummary,
+    BindAddrs, ClientConfig, EnvoixClient, EventSink, IdentityConfig, PairingConfig,
+    PeerDescriptor, RoomReceiveRequest, RoomSendRequest, SPAKE2_EXPERIMENTAL_WARNING,
+    TransferCancelToken, TransferDirection, TransferEvent, TransferSummary,
 };
-use envoix_qr::{QrInvitePayload, generate_token, render_terminal_qr};
+use envoix_qr::render_terminal_qr;
 
 const IPV4_RECEIVE_ADDR: &str = "0.0.0.0:0";
 const IPV6_RECEIVE_ADDR: &str = "[::]:0";
 const PROGRESS_RENDER_INTERVAL: Duration = Duration::from_millis(250);
-/// Lifetime of a generated QR invite before it is considered expired.
-const INVITE_TTL_SECS: u64 = 300;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -290,71 +287,14 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                 )
                 .await?
             } else if enable_mdns {
-                match token {
-                    Some(t) => {
-                        let token_for_print = t.clone();
-                        let client = client_for_token(t, config.as_deref(), identity)?;
-                        eprintln!("waiting for sender...");
-                        let cancel = TransferCancelToken::new();
-                        run_interruptible(
-                            client.receive_with_cancel(
-                                ReceiveRequest {
-                                    output_dir: output,
-                                    connection_policy: ConnectionPolicy::EnableMdns,
-                                    listen_addrs,
-                                },
-                                Box::new(ConsoleClientEventSink),
-                                Box::new(ConsoleEventSink::new()),
-                                move |peer| {
-                                    eprintln!("peer: {peer}");
-                                    eprintln!("token: {token_for_print}");
-                                },
-                                cancel.clone(),
-                            ),
-                            cancel,
-                        )
-                        .await?
-                    }
-                    None => {
-                        // Auto-generate token and print QR invite for the sender.
-                        let generated = generate_token().map_err(|e| {
-                            envoix_client::PublicError::InvalidInput(format!(
-                                "failed to generate token: {e}"
-                            ))
-                        })?;
-                        let token_for_qr = generated.clone();
-                        let client = client_for_token(generated, config.as_deref(), identity)?;
-                        eprintln!("waiting for sender...");
-                        let cancel = TransferCancelToken::new();
-                        run_interruptible(
-                            client.receive_with_cancel(
-                                ReceiveRequest {
-                                    output_dir: output,
-                                    connection_policy: ConnectionPolicy::EnableMdns,
-                                    listen_addrs,
-                                },
-                                Box::new(ConsoleClientEventSink),
-                                Box::new(ConsoleEventSink::new()),
-                                move |peer| {
-                                    let payload = QrInvitePayload::new(
-                                        token_for_qr,
-                                        peer.clone(),
-                                        unix_now() + INVITE_TTL_SECS,
-                                    );
-                                    let invite = payload.encode();
-                                    eprintln!("peer: {peer}");
-                                    eprintln!("\ninvite: {invite}");
-                                    if let Some(qr) = render_terminal_qr(&invite) {
-                                        eprintln!("{qr}");
-                                    }
-                                },
-                                cancel.clone(),
-                            ),
-                            cancel,
-                        )
-                        .await?
-                    }
-                }
+                let client = api_client(config.as_deref(), identity)?;
+                eprintln!("waiting for sender...");
+                let transfer = client.receive(
+                    output,
+                    api::PeerSource::Mdns { token },
+                    receive_options(listen_addrs),
+                )?;
+                run_transfer(transfer).await?
             } else {
                 let token = token.expect("clap requires --token unless --enable-mdns is set");
                 let client = api_client(config.as_deref(), identity)?;
@@ -576,26 +516,6 @@ fn receive_addrs_for(ip_version: IpVersion) -> BindAddrs {
     }
 }
 
-/// Current Unix time in whole seconds.
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-fn client_for_token(
-    token: String,
-    config_path: Option<&std::path::Path>,
-    identity: IdentityConfig,
-) -> Result<EnvoixClient, envoix_client::PublicError> {
-    eprintln!("{SPAKE2_EXPERIMENTAL_WARNING}");
-    let pairing = PairingConfig::spake2_shared_token(token)?;
-    let mut config = ClientConfig::from_runtime_sources(pairing, config_path)?;
-    config.identity = identity;
-    Ok(EnvoixClient::new(config))
-}
-
 fn identity_config(path: Option<PathBuf>) -> IdentityConfig {
     path.map(IdentityConfig::Persistent)
         .unwrap_or(IdentityConfig::Ephemeral)
@@ -700,48 +620,6 @@ impl EventSink for ConsoleEventSink {
                 } else {
                     render_attempt_failure_line(direction, &reason);
                 }
-            }
-        }
-    }
-}
-
-/// A [`ClientEventSink`] that logs client lifecycle events to stderr.
-#[derive(Clone, Copy, Debug)]
-struct ConsoleClientEventSink;
-
-impl envoix_client::ClientEventSink for ConsoleClientEventSink {
-    fn on_event(&self, event: ClientEvent) {
-        match event {
-            ClientEvent::NetworkDetectionStarted => {
-                eprintln!("detecting network environment...");
-            }
-            ClientEvent::EndpointStarted { direction } => {
-                let dir = match direction {
-                    TransferDirection::Send => "send",
-                    TransferDirection::Receive => "receive",
-                };
-                eprintln!("starting {dir} endpoint...");
-            }
-            ClientEvent::DirectAddressAvailable { peer } => {
-                eprintln!("  direct address: {peer}");
-            }
-            ClientEvent::DialStarted { peer } => {
-                eprintln!("dialing {peer}...");
-            }
-            ClientEvent::Authenticated { direction } => {
-                let dir = match direction {
-                    TransferDirection::Send => "send",
-                    TransferDirection::Receive => "receive",
-                };
-                eprintln!("authenticated {dir} peer");
-            }
-            ClientEvent::ConnectionFailed { reason } => {
-                eprintln!("  connection failed: {reason}");
-            }
-            ClientEvent::TooManyAuthFailures => {
-                eprintln!(
-                    "  failed pairing attempts exceeded threshold: another peer may be using the wrong token or interfering"
-                );
             }
         }
     }
