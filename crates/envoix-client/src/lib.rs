@@ -241,21 +241,6 @@ pub struct RoomReceiveRequest {
     pub listen_addrs: BindAddrs,
 }
 
-/// Advisory snapshot of the local network environment.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct NetworkEnvironment {
-    /// Whether local IPv4 connectivity appears available.
-    pub ipv4_available: Option<bool>,
-    /// Whether local IPv6 connectivity appears available.
-    pub ipv6_available: Option<bool>,
-    /// Whether UDP connectivity appears usable for QUIC.
-    pub udp_available: Option<bool>,
-    /// Whether the rendezvous server appears reachable.
-    pub server_reachable: Option<bool>,
-    /// Human-readable diagnostic notes for UI and logs.
-    pub notes: Vec<String>,
-}
-
 /// Observer for client-level discovery, pairing, and connection events.
 pub trait ClientEventSink: Send + Sync {
     /// Handles one client lifecycle event.
@@ -273,8 +258,6 @@ impl ClientEventSink for NoopClientEventSink {
 /// User-visible lifecycle events above the transfer engine.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ClientEvent {
-    /// Advisory network probing has started.
-    NetworkDetectionStarted,
     /// Endpoint setup has started.
     EndpointStarted {
         /// Direction of this local operation.
@@ -285,23 +268,6 @@ pub enum ClientEvent {
         /// Direct descriptor callers can share with a peer.
         peer: PeerDescriptor,
     },
-    /// Dialing a peer has started.
-    DialStarted {
-        /// Peer being dialed.
-        peer: PeerDescriptor,
-    },
-    /// Pairing authentication completed.
-    Authenticated {
-        /// Direction of this local operation.
-        direction: TransferDirection,
-    },
-    /// A connection attempt failed.
-    ConnectionFailed {
-        /// Human-readable failure reason.
-        reason: String,
-    },
-    /// Pairing failed too many times while receiving.
-    TooManyAuthFailures,
 }
 
 /// Public facade for sending and receiving files.
@@ -490,18 +456,6 @@ impl EnvoixClient {
             cancel,
         )
         .await
-    }
-
-    /// Detects the local network environment for UI diagnostics and strategy hints.
-    pub async fn detect_network_environment(
-        &self,
-        events: Box<dyn ClientEventSink>,
-    ) -> Result<NetworkEnvironment, PublicError> {
-        self.validate_config()?;
-        events.on_event(ClientEvent::NetworkDetectionStarted);
-        Err(CoreError::Discovery(
-            "network environment detection is not implemented".into(),
-        ))
     }
 
     /// Sends one file by pairing in a rendezvous room using a short code. The
