@@ -6,7 +6,7 @@
 
 use envoix_protocol::PeerDescriptor;
 use envoix_session::TransferDirection;
-use envoix_types::TransferId;
+use envoix_types::{DataPath, TransferId};
 
 /// One step in the life of a transfer, in emission order.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -28,6 +28,17 @@ pub enum TransferEvent {
     },
     /// Rendezvous pairing through the broker is running.
     Pairing,
+    /// A data path to the peer was selected.
+    Connected {
+        /// The selected path (direct or relay).
+        path: DataPath,
+    },
+    /// The selected data path changed (e.g. a relay -> direct upgrade once
+    /// hole-punching succeeds).
+    PathChanged {
+        /// The newly selected path.
+        path: DataPath,
+    },
     /// The data transfer has started.
     Started {
         /// Transfer identifier for correlating events.

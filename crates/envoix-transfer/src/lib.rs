@@ -13,7 +13,7 @@ use envoix_protocol::{
     ResumeStatus,
 };
 use envoix_storage::{LocalFileStorage, TransferResumeState};
-use envoix_types::{PROTOCOL_VERSION, PeerRole, TransferDirection, TransferId};
+use envoix_types::{DataPath, PROTOCOL_VERSION, PeerRole, TransferDirection, TransferId};
 use tokio::fs;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::Notify;
@@ -143,6 +143,19 @@ pub enum TransferEvent {
         direction: TransferDirection,
         /// Human-readable failure reason.
         reason: String,
+    },
+    /// A data path to the peer was selected for the first time.
+    ///
+    /// Emitted by the session layer (the engine does not know transports).
+    Connected {
+        /// The selected path.
+        path: DataPath,
+    },
+    /// The selected data path changed (e.g. a relay -> direct upgrade after
+    /// hole-punching succeeded).
+    PathChanged {
+        /// The newly selected path.
+        path: DataPath,
     },
 }
 
