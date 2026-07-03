@@ -30,6 +30,10 @@ QR flow (no manual token or address needed):
 "
 )]
 struct Cli {
+    /// Emit lifecycle events as JSON lines on stdout instead of human
+    /// rendering (progress lines stay off; contextual notes stay on stderr).
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -163,6 +167,7 @@ fn init_tracing() {
 }
 
 async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
+    let event_output = EventOutput::new(cli.json);
     match cli.command {
         Command::Send {
             peer,
@@ -195,7 +200,7 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                     },
                     options,
                 )?;
-                run_transfer(transfer).await?
+                run_transfer(transfer, event_output.clone()).await?
             } else if let Some(invite_str) = invite {
                 let client = api_client(config.as_deref(), identity_config(identity))?;
                 let transfer = client.send(
@@ -203,7 +208,7 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                     api::PeerSource::Invite { invite: invite_str },
                     send_options(resume),
                 )?;
-                run_transfer(transfer).await?
+                run_transfer(transfer, event_output.clone()).await?
             } else if enable_mdns {
                 if peer.is_some() {
                     return Err(envoix_client::PublicError::InvalidInput(
@@ -218,7 +223,7 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                     api::PeerSource::Mdns { token: Some(token) },
                     send_options(resume),
                 )?;
-                run_transfer(transfer).await?
+                run_transfer(transfer, event_output.clone()).await?
             } else {
                 let peer = peer.ok_or_else(|| {
                     envoix_client::PublicError::InvalidInput(
@@ -232,7 +237,7 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                     api::PeerSource::Manual { peer, token },
                     send_options(resume),
                 )?;
-                run_transfer(transfer).await?
+                run_transfer(transfer, event_output.clone()).await?
             };
             eprintln!(
                 "sent {} bytes from {}",
@@ -270,7 +275,7 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                     },
                     options,
                 )?;
-                run_transfer(transfer).await?
+                run_transfer(transfer, event_output.clone()).await?
             } else if enable_mdns {
                 let client = api_client(config.as_deref(), identity)?;
                 eprintln!("waiting for sender...");
@@ -279,7 +284,7 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                     api::PeerSource::Mdns { token },
                     receive_options(listen_addrs),
                 )?;
-                run_transfer(transfer).await?
+                run_transfer(transfer, event_output.clone()).await?
             } else {
                 let token = token.expect("clap requires --token unless --enable-mdns is set");
                 let client = api_client(config.as_deref(), identity)?;
@@ -288,7 +293,7 @@ async fn run(cli: Cli) -> Result<(), envoix_client::PublicError> {
                     api::PeerSource::ShowManual { token: Some(token) },
                     receive_options(listen_addrs),
                 )?;
-                run_transfer(transfer).await?
+                run_transfer(transfer, event_output.clone()).await?
             };
             eprintln!(
                 "received {} bytes into {}",
@@ -346,8 +351,8 @@ fn path_policy(relay_only: bool, direct_only: bool) -> api::PathPolicy {
 /// grace period elapsing forces exit).
 async fn run_transfer(
     mut transfer: api::Transfer,
+    mut renderer: EventOutput,
 ) -> Result<TransferSummary, envoix_client::PublicError> {
-    let mut renderer = Renderer::default();
     let interrupted = tokio::select! {
         _ = drain_events(&mut transfer, &mut renderer) => false,
         signal = tokio::signal::ctrl_c() => {
@@ -371,9 +376,47 @@ async fn run_transfer(
     transfer.wait().await
 }
 
-async fn drain_events(transfer: &mut api::Transfer, renderer: &mut Renderer) {
+async fn drain_events(transfer: &mut api::Transfer, renderer: &mut EventOutput) {
     while let Some(event) = transfer.next_event().await {
         renderer.render(event);
+    }
+}
+
+/// How transfer events reach the user: human terminal rendering, or one JSON
+/// object per line on stdout for tooling (the observation-campaign driver).
+#[derive(Debug)]
+enum EventOutput {
+    Console(Renderer),
+    Json,
+}
+
+impl EventOutput {
+    fn new(json: bool) -> Self {
+        if json {
+            Self::Json
+        } else {
+            Self::Console(Renderer::default())
+        }
+    }
+
+    fn render(&mut self, event: api::TransferEvent) {
+        match self {
+            Self::Console(renderer) => renderer.render(event),
+            Self::Json => match serde_json::to_string(&event) {
+                Ok(line) => println!("{line}"),
+                Err(error) => eprintln!("failed to encode event as JSON: {error}"),
+            },
+        }
+    }
+}
+
+impl Clone for EventOutput {
+    fn clone(&self) -> Self {
+        match self {
+            // A fresh renderer per transfer: progress state is per-transfer.
+            Self::Console(_) => Self::Console(Renderer::default()),
+            Self::Json => Self::Json,
+        }
     }
 }
 

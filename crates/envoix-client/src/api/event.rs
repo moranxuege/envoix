@@ -7,10 +7,15 @@
 use envoix_protocol::PeerDescriptor;
 use envoix_session::TransferDirection;
 use envoix_types::{DataPath, TransferId};
+use serde::Serialize;
 
 /// One step in the life of a transfer, in emission order.
-#[derive(Clone, Debug, Eq, PartialEq)]
+///
+/// Serializes as one JSON object per event with an `"event"` tag
+/// (the CLI's `--json` output; stable shape for tooling).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[non_exhaustive]
+#[serde(tag = "event", rename_all = "snake_case")]
 pub enum TransferEvent {
     /// The local endpoint is being set up.
     Binding {
