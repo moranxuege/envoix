@@ -544,3 +544,21 @@ mobile); 3-5 can trail. Time-box the rest.
 - iroh behavior when a configured relay is unreachable: confirm endpoint
   bring-up and direct connects proceed without added blocking (needed to make
   I2's "additional candidates only" defaults safe).
+- Campaign finding (2026-07-04): stripping the relay from the data endpoint
+  also strips hole-punch signaling + QAD, so a NAT'd peer cannot reach a
+  direct-only receiver at all - and stateful IPv6 firewalls make this true on
+  v6 too (no NAT does not mean no filter; punching survived the death of NAT).
+  Redefine DirectOnly as selected-path policy: keep the relay configured for
+  signaling/QAD, fail unless the selected path becomes direct within a grace
+  window (post-connect check on the paths() API).
+- Address observation should not be relay-coupled: (a) relay QAD works today;
+  (b) the broker could report each peer's observed address in Paired - but it
+  currently sees the rendezvous endpoint's socket, not the data endpoint's, so
+  this requires unifying the two endpoints (one endpoint, both ALPNs); with
+  both-sides-dial that yields relay-free punching; (c) generic STUN (free
+  public servers exist) cannot observe iroh's managed socket without iroh
+  support - verify upstream options.
+- Path-migration reasons are invisible: selection is liveness-driven inside
+  iroh; BBR is active but its bandwidth estimate is not read out anywhere.
+  Enrich PathChanged with the old path's last-known stats if paths() exposes
+  them; campaign cells can capture RUST_LOG=iroh=debug for ground truth.
