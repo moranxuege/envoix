@@ -34,7 +34,12 @@ async fn manual_loopback_roundtrip() {
 
     // The listener reports itself: Binding, then Advertised with our token.
     let peer = loop {
-        match receive.next_event().await.expect("receiver event stream") {
+        match receive
+            .next_event()
+            .await
+            .expect("receiver event stream")
+            .event
+        {
             TransferEvent::Advertised {
                 peer,
                 token: advertised_token,
@@ -67,7 +72,7 @@ async fn manual_loopback_roundtrip() {
     let mut saw_started = false;
     let mut saw_completed = false;
     while let Some(event) = receive.next_event().await {
-        match event {
+        match event.event {
             TransferEvent::Started { .. } => saw_started = true,
             TransferEvent::Completed {
                 bytes_transferred, ..

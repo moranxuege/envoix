@@ -16,7 +16,7 @@ mod transfer;
 
 pub use envoix_types::DataPath;
 pub use error::{ErrorKind, Phase, TransferError};
-pub use event::TransferEvent;
+pub use event::{StampedEvent, TransferEvent};
 pub use options::{PathPolicy, TransferOptions};
 pub use source::PeerSource;
 pub use transfer::Transfer;

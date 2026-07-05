@@ -9,6 +9,19 @@ use envoix_session::TransferDirection;
 use envoix_types::{DataPath, TransferId};
 use serde::Serialize;
 
+/// A lifecycle event plus when it was emitted.
+///
+/// Stamped at emission (not receipt), so a slow consumer cannot skew the
+/// timeline; serializes flat: `{"ts_ms": ..., "event": ..., ...fields}`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct StampedEvent {
+    /// Emission time, milliseconds since the Unix epoch.
+    pub ts_ms: u64,
+    /// The event itself.
+    #[serde(flatten)]
+    pub event: TransferEvent,
+}
+
 /// One step in the life of a transfer, in emission order.
 ///
 /// Serializes as one JSON object per event with an `"event"` tag

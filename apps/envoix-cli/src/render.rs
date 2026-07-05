@@ -27,9 +27,9 @@ impl EventOutput {
         }
     }
 
-    pub(crate) fn render(&mut self, event: api::TransferEvent) {
+    pub(crate) fn render(&mut self, event: api::StampedEvent) {
         match self {
-            Self::Console(renderer) => renderer.render(event),
+            Self::Console(renderer) => renderer.render(event.event),
             Self::Json => match serde_json::to_string(&event) {
                 Ok(line) => println!("{line}"),
                 Err(error) => eprintln!("failed to encode event as JSON: {error}"),
