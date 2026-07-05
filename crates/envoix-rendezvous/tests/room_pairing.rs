@@ -8,7 +8,7 @@ use std::time::Duration;
 use envoix_pairing::{
     Confirm, PakeResponse, PakeStart, initiator_start, open_json, responder_respond, seal_json,
 };
-use envoix_rendezvous::{Join, Paired, PeerConn, Role, RoomRegistry, read_framed, write_framed};
+use envoix_rendezvous::{Join, PeerConn, Reply, Role, RoomRegistry, read_framed, write_framed};
 use tokio::io::DuplexStream;
 
 /// Wrap the broker's side of a duplex as a `PeerConn` (the halves own the
@@ -34,7 +34,10 @@ async fn run_initiator(
         },
     )
     .await?;
-    let paired: Paired = read_framed(&mut reader).await?;
+    let reply: Reply = read_framed(&mut reader).await?;
+    let Reply::Paired(paired) = reply else {
+        panic!("expected Paired, got {reply:?}");
+    };
 
     let (pending, start) = initiator_start(code)?;
     write_framed(&mut writer, &start).await?;
@@ -70,7 +73,10 @@ async fn run_responder(
         },
     )
     .await?;
-    let paired: Paired = read_framed(&mut reader).await?;
+    let reply: Reply = read_framed(&mut reader).await?;
+    let Reply::Paired(paired) = reply else {
+        panic!("expected Paired, got {reply:?}");
+    };
 
     let start: PakeStart = read_framed(&mut reader).await?;
     let (confirming, response) = responder_respond(code, &start)?;
@@ -148,9 +154,9 @@ async fn lone_peer_expires() {
         Err(envoix_rendezvous::RendezvousError::Expired)
     ));
 
-    // And the parked stream is closed, so the client sees EOF.
-    let pending: Result<Paired, _> = read_framed(&mut reader).await;
-    assert!(pending.is_err());
+    // The parked peer is told the room expired before the stream closes.
+    let reply: Reply = read_framed(&mut reader).await.unwrap();
+    assert_eq!(reply, Reply::Expired);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -15,7 +15,7 @@ use iroh::endpoint::{Connection, Incoming, RecvStream, RelayMode, SendStream, pr
 use iroh::{Endpoint, EndpointAddr, RelayMap, RelayUrl, SecretKey, TransportAddr};
 
 use envoix_rendezvous::{
-    CloseWaiter, Join, Paired, PeerConn, Role, RoomRegistry, read_framed, write_framed,
+    CloseWaiter, Join, PeerConn, Reply, Role, RoomRegistry, read_framed, write_framed,
 };
 
 mod code;
@@ -56,6 +56,10 @@ impl CloseWaiter for IrohClose {
 
 /// ALPN for the rendezvous protocol (distinct from the data-plane `envoix/1`).
 pub const RENDEZVOUS_ALPN: &[u8] = b"envoix-rendezvous/1";
+
+/// Reason string the broker signals (and `join_room` returns) when a room's
+/// wait window elapses with no partner - distinct from a network failure.
+pub const ROOM_EXPIRED: &str = "no peer joined the room within the wait window";
 
 /// Bind an iroh endpoint that speaks the rendezvous ALPN. Pass
 /// [`RelayMode::Disabled`] for LAN/direct, or a custom relay mode (see
@@ -169,12 +173,16 @@ pub async fn join_room(
         },
     )
     .await?;
-    let paired: Paired = read_framed(&mut recv).await?;
+    let reply: Reply = read_framed(&mut recv).await?;
+    let role = match reply {
+        Reply::Paired(paired) => paired.role,
+        Reply::Expired => anyhow::bail!(ROOM_EXPIRED),
+    };
     Ok(BrokerSession {
         connection,
         send,
         recv,
-        role: paired.role,
+        role,
     })
 }
 
