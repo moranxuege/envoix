@@ -34,6 +34,7 @@ fn config() -> SessionConfig {
         relay: None,
         relay_only: false,
         direct_only: false,
+        candidates: Default::default(),
     }
 }
 
@@ -145,5 +146,34 @@ async fn room_expiry_reports_no_peer_joined() {
     assert!(
         error.to_string().contains("no peer joined the room"),
         "expected the friendly expiry message, got: {error}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn candidate_filter_scopes_the_advertised_descriptor() {
+    use envoix_session::{CandidateFilter, bind_iroh_endpoint_enable_mdns};
+
+    let listen = envoix_session::BindAddrs::dual_stack(0);
+    let bound = bind_iroh_endpoint_enable_mdns(listen, &IdentityConfig::Ephemeral)
+        .await
+        .unwrap();
+
+    // Unfiltered: the endpoint has at least one direct address.
+    let all = bound.direct_addrs();
+    assert!(!all.is_empty(), "endpoint should have direct addrs");
+
+    // Deny one of its addresses: the advertised set drops exactly that one,
+    // proving the filter is applied where descriptors are built.
+    let denied = all[0].ip();
+    let filtered = bound
+        .with_candidate_filter(CandidateFilter::from_lists(&[], &[denied.to_string()]).unwrap());
+    let kept = filtered.direct_addrs();
+    assert!(
+        !kept.iter().any(|a| a.ip() == denied),
+        "denied address must not be advertised"
+    );
+    assert!(
+        kept.len() < all.len(),
+        "filter must reduce the advertised set"
     );
 }

@@ -61,6 +61,8 @@ pub struct SessionConfig {
     /// the transfer itself gets no relay fallback (direct-or-fail). For A/B
     /// testing and confirming a direct path really works.
     pub direct_only: bool,
+    /// CIDR filter over the candidate addresses we advertise to a peer.
+    pub candidates: CandidateFilter,
 }
 
 impl SessionConfig {
@@ -89,6 +91,7 @@ pub(crate) async fn bind_iroh_endpoint_with_relay(
     Ok(BoundEndpoint {
         local_endpoint: build_accept_endpoint(listen_addrs.into(), identity, relay, relay_only)
             .await?,
+        candidates: CandidateFilter::default(),
     })
 }
 
@@ -105,6 +108,7 @@ pub async fn bind_iroh_endpoint_enable_mdns(
             false,
         )
         .await?,
+        candidates: CandidateFilter::default(),
     })
 }
 
@@ -294,7 +298,8 @@ where
         &config.data_relay(),
         config.relay_only,
     )
-    .await?;
+    .await?
+    .with_candidate_filter(config.candidates.clone());
     let peer = bound_endpoint.peer_descriptor()?;
     on_bound_peer(peer);
     receive_one_authenticated(bound_endpoint, output_dir, config, events, cancel).await
