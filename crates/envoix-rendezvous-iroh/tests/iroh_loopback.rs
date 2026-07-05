@@ -43,7 +43,7 @@ async fn two_iroh_peers_pair_through_the_rendezvous() {
     // Broker.
     let server = endpoint().await;
     let broker = ready_addr(&server).await;
-    tokio::spawn(serve_endpoint(server, Arc::new(RoomRegistry::new())));
+    tokio::spawn(serve_endpoint(server, Arc::new(RoomRegistry::new()), None));
 
     // Two clients, each with a real (address-ready) descriptor to exchange.
     let ca = endpoint().await;

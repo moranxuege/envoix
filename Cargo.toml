@@ -38,6 +38,7 @@ envoix-types = { path = "crates/envoix-types" }
 async-trait = "0.1"
 anyhow = "1"
 ipnet = "2"
+maxminddb = "0.29"
 base64 = "0.22"
 qrcode = { version = "0.14", default-features = false }
 blake3 = "1"

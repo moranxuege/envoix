@@ -49,7 +49,7 @@ async fn file_transfers_through_the_rendezvous() {
     .await
     .unwrap();
     let broker = ready_addr(&server).await;
-    tokio::spawn(serve_endpoint(server, Arc::new(RoomRegistry::new())));
+    tokio::spawn(serve_endpoint(server, Arc::new(RoomRegistry::new()), None));
 
     // A source file and an output directory.
     let dir = tempdir().unwrap();
@@ -122,7 +122,7 @@ async fn room_expiry_reports_no_peer_joined() {
     .unwrap();
     let broker = ready_addr(&server).await;
     let registry = Arc::new(RoomRegistry::with_ttl(Duration::from_secs(2)));
-    tokio::spawn(serve_endpoint(server, registry));
+    tokio::spawn(serve_endpoint(server, registry, None));
 
     let dir = tempdir().unwrap();
     let out = dir.path().join("received");
