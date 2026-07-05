@@ -8,6 +8,7 @@ use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMap, RelayUrl, TransportAddr
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 use noq_proto::congestion::Bbr3Config;
 
+use crate::candidates::CandidateFilter;
 use crate::connection::IrohFrameConnection;
 use crate::identity::{IdentityConfig, load_secret_key};
 use crate::{ALPN, SessionError};
@@ -76,17 +77,27 @@ impl From<SocketAddr> for BindAddrs {
 #[derive(Clone, Debug)]
 pub struct BoundEndpoint {
     pub(crate) local_endpoint: Endpoint,
+    /// Filter applied to the addresses this endpoint advertises to a peer.
+    pub(crate) candidates: CandidateFilter,
 }
 
 impl BoundEndpoint {
+    /// Set the filter applied to advertised candidate addresses.
+    pub fn with_candidate_filter(mut self, candidates: CandidateFilter) -> Self {
+        self.candidates = candidates;
+        self
+    }
+
     /// Returns the endpoint ID as a stable display string.
     pub fn endpoint_id(&self) -> String {
         self.local_endpoint.id().to_string()
     }
 
-    /// Returns currently known direct socket addresses.
+    /// Returns the advertised direct socket addresses (after the candidate
+    /// filter).
     pub fn direct_addrs(&self) -> Vec<SocketAddr> {
-        self.local_endpoint.addr().ip_addrs().copied().collect()
+        self.candidates
+            .apply(self.local_endpoint.addr().ip_addrs().copied())
     }
 
     /// Returns an app-level direct peer descriptor for this local endpoint.
@@ -95,9 +106,21 @@ impl BoundEndpoint {
     }
 
     /// Returns this endpoint's full iroh address (id + direct addrs, plus its
-    /// relay home when a relay is configured), for advertising to a peer to dial.
+    /// relay home when a relay is configured), for advertising to a peer to
+    /// dial. Direct addrs pass through the candidate filter; the relay home is
+    /// always kept (filtering candidates must not remove the relay fallback).
     pub fn endpoint_addr(&self) -> EndpointAddr {
-        self.local_endpoint.addr()
+        let addr = self.local_endpoint.addr();
+        if self.candidates.is_empty() {
+            return addr;
+        }
+        let ips = self
+            .candidates
+            .apply(addr.ip_addrs().copied())
+            .into_iter()
+            .map(TransportAddr::Ip);
+        let relays = addr.relay_urls().cloned().map(TransportAddr::Relay);
+        EndpointAddr::from_parts(self.local_endpoint.id(), ips.chain(relays))
     }
 
     pub(crate) async fn accept(&self) -> Result<IrohFrameConnection, SessionError> {

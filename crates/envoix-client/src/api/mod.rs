@@ -14,6 +14,7 @@ mod options;
 mod source;
 mod transfer;
 
+pub use envoix_session::CandidateFilter;
 pub use envoix_types::{DataPath, PairingStep};
 pub use error::{ErrorKind, Phase, TransferError};
 pub use event::{StampedEvent, TransferEvent};
@@ -57,6 +58,8 @@ pub struct Client {
     pub chunk_size: usize,
     /// iroh endpoint identity policy.
     pub identity: IdentityConfig,
+    /// CIDR filter over the candidate addresses advertised to a peer.
+    pub candidates: CandidateFilter,
 }
 
 impl Default for Client {
@@ -64,6 +67,7 @@ impl Default for Client {
         Self {
             chunk_size: DEFAULT_CHUNK_SIZE,
             identity: IdentityConfig::Ephemeral,
+            candidates: CandidateFilter::default(),
         }
     }
 }
@@ -253,7 +257,9 @@ impl Client {
                         direction: TransferDirection::Receive,
                         mode,
                     });
-                    let endpoint = bind_iroh_endpoint_enable_mdns(listen, &identity).await?;
+                    let endpoint = bind_iroh_endpoint_enable_mdns(listen, &identity)
+                        .await?
+                        .with_candidate_filter(config.candidates.clone());
                     let peer = endpoint.peer_descriptor()?;
                     let invite = invite_ttl.map(|ttl| {
                         QrInvitePayload::new(token.clone(), peer.clone(), unix_now() + ttl).encode()
@@ -297,6 +303,7 @@ impl Client {
             relay: options.relay.clone(),
             relay_only: options.path == PathPolicy::RelayOnly,
             direct_only: options.path == PathPolicy::DirectOnly,
+            candidates: self.candidates.clone(),
         }
     }
 }
