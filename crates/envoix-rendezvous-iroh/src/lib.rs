@@ -14,6 +14,8 @@ use anyhow::{Context, Result};
 use iroh::endpoint::{Connection, Incoming, RecvStream, RelayMode, SendStream, presets};
 use iroh::{Endpoint, EndpointAddr, RelayMap, RelayUrl, SecretKey, TransportAddr};
 
+use tracing::Instrument;
+
 use envoix_rendezvous::{
     CloseWaiter, Join, PeerConn, Reply, Role, RoomRegistry, read_framed, write_framed,
 };
@@ -140,11 +142,33 @@ async fn serve_incoming(incoming: Incoming, registry: &RoomRegistry) -> Result<(
     let (send, recv) = tokio::time::timeout(HANDSHAKE_TIMEOUT, connection.accept_bi())
         .await
         .context("rendezvous pairing stream not opened in time")??;
+    // Read the peer's observed address before the Connection is moved into the
+    // close-waiter, and carry it on a span so every broker event for this peer
+    // records where it came from.
+    let peer = observed_addr(&connection);
     // The Connection is the close-waiter: the broker keeps it open until the
     // peer closes, then drops it.
     let conn = PeerConn::new(send, recv, IrohClose(connection));
-    registry.serve(conn).await?;
+    let span = tracing::info_span!(
+        "conn",
+        peer = %peer.map(|addr| addr.to_string()).unwrap_or_else(|| "via-relay".into())
+    );
+    registry.serve(conn).instrument(span).await?;
     Ok(())
+}
+
+/// The peer's observed direct socket address on the selected path, or `None` if
+/// it reached us via a relay (a public broker sees a direct address in the
+/// common case). We never log the relay's address as if it were the peer's.
+fn observed_addr(connection: &Connection) -> Option<SocketAddr> {
+    connection
+        .paths()
+        .iter()
+        .find(|path| path.is_selected())
+        .and_then(|path| match path.remote_addr() {
+            TransportAddr::Ip(addr) => Some(*addr),
+            _ => None,
+        })
 }
 
 /// A peer's live session with the broker after joining a room. The caller drives

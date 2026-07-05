@@ -79,7 +79,7 @@ impl RoomRegistry {
         // Anchor the correlation span on the room id; every event below inherits
         // it, so `room` need not be repeated per line.
         tracing::Span::current().record("room", tracing::field::display(&room_id));
-        tracing::debug!("join");
+        tracing::info!("joined");
 
         // Decide under the lock (no await held), then act once it's released, so
         // two peers arriving at once can't both park and miss each other.
