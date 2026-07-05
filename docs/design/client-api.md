@@ -412,6 +412,117 @@ for tier 2. The grid never appears in primary UI.
 
 ---
 
+## 5.5 Tier C: near-term hardening (DESIGN FOR REVIEW - not yet implemented)
+
+Three fixes surfaced by the 2026-07-04 pc<->home-pc campaign. Each is
+implementable at our layer without a protocol/wire change except where noted;
+each has a decision that needs sign-off before code. Sequenced after the merge
+of steps 1-5 + Tiers A/B.
+
+### C1. `direct-only` becomes a selected-path *policy*, not a transport amputation
+
+**What it does today (the bug).** `direct_only` makes the data endpoint drop
+its relay (`SessionConfig::data_relay()` returns `None`). The campaign proved
+this is self-defeating: stripping the relay also strips hole-punch *signaling*
+and QAD, so a NAT'd or stateful-firewalled peer cannot establish *any* direct
+path. Run 7 (receiver-side flag alone) failed; runs 9/10 (no servers at all)
+proved single-sided dials die at both v4 NAT and v6 stateful firewalls. Every
+direct path we have ever measured from home-pc was relay-*coordinated*
+punching. So "remove the relay to force direct" removes the very thing that
+makes direct possible.
+
+**New semantics.** `DirectOnly` keeps the relay fully configured (signaling +
+QAD + punch coordination, exactly like `Auto`), and adds a *post-connect gate*:
+the transfer proceeds only if the selected data path becomes `Direct` within a
+grace window; otherwise it fails loudly. Net: "relay for setup, never for
+data." This is the honest version of what the flag always promised, and it is
+implementable purely on the `paths()` API the path-watcher already reads.
+
+**Sketch.** In the session transfer functions, after the connection is
+established and the path-watcher attached, before authenticating or sending
+any application bytes:
+
+```
+if config.direct_only {
+    await_direct_path(&connection, DIRECT_GRACE).await?;  // poll selected path
+}
+```
+
+`await_direct_path` polls `selected_path()` until it is `Direct` (success) or
+`DIRECT_GRACE` elapses (fail: `Discovery`/`Transport` error, phase Connecting,
+message "no direct path within Ns; retry without --direct-only to use the
+relay"). Gating *before auth* means nothing app-level - not even the SPAKE2
+control frames - rides the relay.
+
+`RelayOnly` is unchanged: it still binds no IP transport (direct genuinely
+impossible), a different mechanism for a different goal. `data_relay()`'s
+`direct_only` branch is deleted - direct-only no longer touches the relay
+config.
+
+**Decisions needing sign-off.**
+1. Grace window length. Campaign upgrades landed at ~2.5-5s; propose
+   `DIRECT_GRACE = 10s` (generous), constant now, a `PathPolicy` field later.
+2. Gate placement: before auth (nothing rides relay - proposed) vs before data
+   (auth may briefly use relay). Proposed: before auth.
+3. Failure is terminal (no auto-fallback to relay). Correct for an A/B testing
+   flag; a future `PreferDirect` (non-fatal) is the grid's job, not this flag's.
+
+This also retires the standalone campaign finding: direct-only is a grid
+special case (`allow = {direct-*}` with a settle deadline), foreshadowing s5.
+
+### C2. Candidate hygiene - scope, do not blindly filter
+
+**Observation.** home-pc advertised un-dialable candidates to a WAN peer: its
+LAN address (`192.168.1.19`), its Tailscale CGNAT address (`100.65.181.110`),
+and a mysterious `2.0.0.1`. Cost: wasted probe time on dead candidates, and a
+privacy leak (LAN topology + Tailscale identity handed to peer and broker).
+
+**Why not a blind filter.** LAN and private addresses are *exactly right* when
+the two peers share a network (the mDNS / same-LAN case) - the doc's
+server-independence story depends on them. So the fix is *scoping by context*,
+never a global drop:
+
+- WAN modes (Room, and Manual/Invite over the internet): drop RFC1918,
+  CGNAT (100.64/10), and link-local from the advertised set - useless to a WAN
+  peer, and a needless disclosure.
+- LAN mode (Mdns): keep them - they are the point.
+
+**Open questions (verify before code).**
+- Candidate enumeration lives in iroh's address layer, not ours. Does iroh 1.0
+  expose a hook to filter advertised candidates, or only `clear_ip_transports`
+  + explicit binds? If no filter hook, C2 is an upstream item, not a local one.
+- What is `2.0.0.1`? Not a standard private range - identify the interface
+  (China Mobile CPE? a VPN?) before deciding whether to special-case it.
+- Privacy vs reachability trade-off is real: a peer that is *only* reachable on
+  a shared LAN but is in "WAN mode" would lose its one working candidate.
+  Scoping must key off the rendezvous mode, and mDNS must stay permissive.
+
+### C3. Friendly room-TTL error instead of "connection lost"
+
+**Root cause (traced).** When a parked room peer's 300s TTL elapses, the broker
+returns `RendezvousError::Expired` and the connection is simply dropped - no
+goodbye. The client, blocked reading `Paired`, sees the drop as
+`transport error during pairing: io error: connection lost` (reproduced 7x on
+2026-07-03). The phase is correct; the message is a lie - nothing failed, no
+peer arrived.
+
+**Options.**
+- A (clean, preferred): the broker sends a `Bye { reason }` control frame
+  before closing on expiry; the client maps it to a friendly terminal error
+  ("no peer joined room <code> within the wait window"). This is a
+  rendezvous-protocol addition (one frame) + broker + client - **coordinate
+  with the rendezvous/server-logging track**, do not fork it here.
+- B (client-only fallback): while parked awaiting `Paired`, interpret a clean
+  connection close (application-close vs reset - check what iroh's
+  `ConnectionError` distinguishes) as "no peer joined." Simpler, no server
+  change, but the clean/reset distinction must be reliable.
+
+**Recommendation.** A, folded into the next rendezvous-protocol revision (which
+already owns Offer/Accept and the `protocol_version` bump). B only if the
+server track slips and the message needs fixing sooner.
+
+---
+
 ## 6. Server-independence invariant (offline-first)
 
 Manual, Invite, and mDNS transfers must keep working when the broker - or the
