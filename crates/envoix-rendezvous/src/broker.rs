@@ -68,7 +68,6 @@ impl RoomRegistry {
     /// first peer of a room or, if a peer already waits there, pair the two and
     /// relay between them. The first peer's task returns once the second takes
     /// over the relay; the second peer's task drives it.
-    #[tracing::instrument(name = "room", skip_all, fields(room = tracing::field::Empty))]
     pub async fn serve(&self, mut conn: PeerConn) -> Result<(), RendezvousError> {
         let Join { room_id } = tokio::time::timeout(JOIN_TIMEOUT, conn.read_control())
             .await
@@ -76,8 +75,9 @@ impl RoomRegistry {
         if room_id.is_empty() || room_id.len() > MAX_ROOM_ID_LEN {
             return Err(RendezvousError::Rejected("room id length out of range"));
         }
-        // Anchor the correlation span on the room id; every event below inherits
-        // it, so `room` need not be repeated per line.
+        // Record the room id onto the ambient connection span (set up by the
+        // transport layer), so every event below - and the peer-address line the
+        // transport emits asynchronously - correlates by room without repeating it.
         tracing::Span::current().record("room", tracing::field::display(&room_id));
         tracing::info!("joined");
 
