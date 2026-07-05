@@ -85,9 +85,11 @@ pub(crate) struct SendArgs {
     /// testing relay vs direct; requires --relay.
     #[arg(long, requires = "relay")]
     pub(crate) relay_only: bool,
-    /// Force a direct data path: no relay fallback for the transfer (the
-    /// relay is still used to reach the broker). Direct-or-fail.
-    #[arg(long, requires = "room", conflicts_with = "relay_only")]
+    /// (Temporarily disabled - see docs/design/client-api.md 5.5.) A relay-free
+    /// direct path between two NATed peers is not achievable: iroh's
+    /// hole-punching runs over a connection that must first be established via
+    /// the relay, so removing the relay removes the punch itself.
+    #[arg(long, requires = "room", conflicts_with = "relay_only", hide = true)]
     pub(crate) direct_only: bool,
     /// File to send.
     pub(crate) file: PathBuf,
@@ -128,9 +130,11 @@ pub(crate) struct ReceiveArgs {
     /// testing relay vs direct; requires --relay.
     #[arg(long, requires = "relay")]
     pub(crate) relay_only: bool,
-    /// Force a direct data path: no relay fallback for the transfer (the
-    /// relay is still used to reach the broker). Direct-or-fail.
-    #[arg(long, requires = "room", conflicts_with = "relay_only")]
+    /// (Temporarily disabled - see docs/design/client-api.md 5.5.) A relay-free
+    /// direct path between two NATed peers is not achievable: iroh's
+    /// hole-punching runs over a connection that must first be established via
+    /// the relay, so removing the relay removes the punch itself.
+    #[arg(long, requires = "room", conflicts_with = "relay_only", hide = true)]
     pub(crate) direct_only: bool,
     /// Address family to bind for receiving.
     #[arg(long, value_enum, default_value_t = IpVersion::Dual)]
@@ -162,7 +166,7 @@ impl SendArgs {
         let mut options = api::TransferOptions::default();
         options.resume = self.resume;
         options.relay = self.relay;
-        options.path = path_policy(self.relay_only, self.direct_only);
+        options.path = path_policy(self.relay_only, self.direct_only)?;
 
         let (source, note) = if let Some(code) = self.room {
             let broker = self
@@ -209,7 +213,7 @@ impl ReceiveArgs {
         let mut options = api::TransferOptions::default();
         options.listen_addrs = Some(receive_addrs_for(self.ip_version));
         options.relay = self.relay;
-        options.path = path_policy(self.relay_only, self.direct_only);
+        options.path = path_policy(self.relay_only, self.direct_only)?;
 
         let (source, note) = if let Some(code) = self.room {
             let broker = self
@@ -238,14 +242,23 @@ impl ReceiveArgs {
     }
 }
 
-fn path_policy(relay_only: bool, direct_only: bool) -> api::PathPolicy {
-    if relay_only {
+/// Explains why `--direct-only` is refused, honestly and in full.
+const DIRECT_ONLY_DISABLED: &str = "--direct-only is temporarily disabled: a relay-free direct path between two NATed peers \
+     is not achievable. iroh's hole-punching is a QUIC NAT-traversal extension that runs over \
+     a connection which, when both peers are NATed, must first be established through the relay \
+     - so removing the relay removes the punch, not just the fallback. Direct paths still form \
+     automatically when a relay is present (it coordinates the punch, then data flows direct), \
+     when the peer is publicly reachable, or on the same LAN.";
+
+fn path_policy(relay_only: bool, direct_only: bool) -> Result<api::PathPolicy, TransferError> {
+    if direct_only {
+        return Err(TransferError::input(DIRECT_ONLY_DISABLED));
+    }
+    Ok(if relay_only {
         api::PathPolicy::RelayOnly
-    } else if direct_only {
-        api::PathPolicy::DirectOnly
     } else {
         api::PathPolicy::Auto
-    }
+    })
 }
 
 fn receive_addrs_for(ip_version: IpVersion) -> BindAddrs {

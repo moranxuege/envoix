@@ -12,6 +12,13 @@ pub enum PathPolicy {
     RelayOnly,
     /// Force a direct data path: the relay is still used to reach a broker,
     /// but the transfer itself gets no relay fallback (direct-or-fail).
+    ///
+    /// Currently gated off at the CLI (the `--direct-only` flag errors): a
+    /// relay-free direct path between two NATed peers is not achievable, because
+    /// iroh's hole-punching (a QUIC NAT-traversal extension) runs over a
+    /// connection that must first be established through the relay. The variant
+    /// and its plumbing remain for when the story changes; see
+    /// `docs/design/client-api.md` 5.5.
     DirectOnly,
 }
 
