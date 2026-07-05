@@ -552,18 +552,12 @@ mobile); 3-5 can trail. Time-box the rest.
   signaling/QAD, fail unless the selected path becomes direct within a grace
   window (post-connect check on the paths() API).
 - Address observation should not be relay-coupled: (a) relay QAD works today;
-  (b) preferred: a tiny broker "observe" ALPN - the DATA endpoint dials it and
-  the broker echoes the observed transport address; correct by construction
-  because all connections of an iroh endpoint share one socket, so the
-  observed mapping is the data socket's. ~60 lines total, no iroh changes.
-  Notes: broker learns the data endpoint id (privacy trade-off), symmetric
-  NAT unhelped (inherent to any third-party observation). Observation alone
-  does NOT give connectivity (2026-07-04 runs 9/10: single-sided dials die at
-  stateful gateways even with correct addresses) - it must pair with
-  simultaneous mutual dial triggered by pairing completion; together they
-  replace the relay for cone-NAT / stateful-v6 cases. (c) literal STUN is out:
-  iroh owns the data socket and exposes no foreign-datagram API; a separate
-  socket observes the wrong mapping.
+  (b) the broker could report each peer's observed address in Paired - but it
+  currently sees the rendezvous endpoint's socket, not the data endpoint's, so
+  this requires unifying the two endpoints (one endpoint, both ALPNs); with
+  both-sides-dial that yields relay-free punching; (c) generic STUN (free
+  public servers exist) cannot observe iroh's managed socket without iroh
+  support - verify upstream options.
 - Path-migration reasons are invisible: selection is liveness-driven inside
   iroh; BBR is active but its bandwidth estimate is not read out anywhere.
   Enrich PathChanged with the old path's last-known stats if paths() exposes
