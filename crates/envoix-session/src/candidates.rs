@@ -6,12 +6,32 @@
 //! LAN addresses are correct for same-network transfers, so the caller only
 //! enables it where appropriate, and the user configures the CIDRs.
 
+use std::fmt;
 use std::net::SocketAddr;
 
 use envoix_error::CoreError;
 use ipnet::IpNet;
 
 use crate::SessionError;
+
+/// Why the filter rejected a candidate address - reported so a user can see
+/// which rule dropped which address.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Rejection {
+    /// An allow-list is set and the address matched none of its networks.
+    NotAllowed,
+    /// The address matched a deny network.
+    Denied(IpNet),
+}
+
+impl fmt::Display for Rejection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotAllowed => f.write_str("not in the candidate allow-list"),
+            Self::Denied(net) => write!(f, "matched candidate deny rule {net}"),
+        }
+    }
+}
 
 /// An allow/deny filter over advertised candidate addresses, by CIDR.
 ///
@@ -40,19 +60,34 @@ impl CandidateFilter {
         self.allow.is_empty() && self.deny.is_empty()
     }
 
-    /// Keep the addresses this filter permits.
+    /// Keep the addresses this filter permits, logging each drop (and the rule
+    /// that caused it) at debug so `-v` reveals why an address is not
+    /// advertised.
     pub fn apply(&self, addrs: impl IntoIterator<Item = SocketAddr>) -> Vec<SocketAddr> {
         addrs
             .into_iter()
-            .filter(|addr| self.permits(addr.ip()))
+            .filter(|addr| match self.classify(addr.ip()) {
+                Ok(()) => true,
+                Err(reason) => {
+                    tracing::debug!(
+                        target: "envoix",
+                        "candidate {addr} not advertised: {reason}"
+                    );
+                    false
+                }
+            })
             .collect()
     }
 
-    fn permits(&self, ip: std::net::IpAddr) -> bool {
+    /// `Ok` if the filter permits `ip`, else the reason it is rejected.
+    fn classify(&self, ip: std::net::IpAddr) -> Result<(), Rejection> {
         if !self.allow.is_empty() && !self.allow.iter().any(|net| net.contains(&ip)) {
-            return false;
+            return Err(Rejection::NotAllowed);
         }
-        !self.deny.iter().any(|net| net.contains(&ip))
+        match self.deny.iter().find(|net| net.contains(&ip)) {
+            Some(net) => Err(Rejection::Denied(*net)),
+            None => Ok(()),
+        }
     }
 }
 
