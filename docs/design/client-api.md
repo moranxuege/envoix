@@ -419,7 +419,7 @@ implementable at our layer without a protocol/wire change except where noted;
 each has a decision that needs sign-off before code. Sequenced after the merge
 of steps 1-5 + Tiers A/B.
 
-### C1. `direct-only` becomes a selected-path *policy*, not a transport amputation
+### C1. `direct-only` - DEFERRED; fold into endpoint unification (below)
 
 **What it does today (the bug).** `direct_only` makes the data endpoint drop
 its relay (`SessionConfig::data_relay()` returns `None`). The campaign proved
@@ -431,44 +431,39 @@ direct path we have ever measured from home-pc was relay-*coordinated*
 punching. So "remove the relay to force direct" removes the very thing that
 makes direct possible.
 
-**New semantics.** `DirectOnly` keeps the relay fully configured (signaling +
-QAD + punch coordination, exactly like `Auto`), and adds a *post-connect gate*:
-the transfer proceeds only if the selected data path becomes `Direct` within a
-grace window; otherwise it fails loudly. Net: "relay for setup, never for
-data." This is the honest version of what the flag always promised, and it is
-implementable purely on the `paths()` API the path-watcher already reads.
+**Decision (2026-07-05): drop the grace-window band-aid; fix it via
+endpoint unification.** An earlier draft here proposed keeping the relay for
+setup and gating the transfer on the path settling `Direct` within a window.
+That would work, but it is a plaster over iroh's relay=QAD coupling rather than
+a fix - and it is `--direct-only`-specific. The root cause is that address
+observation (QAD) and punch signaling are only *available* from the relay in
+iroh as we use it (QAD runs on the relay, `udp/7842`). The real fix decouples
+them:
 
-**Sketch.** In the session transfer functions, after the connection is
-established and the path-watcher attached, before authenticating or sending
-any application bytes:
+> **Endpoint unification.** Give each peer ONE iroh endpoint (one UDP socket,
+> one NAT mapping) that speaks the rendezvous ALPN to the broker *and* the
+> data ALPN to the peer. Because it is one socket, the address the broker
+> observes on the incoming rendezvous connection (`connection.paths()`
+> selected `remote_addr()`, the same API the path-watcher uses) *is* the data
+> socket's public mapping. The broker reports it (a small unencrypted field in
+> `Paired`); the peer merges it into the address it dials. No separate "observe"
+> ALPN is needed - the rendezvous connection itself is the observation. Combine
+> with both-sides-dial (the reverse-dial machinery, s2.1) and you punch with
+> *no relay at all* for cone-NAT and stateful-v6 peers; `direct-only` can then
+> genuinely run relay-free and still connect.
 
-```
-if config.direct_only {
-    await_direct_path(&connection, DIRECT_GRACE).await?;  // poll selected path
-}
-```
+This supersedes the earlier "broker observation needs endpoint unification"
+open item and is the cleaner form of it (no observe ALPN). Accepted trade-offs:
+the broker learns the data endpoint id (today the rendezvous endpoint uses a
+throwaway key; unification gives that up - team has accepted this); symmetric
+NAT is still unhelped (inherent to any observation). Size: a protocol-batch
+item (Tier D, rides the `protocol_version` bump with Offer/Accept + reverse-
+dial), not a near-term client patch.
 
-`await_direct_path` polls `selected_path()` until it is `Direct` (success) or
-`DIRECT_GRACE` elapses (fail: `Discovery`/`Transport` error, phase Connecting,
-message "no direct path within Ns; retry without --direct-only to use the
-relay"). Gating *before auth* means nothing app-level - not even the SPAKE2
-control frames - rides the relay.
-
-`RelayOnly` is unchanged: it still binds no IP transport (direct genuinely
-impossible), a different mechanism for a different goal. `data_relay()`'s
-`direct_only` branch is deleted - direct-only no longer touches the relay
-config.
-
-**Decisions needing sign-off.**
-1. Grace window length. Campaign upgrades landed at ~2.5-5s; propose
-   `DIRECT_GRACE = 10s` (generous), constant now, a `PathPolicy` field later.
-2. Gate placement: before auth (nothing rides relay - proposed) vs before data
-   (auth may briefly use relay). Proposed: before auth.
-3. Failure is terminal (no auto-fallback to relay). Correct for an A/B testing
-   flag; a future `PreferDirect` (non-fatal) is the grid's job, not this flag's.
-
-This also retires the standalone campaign finding: direct-only is a grid
-special case (`allow = {direct-*}` with a settle deadline), foreshadowing s5.
+**Consequence for now.** `--direct-only` stays as-is (known-broken for NAT'd
+peers) with a doc/`--help` caveat until unification lands; do NOT ship the
+grace-window version. Revisit `direct-only`'s user-facing semantics after
+unification.
 
 ### C2. Candidate hygiene - scope, do not blindly filter
 
@@ -487,15 +482,30 @@ never a global drop:
   peer, and a needless disclosure.
 - LAN mode (Mdns): keep them - they are the point.
 
+**Verified: this is client-side (no iroh hook needed).** The advertised
+descriptor is built by *us* from `endpoint.addr().ip_addrs()`
+(`endpoint.rs:89`, `rendezvous-iroh:98`) - a plain `Vec` of socket addresses
+we control. We filter that list before putting it in the descriptor the peer
+receives, so scoping the *advertised* candidates is a local change, not an
+upstream one. (iroh's own internal candidate set for its holepunching is
+separate and not our concern; the peer only dials what our descriptor lists.)
+
+**Configurable interface selection (feature, requested 2026-07-05).** On top
+of automatic mode-scoping, let the user *pin* which interfaces/addresses are
+used and advertised - an allow/deny list of interface names or CIDRs in the
+config file (tier 2, per s5.4). Uses: privacy (never leave a chosen
+interface), and steering onto a specific line (the CN2 case - advertise only
+the address on the premium-routed interface). Auto mode-scoping is the default;
+the explicit list overrides it.
+
 **Open questions (verify before code).**
-- Candidate enumeration lives in iroh's address layer, not ours. Does iroh 1.0
-  expose a hook to filter advertised candidates, or only `clear_ip_transports`
-  + explicit binds? If no filter hook, C2 is an upstream item, not a local one.
 - What is `2.0.0.1`? Not a standard private range - identify the interface
-  (China Mobile CPE? a VPN?) before deciding whether to special-case it.
+  (China Mobile CPE? a VPN?) before deciding whether it is dropped by the
+  auto WAN scope or needs a special case.
 - Privacy vs reachability trade-off is real: a peer that is *only* reachable on
   a shared LAN but is in "WAN mode" would lose its one working candidate.
-  Scoping must key off the rendezvous mode, and mDNS must stay permissive.
+  Auto scoping keys off the rendezvous mode (mDNS stays permissive); the
+  explicit list, when set, is the user's responsibility.
 
 ### C3. Friendly room-TTL error instead of "connection lost"
 
