@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use envoix_error::CoreError;
 use envoix_rendezvous_iroh::{RoomPairing, build_endpoint, drive_pairing, join_room, split_code};
+use envoix_types::PairingStep;
 use iroh::{Endpoint, EndpointAddr, SecretKey};
 
 use crate::{
@@ -77,6 +78,7 @@ async fn pair_in_room_retrying<T>(
     room_id: &str,
     password: &str,
     mine: &T,
+    events: &dyn EventSink,
 ) -> Result<RoomPairing<T>, SessionError>
 where
     T: serde::Serialize + serde::de::DeserializeOwned,
@@ -85,11 +87,22 @@ where
     const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(8);
     let mut last: Option<SessionError> = None;
     for _ in 0..ATTEMPTS {
+        events.on_event(TransferEvent::Pairing {
+            step: PairingStep::Joining,
+        });
         let session = join_room(rdz, broker.clone(), room_id)
             .await
             .map_err(|error| CoreError::Transport(error.to_string()))?;
+        events.on_event(TransferEvent::Pairing {
+            step: PairingStep::Matched,
+        });
         match tokio::time::timeout(EXCHANGE_TIMEOUT, drive_pairing(session, password, mine)).await {
-            Ok(Ok(pairing)) => return Ok(pairing),
+            Ok(Ok(pairing)) => {
+                events.on_event(TransferEvent::Pairing {
+                    step: PairingStep::Exchanged,
+                });
+                return Ok(pairing);
+            }
             Ok(Err(error)) => last = Some(CoreError::Transport(error.to_string())),
             Err(_) => last = Some(CoreError::Transport("rendezvous pairing stalled".into())),
         }
@@ -110,12 +123,13 @@ async fn pair_or_cancel<T>(
     password: &str,
     mine: &T,
     cancel: &TransferCancelToken,
+    events: &dyn EventSink,
 ) -> Result<RoomPairing<T>, SessionError>
 where
     T: serde::Serialize + serde::de::DeserializeOwned,
 {
     let result = tokio::select! {
-        result = pair_in_room_retrying(rdz, broker, room_id, password, mine) => result,
+        result = pair_in_room_retrying(rdz, broker, room_id, password, mine, events) => result,
         _ = cancel.cancelled() => Err(CoreError::Transfer(crate::USER_INTERRUPT_MESSAGE.into())),
     };
     if result.is_err() {
@@ -157,7 +171,17 @@ pub async fn receive_file_via_room(
     let my_addr = ready_endpoint_addr(&bound, config.data_relay().is_some()).await;
 
     let rdz = rendezvous_endpoint(&config.relay).await?;
-    let pairing = match pair_or_cancel(&rdz, &broker, room_id, password, &my_addr, &cancel).await {
+    let pairing = match pair_or_cancel(
+        &rdz,
+        &broker,
+        room_id,
+        password,
+        &my_addr,
+        &cancel,
+        events.as_ref(),
+    )
+    .await
+    {
         Ok(pairing) => pairing,
         Err(error) => {
             // Pairing was cancelled or failed; close our data listener too so it
@@ -201,7 +225,16 @@ pub async fn send_file_via_room(
     // valid endpoint address works as a placeholder.
     let placeholder = rdz.addr();
 
-    let pairing = pair_or_cancel(&rdz, &broker, room_id, password, &placeholder, &cancel).await?;
+    let pairing = pair_or_cancel(
+        &rdz,
+        &broker,
+        room_id,
+        password,
+        &placeholder,
+        &cancel,
+        events.as_ref(),
+    )
+    .await?;
     // The rendezvous endpoint is only needed for the broker handshake; close it
     // so it does not linger (and log) while the data transfer runs.
     rdz.close().await;

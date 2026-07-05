@@ -14,7 +14,7 @@ mod options;
 mod source;
 mod transfer;
 
-pub use envoix_types::DataPath;
+pub use envoix_types::{DataPath, PairingStep};
 pub use error::{ErrorKind, Phase, TransferError};
 pub use event::{StampedEvent, TransferEvent};
 pub use options::{PathPolicy, TransferOptions};
@@ -164,7 +164,6 @@ impl Client {
                         direction: TransferDirection::Send,
                         mode,
                     });
-                    events.emit(TransferEvent::Pairing);
                     send_file_via_room(broker, &code, file, resume, config, sink, cancel).await
                 })
             }
@@ -277,7 +276,6 @@ impl Client {
                         direction: TransferDirection::Receive,
                         mode,
                     });
-                    events.emit(TransferEvent::Pairing);
                     receive_file_via_room(broker, &code, listen, into, config, sink, cancel).await
                 })
             }

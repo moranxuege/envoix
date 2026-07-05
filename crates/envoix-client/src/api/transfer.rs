@@ -41,7 +41,7 @@ fn phase_of(event: &TransferEvent) -> Phase {
     match event {
         TransferEvent::Binding { .. } => Phase::Setup,
         TransferEvent::Advertised { .. } => Phase::Waiting,
-        TransferEvent::Pairing => Phase::Pairing,
+        TransferEvent::Pairing { .. } => Phase::Pairing,
         TransferEvent::Connecting
         | TransferEvent::Connected { .. }
         | TransferEvent::PathChanged { .. } => Phase::Connecting,
@@ -223,6 +223,7 @@ impl envoix_session::EventSink for SessionEventAdapter {
             SessionEvent::Failed { direction, reason } => {
                 TransferEvent::Failed { direction, reason }
             }
+            SessionEvent::Pairing { step } => TransferEvent::Pairing { step },
             SessionEvent::Connecting => TransferEvent::Connecting,
             SessionEvent::Connected { path } => TransferEvent::Connected { path },
             SessionEvent::PathChanged { path } => TransferEvent::PathChanged { path },
@@ -275,10 +276,17 @@ mod tests {
     #[tokio::test]
     async fn channel_closes_when_all_senders_drop() {
         let (sender, mut receiver) = EventSender::channel();
-        sender.emit(TransferEvent::Pairing);
+        sender.emit(TransferEvent::Pairing {
+            step: envoix_types::PairingStep::Joining,
+        });
         drop(sender);
 
-        assert_eq!(receiver.recv().await.unwrap().event, TransferEvent::Pairing);
+        assert_eq!(
+            receiver.recv().await.unwrap().event,
+            TransferEvent::Pairing {
+                step: envoix_types::PairingStep::Joining,
+            }
+        );
         assert!(receiver.recv().await.is_none());
     }
 }

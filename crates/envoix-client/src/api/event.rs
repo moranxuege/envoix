@@ -6,7 +6,7 @@
 
 use envoix_protocol::PeerDescriptor;
 use envoix_session::TransferDirection;
-use envoix_types::{DataPath, TransferId};
+use envoix_types::{DataPath, PairingStep, TransferId};
 use serde::Serialize;
 
 use super::TransferMode;
@@ -49,7 +49,10 @@ pub enum TransferEvent {
         invite: Option<String>,
     },
     /// Rendezvous pairing through the broker is running.
-    Pairing,
+    Pairing {
+        /// Which pairing step was reached.
+        step: PairingStep,
+    },
     /// Establishing the peer connection (dialing, or accepting after a room
     /// pairing).
     Connecting,
