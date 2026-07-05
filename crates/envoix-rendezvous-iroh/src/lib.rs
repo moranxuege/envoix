@@ -156,35 +156,67 @@ async fn serve_incoming(
     let (send, recv) = tokio::time::timeout(HANDSHAKE_TIMEOUT, connection.accept_bi())
         .await
         .context("rendezvous pairing stream not opened in time")??;
-    // Read the peer's observed address before the Connection is moved into the
-    // close-waiter, and carry it on a span so every broker event for this peer
-    // records where it came from.
-    let peer = observed_addr(&connection);
-    let geo = peer.and_then(|addr| locate.and_then(|locate| locate(addr.ip())));
+    // Correlation span for this connection. `room` is filled in by the broker
+    // once it reads the Join; `peer`/`geo` are filled in by the task below once
+    // the direct path settles (a NATed peer reaches even a public broker over
+    // the relay first, and only punches direct ~seconds later - so the reflexive
+    // address is not known at accept time).
+    let span = tracing::info_span!(
+        "conn",
+        room = tracing::field::Empty,
+        peer = tracing::field::Empty,
+        geo = tracing::field::Empty,
+    );
+    spawn_peer_locator(connection.clone(), locate.cloned(), span.clone());
     // The Connection is the close-waiter: the broker keeps it open until the
     // peer closes, then drops it.
     let conn = PeerConn::new(send, recv, IrohClose(connection));
-    let span = tracing::info_span!(
-        "conn",
-        peer = %peer.map(|addr| addr.to_string()).unwrap_or_else(|| "via-relay".into()),
-        geo = tracing::field::Empty,
-    );
-    if let Some(geo) = &geo {
-        span.record("geo", tracing::field::display(geo));
-    }
     registry.serve(conn).instrument(span).await?;
     Ok(())
 }
 
-/// The peer's observed direct socket address on the selected path, or `None` if
-/// it reached us via a relay (a public broker sees a direct address in the
-/// common case). We never log the relay's address as if it were the peer's.
+/// Interval and cap for waiting on the peer's direct path to settle.
+const PEER_LOCATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+const PEER_LOCATE_ATTEMPTS: usize = 40;
+
+/// Watch `connection` until its direct (reflexive) address appears, then record
+/// it - annotated via `locate` when set - onto `span` and emit one `peer
+/// located` line. Gives up quietly if the connection closes first or never
+/// punches direct (a purely relay-reached peer).
+fn spawn_peer_locator(connection: Connection, locate: Option<PeerLocator>, span: tracing::Span) {
+    tokio::spawn(async move {
+        for _ in 0..PEER_LOCATE_ATTEMPTS {
+            if let Some(addr) = observed_addr(&connection) {
+                let geo = locate.as_ref().and_then(|locate| locate(addr.ip()));
+                span.record("peer", tracing::field::display(&addr));
+                if let Some(geo) = &geo {
+                    span.record("geo", tracing::field::display(geo));
+                }
+                span.in_scope(|| {
+                    tracing::info!(
+                        peer = %addr,
+                        geo = geo.as_deref().unwrap_or(""),
+                        "peer located"
+                    );
+                });
+                return;
+            }
+            tokio::time::sleep(PEER_LOCATE_INTERVAL).await;
+        }
+    });
+}
+
+/// The peer's observed direct socket address (its post-NAT reflexive address),
+/// or `None` if only a relay path is known so far. We take the first direct
+/// (`Ip`) path rather than only the *selected* one, because path selection has
+/// not necessarily settled at accept time - a peer dialing the broker's direct
+/// address is already reachable there even before iroh promotes it to selected.
+/// We never log a relay's address as if it were the peer's.
 fn observed_addr(connection: &Connection) -> Option<SocketAddr> {
     connection
         .paths()
         .iter()
-        .find(|path| path.is_selected())
-        .and_then(|path| match path.remote_addr() {
+        .find_map(|path| match path.remote_addr() {
             TransportAddr::Ip(addr) => Some(*addr),
             _ => None,
         })
