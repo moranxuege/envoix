@@ -83,12 +83,16 @@ impl Client {
     /// without the legacy requirement of supplying a pairing up front.
     pub fn from_runtime_sources(config_path: Option<&Path>) -> Result<Self, TransferError> {
         let mut client = Self::new();
-        if let Some(path) = config_path
-            && let Some(chunk_size) = crate::RuntimeConfig::read(path)
-                .map_err(setup_error)?
-                .chunk_size
-        {
-            client.chunk_size = crate::parse_chunk_size(&chunk_size).map_err(setup_error)?;
+        if let Some(path) = config_path {
+            let config = crate::RuntimeConfig::read(path).map_err(setup_error)?;
+            if let Some(chunk_size) = config.chunk_size {
+                client.chunk_size = crate::parse_chunk_size(&chunk_size).map_err(setup_error)?;
+            }
+            if let Some(candidates) = config.candidates {
+                client.candidates =
+                    CandidateFilter::from_lists(&candidates.allow, &candidates.deny)
+                        .map_err(setup_error)?;
+            }
         }
         if let Some(value) = std::env::var_os(crate::ENVOIX_CHUNK_SIZE) {
             let value = value.into_string().map_err(|_| {
@@ -455,6 +459,40 @@ mod tests {
                 .unwrap_err();
             assert_eq!(error.kind, ErrorKind::Input);
         }
+    }
+
+    #[test]
+    fn runtime_sources_read_candidate_cidrs_from_config_file() {
+        let path = std::env::temp_dir().join(format!(
+            "envoix-api-config-{}-candidates.toml",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            "chunk_size = \"1M\"\n[candidates]\ndeny = [\"10.0.0.0/8\", \"fe80::/10\"]\n",
+        )
+        .unwrap();
+
+        let client = Client::from_runtime_sources(Some(&path)).unwrap();
+
+        assert_eq!(client.chunk_size, 1024 * 1024);
+        // The deny list scopes addresses: a LAN address is dropped, a public one kept.
+        let kept = client
+            .candidates
+            .apply(["10.0.0.5:1".parse().unwrap(), "1.2.3.4:2".parse().unwrap()]);
+        assert_eq!(kept, vec!["1.2.3.4:2".parse().unwrap()]);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn runtime_sources_reject_invalid_candidate_cidr() {
+        let path = std::env::temp_dir().join(format!(
+            "envoix-api-config-{}-badcidr.toml",
+            std::process::id()
+        ));
+        std::fs::write(&path, "[candidates]\ndeny = [\"not-a-cidr\"]\n").unwrap();
+        assert!(Client::from_runtime_sources(Some(&path)).is_err());
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
