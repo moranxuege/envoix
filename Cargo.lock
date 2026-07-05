@@ -1029,6 +1029,7 @@ dependencies = [
  "envoix-rendezvous-iroh",
  "envoix-transfer",
  "envoix-types",
+ "ipnet",
  "iroh",
  "iroh-mdns-address-lookup",
  "n0-future",
