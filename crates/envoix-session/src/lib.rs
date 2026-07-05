@@ -1,5 +1,6 @@
 //! Session orchestration for transfer setup and concrete iroh wiring.
 
+mod candidates;
 mod connection;
 mod endpoint;
 mod identity;
@@ -22,6 +23,7 @@ use iroh::{Endpoint, EndpointAddr};
 use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
 use n0_future::StreamExt;
 
+pub use candidates::CandidateFilter;
 use connection::IrohFrameConnection;
 pub use endpoint::{BindAddrs, BoundEndpoint, parse_broker_addr};
 use endpoint::{
