@@ -18,7 +18,7 @@ pub use envoix_types::DataPath;
 pub use error::{ErrorKind, Phase, TransferError};
 pub use event::{StampedEvent, TransferEvent};
 pub use options::{PathPolicy, TransferOptions};
-pub use source::PeerSource;
+pub use source::{PeerSource, TransferMode};
 pub use transfer::Transfer;
 
 use std::path::{Path, PathBuf};
@@ -114,6 +114,7 @@ impl Client {
         let cancel = TransferCancelToken::new();
         let sink = Box::new(SessionEventAdapter(events.clone()));
         let resume = options.resume;
+        let mode = to.mode();
 
         let task = match to {
             PeerSource::Manual { peer, token } => {
@@ -122,6 +123,7 @@ impl Client {
                 tokio::spawn(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Send,
+                        mode,
                     });
                     send_file_manual(peer, file, resume, config, sink, cancel).await
                 })
@@ -133,6 +135,7 @@ impl Client {
                 tokio::spawn(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Send,
+                        mode,
                     });
                     send_file_manual(peer, file, resume, config, sink, cancel).await
                 })
@@ -143,6 +146,7 @@ impl Client {
                 tokio::spawn(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Send,
+                        mode,
                     });
                     send_file_enable_mdns(file, resume, config, sink, cancel).await
                 })
@@ -158,6 +162,7 @@ impl Client {
                 tokio::spawn(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Send,
+                        mode,
                     });
                     events.emit(TransferEvent::Pairing);
                     send_file_via_room(broker, &code, file, resume, config, sink, cancel).await
@@ -196,6 +201,7 @@ impl Client {
             .listen_addrs
             .clone()
             .unwrap_or_else(|| BindAddrs::dual_stack(0));
+        let mode = from.mode();
 
         let task = match from {
             PeerSource::ShowManual { token } => {
@@ -215,6 +221,7 @@ impl Client {
                 tokio::spawn(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Receive,
+                        mode,
                     });
                     receive_file_with_bound_peer(listen, into, config, sink, on_bound, cancel).await
                 })
@@ -227,6 +234,7 @@ impl Client {
                 tokio::spawn(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Receive,
+                        mode,
                     });
                     receive_file_with_bound_peer(listen, into, config, sink, on_bound, cancel).await
                 })
@@ -244,6 +252,7 @@ impl Client {
                 tokio::spawn(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Receive,
+                        mode,
                     });
                     let endpoint = bind_iroh_endpoint_enable_mdns(listen, &identity).await?;
                     let peer = endpoint.peer_descriptor()?;
@@ -266,6 +275,7 @@ impl Client {
                 tokio::spawn(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Receive,
+                        mode,
                     });
                     events.emit(TransferEvent::Pairing);
                     receive_file_via_room(broker, &code, listen, into, config, sink, cancel).await
