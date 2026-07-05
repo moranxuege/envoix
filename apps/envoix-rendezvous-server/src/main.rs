@@ -4,6 +4,7 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -31,6 +32,10 @@ struct Cli {
     /// https://relay.example.com:8444). Omit for no relay (LAN/direct only).
     #[arg(long)]
     relay: Option<String>,
+    /// How long (seconds) a parked peer waits for a partner before the room
+    /// expires. The first peer is dropped with an expiry notice after this.
+    #[arg(long, default_value_t = 300)]
+    room_ttl: u64,
 }
 
 #[tokio::main]
@@ -60,7 +65,11 @@ async fn main() -> Result<()> {
         println!("connect with: --rendezvous {}@{}", endpoint.id(), cli.bind);
     }
 
-    serve_endpoint(endpoint, Arc::new(RoomRegistry::new())).await
+    serve_endpoint(
+        endpoint,
+        Arc::new(RoomRegistry::with_ttl(Duration::from_secs(cli.room_ttl))),
+    )
+    .await
 }
 
 /// Load the server's secret key from `path`, creating a fresh one if the file
