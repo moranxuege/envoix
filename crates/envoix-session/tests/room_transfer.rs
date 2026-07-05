@@ -177,3 +177,22 @@ async fn candidate_filter_scopes_the_advertised_descriptor() {
         "filter must reduce the advertised set"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn candidate_filter_that_drops_everything_gives_a_pointed_error() {
+    use envoix_session::{CandidateFilter, bind_iroh_endpoint_enable_mdns};
+
+    let listen = envoix_session::BindAddrs::dual_stack(0);
+    let bound = bind_iroh_endpoint_enable_mdns(listen, &IdentityConfig::Ephemeral)
+        .await
+        .unwrap();
+    let all = bound.direct_addrs();
+    let deny: Vec<String> = all.iter().map(|a| a.ip().to_string()).collect();
+    let filtered = bound.with_candidate_filter(CandidateFilter::from_lists(&[], &deny).unwrap());
+
+    let error = filtered.peer_descriptor().unwrap_err().to_string();
+    assert!(
+        error.contains("candidate filter removed every advertisable address"),
+        "expected the pointed filter error, got: {error}"
+    );
+}

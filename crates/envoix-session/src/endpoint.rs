@@ -102,7 +102,22 @@ impl BoundEndpoint {
 
     /// Returns an app-level direct peer descriptor for this local endpoint.
     pub fn peer_descriptor(&self) -> Result<PeerDescriptor, SessionError> {
-        PeerDescriptor::new(self.endpoint_id(), self.direct_addrs())
+        let addrs = self.direct_addrs();
+        // Distinguish "the filter removed everything" from "the endpoint has no
+        // address at all", so an over-aggressive [candidates] config gets a
+        // pointed error rather than a bare "no direct addresses".
+        if addrs.is_empty()
+            && self.local_endpoint.addr().ip_addrs().next().is_some()
+            && !self.candidates.is_empty()
+        {
+            return Err(CoreError::InvalidInput(
+                "the candidate filter removed every advertisable address; \
+                 relax the [candidates] allow/deny config (run with -v to see \
+                 which rule dropped which address)"
+                    .into(),
+            ));
+        }
+        PeerDescriptor::new(self.endpoint_id(), addrs)
     }
 
     /// Returns this endpoint's full iroh address (id + direct addrs, plus its
