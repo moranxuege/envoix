@@ -3,7 +3,12 @@
 use std::path::PathBuf;
 
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
-use envoix_client::PeerDescriptor;
+use envoix_client::api;
+use envoix_client::api::TransferError;
+use envoix_client::{BindAddrs, IdentityConfig, PeerDescriptor};
+
+const IPV4_RECEIVE_ADDR: &str = "0.0.0.0:0";
+const IPV6_RECEIVE_ADDR: &str = "[::]:0";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -133,6 +138,131 @@ pub(crate) enum IpVersion {
     Dual,
     Ipv4,
     Ipv6,
+}
+
+/// Everything `run` needs to start a transfer, derived purely from the
+/// parsed arguments - no I/O, so the args -> behavior mapping is testable.
+pub(crate) struct TransferPlan {
+    /// File to send, or directory to receive into.
+    pub(crate) path: PathBuf,
+    pub(crate) source: api::PeerSource,
+    pub(crate) options: api::TransferOptions,
+    /// Contextual line to print before starting, when the mode warrants one.
+    pub(crate) note: Option<String>,
+    pub(crate) config: Option<PathBuf>,
+    pub(crate) identity: IdentityConfig,
+}
+
+impl SendArgs {
+    pub(crate) fn into_plan(self) -> Result<TransferPlan, TransferError> {
+        let mut options = api::TransferOptions::default();
+        options.resume = self.resume;
+        options.relay = self.relay;
+        options.path = path_policy(self.relay_only, self.direct_only);
+
+        let (source, note) = if let Some(code) = self.room {
+            let broker = self
+                .rendezvous
+                .expect("clap requires --rendezvous with --room");
+            let note = format!("pairing in room via {broker}...");
+            (api::PeerSource::Room { code, broker }, Some(note))
+        } else if let Some(invite) = self.invite {
+            (api::PeerSource::Invite { invite }, None)
+        } else if self.enable_mdns {
+            if self.peer.is_some() {
+                return Err(TransferError::input(
+                    "use either --enable-mdns or --peer, not both",
+                ));
+            }
+            let token = self
+                .token
+                .expect("clap ensures --token is present with --enable-mdns");
+            let source = api::PeerSource::Mdns { token: Some(token) };
+            (source, Some("discovering receiver over mDNS...".into()))
+        } else {
+            let peer = self.peer.ok_or_else(|| {
+                TransferError::input("send requires --peer unless --enable-mdns or --invite is set")
+            })?;
+            let token = self
+                .token
+                .expect("clap ensures --token is present without --invite");
+            (api::PeerSource::Manual { peer, token }, None)
+        };
+
+        Ok(TransferPlan {
+            path: self.file,
+            source,
+            options,
+            note,
+            config: self.config,
+            identity: identity_config(self.identity),
+        })
+    }
+}
+
+impl ReceiveArgs {
+    pub(crate) fn into_plan(self) -> Result<TransferPlan, TransferError> {
+        let mut options = api::TransferOptions::default();
+        options.listen_addrs = Some(receive_addrs_for(self.ip_version));
+        options.relay = self.relay;
+        options.path = path_policy(self.relay_only, self.direct_only);
+
+        let (source, note) = if let Some(code) = self.room {
+            let broker = self
+                .rendezvous
+                .expect("clap requires --rendezvous with --room");
+            let note = format!("waiting for sender via rendezvous {broker}...");
+            (api::PeerSource::Room { code, broker }, Some(note))
+        } else if self.enable_mdns {
+            let source = api::PeerSource::Mdns { token: self.token };
+            (source, Some("waiting for sender...".into()))
+        } else {
+            let token = self
+                .token
+                .expect("clap requires --token unless --enable-mdns is set");
+            (api::PeerSource::ShowManual { token: Some(token) }, None)
+        };
+
+        Ok(TransferPlan {
+            path: self.output,
+            source,
+            options,
+            note,
+            config: self.config,
+            identity: identity_config(self.identity),
+        })
+    }
+}
+
+fn path_policy(relay_only: bool, direct_only: bool) -> api::PathPolicy {
+    if relay_only {
+        api::PathPolicy::RelayOnly
+    } else if direct_only {
+        api::PathPolicy::DirectOnly
+    } else {
+        api::PathPolicy::Auto
+    }
+}
+
+fn receive_addrs_for(ip_version: IpVersion) -> BindAddrs {
+    match ip_version {
+        IpVersion::Dual => BindAddrs::dual_stack(0),
+        IpVersion::Ipv4 => BindAddrs::single(
+            IPV4_RECEIVE_ADDR
+                .parse()
+                .expect("default IPv4 address is valid"),
+        ),
+        IpVersion::Ipv6 => BindAddrs::single(
+            IPV6_RECEIVE_ADDR
+                .parse()
+                .expect("default IPv6 address is valid"),
+        ),
+    }
+}
+
+fn identity_config(path: Option<PathBuf>) -> IdentityConfig {
+    path.map(IdentityConfig::Persistent)
+        .unwrap_or(IdentityConfig::Ephemeral)
 }
 
 #[cfg(test)]
@@ -526,5 +656,74 @@ mod tests {
             ])
             .is_err()
         );
+    }
+    #[test]
+    fn send_plan_maps_room_args_to_room_source_with_path_policy() {
+        let cli = Cli::try_parse_from([
+            "envoix",
+            "send",
+            "--room",
+            "123456-amber-comet",
+            "--rendezvous",
+            "id@1.2.3.4:8445",
+            "--relay",
+            "https://r.example:8444",
+            "--relay-only",
+            "file.txt",
+        ])
+        .unwrap();
+        let Command::Send(args) = cli.command else {
+            panic!()
+        };
+        let plan = args.into_plan().unwrap();
+        assert!(matches!(plan.source, api::PeerSource::Room { .. }));
+        assert_eq!(plan.options.path, api::PathPolicy::RelayOnly);
+        assert_eq!(
+            plan.options.relay.as_deref(),
+            Some("https://r.example:8444")
+        );
+        assert!(plan.note.unwrap().contains("id@1.2.3.4:8445"));
+    }
+
+    #[test]
+    fn receive_plan_without_flags_listens_manually() {
+        let cli = Cli::try_parse_from([
+            "envoix",
+            "receive",
+            "--output",
+            "out",
+            "--token",
+            "abcdefghijkl",
+        ])
+        .unwrap();
+        let Command::Receive(args) = cli.command else {
+            panic!()
+        };
+        let plan = args.into_plan().unwrap();
+        assert!(matches!(
+            plan.source,
+            api::PeerSource::ShowManual { token: Some(_) }
+        ));
+        assert_eq!(plan.options.path, api::PathPolicy::Auto);
+        assert!(plan.note.is_none());
+    }
+
+    #[test]
+    fn send_plan_rejects_peer_with_mdns() {
+        let cli = Cli::try_parse_from([
+            "envoix",
+            "send",
+            "--enable-mdns",
+            "--token",
+            "abcdefghijkl",
+            "--peer",
+            "id@1.2.3.4:1",
+            "file.txt",
+        ])
+        .unwrap();
+        let Command::Send(args) = cli.command else {
+            panic!()
+        };
+        assert!(args.into_plan().is_err());
     }
 }
