@@ -106,3 +106,44 @@ async fn file_transfers_through_the_rendezvous() {
     let got = std::fs::read(out.join("greeting.txt")).expect("received file");
     assert_eq!(got, contents);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn room_expiry_reports_no_peer_joined() {
+    use std::time::Duration;
+
+    // Broker with a short room TTL so the wait window elapses quickly.
+    let server = build_endpoint(
+        "127.0.0.1:0".parse().unwrap(),
+        SecretKey::generate(),
+        RelayMode::Disabled,
+    )
+    .await
+    .unwrap();
+    let broker = ready_addr(&server).await;
+    let registry = Arc::new(RoomRegistry::with_ttl(Duration::from_secs(2)));
+    tokio::spawn(serve_endpoint(server, registry));
+
+    let dir = tempdir().unwrap();
+    let out = dir.path().join("received");
+    std::fs::create_dir(&out).unwrap();
+    let listen: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+
+    // Receive in a room no sender ever joins: it must fail with the friendly
+    // "no peer joined" message, not a bare connection-lost error.
+    let error = receive_file_via_room(
+        broker,
+        "9999-lonely-room",
+        listen,
+        out,
+        config(),
+        Box::new(NoopEventSink),
+        TransferCancelToken::new(),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        error.to_string().contains("no peer joined the room"),
+        "expected the friendly expiry message, got: {error}"
+    );
+}

@@ -19,7 +19,7 @@ mod protocol;
 pub use broker::RoomRegistry;
 pub use io::{read_framed, write_framed};
 pub use peer::{CloseWaiter, PeerConn};
-pub use protocol::{Join, Paired, Role};
+pub use protocol::{Join, Paired, Reply, Role};
 
 /// Errors from the rendezvous broker.
 #[derive(Debug, thiserror::Error)]
