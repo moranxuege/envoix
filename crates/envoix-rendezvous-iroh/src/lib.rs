@@ -6,7 +6,7 @@
 //! only place that knows about iroh.
 
 use std::future::Future;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -63,6 +63,11 @@ pub const RENDEZVOUS_ALPN: &[u8] = b"envoix-rendezvous/1";
 /// wait window elapses with no partner - distinct from a network failure.
 pub const ROOM_EXPIRED: &str = "no peer joined the room within the wait window";
 
+/// Optionally annotates a peer IP with a human location/ISP string for logs
+/// (e.g. a GeoIP lookup). Supplied by the operator binary so this crate needs
+/// no geo-database dependency.
+pub type PeerLocator = Arc<dyn Fn(IpAddr) -> Option<String> + Send + Sync>;
+
 /// Bind an iroh endpoint that speaks the rendezvous ALPN. Pass
 /// [`RelayMode::Disabled`] for LAN/direct, or a custom relay mode (see
 /// [`relay_mode_from_url`]) for WAN reachability through a relay.
@@ -114,7 +119,11 @@ const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10
 
 /// Accept pairing connections forever, serving each through `registry`, up to
 /// MAX_CONCURRENT_CONNECTIONS at a time (excess incoming connections are dropped).
-pub async fn serve_endpoint(endpoint: Endpoint, registry: Arc<RoomRegistry>) -> Result<()> {
+pub async fn serve_endpoint(
+    endpoint: Endpoint,
+    registry: Arc<RoomRegistry>,
+    locate: Option<PeerLocator>,
+) -> Result<()> {
     let limit = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
     while let Some(incoming) = endpoint.accept().await {
         let Ok(permit) = limit.clone().try_acquire_owned() else {
@@ -122,9 +131,10 @@ pub async fn serve_endpoint(endpoint: Endpoint, registry: Arc<RoomRegistry>) -> 
             continue;
         };
         let registry = registry.clone();
+        let locate = locate.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            if let Err(error) = serve_incoming(incoming, &registry).await {
+            if let Err(error) = serve_incoming(incoming, &registry, locate.as_ref()).await {
                 tracing::debug!(%error, "rendezvous connection ended");
             }
         });
@@ -132,7 +142,11 @@ pub async fn serve_endpoint(endpoint: Endpoint, registry: Arc<RoomRegistry>) -> 
     Ok(())
 }
 
-async fn serve_incoming(incoming: Incoming, registry: &RoomRegistry) -> Result<()> {
+async fn serve_incoming(
+    incoming: Incoming,
+    registry: &RoomRegistry,
+    locate: Option<&PeerLocator>,
+) -> Result<()> {
     // Bound the pre-Join setup so a connection that half-opens and then goes idle
     // cannot pin a connection slot; the registry separately bounds the first
     // control-frame read.
@@ -146,13 +160,18 @@ async fn serve_incoming(incoming: Incoming, registry: &RoomRegistry) -> Result<(
     // close-waiter, and carry it on a span so every broker event for this peer
     // records where it came from.
     let peer = observed_addr(&connection);
+    let geo = peer.and_then(|addr| locate.and_then(|locate| locate(addr.ip())));
     // The Connection is the close-waiter: the broker keeps it open until the
     // peer closes, then drops it.
     let conn = PeerConn::new(send, recv, IrohClose(connection));
     let span = tracing::info_span!(
         "conn",
-        peer = %peer.map(|addr| addr.to_string()).unwrap_or_else(|| "via-relay".into())
+        peer = %peer.map(|addr| addr.to_string()).unwrap_or_else(|| "via-relay".into()),
+        geo = tracing::field::Empty,
     );
+    if let Some(geo) = &geo {
+        span.record("geo", tracing::field::display(geo));
+    }
     registry.serve(conn).instrument(span).await?;
     Ok(())
 }

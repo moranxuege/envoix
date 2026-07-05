@@ -11,7 +11,9 @@ use clap::{Parser, ValueEnum};
 use iroh::SecretKey;
 
 use envoix_rendezvous::RoomRegistry;
-use envoix_rendezvous_iroh::{build_endpoint, relay_mode_from_url, serve_endpoint};
+use envoix_rendezvous_iroh::{PeerLocator, build_endpoint, relay_mode_from_url, serve_endpoint};
+
+mod geoip;
 
 #[derive(Parser)]
 #[command(
@@ -40,6 +42,14 @@ struct Cli {
     /// for log aggregators and campaign correlation.
     #[arg(long, value_enum, default_value_t = LogFormat::Pretty)]
     log_format: LogFormat,
+    /// Optional MaxMind-format City database (GeoLite2 or DB-IP Lite `.mmdb`);
+    /// when set, peer log lines are annotated with the peer's city/country.
+    #[arg(long)]
+    geoip_city: Option<PathBuf>,
+    /// Optional MaxMind-format ASN database; when set, peer log lines are
+    /// annotated with the peer's ISP/carrier.
+    #[arg(long)]
+    geoip_asn: Option<PathBuf>,
 }
 
 /// How server logs are rendered.
@@ -92,9 +102,21 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Build the optional GeoIP annotator from the operator-supplied databases.
+    let locate: Option<PeerLocator> =
+        match geoip::GeoIp::load(cli.geoip_city.as_deref(), cli.geoip_asn.as_deref())? {
+            Some(geo) => {
+                let geo = Arc::new(geo);
+                tracing::info!("GeoIP annotation enabled");
+                Some(Arc::new(move |ip| geo.describe(ip)))
+            }
+            None => None,
+        };
+
     serve_endpoint(
         endpoint,
         Arc::new(RoomRegistry::with_ttl(Duration::from_secs(cli.room_ttl))),
+        locate,
     )
     .await
 }
