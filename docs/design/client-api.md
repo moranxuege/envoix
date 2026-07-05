@@ -412,58 +412,57 @@ for tier 2. The grid never appears in primary UI.
 
 ---
 
-## 5.5 Tier C: near-term hardening (DESIGN FOR REVIEW - not yet implemented)
+## 5.5 Tier C: near-term hardening
 
-Three fixes surfaced by the 2026-07-04 pc<->home-pc campaign. Each is
-implementable at our layer without a protocol/wire change except where noted;
-each has a decision that needs sign-off before code. Sequenced after the merge
-of steps 1-5 + Tiers A/B.
+Three fixes surfaced by the 2026-07-04 pc<->home-pc campaign. Status
+(2026-07-05): **C2 and C3 implemented and fleet-validated** (China<->US, both
+directions); **C1 disabled** after an iroh source review showed its goal is
+unreachable. Details per item below.
 
-### C1. `direct-only` - DEFERRED; fold into endpoint unification (below)
+### C1. `direct-only` - DISABLED; relay-free direct is not achievable in iroh 1.0
 
-**What it does today (the bug).** `direct_only` makes the data endpoint drop
-its relay (`SessionConfig::data_relay()` returns `None`). The campaign proved
-this is self-defeating: stripping the relay also strips hole-punch *signaling*
-and QAD, so a NAT'd or stateful-firewalled peer cannot establish *any* direct
-path. Run 7 (receiver-side flag alone) failed; runs 9/10 (no servers at all)
-proved single-sided dials die at both v4 NAT and v6 stateful firewalls. Every
-direct path we have ever measured from home-pc was relay-*coordinated*
-punching. So "remove the relay to force direct" removes the very thing that
-makes direct possible.
+**What it did (the bug).** `direct_only` made the data endpoint drop its relay
+(`SessionConfig::data_relay()` returned `None`). The campaign proved this is
+self-defeating: stripping the relay also strips hole-punch coordination and
+QAD, so a NAT'd peer cannot establish *any* direct path. Run 7 (receiver-side
+flag alone) failed; runs 9/10 (no servers at all) proved single-sided dials die
+at both v4 NAT and v6 stateful firewalls.
 
-**Decision (2026-07-05): drop the grace-window band-aid; fix it via
-endpoint unification.** An earlier draft here proposed keeping the relay for
-setup and gating the transfer on the path settling `Direct` within a window.
-That would work, but it is a plaster over iroh's relay=QAD coupling rather than
-a fix - and it is `--direct-only`-specific. The root cause is that address
-observation (QAD) and punch signaling are only *available* from the relay in
-iroh as we use it (QAD runs on the relay, `udp/7842`). The real fix decouples
-them:
+**Decision (2026-07-05): disable the flag; the "relay-free direct" goal is
+impossible with iroh 1.0.** Two ideas were floated and both fail:
 
-> **Endpoint unification.** Give each peer ONE iroh endpoint (one UDP socket,
-> one NAT mapping) that speaks the rendezvous ALPN to the broker *and* the
-> data ALPN to the peer. Because it is one socket, the address the broker
-> observes on the incoming rendezvous connection (`connection.paths()`
-> selected `remote_addr()`, the same API the path-watcher uses) *is* the data
-> socket's public mapping. The broker reports it (a small unencrypted field in
-> `Paired`); the peer merges it into the address it dials. No separate "observe"
-> ALPN is needed - the rendezvous connection itself is the observation. Combine
-> with both-sides-dial (the reverse-dial machinery, s2.1) and you punch with
-> *no relay at all* for cone-NAT and stateful-v6 peers; `direct-only` can then
-> genuinely run relay-free and still connect.
+- *Grace-window* (keep the relay for setup, gate data on the path settling
+  `Direct`): works, but is a plaster and `--direct-only`-specific.
+- *Endpoint unification + broker-QAD* (one socket speaks both ALPNs, the broker
+  observes the data socket's mapping and reports it, so a transfer needs no
+  relay): the intended real fix - **but a read of the iroh 1.0 source shows it
+  cannot deliver a relay-free punch.** iroh's hole-punching is a QUIC
+  NAT-traversal extension (`noq_proto::n0_nat_traversal`: `AddAddress` /
+  `ReachOut` frames, negotiated at handshake) that runs *over an
+  already-established connection* - `RemoteState::trigger_holepunching` bails if
+  `self.connections.is_empty()` and `do_holepunching` calls
+  `conn.initiate_nat_traversal_round()`. There is **no cold-start / simultaneous
+  -open path**: when both peers are NATed, the *first* connection must form over
+  a reachable path, i.e. the relay, and NAT traversal only *upgrades* it to
+  direct. Broker-QAD supplies reflexive addresses, but with no way to establish
+  the initial connection they are unusable. (The one niche it would help -
+  full-cone NAT where the broker-facing mapping is directly reachable - is
+  uncommon and not worth a protocol batch.) The deployment reality seals it:
+  no relay almost always means no broker (co-deployed), so "broker present,
+  relay absent" is rare *and* wouldn't work.
 
-This supersedes the earlier "broker observation needs endpoint unification"
-open item and is the cleaner form of it (no observe ALPN). Accepted trade-offs:
-the broker learns the data endpoint id (today the rendezvous endpoint uses a
-throwaway key; unification gives that up - team has accepted this); symmetric
-NAT is still unhelped (inherent to any observation). Size: a protocol-batch
-item (Tier D, rides the `protocol_version` bump with Offer/Accept + reverse-
-dial), not a near-term client patch.
+**Where relay-free direct genuinely works (already, no new code):** one peer
+publicly reachable (manual/invite to a public address), or same LAN (mDNS).
+Between two NATs a relay is required to coordinate the punch, full stop.
 
-**Consequence for now.** `--direct-only` stays as-is (known-broken for NAT'd
-peers) with a doc/`--help` caveat until unification lands; do NOT ship the
-grace-window version. Revisit `direct-only`'s user-facing semantics after
-unification.
+**Consequence (implemented).** The `--direct-only` CLI flag is disabled
+(`hide`-den and errors with an honest explanation); there is no env var or
+config key for it. `PathPolicy::DirectOnly` and the session `direct_only`
+plumbing remain, dormant, for if the story ever changes. `--relay-only` is
+unaffected (it binds no IP transport - a genuinely different, working
+mechanism). If an A/B "confirm the path went direct" knob is wanted later, the
+grace-window (relay coordinates, data direct-or-fail) is the only coherent
+form - but it was not built.
 
 ### C2. Candidate hygiene - scope, do not blindly filter
 
