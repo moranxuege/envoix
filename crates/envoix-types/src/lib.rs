@@ -46,6 +46,18 @@ impl fmt::Display for DataPath {
     }
 }
 
+/// Progress of a rendezvous-room pairing.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PairingStep {
+    /// Joining the room at the broker (parks until a partner arrives).
+    Joining,
+    /// The broker matched us with a partner; key exchange starting.
+    Matched,
+    /// SPAKE2 completed and descriptors were exchanged.
+    Exchanged,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Hash, Serialize)]
 pub struct TransferId(pub String);
 
