@@ -46,6 +46,9 @@ pub enum TransferEvent {
     },
     /// Rendezvous pairing through the broker is running.
     Pairing,
+    /// Establishing the peer connection (dialing, or accepting after a room
+    /// pairing).
+    Connecting,
     /// A data path to the peer was selected.
     Connected {
         /// The selected path (direct or relay).
