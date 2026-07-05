@@ -30,12 +30,23 @@ pub(crate) type PublicError = CoreError;
 /// The recognized contents of the optional TOML config file.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RuntimeConfig {
-    chunk_size: Option<String>,
+pub(crate) struct RuntimeConfig {
+    pub(crate) chunk_size: Option<String>,
+    pub(crate) candidates: Option<CandidatesConfig>,
+}
+
+/// `[candidates]` table: CIDR allow/deny lists scoping advertised addresses.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CandidatesConfig {
+    #[serde(default)]
+    pub(crate) allow: Vec<String>,
+    #[serde(default)]
+    pub(crate) deny: Vec<String>,
 }
 
 impl RuntimeConfig {
-    fn read(path: &Path) -> Result<Self, PublicError> {
+    pub(crate) fn read(path: &Path) -> Result<Self, PublicError> {
         let text = fs::read_to_string(path).map_err(|error| {
             CoreError::InvalidInput(format!("failed to read config {}: {error}", path.display()))
         })?;
