@@ -40,14 +40,17 @@ async fn rendezvous_endpoint(relay: &Option<String>) -> Result<Endpoint, Session
 /// peer that cannot reach us directly (true CGNAT) unable to dial us at all.
 async fn ready_endpoint_addr(bound: &BoundEndpoint, want_relay: bool) -> EndpointAddr {
     for _ in 0..100 {
-        let addr = bound.endpoint_addr();
+        // Poll readiness on the raw endpoint address so the candidate filter -
+        // and its per-drop `-v` logging - runs once, on the address we return,
+        // not on every poll iteration.
+        let raw = bound.local_endpoint.addr();
         let ready = if want_relay {
-            addr.relay_urls().next().is_some()
+            raw.relay_urls().next().is_some()
         } else {
-            !addr.is_empty()
+            !raw.is_empty()
         };
         if ready {
-            return addr;
+            return bound.endpoint_addr();
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
