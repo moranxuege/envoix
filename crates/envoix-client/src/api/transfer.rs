@@ -42,7 +42,9 @@ fn phase_of(event: &TransferEvent) -> Phase {
         TransferEvent::Binding { .. } => Phase::Setup,
         TransferEvent::Advertised { .. } => Phase::Waiting,
         TransferEvent::Pairing => Phase::Pairing,
-        TransferEvent::Connected { .. } | TransferEvent::PathChanged { .. } => Phase::Connecting,
+        TransferEvent::Connecting
+        | TransferEvent::Connected { .. }
+        | TransferEvent::PathChanged { .. } => Phase::Connecting,
         TransferEvent::Started { .. }
         | TransferEvent::Progress { .. }
         | TransferEvent::Verifying { .. }
@@ -221,6 +223,7 @@ impl envoix_session::EventSink for SessionEventAdapter {
             SessionEvent::Failed { direction, reason } => {
                 TransferEvent::Failed { direction, reason }
             }
+            SessionEvent::Connecting => TransferEvent::Connecting,
             SessionEvent::Connected { path } => TransferEvent::Connected { path },
             SessionEvent::PathChanged { path } => TransferEvent::PathChanged { path },
         });

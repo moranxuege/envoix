@@ -144,6 +144,9 @@ pub enum TransferEvent {
         /// Human-readable failure reason.
         reason: String,
     },
+    /// Establishing the peer connection (dialing, or accepting after a room
+    /// pairing). Emitted by the session layer.
+    Connecting,
     /// A data path to the peer was selected for the first time.
     ///
     /// Emitted by the session layer (the engine does not know transports).

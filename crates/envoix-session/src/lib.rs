@@ -117,8 +117,9 @@ pub async fn send_file_manual(
 ) -> Result<TransferSummary, SessionError> {
     let local_endpoint =
         build_dial_endpoint(&config.identity, &config.data_relay(), config.relay_only).await?;
-    let mut connection = dial(local_endpoint.clone(), &peer).await?;
     let events: Arc<dyn EventSink> = Arc::from(events);
+    events.on_event(TransferEvent::Connecting);
+    let mut connection = dial(local_endpoint.clone(), &peer).await?;
     connection.watch_path(events.clone());
     let engine = TransferEngine::new(config.chunk_size);
 
@@ -148,6 +149,8 @@ pub async fn send_file_to_endpoint_addr(
 ) -> Result<TransferSummary, SessionError> {
     let local_endpoint =
         build_dial_endpoint(&config.identity, &config.data_relay(), config.relay_only).await?;
+    let events: Arc<dyn EventSink> = Arc::from(events);
+    events.on_event(TransferEvent::Connecting);
     let mut connection = match dial_peer_addr(local_endpoint.clone(), peer_addr).await {
         Ok(connection) => connection,
         Err(error) => {
@@ -155,7 +158,6 @@ pub async fn send_file_to_endpoint_addr(
             return Err(error);
         }
     };
-    let events: Arc<dyn EventSink> = Arc::from(events);
     connection.watch_path(events.clone());
     let engine = TransferEngine::new(config.chunk_size);
     if let Err(error) = authenticate_sender(&mut connection, &config.pairing).await {
@@ -432,6 +434,7 @@ async fn send_file_to_peer_addr(
     events: Arc<dyn EventSink>,
     cancel: &TransferCancelToken,
 ) -> Result<TransferSummary, SessionError> {
+    events.on_event(TransferEvent::Connecting);
     let mut connection = dial_peer_addr(local_endpoint, peer_addr).await?;
     connection.watch_path(events.clone());
     let engine = TransferEngine::new(config.chunk_size);

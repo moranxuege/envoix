@@ -15,8 +15,8 @@ use iroh::{Endpoint, EndpointAddr, SecretKey};
 
 use crate::{
     BindAddrs, BoundEndpoint, EventSink, PairingConfig, SessionConfig, SessionError,
-    TransferCancelToken, TransferSummary, bind_iroh_endpoint_with_relay, receive_with_auth_retries,
-    send_file_to_endpoint_addr,
+    TransferCancelToken, TransferEvent, TransferSummary, bind_iroh_endpoint_with_relay,
+    receive_with_auth_retries, send_file_to_endpoint_addr,
 };
 
 /// An ephemeral iroh endpoint used only to reach the rendezvous broker, routed
@@ -170,6 +170,7 @@ pub async fn receive_file_via_room(
     // so it does not linger (and log) while the data transfer runs.
     rdz.close().await;
 
+    events.on_event(TransferEvent::Connecting);
     // Accept with retries: a stray or wrong-token dial must not kill the
     // transfer before the legitimate sender connects.
     receive_with_auth_retries(

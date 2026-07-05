@@ -62,6 +62,7 @@ impl Renderer {
             // Contextual lines (which mode, which broker) are printed by the
             // dispatch site that knows the arguments.
             E::Binding { .. } | E::Pairing => {}
+            E::Connecting => eprintln!("connecting..."),
             E::Connected { path } | E::PathChanged { path } => {
                 eprintln!("data path: {path}");
             }
