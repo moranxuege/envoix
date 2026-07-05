@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use iroh::SecretKey;
 
 use envoix_rendezvous::RoomRegistry;
@@ -36,33 +36,60 @@ struct Cli {
     /// expires. The first peer is dropped with an expiry notice after this.
     #[arg(long, default_value_t = 300)]
     room_ttl: u64,
+    /// Log output format: `pretty` human lines, or `json` (one object per line)
+    /// for log aggregators and campaign correlation.
+    #[arg(long, value_enum, default_value_t = LogFormat::Pretty)]
+    log_format: LogFormat,
+}
+
+/// How server logs are rendered.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum LogFormat {
+    Pretty,
+    Json,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("envoix_rendezvous_iroh=info,warn"));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
-
     let cli = Cli::parse();
+
+    // Include the broker crate (`envoix_rendezvous`) at info, not just the iroh
+    // wiring - otherwise pairings/expiries (its target) fall to the global warn
+    // default and never show.
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        tracing_subscriber::EnvFilter::new(
+            "envoix_rendezvous=info,envoix_rendezvous_iroh=info,warn",
+        )
+    });
+    let builder = tracing_subscriber::fmt().with_env_filter(filter);
+    match cli.log_format {
+        LogFormat::Json => builder.json().init(),
+        LogFormat::Pretty => builder.init(),
+    }
+
     let secret_key = load_or_create_secret_key(&cli.secret_key)
         .with_context(|| format!("secret key {}", cli.secret_key.display()))?;
     let relay = relay_mode_from_url(cli.relay.as_deref())?;
     let endpoint = build_endpoint(cli.bind, secret_key, relay).await?;
     tracing::info!(endpoint_id = %endpoint.id(), bind = %cli.bind, "rendezvous server listening");
-    println!("rendezvous endpoint id: {}", endpoint.id());
-    println!("listening on {}", cli.bind);
-    // Print a ready-to-use --rendezvous value. When bound to an unspecified
-    // address (0.0.0.0/::) the reachable host is unknown to the process, so show
-    // the (now fixed) port and let the operator fill in the public IP.
-    if cli.bind.ip().is_unspecified() {
-        println!(
-            "connect with: --rendezvous {}@<this-host-ip>:{}",
-            endpoint.id(),
-            cli.bind.port()
-        );
-    } else {
-        println!("connect with: --rendezvous {}@{}", endpoint.id(), cli.bind);
+    // Human copy-paste convenience (endpoint id + a ready-to-use --rendezvous
+    // value). Suppressed under `--log-format json` so the stream stays pure
+    // JSON; the same facts are in the structured "listening" log above.
+    if matches!(cli.log_format, LogFormat::Pretty) {
+        println!("rendezvous endpoint id: {}", endpoint.id());
+        println!("listening on {}", cli.bind);
+        // When bound to an unspecified address (0.0.0.0/::) the reachable host is
+        // unknown to the process, so show the (fixed) port and let the operator
+        // fill in the public IP.
+        if cli.bind.ip().is_unspecified() {
+            println!(
+                "connect with: --rendezvous {}@<this-host-ip>:{}",
+                endpoint.id(),
+                cli.bind.port()
+            );
+        } else {
+            println!("connect with: --rendezvous {}@{}", endpoint.id(), cli.bind);
+        }
     }
 
     serve_endpoint(

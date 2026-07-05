@@ -68,6 +68,7 @@ impl RoomRegistry {
     /// first peer of a room or, if a peer already waits there, pair the two and
     /// relay between them. The first peer's task returns once the second takes
     /// over the relay; the second peer's task drives it.
+    #[tracing::instrument(name = "room", skip_all, fields(room = tracing::field::Empty))]
     pub async fn serve(&self, mut conn: PeerConn) -> Result<(), RendezvousError> {
         let Join { room_id } = tokio::time::timeout(JOIN_TIMEOUT, conn.read_control())
             .await
@@ -75,7 +76,10 @@ impl RoomRegistry {
         if room_id.is_empty() || room_id.len() > MAX_ROOM_ID_LEN {
             return Err(RendezvousError::Rejected("room id length out of range"));
         }
-        tracing::debug!(room = %room_id, "join");
+        // Anchor the correlation span on the room id; every event below inherits
+        // it, so `room` need not be repeated per line.
+        tracing::Span::current().record("room", tracing::field::display(&room_id));
+        tracing::debug!("join");
 
         // Decide under the lock (no await held), then act once it's released, so
         // two peers arriving at once can't both park and miss each other.
@@ -102,7 +106,7 @@ impl RoomRegistry {
                             id,
                         },
                     );
-                    tracing::debug!(room = %room_id, id, "parked (waiting for partner)");
+                    tracing::debug!(id, "parked (waiting for partner)");
                     Decision::Parked(ready_rx, id)
                 }
             }
@@ -111,7 +115,7 @@ impl RoomRegistry {
         match decision {
             // We are the second peer; release the first's task and run the relay.
             Decision::Matched(first, conn) => {
-                tracing::debug!(room = %room_id, "matched two peers");
+                tracing::info!("matched two peers");
                 let _ = first.ready.send(());
                 run_pair(first.conn, conn).await
             }
@@ -140,13 +144,13 @@ impl RoomRegistry {
                             let _ = writer.shutdown().await;
                             let _ = tokio::time::timeout(CLOSE_GRACE, close.wait_closed()).await;
                         }
-                        tracing::debug!(room = %room_id, id, "expired (no partner within ttl)");
+                        tracing::info!(id, "expired (no partner within ttl)");
                         Err(RendezvousError::Expired)
                     }
                 }
             }
             Decision::Rejected(reason) => {
-                tracing::debug!(room = %room_id, reason, "rejected");
+                tracing::warn!(reason, "rejected");
                 Err(RendezvousError::Rejected(reason))
             }
         }
