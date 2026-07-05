@@ -7,8 +7,8 @@ use envoix_session::{TransferCancelToken, TransferEvent as SessionEvent, Transfe
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use super::TransferEvent;
 use super::error::{Phase, TransferError};
+use super::{StampedEvent, TransferEvent};
 use crate::PublicError;
 
 /// Lock-free cell holding the phase the transfer has reached, updated as
@@ -59,7 +59,7 @@ fn phase_of(event: &TransferEvent) -> Phase {
 /// protocol allows it).
 #[derive(Debug)]
 pub struct Transfer {
-    events: mpsc::UnboundedReceiver<TransferEvent>,
+    events: mpsc::UnboundedReceiver<StampedEvent>,
     cancel: TransferCancelToken,
     phase: Arc<PhaseCell>,
     // Option only so `wait(self)` can move it out despite the Drop impl.
@@ -68,7 +68,7 @@ pub struct Transfer {
 
 impl Transfer {
     pub(crate) fn new(
-        events: mpsc::UnboundedReceiver<TransferEvent>,
+        events: mpsc::UnboundedReceiver<StampedEvent>,
         cancel: TransferCancelToken,
         phase: Arc<PhaseCell>,
         task: JoinHandle<Result<TransferSummary, PublicError>>,
@@ -86,9 +86,9 @@ impl Transfer {
         self.phase.load()
     }
 
-    /// The next lifecycle event, or `None` once the transfer has ended and
-    /// all events were consumed.
-    pub async fn next_event(&mut self) -> Option<TransferEvent> {
+    /// The next lifecycle event (with its emission time), or `None` once the
+    /// transfer has ended and all events were consumed.
+    pub async fn next_event(&mut self) -> Option<StampedEvent> {
         self.events.recv().await
     }
 
@@ -121,12 +121,12 @@ impl Drop for Transfer {
 /// advertising, pairing), and is cloned into the adapter sinks.
 #[derive(Clone, Debug)]
 pub(crate) struct EventSender {
-    sender: mpsc::UnboundedSender<TransferEvent>,
+    sender: mpsc::UnboundedSender<StampedEvent>,
     phase: Arc<PhaseCell>,
 }
 
 impl EventSender {
-    pub(crate) fn channel() -> (Self, mpsc::UnboundedReceiver<TransferEvent>) {
+    pub(crate) fn channel() -> (Self, mpsc::UnboundedReceiver<StampedEvent>) {
         let (sender, receiver) = mpsc::unbounded_channel();
         (
             Self {
@@ -142,12 +142,23 @@ impl EventSender {
         self.phase.clone()
     }
 
-    /// Sends one event, advancing the tracked phase; silently dropped when
-    /// the handle is gone.
+    /// Sends one event, stamped with the emission time and advancing the
+    /// tracked phase; silently dropped when the handle is gone.
     pub(crate) fn emit(&self, event: TransferEvent) {
         self.phase.store(phase_of(&event));
-        let _ = self.sender.send(event);
+        let _ = self.sender.send(StampedEvent {
+            ts_ms: unix_now_ms(),
+            event,
+        });
     }
+}
+
+/// Current Unix time in whole milliseconds.
+fn unix_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 /// Adapts the legacy transfer-progress sink onto the unified stream.
@@ -238,8 +249,10 @@ mod tests {
             bytes_transferred: 42,
         });
 
+        let first = receiver.recv().await.unwrap();
+        assert!(first.ts_ms > 0);
         assert_eq!(
-            receiver.recv().await.unwrap(),
+            first.event,
             TransferEvent::Verifying {
                 transfer_id: TransferId::new("t1"),
                 direction: TransferDirection::Receive,
@@ -248,7 +261,7 @@ mod tests {
             }
         );
         assert_eq!(
-            receiver.recv().await.unwrap(),
+            receiver.recv().await.unwrap().event,
             TransferEvent::Completed {
                 transfer_id: TransferId::new("t1"),
                 bytes_transferred: 42,
@@ -262,7 +275,7 @@ mod tests {
         sender.emit(TransferEvent::Pairing);
         drop(sender);
 
-        assert_eq!(receiver.recv().await.unwrap(), TransferEvent::Pairing);
-        assert_eq!(receiver.recv().await, None);
+        assert_eq!(receiver.recv().await.unwrap().event, TransferEvent::Pairing);
+        assert!(receiver.recv().await.is_none());
     }
 }
