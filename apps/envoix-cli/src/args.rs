@@ -29,6 +29,10 @@ pub(crate) struct Cli {
     /// rendering (progress lines stay off; contextual notes stay on stderr).
     #[arg(long, global = true)]
     pub(crate) json: bool,
+    /// Increase log verbosity: -v shows envoix internals, -vv adds iroh
+    /// internals (path selection, hole-punching). RUST_LOG overrides both.
+    #[arg(short = 'v', long = "verbose", action = ArgAction::Count, global = true)]
+    pub(crate) verbose: u8,
     #[command(subcommand)]
     pub(crate) command: Command,
 }
@@ -725,5 +729,29 @@ mod tests {
             panic!()
         };
         assert!(args.into_plan().is_err());
+    }
+    #[test]
+    fn verbose_flag_counts() {
+        let cli = Cli::try_parse_from([
+            "envoix",
+            "receive",
+            "-vv",
+            "--output",
+            "out",
+            "--token",
+            "abcdefghijkl",
+        ])
+        .unwrap();
+        assert_eq!(cli.verbose, 2);
+        let cli = Cli::try_parse_from([
+            "envoix",
+            "receive",
+            "--output",
+            "out",
+            "--token",
+            "abcdefghijkl",
+        ])
+        .unwrap();
+        assert_eq!(cli.verbose, 0);
     }
 }

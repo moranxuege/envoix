@@ -16,8 +16,9 @@ use render::EventOutput;
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    init_tracing();
-    match run(Cli::parse()).await {
+    let cli = Cli::parse();
+    init_tracing(cli.verbose);
+    match run(cli).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error: {error}");
@@ -26,16 +27,20 @@ async fn main() -> ExitCode {
     }
 }
 
-/// Initialize the tracing subscriber.  Honors `RUST_LOG`, defaulting to `info`
-/// for the `envoix` target and `warn` for everything else, so library warnings
-/// reach the terminal and iroh internals stay quiet without flooding it. The
-/// per-transfer "data path" line is rendered from Connected/PathChanged events,
-/// not tracing. Output goes to stderr to keep stdout clean for machine-readable
-/// formats.
-fn init_tracing() {
+/// Initialize the tracing subscriber. `RUST_LOG` always wins; otherwise the
+/// verbosity flag picks the filter - default keeps libraries at `warn` and
+/// envoix at `info`, `-v` shows envoix internals, `-vv` adds iroh internals
+/// (path selection, hole-punching). Output goes to stderr so stdout stays
+/// clean for `--json`.
+fn init_tracing(verbosity: u8) {
     use tracing_subscriber::{EnvFilter, fmt};
+    let default_filter = match verbosity {
+        0 => "envoix=info,warn",
+        1 => "envoix=debug,warn",
+        _ => "envoix=trace,iroh=debug,warn",
+    };
     let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("envoix=info,warn"));
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
     fmt()
         .with_env_filter(filter)
         .with_writer(io::stderr)
