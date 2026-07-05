@@ -1,6 +1,27 @@
 //! How the two peers of a transfer find and authenticate each other.
 
 use envoix_protocol::PeerDescriptor;
+use serde::Serialize;
+
+/// The rendezvous mode of a transfer - the [`PeerSource`] variant kind,
+/// exposed on the event stream so a transfer's setup is reconstructable
+/// from its events alone.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferMode {
+    /// Dialing a pasted peer descriptor.
+    Manual,
+    /// Dialing a scanned/pasted invite.
+    Invite,
+    /// Listening and printing our descriptor.
+    ShowManual,
+    /// Listening and showing an invite/QR.
+    ShowInvite,
+    /// LAN mDNS discovery or advertisement.
+    Mdns,
+    /// Pairing through a rendezvous broker with a short code.
+    Room,
+}
 
 /// How to find and authenticate the peer of a transfer.
 ///
@@ -58,4 +79,18 @@ pub enum PeerSource {
         /// Broker address, `<endpoint-id>@<ip:port>`.
         broker: String,
     },
+}
+
+impl PeerSource {
+    /// The mode this source represents.
+    pub fn mode(&self) -> TransferMode {
+        match self {
+            Self::Manual { .. } => TransferMode::Manual,
+            Self::Invite { .. } => TransferMode::Invite,
+            Self::ShowManual { .. } => TransferMode::ShowManual,
+            Self::ShowInvite { .. } => TransferMode::ShowInvite,
+            Self::Mdns { .. } => TransferMode::Mdns,
+            Self::Room { .. } => TransferMode::Room,
+        }
+    }
 }

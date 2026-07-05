@@ -9,6 +9,8 @@ use envoix_session::TransferDirection;
 use envoix_types::{DataPath, TransferId};
 use serde::Serialize;
 
+use super::TransferMode;
+
 /// A lifecycle event plus when it was emitted.
 ///
 /// Stamped at emission (not receipt), so a slow consumer cannot skew the
@@ -34,6 +36,8 @@ pub enum TransferEvent {
     Binding {
         /// Direction of this local operation.
         direction: TransferDirection,
+        /// The rendezvous mode in use.
+        mode: TransferMode,
     },
     /// We are listening; share these with the peer so it can dial us.
     Advertised {
