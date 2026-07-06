@@ -12,7 +12,7 @@ use envoix_client::api::TransferError;
 use envoix_client::{
     IdentityConfig, SPAKE2_EXPERIMENTAL_WARNING, TransferDirection, TransferSummary,
 };
-use render::EventOutput;
+use render::EventRenderer;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -49,7 +49,7 @@ fn init_tracing(verbosity: u8) {
 }
 
 async fn run(cli: Cli) -> Result<(), TransferError> {
-    let output = EventOutput::new(cli.json);
+    let output = EventRenderer::new(cli.json);
     match cli.command {
         Command::Send(args) => {
             let plan = args.into_plan()?;
@@ -75,7 +75,7 @@ async fn run(cli: Cli) -> Result<(), TransferError> {
 async fn execute(
     plan: TransferPlan,
     direction: TransferDirection,
-    output: EventOutput,
+    output: EventRenderer,
 ) -> Result<TransferSummary, TransferError> {
     if let Some(note) = &plan.note {
         eprintln!("{note}");
@@ -107,7 +107,7 @@ fn api_client(
 /// grace period elapsing forces exit).
 async fn run_transfer(
     mut transfer: api::Transfer,
-    mut renderer: EventOutput,
+    mut renderer: EventRenderer,
 ) -> Result<TransferSummary, TransferError> {
     let interrupted = tokio::select! {
         _ = drain_events(&mut transfer, &mut renderer) => false,
@@ -130,7 +130,7 @@ async fn run_transfer(
     transfer.wait().await
 }
 
-async fn drain_events(transfer: &mut api::Transfer, renderer: &mut EventOutput) {
+async fn drain_events(transfer: &mut api::Transfer, renderer: &mut EventRenderer) {
     while let Some(event) = transfer.next_event().await {
         renderer.render(event);
     }
