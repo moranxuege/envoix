@@ -1,15 +1,122 @@
 //! The transfer handle and the adapters that feed its event stream.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
 
 use envoix_session::{TransferCancelToken, TransferEvent as SessionEvent, TransferSummary};
+use envoix_types::DataPath;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use super::error::{Phase, TransferError};
 use super::{StampedEvent, TransferEvent};
 use crate::PublicError;
+
+/// Measured performance of one transfer, for a stats display or a campaign
+/// ledger. Derived entirely from the event stream - no extra instrumentation in
+/// the transfer engine - and final once the transfer has ended. Pairs with
+/// [`TransferSummary`], which owns the transfer's identity and byte count;
+/// this type is purely how *fast* and *by what path*.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TransferStats {
+    /// Wall-clock transfer duration (started -> completed), in milliseconds.
+    pub duration_ms: u64,
+    /// Average throughput over the transfer, in bytes per second.
+    pub avg_bytes_per_sec: u64,
+    /// Peak throughput between two progress samples, in bytes per second.
+    pub peak_bytes_per_sec: u64,
+    /// Time from starting to the first data path being selected, or `None` if
+    /// it never connected.
+    pub connect_latency_ms: Option<u64>,
+    /// Every data path used, in order (e.g. a relay path then its direct
+    /// upgrade), so the full path history is visible, not only the final one.
+    pub paths: Vec<DataPath>,
+}
+
+/// Accumulates [`TransferStats`] as events flow, behind a shared handle so the
+/// emitting task and the reading [`Transfer`] observe the same running totals.
+#[derive(Clone, Debug)]
+pub(crate) struct StatsHandle(Arc<Mutex<StatsInner>>);
+
+#[derive(Default, Debug)]
+struct StatsInner {
+    start_ms: Option<u64>,
+    connected_ms: Option<u64>,
+    started_ms: Option<u64>,
+    end_ms: Option<u64>,
+    bytes: u64,
+    last_progress: Option<(u64, u64)>,
+    peak_bps: u64,
+    paths: Vec<DataPath>,
+}
+
+impl StatsHandle {
+    fn new() -> Self {
+        Self(Arc::new(Mutex::new(StatsInner::default())))
+    }
+
+    /// Fold one stamped event into the running stats.
+    fn observe(&self, ts_ms: u64, event: &TransferEvent) {
+        let mut s = self.0.lock().expect("stats mutex");
+        match event {
+            TransferEvent::Binding { .. } => {
+                s.start_ms.get_or_insert(ts_ms);
+            }
+            TransferEvent::Connected { path } => {
+                s.connected_ms.get_or_insert(ts_ms);
+                s.paths.push(path.clone());
+            }
+            TransferEvent::PathChanged { path } => s.paths.push(path.clone()),
+            TransferEvent::Started { .. } => {
+                s.started_ms.get_or_insert(ts_ms);
+            }
+            TransferEvent::Progress {
+                bytes_transferred, ..
+            } => {
+                let bytes = *bytes_transferred;
+                if let Some((last_ms, last_bytes)) = s.last_progress
+                    && ts_ms > last_ms
+                    && bytes >= last_bytes
+                {
+                    let bps = (bytes - last_bytes).saturating_mul(1000) / (ts_ms - last_ms);
+                    s.peak_bps = s.peak_bps.max(bps);
+                }
+                s.bytes = bytes;
+                s.last_progress = Some((ts_ms, bytes));
+            }
+            TransferEvent::Completed {
+                bytes_transferred, ..
+            } => {
+                s.bytes = *bytes_transferred;
+                s.end_ms.get_or_insert(ts_ms);
+            }
+            _ => {}
+        }
+    }
+
+    /// A snapshot of the stats so far (final once the transfer has ended).
+    pub(crate) fn snapshot(&self) -> TransferStats {
+        let s = self.0.lock().expect("stats mutex");
+        let duration_ms = match (s.started_ms, s.end_ms) {
+            (Some(start), Some(end)) => end.saturating_sub(start),
+            _ => 0,
+        };
+        TransferStats {
+            duration_ms,
+            avg_bytes_per_sec: s
+                .bytes
+                .saturating_mul(1000)
+                .checked_div(duration_ms)
+                .unwrap_or(0),
+            peak_bytes_per_sec: s.peak_bps,
+            connect_latency_ms: match (s.start_ms, s.connected_ms) {
+                (Some(start), Some(connected)) => Some(connected.saturating_sub(start)),
+                _ => None,
+            },
+            paths: s.paths.clone(),
+        }
+    }
+}
 
 /// Lock-free cell holding the phase the transfer has reached, updated as
 /// lifecycle events flow through the [`EventSender`].
@@ -64,6 +171,7 @@ pub struct Transfer {
     events: mpsc::UnboundedReceiver<StampedEvent>,
     cancel: TransferCancelToken,
     phase: Arc<PhaseCell>,
+    stats: StatsHandle,
     // Option only so `wait(self)` can move it out despite the Drop impl.
     task: Option<JoinHandle<Result<TransferSummary, PublicError>>>,
 }
@@ -73,12 +181,14 @@ impl Transfer {
         events: mpsc::UnboundedReceiver<StampedEvent>,
         cancel: TransferCancelToken,
         phase: Arc<PhaseCell>,
+        stats: StatsHandle,
         task: JoinHandle<Result<TransferSummary, PublicError>>,
     ) -> Self {
         Self {
             events,
             cancel,
             phase,
+            stats,
             task: Some(task),
         }
     }
@@ -86,6 +196,12 @@ impl Transfer {
     /// The phase this transfer has reached (per its last lifecycle event).
     pub fn phase(&self) -> Phase {
         self.phase.load()
+    }
+
+    /// A snapshot of the transfer's measured stats - throughput, connect
+    /// latency, and the full data-path history - final once it has ended.
+    pub fn stats(&self) -> TransferStats {
+        self.stats.snapshot()
     }
 
     /// The next lifecycle event (with its emission time), or `None` once the
@@ -125,6 +241,7 @@ impl Drop for Transfer {
 pub(crate) struct EventSender {
     sender: mpsc::UnboundedSender<StampedEvent>,
     phase: Arc<PhaseCell>,
+    stats: StatsHandle,
 }
 
 impl EventSender {
@@ -134,6 +251,7 @@ impl EventSender {
             Self {
                 sender,
                 phase: PhaseCell::new(),
+                stats: StatsHandle::new(),
             },
             receiver,
         )
@@ -144,19 +262,23 @@ impl EventSender {
         self.phase.clone()
     }
 
+    /// The handle accumulating this transfer's stats from the event stream.
+    pub(crate) fn stats_handle(&self) -> StatsHandle {
+        self.stats.clone()
+    }
+
     /// Sends one event, stamped with the emission time and advancing the
-    /// tracked phase; silently dropped when the handle is gone.
+    /// tracked phase and stats; silently dropped when the handle is gone.
     pub(crate) fn emit(&self, event: TransferEvent) {
         self.phase.store(phase_of(&event));
+        let ts_ms = unix_now_ms();
+        self.stats.observe(ts_ms, &event);
         // Fold the transfer id onto the ambient transfer span the first time it
         // is known, so subsequent client log lines correlate with the peer's.
         if let TransferEvent::Started { transfer_id, .. } = &event {
             tracing::Span::current().record("transfer_id", tracing::field::display(transfer_id));
         }
-        let _ = self.sender.send(StampedEvent {
-            ts_ms: unix_now_ms(),
-            event,
-        });
+        let _ = self.sender.send(StampedEvent { ts_ms, event });
     }
 }
 
@@ -293,5 +415,68 @@ mod tests {
             }
         );
         assert!(receiver.recv().await.is_none());
+    }
+
+    #[test]
+    fn stats_accumulate_from_the_event_stream() {
+        use super::super::TransferMode;
+        let addr = "1.2.3.4:5".parse().unwrap();
+        let h = StatsHandle::new();
+        h.observe(
+            1000,
+            &TransferEvent::Binding {
+                direction: TransferDirection::Send,
+                mode: TransferMode::Room,
+            },
+        );
+        h.observe(
+            1200,
+            &TransferEvent::Connected {
+                path: DataPath::Relay { url: "r".into() },
+            },
+        );
+        h.observe(
+            1300,
+            &TransferEvent::Started {
+                transfer_id: TransferId::new("t"),
+                direction: TransferDirection::Send,
+                file_name: "f".into(),
+                total_bytes: 1000,
+                bytes_resumed: 0,
+            },
+        );
+        let progress = |bytes| TransferEvent::Progress {
+            transfer_id: TransferId::new("t"),
+            bytes_transferred: bytes,
+            total_bytes: 1000,
+        };
+        h.observe(1300, &progress(0));
+        h.observe(
+            1400,
+            &TransferEvent::PathChanged {
+                path: DataPath::Direct { addr },
+            },
+        );
+        h.observe(1400, &progress(1000)); // 1000 B in 100 ms -> 10_000 B/s peak
+        h.observe(
+            1800,
+            &TransferEvent::Completed {
+                transfer_id: TransferId::new("t"),
+                bytes_transferred: 1000,
+            },
+        );
+
+        let stats = h.snapshot();
+        assert_eq!(stats.duration_ms, 500); // started 1300 -> completed 1800
+        assert_eq!(stats.avg_bytes_per_sec, 2000); // 1000 * 1000 / 500
+        assert_eq!(stats.peak_bytes_per_sec, 10_000);
+        assert_eq!(stats.connect_latency_ms, Some(200)); // binding 1000 -> connected 1200
+        assert_eq!(
+            stats.paths,
+            vec![
+                DataPath::Relay { url: "r".into() },
+                DataPath::Direct { addr }
+            ]
+        );
     }
 }
