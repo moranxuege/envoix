@@ -60,6 +60,12 @@ impl CandidateFilter {
         self.allow.is_empty() && self.deny.is_empty()
     }
 
+    /// Whether the filter permits `ip` (used to decide which local interfaces
+    /// to bind, so a denied range - e.g. Tailscale - is never used at all).
+    pub fn permits_ip(&self, ip: std::net::IpAddr) -> bool {
+        self.classify(ip).is_ok()
+    }
+
     /// Keep the addresses this filter permits, logging each drop (and the rule
     /// that caused it) at debug so `-v` reveals why an address is not
     /// advertised.

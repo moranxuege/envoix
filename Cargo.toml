@@ -37,6 +37,7 @@ envoix-transfer = { path = "crates/envoix-transfer" }
 envoix-types = { path = "crates/envoix-types" }
 async-trait = "0.1"
 anyhow = "1"
+if-addrs = "0.13"
 ipnet = "2"
 maxminddb = "0.29"
 base64 = "0.22"

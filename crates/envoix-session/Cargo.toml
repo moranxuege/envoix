@@ -12,6 +12,7 @@ envoix-error.workspace = true
 envoix-protocol.workspace = true
 envoix-rendezvous-iroh.workspace = true
 envoix-transfer.workspace = true
+if-addrs.workspace = true
 envoix-types.workspace = true
 base64.workspace = true
 ipnet.workspace = true
