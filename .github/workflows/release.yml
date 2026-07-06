@@ -1,0 +1,86 @@
+name: release
+
+# Builds the envoix CLI for Linux / macOS (arm64 + x86_64) / Windows.
+#   - push a tag `vX.Y.Z`  -> builds all four and attaches them to a GitHub Release
+#   - run manually (Actions -> release -> Run workflow) -> builds all four as
+#     downloadable run artifacts, without publishing a release
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write # needed to create the release
+
+jobs:
+  build:
+    name: build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            name: envoix-linux-x86_64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            name: envoix-macos-aarch64
+          - os: macos-14
+            target: x86_64-apple-darwin
+            name: envoix-macos-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: envoix-windows-x86_64.exe
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust (iroh needs >= 1.91)
+        shell: bash
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+          rustc --version
+
+      - name: Install musl tools
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build envoix CLI
+        run: cargo build --release -p envoix-cli --target ${{ matrix.target }}
+
+      - name: Stage binary
+        shell: bash
+        run: |
+          mkdir -p dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "target/${{ matrix.target }}/release/envoix.exe" "dist/${{ matrix.name }}"
+          else
+            cp "target/${{ matrix.target }}/release/envoix" "dist/${{ matrix.name }}"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/${{ matrix.name }}
+          if-no-files-found: error
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Download all binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" dist/* --generate-notes --repo "${{ github.repository }}"
