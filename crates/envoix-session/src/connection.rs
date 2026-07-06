@@ -57,24 +57,30 @@ fn spawn_path_watcher(
     connection: Connection,
     events: Option<Arc<dyn EventSink>>,
 ) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut last: Option<DataPath> = None;
-        loop {
-            if let Some(path) = selected_path(&connection)
-                && last.as_ref() != Some(&path)
-            {
-                tracing::debug!(target: "envoix", "data path: {path}");
-                if let Some(events) = &events {
-                    events.on_event(match last {
-                        None => TransferEvent::Connected { path: path.clone() },
-                        Some(_) => TransferEvent::PathChanged { path: path.clone() },
-                    });
+    // Inherit the caller's transfer span so the data-path lines correlate by
+    // room / transfer_id like the rest of the transfer's logs.
+    use tracing::Instrument as _;
+    tokio::spawn(
+        async move {
+            let mut last: Option<DataPath> = None;
+            loop {
+                if let Some(path) = selected_path(&connection)
+                    && last.as_ref() != Some(&path)
+                {
+                    tracing::debug!(target: "envoix", "data path: {path}");
+                    if let Some(events) = &events {
+                        events.on_event(match last {
+                            None => TransferEvent::Connected { path: path.clone() },
+                            Some(_) => TransferEvent::PathChanged { path: path.clone() },
+                        });
+                    }
+                    last = Some(path);
                 }
-                last = Some(path);
+                tokio::time::sleep(PATH_WATCH_INTERVAL).await;
             }
-            tokio::time::sleep(PATH_WATCH_INTERVAL).await;
         }
-    })
+        .instrument(tracing::Span::current()),
+    )
 }
 
 impl IrohFrameConnection {

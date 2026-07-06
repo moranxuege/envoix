@@ -148,6 +148,11 @@ impl EventSender {
     /// tracked phase; silently dropped when the handle is gone.
     pub(crate) fn emit(&self, event: TransferEvent) {
         self.phase.store(phase_of(&event));
+        // Fold the transfer id onto the ambient transfer span the first time it
+        // is known, so subsequent client log lines correlate with the peer's.
+        if let TransferEvent::Started { transfer_id, .. } = &event {
+            tracing::Span::current().record("transfer_id", tracing::field::display(transfer_id));
+        }
         let _ = self.sender.send(StampedEvent {
             ts_ms: unix_now_ms(),
             event,
