@@ -117,6 +117,14 @@ essential. Decoupling matters:
   current fixed roles fail. We have already observed direction-dependent
   hole-punch success (CN->US direct worked; US->CN failed) - a reverse-dial
   fallback converts those from failures into transfers.
+  - **Validated 2026-07-06 (serverless case):** with *no* relay and *no*
+    broker, a manual IPv6 transfer is directional - it works only when the
+    *listener* is inbound-reachable. pc->laptop (laptop on CERNET, inbound-open)
+    succeeded direct in 304 ms; laptop->pc failed (`connecting: timed out`)
+    because pc's Comcast-home v6 blocks unsolicited inbound. So server-
+    independence holds, but *which side listens matters*: a listener behind an
+    inbound-filtering firewall needs either the peer to listen instead
+    (reverse-dial) or a relay to coordinate.
 - **Workflows**: mobile share-sheet is sender-initiated end to end; "fetch
   from my desktop" is receiver-initiated. Both are natural once establishment
   is decoupled from direction.

@@ -25,8 +25,9 @@ pub struct TransferStats {
     pub avg_bytes_per_sec: u64,
     /// Peak throughput between two progress samples, in bytes per second.
     pub peak_bytes_per_sec: u64,
-    /// Time from starting to the first data path being selected, or `None` if
-    /// it never connected.
+    /// Time from *beginning to connect* (pairing done / the `Connecting` event)
+    /// to the first data path being selected - so it excludes any wait for the
+    /// peer to arrive. `None` if it never connected.
     pub connect_latency_ms: Option<u64>,
     /// Every data path used, in order (e.g. a relay path then its direct
     /// upgrade), so the full path history is visible, not only the final one.
@@ -40,7 +41,7 @@ pub(crate) struct StatsHandle(Arc<Mutex<StatsInner>>);
 
 #[derive(Default, Debug)]
 struct StatsInner {
-    start_ms: Option<u64>,
+    connect_start_ms: Option<u64>,
     connected_ms: Option<u64>,
     started_ms: Option<u64>,
     end_ms: Option<u64>,
@@ -59,8 +60,11 @@ impl StatsHandle {
     fn observe(&self, ts_ms: u64, event: &TransferEvent) {
         let mut s = self.0.lock().expect("stats mutex");
         match event {
-            TransferEvent::Binding { .. } => {
-                s.start_ms.get_or_insert(ts_ms);
+            // The connect window opens once pairing is done and we begin
+            // connecting; the pairing steps and the Connecting event both mark
+            // it, the latest wins - so a room receiver's peer-wait is excluded.
+            TransferEvent::Pairing { .. } | TransferEvent::Connecting => {
+                s.connect_start_ms = Some(ts_ms);
             }
             TransferEvent::Connected { path } => {
                 s.connected_ms.get_or_insert(ts_ms);
@@ -109,7 +113,7 @@ impl StatsHandle {
                 .checked_div(duration_ms)
                 .unwrap_or(0),
             peak_bytes_per_sec: s.peak_bps,
-            connect_latency_ms: match (s.start_ms, s.connected_ms) {
+            connect_latency_ms: match (s.connect_start_ms, s.connected_ms) {
                 (Some(start), Some(connected)) => Some(connected.saturating_sub(start)),
                 _ => None,
             },
@@ -429,6 +433,7 @@ mod tests {
                 mode: TransferMode::Room,
             },
         );
+        h.observe(1100, &TransferEvent::Connecting);
         h.observe(
             1200,
             &TransferEvent::Connected {
@@ -470,7 +475,7 @@ mod tests {
         assert_eq!(stats.duration_ms, 500); // started 1300 -> completed 1800
         assert_eq!(stats.avg_bytes_per_sec, 2000); // 1000 * 1000 / 500
         assert_eq!(stats.peak_bytes_per_sec, 10_000);
-        assert_eq!(stats.connect_latency_ms, Some(200)); // binding 1000 -> connected 1200
+        assert_eq!(stats.connect_latency_ms, Some(100)); // connecting 1100 -> connected 1200
         assert_eq!(
             stats.paths,
             vec![

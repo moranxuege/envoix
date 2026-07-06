@@ -188,8 +188,10 @@ pub async fn receive_file_via_room(
     {
         Ok(pairing) => pairing,
         Err(error) => {
-            // Pairing was cancelled or failed; close our data listener too so it
-            // does not drop without a graceful close.
+            // Pairing was cancelled or failed (e.g. room expiry); close both the
+            // rendezvous endpoint and our data listener so neither drops without
+            // a graceful close.
+            rdz.close().await;
             bound.local_endpoint.close().await;
             return Err(error);
         }
@@ -229,7 +231,7 @@ pub async fn send_file_via_room(
     // valid endpoint address works as a placeholder.
     let placeholder = rdz.addr();
 
-    let pairing = pair_or_cancel(
+    let pairing = match pair_or_cancel(
         &rdz,
         &broker,
         room_id,
@@ -238,7 +240,16 @@ pub async fn send_file_via_room(
         &cancel,
         events.as_ref(),
     )
-    .await?;
+    .await
+    {
+        Ok(pairing) => pairing,
+        Err(error) => {
+            // Close the rendezvous endpoint before returning so a pairing
+            // failure does not drop it ungracefully.
+            rdz.close().await;
+            return Err(error);
+        }
+    };
     // The rendezvous endpoint is only needed for the broker handshake; close it
     // so it does not linger (and log) while the data transfer runs.
     rdz.close().await;
