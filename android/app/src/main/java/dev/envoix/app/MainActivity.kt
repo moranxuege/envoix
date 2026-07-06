@@ -1,9 +1,13 @@
 package dev.envoix.app
 
+import android.Manifest
+import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
@@ -16,10 +20,13 @@ import androidx.lifecycle.lifecycleScope
 import dev.envoix.app.ui.EnvoixTheme
 import dev.envoix.app.ui.HomeScreen
 import dev.envoix.app.ui.LogScreen
+import dev.envoix.app.ui.SettingsScreen
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+
+private enum class Screen { Home, Logs, Settings }
 
 class MainActivity : ComponentActivity() {
 
@@ -37,32 +44,53 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+    private val requestNotif =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            requestNotif.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
         setContent {
             EnvoixTheme {
-                var showLogs by remember { mutableStateOf(false) }
-                if (showLogs) {
-                    LogScreen(onBack = { showLogs = false })
-                } else {
-                    val transfers by vm.transfers.collectAsState()
-                    HomeScreen(
-                        transfers = transfers,
-                        onReceive = { room -> vm.startReceive(room) },
-                        onSend = { room ->
-                            pendingSendRoom = room
-                            pickFile.launch(arrayOf("*/*"))
-                        },
-                        onCancel = { vm.cancel(it) },
-                        onDismiss = { vm.dismiss(it) },
-                        onOpenLogs = { showLogs = true },
-                    )
+                var screen by remember { mutableStateOf(Screen.Home) }
+                if (screen != Screen.Home) BackHandler { screen = Screen.Home }
+                when (screen) {
+                    Screen.Logs -> LogScreen(onBack = { screen = Screen.Home })
+                    Screen.Settings -> SettingsScreen(onBack = { screen = Screen.Home })
+                    Screen.Home -> {
+                        val transfers by vm.transfers.collectAsState()
+                        HomeScreen(
+                            transfers = transfers,
+                            onReceive = { room -> vm.startReceive(room) },
+                            onSend = { room ->
+                                pendingSendRoom = room
+                                pickFile.launch(arrayOf("*/*"))
+                            },
+                            onCancel = { vm.cancel(it) },
+                            onDismiss = { vm.dismiss(it) },
+                            onOpenLogs = { screen = Screen.Logs },
+                            onOpenSettings = { screen = Screen.Settings },
+                            onOpen = { openReceived(it) },
+                        )
+                    }
                 }
             }
         }
     }
 
-    /** Copy a picked content Uri into a real cache path the CLI can read. */
+    /** Open a received file (a Downloads content Uri) in whatever app handles it. */
+    private fun openReceived(t: Transfer) {
+        val uri = t.savedUri?.let { Uri.parse(it) } ?: return
+        val view = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "*/*")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        runCatching { startActivity(Intent.createChooser(view, "Open with")) }
+    }
+
+    /** Copy a picked content Uri into a real cache path the core can read. */
     private fun copyToCache(uri: Uri): String? {
         val name = displayName(uri) ?: "upload.bin"
         val dir = File(cacheDir, "send").apply { mkdirs() }

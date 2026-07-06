@@ -6,6 +6,7 @@ import android.app.Application
 class EnvoixApp : Application() {
     override fun onCreate() {
         super.onCreate()
+        SettingsStore.init(this)
         LogStore.init(filesDir)
         Native.initLogging(LogSink) // before initContext, so init logs are captured
         Native.initContext(this)

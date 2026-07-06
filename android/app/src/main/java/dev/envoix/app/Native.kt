@@ -35,6 +35,7 @@ object Native {
         broker: String,
         relay: String,
         path: String,
+        configPath: String,
         callback: EventCallback,
     )
 

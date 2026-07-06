@@ -22,6 +22,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
@@ -58,6 +59,8 @@ fun HomeScreen(
     onCancel: (Long) -> Unit,
     onDismiss: (Long) -> Unit,
     onOpenLogs: () -> Unit,
+    onOpenSettings: () -> Unit,
+    onOpen: (Transfer) -> Unit,
 ) {
     val colors = Envoix.colors
     var sheetOpen by remember { mutableStateOf(false) }
@@ -83,7 +86,7 @@ fun HomeScreen(
                 .padding(inner)
                 .padding(horizontal = 20.dp),
         ) {
-            Header(active, onOpenLogs)
+            Header(active, onOpenLogs, onOpenSettings)
             Spacer(Modifier.height(12.dp))
             if (transfers.isEmpty()) {
                 EmptyState()
@@ -93,7 +96,7 @@ fun HomeScreen(
                     contentPadding = PaddingValues(top = 4.dp, bottom = 96.dp),
                 ) {
                     items(transfers.sortedByDescending { it.id }, key = { it.id }) { t ->
-                        TransferCard(t, onCancel, onDismiss)
+                        TransferCard(t, onCancel, onDismiss, onOpen)
                     }
                 }
             }
@@ -115,7 +118,7 @@ fun HomeScreen(
 }
 
 @Composable
-private fun Header(active: Int, onOpenLogs: () -> Unit) {
+private fun Header(active: Int, onOpenLogs: () -> Unit, onOpenSettings: () -> Unit) {
     val colors = Envoix.colors
     Row(
         Modifier
@@ -149,6 +152,16 @@ private fun Header(active: Int, onOpenLogs: () -> Unit) {
                     .clickable(onClick = onOpenLogs)
                     .padding(horizontal = 10.dp, vertical = 6.dp),
             )
+            Icon(
+                Icons.Default.Settings,
+                contentDescription = "Settings",
+                tint = colors.accent,
+                modifier = Modifier
+                    .clip(CircleShape)
+                    .clickable(onClick = onOpenSettings)
+                    .padding(6.dp)
+                    .size(22.dp),
+            )
         }
     }
 }
@@ -166,16 +179,23 @@ private fun EmptyState() {
 }
 
 @Composable
-private fun TransferCard(t: Transfer, onCancel: (Long) -> Unit, onDismiss: (Long) -> Unit) {
+private fun TransferCard(
+    t: Transfer,
+    onCancel: (Long) -> Unit,
+    onDismiss: (Long) -> Unit,
+    onOpen: (Transfer) -> Unit,
+) {
     val colors = Envoix.colors
     val done = t.status == Status.Completed
     val failed = t.status == Status.Failed || t.status == Status.Cancelled
+    val openable = done && t.savedUri != null
     Row(
         Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
             .background(colors.surface)
             .border(1.dp, colors.line, RoundedCornerShape(16.dp))
+            .then(if (openable) Modifier.clickable { onOpen(t) } else Modifier)
             .padding(14.dp),
         verticalAlignment = Alignment.Top,
     ) {
@@ -343,6 +363,7 @@ private fun title(t: Transfer): String {
 }
 
 private fun subtitle(t: Transfer): String = when {
+    t.status == Status.Completed && t.savedUri != null -> "Saved to Downloads · tap to open"
     t.pathAddr != null -> t.pathAddr
     else -> "room ${t.room}"
 }

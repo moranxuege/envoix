@@ -79,6 +79,7 @@ pub extern "system" fn Java_dev_envoix_app_Native_runTransfer(
     broker: JString,
     relay: JString,
     path: JString,
+    config_path: JString,
     callback: JObject,
 ) {
     let direction = jstr(&mut env, &direction);
@@ -86,12 +87,13 @@ pub extern "system" fn Java_dev_envoix_app_Native_runTransfer(
     let broker = jstr(&mut env, &broker);
     let relay = jstr(&mut env, &relay);
     let path = jstr(&mut env, &path);
+    let config_path = jstr(&mut env, &config_path);
 
     let vm = env.get_java_vm().expect("java vm");
     let cb = env.new_global_ref(&callback).expect("callback ref");
 
     runtime().block_on(async move {
-        if let Err(err) = drive(id, &direction, code, broker, relay, path, &vm, &cb).await {
+        if let Err(err) = drive(id, &direction, code, broker, relay, path, config_path, &vm, &cb).await {
             emit(&vm, &cb, &format!(r#"{{"event":"failed","error":{}}}"#, json_str(&err)));
         }
     });
@@ -114,6 +116,7 @@ pub extern "system" fn Java_dev_envoix_app_Native_cancel(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn drive(
     id: i64,
     direction: &str,
@@ -121,10 +124,12 @@ async fn drive(
     broker: String,
     relay: String,
     path: String,
+    config_path: String,
     vm: &JavaVM,
     cb: &GlobalRef,
 ) -> Result<(), String> {
-    let client = Client::from_runtime_sources(None).map_err(|e| e.to_string())?;
+    let config = (!config_path.is_empty()).then(|| PathBuf::from(config_path));
+    let client = Client::from_runtime_sources(config.as_deref()).map_err(|e| e.to_string())?;
     let source = PeerSource::Room { code, broker };
     let mut options = TransferOptions::default();
     options.relay = Some(relay);

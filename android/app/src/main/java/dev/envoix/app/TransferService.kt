@@ -43,12 +43,15 @@ class TransferService : Service() {
                 val room = intent.getStringExtra(EXTRA_ROOM)
                 val path = intent.getStringExtra(EXTRA_PATH)
                 if (direction == null || room == null || path == null) return stopIfIdle()
+                val broker = intent.getStringExtra(EXTRA_BROKER) ?: Endpoints.BROKER
+                val relay = intent.getStringExtra(EXTRA_RELAY) ?: Endpoints.RELAY
+                val config = intent.getStringExtra(EXTRA_CONFIG) ?: ""
                 startForeground(
                     NOTIF_ID,
                     notification(),
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
                 )
-                launchTransfer(direction, room, path)
+                launchTransfer(direction, room, path, broker, relay, config)
             }
             ACTION_CANCEL -> {
                 val id = intent.getLongExtra(EXTRA_ID, -1L)
@@ -61,7 +64,14 @@ class TransferService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun launchTransfer(directionStr: String, room: String, path: String) {
+    private fun launchTransfer(
+        directionStr: String,
+        room: String,
+        path: String,
+        broker: String,
+        relay: String,
+        config: String,
+    ) {
         val dir = if (directionStr == "send") Direction.Send else Direction.Receive
         val id = TransferRepository.create(dir, room)
         LogStore.append("app: start $directionStr room=${room.substringBefore('-')} id=$id")
@@ -70,7 +80,7 @@ class TransferService : Service() {
         scope.launch {
             var lastTs = 0L
             var lastBytes = 0L
-            NativeTransfer.run(id, directionStr, room, Endpoints.BROKER, Endpoints.RELAY, path)
+            NativeTransfer.run(id, directionStr, room, broker, relay, path, config)
                 .collect { ev ->
                     TransferRepository.update(id) { t ->
                         when (ev) {
@@ -91,7 +101,10 @@ class TransferService : Service() {
                             is CliEvent.Completed ->
                                 t.copy(bytes = ev.bytesTransferred, speedBps = 0.0, status = Status.Completed)
                             is CliEvent.Failed ->
-                                t.copy(status = Status.Failed, error = ev.error)
+                                // A user cancel surfaces as a Failed event; keep the
+                                // Cancelled status the cancel action already set.
+                                if (t.status == Status.Cancelled) t
+                                else t.copy(status = Status.Failed, error = ev.error)
                             is CliEvent.Exit ->
                                 if (!t.status.isTerminal)
                                     t.copy(status = if (ev.code == 0) Status.Completed else Status.Failed)
@@ -161,17 +174,31 @@ class TransferService : Service() {
         private const val EXTRA_DIRECTION = "direction"
         private const val EXTRA_ROOM = "room"
         private const val EXTRA_PATH = "path"
+        private const val EXTRA_BROKER = "broker"
+        private const val EXTRA_RELAY = "relay"
+        private const val EXTRA_CONFIG = "config"
         private const val EXTRA_ID = "id"
 
         /** `direction` is "send"/"receive"; `path` is the file to send or the
-         *  output directory to receive into. */
-        fun start(context: Context, direction: String, room: String, path: String) {
+         *  output directory to receive into; `config` is a config.toml path or "". */
+        fun start(
+            context: Context,
+            direction: String,
+            room: String,
+            path: String,
+            broker: String,
+            relay: String,
+            config: String,
+        ) {
             context.startForegroundService(
                 Intent(context, TransferService::class.java).apply {
                     action = ACTION_START
                     putExtra(EXTRA_DIRECTION, direction)
                     putExtra(EXTRA_ROOM, room)
                     putExtra(EXTRA_PATH, path)
+                    putExtra(EXTRA_BROKER, broker)
+                    putExtra(EXTRA_RELAY, relay)
+                    putExtra(EXTRA_CONFIG, config)
                 }
             )
         }
