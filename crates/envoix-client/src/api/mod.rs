@@ -22,16 +22,19 @@ pub use options::{PathPolicy, TransferOptions};
 pub use source::{PeerSource, TransferMode};
 pub use transfer::Transfer;
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use envoix_qr::{QrInvitePayload, generate_token};
 use envoix_session::{
     BindAddrs, DEFAULT_CHUNK_SIZE, SessionConfig, TransferCancelToken, TransferDirection,
-    bind_iroh_endpoint_enable_mdns, parse_broker_addr, receive_file_via_room,
+    TransferSummary, bind_iroh_endpoint_enable_mdns, parse_broker_addr, receive_file_via_room,
     receive_file_with_bound_peer, receive_with_auth_retries, send_file_enable_mdns,
     send_file_manual, send_file_via_room,
 };
+use tracing::Instrument;
 
 use crate::{IdentityConfig, PeerDescriptor, PublicError};
 use envoix_auth::PairingConfig;
@@ -41,6 +44,30 @@ use transfer::{EventSender, SessionEventAdapter};
 /// token from the SPAKE2 exchange and overrides this before authentication;
 /// it exists only because `SessionConfig` requires a pairing.
 const ROOM_PLACEHOLDER_TOKEN: &str = "envoix-room-unused-placeholder";
+
+/// The transfer body each dispatch arm produces, run under the correlation span.
+type TransferFuture = Pin<Box<dyn Future<Output = Result<TransferSummary, PublicError>> + Send>>;
+
+/// The correlation span a transfer runs in: `room`/`transfer_id` are recorded
+/// once known (the room id up front for room transfers, the transfer id when
+/// the transfer starts), so every client log line correlates by the same ids
+/// the broker (`room`) and the peer (`transfer_id`) use.
+fn transfer_span(direction: TransferDirection, mode: TransferMode) -> tracing::Span {
+    tracing::info_span!(
+        "transfer",
+        ?direction,
+        ?mode,
+        room = tracing::field::Empty,
+        transfer_id = tracing::field::Empty,
+    )
+}
+
+/// The rendezvous room id (the part the broker sees) of a room code, i.e.
+/// everything before the first `-`; the remainder is the SPAKE2 password and
+/// must never reach a log.
+fn room_id_of(code: &str) -> &str {
+    code.split('-').next().unwrap_or(code)
+}
 
 /// Invite lifetime when the source does not specify one (mDNS listener with
 /// a generated token).
@@ -123,12 +150,13 @@ impl Client {
         let sink = Box::new(SessionEventAdapter(events.clone()));
         let resume = options.resume;
         let mode = to.mode();
+        let span = transfer_span(TransferDirection::Send, mode);
 
-        let task = match to {
+        let fut: TransferFuture = match to {
             PeerSource::Manual { peer, token } => {
                 let config = self.session_config(shared_token(&token)?, &options);
                 let cancel = cancel.clone();
-                tokio::spawn(async move {
+                Box::pin(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Send,
                         mode,
@@ -140,7 +168,7 @@ impl Client {
                 let (peer, token) = resolve_invite(&invite)?;
                 let config = self.session_config(shared_token(&token)?, &options);
                 let cancel = cancel.clone();
-                tokio::spawn(async move {
+                Box::pin(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Send,
                         mode,
@@ -151,7 +179,7 @@ impl Client {
             PeerSource::Mdns { token: Some(token) } => {
                 let config = self.session_config(shared_token(&token)?, &options);
                 let cancel = cancel.clone();
-                tokio::spawn(async move {
+                Box::pin(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Send,
                         mode,
@@ -163,11 +191,12 @@ impl Client {
                 return Err(TransferError::input("sending over mDNS requires a token"));
             }
             PeerSource::Room { code, broker } => {
+                span.record("room", room_id_of(&code));
                 let broker =
                     parse_broker_addr(&broker, options.relay.as_deref()).map_err(setup_error)?;
                 let config = self.session_config(shared_token(ROOM_PLACEHOLDER_TOKEN)?, &options);
                 let cancel = cancel.clone();
-                tokio::spawn(async move {
+                Box::pin(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Send,
                         mode,
@@ -182,6 +211,7 @@ impl Client {
                 ));
             }
         };
+        let task = tokio::spawn(fut.instrument(span));
         Ok(Transfer::new(event_receiver, cancel, events_phase, task))
     }
 
@@ -209,8 +239,9 @@ impl Client {
             .clone()
             .unwrap_or_else(|| BindAddrs::dual_stack(0));
         let mode = from.mode();
+        let span = transfer_span(TransferDirection::Receive, mode);
 
-        let task = match from {
+        let fut: TransferFuture = match from {
             PeerSource::ShowManual { token } => {
                 let token = token.map_or_else(new_token, Ok)?;
                 let config = self.session_config(shared_token(&token)?, &options);
@@ -225,7 +256,7 @@ impl Client {
                         });
                     }
                 };
-                tokio::spawn(async move {
+                Box::pin(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Receive,
                         mode,
@@ -238,7 +269,7 @@ impl Client {
                 let config = self.session_config(shared_token(&token)?, &options);
                 let cancel = cancel.clone();
                 let on_bound = advertise_with_invite(events.clone(), token, ttl_secs);
-                tokio::spawn(async move {
+                Box::pin(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Receive,
                         mode,
@@ -256,7 +287,7 @@ impl Client {
                 let config = self.session_config(shared_token(&token)?, &options);
                 let identity = self.identity.clone();
                 let cancel = cancel.clone();
-                tokio::spawn(async move {
+                Box::pin(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Receive,
                         mode,
@@ -277,11 +308,12 @@ impl Client {
                 })
             }
             PeerSource::Room { code, broker } => {
+                span.record("room", room_id_of(&code));
                 let broker =
                     parse_broker_addr(&broker, options.relay.as_deref()).map_err(setup_error)?;
                 let config = self.session_config(shared_token(ROOM_PLACEHOLDER_TOKEN)?, &options);
                 let cancel = cancel.clone();
-                tokio::spawn(async move {
+                Box::pin(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Receive,
                         mode,
@@ -296,6 +328,7 @@ impl Client {
                 ));
             }
         };
+        let task = tokio::spawn(fut.instrument(span));
         Ok(Transfer::new(event_receiver, cancel, events_phase, task))
     }
 
