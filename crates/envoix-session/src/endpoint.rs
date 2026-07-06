@@ -43,6 +43,65 @@ impl BindAddrs {
     fn iter(&self) -> impl Iterator<Item = BindAddr> + '_ {
         self.addrs.iter().copied()
     }
+
+    /// Replace unspecified (`0.0.0.0` / `::`) binds with the concrete local
+    /// interface addresses `filter` permits, so a denied range (e.g. Tailscale's
+    /// `100.64.0.0/10` / `fd7a:115c:a1e0::/48`) is never bound - and therefore
+    /// never used by iroh as a holepunch candidate, not merely hidden from the
+    /// advertised descriptor. Specific binds are kept if permitted; an empty
+    /// filter (or an empty survivor set) leaves the binds untouched.
+    fn resolve_interfaces(self, filter: &CandidateFilter) -> Self {
+        if filter.is_empty() {
+            return self;
+        }
+        let locals = local_interface_ips();
+        let mut addrs = Vec::new();
+        for bind in &self.addrs {
+            if bind.addr.ip().is_unspecified() {
+                // Bind one permitted interface address per family: iroh allows
+                // only one default route per family, and it discovers the
+                // reflexive/public addresses itself, so a single concrete address
+                // per family is enough for reachability.
+                let want_v6 = bind.addr.is_ipv6();
+                if let Some(ip) = locals
+                    .iter()
+                    .find(|ip| ip.is_ipv6() == want_v6 && filter.permits_ip(**ip))
+                {
+                    addrs.push(BindAddr {
+                        addr: SocketAddr::new(*ip, bind.addr.port()),
+                        required: bind.required,
+                    });
+                }
+            } else if filter.permits_ip(bind.addr.ip()) {
+                addrs.push(*bind);
+            }
+        }
+        // If the filter left nothing to bind, keep the original request rather
+        // than silently producing a relay-only endpoint.
+        if addrs.is_empty() {
+            self
+        } else {
+            Self { addrs }
+        }
+    }
+}
+
+/// Concrete local interface IP addresses worth binding: loopback, link-local,
+/// and unspecified are dropped. Best-effort - an enumeration error yields none.
+fn local_interface_ips() -> Vec<IpAddr> {
+    if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|iface| iface.ip())
+        .filter(|ip| !ip.is_loopback() && !ip.is_unspecified() && !is_link_local(ip))
+        .collect()
+}
+
+fn is_link_local(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_link_local(),
+        IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) == 0xfe80,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -218,8 +277,18 @@ pub(crate) async fn build_accept_endpoint(
     identity: &IdentityConfig,
     relay: &Option<String>,
     relay_only: bool,
+    candidates: &CandidateFilter,
 ) -> Result<Endpoint, SessionError> {
-    build_endpoint(Some(listen_addrs), identity, true, false, relay, relay_only).await
+    build_endpoint(
+        Some(listen_addrs),
+        identity,
+        true,
+        false,
+        relay,
+        relay_only,
+        candidates,
+    )
+    .await
 }
 
 pub(crate) async fn build_advertising_accept_endpoint(
@@ -227,16 +296,27 @@ pub(crate) async fn build_advertising_accept_endpoint(
     identity: &IdentityConfig,
     relay: &Option<String>,
     relay_only: bool,
+    candidates: &CandidateFilter,
 ) -> Result<Endpoint, SessionError> {
-    build_endpoint(Some(listen_addrs), identity, true, true, relay, relay_only).await
+    build_endpoint(
+        Some(listen_addrs),
+        identity,
+        true,
+        true,
+        relay,
+        relay_only,
+        candidates,
+    )
+    .await
 }
 
 pub(crate) async fn build_dial_endpoint(
     identity: &IdentityConfig,
     relay: &Option<String>,
     relay_only: bool,
+    candidates: &CandidateFilter,
 ) -> Result<Endpoint, SessionError> {
-    build_endpoint(None, identity, false, false, relay, relay_only).await
+    build_endpoint(None, identity, false, false, relay, relay_only, candidates).await
 }
 
 /// QUIC transport tuning for high-latency links (e.g. trans-Pacific, ~280 ms RTT).
@@ -273,6 +353,7 @@ async fn build_endpoint(
     advertise_self: bool,
     relay: &Option<String>,
     relay_only: bool,
+    candidates: &CandidateFilter,
 ) -> Result<Endpoint, SessionError> {
     let secret_key = load_secret_key(identity).await?;
     let mut builder = Endpoint::builder(presets::N0)
@@ -291,6 +372,21 @@ async fn build_endpoint(
         // relay - forces the relay data path (for A/B testing relay vs direct).
         // Requires a relay to be configured, else the endpoint can reach no one.
         builder = builder.clear_ip_transports();
+    } else if !candidates.is_empty() {
+        // A candidate filter is set: bind only the concrete local interface
+        // addresses it permits, so a denied range (e.g. Tailscale) is never bound
+        // and iroh cannot use it as a holepunch candidate. This also covers the
+        // dial endpoint (which otherwise binds all interfaces via the default).
+        let base = local_listen_addrs.unwrap_or_else(|| BindAddrs::dual_stack(0));
+        builder = builder.clear_ip_transports();
+        for bind_addr in base.resolve_interfaces(candidates).iter() {
+            builder = builder
+                .bind_addr_with_opts(
+                    bind_addr.addr,
+                    BindOpts::default().set_is_required(bind_addr.required),
+                )
+                .map_err(|error| CoreError::Transport(error.to_string()))?;
+        }
     } else if let Some(addrs) = local_listen_addrs {
         builder = builder.clear_ip_transports();
         for bind_addr in addrs.iter() {
@@ -312,6 +408,40 @@ async fn build_endpoint(
 mod tests {
     use super::*;
     use iroh::SecretKey;
+
+    #[test]
+    fn resolve_interfaces_excludes_denied_ranges_from_the_bind() {
+        // Deny a real local interface address; resolving the unspecified binds
+        // must not include it (so iroh never binds it, never uses it as a
+        // candidate) - this is what makes the filter suppress e.g. Tailscale.
+        let locals = local_interface_ips();
+        let Some(&denied) = locals.first() else {
+            return; // no non-loopback interfaces in this environment
+        };
+        let cidr = match denied {
+            IpAddr::V4(_) => format!("{denied}/32"),
+            IpAddr::V6(_) => format!("{denied}/128"),
+        };
+        let filter = CandidateFilter::from_lists(&[], &[cidr]).unwrap();
+        let resolved: Vec<IpAddr> = BindAddrs::dual_stack(0)
+            .resolve_interfaces(&filter)
+            .iter()
+            .map(|bind| bind.addr.ip())
+            .collect();
+        assert!(
+            !resolved.contains(&denied),
+            "denied interface {denied} must not be bound, got {resolved:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_interfaces_is_a_noop_without_a_filter() {
+        let base = BindAddrs::dual_stack(0);
+        assert_eq!(
+            base.clone().resolve_interfaces(&CandidateFilter::default()),
+            base
+        );
+    }
 
     #[test]
     fn dual_stack_bind_addrs_include_ipv4_and_ipv6_unspecified() {

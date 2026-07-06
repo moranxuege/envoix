@@ -87,11 +87,18 @@ pub(crate) async fn bind_iroh_endpoint_with_relay(
     identity: &IdentityConfig,
     relay: &Option<String>,
     relay_only: bool,
+    candidates: &CandidateFilter,
 ) -> Result<BoundEndpoint, SessionError> {
     Ok(BoundEndpoint {
-        local_endpoint: build_accept_endpoint(listen_addrs.into(), identity, relay, relay_only)
-            .await?,
-        candidates: CandidateFilter::default(),
+        local_endpoint: build_accept_endpoint(
+            listen_addrs.into(),
+            identity,
+            relay,
+            relay_only,
+            candidates,
+        )
+        .await?,
+        candidates: candidates.clone(),
     })
 }
 
@@ -99,6 +106,7 @@ pub(crate) async fn bind_iroh_endpoint_with_relay(
 pub async fn bind_iroh_endpoint_enable_mdns(
     listen_addrs: impl Into<BindAddrs>,
     identity: &IdentityConfig,
+    candidates: &CandidateFilter,
 ) -> Result<BoundEndpoint, SessionError> {
     Ok(BoundEndpoint {
         local_endpoint: build_advertising_accept_endpoint(
@@ -106,9 +114,10 @@ pub async fn bind_iroh_endpoint_enable_mdns(
             identity,
             &None,
             false,
+            candidates,
         )
         .await?,
-        candidates: CandidateFilter::default(),
+        candidates: candidates.clone(),
     })
 }
 
@@ -121,8 +130,13 @@ pub async fn send_file_manual(
     events: Box<dyn EventSink>,
     cancel: TransferCancelToken,
 ) -> Result<TransferSummary, SessionError> {
-    let local_endpoint =
-        build_dial_endpoint(&config.identity, &config.data_relay(), config.relay_only).await?;
+    let local_endpoint = build_dial_endpoint(
+        &config.identity,
+        &config.data_relay(),
+        config.relay_only,
+        &config.candidates,
+    )
+    .await?;
     let events: Arc<dyn EventSink> = Arc::from(events);
     events.on_event(TransferEvent::Connecting);
     let mut connection = match dial(local_endpoint.clone(), &peer).await {
@@ -161,8 +175,13 @@ pub async fn send_file_to_endpoint_addr(
     events: Box<dyn EventSink>,
     cancel: TransferCancelToken,
 ) -> Result<TransferSummary, SessionError> {
-    let local_endpoint =
-        build_dial_endpoint(&config.identity, &config.data_relay(), config.relay_only).await?;
+    let local_endpoint = build_dial_endpoint(
+        &config.identity,
+        &config.data_relay(),
+        config.relay_only,
+        &config.candidates,
+    )
+    .await?;
     let events: Arc<dyn EventSink> = Arc::from(events);
     events.on_event(TransferEvent::Connecting);
     let mut connection = match dial_peer_addr(local_endpoint.clone(), peer_addr).await {
@@ -197,8 +216,13 @@ pub async fn send_file_enable_mdns(
     cancel: TransferCancelToken,
 ) -> Result<TransferSummary, SessionError> {
     let events: Arc<dyn EventSink> = Arc::from(events);
-    let local_endpoint =
-        build_dial_endpoint(&config.identity, &config.data_relay(), config.relay_only).await?;
+    let local_endpoint = build_dial_endpoint(
+        &config.identity,
+        &config.data_relay(),
+        config.relay_only,
+        &config.candidates,
+    )
+    .await?;
     let mdns = MdnsAddressLookup::builder()
         .advertise(false)
         .build(local_endpoint.id())
@@ -305,9 +329,9 @@ where
         &config.identity,
         &config.data_relay(),
         config.relay_only,
+        &config.candidates,
     )
-    .await?
-    .with_candidate_filter(config.candidates.clone());
+    .await?;
     let peer = bound_endpoint.peer_descriptor()?;
     on_bound_peer(peer);
     receive_one_authenticated(bound_endpoint, output_dir, config, events, cancel).await

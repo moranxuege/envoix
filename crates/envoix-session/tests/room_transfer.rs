@@ -154,9 +154,13 @@ async fn candidate_filter_scopes_the_advertised_descriptor() {
     use envoix_session::{CandidateFilter, bind_iroh_endpoint_enable_mdns};
 
     let listen = envoix_session::BindAddrs::dual_stack(0);
-    let bound = bind_iroh_endpoint_enable_mdns(listen, &IdentityConfig::Ephemeral)
-        .await
-        .unwrap();
+    let bound = bind_iroh_endpoint_enable_mdns(
+        listen,
+        &IdentityConfig::Ephemeral,
+        &CandidateFilter::default(),
+    )
+    .await
+    .unwrap();
 
     // Unfiltered: the endpoint has at least one direct address.
     let all = bound.direct_addrs();
@@ -183,9 +187,13 @@ async fn candidate_filter_that_drops_everything_gives_a_pointed_error() {
     use envoix_session::{CandidateFilter, bind_iroh_endpoint_enable_mdns};
 
     let listen = envoix_session::BindAddrs::dual_stack(0);
-    let bound = bind_iroh_endpoint_enable_mdns(listen, &IdentityConfig::Ephemeral)
-        .await
-        .unwrap();
+    let bound = bind_iroh_endpoint_enable_mdns(
+        listen,
+        &IdentityConfig::Ephemeral,
+        &CandidateFilter::default(),
+    )
+    .await
+    .unwrap();
     let all = bound.direct_addrs();
     let deny: Vec<String> = all.iter().map(|a| a.ip().to_string()).collect();
     let filtered = bound.with_candidate_filter(CandidateFilter::from_lists(&[], &deny).unwrap());

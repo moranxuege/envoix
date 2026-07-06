@@ -339,9 +339,9 @@ impl Client {
                         direction: TransferDirection::Receive,
                         mode,
                     });
-                    let endpoint = bind_iroh_endpoint_enable_mdns(listen, &identity)
-                        .await?
-                        .with_candidate_filter(config.candidates.clone());
+                    let endpoint =
+                        bind_iroh_endpoint_enable_mdns(listen, &identity, &config.candidates)
+                            .await?;
                     let peer = endpoint.peer_descriptor()?;
                     let invite = invite_ttl.map(|ttl| {
                         QrInvitePayload::new(token.clone(), peer.clone(), unix_now() + ttl).encode()

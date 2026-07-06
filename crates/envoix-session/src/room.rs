@@ -167,9 +167,9 @@ pub async fn receive_file_via_room(
         &config.identity,
         &config.data_relay(),
         config.relay_only,
+        &config.candidates,
     )
-    .await?
-    .with_candidate_filter(config.candidates.clone());
+    .await?;
     // With direct-only the data endpoint has no relay home, so wait for a direct
     // addr rather than a relay home; otherwise wait for the relay home as usual.
     let my_addr = ready_endpoint_addr(&bound, config.data_relay().is_some()).await;
