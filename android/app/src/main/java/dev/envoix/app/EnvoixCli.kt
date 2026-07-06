@@ -24,6 +24,7 @@ sealed interface CliEvent {
  */
 object NativeTransfer {
     fun run(
+        id: Long,
         direction: String,
         code: String,
         broker: String,
@@ -37,7 +38,7 @@ object NativeTransfer {
         }
         val worker = Thread {
             try {
-                Native.runTransfer(direction, code, broker, relay, path, callback)
+                Native.runTransfer(id, direction, code, broker, relay, path, callback)
             } catch (t: Throwable) {
                 trySend(CliEvent.Failed(t.message ?: "native error"))
             } finally {

@@ -8,16 +8,26 @@
 //! `ndk_context`. [`initContext`] wires the VM + app context in once; without it
 //! those crates panic ("android context was not initialized").
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use envoix_client::api::{Client, PeerSource, TransferOptions};
 use jni::JNIEnv;
 use jni::JavaVM;
 use jni::objects::{GlobalRef, JClass, JObject, JString, JValue};
+use jni::sys::jlong;
 
 static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+
+/// Cancel closures for in-flight transfers, keyed by the Kotlin-side transfer id.
+#[allow(clippy::type_complexity)]
+static CANCELS: OnceLock<Mutex<HashMap<i64, Box<dyn Fn() + Send + Sync>>>> = OnceLock::new();
+
+fn cancels() -> &'static Mutex<HashMap<i64, Box<dyn Fn() + Send + Sync>>> {
+    CANCELS.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 /// VM + Kotlin log sink for [`Java_dev_envoix_app_Native_initLogging`]. The
 /// `tracing` subscriber below forwards every formatted line to `sink.log(String)`.
@@ -63,6 +73,7 @@ pub extern "system" fn Java_dev_envoix_app_Native_initContext(
 pub extern "system" fn Java_dev_envoix_app_Native_runTransfer(
     mut env: JNIEnv,
     _class: JClass,
+    id: jlong,
     direction: JString,
     code: JString,
     broker: JString,
@@ -80,13 +91,31 @@ pub extern "system" fn Java_dev_envoix_app_Native_runTransfer(
     let cb = env.new_global_ref(&callback).expect("callback ref");
 
     runtime().block_on(async move {
-        if let Err(err) = drive(&direction, code, broker, relay, path, &vm, &cb).await {
+        if let Err(err) = drive(id, &direction, code, broker, relay, path, &vm, &cb).await {
             emit(&vm, &cb, &format!(r#"{{"event":"failed","error":{}}}"#, json_str(&err)));
         }
     });
+    if let Ok(mut map) = cancels().lock() {
+        map.remove(&id);
+    }
+}
+
+/// Cancel the in-flight transfer with the given id (no-op if it already ended).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_cancel(
+    _env: JNIEnv,
+    _class: JClass,
+    id: jlong,
+) {
+    if let Ok(map) = cancels().lock()
+        && let Some(cancel) = map.get(&id)
+    {
+        cancel();
+    }
 }
 
 async fn drive(
+    id: i64,
     direction: &str,
     code: String,
     broker: String,
@@ -105,6 +134,12 @@ async fn drive(
         _ => client.receive(into, source, options),
     }
     .map_err(|e| e.to_string())?;
+
+    // Register a cancel handle so `cancel(id)` can stop this transfer.
+    let handle = transfer.cancel_handle();
+    if let Ok(mut map) = cancels().lock() {
+        map.insert(id, Box::new(move || handle.cancel()));
+    }
 
     while let Some(event) = transfer.next_event().await {
         if let Ok(json) = serde_json::to_string(&event) {

@@ -24,10 +24,12 @@ object Native {
 
     /**
      * Run one transfer to completion, blocking the calling thread; each event's
-     * JSON is delivered to [callback]. `direction` is "send" or "receive";
-     * `path` is the file to send or the output directory to receive into.
+     * JSON is delivered to [callback]. `direction` is "send" or "receive"; `path`
+     * is the file to send or the output directory to receive into. `id` keys the
+     * transfer so it can be [cancel]led.
      */
     external fun runTransfer(
+        id: Long,
         direction: String,
         code: String,
         broker: String,
@@ -35,4 +37,7 @@ object Native {
         path: String,
         callback: EventCallback,
     )
+
+    /** Request cancellation of the in-flight transfer with the given [id]. */
+    external fun cancel(id: Long)
 }
