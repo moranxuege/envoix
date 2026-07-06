@@ -45,8 +45,6 @@ pub type SessionError = CoreError;
 pub struct SessionConfig {
     /// Maximum chunk payload size sent by the transfer engine.
     pub chunk_size: usize,
-    /// Pairing authentication required before any transfer frame.
-    pub pairing: PairingConfig,
     /// iroh endpoint identity policy.
     pub identity: IdentityConfig,
     /// Optional relay URL for WAN/NAT reachability. `None` keeps endpoints
@@ -127,6 +125,7 @@ pub async fn send_file_manual(
     file_path: PathBuf,
     resume: bool,
     config: SessionConfig,
+    pairing: &PairingConfig,
     events: Box<dyn EventSink>,
     cancel: TransferCancelToken,
 ) -> Result<TransferSummary, SessionError> {
@@ -151,7 +150,7 @@ pub async fn send_file_manual(
     connection.watch_path(events.clone());
     let engine = TransferEngine::new(config.chunk_size);
 
-    if let Err(error) = authenticate_sender(&mut connection, &config.pairing).await {
+    if let Err(error) = authenticate_sender(&mut connection, pairing).await {
         let _ = connection.close().await;
         local_endpoint.close().await;
         return Err(error);
@@ -172,6 +171,7 @@ pub async fn send_file_to_endpoint_addr(
     file_path: PathBuf,
     resume: bool,
     config: SessionConfig,
+    pairing: &PairingConfig,
     events: Box<dyn EventSink>,
     cancel: TransferCancelToken,
 ) -> Result<TransferSummary, SessionError> {
@@ -193,7 +193,7 @@ pub async fn send_file_to_endpoint_addr(
     };
     connection.watch_path(events.clone());
     let engine = TransferEngine::new(config.chunk_size);
-    if let Err(error) = authenticate_sender(&mut connection, &config.pairing).await {
+    if let Err(error) = authenticate_sender(&mut connection, pairing).await {
         let _ = connection.close().await;
         local_endpoint.close().await;
         return Err(error);
@@ -212,6 +212,7 @@ pub async fn send_file_enable_mdns(
     file_path: PathBuf,
     resume: bool,
     config: SessionConfig,
+    pairing: &PairingConfig,
     events: Box<dyn EventSink>,
     cancel: TransferCancelToken,
 ) -> Result<TransferSummary, SessionError> {
@@ -279,6 +280,7 @@ pub async fn send_file_enable_mdns(
             file_path.clone(),
             resume,
             config.clone(),
+            pairing,
             events.clone(),
             &cancel,
         )
@@ -317,6 +319,7 @@ pub async fn receive_file_with_bound_peer<F>(
     listen_addrs: impl Into<BindAddrs>,
     output_dir: PathBuf,
     config: SessionConfig,
+    pairing: &PairingConfig,
     events: Box<dyn EventSink>,
     on_bound_peer: F,
     cancel: TransferCancelToken,
@@ -334,7 +337,7 @@ where
     .await?;
     let peer = bound_endpoint.peer_descriptor()?;
     on_bound_peer(peer);
-    receive_one_authenticated(bound_endpoint, output_dir, config, events, cancel).await
+    receive_one_authenticated(bound_endpoint, output_dir, config, pairing, events, cancel).await
 }
 
 /// Receives one file on an already-bound endpoint, stopping on cancellation.
@@ -342,6 +345,7 @@ pub async fn receive_one_authenticated(
     bound_endpoint: BoundEndpoint,
     output_dir: PathBuf,
     config: SessionConfig,
+    pairing: &PairingConfig,
     events: Box<dyn EventSink>,
     cancel: TransferCancelToken,
 ) -> Result<TransferSummary, SessionError> {
@@ -356,7 +360,7 @@ pub async fn receive_one_authenticated(
     connection.watch_path(events.clone());
     let engine = TransferEngine::new(config.chunk_size);
 
-    if let Err(error) = authenticate_receiver(&mut connection, &config.pairing).await {
+    if let Err(error) = authenticate_receiver(&mut connection, pairing).await {
         let _ = connection.close().await;
         bound_endpoint.local_endpoint.close().await;
         return Err(error);
@@ -375,11 +379,12 @@ pub async fn receive_with_auth_retries(
     bound_endpoint: BoundEndpoint,
     output_dir: PathBuf,
     config: SessionConfig,
+    pairing: &PairingConfig,
     events: Box<dyn EventSink>,
     cancel: TransferCancelToken,
 ) -> Result<TransferSummary, SessionError> {
     let mut connection =
-        match accept_authenticated_with_retries(&bound_endpoint, &config, &cancel).await {
+        match accept_authenticated_with_retries(&bound_endpoint, pairing, &cancel).await {
             Ok(connection) => connection,
             Err(error) => {
                 bound_endpoint.local_endpoint.close().await;
@@ -415,13 +420,13 @@ async fn close_after_receive(
 
 async fn accept_authenticated_with_retries(
     bound_endpoint: &BoundEndpoint,
-    config: &SessionConfig,
+    pairing: &PairingConfig,
     cancel: &TransferCancelToken,
 ) -> Result<IrohFrameConnection, SessionError> {
     let mut failures = 0_u32;
     loop {
         let mut connection = accept_or_cancel(bound_endpoint, cancel).await?;
-        match authenticate_receiver(&mut connection, &config.pairing).await {
+        match authenticate_receiver(&mut connection, pairing).await {
             Ok(()) => return Ok(connection),
             Err(_) => {
                 let _ = connection.close().await;
@@ -464,12 +469,14 @@ async fn dial_peer_addr(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_file_to_peer_addr(
     local_endpoint: Endpoint,
     peer_addr: EndpointAddr,
     file_path: PathBuf,
     resume: bool,
     config: SessionConfig,
+    pairing: &PairingConfig,
     events: Arc<dyn EventSink>,
     cancel: &TransferCancelToken,
 ) -> Result<TransferSummary, SessionError> {
@@ -477,7 +484,7 @@ async fn send_file_to_peer_addr(
     let mut connection = dial_peer_addr(local_endpoint, peer_addr).await?;
     connection.watch_path(events.clone());
     let engine = TransferEngine::new(config.chunk_size);
-    if let Err(error) = authenticate_sender(&mut connection, &config.pairing).await {
+    if let Err(error) = authenticate_sender(&mut connection, pairing).await {
         let _ = connection.close().await;
         return Err(error);
     }

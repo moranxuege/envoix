@@ -7,7 +7,7 @@ use std::time::Duration;
 use envoix_rendezvous::RoomRegistry;
 use envoix_rendezvous_iroh::{build_endpoint, endpoint_addr, serve_endpoint};
 use envoix_session::{
-    DEFAULT_CHUNK_SIZE, IdentityConfig, NoopEventSink, PairingConfig, SessionConfig,
+    DEFAULT_CHUNK_SIZE, IdentityConfig, NoopEventSink, SessionConfig,
     TransferCancelToken, receive_file_via_room, send_file_via_room,
 };
 use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
@@ -23,13 +23,11 @@ async fn ready_addr(ep: &Endpoint) -> EndpointAddr {
     endpoint_addr(ep)
 }
 
-/// A config whose pairing token is overwritten by the room flow.
+/// A room-mode config: no pairing here - the room flow derives the token from
+/// the SPAKE2 exchange during pairing.
 fn config() -> SessionConfig {
     SessionConfig {
         chunk_size: DEFAULT_CHUNK_SIZE,
-        pairing: PairingConfig::Spake2SharedToken {
-            token: "unused-placeholder".into(),
-        },
         identity: IdentityConfig::Ephemeral,
         relay: None,
         relay_only: false,

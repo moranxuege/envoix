@@ -141,14 +141,6 @@ where
     result
 }
 
-/// Override the pairing config with the token derived from the room pairing.
-fn with_room_token(config: SessionConfig, token: String) -> SessionConfig {
-    SessionConfig {
-        pairing: PairingConfig::Spake2SharedToken { token },
-        ..config
-    }
-}
-
 /// Receive a file by pairing in a room: bind the data endpoint, exchange its
 /// descriptor with the sender over the broker (SPAKE2 with `code`), then accept
 /// the transfer using the token derived from the pairing.
@@ -203,14 +195,10 @@ pub async fn receive_file_via_room(
     events.on_event(TransferEvent::Connecting);
     // Accept with retries: a stray or wrong-token dial must not kill the
     // transfer before the legitimate sender connects.
-    receive_with_auth_retries(
-        bound,
-        output_dir,
-        with_room_token(config, pairing.token),
-        events,
-        cancel,
-    )
-    .await
+    let auth = PairingConfig::Spake2SharedToken {
+        token: pairing.token,
+    };
+    receive_with_auth_retries(bound, output_dir, config, &auth, events, cancel).await
 }
 
 /// Send a file by pairing in a room: exchange descriptors with the receiver over
@@ -254,11 +242,15 @@ pub async fn send_file_via_room(
     // so it does not linger (and log) while the data transfer runs.
     rdz.close().await;
 
+    let auth = PairingConfig::Spake2SharedToken {
+        token: pairing.token,
+    };
     send_file_to_endpoint_addr(
         pairing.peer,
         file_path,
         resume,
-        with_room_token(config, pairing.token),
+        config,
+        &auth,
         events,
         cancel,
     )

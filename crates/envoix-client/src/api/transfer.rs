@@ -294,12 +294,19 @@ fn unix_now_ms() -> u64 {
         .as_millis() as u64
 }
 
-/// Adapts the legacy transfer-progress sink onto the unified stream.
+/// Adapts the session-layer event sink onto the unified client stream.
 pub(crate) struct SessionEventAdapter(pub(crate) EventSender);
 
 impl envoix_session::EventSink for SessionEventAdapter {
     fn on_event(&self, event: SessionEvent) {
-        self.0.emit(match event {
+        self.0.emit(event.into());
+    }
+}
+
+/// Maps a session-layer event onto the unified client event vocabulary.
+impl From<SessionEvent> for TransferEvent {
+    fn from(event: SessionEvent) -> Self {
+        match event {
             SessionEvent::Started {
                 transfer_id,
                 direction,
@@ -358,7 +365,7 @@ impl envoix_session::EventSink for SessionEventAdapter {
             SessionEvent::Connecting => TransferEvent::Connecting,
             SessionEvent::Connected { path } => TransferEvent::Connected { path },
             SessionEvent::PathChanged { path } => TransferEvent::PathChanged { path },
-        });
+        }
     }
 }
 
