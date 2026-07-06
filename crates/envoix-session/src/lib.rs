@@ -125,7 +125,15 @@ pub async fn send_file_manual(
         build_dial_endpoint(&config.identity, &config.data_relay(), config.relay_only).await?;
     let events: Arc<dyn EventSink> = Arc::from(events);
     events.on_event(TransferEvent::Connecting);
-    let mut connection = dial(local_endpoint.clone(), &peer).await?;
+    let mut connection = match dial(local_endpoint.clone(), &peer).await {
+        Ok(connection) => connection,
+        Err(error) => {
+            // Close the endpoint before returning, so a failed dial does not
+            // drop it with active state (iroh logs an ungraceful-close error).
+            local_endpoint.close().await;
+            return Err(error);
+        }
+    };
     connection.watch_path(events.clone());
     let engine = TransferEngine::new(config.chunk_size);
 
