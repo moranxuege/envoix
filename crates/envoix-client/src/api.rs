@@ -20,7 +20,7 @@ pub use error::{ErrorKind, Phase, TransferError};
 pub use event::{StampedEvent, TransferEvent};
 pub use options::{PathPolicy, TransferOptions};
 pub use source::{PeerSource, TransferMode};
-pub use transfer::Transfer;
+pub use transfer::{Transfer, TransferStats};
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -38,7 +38,7 @@ use tracing::Instrument;
 
 use crate::{IdentityConfig, PeerDescriptor, PublicError};
 use envoix_auth::PairingConfig;
-use transfer::{EventSender, SessionEventAdapter};
+use transfer::{EventSender, SessionEventAdapter, StatsHandle};
 
 /// Placeholder pairing for room transfers: the room flow derives the real
 /// token from the SPAKE2 exchange and overrides this before authentication;
@@ -72,16 +72,38 @@ fn room_id_of(code: &str) -> &str {
 /// Run a transfer body and emit one structured summary line for it (in the
 /// ambient transfer span, so it carries `room`/`transfer_id`) - a compact,
 /// grep-able ledger entry per transfer that does not require `--json`.
-async fn with_summary(fut: TransferFuture) -> Result<TransferSummary, PublicError> {
+async fn with_summary(
+    fut: TransferFuture,
+    stats: StatsHandle,
+) -> Result<TransferSummary, PublicError> {
     let result = fut.await;
+    let stats = stats.snapshot();
+    // The full data-path history, e.g. "relay -> [2607:..]:.. -> 1.2.3.4:..".
+    let paths = stats
+        .paths
+        .iter()
+        .map(|path| path.to_string())
+        .collect::<Vec<_>>()
+        .join(" -> ");
     match &result {
         Ok(summary) => tracing::info!(
             bytes = summary.bytes_transferred,
             file = %summary.file_name,
+            avg_bps = stats.avg_bytes_per_sec,
+            peak_bps = stats.peak_bytes_per_sec,
+            connect_ms = stats.connect_latency_ms.unwrap_or_default(),
+            duration_ms = stats.duration_ms,
+            paths = %paths,
             outcome = "completed",
             "transfer finished"
         ),
-        Err(error) => tracing::warn!(outcome = "failed", %error, "transfer finished"),
+        Err(error) => tracing::warn!(
+            avg_bps = stats.avg_bytes_per_sec,
+            paths = %paths,
+            outcome = "failed",
+            %error,
+            "transfer finished"
+        ),
     }
     result
 }
@@ -163,6 +185,7 @@ impl Client {
         validate_path_policy(&options)?;
         let (events, event_receiver) = EventSender::channel();
         let events_phase = events.phase_cell();
+        let events_stats = events.stats_handle();
         let cancel = TransferCancelToken::new();
         let sink = Box::new(SessionEventAdapter(events.clone()));
         let resume = options.resume;
@@ -228,8 +251,14 @@ impl Client {
                 ));
             }
         };
-        let task = tokio::spawn(with_summary(fut).instrument(span));
-        Ok(Transfer::new(event_receiver, cancel, events_phase, task))
+        let task = tokio::spawn(with_summary(fut, events_stats.clone()).instrument(span));
+        Ok(Transfer::new(
+            event_receiver,
+            cancel,
+            events_phase,
+            events_stats,
+            task,
+        ))
     }
 
     /// Receives one file into the `into` directory from the peer described
@@ -249,6 +278,7 @@ impl Client {
         validate_path_policy(&options)?;
         let (events, event_receiver) = EventSender::channel();
         let events_phase = events.phase_cell();
+        let events_stats = events.stats_handle();
         let cancel = TransferCancelToken::new();
         let sink = Box::new(SessionEventAdapter(events.clone()));
         let listen = options
@@ -345,8 +375,14 @@ impl Client {
                 ));
             }
         };
-        let task = tokio::spawn(with_summary(fut).instrument(span));
-        Ok(Transfer::new(event_receiver, cancel, events_phase, task))
+        let task = tokio::spawn(with_summary(fut, events_stats.clone()).instrument(span));
+        Ok(Transfer::new(
+            event_receiver,
+            cancel,
+            events_phase,
+            events_stats,
+            task,
+        ))
     }
 
     fn session_config(&self, pairing: PairingConfig, options: &TransferOptions) -> SessionConfig {
