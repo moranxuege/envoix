@@ -7,7 +7,7 @@ occurrence maps to whichever plane(s) fit, not all three by reflex.
 |---|---|---|---|
 | **Events** | the transfer's story (`TransferEvent`) | users, UIs, campaigns | client `--json` / human render |
 | **Logs** | diagnostic detail (`tracing`, levelled) | developers, operators | client stderr, server stdout |
-| **Metrics** | aggregate counters/gauges | operators | *not yet built* |
+| **Metrics** | aggregate counters/gauges | operators | *planned — see below* |
 
 ## Correlation ids
 
@@ -102,3 +102,64 @@ is optional; with neither, peer lines carry the address only.
   event stream's `path` field and at `debug` in logs.
 - Candidate addresses advertised to a peer can be scoped with the `[candidates]`
   CIDR allow/deny config (see `docs/design/client-api.md` §5.5 C2).
+
+## Metrics plane (planned, not yet implemented)
+
+The design, agreed 2026-07-06; build later.
+
+**The elegance rule — metric labels are low-cardinality only.** `room_id`,
+`transfer_id`, `peer` address, and (tempting but wrong) **carrier/ASN** never
+become labels — unbounded cardinality kills a metrics backend. Those stay in
+*logs*, where correlation lives. Country (~200) is the only geo dimension
+bounded enough to label, and even that is optional. Metrics *aggregate*; logs
+*correlate*; events *narrate* — each occurrence maps to whichever fits.
+
+**Facade.** Use the `metrics` crate (a facade, as `tracing` is for logs):
+instrument with `counter!`/`gauge!`/`histogram!`; the exporter is chosen at the
+binary and is near-zero-cost when absent. Instrument at the sites that already
+log `matched`/`expired`/`rejected` (one `counter!` beside each `tracing!`).
+
+**Server (the home of metrics).** Long-lived and aggregate by nature. Expose a
+Prometheus `/metrics` endpoint via `metrics-exporter-prometheus`, opt-in behind
+`--metrics-addr 0.0.0.0:9100`. Because it is a facade, the same instrumentation
+could instead drive a periodic-log exporter where a Prometheus scrape is
+overkill. Taxonomy:
+
+```
+# counters
+envoix_rdz_connections_total
+envoix_rdz_joins_total
+envoix_rdz_pairings_total
+envoix_rdz_expiries_total
+envoix_rdz_rejections_total{reason}   # reason bounded: length | too_many_rooms | join_timeout
+# gauges
+envoix_rdz_active_rooms
+envoix_rdz_waiting_peers
+# histograms
+envoix_rdz_pairing_latency_seconds    # first join -> match
+envoix_rdz_room_wait_seconds          # wait until matched or expired
+# optional, bounded
+envoix_rdz_peer_country_total{country}
+```
+
+**Client — delivery follows the process model.** A one-shot CLI has nothing to
+scrape, but its flow data still exists on the *event stream*: `Progress`
+(`bytes_transferred` + `ts_ms`) is the *instant* flow (rate = Δbytes/Δt),
+and the `transfer finished` summary is the *aggregate* flow. Contrast a
+long-lived proxy daemon (e.g. mihomo), whose `/traffic` (instant) and
+`/connections` (aggregate) endpoints make sense precisely because the process
+persists.
+
+- *One-shot CLI (today):* flow via events; no metrics endpoint. Optional
+  enrichment: pre-compute `bytes_per_sec` into `Progress`/summary so consumers
+  get a cooked instant-flow number instead of differencing events themselves.
+  The deferred iroh **BBR bandwidth estimate** lands here too.
+- *Long-lived client (daemon / UniFFI mobile app doing many transfers, later):*
+  a client-side flow interface then belongs — aggregate-across-transfers plus a
+  live throughput stream, mihomo-shaped. Facade-ready: the per-transfer data
+  already flows through events, so this is an *aggregator* + query/stream
+  interface, not new instrumentation.
+
+Campaigns aggregate one-shot runs offline by parsing the JSON `transfer
+finished` summaries (throughput distribution, punch-success rate) — no
+in-process client metrics needed for that.
