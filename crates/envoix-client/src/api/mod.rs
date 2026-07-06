@@ -69,6 +69,23 @@ fn room_id_of(code: &str) -> &str {
     code.split('-').next().unwrap_or(code)
 }
 
+/// Run a transfer body and emit one structured summary line for it (in the
+/// ambient transfer span, so it carries `room`/`transfer_id`) - a compact,
+/// grep-able ledger entry per transfer that does not require `--json`.
+async fn with_summary(fut: TransferFuture) -> Result<TransferSummary, PublicError> {
+    let result = fut.await;
+    match &result {
+        Ok(summary) => tracing::info!(
+            bytes = summary.bytes_transferred,
+            file = %summary.file_name,
+            outcome = "completed",
+            "transfer finished"
+        ),
+        Err(error) => tracing::warn!(outcome = "failed", %error, "transfer finished"),
+    }
+    result
+}
+
 /// Invite lifetime when the source does not specify one (mDNS listener with
 /// a generated token).
 const DEFAULT_INVITE_TTL_SECS: u64 = 300;
@@ -211,7 +228,7 @@ impl Client {
                 ));
             }
         };
-        let task = tokio::spawn(fut.instrument(span));
+        let task = tokio::spawn(with_summary(fut).instrument(span));
         Ok(Transfer::new(event_receiver, cancel, events_phase, task))
     }
 
@@ -328,7 +345,7 @@ impl Client {
                 ));
             }
         };
-        let task = tokio::spawn(fut.instrument(span));
+        let task = tokio::spawn(with_summary(fut).instrument(span));
         Ok(Transfer::new(event_receiver, cancel, events_phase, task))
     }
 
