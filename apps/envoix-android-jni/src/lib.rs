@@ -13,11 +13,11 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
-use envoix_client::api::{Client, Invite, PeerSource, Role, TransferOptions};
+use envoix_client::api::{Client, Invite, PeerSource, Role, TransferEvent, TransferOptions};
 use jni::JNIEnv;
 use jni::JavaVM;
 use jni::objects::{GlobalRef, JClass, JObject, JString, JValue};
-use jni::sys::jlong;
+use jni::sys::{jboolean, jlong};
 
 static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
@@ -89,6 +89,8 @@ pub extern "system" fn Java_dev_envoix_app_Native_runTransfer(
     relay: JString,
     path: JString,
     config_path: JString,
+    use_room: jboolean,
+    use_mdns: jboolean,
     callback: JObject,
 ) {
     let direction = jstr(&mut env, &direction);
@@ -102,7 +104,12 @@ pub extern "system" fn Java_dev_envoix_app_Native_runTransfer(
     let cb = env.new_global_ref(&callback).expect("callback ref");
 
     runtime().block_on(async move {
-        if let Err(err) = drive(id, &direction, code, broker, relay, path, config_path, &vm, &cb).await {
+        if let Err(err) = drive(
+            id, &direction, code, broker, relay, path, config_path,
+            use_room != 0, use_mdns != 0, &vm, &cb,
+        )
+        .await
+        {
             emit(&vm, &cb, &format!(r#"{{"event":"failed","error":{}}}"#, json_str(&err)));
         }
     });
@@ -196,33 +203,67 @@ async fn drive(
     relay: String,
     path: String,
     config_path: String,
+    use_room: bool,
+    use_mdns: bool,
     vm: &JavaVM,
     cb: &GlobalRef,
 ) -> Result<(), String> {
     let config = (!config_path.is_empty()).then(|| PathBuf::from(config_path));
     let client = Client::from_runtime_sources(config.as_deref()).map_err(|e| e.to_string())?;
-    let source = PeerSource::Room { code, broker };
-    let mut options = TransferOptions::default();
-    options.relay = Some(relay);
     let into = PathBuf::from(path);
-    let mut transfer = match direction {
-        "send" => client.send(into, source, options),
-        _ => client.receive(into, source, options),
-    }
-    .map_err(|e| e.to_string())?;
 
-    // Register a cancel handle so `cancel(id)` can stop this transfer.
-    let handle = transfer.cancel_handle();
-    if let Ok(mut map) = cancels().lock() {
-        map.insert(id, Box::new(move || handle.cancel()));
+    // Try each enabled rendezvous in order (Room, then mDNS via the code as its
+    // token). Fall back to the next only on a *pre-connection* failure, so a
+    // transfer that already started is never re-sent.
+    let mut sources: Vec<PeerSource> = Vec::new();
+    if use_room {
+        sources.push(PeerSource::Room { code: code.clone(), broker });
+    }
+    if use_mdns {
+        sources.push(PeerSource::Mdns { token: Some(code) });
+    }
+    if sources.is_empty() {
+        return Err("no rendezvous mode enabled".to_string());
     }
 
-    while let Some(event) = transfer.next_event().await {
-        if let Ok(json) = serde_json::to_string(&event) {
-            emit(vm, cb, &json);
+    let count = sources.len();
+    let mut last_err = "transfer failed".to_string();
+    for (i, source) in sources.into_iter().enumerate() {
+        let mut options = TransferOptions::default();
+        options.relay = Some(relay.clone());
+        let mut transfer = match direction {
+            "send" => client.send(into.clone(), source, options),
+            _ => client.receive(into.clone(), source, options),
+        }
+        .map_err(|e| e.to_string())?;
+
+        // Register a cancel handle so `cancel(id)` can stop this transfer.
+        let handle = transfer.cancel_handle();
+        if let Ok(mut map) = cancels().lock() {
+            map.insert(id, Box::new(move || handle.cancel()));
+        }
+
+        let mut connected = false;
+        while let Some(event) = transfer.next_event().await {
+            if matches!(event.event, TransferEvent::Connected { .. }) {
+                connected = true;
+            }
+            if let Ok(json) = serde_json::to_string(&event) {
+                emit(vm, cb, &json);
+            }
+        }
+        match transfer.wait().await {
+            Ok(_) => return Ok(()),
+            Err(err) => {
+                last_err = err.to_string();
+                // Fall back only if we never reached a live connection.
+                if connected || i + 1 == count {
+                    return Err(last_err);
+                }
+            }
         }
     }
-    transfer.wait().await.map(|_| ()).map_err(|e| e.to_string())
+    Err(last_err)
 }
 
 /// Read a Java string into a Rust `String` (empty on any error).

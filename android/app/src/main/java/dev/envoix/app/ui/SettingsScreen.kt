@@ -108,6 +108,19 @@ fun SettingsScreen(onBack: () -> Unit) {
             checked = SettingsStore.avoidsTailscale(settings),
         ) { SettingsStore.setAvoidTailscale(it) }
 
+        Spacer(Modifier.height(18.dp))
+        ToggleRow(
+            title = "Internet pairing",
+            subtitle = "Pair through the rendezvous broker — works anywhere.",
+            checked = settings.useRoom,
+        ) { SettingsStore.update { s -> s.copy(useRoom = it) } }
+        Spacer(Modifier.height(18.dp))
+        ToggleRow(
+            title = "Local Wi-Fi pairing (mDNS)",
+            subtitle = "Also try nearby devices on the same Wi-Fi — works with no internet.",
+            checked = settings.useMdns,
+        ) { SettingsStore.update { s -> s.copy(useMdns = it) } }
+
         Spacer(Modifier.height(26.dp))
         AdvancedHeader(showAdvanced) { showAdvanced = !showAdvanced }
         if (showAdvanced) {

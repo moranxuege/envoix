@@ -40,6 +40,8 @@ object Native {
         relay: String,
         path: String,
         configPath: String,
+        useRoom: Boolean,
+        useMdns: Boolean,
         callback: EventCallback,
     )
 

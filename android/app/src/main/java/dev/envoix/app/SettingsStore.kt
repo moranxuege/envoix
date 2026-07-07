@@ -25,6 +25,9 @@ data class Settings(
     // native app prefs (seed per-transfer choices)
     val saveFolder: String = "Envoix",
     val defaultRole: String = "receive",
+    // rendezvous modes to attempt, in order Room → mDNS (fall back on failure)
+    val useRoom: Boolean = true,
+    val useMdns: Boolean = true,
     // developer / diagnostics
     val devMode: Boolean = false,
     val verboseLog: Boolean = false,
@@ -49,6 +52,8 @@ object SettingsStore {
             candidatesDeny = readList("candidatesDeny"),
             saveFolder = prefs.getString("saveFolder", "Envoix")!!,
             defaultRole = prefs.getString("defaultRole", "receive")!!,
+            useRoom = prefs.getBoolean("useRoom", true),
+            useMdns = prefs.getBoolean("useMdns", true),
             devMode = prefs.getBoolean("devMode", false),
             verboseLog = prefs.getBoolean("verboseLog", false),
         )
@@ -67,6 +72,8 @@ object SettingsStore {
             .putString("candidatesDeny", s.candidatesDeny.joinToString("\n"))
             .putString("saveFolder", s.saveFolder)
             .putString("defaultRole", s.defaultRole)
+            .putBoolean("useRoom", s.useRoom)
+            .putBoolean("useMdns", s.useMdns)
             .putBoolean("devMode", s.devMode)
             .putBoolean("verboseLog", s.verboseLog)
             .apply()

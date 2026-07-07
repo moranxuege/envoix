@@ -31,6 +31,8 @@ object NativeTransfer {
         relay: String,
         path: String,
         configPath: String,
+        useRoom: Boolean,
+        useMdns: Boolean,
     ): Flow<CliEvent> = callbackFlow {
         val callback = object : EventCallback {
             override fun onEvent(json: String) {
@@ -39,7 +41,7 @@ object NativeTransfer {
         }
         val worker = Thread {
             try {
-                Native.runTransfer(id, direction, code, broker, relay, path, configPath, callback)
+                Native.runTransfer(id, direction, code, broker, relay, path, configPath, useRoom, useMdns, callback)
             } catch (t: Throwable) {
                 trySend(CliEvent.Failed(t.message ?: "native error"))
             } finally {

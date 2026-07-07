@@ -27,6 +27,9 @@ private data class Spec(
     val config: String,
     /** Invite payload to advertise as a QR while waiting (initiated sessions only). */
     val qrPayload: String?,
+    /** Rendezvous modes to attempt, in order Room → mDNS. */
+    val useRoom: Boolean,
+    val useMdns: Boolean,
 ) {
     fun dir(): Direction = if (direction == "send") Direction.Send else Direction.Receive
 }
@@ -39,6 +42,23 @@ private data class Spec(
 class TransferService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var active = 0
+
+    /** Held while an mDNS-enabled transfer runs; Android gates multicast behind it. */
+    private val multicastLock by lazy {
+        (getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager)
+            .createMulticastLock("envoix-mdns").apply { setReferenceCounted(true) }
+    }
+
+    /** True when the active network actually reaches the internet (not just a
+     *  captive portal). Room pairing needs the broker, so skip it when this is
+     *  false — otherwise Room just retries an unreachable broker forever, and the
+     *  mDNS fallback never gets a turn. */
+    private fun hasInternet(): Boolean {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+        val caps = cm.activeNetwork?.let { cm.getNetworkCapabilities(it) } ?: return false
+        return caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+            caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -63,6 +83,8 @@ class TransferService : Service() {
                     intent.getStringExtra(EXTRA_RELAY) ?: Endpoints.RELAY,
                     intent.getStringExtra(EXTRA_CONFIG) ?: "",
                     intent.getStringExtra(EXTRA_QR),
+                    SettingsStore.settings.value.useRoom && hasInternet(),
+                    SettingsStore.settings.value.useMdns,
                 )
                 enterForeground()
                 val id = TransferRepository.create(spec.dir(), room)
@@ -119,7 +141,8 @@ class TransferService : Service() {
         scope.launch {
             var lastTs = 0L
             var lastBytes = 0L
-            NativeTransfer.run(id, spec.direction, spec.room, spec.broker, spec.relay, spec.path, spec.config)
+            if (spec.useMdns) runCatching { multicastLock.acquire() }
+            NativeTransfer.run(id, spec.direction, spec.room, spec.broker, spec.relay, spec.path, spec.config, spec.useRoom, spec.useMdns)
                 .collect { ev ->
                     TransferRepository.update(id) { t ->
                         when (ev) {
@@ -171,6 +194,7 @@ class TransferService : Service() {
                         }
                     }
                 }
+            if (spec.useMdns) runCatching { multicastLock.release() }
             if (spec.dir() == Direction.Receive) publishReceived(id, spec.path)
             active--
             updateNotification()
