@@ -9,10 +9,11 @@ description = "iroh-node rendezvous server: matches peers by room id and relays 
 envoix-rendezvous.workspace = true
 envoix-rendezvous-iroh.workspace = true
 anyhow.workspace = true
+axum = "0.8"
 clap.workspace = true
 iroh.workspace = true
 maxminddb.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "net"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

@@ -10,6 +10,7 @@
 
 mod error;
 mod event;
+mod invite;
 mod options;
 mod source;
 mod transfer;
@@ -18,6 +19,7 @@ pub use envoix_session::CandidateFilter;
 pub use envoix_types::{DataPath, PairingStep};
 pub use error::{ErrorKind, Phase, TransferError};
 pub use event::{StampedEvent, TransferEvent};
+pub use invite::{Invite, Role};
 pub use options::{PathPolicy, TransferOptions};
 pub use source::{PeerSource, TransferMode};
 pub use transfer::{Transfer, TransferStats};
