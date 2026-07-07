@@ -6,6 +6,7 @@
 //! never touches the SPAKE2 wire protocol.
 
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -13,6 +14,11 @@ use axum::Router;
 use axum::extract::{DefaultBodyLimit, Path, RawQuery, State};
 use axum::http::StatusCode;
 use axum::routing::post;
+use tracing::field::{Field, Visit};
+use tracing::span::{Attributes, Id, Record};
+use tracing::{Event, Subscriber};
+use tracing_subscriber::layer::{Context, Layer};
+use tracing_subscriber::registry::LookupSpan;
 
 /// Cap on a single uploaded log body.
 const MAX_BODY: usize = 512 * 1024;
@@ -142,5 +148,106 @@ fn side_of(query: Option<&str>) -> String {
         "peer".to_string()
     } else {
         side
+    }
+}
+
+// ───────── capturing the rdz's own per-room events ─────────
+
+/// A span's `room` field, stored in span extensions once known.
+struct RoomTag(String);
+
+/// Pulls the `room` field out of span attributes / records.
+struct FindRoom(Option<String>);
+impl Visit for FindRoom {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == "room" {
+            self.0 = Some(value.to_string());
+        }
+    }
+    fn record_debug(&mut self, field: &Field, value: &dyn Debug) {
+        if field.name() == "room" {
+            self.0 = Some(format!("{value:?}").trim_matches('"').to_string());
+        }
+    }
+}
+
+/// Renders an event into "message  k=v …".
+struct FmtEvent {
+    message: String,
+    fields: String,
+}
+impl Visit for FmtEvent {
+    fn record_debug(&mut self, field: &Field, value: &dyn Debug) {
+        match field.name() {
+            "message" => self.message = format!("{value:?}"),
+            "room" => {}
+            name => {
+                if !self.fields.is_empty() {
+                    self.fields.push(' ');
+                }
+                self.fields.push_str(&format!("{name}={value:?}"));
+            }
+        }
+    }
+}
+
+/// Tracing layer that captures every event tagged (via its span) with a `room`
+/// field into [`RoomLogs`], so the rdz's own pairing story lands in the room view
+/// alongside both peers' uploaded logs.
+pub struct RoomCapture {
+    store: Arc<RoomLogs>,
+}
+
+impl RoomCapture {
+    pub fn new(store: Arc<RoomLogs>) -> Self {
+        Self { store }
+    }
+}
+
+impl<S> Layer<S> for RoomCapture
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
+        if let Some(span) = ctx.span(id) {
+            let mut find = FindRoom(None);
+            attrs.record(&mut find);
+            if let Some(room) = find.0 {
+                span.extensions_mut().insert(RoomTag(room));
+            }
+        }
+    }
+
+    fn on_record(&self, id: &Id, values: &Record<'_>, ctx: Context<'_, S>) {
+        // `room` is recorded lazily (Span::current().record("room", …)), so pick
+        // it up here too.
+        if let Some(span) = ctx.span(id) {
+            let mut find = FindRoom(None);
+            values.record(&mut find);
+            if let Some(room) = find.0 {
+                span.extensions_mut().insert(RoomTag(room));
+            }
+        }
+    }
+
+    fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
+        let room = ctx.event_scope(event).and_then(|scope| {
+            scope
+                .from_root()
+                .find_map(|span| span.extensions().get::<RoomTag>().map(|t| t.0.clone()))
+        });
+        let Some(room) = room else { return };
+        let mut fmt = FmtEvent {
+            message: String::new(),
+            fields: String::new(),
+        };
+        event.record(&mut fmt);
+        let level = event.metadata().level();
+        let line = if fmt.fields.is_empty() {
+            format!("{level}  {}", fmt.message)
+        } else {
+            format!("{level}  {}  {}", fmt.message, fmt.fields)
+        };
+        self.store.push_rdz(&room, line);
     }
 }

@@ -71,6 +71,10 @@ enum LogFormat {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // Shared per-room log store: fed by the capture layer below, served by the
+    // optional HTTP endpoint.
+    let log_store = Arc::new(logs::RoomLogs::new(Duration::from_secs(cli.log_ttl)));
+
     // Include the broker crate (`envoix_rendezvous`) at info, not just the iroh
     // wiring - otherwise pairings/expiries (its target) fall to the global warn
     // default and never show.
@@ -79,10 +83,14 @@ async fn main() -> Result<()> {
             "envoix_rendezvous=info,envoix_rendezvous_iroh=info,warn",
         )
     });
-    let builder = tracing_subscriber::fmt().with_env_filter(filter);
+    // Only capture per-room events when the log endpoint is enabled.
+    let capture = cli.log_bind.map(|_| logs::RoomCapture::new(log_store.clone()));
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+    let registry = tracing_subscriber::registry().with(filter).with(capture);
     match cli.log_format {
-        LogFormat::Json => builder.json().init(),
-        LogFormat::Pretty => builder.init(),
+        LogFormat::Json => registry.with(tracing_subscriber::fmt::layer().json()).init(),
+        LogFormat::Pretty => registry.with(tracing_subscriber::fmt::layer()).init(),
     }
 
     let secret_key = load_or_create_secret_key(&cli.secret_key)
@@ -124,7 +132,7 @@ async fn main() -> Result<()> {
     // Optional per-room log-collection endpoint on its own HTTP port. Off unless
     // --log-bind is given; a separate task that never touches the pairing endpoint.
     if let Some(addr) = cli.log_bind {
-        let store = Arc::new(logs::RoomLogs::new(Duration::from_secs(cli.log_ttl)));
+        let store = log_store.clone();
         tokio::spawn(async move {
             match tokio::net::TcpListener::bind(addr).await {
                 Ok(listener) => {
