@@ -201,15 +201,17 @@ class TransferService : Service() {
                             val now = System.currentTimeMillis()
                             if (now - lastNotif > 700) { lastNotif = now; updateNotification() }
                         }
-                        is CliEvent.Started, is CliEvent.Connected,
-                        is CliEvent.Completed, is CliEvent.Failed -> updateNotification()
+                        is CliEvent.Started, is CliEvent.Connected -> updateNotification()
                         else -> {}
                     }
                 }
             if (spec.useMdns) runCatching { multicastLock.release() }
             if (spec.dir() == Direction.Receive) publishReceived(id, spec.path)
             active--
-            updateNotification()
+            // Refresh only while transfers remain; when idle, let stopIfIdle's
+            // stopForeground(REMOVE) clear the notification — reposting here would
+            // detach it and leave a stale status-bar icon.
+            if (active > 0) updateNotification()
             stopIfIdle()
         }
     }
