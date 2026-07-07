@@ -105,7 +105,7 @@ fun SettingsScreen(onBack: () -> Unit) {
         FolderPickerRow(
             label = SettingsStore.saveLabel(context),
             custom = settings.saveTreeUri.isNotBlank(),
-            onPick = { folderPicker.launch(null) },
+            onPick = { folderPicker.launch(SettingsStore.savePickerInitialUri()) },
             onReset = { SettingsStore.setSaveTree(context, null) },
         )
         Spacer(Modifier.height(18.dp))

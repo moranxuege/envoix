@@ -108,6 +108,20 @@ object SettingsStore {
         return "Downloads / ${s.saveFolder}"
     }
 
+    /** Where the folder picker should open: the current custom folder if set, else
+     *  the Downloads folder — so after "Reset to Downloads" it doesn't reopen at
+     *  the previously picked place. */
+    fun savePickerInitialUri(): android.net.Uri {
+        val tree = _settings.value.saveTreeUri
+        return if (tree.isNotBlank()) {
+            android.net.Uri.parse(tree)
+        } else {
+            android.provider.DocumentsContract.buildDocumentUri(
+                "com.android.externalstorage.documents", "primary:Download",
+            )
+        }
+    }
+
     /** Persist a SAF folder pick with a durable permission grant; null clears it. */
     fun setSaveTree(context: Context, uri: android.net.Uri?) {
         if (uri == null) {

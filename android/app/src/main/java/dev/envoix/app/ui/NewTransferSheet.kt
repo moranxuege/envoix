@@ -188,7 +188,7 @@ fun NewTransferSheet(
             }
         } else {
             PathRow("SAVE TO", SettingsStore.saveLabel(context), placeholder = false) {
-                folderPicker.launch(null)
+                folderPicker.launch(SettingsStore.savePickerInitialUri())
             }
         }
 
