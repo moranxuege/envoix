@@ -49,8 +49,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.journeyapps.barcodescanner.ScanContract
-import com.journeyapps.barcodescanner.ScanOptions
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import dev.envoix.app.InviteCodec
 import dev.envoix.app.SettingsStore
 
@@ -90,9 +90,9 @@ fun NewTransferSheet(
         if (!joining) generated = InviteCodec.generate(role, broker, relay)
     }
 
-    val scanner = rememberLauncherForActivityResult(ScanContract()) { result ->
-        val scanned = result.contents ?: return@rememberLauncherForActivityResult
-        val inv = InviteCodec.parse(scanned) ?: return@rememberLauncherForActivityResult
+    var scanning by remember { mutableStateOf(false) }
+    fun applyScanned(scanned: String) {
+        val inv = InviteCodec.parse(scanned) ?: return
         typed = inv.code
         scannedBroker = inv.broker
         scannedRelay = inv.relay
@@ -123,15 +123,7 @@ fun NewTransferSheet(
             Box(
                 Modifier.size(52.dp).clip(RoundedCornerShape(12.dp))
                     .border(1.dp, colors.line, RoundedCornerShape(12.dp))
-                    .clickable {
-                        scanner.launch(
-                            ScanOptions()
-                                .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                                .setBeepEnabled(false)
-                                .setOrientationLocked(false)
-                                .setPrompt("Scan an Envoix code"),
-                        )
-                    },
+                    .clickable { scanning = true },
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(Icons.Default.QrCodeScanner, "Scan a QR code", tint = colors.accent, modifier = Modifier.size(24.dp))
@@ -209,6 +201,18 @@ fun NewTransferSheet(
             Text(
                 if (role == "send") "Send" else "Receive",
                 color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp,
+            )
+        }
+    }
+
+    if (scanning) {
+        Dialog(
+            onDismissRequest = { scanning = false },
+            properties = DialogProperties(usePlatformDefaultWidth = false),
+        ) {
+            ScanScreen(
+                onResult = { scanning = false; applyScanned(it) },
+                onClose = { scanning = false },
             )
         }
     }
