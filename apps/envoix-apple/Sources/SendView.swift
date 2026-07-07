@@ -21,6 +21,8 @@ struct SendView: View {
     @State private var dropTargeted = false
     @State private var filePathInput = ""
     @State private var isFileImporterPresented = false
+    @State private var isQRScannerPresented = false
+    @State private var selectedFileAccess: AnyObject?
 
     init(viewModel: TransferViewModel, initialMode: PairingMode = .room) {
         self.viewModel = viewModel
@@ -33,6 +35,11 @@ struct SendView: View {
             scrollContent
         }
         .safeAreaInset(edge: .bottom) { bottomActionBar }
+        .sheet(isPresented: $isQRScannerPresented) {
+            QRCodeScannerSheet(language: uiLanguage) { value in
+                handleScannedInvite(value)
+            }
+        }
         #else
         VStack(spacing: 0) {
             scrollContent
@@ -287,6 +294,16 @@ struct SendView: View {
                         .contentShape(Rectangle())
                 }
                 .disabled(viewModel.isBusy)
+                #if os(iOS)
+                Button {
+                    isQRScannerPresented = true
+                } label: {
+                    Label(AppText.value("Scan", "扫码", language: uiLanguage), systemImage: "qrcode.viewfinder")
+                        .frame(minHeight: 34)
+                        .contentShape(Rectangle())
+                }
+                .disabled(viewModel.isBusy)
+                #endif
             }
             .padding(.horizontal, 10)
             .frame(minHeight: 44)
@@ -298,6 +315,16 @@ struct SendView: View {
             .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
         }
         .card(padding: 14)
+    }
+
+    private func handleScannedInvite(_ value: String) {
+        let scanned = value.trimmed
+        guard scanned.lowercased().hasPrefix("envoix:") else {
+            ToastCenter.shared.show(AppText.value("This QR code is not an Envoix invite.", "这个二维码不是 Envoix 邀请。", language: uiLanguage))
+            return
+        }
+        invite = scanned
+        ToastCenter.shared.show(AppText.value("Invite scanned", "邀请已扫描", language: uiLanguage))
     }
 
     private var primaryLabel: String {
@@ -324,7 +351,8 @@ struct SendView: View {
         !concurrentTransfers && !viewModel.isBusy && model.receive.isBusy
     }
 
-    private func selectFile(_ url: URL) {
+    private func selectFile(_ url: URL, access: AnyObject? = nil) {
+        selectedFileAccess = access
         file = url
         filePathInput = url.path
     }
@@ -332,30 +360,23 @@ struct SendView: View {
     private func handleImportedFile(_ result: Result<[URL], Error>) {
         do {
             guard let url = try result.get().first else { return }
-            selectFile(try localReadableCopy(for: url))
+            #if os(iOS)
+            let access = SecurityScopedResourceAccess(url: url)
+            guard access.isActive || FileManager.default.isReadableFile(atPath: url.path) else {
+                throw RuntimeSettingsError(AppText.value(
+                    "Envoix could not access the selected file. Choose it again from Files.",
+                    "Envoix 无法访问所选文件。请从 Files 中重新选择。",
+                    language: uiLanguage
+                ))
+            }
+            selectFile(url, access: access)
+            #else
+            selectFile(url)
+            #endif
             ToastCenter.shared.show(AppText.value("File selected", "已选择文件", language: uiLanguage))
         } catch {
             ToastCenter.shared.show(error.localizedDescription)
         }
-    }
-
-    private func localReadableCopy(for url: URL) throws -> URL {
-        #if os(iOS)
-        let shouldStop = url.startAccessingSecurityScopedResource()
-        defer {
-            if shouldStop { url.stopAccessingSecurityScopedResource() }
-        }
-
-        let fileName = url.lastPathComponent.isEmpty ? "envoix-send-file" : url.lastPathComponent
-        let destination = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
-        if FileManager.default.fileExists(atPath: destination.path) {
-            try FileManager.default.removeItem(at: destination)
-        }
-        try FileManager.default.copyItem(at: url, to: destination)
-        return destination
-        #else
-        return url
-        #endif
     }
 
     private func applyPathInput() {
@@ -389,11 +410,26 @@ struct SendView: View {
             )
             switch mode {
             case .room:
-                viewModel.startSendingWithRoom(filePath: file.path, code: roomCode.trimmed, settings: settings)
+                viewModel.startSendingWithRoom(
+                    filePath: file.path,
+                    code: roomCode.trimmed,
+                    settings: settings,
+                    sourceAccess: selectedFileAccess
+                )
             case .invite:
-                viewModel.startSendingWithInvite(filePath: file.path, invite: invite.trimmed, settings: settings)
+                viewModel.startSendingWithInvite(
+                    filePath: file.path,
+                    invite: invite.trimmed,
+                    settings: settings,
+                    sourceAccess: selectedFileAccess
+                )
             case .token:
-                viewModel.startSendingWithToken(filePath: file.path, token: token.trimmed, settings: settings)
+                viewModel.startSendingWithToken(
+                    filePath: file.path,
+                    token: token.trimmed,
+                    settings: settings,
+                    sourceAccess: selectedFileAccess
+                )
             }
         } catch {
             viewModel.handleFailed(error.localizedDescription)

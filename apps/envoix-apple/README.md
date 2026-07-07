@@ -106,8 +106,8 @@ iOS later.
 For a quick demo, run the macOS app on the Mac and the iOS app on the iPhone.
 Use **Room Code** first because it avoids typing peer addresses. Start
 receiving on one device, enter that code on the other device, choose a small
-file, then send. The iOS app stores received files in its app Documents
-directory for now.
+file, then send. On iOS, choose a save folder in Files before receiving;
+Downloads is recommended so the received file is easy to find later.
 
 ## UI iteration workflow
 
@@ -136,9 +136,10 @@ Each tab has three pairing modes:
 - **Shared Token**: both sides enter the same shared token (12+ chars); the peer
   is discovered automatically over mDNS. This is best for same-LAN transfers.
 
-The receive folder defaults to `~/Downloads` until you pick another (remembered
-across launches). The first transfer may trigger a macOS "allow local network
-access" prompt.
+On macOS, the receive folder defaults to `~/Downloads` until you pick another.
+On iOS, Envoix asks you to choose a Files folder before receiving and remembers
+that folder across launches. The first transfer may trigger a local-network
+access prompt; allow it or LAN discovery/transfer will fail.
 
 Quality-of-life:
 
@@ -147,8 +148,8 @@ Quality-of-life:
 - **Send** accepts a file by drag-and-drop or *Paste Path* (from the clipboard),
   as well as the file panel.
 - During a transfer the status line shows live throughput and an ETA based on a
-  short rolling average; on completion the receiver gets *Reveal in Finder* and
-  a copyable absolute path.
+  short rolling average; on macOS completion includes *Reveal in Finder* and a
+  copyable absolute path.
 - A **menu-bar item** shows transfer status and an *Open Envoix* action; closing
   the main window keeps the app running there. The window is resizable and
   supports full screen.
@@ -158,6 +159,10 @@ Quality-of-life:
 Planned follow-ups, captured here so they are not lost:
 
 - Multi-file / folder transfer (near-term: app-side zip; later: core manifest).
+- Enforced speed limits. The settings model has a reserved field, but current
+  transfers do not throttle bandwidth yet.
+- Parallel chunk transport / out-of-order recovery. The current core still
+  sends sequential resumable chunks.
 - Global hotkey to send a chosen file fast.
 - Saved peers: fixed token per known machine, so reconnecting needs no re-entry.
 - Launch-at-login option.

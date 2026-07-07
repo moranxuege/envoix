@@ -53,6 +53,7 @@ final class TransferViewModel: ObservableObject {
 
     private var session: EnvoixSession?
     private var destinationDir: String?       // receiver only
+    private var resourceAccess: AnyObject?    // keeps iOS Files permission alive
     private var rate = RateTracker()
     private var suppressNextFailure = false
     private var displayLanguage = "en"
@@ -78,39 +79,45 @@ final class TransferViewModel: ObservableObject {
     // MARK: User actions
 
     /// Receive on the local network using a shared token (mDNS auto-discovery).
-    func startReceivingWithToken(outputDir: String, token: String, settings: EnvoixRuntimeSettings) {
+    func startReceivingWithToken(outputDir: String, token: String, settings: EnvoixRuntimeSettings, destinationAccess: AnyObject? = nil) {
         destinationDir = outputDir
         start(settings: settings, phase: .waiting) { try $0.receiveMdns(outputDir: outputDir, token: token, observer: $1) }
+        retainResourceAccess(destinationAccess)
     }
 
     /// Receive by pairing through a rendezvous room code.
-    func startReceivingWithRoom(outputDir: String, code: String, settings: EnvoixRuntimeSettings) {
+    func startReceivingWithRoom(outputDir: String, code: String, settings: EnvoixRuntimeSettings, destinationAccess: AnyObject? = nil) {
         destinationDir = outputDir
         start(settings: settings, phase: .waiting) { try $0.receiveRoom(outputDir: outputDir, code: code, observer: $1) }
+        retainResourceAccess(destinationAccess)
     }
 
     /// Receive by publishing an invite the sender pastes/scans.
-    func startReceivingWithInvite(outputDir: String, settings: EnvoixRuntimeSettings) {
+    func startReceivingWithInvite(outputDir: String, settings: EnvoixRuntimeSettings, destinationAccess: AnyObject? = nil) {
         destinationDir = outputDir
         start(settings: settings, phase: .waiting) { try $0.receive(outputDir: outputDir, observer: $1) }
+        retainResourceAccess(destinationAccess)
     }
 
     /// Send on the local network using a shared token (mDNS auto-discovery).
-    func startSendingWithToken(filePath: String, token: String, settings: EnvoixRuntimeSettings) {
+    func startSendingWithToken(filePath: String, token: String, settings: EnvoixRuntimeSettings, sourceAccess: AnyObject? = nil) {
         destinationDir = nil
         start(settings: settings, phase: .transferring) { try $0.sendMdns(filePath: filePath, token: token, observer: $1) }
+        retainResourceAccess(sourceAccess)
     }
 
     /// Send by pairing through a rendezvous room code.
-    func startSendingWithRoom(filePath: String, code: String, settings: EnvoixRuntimeSettings) {
+    func startSendingWithRoom(filePath: String, code: String, settings: EnvoixRuntimeSettings, sourceAccess: AnyObject? = nil) {
         destinationDir = nil
         start(settings: settings, phase: .waiting) { try $0.sendRoom(filePath: filePath, code: code, observer: $1) }
+        retainResourceAccess(sourceAccess)
     }
 
     /// Send to the peer encoded in an invite string.
-    func startSendingWithInvite(filePath: String, invite: String, settings: EnvoixRuntimeSettings) {
+    func startSendingWithInvite(filePath: String, invite: String, settings: EnvoixRuntimeSettings, sourceAccess: AnyObject? = nil) {
         destinationDir = nil
         start(settings: settings, phase: .transferring) { try $0.sendInvite(invite: invite, filePath: filePath, observer: $1) }
+        retainResourceAccess(sourceAccess)
     }
 
     func cancel() {
@@ -143,6 +150,14 @@ final class TransferViewModel: ObservableObject {
         }
     }
 
+    private func retainResourceAccess(_ access: AnyObject?) {
+        if case .failed = phase {
+            resourceAccess = nil
+        } else {
+            resourceAccess = access
+        }
+    }
+
     // MARK: Core callbacks (already on main via Observer)
 
     func handleInvite(_ invite: String) { self.invite = invite }
@@ -168,6 +183,7 @@ final class TransferViewModel: ObservableObject {
         if let dir = destinationDir, !fileName.isEmpty {
             completedFileURL = URL(fileURLWithPath: dir).appendingPathComponent(fileName)
         }
+        resourceAccess = nil
         phase = .completed(bytes: bytes)
     }
 
@@ -178,6 +194,7 @@ final class TransferViewModel: ObservableObject {
             statusText = AppText.value("Canceled", "已取消", language: displayLanguage)
             return
         }
+        resourceAccess = nil
         phase = .failed(friendlyError(reason, language: displayLanguage))
     }
 
@@ -202,6 +219,7 @@ final class TransferViewModel: ObservableObject {
         peerAddress = ""
         bytesPerSec = 0
         completedFileURL = nil
+        resourceAccess = nil
         rate.reset()
         phase = .idle
     }

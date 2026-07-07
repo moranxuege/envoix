@@ -15,19 +15,28 @@ struct ReceiveView: View {
     @State private var mode: PairingMode = .room
     @State private var roomCode = newRoomCode()
     @State private var revealAddress = false
+    #if os(iOS)
+    @State private var isFolderPickerPresented = false
+    @State private var shouldStartAfterFolderPick = false
+    #endif
 
     init(viewModel: TransferViewModel, initialMode: PairingMode = .room) {
         self.viewModel = viewModel
         _mode = State(initialValue: initialMode)
     }
 
-    /// Defaults to ~/Downloads on macOS and the app Documents directory on iOS.
-    private var outputDir: URL {
-        if !outputDirPath.isEmpty { return URL(fileURLWithPath: outputDirPath) }
+    private let outputDirBookmarkKey = "envoix.outputDirBookmark"
+
+    /// Defaults to ~/Downloads on macOS. On iOS, the user must grant access to
+    /// a Files folder such as Downloads before receiving.
+    private var outputDir: URL? {
         #if os(iOS)
-        return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
-            ?? FileManager.default.temporaryDirectory
+        guard let data = UserDefaults.standard.data(forKey: outputDirBookmarkKey) else {
+            return nil
+        }
+        return try? resolveSecurityScopedFolderBookmark(data)
         #else
+        if !outputDirPath.isEmpty { return URL(fileURLWithPath: outputDirPath) }
         return FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser
         #endif
@@ -39,6 +48,15 @@ struct ReceiveView: View {
             scrollContent
         }
         .safeAreaInset(edge: .bottom) { bottomActionBar }
+        .sheet(isPresented: $isFolderPickerPresented) {
+            FolderPickerSheet(
+                onPick: handlePickedOutputFolder,
+                onCancel: {
+                    shouldStartAfterFolderPick = false
+                    isFolderPickerPresented = false
+                }
+            )
+        }
         #else
         VStack(spacing: 0) {
             scrollContent
@@ -117,11 +135,26 @@ struct ReceiveView: View {
 
     private var outputSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(AppText.value("Save as", "保存到", language: uiLanguage))
+            Text(AppText.value("Save to", "保存到", language: uiLanguage))
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(Theme.muted)
-            LinkRow(text: outputDir.path) {
-                #if os(macOS)
+            #if os(iOS)
+            LinkRow(text: outputDirDisplayText) {
+                Button {
+                    isFolderPickerPresented = true
+                } label: {
+                    Label(AppText.value("Choose", "选择", language: uiLanguage), systemImage: "folder")
+                        .frame(minHeight: 34)
+                        .contentShape(Rectangle())
+                }
+                .disabled(viewModel.isBusy)
+            }
+            Text(AppText.value("Choose a folder in Files. Downloads is recommended for easy access.", "请选择 Files 中的文件夹。推荐选择 Downloads，后续最容易找到。", language: uiLanguage))
+                .font(.footnote)
+                .foregroundStyle(Theme.muted)
+                .fixedSize(horizontal: false, vertical: true)
+            #else
+            LinkRow(text: outputDir?.path ?? "") {
                 Button {
                     if let url = chooseURL(directory: true) { outputDirPath = url.path }
                 } label: {
@@ -130,14 +163,21 @@ struct ReceiveView: View {
                         .contentShape(Rectangle())
                 }
                 .disabled(viewModel.isBusy)
-                #else
-                Text(AppText.value("App Documents", "App 文档目录", language: uiLanguage))
-                    .font(.callout.weight(.semibold))
-                    .foregroundStyle(Theme.muted)
-                #endif
             }
+            #endif
         }
         .card(padding: 14)
+    }
+
+    private var outputDirDisplayText: String {
+        #if os(iOS)
+        guard let outputDir else {
+            return AppText.value("No folder selected", "尚未选择文件夹", language: uiLanguage)
+        }
+        return outputDir.lastPathComponent.isEmpty ? outputDir.path : outputDir.lastPathComponent
+        #else
+        return outputDir?.path ?? ""
+        #endif
     }
 
     private var primaryLabel: String {
@@ -282,6 +322,13 @@ struct ReceiveView: View {
         if viewModel.isBusy {
             viewModel.cancel()
         } else {
+            #if os(iOS)
+            guard outputDir != nil else {
+                shouldStartAfterFolderPick = true
+                isFolderPickerPresented = true
+                return
+            }
+            #endif
             startReceive()
         }
     }
@@ -300,6 +347,7 @@ struct ReceiveView: View {
 
     private func startReceiveWithToken() {
         do {
+            let prepared = try prepareOutputDir()
             let settings = try RuntimeSettingsProvider.make(
                 concurrentTransfers: concurrentTransfers,
                 language: language,
@@ -307,7 +355,12 @@ struct ReceiveView: View {
                 relayURL: relayURL,
                 speedLimit: speedLimit
             )
-            viewModel.startReceivingWithToken(outputDir: outputDir.path, token: token.trimmed, settings: settings)
+            viewModel.startReceivingWithToken(
+                outputDir: prepared.url.path,
+                token: token.trimmed,
+                settings: settings,
+                destinationAccess: prepared.access
+            )
         } catch {
             viewModel.handleFailed(error.localizedDescription)
         }
@@ -315,6 +368,7 @@ struct ReceiveView: View {
 
     private func startReceiveWithRoom() {
         do {
+            let prepared = try prepareOutputDir()
             let settings = try RuntimeSettingsProvider.make(
                 concurrentTransfers: concurrentTransfers,
                 language: language,
@@ -322,7 +376,12 @@ struct ReceiveView: View {
                 relayURL: relayURL,
                 speedLimit: speedLimit
             )
-            viewModel.startReceivingWithRoom(outputDir: outputDir.path, code: roomCode.trimmed, settings: settings)
+            viewModel.startReceivingWithRoom(
+                outputDir: prepared.url.path,
+                code: roomCode.trimmed,
+                settings: settings,
+                destinationAccess: prepared.access
+            )
         } catch {
             viewModel.handleFailed(error.localizedDescription)
         }
@@ -330,6 +389,7 @@ struct ReceiveView: View {
 
     private func startReceiveWithInvite() {
         do {
+            let prepared = try prepareOutputDir()
             let settings = try RuntimeSettingsProvider.make(
                 concurrentTransfers: concurrentTransfers,
                 language: language,
@@ -337,9 +397,48 @@ struct ReceiveView: View {
                 relayURL: relayURL,
                 speedLimit: speedLimit
             )
-            viewModel.startReceivingWithInvite(outputDir: outputDir.path, settings: settings)
+            viewModel.startReceivingWithInvite(
+                outputDir: prepared.url.path,
+                settings: settings,
+                destinationAccess: prepared.access
+            )
         } catch {
             viewModel.handleFailed(error.localizedDescription)
         }
     }
+
+    private func prepareOutputDir() throws -> (url: URL, access: AnyObject?) {
+        guard let url = outputDir else {
+            throw RuntimeSettingsError(AppText.value("Choose a save folder first.", "请先选择保存文件夹。", language: uiLanguage))
+        }
+        #if os(iOS)
+        let access = SecurityScopedResourceAccess(url: url)
+        #else
+        let access: AnyObject? = nil
+        #endif
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return (url, access)
+    }
+
+    #if os(iOS)
+    private func handlePickedOutputFolder(_ url: URL) {
+        do {
+            let bookmark = try makeSecurityScopedFolderBookmark(for: url)
+            UserDefaults.standard.set(bookmark, forKey: outputDirBookmarkKey)
+            outputDirPath = url.lastPathComponent
+            isFolderPickerPresented = false
+            ToastCenter.shared.show(AppText.value("Save folder selected", "已选择保存文件夹", language: uiLanguage))
+            if shouldStartAfterFolderPick {
+                shouldStartAfterFolderPick = false
+                DispatchQueue.main.async {
+                    startReceive()
+                }
+            }
+        } catch {
+            shouldStartAfterFolderPick = false
+            isFolderPickerPresented = false
+            viewModel.handleFailed(error.localizedDescription)
+        }
+    }
+    #endif
 }

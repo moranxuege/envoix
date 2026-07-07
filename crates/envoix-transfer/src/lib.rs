@@ -6,6 +6,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::Duration;
 
 use envoix_error::CoreError;
 use envoix_protocol::{
@@ -24,6 +25,10 @@ use tokio::sync::Notify;
 pub const DEFAULT_CHUNK_SIZE: usize = 64 * 1024;
 /// Protocol error text sent when a local user interrupts a transfer.
 pub const USER_INTERRUPT_MESSAGE: &str = "transfer interrupted by user";
+#[cfg(not(test))]
+const COMPLETE_ACK_TIMEOUT: Duration = Duration::from_secs(60);
+#[cfg(test)]
+const COMPLETE_ACK_TIMEOUT: Duration = Duration::from_millis(250);
 const RESUME_STATE_WRITE_INTERVAL: u64 = 8 * 1024 * 1024;
 
 /// Error type returned by the transfer state machine.
@@ -365,7 +370,8 @@ impl TransferEngine {
         // close. A genuine failure surfaces as an Error frame here (or earlier,
         // during the chunk phase); only a true network death in this final round
         // trip fails an otherwise-complete send, which resume recovers on retry.
-        let ack = recv_frame_or_cancel(connection, cancel).await?;
+        let ack =
+            recv_frame_or_cancel_with_timeout(connection, cancel, COMPLETE_ACK_TIMEOUT).await?;
         expect_complete_ack(ack, &transfer_id)?;
         events.on_event(TransferEvent::Completed {
             transfer_id: transfer_id.clone(),
@@ -620,6 +626,24 @@ async fn recv_frame_or_cancel(
             notify_interrupted(connection).await;
             Err(interrupted_error())
         }
+    }
+}
+
+async fn recv_frame_or_cancel_with_timeout(
+    connection: &mut dyn FrameConnection,
+    cancel: &TransferCancelToken,
+    timeout: Duration,
+) -> Result<Frame, TransferError> {
+    tokio::select! {
+        frame = connection.recv_frame() => frame,
+        () = cancel.cancelled() => {
+            notify_interrupted(connection).await;
+            Err(interrupted_error())
+        }
+        () = tokio::time::sleep(timeout) => Err(CoreError::Transfer(format!(
+            "receiver did not confirm completion within {} seconds; retry may resume the transfer",
+            timeout.as_secs()
+        ))),
     }
 }
 
@@ -1400,6 +1424,46 @@ mod tests {
             "sender must fail when the receiver never sends CompleteAck"
         );
         receiver.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sender_times_out_when_receiver_never_acks_but_keeps_connection_open() {
+        let root = unique_test_dir();
+        let source_dir = root.join("source");
+        tokio::fs::create_dir_all(&source_dir).await.unwrap();
+        let source_path = source_dir.join("stalled-ack.txt");
+        tokio::fs::write(&source_path, b"receiver stalls before acking")
+            .await
+            .unwrap();
+
+        let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
+        let receiver = tokio::spawn(async move {
+            let transfer_id = receive_header_and_resume(&mut receiver_connection).await;
+            loop {
+                match receiver_connection.recv_frame().await.unwrap() {
+                    Frame::Chunk(_) => {}
+                    Frame::Complete(complete) => {
+                        assert_eq!(complete.transfer_id, transfer_id);
+                        break;
+                    }
+                    other => panic!("unexpected frame while draining: {other:?}"),
+                }
+            }
+            let _hold_connection = receiver_connection;
+            std::future::pending::<()>().await;
+        });
+
+        let error = TransferEngine::new(4)
+            .send_file(&mut sender_connection, source_path, false, &NoopEventSink)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CoreError::Transfer(message) if message.contains("did not confirm completion")
+        ));
+        receiver.abort();
+        let _ = receiver.await;
     }
 
     #[tokio::test]

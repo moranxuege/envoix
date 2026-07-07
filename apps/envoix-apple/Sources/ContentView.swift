@@ -476,7 +476,7 @@ private struct SettingsStageView: View {
                     concurrentTransfers.toggle()
                 } label: {
                     HStack {
-                        Text(AppText.value("Concurrent transferring", "并发传输", language: language))
+                        Text(AppText.value("Allow simultaneous send and receive", "允许同时发送和接收", language: language))
                             .font(.title3)
                         Spacer()
                         Text(concurrentTransfers
