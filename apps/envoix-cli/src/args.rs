@@ -173,13 +173,15 @@ fn resolve_room_code(
     room: Option<String>,
     broker: &str,
     relay: Option<&str>,
+    role: api::Role,
     give_to: &str,
     waiting: &str,
 ) -> Result<(String, String), TransferError> {
     match room {
         Some(code) => Ok((code, waiting.to_string())),
         None => {
-            let invite = api::Invite::room(broker.to_string(), relay.map(String::from))?;
+            let invite =
+                api::Invite::room(broker.to_string(), relay.map(String::from))?.with_role(role);
             let qr = render_terminal_qr(&invite.payload())
                 .map(|q| format!("\n{q}"))
                 .unwrap_or_default();
@@ -205,6 +207,7 @@ impl SendArgs {
                 room,
                 &broker,
                 self.relay.as_deref(),
+                api::Role::Send,
                 "receiver",
                 &format!("pairing in room via {broker}..."),
             )?;
@@ -258,6 +261,7 @@ impl ReceiveArgs {
                 room,
                 &broker,
                 self.relay.as_deref(),
+                api::Role::Receive,
                 "sender",
                 &format!("waiting for sender via rendezvous {broker}..."),
             )?;

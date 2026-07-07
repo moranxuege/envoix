@@ -16,6 +16,41 @@ const SCHEME: &str = "envoix://pair/";
 /// Word count in a generated code (`<digits>-<word>-<word>`).
 const CODE_WORDS: usize = 2;
 
+/// The role the invite's creator will take; a peer that scans/opens it should
+/// take the [`opposite`](Role::opposite). A hint only - the transfer still runs
+/// whichever command each side chooses; this just lets a scanner avoid the
+/// two-senders / two-receivers mistake.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Role {
+    Send,
+    Receive,
+}
+
+impl Role {
+    /// The complementary role - what a peer joining this invite should take.
+    pub fn opposite(self) -> Role {
+        match self {
+            Role::Send => Role::Receive,
+            Role::Receive => Role::Send,
+        }
+    }
+
+    fn wire(self) -> &'static str {
+        match self {
+            Role::Send => "send",
+            Role::Receive => "receive",
+        }
+    }
+
+    fn from_wire(s: &str) -> Option<Role> {
+        match s {
+            "send" => Some(Role::Send),
+            "receive" => Some(Role::Receive),
+            _ => None,
+        }
+    }
+}
+
 /// A pairing invite. Auth is SPAKE2 with [`code`](Invite::code) over whatever
 /// transport connects, so the same invite works direct, over a relay, or through
 /// a broker.
@@ -28,6 +63,8 @@ pub struct Invite {
     broker: Option<String>,
     /// Relay URL for WAN/NAT reachability, when advertised.
     relay: Option<String>,
+    /// The role the creator will take; a joiner takes the opposite. Hint only.
+    role: Option<Role>,
 }
 
 impl Invite {
@@ -37,12 +74,26 @@ impl Invite {
             code: generate_code(CODE_WORDS).map_err(TransferError::input)?,
             broker: Some(broker),
             relay,
+            role: None,
         })
+    }
+
+    /// Advertise the role the creator will take, so a peer that scans this can
+    /// auto-select the opposite and avoid a two-senders / two-receivers mistake.
+    pub fn with_role(mut self, role: Role) -> Self {
+        self.role = Some(role);
+        self
     }
 
     /// The pairing code, for display or typed entry.
     pub fn code(&self) -> &str {
         &self.code
+    }
+
+    /// The role the creator advertised, if any; a joiner should take its
+    /// [`opposite`](Role::opposite).
+    pub fn role(&self) -> Option<Role> {
+        self.role
     }
 
     /// A shareable `envoix://` URL carrying every advertised method - the QR
@@ -54,6 +105,9 @@ impl Invite {
         }
         if let Some(relay) = &self.relay {
             params.push(format!("relay={}", encode(relay)));
+        }
+        if let Some(role) = self.role {
+            params.push(format!("role={}", role.wire()));
         }
         let mut url = format!("{SCHEME}{}", self.code);
         if !params.is_empty() {
@@ -78,6 +132,7 @@ impl Invite {
             match key {
                 "broker" => invite.broker = Some(decode(value)),
                 "relay" => invite.relay = Some(decode(value)),
+                "role" => invite.role = Role::from_wire(&decode(value)),
                 _ => {} // reserved for future methods (direct, mdns, node)
             }
         }
@@ -110,6 +165,7 @@ impl Invite {
             code: code.to_string(),
             broker: None,
             relay: None,
+            role: None,
         })
     }
 }
@@ -191,6 +247,16 @@ mod tests {
         let inv = Invite::parse(url).unwrap();
         assert_eq!(inv.code(), "1234-amber-comet");
         assert_eq!(inv.broker.as_deref(), Some("id@h:1"));
+    }
+
+    #[test]
+    fn role_hint_round_trips_and_flips() {
+        let inv = Invite::room("id@h:1".into(), None).unwrap().with_role(Role::Send);
+        let parsed = Invite::parse(&inv.payload()).unwrap();
+        assert_eq!(parsed.role(), Some(Role::Send));
+        assert_eq!(parsed.role().unwrap().opposite(), Role::Receive);
+        // A bare code carries no role.
+        assert_eq!(Invite::parse("1234-amber-comet").unwrap().role(), None);
     }
 
     #[test]
