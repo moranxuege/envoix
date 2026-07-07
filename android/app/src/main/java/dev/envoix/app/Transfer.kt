@@ -14,7 +14,10 @@ data class Transfer(
     val pathAddr: String? = null,
     val bytes: Long = 0,
     val total: Long = 0,
+    /** Instantaneous throughput (bytes/s) of the last interval. */
     val speedBps: Double = 0.0,
+    /** True average throughput (total bytes / elapsed), matching the CLI's avg_bps. */
+    val avgBps: Double = 0.0,
     val status: Status = Status.Connecting,
     val error: String? = null,
     /** Where a received file ended up (a `content://` in Downloads), for opening. */

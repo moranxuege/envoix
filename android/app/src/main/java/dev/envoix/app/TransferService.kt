@@ -142,6 +142,7 @@ class TransferService : Service() {
             var lastTs = 0L
             var lastBytes = 0L
             var lastNotif = 0L
+            var startTs = 0L
             if (spec.useMdns) runCatching { multicastLock.acquire() }
             NativeTransfer.run(id, spec.direction, spec.room, spec.broker, spec.relay, spec.path, spec.config, spec.useRoom, spec.useMdns)
                 .collect { ev ->
@@ -168,22 +169,41 @@ class TransferService : Service() {
                                     log = addLog(t.log, "started · ${ev.fileName}"),
                                 )
                             is CliEvent.Progress -> {
-                                val now = System.currentTimeMillis()
-                                val bps = if (lastTs > 0 && now > lastTs)
-                                    (ev.bytesTransferred - lastBytes) * 1000.0 / (now - lastTs)
-                                else t.speedBps
-                                lastTs = now; lastBytes = ev.bytesTransferred
+                                val now = System.nanoTime()
+                                if (startTs == 0L) {
+                                    startTs = now; lastTs = now; lastBytes = ev.bytesTransferred
+                                }
+                                // True average = total bytes / elapsed (matches the CLI's avg_bps),
+                                // not the mean of per-event samples (which over-weights fast bursts).
+                                val avg = if (now > startTs)
+                                    ev.bytesTransferred * 1e9 / (now - startTs) else 0.0
+                                val dt = now - lastTs
+                                // Sample the instantaneous rate over >=250ms windows, so the chart
+                                // and peak reflect real bursts, not sub-ms measurement noise.
+                                if (dt >= 250_000_000L) {
+                                    val bps = (ev.bytesTransferred - lastBytes) * 1e9 / dt
+                                    lastTs = now; lastBytes = ev.bytesTransferred
+                                    t.copy(
+                                        bytes = ev.bytesTransferred, total = ev.totalBytes,
+                                        speedBps = bps, avgBps = avg, status = Status.Transferring,
+                                        speedHistory = (t.speedHistory + bps).takeLast(90),
+                                    )
+                                } else {
+                                    t.copy(
+                                        bytes = ev.bytesTransferred, total = ev.totalBytes,
+                                        avgBps = avg, status = Status.Transferring,
+                                    )
+                                }
+                            }
+                            is CliEvent.Completed -> {
+                                val now = System.nanoTime()
+                                val avg = if (startTs > 0 && now > startTs)
+                                    ev.bytesTransferred * 1e9 / (now - startTs) else t.avgBps
                                 t.copy(
-                                    bytes = ev.bytesTransferred, total = ev.totalBytes, speedBps = bps,
-                                    status = Status.Transferring,
-                                    speedHistory = (t.speedHistory + bps).takeLast(90),
+                                    bytes = ev.bytesTransferred, speedBps = 0.0, avgBps = avg,
+                                    status = Status.Completed, log = addLog(t.log, "complete"),
                                 )
                             }
-                            is CliEvent.Completed ->
-                                t.copy(
-                                    bytes = ev.bytesTransferred, speedBps = 0.0, status = Status.Completed,
-                                    log = addLog(t.log, "complete"),
-                                )
                             is CliEvent.Failed ->
                                 // A pause/cancel surfaces as a Failed event; keep the
                                 // Paused/Cancelled status the action already set.

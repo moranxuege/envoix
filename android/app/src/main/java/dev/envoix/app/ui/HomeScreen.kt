@@ -23,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.rememberScrollState
@@ -264,6 +265,9 @@ private fun TransferCard(
                 .background(if (cancelled) colors.line else colors.surface)
                 .border(1.dp, colors.line, RoundedCornerShape(16.dp))
                 .combinedClickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null, // the drawer expanding is feedback enough; the
+                    // default ripple fills the whole card, which looks heavy
                     onClick = { if (t.status == Status.Completed && t.savedUri != null) onOpen(t) },
                     onLongClick = { onToggleDetail(t.id) },
                 ),
@@ -434,7 +438,7 @@ private fun DetailDrawer(t: Transfer) {
         HorizontalDivider(color = colors.line)
         if (t.speedHistory.size >= 2) {
             val peak = t.speedHistory.maxOrNull() ?: 0.0
-            val avg = t.speedHistory.average()
+            val avg = t.avgBps
             Row(
                 Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 4.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -450,7 +454,7 @@ private fun DetailDrawer(t: Transfer) {
                     color = colors.muted, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
                 )
             }
-            SpeedChart(t.speedHistory)
+            SpeedChart(t.speedHistory, t.avgBps)
         }
         Spacer(Modifier.height(4.dp))
         DetailRow("Room", t.room)
@@ -522,14 +526,14 @@ private fun PillButton(text: String, onClick: () -> Unit) {
 }
 
 @Composable
-private fun SpeedChart(history: List<Double>) {
+private fun SpeedChart(history: List<Double>, avgBps: Double) {
     val accent = Envoix.colors.accent
     val muted = Envoix.colors.muted
     Canvas(Modifier.fillMaxWidth().height(50.dp)) {
         val n = history.size
         if (n < 2) return@Canvas
         val max = (history.maxOrNull() ?: 1.0).coerceAtLeast(1.0)
-        val avg = history.average()
+        val avg = avgBps.coerceIn(0.0, max)
         val w = size.width
         val h = size.height
         fun px(i: Int) = w * i / (n - 1)
