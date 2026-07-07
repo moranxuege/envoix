@@ -73,6 +73,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.envoix.app.Direction
+import dev.envoix.app.SettingsStore
 import dev.envoix.app.Status
 import dev.envoix.app.Transfer
 import kotlin.math.roundToInt
@@ -377,7 +378,8 @@ private fun WaitingBody(t: Transfer, onCancel: (Long) -> Unit) {
                     color = colors.text, fontSize = 16.sp, fontWeight = FontWeight.Bold,
                 )
                 Text(
-                    if (t.direction == Direction.Send) "Sending ${t.fileName ?: "a file"}" else "Saving to Downloads/Envoix",
+                    if (t.direction == Direction.Send) "Sending ${t.fileName ?: "a file"}"
+                    else "Saving to Downloads/${SettingsStore.settings.value.saveFolder}",
                     color = colors.muted, fontSize = 13.sp,
                     maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )

@@ -13,12 +13,13 @@ import java.io.File
  * needed on Android 10+). Returns the content Uri, or null on failure.
  */
 object MediaStoreSaver {
-    fun saveToDownloads(context: Context, source: File, displayName: String): Uri? {
+    fun saveToDownloads(context: Context, source: File, displayName: String, folder: String): Uri? {
         val resolver = context.contentResolver
+        val sub = folder.trim().ifBlank { "Envoix" }
         val pending = ContentValues().apply {
             put(MediaStore.Downloads.DISPLAY_NAME, displayName)
             put(MediaStore.Downloads.MIME_TYPE, "application/octet-stream")
-            put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/Envoix")
+            put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/$sub")
             put(MediaStore.Downloads.IS_PENDING, 1)
         }
         val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, pending) ?: return null
