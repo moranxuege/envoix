@@ -68,8 +68,9 @@ class MainActivity : ComponentActivity() {
                                 pendingSendRoom = room
                                 pickFile.launch(arrayOf("*/*"))
                             },
+                            onPauseResume = { vm.pauseResume(it) },
                             onCancel = { vm.cancel(it) },
-                            onDismiss = { vm.dismiss(it) },
+                            onRemove = { vm.remove(it) },
                             onOpenLogs = { screen = Screen.Logs },
                             onOpenSettings = { screen = Screen.Settings },
                             onOpen = { openReceived(it) },

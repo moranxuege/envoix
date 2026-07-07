@@ -26,5 +26,15 @@ class TransferViewModel(app: Application) : AndroidViewModel(app) {
 
     fun cancel(id: Long) = TransferService.cancel(getApplication(), id)
 
-    fun dismiss(id: Long) = TransferRepository.remove(id)
+    /** Remove a (terminal) transfer from the list. */
+    fun remove(id: Long) = TransferRepository.remove(id)
+
+    /** Pause a running transfer, or resume/retry a paused/failed one. */
+    fun pauseResume(id: Long) {
+        val t = TransferRepository.transfers.value.find { it.id == id } ?: return
+        if (t.status == Status.Paused || t.status == Status.Failed)
+            TransferService.resume(getApplication(), id)
+        else
+            TransferService.pause(getApplication(), id)
+    }
 }

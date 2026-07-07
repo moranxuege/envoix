@@ -20,9 +20,23 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
+import androidx.compose.material3.rememberSwipeToDismissBoxState
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
@@ -34,6 +48,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -56,14 +71,16 @@ fun HomeScreen(
     transfers: List<Transfer>,
     onReceive: (String) -> Unit,
     onSend: (String) -> Unit,
+    onPauseResume: (Long) -> Unit,
     onCancel: (Long) -> Unit,
-    onDismiss: (Long) -> Unit,
+    onRemove: (Long) -> Unit,
     onOpenLogs: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpen: (Transfer) -> Unit,
 ) {
     val colors = Envoix.colors
     var sheetOpen by remember { mutableStateOf(false) }
+    val expanded = remember { mutableStateListOf<Long>() }
     val active = transfers.count { it.status == Status.Connecting || it.status == Status.Transferring }
 
     Scaffold(
@@ -96,7 +113,15 @@ fun HomeScreen(
                     contentPadding = PaddingValues(top = 4.dp, bottom = 96.dp),
                 ) {
                     items(transfers.sortedByDescending { it.id }, key = { it.id }) { t ->
-                        TransferCard(t, onCancel, onDismiss, onOpen)
+                        TransferCard(
+                            t = t,
+                            expanded = t.id in expanded,
+                            onToggleDetail = { if (it in expanded) expanded.remove(it) else expanded.add(it) },
+                            onPauseResume = onPauseResume,
+                            onCancel = onCancel,
+                            onRemove = onRemove,
+                            onOpen = onOpen,
+                        )
                     }
                 }
             }
@@ -178,82 +203,175 @@ private fun EmptyState() {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun TransferCard(
     t: Transfer,
+    expanded: Boolean,
+    onToggleDetail: (Long) -> Unit,
+    onPauseResume: (Long) -> Unit,
     onCancel: (Long) -> Unit,
-    onDismiss: (Long) -> Unit,
+    onRemove: (Long) -> Unit,
     onOpen: (Transfer) -> Unit,
 ) {
     val colors = Envoix.colors
-    val done = t.status == Status.Completed
-    val failed = t.status == Status.Failed || t.status == Status.Cancelled
-    val openable = done && t.savedUri != null
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
-            .background(colors.surface)
-            .border(1.dp, colors.line, RoundedCornerShape(16.dp))
-            .then(if (openable) Modifier.clickable { onOpen(t) } else Modifier)
-            .padding(14.dp),
-        verticalAlignment = Alignment.Top,
-    ) {
-        // cancel / dismiss circle
-        Box(
-            Modifier
-                .size(26.dp)
-                .clip(CircleShape)
-                .background(colors.muted.copy(alpha = 0.85f))
-                .clickable { if (done || failed) onDismiss(t.id) else onCancel(t.id) },
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(Icons.Default.Close, null, tint = androidx.compose.ui.graphics.Color.White, modifier = Modifier.size(16.dp))
-        }
-        Spacer(Modifier.width(12.dp))
-        Column(Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    title(t),
-                    color = colors.text,
-                    fontSize = 17.sp,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false),
-                )
+    val failed = t.status == Status.Failed
+    val cancelled = t.status == Status.Cancelled
+    val dismissState = rememberSwipeToDismissBoxState(
+        confirmValueChange = {
+            if (it == SwipeToDismissBoxValue.EndToStart) { onRemove(t.id); true } else false
+        },
+    )
+    SwipeToDismissBox(
+        state = dismissState,
+        enableDismissFromStartToEnd = false,
+        enableDismissFromEndToStart = true,
+        backgroundContent = {
+            Row(
+                Modifier.fillMaxSize().clip(RoundedCornerShape(16.dp)).background(colors.danger)
+                    .padding(horizontal = 22.dp),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Default.Delete, null, tint = Color.White, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
-                PathBadge(t)
+                Text("Remove", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
             }
-            Text(
-                subtitle(t),
-                color = colors.muted,
-                fontSize = 13.sp,
-                fontFamily = FontFamily.Monospace,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Spacer(Modifier.height(10.dp))
-            LinearProgressIndicator(
-                progress = { fraction(t) },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(8.dp)
-                    .clip(CircleShape),
-                color = if (failed) colors.danger else colors.accent,
-                trackColor = colors.line.copy(alpha = 0.6f),
-            )
-            Spacer(Modifier.height(10.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Stat(speedText(t))
-                Stat(etaText(t))
-                Stat(sizeText(t))
+        },
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(16.dp))
+                .background(if (cancelled) colors.line else colors.surface)
+                .border(1.dp, colors.line, RoundedCornerShape(16.dp))
+                .combinedClickable(
+                    onClick = { if (t.status == Status.Completed && t.savedUri != null) onOpen(t) },
+                    onLongClick = { onToggleDetail(t.id) },
+                ),
+        ) {
+            Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            title(t),
+                            color = if (cancelled) colors.muted else colors.text,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        PathBadge(t)
+                    }
+                    Text(
+                        subtitle(t),
+                        color = colors.muted,
+                        fontSize = 13.sp,
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    LinearProgressIndicator(
+                        progress = { fraction(t) },
+                        modifier = Modifier.fillMaxWidth().height(8.dp).clip(CircleShape),
+                        color = when {
+                            failed -> colors.danger
+                            t.status == Status.Paused -> colors.warning
+                            cancelled -> colors.muted
+                            else -> colors.accent
+                        },
+                        trackColor = colors.line.copy(alpha = 0.6f),
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Stat(speedText(t)); Stat(etaText(t)); Stat(sizeText(t))
+                    }
+                    if (failed && t.error != null) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(t.error, color = colors.danger, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+                Spacer(Modifier.width(10.dp))
+                CardControls(t, onPauseResume, onCancel, onOpen)
             }
-            if (failed && t.error != null) {
-                Spacer(Modifier.height(6.dp))
-                Text(t.error, color = colors.danger, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            }
+            if (expanded) DetailDrawer(t)
         }
+    }
+}
+
+@Composable
+private fun CardControls(
+    t: Transfer,
+    onPauseResume: (Long) -> Unit,
+    onCancel: (Long) -> Unit,
+    onOpen: (Transfer) -> Unit,
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        when (t.status) {
+            Status.Connecting, Status.Transferring -> {
+                CircleBtn(Icons.Default.Pause, filled = true) { onPauseResume(t.id) }
+                CircleBtn(Icons.Default.Close, filled = false) { onCancel(t.id) }
+            }
+            Status.Paused -> {
+                CircleBtn(Icons.Default.PlayArrow, filled = true) { onPauseResume(t.id) }
+                CircleBtn(Icons.Default.Close, filled = false) { onCancel(t.id) }
+            }
+            Status.Failed -> CircleBtn(Icons.Default.Refresh, filled = true) { onPauseResume(t.id) }
+            Status.Completed -> if (t.savedUri != null) CircleBtn(Icons.Default.OpenInNew, filled = false) { onOpen(t) }
+            Status.Cancelled -> {}
+        }
+    }
+}
+
+@Composable
+private fun CircleBtn(icon: ImageVector, filled: Boolean, onClick: () -> Unit) {
+    val colors = Envoix.colors
+    Box(
+        Modifier
+            .size(38.dp)
+            .clip(CircleShape)
+            .then(
+                if (filled) Modifier.background(colors.accent)
+                else Modifier.border(1.5.dp, colors.line, CircleShape)
+            )
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(icon, null, tint = if (filled) Color.White else colors.muted, modifier = Modifier.size(18.dp))
+    }
+}
+
+/** Expanded on long-press: full details for this transfer (P1). Speed history +
+ *  per-transfer log arrive in a later pass. */
+@Composable
+private fun DetailDrawer(t: Transfer) {
+    val colors = Envoix.colors
+    Column(Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, bottom = 14.dp)) {
+        HorizontalDivider(color = colors.line)
+        Spacer(Modifier.height(10.dp))
+        DetailRow("Room", t.room)
+        if (t.pathAddr != null) DetailRow("Path", "${t.pathType ?: "—"} · ${t.pathAddr}")
+        DetailRow("Transferred", "${humanBytes(t.bytes)} / ${humanBytes(t.total)}")
+        if (t.status == Status.Transferring) DetailRow("Speed", speedText(t))
+    }
+}
+
+@Composable
+private fun DetailRow(label: String, value: String) {
+    val colors = Envoix.colors
+    Row(Modifier.fillMaxWidth().padding(vertical = 3.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+        Text(label, color = colors.muted, fontSize = 12.sp)
+        Text(
+            value, color = colors.text, fontSize = 12.sp, fontFamily = FontFamily.Monospace,
+            maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false).padding(start = 12.dp),
+        )
     }
 }
 
@@ -264,6 +382,7 @@ private fun PathBadge(t: Transfer) {
         t.status == Status.Completed -> Triple("Done", colors.success, colors.successSoft)
         t.status == Status.Failed -> Triple("Failed", colors.danger, colors.danger.copy(alpha = 0.12f))
         t.status == Status.Cancelled -> Triple("Cancelled", colors.muted, colors.line.copy(alpha = 0.5f))
+        t.status == Status.Paused -> Triple("Paused", colors.warning, colors.warning.copy(alpha = 0.14f))
         t.pathType == "relay" -> Triple("Relay", colors.accent, colors.accentSoft)
         t.pathType == "direct" -> Triple("Direct", colors.accent, colors.accentSoft)
         else -> Triple("…", colors.muted, colors.line.copy(alpha = 0.5f))
@@ -378,6 +497,7 @@ private fun speedText(t: Transfer): String {
     if (t.status != Status.Transferring || t.speedBps <= 0) return when (t.status) {
         Status.Connecting -> "connecting"
         Status.Completed -> "complete"
+        Status.Paused -> "paused"
         Status.Failed -> "failed"
         Status.Cancelled -> "cancelled"
         else -> "—"

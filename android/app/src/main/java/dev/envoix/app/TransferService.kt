@@ -17,6 +17,18 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import java.io.File
 
+/** Params needed to (re)launch a transfer, kept so a paused/failed one can resume. */
+private data class Spec(
+    val direction: String,
+    val room: String,
+    val path: String,
+    val broker: String,
+    val relay: String,
+    val config: String,
+) {
+    fun dir(): Direction = if (direction == "send") Direction.Send else Direction.Receive
+}
+
 /**
  * Foreground service that owns running transfers (decoupled from the Activity so
  * they survive backgrounding), updates [TransferRepository], publishes received
@@ -43,19 +55,37 @@ class TransferService : Service() {
                 val room = intent.getStringExtra(EXTRA_ROOM)
                 val path = intent.getStringExtra(EXTRA_PATH)
                 if (direction == null || room == null || path == null) return stopIfIdle()
-                val broker = intent.getStringExtra(EXTRA_BROKER) ?: Endpoints.BROKER
-                val relay = intent.getStringExtra(EXTRA_RELAY) ?: Endpoints.RELAY
-                val config = intent.getStringExtra(EXTRA_CONFIG) ?: ""
-                startForeground(
-                    NOTIF_ID,
-                    notification(),
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+                val spec = Spec(
+                    direction, room, path,
+                    intent.getStringExtra(EXTRA_BROKER) ?: Endpoints.BROKER,
+                    intent.getStringExtra(EXTRA_RELAY) ?: Endpoints.RELAY,
+                    intent.getStringExtra(EXTRA_CONFIG) ?: "",
                 )
-                launchTransfer(direction, room, path, broker, relay, config)
+                enterForeground()
+                val id = TransferRepository.create(spec.dir(), room)
+                specs[id] = spec
+                LogStore.append("app: start $direction room=${room.substringBefore('-')} id=$id")
+                runLoop(id, spec)
+            }
+            ACTION_RESUME -> {
+                val id = intent.getLongExtra(EXTRA_ID, -1L)
+                val spec = specs[id] ?: return stopIfIdle()
+                enterForeground()
+                TransferRepository.update(id) { it.copy(status = Status.Connecting, error = null) }
+                LogStore.append("app: resume id=$id")
+                runLoop(id, spec)
+            }
+            ACTION_PAUSE -> {
+                val id = intent.getLongExtra(EXTRA_ID, -1L)
+                Native.cancel(id)
+                TransferRepository.update(id) {
+                    if (it.status.isTerminal) it else it.copy(status = Status.Paused, speedBps = 0.0)
+                }
             }
             ACTION_CANCEL -> {
                 val id = intent.getLongExtra(EXTRA_ID, -1L)
                 Native.cancel(id)
+                specs.remove(id)
                 TransferRepository.update(id) {
                     if (it.status.isTerminal) it else it.copy(status = Status.Cancelled)
                 }
@@ -64,23 +94,16 @@ class TransferService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun launchTransfer(
-        directionStr: String,
-        room: String,
-        path: String,
-        broker: String,
-        relay: String,
-        config: String,
-    ) {
-        val dir = if (directionStr == "send") Direction.Send else Direction.Receive
-        val id = TransferRepository.create(dir, room)
-        LogStore.append("app: start $directionStr room=${room.substringBefore('-')} id=$id")
+    private fun enterForeground() =
+        startForeground(NOTIF_ID, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+
+    private fun runLoop(id: Long, spec: Spec) {
         active++
         updateNotification()
         scope.launch {
             var lastTs = 0L
             var lastBytes = 0L
-            NativeTransfer.run(id, directionStr, room, broker, relay, path, config)
+            NativeTransfer.run(id, spec.direction, spec.room, spec.broker, spec.relay, spec.path, spec.config)
                 .collect { ev ->
                     TransferRepository.update(id) { t ->
                         when (ev) {
@@ -101,18 +124,17 @@ class TransferService : Service() {
                             is CliEvent.Completed ->
                                 t.copy(bytes = ev.bytesTransferred, speedBps = 0.0, status = Status.Completed)
                             is CliEvent.Failed ->
-                                // A user cancel surfaces as a Failed event; keep the
-                                // Cancelled status the cancel action already set.
-                                if (t.status == Status.Cancelled) t
+                                // A pause/cancel surfaces as a Failed event; keep the
+                                // Paused/Cancelled status the action already set.
+                                if (t.status == Status.Cancelled || t.status == Status.Paused) t
                                 else t.copy(status = Status.Failed, error = ev.error)
                             is CliEvent.Exit ->
-                                if (!t.status.isTerminal)
-                                    t.copy(status = if (ev.code == 0) Status.Completed else Status.Failed)
-                                else t
+                                if (t.status.isTerminal || t.status == Status.Paused) t
+                                else t.copy(status = if (ev.code == 0) Status.Completed else Status.Failed)
                         }
                     }
                 }
-            if (dir == Direction.Receive) publishReceived(id, path)
+            if (spec.dir() == Direction.Receive) publishReceived(id, spec.path)
             active--
             updateNotification()
             stopIfIdle()
@@ -171,6 +193,11 @@ class TransferService : Service() {
         private const val NOTIF_ID = 1
         private const val ACTION_START = "dev.envoix.app.START"
         private const val ACTION_CANCEL = "dev.envoix.app.CANCEL"
+        private const val ACTION_PAUSE = "dev.envoix.app.PAUSE"
+        private const val ACTION_RESUME = "dev.envoix.app.RESUME"
+
+        /** Launch specs by id, so a paused/failed transfer can be resumed. */
+        private val specs = java.util.concurrent.ConcurrentHashMap<Long, Spec>()
         private const val EXTRA_DIRECTION = "direction"
         private const val EXTRA_ROOM = "room"
         private const val EXTRA_PATH = "path"
@@ -207,6 +234,26 @@ class TransferService : Service() {
             context.startService(
                 Intent(context, TransferService::class.java).apply {
                     action = ACTION_CANCEL
+                    putExtra(EXTRA_ID, id)
+                }
+            )
+        }
+
+        /** Stop a transfer but keep its partial + spec, so it can be resumed. */
+        fun pause(context: Context, id: Long) {
+            context.startService(
+                Intent(context, TransferService::class.java).apply {
+                    action = ACTION_PAUSE
+                    putExtra(EXTRA_ID, id)
+                }
+            )
+        }
+
+        /** Relaunch a paused/failed transfer from its stored spec (resumes the partial). */
+        fun resume(context: Context, id: Long) {
+            context.startForegroundService(
+                Intent(context, TransferService::class.java).apply {
+                    action = ACTION_RESUME
                     putExtra(EXTRA_ID, id)
                 }
             )
