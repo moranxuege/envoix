@@ -19,6 +19,10 @@ data class Transfer(
     val error: String? = null,
     /** Where a received file ended up (a `content://` in Downloads), for opening. */
     val savedUri: String? = null,
+    /** Recent throughput samples (bytes/s), for the detail drawer's speed chart. */
+    val speedHistory: List<Double> = emptyList(),
+    /** Timestamped log lines scoped to this transfer, for the detail drawer. */
+    val log: List<String> = emptyList(),
 )
 
 val Status.isTerminal: Boolean

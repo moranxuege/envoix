@@ -20,9 +20,20 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
@@ -347,18 +358,109 @@ private fun CircleBtn(icon: ImageVector, filled: Boolean, onClick: () -> Unit) {
     }
 }
 
-/** Expanded on long-press: full details for this transfer (P1). Speed history +
- *  per-transfer log arrive in a later pass. */
+/** Expanded on long-press: speed history, key details, and this transfer's log. */
 @Composable
 private fun DetailDrawer(t: Transfer) {
     val colors = Envoix.colors
     Column(Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, bottom = 14.dp)) {
         HorizontalDivider(color = colors.line)
-        Spacer(Modifier.height(10.dp))
+        if (t.speedHistory.size >= 2) {
+            DrawerLabel("Speed")
+            SpeedChart(t.speedHistory)
+        }
+        Spacer(Modifier.height(4.dp))
         DetailRow("Room", t.room)
         if (t.pathAddr != null) DetailRow("Path", "${t.pathType ?: "—"} · ${t.pathAddr}")
         DetailRow("Transferred", "${humanBytes(t.bytes)} / ${humanBytes(t.total)}")
-        if (t.status == Status.Transferring) DetailRow("Speed", speedText(t))
+        if (t.log.isNotEmpty()) {
+            val clip = LocalClipboardManager.current
+            var copied by remember(t.id) { mutableStateOf(false) }
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                DrawerLabel("This transfer's log")
+                Text(
+                    if (copied) "Copied ✓" else "Copy",
+                    color = colors.accent,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable {
+                            clip.setText(AnnotatedString(t.log.joinToString("\n")))
+                            copied = true
+                        }
+                        .background(colors.accentSoft)
+                        .padding(horizontal = 10.dp, vertical = 5.dp),
+                )
+            }
+            Spacer(Modifier.height(6.dp))
+            LogBox(t.log)
+        }
+    }
+}
+
+@Composable
+private fun DrawerLabel(text: String) {
+    Text(
+        text,
+        color = Envoix.colors.muted,
+        fontSize = 11.sp,
+        fontWeight = FontWeight.Bold,
+        letterSpacing = 1.sp,
+        modifier = Modifier.padding(top = 10.dp, bottom = 4.dp),
+    )
+}
+
+@Composable
+private fun SpeedChart(history: List<Double>) {
+    val accent = Envoix.colors.accent
+    Canvas(Modifier.fillMaxWidth().height(50.dp)) {
+        val n = history.size
+        if (n < 2) return@Canvas
+        val max = (history.maxOrNull() ?: 1.0).coerceAtLeast(1.0)
+        val w = size.width
+        val h = size.height
+        fun px(i: Int) = w * i / (n - 1)
+        fun py(v: Double) = (h - h * (v / max)).toFloat()
+        val line = Path()
+        val area = Path().apply { moveTo(0f, h) }
+        history.forEachIndexed { i, v ->
+            val x = px(i)
+            val y = py(v)
+            if (i == 0) line.moveTo(x, y) else line.lineTo(x, y)
+            area.lineTo(x, y)
+        }
+        area.lineTo(w, h)
+        area.close()
+        drawPath(area, accent.copy(alpha = 0.14f))
+        drawPath(line, accent, style = Stroke(width = 2.5.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
+        drawCircle(accent, radius = 3.dp.toPx(), center = Offset(px(n - 1), py(history.last())))
+    }
+}
+
+@Composable
+private fun LogBox(log: List<String>) {
+    val colors = Envoix.colors
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(max = 132.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(colors.bg)
+            .border(1.dp, colors.line, RoundedCornerShape(10.dp))
+            .verticalScroll(rememberScrollState())
+            .padding(10.dp),
+    ) {
+        Text(
+            log.joinToString("\n"),
+            color = colors.muted,
+            fontSize = 11.sp,
+            fontFamily = FontFamily.Monospace,
+            lineHeight = 17.sp,
+        )
     }
 }
 

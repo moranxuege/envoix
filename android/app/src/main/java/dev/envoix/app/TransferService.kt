@@ -97,6 +97,12 @@ class TransferService : Service() {
     private fun enterForeground() =
         startForeground(NOTIF_ID, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
 
+    private val logTime = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
+
+    /** Append a timestamped line to a transfer's log, keeping the last 60. */
+    private fun addLog(cur: List<String>, line: String): List<String> =
+        (cur + "${logTime.format(java.util.Date())}  $line").takeLast(60)
+
     private fun runLoop(id: Long, spec: Spec) {
         active++
         updateNotification()
@@ -108,26 +114,47 @@ class TransferService : Service() {
                     TransferRepository.update(id) { t ->
                         when (ev) {
                             CliEvent.Binding, CliEvent.Connecting ->
-                                t.copy(status = Status.Connecting)
+                                t.copy(
+                                    status = Status.Connecting,
+                                    log = if (t.log.isEmpty())
+                                        addLog(t.log, "pairing in room ${spec.room.substringBefore('-')}…")
+                                    else t.log,
+                                )
                             is CliEvent.Connected ->
-                                t.copy(pathType = ev.pathType, pathAddr = ev.addr)
+                                t.copy(
+                                    pathType = ev.pathType, pathAddr = ev.addr,
+                                    log = addLog(
+                                        t.log,
+                                        "connected · ${ev.pathType}" + if (ev.addr.isNotBlank()) " (${ev.addr})" else "",
+                                    ),
+                                )
                             is CliEvent.Started ->
-                                t.copy(fileName = ev.fileName, total = ev.totalBytes, status = Status.Transferring)
+                                t.copy(
+                                    fileName = ev.fileName, total = ev.totalBytes, status = Status.Transferring,
+                                    log = addLog(t.log, "started · ${ev.fileName}"),
+                                )
                             is CliEvent.Progress -> {
                                 val now = System.currentTimeMillis()
                                 val bps = if (lastTs > 0 && now > lastTs)
                                     (ev.bytesTransferred - lastBytes) * 1000.0 / (now - lastTs)
                                 else t.speedBps
                                 lastTs = now; lastBytes = ev.bytesTransferred
-                                t.copy(bytes = ev.bytesTransferred, total = ev.totalBytes, speedBps = bps, status = Status.Transferring)
+                                t.copy(
+                                    bytes = ev.bytesTransferred, total = ev.totalBytes, speedBps = bps,
+                                    status = Status.Transferring,
+                                    speedHistory = (t.speedHistory + bps).takeLast(90),
+                                )
                             }
                             is CliEvent.Completed ->
-                                t.copy(bytes = ev.bytesTransferred, speedBps = 0.0, status = Status.Completed)
+                                t.copy(
+                                    bytes = ev.bytesTransferred, speedBps = 0.0, status = Status.Completed,
+                                    log = addLog(t.log, "complete"),
+                                )
                             is CliEvent.Failed ->
                                 // A pause/cancel surfaces as a Failed event; keep the
                                 // Paused/Cancelled status the action already set.
                                 if (t.status == Status.Cancelled || t.status == Status.Paused) t
-                                else t.copy(status = Status.Failed, error = ev.error)
+                                else t.copy(status = Status.Failed, error = ev.error, log = addLog(t.log, "failed · ${ev.error}"))
                             is CliEvent.Exit ->
                                 if (t.status.isTerminal || t.status == Status.Paused) t
                                 else t.copy(status = if (ev.code == 0) Status.Completed else Status.Failed)
