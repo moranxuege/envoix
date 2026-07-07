@@ -22,7 +22,13 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
+            // Debug-signed so the shrunk APK stays installable for testers.
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 
