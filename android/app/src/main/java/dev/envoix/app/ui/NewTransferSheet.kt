@@ -143,7 +143,12 @@ fun NewTransferSheet(
         }
 
         Spacer(Modifier.height(16.dp))
-        // ---- role toggle ----
+        // ---- role picker (sets your role + the QR's role hint) ----
+        Text(
+            "I WANT TO",
+            color = colors.muted, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp,
+        )
+        Spacer(Modifier.height(6.dp))
         Row(
             Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
                 .background(colors.bg).border(1.dp, colors.line, RoundedCornerShape(12.dp)).padding(3.dp),
@@ -164,7 +169,7 @@ fun NewTransferSheet(
             contentAlignment = Alignment.Center,
         ) {
             Text(
-                if (role == "send") "Send a file" else "Receive",
+                if (joining) "Join" else if (role == "send") "Pick a file & wait" else "Wait to receive",
                 color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp,
             )
         }
