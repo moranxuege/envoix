@@ -41,4 +41,12 @@ object Native {
 
     /** Request cancellation of the in-flight transfer with the given [id]. */
     external fun cancel(id: Long)
+
+    /** Generate a room invite for [role] ("send"/"receive"). Returns JSON
+     *  `{"code":..,"payload":..}` (payload = the QR string), or `{"error":..}`. */
+    external fun generateInvite(role: String, broker: String, relay: String): String
+
+    /** Parse a typed code or a scanned `envoix://` payload. Returns JSON
+     *  `{"code":..,"broker":..,"relay":..,"role":..}`, or `{"error":..}`. */
+    external fun parseInvite(input: String): String
 }

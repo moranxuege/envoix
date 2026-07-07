@@ -156,6 +156,11 @@ impl Invite {
         self.relay.as_deref()
     }
 
+    /// The broker this invite advertised, if any.
+    pub fn broker(&self) -> Option<&str> {
+        self.broker.as_deref()
+    }
+
     fn from_code(code: &str) -> Result<Self, TransferError> {
         let code = code.trim();
         if code.is_empty() {

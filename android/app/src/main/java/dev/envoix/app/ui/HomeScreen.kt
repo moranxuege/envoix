@@ -80,8 +80,8 @@ import kotlin.math.roundToInt
 @Composable
 fun HomeScreen(
     transfers: List<Transfer>,
-    onReceive: (String) -> Unit,
-    onSend: (String) -> Unit,
+    onReceive: (code: String, broker: String, relay: String) -> Unit,
+    onSend: (code: String, broker: String, relay: String) -> Unit,
     onPauseResume: (Long) -> Unit,
     onCancel: (Long) -> Unit,
     onRemove: (Long) -> Unit,
@@ -142,12 +142,12 @@ fun HomeScreen(
     if (sheetOpen) {
         ModalBottomSheet(
             onDismissRequest = { sheetOpen = false },
-            sheetState = rememberModalBottomSheetState(),
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
             containerColor = colors.surface,
         ) {
             NewTransferSheet(
-                onReceive = { room -> sheetOpen = false; onReceive(room) },
-                onSend = { room -> sheetOpen = false; onSend(room) },
+                onReceive = { c, b, r -> sheetOpen = false; onReceive(c, b, r) },
+                onSend = { c, b, r -> sheetOpen = false; onSend(c, b, r) },
             )
         }
     }
@@ -509,70 +509,6 @@ private fun Pill(text: String, fg: androidx.compose.ui.graphics.Color, bg: andro
 @Composable
 private fun Stat(text: String) {
     Text(text, color = Envoix.colors.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun NewTransferSheet(onReceive: (String) -> Unit, onSend: (String) -> Unit) {
-    val colors = Envoix.colors
-    var room by remember { mutableStateOf("") }
-    val valid = room.trim().length >= 3 && room.contains("-")
-
-    Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 32.dp)) {
-        Text("New transfer", color = colors.text, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold)
-        Spacer(Modifier.height(4.dp))
-        Text(
-            "Both sides share one code, e.g. 246810-cobalt-fox.",
-            color = colors.muted, fontSize = 14.sp,
-        )
-        Spacer(Modifier.height(16.dp))
-        OutlinedTextField(
-            value = room,
-            onValueChange = { room = it.trim() },
-            label = { Text("Room code") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Spacer(Modifier.height(20.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            SheetButton("Receive", filled = false, enabled = valid, modifier = Modifier.weight(1f)) {
-                onReceive(room.trim())
-            }
-            SheetButton("Send file", filled = true, enabled = valid, modifier = Modifier.weight(1f)) {
-                onSend(room.trim())
-            }
-        }
-    }
-}
-
-@Composable
-private fun SheetButton(
-    text: String,
-    filled: Boolean,
-    enabled: Boolean,
-    modifier: Modifier = Modifier,
-    onClick: () -> Unit,
-) {
-    val colors = Envoix.colors
-    val alpha = if (enabled) 1f else 0.4f
-    Box(
-        modifier
-            .height(52.dp)
-            .clip(RoundedCornerShape(14.dp))
-            .then(
-                if (filled) Modifier.background(colors.accent.copy(alpha = alpha))
-                else Modifier.border(1.5.dp, colors.accent.copy(alpha = alpha), RoundedCornerShape(14.dp))
-            )
-            .clickable(enabled = enabled, onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text,
-            color = if (filled) androidx.compose.ui.graphics.Color.White else colors.accent.copy(alpha = alpha),
-            fontWeight = FontWeight.Bold,
-            fontSize = 16.sp,
-        )
-    }
 }
 
 /* ---- formatting helpers ---- */

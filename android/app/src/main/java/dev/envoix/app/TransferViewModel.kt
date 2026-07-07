@@ -14,14 +14,15 @@ class TransferViewModel(app: Application) : AndroidViewModel(app) {
 
     val transfers: StateFlow<List<Transfer>> = TransferRepository.transfers
 
-    fun startReceive(room: String) = start("receive", room, incomingDir.absolutePath)
+    fun startReceive(room: String, broker: String, relay: String) =
+        start("receive", room, incomingDir.absolutePath, broker, relay)
 
-    fun startSend(room: String, filePath: String) = start("send", room, filePath)
+    fun startSend(room: String, filePath: String, broker: String, relay: String) =
+        start("send", room, filePath, broker, relay)
 
-    private fun start(direction: String, room: String, path: String) {
-        val s = SettingsStore.settings.value
+    private fun start(direction: String, room: String, path: String, broker: String, relay: String) {
         val config = SettingsStore.renderConfig(getApplication()) ?: ""
-        TransferService.start(getApplication(), direction, room, path, s.broker, s.relay, config)
+        TransferService.start(getApplication(), direction, room, path, broker, relay, config)
     }
 
     fun cancel(id: Long) = TransferService.cancel(getApplication(), id)

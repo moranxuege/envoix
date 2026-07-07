@@ -13,7 +13,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
-use envoix_client::api::{Client, PeerSource, TransferOptions};
+use envoix_client::api::{Client, Invite, PeerSource, Role, TransferOptions};
 use jni::JNIEnv;
 use jni::JavaVM;
 use jni::objects::{GlobalRef, JClass, JObject, JString, JValue};
@@ -117,6 +117,68 @@ pub extern "system" fn Java_dev_envoix_app_Native_cancel(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Generate a room invite for `role` ("send"/"receive"). Returns JSON
+/// `{"code":..,"payload":..}` (the payload is the QR string), or `{"error":..}`.
+/// `relay` may be empty.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_generateInvite(
+    mut env: JNIEnv,
+    _class: JClass,
+    role: JString,
+    broker: JString,
+    relay: JString,
+) -> jni::sys::jstring {
+    let role = if jstr(&mut env, &role) == "send" { Role::Send } else { Role::Receive };
+    let broker = jstr(&mut env, &broker);
+    let relay = jstr(&mut env, &relay);
+    let relay = (!relay.is_empty()).then_some(relay);
+    let json = match Invite::room(broker, relay) {
+        Ok(inv) => {
+            let inv = inv.with_role(role);
+            format!(r#"{{"code":{},"payload":{}}}"#, json_str(inv.code()), json_str(&inv.payload()))
+        }
+        Err(e) => format!(r#"{{"error":{}}}"#, json_str(&e.to_string())),
+    };
+    to_jstring(&mut env, &json)
+}
+
+/// Parse a typed code or a scanned `envoix://` payload. Returns JSON
+/// `{"code":..,"broker":..,"relay":..,"role":..}`, or `{"error":..}`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_parseInvite(
+    mut env: JNIEnv,
+    _class: JClass,
+    input: JString,
+) -> jni::sys::jstring {
+    let input = jstr(&mut env, &input);
+    let json = match Invite::parse(&input) {
+        Ok(inv) => {
+            let role = match inv.role() {
+                Some(Role::Send) => "\"send\"",
+                Some(Role::Receive) => "\"receive\"",
+                None => "null",
+            };
+            format!(
+                r#"{{"code":{},"broker":{},"relay":{},"role":{}}}"#,
+                json_str(inv.code()),
+                opt_json(inv.broker()),
+                opt_json(inv.relay()),
+                role,
+            )
+        }
+        Err(e) => format!(r#"{{"error":{}}}"#, json_str(&e.to_string())),
+    };
+    to_jstring(&mut env, &json)
+}
+
+fn to_jstring(env: &mut JNIEnv, s: &str) -> jni::sys::jstring {
+    env.new_string(s).map(|s| s.into_raw()).unwrap_or(std::ptr::null_mut())
+}
+
+fn opt_json(s: Option<&str>) -> String {
+    s.map(json_str).unwrap_or_else(|| "null".to_string())
+}
+
 async fn drive(
     id: i64,
     direction: &str,
