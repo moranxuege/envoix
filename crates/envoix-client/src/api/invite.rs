@@ -141,9 +141,14 @@ impl Invite {
 
     /// The [`PeerSource`] this invite drives. `fallback_broker` is used when the
     /// invite carried no broker (a bare typed code), e.g. from CLI `--rendezvous`.
-    pub fn peer_source(&self, fallback_broker: Option<String>) -> Result<PeerSource, TransferError> {
+    pub fn peer_source(
+        &self,
+        fallback_broker: Option<String>,
+    ) -> Result<PeerSource, TransferError> {
         let broker = self.broker.clone().or(fallback_broker).ok_or_else(|| {
-            TransferError::input("room pairing needs a broker (pass --rendezvous or scan a full invite)")
+            TransferError::input(
+                "room pairing needs a broker (pass --rendezvous or scan a full invite)",
+            )
         })?;
         Ok(PeerSource::Room {
             code: self.code.clone(),
@@ -221,7 +226,14 @@ mod tests {
         let inv = Invite::room(BROKER.into(), Some(RELAY.into())).unwrap();
         // <digits>-<word>-<word>
         assert_eq!(inv.code().split('-').count(), 3);
-        assert!(inv.code().split('-').next().unwrap().chars().all(|c| c.is_ascii_digit()));
+        assert!(
+            inv.code()
+                .split('-')
+                .next()
+                .unwrap()
+                .chars()
+                .all(|c| c.is_ascii_digit())
+        );
     }
 
     #[test]
@@ -248,7 +260,8 @@ mod tests {
 
     #[test]
     fn unknown_params_are_ignored_for_forward_compat() {
-        let url = "envoix://pair/1234-amber-comet?broker=id%40h%3A1&direct=9.9.9.9%3A1&mdns=envoix-x";
+        let url =
+            "envoix://pair/1234-amber-comet?broker=id%40h%3A1&direct=9.9.9.9%3A1&mdns=envoix-x";
         let inv = Invite::parse(url).unwrap();
         assert_eq!(inv.code(), "1234-amber-comet");
         assert_eq!(inv.broker.as_deref(), Some("id@h:1"));
@@ -256,7 +269,9 @@ mod tests {
 
     #[test]
     fn role_hint_round_trips_and_flips() {
-        let inv = Invite::room("id@h:1".into(), None).unwrap().with_role(Role::Send);
+        let inv = Invite::room("id@h:1".into(), None)
+            .unwrap()
+            .with_role(Role::Send);
         let parsed = Invite::parse(&inv.payload()).unwrap();
         assert_eq!(parsed.role(), Some(Role::Send));
         assert_eq!(parsed.role().unwrap().opposite(), Role::Receive);

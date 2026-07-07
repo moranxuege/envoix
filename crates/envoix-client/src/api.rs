@@ -309,7 +309,10 @@ impl Client {
                         direction: TransferDirection::Receive,
                         mode,
                     });
-                    receive_file_with_bound_peer(listen, into, config, &pairing, sink, on_bound, cancel).await
+                    receive_file_with_bound_peer(
+                        listen, into, config, &pairing, sink, on_bound, cancel,
+                    )
+                    .await
                 })
             }
             PeerSource::ShowInvite { ttl_secs } => {
@@ -323,7 +326,10 @@ impl Client {
                         direction: TransferDirection::Receive,
                         mode,
                     });
-                    receive_file_with_bound_peer(listen, into, config, &pairing, sink, on_bound, cancel).await
+                    receive_file_with_bound_peer(
+                        listen, into, config, &pairing, sink, on_bound, cancel,
+                    )
+                    .await
                 })
             }
             PeerSource::Mdns { token } => {

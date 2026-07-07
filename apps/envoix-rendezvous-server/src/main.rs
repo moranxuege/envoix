@@ -84,12 +84,16 @@ async fn main() -> Result<()> {
         )
     });
     // Only capture per-room events when the log endpoint is enabled.
-    let capture = cli.log_bind.map(|_| logs::RoomCapture::new(log_store.clone()));
+    let capture = cli
+        .log_bind
+        .map(|_| logs::RoomCapture::new(log_store.clone()));
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
     let registry = tracing_subscriber::registry().with(filter).with(capture);
     match cli.log_format {
-        LogFormat::Json => registry.with(tracing_subscriber::fmt::layer().json()).init(),
+        LogFormat::Json => registry
+            .with(tracing_subscriber::fmt::layer().json())
+            .init(),
         LogFormat::Pretty => registry.with(tracing_subscriber::fmt::layer()).init(),
     }
 

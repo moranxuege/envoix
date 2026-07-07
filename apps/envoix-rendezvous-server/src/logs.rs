@@ -128,7 +128,10 @@ async fn upload(
     StatusCode::NO_CONTENT
 }
 
-async fn view(Path(room): Path<String>, State(store): State<Arc<RoomLogs>>) -> (StatusCode, String) {
+async fn view(
+    Path(room): Path<String>,
+    State(store): State<Arc<RoomLogs>>,
+) -> (StatusCode, String) {
     match store.view(&room) {
         Some(text) => (StatusCode::OK, text),
         None => (StatusCode::NOT_FOUND, "no logs for this room\n".to_string()),

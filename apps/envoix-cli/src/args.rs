@@ -185,8 +185,10 @@ fn resolve_room_code(
             let qr = render_terminal_qr(&invite.payload())
                 .map(|q| format!("\n{q}"))
                 .unwrap_or_default();
-            let note =
-                format!("your code: {}  - give this to the {give_to}{qr}\n{waiting}", invite.code());
+            let note = format!(
+                "your code: {}  - give this to the {give_to}{qr}\n{waiting}",
+                invite.code()
+            );
             Ok((invite.code().to_string(), note))
         }
     }
