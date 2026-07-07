@@ -141,6 +141,7 @@ class TransferService : Service() {
         scope.launch {
             var lastTs = 0L
             var lastBytes = 0L
+            var lastNotif = 0L
             if (spec.useMdns) runCatching { multicastLock.acquire() }
             NativeTransfer.run(id, spec.direction, spec.room, spec.broker, spec.relay, spec.path, spec.config, spec.useRoom, spec.useMdns)
                 .collect { ev ->
@@ -193,6 +194,17 @@ class TransferService : Service() {
                                 else t.copy(status = if (ev.code == 0) Status.Completed else Status.Failed)
                         }
                     }
+                    // Keep the foreground notification's progress bar live while
+                    // backgrounded; throttle the frequent Progress events.
+                    when (ev) {
+                        is CliEvent.Progress -> {
+                            val now = System.currentTimeMillis()
+                            if (now - lastNotif > 700) { lastNotif = now; updateNotification() }
+                        }
+                        is CliEvent.Started, is CliEvent.Connected,
+                        is CliEvent.Completed, is CliEvent.Failed -> updateNotification()
+                        else -> {}
+                    }
                 }
             if (spec.useMdns) runCatching { multicastLock.release() }
             if (spec.dir() == Direction.Receive) publishReceived(id, spec.path)
@@ -218,18 +230,47 @@ class TransferService : Service() {
     }
 
     private fun notification(): Notification {
-        val count = TransferRepository.activeCount()
         val open = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        return NotificationCompat.Builder(this, CHANNEL)
+        val active = TransferRepository.transfers.value.filter {
+            it.status == Status.Transferring || it.status == Status.Connecting
+        }
+        val b = NotificationCompat.Builder(this, CHANNEL)
             .setSmallIcon(android.R.drawable.stat_sys_upload)
-            .setContentTitle("Envoix")
-            .setContentText(if (count > 0) "$count transfer${if (count == 1) "" else "s"} in progress" else "Done")
-            .setOngoing(count > 0)
+            .setOngoing(active.isNotEmpty())
+            .setOnlyAlertOnce(true)
             .setContentIntent(open)
-            .build()
+        val t = active.singleOrNull()
+        when {
+            active.isEmpty() -> b.setContentTitle("Envoix").setContentText("Done")
+            t == null -> b.setContentTitle("Envoix").setContentText("${active.size} transfers in progress")
+            else -> {
+                b.setSmallIcon(
+                    if (t.direction == Direction.Send) android.R.drawable.stat_sys_upload
+                    else android.R.drawable.stat_sys_download,
+                )
+                val verb = if (t.direction == Direction.Send) "Sending" else "Receiving"
+                b.setContentTitle("$verb ${t.fileName ?: "…"}")
+                if (t.status == Status.Transferring && t.total > 0) {
+                    val pct = ((t.bytes * 100) / t.total).toInt().coerceIn(0, 100)
+                    b.setContentText("$pct%  ·  ${humanBytes(t.bytes)} / ${humanBytes(t.total)}")
+                    b.setProgress(100, pct, false)
+                } else {
+                    b.setContentText("Connecting…")
+                    b.setProgress(0, 0, true)
+                }
+            }
+        }
+        return b.build()
+    }
+
+    private fun humanBytes(n: Long): String = when {
+        n < 1024 -> "$n B"
+        n < 1024 * 1024 -> "%.0f KB".format(n / 1024.0)
+        n < 1024L * 1024 * 1024 -> "%.1f MB".format(n / 1048576.0)
+        else -> "%.2f GB".format(n / 1073741824.0)
     }
 
     private fun updateNotification() {
