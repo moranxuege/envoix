@@ -13,9 +13,9 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -26,7 +26,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -49,15 +48,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import dev.envoix.app.InviteCodec
 import dev.envoix.app.SettingsStore
 
 /**
- * New-transfer sheet: enter/scan a code to join, or show your own generated QR +
- * code and pick a role. Scanning auto-selects the opposite role (from the
- * invite's role hint), so both sides never end up on the same role.
+ * New-transfer sheet. The top is a mutually-exclusive **Show QR / Scan QR** pane
+ * (your own code vs a live inline scanner); below it a code field to type/paste a
+ * code, then the role picker, the file/save path, and the start button. Scanning
+ * fills the code and picks the opposite role, so both sides never share a role.
  */
 @Composable
 fun NewTransferSheet(
@@ -77,6 +75,8 @@ fun NewTransferSheet(
     var scannedRelay by remember { mutableStateOf<String?>(null) }
     var fileUri by remember { mutableStateOf<Uri?>(null) }
     var fileName by remember { mutableStateOf<String?>(null) }
+    var topMode by remember { mutableStateOf("show") } // "show" | "scan"
+
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
             fileUri = uri
@@ -90,13 +90,13 @@ fun NewTransferSheet(
         if (!joining) generated = InviteCodec.generate(role, broker, relay)
     }
 
-    var scanning by remember { mutableStateOf(false) }
     fun applyScanned(scanned: String) {
         val inv = InviteCodec.parse(scanned) ?: return
         typed = inv.code
         scannedBroker = inv.broker
         scannedRelay = inv.relay
         InviteCodec.oppositeRole(inv.role)?.let { role = it }
+        topMode = "show" // stop the camera; the code is filled in now
     }
 
     val code = if (joining) typed.trim() else generated?.first
@@ -111,71 +111,73 @@ fun NewTransferSheet(
         Text("New transfer", color = colors.text, fontSize = 21.sp, fontWeight = FontWeight.ExtraBold)
         Spacer(Modifier.height(14.dp))
 
-        // ---- join: enter a code + scan ----
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-            OutlinedTextField(
-                value = typed,
-                onValueChange = { typed = it.trim(); scannedBroker = null; scannedRelay = null },
-                placeholder = { Text("enter a code to join…") },
-                singleLine = true,
-                modifier = Modifier.weight(1f),
-            )
-            Box(
-                Modifier.size(52.dp).clip(RoundedCornerShape(12.dp))
-                    .border(1.dp, colors.line, RoundedCornerShape(12.dp))
-                    .clickable { scanning = true },
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(Icons.Default.QrCodeScanner, "Scan a QR code", tint = colors.accent, modifier = Modifier.size(24.dp))
+        // ---- top pane: show my QR vs scan one ----
+        Row(
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                .background(colors.bg).border(1.dp, colors.line, RoundedCornerShape(12.dp)).padding(3.dp),
+        ) {
+            SegTab("Show QR", topMode == "show", Modifier.weight(1f)) { topMode = "show" }
+            SegTab("Scan QR", topMode == "scan", Modifier.weight(1f)) { topMode = "scan" }
+        }
+
+        Spacer(Modifier.height(14.dp))
+        Box(Modifier.fillMaxWidth().heightIn(min = 250.dp), contentAlignment = Alignment.Center) {
+            if (topMode == "scan") {
+                InlineScanner(onScanned = ::applyScanned, modifier = Modifier.fillMaxWidth())
+            } else if (joining) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("You'll join", color = colors.muted, fontSize = 13.sp)
+                    Spacer(Modifier.height(6.dp))
+                    Text(typed, color = colors.accent, fontSize = 18.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                    Spacer(Modifier.height(6.dp))
+                    Text("clear the code below to show your own", color = colors.muted, fontSize = 11.sp)
+                }
+            } else if (generated != null) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    QrCode(generated!!.second, side = 168.dp)
+                    Spacer(Modifier.height(12.dp))
+                    val clip = LocalClipboardManager.current
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            generated!!.first,
+                            color = colors.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Icon(
+                            Icons.Default.ContentCopy, "Copy code",
+                            tint = colors.muted,
+                            modifier = Modifier.size(18.dp).clip(CircleShape)
+                                .clickable { clip.setText(AnnotatedString(generated!!.first)) },
+                        )
+                    }
+                }
             }
         }
 
-        // ---- initiate: show your own QR (only when not joining) ----
-        if (!joining && generated != null) {
-            Spacer(Modifier.height(14.dp))
-            Divider("or show your code")
-            Spacer(Modifier.height(12.dp))
-            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                QrCode(generated!!.second, side = 150.dp)
-            }
-            Spacer(Modifier.height(10.dp))
-            val clip = LocalClipboardManager.current
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    generated!!.first,
-                    color = colors.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
-                    fontFamily = FontFamily.Monospace,
-                )
-                Spacer(Modifier.width(8.dp))
-                Icon(
-                    Icons.Default.ContentCopy, "Copy code",
-                    tint = colors.muted,
-                    modifier = Modifier.size(18.dp).clip(CircleShape)
-                        .clickable { clip.setText(AnnotatedString(generated!!.first)) },
-                )
-            }
-        }
-
+        // ---- code field (type/paste a code to join) ----
         Spacer(Modifier.height(16.dp))
-        // ---- role picker (sets your role + the QR's role hint) ----
-        Text(
-            "I WANT TO",
-            color = colors.muted, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp,
+        OutlinedTextField(
+            value = typed,
+            onValueChange = { typed = it.trim(); scannedBroker = null; scannedRelay = null },
+            placeholder = { Text("or enter a code to join…") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
         )
+
+        // ---- role picker ----
+        Spacer(Modifier.height(16.dp))
+        Text("I WANT TO", color = colors.muted, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
         Spacer(Modifier.height(6.dp))
         Row(
             Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
                 .background(colors.bg).border(1.dp, colors.line, RoundedCornerShape(12.dp)).padding(3.dp),
         ) {
-            RoleTab("Send", role == "send", Modifier.weight(1f)) { role = "send" }
-            RoleTab("Receive", role == "receive", Modifier.weight(1f)) { role = "receive" }
+            SegTab("Send", role == "send", Modifier.weight(1f)) { role = "send" }
+            SegTab("Receive", role == "receive", Modifier.weight(1f)) { role = "receive" }
         }
 
-        // ---- path: the file to send (required), or where received files land ----
+        // ---- path: file to send (required) or where received files land ----
         Spacer(Modifier.height(14.dp))
         if (role == "send") {
             PathRow("FILE TO SEND", fileName ?: "Choose a file…", placeholder = fileName == null) {
@@ -185,14 +187,13 @@ fun NewTransferSheet(
             PathRow("SAVE TO", "Downloads / ${settings.saveFolder}", placeholder = false, onClick = null)
         }
 
-        Spacer(Modifier.height(16.dp))
         // ---- start ----
+        Spacer(Modifier.height(16.dp))
         Box(
             Modifier.fillMaxWidth().height(52.dp).clip(RoundedCornerShape(14.dp))
                 .background(colors.accent.copy(alpha = if (ready) 1f else 0.4f))
                 .clickable(enabled = ready) {
                     val c = code ?: return@clickable
-                    // Advertise our QR only when we initiated (not when joining a code).
                     val qr = if (joining) null else generated?.second
                     if (role == "send") onSend(c, useBroker, useRelay, fileUri!!, qr) else onReceive(c, useBroker, useRelay, qr)
                 },
@@ -204,22 +205,10 @@ fun NewTransferSheet(
             )
         }
     }
-
-    if (scanning) {
-        Dialog(
-            onDismissRequest = { scanning = false },
-            properties = DialogProperties(usePlatformDefaultWidth = false),
-        ) {
-            ScanScreen(
-                onResult = { scanning = false; applyScanned(it) },
-                onClose = { scanning = false },
-            )
-        }
-    }
 }
 
 @Composable
-private fun RoleTab(text: String, selected: Boolean, modifier: Modifier, onClick: () -> Unit) {
+private fun SegTab(text: String, selected: Boolean, modifier: Modifier, onClick: () -> Unit) {
     val colors = Envoix.colors
     Box(
         modifier.clip(RoundedCornerShape(9.dp))
@@ -232,16 +221,6 @@ private fun RoleTab(text: String, selected: Boolean, modifier: Modifier, onClick
             color = if (selected) Color.White else colors.muted,
             fontWeight = FontWeight.Bold, fontSize = 14.sp,
         )
-    }
-}
-
-@Composable
-private fun Divider(label: String) {
-    val colors = Envoix.colors
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Box(Modifier.weight(1f).height(1.dp).background(colors.line))
-        Text(label, color = colors.muted, fontSize = 12.sp)
-        Box(Modifier.weight(1f).height(1.dp).background(colors.line))
     }
 }
 

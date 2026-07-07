@@ -27,10 +27,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -44,14 +42,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -69,16 +62,17 @@ import com.google.zxing.common.HybridBinarizer
 import java.util.concurrent.Executors
 
 /**
- * Full-screen QR scanner: a live CameraX preview behind a styled viewfinder, plus
- * a "Choose from photos" fallback that decodes a QR out of an image (handy when
- * the code is on another screen). [onResult] fires once with the decoded text.
+ * Inline QR scanner: a live camera preview in a rounded, bracketed viewfinder,
+ * plus a "Choose from photos" fallback that decodes a QR from an image. Meant to
+ * sit *inside* another surface (the New-transfer sheet), not as a separate screen.
+ * [onScanned] fires once with the decoded text.
  */
 @Composable
-fun ScanScreen(onResult: (String) -> Unit, onClose: () -> Unit) {
+fun InlineScanner(onScanned: (String) -> Unit, modifier: Modifier = Modifier) {
     val colors = Envoix.colors
     val context = LocalContext.current
     var handled by remember { mutableStateOf(false) }
-    val deliver: (String) -> Unit = { if (!handled) { handled = true; onResult(it) } }
+    val deliver: (String) -> Unit = { if (!handled) { handled = true; onScanned(it) } }
 
     var hasCamera by remember {
         mutableStateOf(
@@ -96,58 +90,37 @@ fun ScanScreen(onResult: (String) -> Unit, onClose: () -> Unit) {
         if (uri != null) decodeQrFromUri(context, uri)?.let(deliver) ?: run { pickError = true }
     }
 
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
-        if (hasCamera) {
-            CameraPreview(onQr = deliver, modifier = Modifier.fillMaxSize())
-        } else {
-            Column(
-                Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                Text("Camera access is off", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(6.dp))
-                Text("Choose a QR image below instead", color = Color.White.copy(alpha = 0.6f), fontSize = 13.sp)
+    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        Box(
+            Modifier.fillMaxWidth().height(210.dp).clip(RoundedCornerShape(16.dp)).background(Color.Black),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (hasCamera) {
+                CameraPreview(onQr = deliver, modifier = Modifier.fillMaxSize())
+                CornerBrackets(colors.accent, Modifier.fillMaxSize())
+            } else {
+                Text(
+                    "Camera access is off —\nchoose a QR image below",
+                    color = Color.White.copy(alpha = 0.75f), fontSize = 13.sp,
+                    modifier = Modifier.padding(16.dp),
+                )
             }
         }
-
-        ViewfinderOverlay(accent = colors.accent, dim = hasCamera)
-
-        // top bar: close + title
+        Spacer(Modifier.height(10.dp))
+        Text(
+            if (pickError) "No QR code found in that image" else "Point at an Envoix QR code",
+            color = if (pickError) Color(0xFFE05B5B) else colors.muted, fontSize = 12.sp,
+        )
+        Spacer(Modifier.height(8.dp))
         Row(
-            Modifier.fillMaxWidth().padding(top = 18.dp, start = 12.dp, end = 12.dp),
+            Modifier.clip(RoundedCornerShape(20.dp)).background(colors.accentSoft)
+                .clickable { pickError = false; picker.launch("image/*") }
+                .padding(horizontal = 16.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(
-                Modifier.size(44.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.35f))
-                    .clickable(onClick = onClose),
-                contentAlignment = Alignment.Center,
-            ) { Icon(Icons.Default.Close, "Close", tint = Color.White) }
-            Spacer(Modifier.width(12.dp))
-            Text("Scan Envoix code", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-        }
-
-        // prompt + gallery button
-        Column(
-            Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(bottom = 46.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            Text(
-                if (pickError) "No QR code found in that image" else "Point at an Envoix QR code",
-                color = if (pickError) Color(0xFFFF7676) else Color.White.copy(alpha = 0.9f),
-                fontSize = 14.sp,
-            )
-            Spacer(Modifier.height(16.dp))
-            Row(
-                Modifier.clip(RoundedCornerShape(24.dp)).background(colors.accent)
-                    .clickable { pickError = false; picker.launch("image/*") }
-                    .padding(horizontal = 22.dp, vertical = 13.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(Icons.Default.Image, null, tint = Color.White, modifier = Modifier.size(20.dp))
-                Spacer(Modifier.width(9.dp))
-                Text("Choose from photos", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
-            }
+            Icon(Icons.Default.Image, null, tint = colors.accent, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(7.dp))
+            Text("Choose from photos", color = colors.accent, fontWeight = FontWeight.Bold, fontSize = 13.sp)
         }
     }
 }
@@ -222,41 +195,21 @@ private fun decodeQrFromUri(context: Context, uri: Uri): String? {
         .getOrNull()
 }
 
-/** Dark scrim with a rounded cut-out window and accent corner brackets. */
+/** Accent corner brackets hugging the viewfinder box. */
 @Composable
-private fun ViewfinderOverlay(accent: Color, dim: Boolean) {
-    Canvas(Modifier.fillMaxSize().graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)) {
-        val box = size.minDimension * 0.66f
-        val left = (size.width - box) / 2f
-        val top = (size.height - box) / 2f
-        val radius = 26.dp.toPx()
-        if (dim) {
-            drawRect(Color.Black.copy(alpha = 0.5f))
-            drawRoundRect(
-                color = Color.Black,
-                topLeft = Offset(left, top),
-                size = Size(box, box),
-                cornerRadius = CornerRadius(radius, radius),
-                blendMode = BlendMode.Clear,
-            )
-        }
-        // accent corner brackets, starting just past the rounded corners
-        val len = box * 0.16f
-        val sw = 4.dp.toPx()
-        val right = left + box
-        val bottom = top + box
-        fun l(a: Offset, b: Offset) = drawLine(accent, a, b, sw, StrokeCap.Round)
-        // top-left
-        l(Offset(left, top + radius), Offset(left, top + radius + len))
-        l(Offset(left + radius, top), Offset(left + radius + len, top))
-        // top-right
-        l(Offset(right, top + radius), Offset(right, top + radius + len))
-        l(Offset(right - radius, top), Offset(right - radius - len, top))
-        // bottom-left
-        l(Offset(left, bottom - radius), Offset(left, bottom - radius - len))
-        l(Offset(left + radius, bottom), Offset(left + radius + len, bottom))
-        // bottom-right
-        l(Offset(right, bottom - radius), Offset(right, bottom - radius - len))
-        l(Offset(right - radius, bottom), Offset(right - radius - len, bottom))
+private fun CornerBrackets(accent: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        val inset = 14.dp.toPx()
+        val len = size.minDimension * 0.14f
+        val sw = 3.5.dp.toPx()
+        val l = inset
+        val t = inset
+        val r = size.width - inset
+        val b = size.height - inset
+        fun line(a: Offset, c: Offset) = drawLine(accent, a, c, sw, StrokeCap.Round)
+        line(Offset(l, t), Offset(l + len, t)); line(Offset(l, t), Offset(l, t + len))
+        line(Offset(r, t), Offset(r - len, t)); line(Offset(r, t), Offset(r, t + len))
+        line(Offset(l, b), Offset(l + len, b)); line(Offset(l, b), Offset(l, b - len))
+        line(Offset(r, b), Offset(r - len, b)); line(Offset(r, b), Offset(r, b - len))
     }
 }
