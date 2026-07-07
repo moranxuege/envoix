@@ -81,7 +81,7 @@ import kotlin.math.roundToInt
 fun HomeScreen(
     transfers: List<Transfer>,
     onReceive: (code: String, broker: String, relay: String) -> Unit,
-    onSend: (code: String, broker: String, relay: String) -> Unit,
+    onSend: (code: String, broker: String, relay: String, file: android.net.Uri) -> Unit,
     onPauseResume: (Long) -> Unit,
     onCancel: (Long) -> Unit,
     onRemove: (Long) -> Unit,
@@ -147,7 +147,7 @@ fun HomeScreen(
         ) {
             NewTransferSheet(
                 onReceive = { c, b, r -> sheetOpen = false; onReceive(c, b, r) },
-                onSend = { c, b, r -> sheetOpen = false; onSend(c, b, r) },
+                onSend = { c, b, r, uri -> sheetOpen = false; onSend(c, b, r, uri) },
             )
         }
     }

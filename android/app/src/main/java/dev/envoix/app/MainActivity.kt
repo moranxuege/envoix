@@ -31,18 +31,6 @@ private enum class Screen { Home, Logs, Settings }
 class MainActivity : ComponentActivity() {
 
     private val vm: TransferViewModel by viewModels()
-    private var pendingSend: Triple<String, String, String>? = null // code, broker, relay
-
-    private val pickFile =
-        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-            val send = pendingSend ?: return@registerForActivityResult
-            pendingSend = null
-            if (uri == null) return@registerForActivityResult
-            lifecycleScope.launch {
-                val path = withContext(Dispatchers.IO) { copyToCache(uri) }
-                if (path != null) vm.startSend(send.first, path, send.second, send.third)
-            }
-        }
 
     private val requestNotif =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
@@ -64,9 +52,11 @@ class MainActivity : ComponentActivity() {
                         HomeScreen(
                             transfers = transfers,
                             onReceive = { c, b, r -> vm.startReceive(c, b, r) },
-                            onSend = { c, b, r ->
-                                pendingSend = Triple(c, b, r)
-                                pickFile.launch(arrayOf("*/*"))
+                            onSend = { c, b, r, uri ->
+                                lifecycleScope.launch {
+                                    val path = withContext(Dispatchers.IO) { copyToCache(uri) }
+                                    if (path != null) vm.startSend(c, path, b, r)
+                                }
                             },
                             onPauseResume = { vm.pauseResume(it) },
                             onCancel = { vm.cancel(it) },
