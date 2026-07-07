@@ -36,6 +36,7 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Pause
@@ -388,13 +389,25 @@ private fun WaitingBody(t: Transfer, onCancel: (Long) -> Unit) {
             QrCode(t.qrPayload!!, 172.dp)
         }
         Spacer(Modifier.height(10.dp))
-        Text(
-            t.room,
-            color = colors.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
-            fontFamily = FontFamily.Monospace,
-            modifier = Modifier.fillMaxWidth(),
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-        )
+        val clip = LocalClipboardManager.current
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                t.room,
+                color = colors.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+                fontFamily = FontFamily.Monospace,
+            )
+            Spacer(Modifier.width(8.dp))
+            Icon(
+                Icons.Default.ContentCopy, "Copy code",
+                tint = colors.muted,
+                modifier = Modifier.size(18.dp).clip(CircleShape)
+                    .clickable { clip.setText(AnnotatedString(t.room)) },
+            )
+        }
         Spacer(Modifier.height(2.dp))
         Text(
             "Scan or enter this code",
