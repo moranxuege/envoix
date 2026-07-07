@@ -223,7 +223,8 @@ class TransferService : Service() {
         val name = t.fileName ?: return
         val src = File(outputDir, name)
         if (!src.exists()) return
-        val uri = MediaStoreSaver.saveToDownloads(this, src, name, SettingsStore.settings.value.saveFolder)
+        val s = SettingsStore.settings.value
+        val uri = MediaStoreSaver.saveReceived(this, src, name, s.saveTreeUri, s.saveFolder)
         if (uri != null) {
             src.delete()
             TransferRepository.update(id) { it.copy(savedUri = uri.toString()) }

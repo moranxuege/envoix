@@ -83,6 +83,9 @@ fun NewTransferSheet(
             fileName = displayName(context, uri)
         }
     }
+    val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) SettingsStore.setSaveTree(context, uri)
+    }
     val joining = typed.isNotBlank()
 
     // (Re)generate our own code whenever the role changes and we're not joining.
@@ -184,7 +187,9 @@ fun NewTransferSheet(
                 filePicker.launch(arrayOf("*/*"))
             }
         } else {
-            PathRow("SAVE TO", "Downloads / ${settings.saveFolder}", placeholder = false, onClick = null)
+            PathRow("SAVE TO", SettingsStore.saveLabel(context), placeholder = false) {
+                folderPicker.launch(null)
+            }
         }
 
         // ---- start ----

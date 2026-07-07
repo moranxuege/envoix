@@ -24,6 +24,8 @@ data class Settings(
     val candidatesDeny: List<String> = emptyList(),
     // native app prefs (seed per-transfer choices)
     val saveFolder: String = "Envoix",
+    /** A user-picked SAF folder for received files; empty = default Downloads/[saveFolder]. */
+    val saveTreeUri: String = "",
     val defaultRole: String = "receive",
     // rendezvous modes to attempt, in order Room → mDNS (fall back on failure)
     val useRoom: Boolean = true,
@@ -53,6 +55,7 @@ object SettingsStore {
             candidatesAllow = readList("candidatesAllow"),
             candidatesDeny = readList("candidatesDeny"),
             saveFolder = prefs.getString("saveFolder", "Envoix")!!,
+            saveTreeUri = prefs.getString("saveTreeUri", "")!!,
             defaultRole = prefs.getString("defaultRole", "receive")!!,
             useRoom = prefs.getBoolean("useRoom", true),
             useMdns = prefs.getBoolean("useMdns", true),
@@ -74,6 +77,7 @@ object SettingsStore {
             .putString("candidatesAllow", s.candidatesAllow.joinToString("\n"))
             .putString("candidatesDeny", s.candidatesDeny.joinToString("\n"))
             .putString("saveFolder", s.saveFolder)
+            .putString("saveTreeUri", s.saveTreeUri)
             .putString("defaultRole", s.defaultRole)
             .putBoolean("useRoom", s.useRoom)
             .putBoolean("useMdns", s.useMdns)
@@ -90,6 +94,35 @@ object SettingsStore {
     /** Push the current verbosity down to the native reloadable filter. */
     fun applyLogLevel() =
         Native.setLogLevel(if (_settings.value.verboseLog) LOG_VERBOSE else LOG_BASELINE)
+
+    /** Where received files go, for display: the picked SAF folder's name, else Downloads/<folder>. */
+    fun saveLabel(context: Context): String {
+        val s = _settings.value
+        if (s.saveTreeUri.isNotBlank()) {
+            val name = runCatching {
+                androidx.documentfile.provider.DocumentFile
+                    .fromTreeUri(context, android.net.Uri.parse(s.saveTreeUri))?.name
+            }.getOrNull()
+            if (!name.isNullOrBlank()) return name
+        }
+        return "Downloads / ${s.saveFolder}"
+    }
+
+    /** Persist a SAF folder pick with a durable permission grant; null clears it. */
+    fun setSaveTree(context: Context, uri: android.net.Uri?) {
+        if (uri == null) {
+            update { it.copy(saveTreeUri = "") }
+            return
+        }
+        runCatching {
+            context.contentResolver.takePersistableUriPermission(
+                uri,
+                android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+            )
+        }
+        update { it.copy(saveTreeUri = uri.toString()) }
+    }
 
     /** The "Avoid Tailscale" toggle is a *view* over `deny`: on iff the ranges are present. */
     fun avoidsTailscale(s: Settings): Boolean = s.candidatesDeny.containsAll(TAILSCALE_CIDRS)

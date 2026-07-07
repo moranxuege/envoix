@@ -5,14 +5,42 @@ import android.content.Context
 import android.net.Uri
 import android.os.Environment
 import android.provider.MediaStore
+import androidx.documentfile.provider.DocumentFile
 import java.io.File
 
 /**
- * Publishes a received file into the public Downloads/Envoix folder via
- * MediaStore, so it is reachable from any file manager (no storage permission
- * needed on Android 10+). Returns the content Uri, or null on failure.
+ * Publishes a received file. By default it goes into the public Downloads/<folder>
+ * via MediaStore (no storage permission on Android 10+). If the user picked a
+ * folder via SAF, it goes there instead. Returns the content Uri, or null.
  */
 object MediaStoreSaver {
+    /** SAF folder ([treeUri]) if set, else Downloads/[folder] via MediaStore. */
+    fun saveReceived(
+        context: Context,
+        source: File,
+        displayName: String,
+        treeUri: String,
+        folder: String,
+    ): Uri? = treeUri.takeIf { it.isNotBlank() }
+        ?.let { saveToTree(context, source, displayName, Uri.parse(it)) }
+        ?: saveToDownloads(context, source, displayName, folder)
+
+    /** Save into a user-picked SAF tree via DocumentFile; null on failure. */
+    private fun saveToTree(context: Context, source: File, displayName: String, treeUri: Uri): Uri? {
+        val tree = DocumentFile.fromTreeUri(context, treeUri)?.takeIf { it.canWrite() } ?: return null
+        tree.findFile(displayName)?.delete() // overwrite a same-named file
+        val doc = tree.createFile("application/octet-stream", displayName) ?: return null
+        return runCatching {
+            context.contentResolver.openOutputStream(doc.uri)!!.use { out ->
+                source.inputStream().use { it.copyTo(out) }
+            }
+            doc.uri
+        }.getOrElse {
+            doc.delete()
+            null
+        }
+    }
+
     fun saveToDownloads(context: Context, source: File, displayName: String, folder: String): Uri? {
         val resolver = context.contentResolver
         val sub = folder.trim().ifBlank { "Envoix" }

@@ -41,8 +41,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.platform.LocalContext
 import dev.envoix.app.SettingsStore
 
 @Composable
@@ -54,7 +58,10 @@ fun SettingsScreen(onBack: () -> Unit) {
     var broker by remember { mutableStateOf(settings.broker) }
     var relay by remember { mutableStateOf(settings.relay) }
     var chunkSize by remember { mutableStateOf(settings.chunkSize) }
-    var saveFolder by remember { mutableStateOf(settings.saveFolder) }
+    val context = LocalContext.current
+    val folderPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree(),
+    ) { uri -> if (uri != null) SettingsStore.setSaveTree(context, uri) }
     var allowText by remember { mutableStateOf(settings.candidatesAllow.joinToString("\n")) }
     var denyText by remember { mutableStateOf(settings.candidatesDeny.joinToString("\n")) }
     var logServer by remember { mutableStateOf(settings.logServer) }
@@ -95,9 +102,12 @@ fun SettingsScreen(onBack: () -> Unit) {
         }
 
         SectionLabel("BASIC")
-        Field("Save to · folder in Downloads", saveFolder) {
-            saveFolder = it; SettingsStore.update { s -> s.copy(saveFolder = it) }
-        }
+        FolderPickerRow(
+            label = SettingsStore.saveLabel(context),
+            custom = settings.saveTreeUri.isNotBlank(),
+            onPick = { folderPicker.launch(null) },
+            onReset = { SettingsStore.setSaveTree(context, null) },
+        )
         Spacer(Modifier.height(18.dp))
         LabeledControl("Default role for a new code") {
             RoleToggle(settings.defaultRole) { SettingsStore.update { s -> s.copy(defaultRole = it) } }
@@ -184,6 +194,39 @@ private fun SectionLabel(text: String) {
         letterSpacing = 1.1.sp,
         modifier = Modifier.padding(bottom = 10.dp),
     )
+}
+
+@Composable
+private fun FolderPickerRow(label: String, custom: Boolean, onPick: () -> Unit, onReset: () -> Unit) {
+    val colors = Envoix.colors
+    Text(
+        "SAVE RECEIVED FILES TO",
+        color = colors.muted, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp,
+    )
+    Spacer(Modifier.height(6.dp))
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+            .border(1.dp, colors.line, RoundedCornerShape(12.dp))
+            .clickable(onClick = onPick).padding(horizontal = 14.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text(
+            label, color = colors.text, fontSize = 14.sp, fontFamily = FontFamily.Monospace,
+            maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false),
+        )
+        Spacer(Modifier.width(10.dp))
+        Text("Change", color = colors.accent, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+    }
+    if (custom) {
+        Spacer(Modifier.height(6.dp))
+        Text(
+            "Reset to Downloads",
+            color = colors.accent, fontSize = 12.sp,
+            modifier = Modifier.clip(RoundedCornerShape(6.dp)).clickable(onClick = onReset)
+                .padding(vertical = 3.dp, horizontal = 4.dp),
+        )
+    }
 }
 
 @Composable
