@@ -4,7 +4,7 @@ struct ReceiveView: View {
     @Environment(\.appLanguage) private var uiLanguage
     @EnvironmentObject private var model: AppModel
     @ObservedObject var viewModel: TransferViewModel
-    // Remembered across launches. Empty means "use the Downloads default".
+    // Remembered across launches. Empty means "use the platform default".
     @AppStorage("envoix.outputDir") private var outputDirPath: String = ""
     @AppStorage("envoix.token") private var token: String = ""
     @AppStorage("envoix.concurrentTransfers") private var concurrentTransfers = true
@@ -21,58 +21,95 @@ struct ReceiveView: View {
         _mode = State(initialValue: initialMode)
     }
 
-    /// Defaults to ~/Downloads until the user explicitly picks another folder.
+    /// Defaults to ~/Downloads on macOS and the app Documents directory on iOS.
     private var outputDir: URL {
         if !outputDirPath.isEmpty { return URL(fileURLWithPath: outputDirPath) }
+        #if os(iOS)
+        return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        #else
         return FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser
+        #endif
     }
 
     var body: some View {
+        #if os(iOS)
         VStack(spacing: 0) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    outputSection
-                    modeSelector
+            scrollContent
+        }
+        .safeAreaInset(edge: .bottom) { bottomActionBar }
+        #else
+        VStack(spacing: 0) {
+            scrollContent
+            footerMessage
+            primaryButton
+                .padding(.top, 12)
+        }
+        #endif
+    }
 
-                    if mode == .invite {
-                        inviteSection
-                    } else if mode == .room {
-                        roomSection
-                    } else {
-                        TokenField(token: $token, disabled: viewModel.isBusy)
-                            .card(padding: 14)
-                    }
+    private var scrollContent: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                outputSection
+                modeSelector
 
-                    if !viewModel.peerAddress.isEmpty {
-                        addressReveal
-                    }
-
-                    TransferStatusView(viewModel: viewModel)
+                if mode == .invite {
+                    inviteSection
+                } else if mode == .room {
+                    roomSection
+                } else {
+                    TokenField(token: $token, disabled: viewModel.isBusy)
+                        .card(padding: 14)
                 }
-                .padding(.vertical, 12)
-            }
 
-            if concurrencyBlocked {
-                Text(AppText.value("Finish sending before starting a receive.", "请先完成发送任务，再开始接收。", language: uiLanguage))
-                    .font(.callout)
-                    .foregroundStyle(Theme.muted)
-                    .padding(.bottom, 8)
-            }
+                if !viewModel.peerAddress.isEmpty {
+                    addressReveal
+                }
 
-            Button(action: primaryAction) {
-                Label(primaryLabel, systemImage: viewModel.isBusy ? "xmark" : "tray.and.arrow.down")
-                    .frame(maxWidth: .infinity, minHeight: 44)
-                    .contentShape(Rectangle())
+                TransferStatusView(viewModel: viewModel)
             }
-            .keyboardShortcut(.defaultAction)
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .tint(viewModel.isBusy ? Theme.warning : Theme.accent)
-            .disabled((!canStart || concurrencyBlocked) && !viewModel.isBusy)
-            .padding(.top, 12)
+            .padding(.vertical, 12)
+            #if os(iOS)
+            .padding(.bottom, 88)
+            #endif
         }
     }
+
+    @ViewBuilder private var footerMessage: some View {
+        if concurrencyBlocked {
+            Text(AppText.value("Finish sending before starting a receive.", "请先完成发送任务，再开始接收。", language: uiLanguage))
+                .font(.callout)
+                .foregroundStyle(Theme.muted)
+                .padding(.bottom, 8)
+        }
+    }
+
+    private var primaryButton: some View {
+        Button(action: primaryAction) {
+            Label(primaryLabel, systemImage: viewModel.isBusy ? "xmark" : "tray.and.arrow.down")
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .keyboardShortcut(.defaultAction)
+        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+        .tint(viewModel.isBusy ? Theme.warning : Theme.accent)
+        .disabled((!canStart || concurrencyBlocked) && !viewModel.isBusy)
+    }
+
+    #if os(iOS)
+    private var bottomActionBar: some View {
+        VStack(spacing: 8) {
+            footerMessage
+            primaryButton
+        }
+        .padding(.top, 10)
+        .padding(.bottom, 8)
+        .background(.regularMaterial)
+    }
+    #endif
 
     private var modeSelector: some View {
         PairingModeSelector(selection: $mode, role: .receive, disabled: viewModel.isBusy)
@@ -84,6 +121,7 @@ struct ReceiveView: View {
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(Theme.muted)
             LinkRow(text: outputDir.path) {
+                #if os(macOS)
                 Button {
                     if let url = chooseURL(directory: true) { outputDirPath = url.path }
                 } label: {
@@ -92,6 +130,11 @@ struct ReceiveView: View {
                         .contentShape(Rectangle())
                 }
                 .disabled(viewModel.isBusy)
+                #else
+                Text(AppText.value("App Documents", "App 文档目录", language: uiLanguage))
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(Theme.muted)
+                #endif
             }
         }
         .card(padding: 14)
@@ -174,7 +217,7 @@ struct ReceiveView: View {
                 Text(AppText.value("Share this code with the sender", "把这个码分享给发送方", language: uiLanguage))
                     .font(.title2.weight(.semibold))
                     .foregroundStyle(Theme.text)
-                Text(AppText.value("1. Copy this code to the sending Mac.\n2. Click Start Receiving and keep this screen open.", "1. 把这个码复制到发送端 Mac。\n2. 点击开始接收，并保持此界面打开。", language: uiLanguage))
+                Text(AppText.value("1. Copy this code to the sending device.\n2. Click Start Receiving and keep this screen open.", "1. 把这个码复制到发送端设备。\n2. 点击开始接收，并保持此界面打开。", language: uiLanguage))
                     .font(.body)
                     .foregroundStyle(Theme.muted)
                     .fixedSize(horizontal: false, vertical: true)

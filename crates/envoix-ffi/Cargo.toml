@@ -6,7 +6,7 @@ license.workspace = true
 
 [lib]
 name = "envoix_ffi"
-crate-type = ["lib", "staticlib", "cdylib"]
+crate-type = ["lib", "staticlib"]
 
 [dependencies]
 envoix-client.workspace = true

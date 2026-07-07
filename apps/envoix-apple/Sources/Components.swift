@@ -1,5 +1,9 @@
 import SwiftUI
+#if os(macOS)
 import AppKit
+#elseif os(iOS)
+import UIKit
+#endif
 
 // MARK: - Card
 
@@ -88,12 +92,92 @@ struct PairingModeSelector: View {
     var disabled: Bool
 
     var body: some View {
+        #if os(iOS)
+        mobileBody
+        #else
+        desktopBody
+        #endif
+    }
+
+    private var desktopBody: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(AppText.value("Pairing method", "配对方式", language: language))
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(Theme.muted)
 
             HStack(spacing: 10) {
+                pairingOptions
+            }
+        }
+        .card(padding: 14)
+        .disabled(disabled)
+    }
+
+    #if os(iOS)
+    private var mobileBody: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(AppText.value("Pairing", "配对", language: language))
+                .font(.headline.weight(.semibold))
+                .foregroundStyle(Theme.muted)
+
+            HStack(spacing: 8) {
+                mobileOption(.room, title: AppText.value("Code", "码", language: language), systemImage: "number")
+                mobileOption(.invite, title: AppText.value("Link", "链接", language: language), systemImage: "qrcode")
+                mobileOption(.token, title: AppText.value("Token", "口令", language: language), systemImage: "key")
+            }
+
+            Text(selectedHint)
+                .font(.footnote)
+                .foregroundStyle(Theme.muted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .card(padding: 12)
+        .disabled(disabled)
+    }
+
+    private func mobileOption(_ mode: PairingMode, title: String, systemImage: String) -> some View {
+        let selected = selection == mode
+        return Button {
+            selection = mode
+        } label: {
+            VStack(spacing: 4) {
+                Image(systemName: systemImage)
+                    .font(.headline.weight(.semibold))
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+            .frame(maxWidth: .infinity, minHeight: 50)
+            .foregroundStyle(selected ? Theme.accentStrong : Theme.muted)
+            .background(selected ? Theme.accentSoft : Theme.surface)
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.cardRadius)
+                    .strokeBorder(selected ? Theme.accent.opacity(0.55) : Theme.line.opacity(0.75), lineWidth: selected ? 1.2 : 0.8)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
+            .contentShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var selectedHint: String {
+        switch selection {
+        case .room:
+            return role == .receive
+                ? AppText.value("Show a short code on this device.", "在本机显示短码。", language: language)
+                : AppText.value("Enter the receiver's short code.", "输入接收端短码。", language: language)
+        case .invite:
+            return role == .receive
+                ? AppText.value("Create a link or QR invite.", "创建链接或二维码邀请。", language: language)
+                : AppText.value("Paste the receiver's invite.", "粘贴接收端邀请。", language: language)
+        case .token:
+            return AppText.value("Same network only. Hotspots may block discovery.", "仅适合同一局域网；热点可能阻止发现。", language: language)
+        }
+    }
+    #endif
+
+    @ViewBuilder private var pairingOptions: some View {
                 option(
                     mode: .room,
                     title: role == .receive
@@ -120,10 +204,6 @@ struct PairingModeSelector: View {
                     subtitle: AppText.value("Both devices use the same saved token on the same network.", "两台设备在同一网络中使用同一个已保存口令。", language: language),
                     systemImage: "key"
                 )
-            }
-        }
-        .card(padding: 14)
-        .disabled(disabled)
     }
 
     private func option(
@@ -249,11 +329,11 @@ struct LinkRow<Trailing: View>: View {
 
 /// White, bordered card framing a QR image (white in both themes, by design).
 struct QRCard: View {
-    var image: NSImage
+    var image: PlatformImage
     var size: CGFloat = 184
 
     var body: some View {
-        Image(nsImage: image)
+        platformImage
             .interpolation(.none)
             .resizable()
             .frame(width: size, height: size)
@@ -264,6 +344,14 @@ struct QRCard: View {
                     .strokeBorder(Theme.line.opacity(0.75), lineWidth: 0.8)
             )
             .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
+    }
+
+    private var platformImage: Image {
+        #if os(macOS)
+        Image(nsImage: image)
+        #elseif os(iOS)
+        Image(uiImage: image)
+        #endif
     }
 }
 
@@ -279,6 +367,15 @@ struct RailButton: View {
     @State private var isHovering = false
 
     var body: some View {
+        #if os(macOS)
+        content
+            .onHover { isHovering = $0 }
+        #else
+        content
+        #endif
+    }
+
+    private var content: some View {
         Button(action: action) {
             HStack(spacing: 10) {
                 RoundedRectangle(cornerRadius: 2)
@@ -321,7 +418,6 @@ struct RailButton: View {
         )
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .contentShape(RoundedRectangle(cornerRadius: 10))
-        .onHover { isHovering = $0 }
     }
 }
 

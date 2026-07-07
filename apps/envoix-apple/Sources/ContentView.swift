@@ -34,6 +34,17 @@ struct ContentView: View {
         ZStack {
             Theme.bg.ignoresSafeArea()
 
+            #if os(iOS)
+            mobileContent
+            #else
+            desktopContent
+            #endif
+        }
+        .toastHost()
+        .preferredColorScheme(appearance.colorScheme)
+    }
+
+    private var desktopContent: some View {
             HStack(spacing: 0) {
                 stageRail
 
@@ -47,10 +58,28 @@ struct ContentView: View {
             }
             .frame(minWidth: 760, idealWidth: 920, minHeight: 620, idealHeight: 680)
             .background(Theme.surface)
-        }
-        .toastHost()
-        .preferredColorScheme(appearance.colorScheme)
     }
+
+    #if os(iOS)
+    private var mobileContent: some View {
+        TabView(selection: $stage) {
+            ForEach(AppStage.allCases, id: \.self) { item in
+                NavigationStack {
+                    stageContent(for: item)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        .padding(.horizontal, 16)
+                        .background(Theme.surface)
+                        .navigationTitle(item.title(language: language))
+                        .navigationBarTitleDisplayMode(.inline)
+                }
+                .tabItem {
+                    Label(item.title(language: language), systemImage: item.icon)
+                }
+                .tag(item)
+            }
+        }
+    }
+    #endif
 
     private var stageRail: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -117,7 +146,7 @@ struct ContentView: View {
     private var desktopToolbar: some View {
         HStack(alignment: .top, spacing: 16) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(AppText.value("macOS Pairing", "macOS 配对", language: language))
+                Text(AppText.value(platformPairingTitle, platformPairingTitleZh, language: language))
                     .font(.title3.weight(.semibold))
                     .foregroundStyle(Theme.accentStrong)
                 Text(stageTitle)
@@ -131,6 +160,10 @@ struct ContentView: View {
     }
 
     @ViewBuilder private var stageContent: some View {
+        stageContent(for: stage)
+    }
+
+    @ViewBuilder private func stageContent(for stage: AppStage) -> some View {
         switch stage {
         case .sender:
             SendView(viewModel: model.send)
@@ -141,6 +174,22 @@ struct ContentView: View {
         case .settings:
             SettingsStageView()
         }
+    }
+
+    private var platformPairingTitle: String {
+        #if os(iOS)
+        return "iPhone Pairing"
+        #else
+        return "macOS Pairing"
+        #endif
+    }
+
+    private var platformPairingTitleZh: String {
+        #if os(iOS)
+        return "iPhone 配对"
+        #else
+        return "macOS 配对"
+        #endif
     }
 
     private var stageTitle: String {

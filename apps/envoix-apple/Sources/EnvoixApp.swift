@@ -6,10 +6,9 @@ struct EnvoixApp: App {
     @AppStorage("envoix.language") private var language = "en"
 
     var body: some Scene {
+        #if os(macOS)
         WindowGroup(id: "main") {
-            ContentView()
-                .environmentObject(model)
-                .environment(\.appLanguage, language)
+            rootView
         }
         .windowResizability(.contentMinSize)
         .defaultSize(width: 980, height: 720)
@@ -25,5 +24,16 @@ struct EnvoixApp: App {
                                               : "arrow.up.arrow.down.circle")
         }
         .menuBarExtraStyle(.window)
+        #else
+        WindowGroup {
+            rootView
+        }
+        #endif
+    }
+
+    private var rootView: some View {
+        ContentView()
+            .environmentObject(model)
+            .environment(\.appLanguage, language)
     }
 }

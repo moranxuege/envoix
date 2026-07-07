@@ -10,12 +10,16 @@ use tokio::sync::oneshot;
 
 use crate::RendezvousError;
 use crate::peer::PeerConn;
-use crate::protocol::{Join, Paired, Role};
+use crate::protocol::{Join, Paired, Reply, Role};
 
 /// How long a first peer waits in a room for its partner.
 const DEFAULT_ROOM_TTL: Duration = Duration::from_secs(300);
 /// Hard cap on a single relay session, so a stalled peer can't pin resources.
 const RELAY_TTL: Duration = Duration::from_secs(120);
+/// Cap on the wait for a peer's first control frame (its Join). A peer that
+/// connects and opens a stream but never sends Join is not in any room, so the
+/// room TTL cannot reclaim it - without this it would pin a connection slot.
+const JOIN_TIMEOUT: Duration = Duration::from_secs(10);
 /// Grace period to wait for peers to close after relaying, so buffered data is
 /// delivered before the transports are dropped.
 const CLOSE_GRACE: Duration = Duration::from_secs(10);
@@ -65,11 +69,17 @@ impl RoomRegistry {
     /// relay between them. The first peer's task returns once the second takes
     /// over the relay; the second peer's task drives it.
     pub async fn serve(&self, mut conn: PeerConn) -> Result<(), RendezvousError> {
-        let Join { room_id } = conn.read_control().await?;
+        let Join { room_id } = tokio::time::timeout(JOIN_TIMEOUT, conn.read_control())
+            .await
+            .map_err(|_| RendezvousError::Rejected("no join received within timeout"))??;
         if room_id.is_empty() || room_id.len() > MAX_ROOM_ID_LEN {
             return Err(RendezvousError::Rejected("room id length out of range"));
         }
-        tracing::debug!(room = %room_id, "join");
+        // Record the room id onto the ambient connection span (set up by the
+        // transport layer), so every event below - and the peer-address line the
+        // transport emits asynchronously - correlates by room without repeating it.
+        tracing::Span::current().record("room", tracing::field::display(&room_id));
+        tracing::info!("joined");
 
         // Decide under the lock (no await held), then act once it's released, so
         // two peers arriving at once can't both park and miss each other.
@@ -96,7 +106,7 @@ impl RoomRegistry {
                             id,
                         },
                     );
-                    tracing::debug!(room = %room_id, id, "parked (waiting for partner)");
+                    tracing::debug!(id, "parked (waiting for partner)");
                     Decision::Parked(ready_rx, id)
                 }
             }
@@ -105,7 +115,7 @@ impl RoomRegistry {
         match decision {
             // We are the second peer; release the first's task and run the relay.
             Decision::Matched(first, conn) => {
-                tracing::debug!(room = %room_id, "matched two peers");
+                tracing::info!("matched two peers");
                 let _ = first.ready.send(());
                 run_pair(first.conn, conn).await
             }
@@ -116,17 +126,31 @@ impl RoomRegistry {
                     Err(_) => {
                         // Only drop our own waiter: a concurrent match + re-park can
                         // have replaced us with a newer waiter under the same room id.
-                        let mut waiting = self.waiting.lock().expect("registry mutex");
-                        if waiting.get(&room_id).is_some_and(|w| w.id == id) {
-                            waiting.remove(&room_id);
+                        let expired = {
+                            let mut waiting = self.waiting.lock().expect("registry mutex");
+                            if waiting.get(&room_id).is_some_and(|w| w.id == id) {
+                                waiting.remove(&room_id)
+                            } else {
+                                None
+                            }
+                        };
+                        if let Some(mut waiter) = expired {
+                            // Tell the parked peer *why* we are closing, so it can
+                            // report "no peer joined" instead of a bare connection
+                            // drop. Best-effort: if it is lost the peer falls back
+                            // to the connection-closed path.
+                            let _ = waiter.conn.write_control(&Reply::Expired).await;
+                            let (mut writer, _reader, close) = waiter.conn.into_parts();
+                            let _ = writer.shutdown().await;
+                            let _ = tokio::time::timeout(CLOSE_GRACE, close.wait_closed()).await;
                         }
-                        tracing::debug!(room = %room_id, id, "expired (no partner within ttl)");
+                        tracing::info!(id, "expired (no partner within ttl)");
                         Err(RendezvousError::Expired)
                     }
                 }
             }
             Decision::Rejected(reason) => {
-                tracing::debug!(room = %room_id, reason, "rejected");
+                tracing::warn!(reason, "rejected");
                 Err(RendezvousError::Rejected(reason))
             }
         }
@@ -148,16 +172,16 @@ async fn run_pair(initiator: PeerConn, responder: PeerConn) -> Result<(), Rendez
 
     crate::io::write_framed(
         &mut iw,
-        &Paired {
+        &Reply::Paired(Paired {
             role: Role::Initiator,
-        },
+        }),
     )
     .await?;
     crate::io::write_framed(
         &mut rw,
-        &Paired {
+        &Reply::Paired(Paired {
             role: Role::Responder,
-        },
+        }),
     )
     .await?;
 

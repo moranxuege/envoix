@@ -6,7 +6,7 @@
 //! only place that knows about iroh.
 
 use std::future::Future;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -14,8 +14,10 @@ use anyhow::{Context, Result};
 use iroh::endpoint::{Connection, Incoming, RecvStream, RelayMode, SendStream, presets};
 use iroh::{Endpoint, EndpointAddr, RelayMap, RelayUrl, SecretKey, TransportAddr};
 
+use tracing::Instrument;
+
 use envoix_rendezvous::{
-    CloseWaiter, Join, Paired, PeerConn, Role, RoomRegistry, read_framed, write_framed,
+    CloseWaiter, Join, PeerConn, Reply, Role, RoomRegistry, read_framed, write_framed,
 };
 
 mod code;
@@ -56,6 +58,15 @@ impl CloseWaiter for IrohClose {
 
 /// ALPN for the rendezvous protocol (distinct from the data-plane `envoix/1`).
 pub const RENDEZVOUS_ALPN: &[u8] = b"envoix-rendezvous/1";
+
+/// Reason string the broker signals (and `join_room` returns) when a room's
+/// wait window elapses with no partner - distinct from a network failure.
+pub const ROOM_EXPIRED: &str = "no peer joined the room within the wait window";
+
+/// Optionally annotates a peer IP with a human location/ISP string for logs
+/// (e.g. a GeoIP lookup). Supplied by the operator binary so this crate needs
+/// no geo-database dependency.
+pub type PeerLocator = Arc<dyn Fn(IpAddr) -> Option<String> + Send + Sync>;
 
 /// Bind an iroh endpoint that speaks the rendezvous ALPN. Pass
 /// [`RelayMode::Disabled`] for LAN/direct, or a custom relay mode (see
@@ -102,9 +113,17 @@ pub fn endpoint_addr(endpoint: &Endpoint) -> EndpointAddr {
 /// Cap on connections served at once, so a flood cannot exhaust the broker.
 const MAX_CONCURRENT_CONNECTIONS: usize = 256;
 
+/// Cap on a fresh connection's handshake + pairing-stream open before Join, so a
+/// half-open idle connection cannot hold a connection slot indefinitely.
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Accept pairing connections forever, serving each through `registry`, up to
 /// MAX_CONCURRENT_CONNECTIONS at a time (excess incoming connections are dropped).
-pub async fn serve_endpoint(endpoint: Endpoint, registry: Arc<RoomRegistry>) -> Result<()> {
+pub async fn serve_endpoint(
+    endpoint: Endpoint,
+    registry: Arc<RoomRegistry>,
+    locate: Option<PeerLocator>,
+) -> Result<()> {
     let limit = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
     while let Some(incoming) = endpoint.accept().await {
         let Ok(permit) = limit.clone().try_acquire_owned() else {
@@ -112,9 +131,10 @@ pub async fn serve_endpoint(endpoint: Endpoint, registry: Arc<RoomRegistry>) -> 
             continue;
         };
         let registry = registry.clone();
+        let locate = locate.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            if let Err(error) = serve_incoming(incoming, &registry).await {
+            if let Err(error) = serve_incoming(incoming, &registry, locate.as_ref()).await {
                 tracing::debug!(%error, "rendezvous connection ended");
             }
         });
@@ -122,14 +142,84 @@ pub async fn serve_endpoint(endpoint: Endpoint, registry: Arc<RoomRegistry>) -> 
     Ok(())
 }
 
-async fn serve_incoming(incoming: Incoming, registry: &RoomRegistry) -> Result<()> {
-    let connection = incoming.await?;
-    let (send, recv) = connection.accept_bi().await?;
+async fn serve_incoming(
+    incoming: Incoming,
+    registry: &RoomRegistry,
+    locate: Option<&PeerLocator>,
+) -> Result<()> {
+    // Bound the pre-Join setup so a connection that half-opens and then goes idle
+    // cannot pin a connection slot; the registry separately bounds the first
+    // control-frame read.
+    let connection = tokio::time::timeout(HANDSHAKE_TIMEOUT, incoming)
+        .await
+        .context("rendezvous connection handshake timed out")??;
+    let (send, recv) = tokio::time::timeout(HANDSHAKE_TIMEOUT, connection.accept_bi())
+        .await
+        .context("rendezvous pairing stream not opened in time")??;
+    // Correlation span for this connection. `room` is filled in by the broker
+    // once it reads the Join; `peer`/`geo` are filled in by the task below once
+    // the direct path settles (a NATed peer reaches even a public broker over
+    // the relay first, and only punches direct ~seconds later - so the reflexive
+    // address is not known at accept time).
+    let span = tracing::info_span!(
+        "conn",
+        room = tracing::field::Empty,
+        peer = tracing::field::Empty,
+        geo = tracing::field::Empty,
+    );
+    spawn_peer_locator(connection.clone(), locate.cloned(), span.clone());
     // The Connection is the close-waiter: the broker keeps it open until the
     // peer closes, then drops it.
     let conn = PeerConn::new(send, recv, IrohClose(connection));
-    registry.serve(conn).await?;
+    registry.serve(conn).instrument(span).await?;
     Ok(())
+}
+
+/// Interval and cap for waiting on the peer's direct path to settle.
+const PEER_LOCATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+const PEER_LOCATE_ATTEMPTS: usize = 40;
+
+/// Watch `connection` until its direct (reflexive) address appears, then record
+/// it - annotated via `locate` when set - onto `span` and emit one `peer
+/// located` line. Gives up quietly if the connection closes first or never
+/// punches direct (a purely relay-reached peer).
+fn spawn_peer_locator(connection: Connection, locate: Option<PeerLocator>, span: tracing::Span) {
+    tokio::spawn(async move {
+        for _ in 0..PEER_LOCATE_ATTEMPTS {
+            if let Some(addr) = observed_addr(&connection) {
+                let geo = locate.as_ref().and_then(|locate| locate(addr.ip()));
+                span.record("peer", tracing::field::display(&addr));
+                if let Some(geo) = &geo {
+                    span.record("geo", tracing::field::display(geo));
+                }
+                span.in_scope(|| {
+                    tracing::info!(
+                        peer = %addr,
+                        geo = geo.as_deref().unwrap_or(""),
+                        "peer located"
+                    );
+                });
+                return;
+            }
+            tokio::time::sleep(PEER_LOCATE_INTERVAL).await;
+        }
+    });
+}
+
+/// The peer's observed direct socket address (its post-NAT reflexive address),
+/// or `None` if only a relay path is known so far. We take the first direct
+/// (`Ip`) path rather than only the *selected* one, because path selection has
+/// not necessarily settled at accept time - a peer dialing the broker's direct
+/// address is already reachable there even before iroh promotes it to selected.
+/// We never log a relay's address as if it were the peer's.
+fn observed_addr(connection: &Connection) -> Option<SocketAddr> {
+    connection
+        .paths()
+        .iter()
+        .find_map(|path| match path.remote_addr() {
+            TransportAddr::Ip(addr) => Some(*addr),
+            _ => None,
+        })
 }
 
 /// A peer's live session with the broker after joining a room. The caller drives
@@ -158,12 +248,16 @@ pub async fn join_room(
         },
     )
     .await?;
-    let paired: Paired = read_framed(&mut recv).await?;
+    let reply: Reply = read_framed(&mut recv).await?;
+    let role = match reply {
+        Reply::Paired(paired) => paired.role,
+        Reply::Expired => anyhow::bail!(ROOM_EXPIRED),
+    };
     Ok(BrokerSession {
         connection,
         send,
         recv,
-        role: paired.role,
+        role,
     })
 }
 

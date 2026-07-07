@@ -23,3 +23,13 @@ pub struct Join {
 pub struct Paired {
     pub role: Role,
 }
+
+/// The broker's reply to a [`Join`]: either a partner arrived (pairing traffic
+/// follows) or the room's wait window elapsed with no partner.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub enum Reply {
+    /// A partner is present; here is the peer's assigned role.
+    Paired(Paired),
+    /// No partner joined within the room's TTL; the broker is closing.
+    Expired,
+}

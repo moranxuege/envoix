@@ -1,7 +1,7 @@
 //! uniffi bridge exposing the envoix client core to native UIs (Swift/Kotlin).
 //!
-//! The bridge is intentionally thin: it wires the existing [`EnvoixClient`]
-//! facade and the QR invite codec to a small, foreign-implementable observer.
+//! The bridge is intentionally thin: it wires the unified envoix client API to a
+//! small, foreign-implementable observer.
 //! All networking, pairing, and transfer logic stays in the Rust core.
 //!
 //! Operations are non-blocking. Each call spawns work on a session-owned tokio
@@ -9,27 +9,23 @@
 //! callbacks, which fire on runtime threads — the UI must hop to its own main
 //! thread before touching UI state.
 
-use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use envoix_client::{
-    BindAddrs, ClientConfig, ClientEvent, ClientEventSink, ConnectionPolicy, EnvoixClient,
-    EventSink, PairingConfig, PeerDescriptor, PublicError, ReceiveRequest, RoomReceiveRequest,
-    RoomSendRequest, SendFileRequest, SendRequest, TransferCancelToken, TransferEvent,
-    TransferSummary,
+    BindAddrs, TransferSummary,
+    api::{
+        Client, PairingStep, PeerSource, Transfer, TransferError, TransferEvent, TransferOptions,
+    },
 };
 use envoix_rendezvous_iroh::generate_code;
-use envoix_qr::{QrInvitePayload, generate_token};
 use tokio::runtime::Runtime;
+use tokio::sync::oneshot;
 
 uniffi::setup_scaffolding!();
 
 /// Lifetime of a generated invite before it expires, in seconds.
 const INVITE_TTL_SECS: u64 = 300;
-/// Receiver bind address: any IPv4 interface, OS-assigned port.
-const RECEIVE_ADDR: &str = "0.0.0.0:0";
 /// Default rendezvous broker used by the macOS app for room pairing.
 const DEFAULT_RENDEZVOUS_BROKER: &str =
     "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445";
@@ -116,7 +112,7 @@ pub trait TransferObserver: Send + Sync {
 #[derive(uniffi::Object)]
 pub struct EnvoixSession {
     runtime: Runtime,
-    cancel: Mutex<Option<TransferCancelToken>>,
+    cancel: Mutex<Option<oneshot::Sender<()>>>,
     settings: EnvoixRuntimeSettings,
 }
 
@@ -152,34 +148,19 @@ impl EnvoixSession {
         output_dir: String,
         observer: Arc<dyn TransferObserver>,
     ) -> Result<(), EnvoixError> {
-        let token = generate_token().map_err(op_err)?;
-        let client = build_client(token.clone(), &self.settings)?;
-        let listen_addrs = receive_addrs()?;
-        let cancel = self.replace_cancel();
-
-        self.runtime.spawn(async move {
-            let transfer_sink = Box::new(ObserverSink(observer.clone()));
-            let client_sink = Box::new(ClientSink(observer.clone()));
-            let invite_observer = observer.clone();
-            let on_bound = move |peer: PeerDescriptor| {
-                let payload = QrInvitePayload::new(token, peer, unix_now() + INVITE_TTL_SECS);
-                invite_observer.on_invite_ready(payload.encode());
-            };
-            let result = client
-                .receive_with_cancel(
-                    ReceiveRequest {
-                        output_dir: output_dir.into(),
-                        connection_policy: ConnectionPolicy::EnableMdns,
-                        listen_addrs,
-                    },
-                    client_sink,
-                    transfer_sink,
-                    on_bound,
-                    cancel,
-                )
-                .await;
-            report_terminal(&*observer, result);
-        });
+        let client = build_client(&self.settings);
+        let options = transfer_options(&self.settings)?;
+        let _guard = self.runtime.enter();
+        let transfer = client
+            .receive(
+                output_dir.into(),
+                PeerSource::ShowInvite {
+                    ttl_secs: INVITE_TTL_SECS,
+                },
+                options,
+            )
+            .map_err(op_err)?;
+        self.spawn_transfer(transfer, observer);
         Ok(())
     }
 
@@ -194,25 +175,13 @@ impl EnvoixSession {
         file_path: String,
         observer: Arc<dyn TransferObserver>,
     ) -> Result<(), EnvoixError> {
-        let ResolvedInvite { peer, token } = resolve_invite(&invite)?;
-        let client = build_client(token, &self.settings)?;
-        let cancel = self.replace_cancel();
-
-        self.runtime.spawn(async move {
-            let transfer_sink = Box::new(ObserverSink(observer.clone()));
-            let result = client
-                .send_file_with_cancel(
-                    SendFileRequest {
-                        peer,
-                        file_path: file_path.into(),
-                        resume: true,
-                    },
-                    transfer_sink,
-                    cancel,
-                )
-                .await;
-            report_terminal(&*observer, result);
-        });
+        let client = build_client(&self.settings);
+        let options = transfer_options(&self.settings)?;
+        let _guard = self.runtime.enter();
+        let transfer = client
+            .send(file_path.into(), PeerSource::Invite { invite }, options)
+            .map_err(op_err)?;
+        self.spawn_transfer(transfer, observer);
         Ok(())
     }
 
@@ -228,28 +197,17 @@ impl EnvoixSession {
         token: String,
         observer: Arc<dyn TransferObserver>,
     ) -> Result<(), EnvoixError> {
-        let client = build_client(token, &self.settings)?;
-        let listen_addrs = receive_addrs()?;
-        let cancel = self.replace_cancel();
-
-        self.runtime.spawn(async move {
-            let transfer_sink = Box::new(ObserverSink(observer.clone()));
-            let client_sink = Box::new(ClientSink(observer.clone()));
-            let result = client
-                .receive_with_cancel(
-                    ReceiveRequest {
-                        output_dir: output_dir.into(),
-                        connection_policy: ConnectionPolicy::EnableMdns,
-                        listen_addrs,
-                    },
-                    client_sink,
-                    transfer_sink,
-                    |_peer| {},
-                    cancel,
-                )
-                .await;
-            report_terminal(&*observer, result);
-        });
+        let client = build_client(&self.settings);
+        let options = transfer_options(&self.settings)?;
+        let _guard = self.runtime.enter();
+        let transfer = client
+            .receive(
+                output_dir.into(),
+                PeerSource::Mdns { token: Some(token) },
+                options,
+            )
+            .map_err(op_err)?;
+        self.spawn_transfer(transfer, observer);
         Ok(())
     }
 
@@ -264,26 +222,17 @@ impl EnvoixSession {
         token: String,
         observer: Arc<dyn TransferObserver>,
     ) -> Result<(), EnvoixError> {
-        let client = build_client(token, &self.settings)?;
-        let cancel = self.replace_cancel();
-
-        self.runtime.spawn(async move {
-            let transfer_sink = Box::new(ObserverSink(observer.clone()));
-            let client_sink = Box::new(ClientSink(observer.clone()));
-            let result = client
-                .send_with_cancel(
-                    SendRequest {
-                        file_path: file_path.into(),
-                        connection_policy: ConnectionPolicy::EnableMdns,
-                        resume: true,
-                    },
-                    client_sink,
-                    transfer_sink,
-                    cancel,
-                )
-                .await;
-            report_terminal(&*observer, result);
-        });
+        let client = build_client(&self.settings);
+        let options = transfer_options(&self.settings)?;
+        let _guard = self.runtime.enter();
+        let transfer = client
+            .send(
+                file_path.into(),
+                PeerSource::Mdns { token: Some(token) },
+                options,
+            )
+            .map_err(op_err)?;
+        self.spawn_transfer(transfer, observer);
         Ok(())
     }
 
@@ -294,30 +243,18 @@ impl EnvoixSession {
         code: String,
         observer: Arc<dyn TransferObserver>,
     ) -> Result<(), EnvoixError> {
-        let client = build_room_client(&self.settings)?;
-        let listen_addrs = receive_addrs()?;
+        let client = build_client(&self.settings);
+        let options = transfer_options(&self.settings)?;
         let broker = rendezvous_broker(&self.settings);
-        let relay = relay_url(&self.settings);
-        let cancel = self.replace_cancel();
-
-        self.runtime.spawn(async move {
-            let transfer_sink = Box::new(ObserverSink(observer.clone()));
-            let result = run_without_cancel(
-                cancel,
-                client.receive_file_via_room(
-                    RoomReceiveRequest {
-                        broker,
-                        relay,
-                        code,
-                        output_dir: output_dir.into(),
-                        listen_addrs,
-                    },
-                    transfer_sink,
-                ),
+        let _guard = self.runtime.enter();
+        let transfer = client
+            .receive(
+                output_dir.into(),
+                PeerSource::Room { code, broker },
+                options,
             )
-            .await;
-            report_terminal(&*observer, result);
-        });
+            .map_err(op_err)?;
+        self.spawn_transfer(transfer, observer);
         Ok(())
     }
 
@@ -328,74 +265,55 @@ impl EnvoixSession {
         code: String,
         observer: Arc<dyn TransferObserver>,
     ) -> Result<(), EnvoixError> {
-        let client = build_room_client(&self.settings)?;
+        let client = build_client(&self.settings);
+        let options = transfer_options(&self.settings)?;
         let broker = rendezvous_broker(&self.settings);
-        let relay = relay_url(&self.settings);
-        let cancel = self.replace_cancel();
-
-        self.runtime.spawn(async move {
-            let transfer_sink = Box::new(ObserverSink(observer.clone()));
-            let result = run_without_cancel(
-                cancel,
-                client.send_file_via_room(
-                    RoomSendRequest {
-                        broker,
-                        relay,
-                        code,
-                        file_path: file_path.into(),
-                        resume: true,
-                    },
-                    transfer_sink,
-                ),
-            )
-            .await;
-            report_terminal(&*observer, result);
-        });
+        let _guard = self.runtime.enter();
+        let transfer = client
+            .send(file_path.into(), PeerSource::Room { code, broker }, options)
+            .map_err(op_err)?;
+        self.spawn_transfer(transfer, observer);
         Ok(())
     }
 
     /// Requests cancellation of the in-flight transfer, if any.
     pub fn cancel(&self) {
-        if let Some(cancel) = self.cancel.lock().unwrap().as_ref() {
-            cancel.cancel();
+        if let Some(cancel) = self.cancel.lock().unwrap().take() {
+            let _ = cancel.send(());
         }
     }
 }
 
 impl EnvoixSession {
-    /// Installs a fresh cancel token for a new operation and returns it.
-    fn replace_cancel(&self) -> TransferCancelToken {
-        let cancel = TransferCancelToken::new();
-        *self.cancel.lock().unwrap() = Some(cancel.clone());
-        cancel
+    /// Installs a fresh cancel signal for a new operation and returns its receiver.
+    fn replace_cancel(&self) -> oneshot::Receiver<()> {
+        let (sender, receiver) = oneshot::channel();
+        *self.cancel.lock().unwrap() = Some(sender);
+        receiver
+    }
+
+    fn spawn_transfer(&self, transfer: Transfer, observer: Arc<dyn TransferObserver>) {
+        let cancel = self.replace_cancel();
+        self.runtime
+            .spawn(drive_transfer(transfer, observer, cancel));
     }
 }
 
-fn build_client(token: String, settings: &EnvoixRuntimeSettings) -> Result<EnvoixClient, EnvoixError> {
-    let pairing = PairingConfig::spake2_shared_token(token).map_err(op_err)?;
-    let mut config = ClientConfig::new(pairing);
-    config.chunk_size = GUI_CHUNK_SIZE;
-    apply_runtime_overrides(&mut config, settings);
-    Ok(EnvoixClient::new(config))
+fn build_client(_settings: &EnvoixRuntimeSettings) -> Client {
+    let mut client = Client::new();
+    client.chunk_size = GUI_CHUNK_SIZE;
+    client
 }
 
-fn build_room_client(settings: &EnvoixRuntimeSettings) -> Result<EnvoixClient, EnvoixError> {
-    let pairing =
-        PairingConfig::spake2_shared_token("envoix-room-unused-placeholder").map_err(op_err)?;
-    let mut config = ClientConfig::new(pairing);
-    config.chunk_size = GUI_CHUNK_SIZE;
-    apply_runtime_overrides(&mut config, settings);
-    Ok(EnvoixClient::new(config))
+fn transfer_options(settings: &EnvoixRuntimeSettings) -> Result<TransferOptions, EnvoixError> {
+    let mut options = TransferOptions::default();
+    options.relay = relay_url(settings);
+    options.listen_addrs = Some(receive_addrs());
+    Ok(options)
 }
 
-fn apply_runtime_overrides(config: &mut ClientConfig, _settings: &EnvoixRuntimeSettings) {
-    // Reserved for future settings that map directly onto ClientConfig.
-    let _ = config;
-}
-
-fn receive_addrs() -> Result<BindAddrs, EnvoixError> {
-    let _addr: std::net::SocketAddr = RECEIVE_ADDR.parse().map_err(op_err)?;
-    Ok(BindAddrs::dual_stack(0))
+fn receive_addrs() -> BindAddrs {
+    BindAddrs::dual_stack(0)
 }
 
 fn rendezvous_broker(settings: &EnvoixRuntimeSettings) -> String {
@@ -420,100 +338,93 @@ fn relay_url(settings: &EnvoixRuntimeSettings) -> Option<String> {
     }
 }
 
-async fn run_without_cancel<F>(
-    cancel: TransferCancelToken,
-    operation: F,
-) -> Result<TransferSummary, PublicError>
-where
-    F: Future<Output = Result<TransferSummary, PublicError>>,
-{
-    tokio::select! {
-        result = operation => result,
-        () = cancel.cancelled() => Err(PublicError::Cancelled),
-    }
-}
-
-/// Fields extracted from a validated invite.
-struct ResolvedInvite {
-    peer: PeerDescriptor,
-    token: String,
-}
-
-fn resolve_invite(invite: &str) -> Result<ResolvedInvite, EnvoixError> {
-    let payload = QrInvitePayload::decode(invite).map_err(op_err)?;
-    payload.validate(unix_now()).map_err(op_err)?;
-    let peer = payload.peer_descriptor().map_err(op_err)?;
-    Ok(ResolvedInvite {
-        peer,
-        token: payload.token,
-    })
-}
-
 /// Reports the single terminal outcome from the awaited operation result.
-fn report_terminal(observer: &dyn TransferObserver, result: Result<TransferSummary, PublicError>) {
+fn report_terminal(
+    observer: &dyn TransferObserver,
+    result: Result<TransferSummary, TransferError>,
+) {
     match result {
         Ok(summary) => observer.on_completed(summary.bytes_transferred),
         Err(error) => observer.on_failed(error.to_string()),
     }
 }
 
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+async fn drive_transfer(
+    mut transfer: Transfer,
+    observer: Arc<dyn TransferObserver>,
+    mut cancel: oneshot::Receiver<()>,
+) {
+    let mut cancel_requested = false;
+    loop {
+        tokio::select! {
+            event = transfer.next_event() => {
+                let Some(event) = event else { break };
+                observe_transfer_event(&*observer, event.event);
+            }
+            _ = &mut cancel, if !cancel_requested => {
+                cancel_requested = true;
+                transfer.cancel();
+                observer.on_status("cancelling".to_string());
+            }
+        }
+    }
+    report_terminal(&*observer, transfer.wait().await);
 }
 
-/// Adapts core transfer events onto the foreign observer. Terminal
-/// `Completed`/`Failed` events are dropped here so the outcome is reported
-/// exactly once from the awaited result instead.
-struct ObserverSink(Arc<dyn TransferObserver>);
-
-impl EventSink for ObserverSink {
-    fn on_event(&self, event: TransferEvent) {
-        match event {
-            TransferEvent::Started {
-                file_name,
-                total_bytes,
-                ..
-            } => self.0.on_started(file_name, total_bytes),
-            TransferEvent::Progress {
-                bytes_transferred,
-                total_bytes,
-                ..
-            } => self.0.on_progress(bytes_transferred, total_bytes),
-            TransferEvent::HashStarted { .. } => self.0.on_status("verifying".to_string()),
-            TransferEvent::HashCompleted { .. } => self.0.on_status("verified".to_string()),
-            TransferEvent::Completed { .. } | TransferEvent::Failed { .. } => {}
+fn observe_transfer_event(observer: &dyn TransferObserver, event: TransferEvent) {
+    match event {
+        TransferEvent::Binding { direction, mode } => {
+            observer.on_status(format!("binding {direction:?} via {mode:?}"));
         }
+        TransferEvent::Advertised { invite, .. } => {
+            if let Some(invite) = invite {
+                observer.on_invite_ready(invite);
+                observer.on_status("invite ready; waiting for sender".to_string());
+            } else {
+                observer.on_status("waiting for peer".to_string());
+            }
+        }
+        TransferEvent::Pairing { step } => {
+            observer.on_status(format!("pairing: {}", pairing_step_label(step)));
+        }
+        TransferEvent::Connecting => observer.on_status("connecting".to_string()),
+        TransferEvent::Connected { path } => {
+            observer.on_status(format!("connected via {path}"));
+        }
+        TransferEvent::PathChanged { path } => {
+            observer.on_status(format!("path changed: {path}"));
+        }
+        TransferEvent::Started {
+            file_name,
+            total_bytes,
+            ..
+        } => observer.on_started(file_name, total_bytes),
+        TransferEvent::Progress {
+            bytes_transferred,
+            total_bytes,
+            ..
+        } => observer.on_progress(bytes_transferred, total_bytes),
+        TransferEvent::Verifying { .. } => observer.on_status("verifying".to_string()),
+        TransferEvent::Verified { .. } => observer.on_status("verified".to_string()),
+        TransferEvent::Completed { .. } | TransferEvent::Failed { .. } => {}
+        _ => {}
     }
 }
 
-/// Adapts core client-lifecycle events onto the foreign observer as status text.
-struct ClientSink(Arc<dyn TransferObserver>);
-
-impl ClientEventSink for ClientSink {
-    fn on_event(&self, event: ClientEvent) {
-        let message = match event {
-            ClientEvent::NetworkDetectionStarted => "detecting network".to_string(),
-            ClientEvent::EndpointStarted { .. } => "starting endpoint".to_string(),
-            ClientEvent::DirectAddressAvailable { peer } => format!("address: {peer}"),
-            ClientEvent::DialStarted { peer } => format!("dialing {peer}"),
-            ClientEvent::Authenticated { .. } => "authenticated".to_string(),
-            ClientEvent::ConnectionFailed { reason } => format!("connection failed: {reason}"),
-            ClientEvent::TooManyAuthFailures => "too many failed pairing attempts".to_string(),
-        };
-        self.0.on_status(message);
+fn pairing_step_label(step: PairingStep) -> &'static str {
+    match step {
+        PairingStep::Joining => "joining room",
+        PairingStep::Matched => "peer matched",
+        PairingStep::Exchanged => "keys exchanged",
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use envoix_qr::QrInvitePayload;
     use envoix_rendezvous::RoomRegistry;
-    use envoix_rendezvous_iroh::{
-        build_endpoint, endpoint_addr, serve_endpoint,
-    };
+    use envoix_rendezvous_iroh::{build_endpoint, endpoint_addr, serve_endpoint};
     use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::mpsc::{Sender, channel};
@@ -605,7 +516,10 @@ mod tests {
         }
 
         let bytes = loop {
-            match rrx.recv_timeout(Duration::from_secs(15)).expect("receiver timed out") {
+            match rrx
+                .recv_timeout(Duration::from_secs(15))
+                .expect("receiver timed out")
+            {
                 Msg::Completed(bytes) => break bytes,
                 Msg::Failed(reason) => panic!("receiver failed: {reason}"),
                 Msg::Invite(_) => continue,
@@ -637,7 +551,7 @@ mod tests {
                     .expect("server should have a direct address");
                 let broker = format!("{server_id}@{server_addr}");
                 broker_tx.send(broker).unwrap();
-                serve_endpoint(server, Arc::new(RoomRegistry::new()))
+                serve_endpoint(server, Arc::new(RoomRegistry::new()), None)
                     .await
                     .unwrap();
             });

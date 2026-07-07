@@ -1,6 +1,6 @@
-# Envoix — macOS app
+# Envoix — Apple app
 
-Native SwiftUI desktop client for envoix. The UI is a thin layer over the Rust
+Native SwiftUI Apple client for envoix. The UI is a thin layer over the Rust
 core (`envoix-client`), reached through the `EnvoixCore` Swift package generated
 from `crates/envoix-ffi` (uniffi). The same Swift sources are intended to port to
 iOS later.
@@ -10,6 +10,10 @@ iOS later.
 - Xcode 16+
 - [`cargo-swift`](https://github.com/antoniusnaumann/cargo-swift): `cargo install cargo-swift`
 - [`xcodegen`](https://github.com/yonaskolb/XcodeGen): `brew install xcodegen`
+- For iPhone builds:
+  ```bash
+  rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+  ```
 
 ## Build & run
 
@@ -23,6 +27,15 @@ iOS later.
 
    This writes `crates/envoix-ffi/EnvoixCore/` (xcframework + Swift bindings).
    It is git-ignored and must be regenerated locally.
+
+   For a combined macOS + iOS package, generate both platforms:
+
+   ```bash
+   cd crates/envoix-ffi
+   cargo swift package --platforms macos@13 ios@16 --name EnvoixCore \
+     --lib-type static --exclude-arch x86_64-apple-ios \
+     --swift-tools-version 5.7 --accept-all
+   ```
 
 2. Generate the Xcode project and run:
 
@@ -39,6 +52,62 @@ iOS later.
      -configuration Debug -derivedDataPath build build
    open build/Build/Products/Debug/Envoix.app
    ```
+
+### Run on iPhone
+
+1. Install the Rust iOS targets:
+
+   ```bash
+   rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+   ```
+
+   If downloads are slow, temporarily use a mirror:
+
+   ```bash
+   export RUSTUP_DIST_SERVER=https://mirrors.tuna.tsinghua.edu.cn/rustup
+   export RUSTUP_UPDATE_ROOT=https://mirrors.tuna.tsinghua.edu.cn/rustup/rustup
+   rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+   ```
+
+2. Regenerate `EnvoixCore` with an iOS slice:
+
+   ```bash
+   cd crates/envoix-ffi
+   cargo swift package --platforms macos@13 ios@16 --name EnvoixCore \
+     --lib-type static --exclude-arch x86_64-apple-ios \
+     --swift-tools-version 5.7 --accept-all
+   ```
+
+   `--exclude-arch x86_64-apple-ios` skips the Intel simulator slice. This is
+   fine for Apple Silicon simulator builds and real iPhone demos.
+
+3. Regenerate the Xcode project:
+
+   ```bash
+   cd apps/envoix-apple
+   xcodegen generate
+   open Envoix.xcodeproj
+   ```
+
+4. Connect the iPhone:
+   - Use a USB cable or enable wireless debugging after first pairing.
+   - Unlock the iPhone and tap **Trust This Computer** if prompted.
+   - If Xcode says the iOS platform is not installed or shows no eligible
+     destinations, open **Xcode > Settings > Platforms** and install the iOS
+     platform/runtime matching this Xcode.
+   - In Xcode, select the `Envoix-iOS` scheme and your iPhone as the run
+     destination.
+   - Open target **Envoix-iOS > Signing & Capabilities**, choose your Apple
+     Development Team, and let Xcode manage signing.
+
+5. Press **Run** (`⌘R`). On first launch, iOS may ask for local-network access;
+   allow it, or LAN discovery/transfer will fail.
+
+For a quick demo, run the macOS app on the Mac and the iOS app on the iPhone.
+Use **Room Code** first because it avoids typing peer addresses. Start
+receiving on one device, enter that code on the other device, choose a small
+file, then send. The iOS app stores received files in its app Documents
+directory for now.
 
 ## UI iteration workflow
 

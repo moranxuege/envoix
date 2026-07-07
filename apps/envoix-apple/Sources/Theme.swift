@@ -1,8 +1,13 @@
 import SwiftUI
+#if os(macOS)
 import AppKit
+#elseif os(iOS)
+import UIKit
+#endif
 
 // MARK: - Dynamic colors
 
+#if os(macOS)
 private extension NSColor {
     /// Builds an opaque sRGB color from a `0xRRGGBB` literal.
     convenience init(rgb: UInt32) {
@@ -14,16 +19,35 @@ private extension NSColor {
         )
     }
 }
+#elseif os(iOS)
+private extension UIColor {
+    /// Builds an opaque sRGB color from a `0xRRGGBB` literal.
+    convenience init(rgb: UInt32) {
+        self.init(
+            red: CGFloat((rgb >> 16) & 0xff) / 255,
+            green: CGFloat((rgb >> 8) & 0xff) / 255,
+            blue: CGFloat(rgb & 0xff) / 255,
+            alpha: 1
+        )
+    }
+}
+#endif
 
 extension Color {
     /// A color that resolves to `light` or `dark` (each `0xRRGGBB`) based on the
     /// effective appearance, so the system theme and `.preferredColorScheme`
     /// (driven by the in-app toggle) both switch it.
     init(light: UInt32, dark: UInt32) {
+        #if os(macOS)
         self.init(nsColor: NSColor(name: nil) { appearance in
             let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
             return NSColor(rgb: isDark ? dark : light)
         })
+        #elseif os(iOS)
+        self.init(uiColor: UIColor { traits in
+            UIColor(rgb: traits.userInterfaceStyle == .dark ? dark : light)
+        })
+        #endif
     }
 }
 

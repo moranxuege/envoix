@@ -1,7 +1,17 @@
 import SwiftUI
+#if os(macOS)
 import AppKit
+#elseif os(iOS)
+import UIKit
+#endif
 import CoreImage.CIFilterBuiltins
 import EnvoixCore
+
+#if os(macOS)
+typealias PlatformImage = NSImage
+#elseif os(iOS)
+typealias PlatformImage = UIImage
+#endif
 
 /// Minimum length of a shared pairing token, matching the core requirement.
 let minTokenLength = 12
@@ -93,6 +103,14 @@ struct TokenField: View {
     var disabled: Bool
 
     var body: some View {
+        #if os(iOS)
+        mobileBody
+        #else
+        desktopBody
+        #endif
+    }
+
+    private var desktopBody: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(AppText.value("Shared token (same on both devices, \(minTokenLength)+ characters)", "共享口令（两台设备相同，至少 \(minTokenLength) 个字符）", language: language))
                 .font(.title3.weight(.semibold))
@@ -125,11 +143,58 @@ struct TokenField: View {
             .background(Theme.surface)
             .overlay(
                 RoundedRectangle(cornerRadius: Theme.cardRadius)
-                    .strokeBorder(Theme.line.opacity(0.75), lineWidth: 0.8)
+                .strokeBorder(Theme.line.opacity(0.75), lineWidth: 0.8)
             )
             .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
         }
     }
+
+    #if os(iOS)
+    private var mobileBody: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(AppText.value("Shared token", "共享口令", language: language))
+                .font(.headline.weight(.semibold))
+                .foregroundStyle(Theme.muted)
+
+            TextField("e.g. envoix-lan-2026", text: $token)
+                .textFieldStyle(.plain)
+                .font(.body.monospaced())
+                .foregroundStyle(Theme.text)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .disabled(disabled)
+                .padding(.horizontal, 10)
+                .frame(minHeight: 44)
+                .background(Theme.surface)
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.cardRadius)
+                        .strokeBorder(Theme.line.opacity(0.75), lineWidth: 0.8)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
+
+            HStack(spacing: 8) {
+                Button {
+                    token = friendlyToken()
+                    ToastCenter.shared.show(AppText.value("Token generated", "口令已生成", language: language))
+                } label: {
+                    Label(AppText.value("Generate", "生成", language: language), systemImage: "wand.and.stars")
+                        .frame(maxWidth: .infinity, minHeight: 36)
+                }
+                .disabled(disabled)
+
+                Button {
+                    copyWithToast(token, AppText.value("Token copied", "口令已复制", language: language))
+                } label: {
+                    Label(AppText.value("Copy", "复制", language: language), systemImage: "doc.on.doc")
+                        .frame(maxWidth: .infinity, minHeight: 36)
+                }
+                .disabled(token.trimmed.isEmpty)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+    }
+    #endif
 }
 
 struct RoomCodeField: View {
@@ -144,6 +209,14 @@ struct RoomCodeField: View {
     var helper: String
 
     var body: some View {
+        #if os(iOS)
+        mobileBody
+        #else
+        desktopBody
+        #endif
+    }
+
+    private var desktopBody: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(title)
                 .font(.title3.weight(.semibold))
@@ -189,41 +262,115 @@ struct RoomCodeField: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
+
+    #if os(iOS)
+    private var mobileBody: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(.headline.weight(.semibold))
+                .foregroundStyle(Theme.muted)
+
+            TextField(placeholder, text: $code)
+                .textFieldStyle(.plain)
+                .font(.body.monospaced())
+                .foregroundStyle(Theme.text)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .disabled(disabled)
+                .padding(.horizontal, 10)
+                .frame(minHeight: 44)
+                .background(Theme.surface)
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.cardRadius)
+                        .strokeBorder(Theme.line.opacity(0.75), lineWidth: 0.8)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
+
+            HStack(spacing: 8) {
+                if canGenerate {
+                    Button {
+                        code = newRoomCode()
+                        ToastCenter.shared.show(AppText.value("Room code generated", "接收码已生成", language: language))
+                    } label: {
+                        Label(generateLabel, systemImage: "wand.and.stars")
+                            .frame(maxWidth: .infinity, minHeight: 36)
+                    }
+                    .disabled(disabled)
+                }
+
+                Button {
+                    copyWithToast(code, AppText.value("Room code copied", "接收码已复制", language: language))
+                } label: {
+                    Label(copyLabel == "Copy Code" ? AppText.value("Copy", "复制", language: language) : copyLabel, systemImage: "doc.on.doc")
+                        .frame(maxWidth: .infinity, minHeight: 36)
+                }
+                .disabled(code.trimmed.isEmpty)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+
+            Text(helper)
+                .font(.footnote)
+                .foregroundStyle(Theme.muted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+    #endif
 }
 
 /// Renders a string into a crisp QR code image.
 enum QRCode {
-    static func image(from string: String) -> NSImage? {
+    static func image(from string: String) -> PlatformImage? {
         let filter = CIFilter.qrCodeGenerator()
         filter.message = Data(string.utf8)
         filter.correctionLevel = "M"
         guard let output = filter.outputImage else { return nil }
         let scaled = output.transformed(by: CGAffineTransform(scaleX: 8, y: 8))
-        let rep = NSCIImageRep(ciImage: scaled)
-        let image = NSImage(size: rep.size)
-        image.addRepresentation(rep)
-        return image
+        let context = CIContext()
+        guard let cgImage = context.createCGImage(scaled, from: scaled.extent) else { return nil }
+        #if os(macOS)
+        return NSImage(cgImage: cgImage, size: NSSize(width: scaled.extent.width, height: scaled.extent.height))
+        #elseif os(iOS)
+        return UIImage(cgImage: cgImage)
+        #endif
     }
 }
 
 /// Presents an open panel for a single file or directory; returns the choice.
 func chooseURL(directory: Bool) -> URL? {
+    #if os(macOS)
     let panel = NSOpenPanel()
     panel.canChooseFiles = !directory
     panel.canChooseDirectories = directory
     panel.allowsMultipleSelection = false
     return panel.runModal() == .OK ? panel.url : nil
+    #else
+    return nil
+    #endif
 }
 
 func copyToPasteboard(_ text: String) {
+    #if os(macOS)
     NSPasteboard.general.clearContents()
     NSPasteboard.general.setString(text, forType: .string)
+    #elseif os(iOS)
+    UIPasteboard.general.string = text
+    #endif
+}
+
+func pasteboardString() -> String? {
+    #if os(macOS)
+    return NSPasteboard.general.string(forType: .string)
+    #elseif os(iOS)
+    return UIPasteboard.general.string
+    #endif
 }
 
 /// Resolves a file from the clipboard, handling both a file copied in Finder
 /// (a file-URL on the pasteboard) and a plain-text path (expanding a leading
 /// `~`). Returns the URL only if it points to an existing file.
 func pastedFileURL() -> URL? {
+    #if os(macOS)
     let pb = NSPasteboard.general
     let exists = { FileManager.default.fileExists(atPath: $0) }
 
@@ -237,11 +384,26 @@ func pastedFileURL() -> URL? {
         if exists(expanded) { return URL(fileURLWithPath: expanded) }
     }
     return nil
+    #else
+    return nil
+    #endif
 }
 
 /// Selects the file in Finder (opening its enclosing folder).
 func revealInFinder(_ url: URL) {
+    #if os(macOS)
     NSWorkspace.shared.activateFileViewerSelecting([url])
+    #elseif os(iOS)
+    UIApplication.shared.open(url)
+    #endif
+}
+
+func platformRevealTitle(language: String) -> String {
+    #if os(macOS)
+    return AppText.value("Reveal in Finder", "在 Finder 中显示", language: language)
+    #else
+    return AppText.value("Open File", "打开文件", language: language)
+    #endif
 }
 
 /// Formats a byte count as a short human-readable string (auto KB/MB/GB).
@@ -438,7 +600,7 @@ struct TransferStatusView: View {
         if lower.contains("mdns") && lower.contains("peers discovered") {
             return (
                 AppText.value("No device found on the local network", "未在局域网发现设备", language: language),
-                AppText.value("Make sure the other Mac is receiving with the same token and both devices are on the same network.", "请确认另一台 Mac 正在使用相同口令接收，并且两台设备在同一网络中。", language: language)
+                AppText.value("Make sure the other device is receiving with the same token and both devices are on the same network.", "请确认另一台设备正在使用相同口令接收，并且两台设备在同一网络中。", language: language)
             )
         }
         if cleanReason.isEmpty {
@@ -454,7 +616,7 @@ struct TransferStatusView: View {
     /// into an AI or another tool).
     @ViewBuilder private func completedFileControls(_ url: URL) -> some View {
         HStack {
-            Button(AppText.value("Reveal in Finder", "在 Finder 中显示", language: language)) { revealInFinder(url) }
+            Button(platformRevealTitle(language: language)) { revealInFinder(url) }
             Button(AppText.value("Copy Path", "复制路径", language: language)) {
                 copyWithToast(url.path, AppText.value("Path copied", "路径已复制", language: language))
             }

@@ -1,16 +1,19 @@
-//! Rendezvous server binary: bind an iroh endpoint, print its endpoint id (the
-//! address clients hard-code), and serve room pairing until terminated.
+//! Rendezvous server binary: bind an iroh endpoint, print a usable rendezvous
+//! address (`<endpoint-id>@<ip:port>`), and serve room pairing until terminated.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use iroh::SecretKey;
 
 use envoix_rendezvous::RoomRegistry;
-use envoix_rendezvous_iroh::{build_endpoint, relay_mode_from_url, serve_endpoint};
+use envoix_rendezvous_iroh::{PeerLocator, build_endpoint, relay_mode_from_url, serve_endpoint};
+
+mod geoip;
 
 #[derive(Parser)]
 #[command(
@@ -18,8 +21,10 @@ use envoix_rendezvous_iroh::{build_endpoint, relay_mode_from_url, serve_endpoint
     about = "Envoix room rendezvous (iroh node)"
 )]
 struct Cli {
-    /// UDP address to bind the iroh endpoint to.
-    #[arg(long, default_value = "0.0.0.0:0")]
+    /// UDP address to bind the iroh endpoint to. Defaults to a fixed port so the
+    /// advertised `<endpoint-id>@<ip:port>` stays stable across restarts; use a
+    /// random `:0` port only for throwaway or relay-only setups.
+    #[arg(long, default_value = "0.0.0.0:8445")]
     bind: SocketAddr,
     /// File holding the server's persistent secret key (created with owner-only
     /// permissions if missing), so the endpoint id stays stable across restarts.
@@ -29,23 +34,91 @@ struct Cli {
     /// https://relay.example.com:8444). Omit for no relay (LAN/direct only).
     #[arg(long)]
     relay: Option<String>,
+    /// How long (seconds) a parked peer waits for a partner before the room
+    /// expires. The first peer is dropped with an expiry notice after this.
+    #[arg(long, default_value_t = 300)]
+    room_ttl: u64,
+    /// Log output format: `pretty` human lines, or `json` (one object per line)
+    /// for log aggregators and campaign correlation.
+    #[arg(long, value_enum, default_value_t = LogFormat::Pretty)]
+    log_format: LogFormat,
+    /// Optional MaxMind-format City database (GeoLite2 or DB-IP Lite `.mmdb`);
+    /// when set, peer log lines are annotated with the peer's city/country.
+    #[arg(long)]
+    geoip_city: Option<PathBuf>,
+    /// Optional MaxMind-format ASN database; when set, peer log lines are
+    /// annotated with the peer's ISP/carrier.
+    #[arg(long)]
+    geoip_asn: Option<PathBuf>,
+}
+
+/// How server logs are rendered.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum LogFormat {
+    Pretty,
+    Json,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("envoix_rendezvous_iroh=info,warn"));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
-
     let cli = Cli::parse();
+
+    // Include the broker crate (`envoix_rendezvous`) at info, not just the iroh
+    // wiring - otherwise pairings/expiries (its target) fall to the global warn
+    // default and never show.
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        tracing_subscriber::EnvFilter::new(
+            "envoix_rendezvous=info,envoix_rendezvous_iroh=info,warn",
+        )
+    });
+    let builder = tracing_subscriber::fmt().with_env_filter(filter);
+    match cli.log_format {
+        LogFormat::Json => builder.json().init(),
+        LogFormat::Pretty => builder.init(),
+    }
+
     let secret_key = load_or_create_secret_key(&cli.secret_key)
         .with_context(|| format!("secret key {}", cli.secret_key.display()))?;
     let relay = relay_mode_from_url(cli.relay.as_deref())?;
     let endpoint = build_endpoint(cli.bind, secret_key, relay).await?;
-    tracing::info!(endpoint_id = %endpoint.id(), "rendezvous server listening");
-    println!("rendezvous endpoint id: {}", endpoint.id());
+    tracing::info!(endpoint_id = %endpoint.id(), bind = %cli.bind, "rendezvous server listening");
+    // Human copy-paste convenience (endpoint id + a ready-to-use --rendezvous
+    // value). Suppressed under `--log-format json` so the stream stays pure
+    // JSON; the same facts are in the structured "listening" log above.
+    if matches!(cli.log_format, LogFormat::Pretty) {
+        println!("rendezvous endpoint id: {}", endpoint.id());
+        println!("listening on {}", cli.bind);
+        // When bound to an unspecified address (0.0.0.0/::) the reachable host is
+        // unknown to the process, so show the (fixed) port and let the operator
+        // fill in the public IP.
+        if cli.bind.ip().is_unspecified() {
+            println!(
+                "connect with: --rendezvous {}@<this-host-ip>:{}",
+                endpoint.id(),
+                cli.bind.port()
+            );
+        } else {
+            println!("connect with: --rendezvous {}@{}", endpoint.id(), cli.bind);
+        }
+    }
 
-    serve_endpoint(endpoint, Arc::new(RoomRegistry::new())).await
+    // Build the optional GeoIP annotator from the operator-supplied databases.
+    let locate: Option<PeerLocator> =
+        match geoip::GeoIp::load(cli.geoip_city.as_deref(), cli.geoip_asn.as_deref())? {
+            Some(geo) => {
+                let geo = Arc::new(geo);
+                tracing::info!("GeoIP annotation enabled");
+                Some(Arc::new(move |ip| geo.describe(ip)))
+            }
+            None => None,
+        };
+
+    serve_endpoint(
+        endpoint,
+        Arc::new(RoomRegistry::with_ttl(Duration::from_secs(cli.room_ttl))),
+        locate,
+    )
+    .await
 }
 
 /// Load the server's secret key from `path`, creating a fresh one if the file

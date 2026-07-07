@@ -39,6 +39,9 @@ envoix-transfer = { path = "crates/envoix-transfer" }
 envoix-types = { path = "crates/envoix-types" }
 async-trait = "0.1"
 anyhow = "1"
+if-addrs = "0.13"
+ipnet = "2"
+maxminddb = "0.29"
 base64 = "0.22"
 qrcode = { version = "0.14", default-features = false }
 blake3 = "1"
@@ -60,4 +63,4 @@ tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt", "rt
 toml = "0.8"
 uniffi = "0.31"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }

@@ -135,7 +135,7 @@ final class TransferViewModel: ObservableObject {
         let operationID = operationID
         self.phase = phase
         do {
-            let session = try EnvoixSession.newWithSettings(settings: settings)
+            let session = EnvoixSession.newWithSettings(settings: settings)
             self.session = session
             try operation(session, Observer(self, operationID: operationID))
         } catch {
