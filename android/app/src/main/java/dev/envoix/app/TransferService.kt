@@ -111,7 +111,7 @@ class TransferService : Service() {
 
     /** Append a timestamped line to a transfer's log, keeping the last 60. */
     private fun addLog(cur: List<String>, line: String): List<String> =
-        (cur + "${logTime.format(java.util.Date())}  $line").takeLast(60)
+        (cur + "${logTime.format(java.util.Date())}  $line").takeLast(TransferRepository.LOG_CAP)
 
     private fun runLoop(id: Long, spec: Spec) {
         active++

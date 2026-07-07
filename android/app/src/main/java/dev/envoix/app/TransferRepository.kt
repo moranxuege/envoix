@@ -10,6 +10,9 @@ import kotlinx.coroutines.flow.asStateFlow
  * without binding the Service to the Activity.
  */
 object TransferRepository {
+    /** Max lines kept in a transfer's own log (events + routed core lines). */
+    const val LOG_CAP = 200
+
     private val _transfers = MutableStateFlow<List<Transfer>>(emptyList())
     val transfers: StateFlow<List<Transfer>> = _transfers.asStateFlow()
 
@@ -26,6 +29,19 @@ object TransferRepository {
     @Synchronized
     fun update(id: Long, transform: (Transfer) -> Transfer) {
         _transfers.value = _transfers.value.map { if (it.id == id) transform(it) else it }
+    }
+
+    /** Append an (already compacted) native-core log line to the newest transfer
+     *  whose room matches [roomPrefix], so the core's per-transfer logs show up
+     *  in that transfer's detail drawer. No-op if no transfer matches. */
+    @Synchronized
+    fun appendCoreLog(roomPrefix: String, line: String) {
+        val id = _transfers.value
+            .filter { it.room.substringBefore('-') == roomPrefix }
+            .maxByOrNull { it.id }?.id ?: return
+        _transfers.value = _transfers.value.map {
+            if (it.id == id) it.copy(log = (it.log + line).takeLast(LOG_CAP)) else it
+        }
     }
 
     @Synchronized
