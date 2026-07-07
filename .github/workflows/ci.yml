@@ -1,0 +1,46 @@
+name: ci
+
+# Enforce the checks that release.yml doesn't: rustfmt, clippy, and Android lint.
+# Runs on every push and PR so formatting / clippy / Compose-lint regressions are
+# caught before they can ship.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  rust:
+    name: rust fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Rust
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup component add rustfmt clippy
+          rustc --version
+      - uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  android-lint:
+    name: android lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Install SDK components
+        run: sdkmanager --install "platforms;android-34" "build-tools;34.0.0"
+      # Lint only needs the Kotlin/resources, not the native .so, so skip the JNI build.
+      - name: Lint
+        working-directory: android
+        run: ./gradlew :app:lintDebug --no-daemon --stacktrace
