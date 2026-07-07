@@ -22,10 +22,10 @@ use jni::sys::{jboolean, jlong};
 static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
 /// Cancel closures for in-flight transfers, keyed by the Kotlin-side transfer id.
-#[allow(clippy::type_complexity)]
-static CANCELS: OnceLock<Mutex<HashMap<i64, Box<dyn Fn() + Send + Sync>>>> = OnceLock::new();
+type CancelMap = HashMap<i64, Box<dyn Fn() + Send + Sync>>;
+static CANCELS: OnceLock<Mutex<CancelMap>> = OnceLock::new();
 
-fn cancels() -> &'static Mutex<HashMap<i64, Box<dyn Fn() + Send + Sync>>> {
+fn cancels() -> &'static Mutex<CancelMap> {
     CANCELS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -103,14 +103,24 @@ pub extern "system" fn Java_dev_envoix_app_Native_runTransfer(
     let vm = env.get_java_vm().expect("java vm");
     let cb = env.new_global_ref(&callback).expect("callback ref");
 
+    let req = DriveRequest {
+        id,
+        direction,
+        code,
+        broker,
+        relay,
+        path,
+        config_path,
+        use_room: use_room != 0,
+        use_mdns: use_mdns != 0,
+    };
     runtime().block_on(async move {
-        if let Err(err) = drive(
-            id, &direction, code, broker, relay, path, config_path,
-            use_room != 0, use_mdns != 0, &vm, &cb,
-        )
-        .await
-        {
-            emit(&vm, &cb, &format!(r#"{{"event":"failed","error":{}}}"#, json_str(&err)));
+        if let Err(err) = drive(req, &vm, &cb).await {
+            emit(
+                &vm,
+                &cb,
+                &format!(r#"{{"event":"failed","error":{}}}"#, json_str(&err)),
+            );
         }
     });
     if let Ok(mut map) = cancels().lock() {
@@ -120,11 +130,7 @@ pub extern "system" fn Java_dev_envoix_app_Native_runTransfer(
 
 /// Cancel the in-flight transfer with the given id (no-op if it already ended).
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_envoix_app_Native_cancel(
-    _env: JNIEnv,
-    _class: JClass,
-    id: jlong,
-) {
+pub extern "system" fn Java_dev_envoix_app_Native_cancel(_env: JNIEnv, _class: JClass, id: jlong) {
     if let Ok(map) = cancels().lock()
         && let Some(cancel) = map.get(&id)
     {
@@ -144,14 +150,22 @@ pub extern "system" fn Java_dev_envoix_app_Native_generateInvite(
     broker: JString,
     relay: JString,
 ) -> jni::sys::jstring {
-    let role = if jstr(&mut env, &role) == "send" { Role::Send } else { Role::Receive };
+    let role = if jstr(&mut env, &role) == "send" {
+        Role::Send
+    } else {
+        Role::Receive
+    };
     let broker = jstr(&mut env, &broker);
     let relay = jstr(&mut env, &relay);
     let relay = (!relay.is_empty()).then_some(relay);
     let json = match Invite::room(broker, relay) {
         Ok(inv) => {
             let inv = inv.with_role(role);
-            format!(r#"{{"code":{},"payload":{}}}"#, json_str(inv.code()), json_str(&inv.payload()))
+            format!(
+                r#"{{"code":{},"payload":{}}}"#,
+                json_str(inv.code()),
+                json_str(&inv.payload())
+            )
         }
         Err(e) => format!(r#"{{"error":{}}}"#, json_str(&e.to_string())),
     };
@@ -188,16 +202,20 @@ pub extern "system" fn Java_dev_envoix_app_Native_parseInvite(
 }
 
 fn to_jstring(env: &mut JNIEnv, s: &str) -> jni::sys::jstring {
-    env.new_string(s).map(|s| s.into_raw()).unwrap_or(std::ptr::null_mut())
+    env.new_string(s)
+        .map(|s| s.into_raw())
+        .unwrap_or(std::ptr::null_mut())
 }
 
 fn opt_json(s: Option<&str>) -> String {
     s.map(json_str).unwrap_or_else(|| "null".to_string())
 }
 
-async fn drive(
+/// Everything one native transfer needs, bundled so the JNI entry point and
+/// [`drive`] stay readable (and clippy-clean).
+struct DriveRequest {
     id: i64,
-    direction: &str,
+    direction: String,
     code: String,
     broker: String,
     relay: String,
@@ -205,22 +223,27 @@ async fn drive(
     config_path: String,
     use_room: bool,
     use_mdns: bool,
-    vm: &JavaVM,
-    cb: &GlobalRef,
-) -> Result<(), String> {
-    let config = (!config_path.is_empty()).then(|| PathBuf::from(config_path));
+}
+
+async fn drive(req: DriveRequest, vm: &JavaVM, cb: &GlobalRef) -> Result<(), String> {
+    let config = (!req.config_path.is_empty()).then(|| PathBuf::from(&req.config_path));
     let client = Client::from_runtime_sources(config.as_deref()).map_err(|e| e.to_string())?;
-    let into = PathBuf::from(path);
+    let into = PathBuf::from(&req.path);
 
     // Try each enabled rendezvous in order (Room, then mDNS via the code as its
     // token). Fall back to the next only on a *pre-connection* failure, so a
     // transfer that already started is never re-sent.
     let mut sources: Vec<PeerSource> = Vec::new();
-    if use_room {
-        sources.push(PeerSource::Room { code: code.clone(), broker });
+    if req.use_room {
+        sources.push(PeerSource::Room {
+            code: req.code.clone(),
+            broker: req.broker,
+        });
     }
-    if use_mdns {
-        sources.push(PeerSource::Mdns { token: Some(code) });
+    if req.use_mdns {
+        sources.push(PeerSource::Mdns {
+            token: Some(req.code),
+        });
     }
     if sources.is_empty() {
         return Err("no rendezvous mode enabled".to_string());
@@ -230,8 +253,8 @@ async fn drive(
     let mut last_err = "transfer failed".to_string();
     for (i, source) in sources.into_iter().enumerate() {
         let mut options = TransferOptions::default();
-        options.relay = Some(relay.clone());
-        let mut transfer = match direction {
+        options.relay = Some(req.relay.clone());
+        let mut transfer = match req.direction.as_str() {
             "send" => client.send(into.clone(), source, options),
             _ => client.receive(into.clone(), source, options),
         }
@@ -240,7 +263,7 @@ async fn drive(
         // Register a cancel handle so `cancel(id)` can stop this transfer.
         let handle = transfer.cancel_handle();
         if let Ok(mut map) = cancels().lock() {
-            map.insert(id, Box::new(move || handle.cancel()));
+            map.insert(req.id, Box::new(move || handle.cancel()));
         }
 
         let mut connected = false;
@@ -277,7 +300,12 @@ fn emit(vm: &JavaVM, cb: &GlobalRef, json: &str) {
         return;
     };
     if let Ok(js) = env.new_string(json) {
-        let _ = env.call_method(cb, "onEvent", "(Ljava/lang/String;)V", &[JValue::Object(&js)]);
+        let _ = env.call_method(
+            cb,
+            "onEvent",
+            "(Ljava/lang/String;)V",
+            &[JValue::Object(&js)],
+        );
     }
 }
 
@@ -333,9 +361,10 @@ pub extern "system" fn Java_dev_envoix_app_Native_setLogLevel(
         return;
     };
     let spec: String = spec.into();
-    if let (Some(handle), Ok(filter)) =
-        (LOG_RELOAD.get(), tracing_subscriber::EnvFilter::try_new(&spec))
-    {
+    if let (Some(handle), Ok(filter)) = (
+        LOG_RELOAD.get(),
+        tracing_subscriber::EnvFilter::try_new(&spec),
+    ) {
         let _ = handle.reload(filter);
     }
 }

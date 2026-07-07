@@ -41,7 +41,7 @@ private data class Spec(
  */
 class TransferService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private var active = 0
+    private val active = java.util.concurrent.atomic.AtomicInteger(0)
 
     /** Held while an mDNS-enabled transfer runs; Android gates multicast behind it. */
     private val multicastLock by lazy {
@@ -136,7 +136,7 @@ class TransferService : Service() {
         (cur + "${logTime.format(java.util.Date())}  $line").takeLast(TransferRepository.LOG_CAP)
 
     private fun runLoop(id: Long, spec: Spec) {
-        active++
+        active.incrementAndGet()
         updateNotification()
         scope.launch {
             var lastTs = 0L
@@ -207,11 +207,11 @@ class TransferService : Service() {
                 }
             if (spec.useMdns) runCatching { multicastLock.release() }
             if (spec.dir() == Direction.Receive) publishReceived(id, spec.path)
-            active--
+            active.decrementAndGet()
             // Refresh only while transfers remain; when idle, let stopIfIdle's
             // stopForeground(REMOVE) clear the notification — reposting here would
             // detach it and leave a stale status-bar icon.
-            if (active > 0) updateNotification()
+            if (active.get() > 0) updateNotification()
             stopIfIdle()
         }
     }
@@ -280,7 +280,7 @@ class TransferService : Service() {
     }
 
     private fun stopIfIdle(): Int {
-        if (active <= 0) {
+        if (active.get() <= 0) {
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
         }

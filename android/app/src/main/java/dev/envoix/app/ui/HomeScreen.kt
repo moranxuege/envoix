@@ -375,6 +375,7 @@ private fun CircleBtn(icon: ImageVector, filled: Boolean, onClick: () -> Unit) {
 @Composable
 private fun WaitingBody(t: Transfer, onCancel: (Long) -> Unit) {
     val colors = Envoix.colors
+    val settings by SettingsStore.settings.collectAsState()
     Column(Modifier.fillMaxWidth().padding(16.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
             Column(Modifier.weight(1f)) {
@@ -384,7 +385,7 @@ private fun WaitingBody(t: Transfer, onCancel: (Long) -> Unit) {
                 )
                 Text(
                     if (t.direction == Direction.Send) "Sending ${t.fileName ?: "a file"}"
-                    else "Saving to Downloads/${SettingsStore.settings.value.saveFolder}",
+                    else "Saving to Downloads/${settings.saveFolder}",
                     color = colors.muted, fontSize = 13.sp,
                     maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )

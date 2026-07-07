@@ -1,8 +1,11 @@
 package dev.envoix.app
 
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.launch
 import org.json.JSONObject
 
 /** Parsed events from the Envoix core (see the client event stream schema). */
@@ -39,18 +42,26 @@ object NativeTransfer {
                 parse(json)?.let { trySend(it) }
             }
         }
-        val worker = Thread {
-            try {
+        // The native call blocks, so run it on the IO dispatcher as a child of
+        // this flow's scope; close the flow when it returns, reporting the real
+        // terminal state rather than a blanket Exit(0).
+        val job = launch(Dispatchers.IO) {
+            val result = runCatching {
                 Native.runTransfer(id, direction, code, broker, relay, path, configPath, useRoom, useMdns, callback)
-            } catch (t: Throwable) {
-                trySend(CliEvent.Failed(t.message ?: "native error"))
-            } finally {
-                trySend(CliEvent.Exit(0))
-                channel.close()
             }
-        }.apply { isDaemon = true; start() }
+            result.exceptionOrNull()?.let { t ->
+                if (t !is CancellationException) trySend(CliEvent.Failed(t.message ?: "native error"))
+            }
+            trySend(CliEvent.Exit(if (result.isSuccess) 0 else 1))
+            close()
+        }
 
-        awaitClose { /* native transfer runs to completion; no cancel yet */ }
+        // If the collector is cancelled, stop the native transfer too — otherwise
+        // it keeps running detached.
+        awaitClose {
+            Native.cancel(id)
+            job.cancel()
+        }
     }
 
     private fun parse(line: String): CliEvent? {
