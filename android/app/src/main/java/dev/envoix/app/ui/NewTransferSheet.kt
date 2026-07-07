@@ -150,8 +150,9 @@ fun NewTransferSheet(
                         Icon(
                             Icons.Default.ContentCopy, "Copy code",
                             tint = colors.muted,
-                            modifier = Modifier.size(18.dp).clip(CircleShape)
-                                .clickable { clip.setText(AnnotatedString(generated!!.first)) },
+                            modifier = Modifier.clip(CircleShape)
+                                .clickable { clip.setText(AnnotatedString(generated!!.first)) }
+                                .padding(6.dp).size(18.dp),
                         )
                     }
                 }

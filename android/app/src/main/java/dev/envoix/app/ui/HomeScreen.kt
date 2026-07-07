@@ -171,16 +171,7 @@ private fun Header(active: Int, onOpenLogs: () -> Unit, onOpenSettings: () -> Un
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column {
-            Text(
-                "ANDROID PAIRING",
-                color = colors.accent,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 1.2.sp,
-            )
-            Text("Envoix", color = colors.text, fontSize = 32.sp, fontWeight = FontWeight.ExtraBold)
-        }
+        Text("Envoix", color = colors.text, fontSize = 32.sp, fontWeight = FontWeight.ExtraBold)
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (active > 0) {
                 Pill(text = "$active active", fg = colors.success, bg = colors.successSoft)
@@ -416,8 +407,9 @@ private fun WaitingBody(t: Transfer, onCancel: (Long) -> Unit) {
             Icon(
                 Icons.Default.ContentCopy, "Copy code",
                 tint = colors.muted,
-                modifier = Modifier.size(18.dp).clip(CircleShape)
-                    .clickable { clip.setText(AnnotatedString(t.room)) },
+                modifier = Modifier.clip(CircleShape)
+                    .clickable { clip.setText(AnnotatedString(t.room)) }
+                    .padding(6.dp).size(18.dp),
             )
         }
         Spacer(Modifier.height(2.dp))

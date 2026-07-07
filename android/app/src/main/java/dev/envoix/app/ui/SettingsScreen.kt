@@ -136,12 +136,12 @@ fun SettingsScreen(onBack: () -> Unit) {
         AdvancedHeader(showAdvanced) { showAdvanced = !showAdvanced }
         if (showAdvanced) {
             Spacer(Modifier.height(16.dp))
-            SectionLabel("RENDEZVOUS")
-            Field("Broker", broker) { broker = it; SettingsStore.update { s -> s.copy(broker = it) } }
+            SectionLabel("SERVERS")
+            Field("Broker · rendezvous", broker) { broker = it; SettingsStore.update { s -> s.copy(broker = it) } }
             Spacer(Modifier.height(12.dp))
-            Field("Relay", relay) { relay = it; SettingsStore.update { s -> s.copy(relay = it) } }
+            Field("Relay · data path", relay) { relay = it; SettingsStore.update { s -> s.copy(relay = it) } }
             Spacer(Modifier.height(12.dp))
-            Field("Log server · rdz /logs endpoint", logServer) {
+            Field("Log server · diagnostics", logServer) {
                 logServer = it; SettingsStore.update { s -> s.copy(logServer = it) }
             }
 
