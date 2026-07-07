@@ -7,8 +7,8 @@ use std::time::Duration;
 use envoix_rendezvous::RoomRegistry;
 use envoix_rendezvous_iroh::{build_endpoint, endpoint_addr, serve_endpoint};
 use envoix_session::{
-    DEFAULT_CHUNK_SIZE, IdentityConfig, NoopEventSink, SessionConfig,
-    TransferCancelToken, receive_file_via_room, send_file_via_room,
+    DEFAULT_CHUNK_SIZE, IdentityConfig, NoopEventSink, SessionConfig, TransferCancelToken,
+    receive_file_via_room, send_file_via_room,
 };
 use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 use tempfile::tempdir;

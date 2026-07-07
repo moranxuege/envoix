@@ -219,6 +219,13 @@ impl Transfer {
         self.cancel.cancel();
     }
 
+    /// A clonable handle that cancels this transfer, for callers that drive the
+    /// event loop on one thread and want to cancel from another (e.g. the JNI
+    /// bridge). Triggering it is equivalent to [`Transfer::cancel`].
+    pub fn cancel_handle(&self) -> TransferCancelToken {
+        self.cancel.clone()
+    }
+
     /// Waits for the transfer to finish and returns its outcome. Events not
     /// yet consumed are discarded.
     pub async fn wait(mut self) -> Result<TransferSummary, TransferError> {

@@ -95,8 +95,10 @@ Not implemented in this walking skeleton:
 - end-to-end file encryption;
 - relay or server fallback;
 - interactive pause, folder transfer, or multi-file manifests;
+- enforced transfer speed limiting;
 - per-chunk hashes, parallel chunk transfer, or out-of-order chunk recovery;
-- mobile camera scanning (QR invite requires manual paste on CLI).
+- CLI QR scanning (QR invites require manual paste in the CLI; the Apple app
+  has its own camera scanner).
 
 QUIC currently uses generated self-signed certificates with an explicitly
 insecure no-auth verifier. Peer/session authentication is provided by the
