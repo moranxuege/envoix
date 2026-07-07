@@ -25,6 +25,8 @@ private data class Spec(
     val broker: String,
     val relay: String,
     val config: String,
+    /** Invite payload to advertise as a QR while waiting (initiated sessions only). */
+    val qrPayload: String?,
 ) {
     fun dir(): Direction = if (direction == "send") Direction.Send else Direction.Receive
 }
@@ -60,9 +62,17 @@ class TransferService : Service() {
                     intent.getStringExtra(EXTRA_BROKER) ?: Endpoints.BROKER,
                     intent.getStringExtra(EXTRA_RELAY) ?: Endpoints.RELAY,
                     intent.getStringExtra(EXTRA_CONFIG) ?: "",
+                    intent.getStringExtra(EXTRA_QR),
                 )
                 enterForeground()
                 val id = TransferRepository.create(spec.dir(), room)
+                TransferRepository.update(id) {
+                    it.copy(
+                        qrPayload = spec.qrPayload,
+                        // Show the outgoing file name right away; receives learn it on Started.
+                        fileName = if (spec.dir() == Direction.Send) File(spec.path).name else it.fileName,
+                    )
+                }
                 specs[id] = spec
                 LogStore.append("app: start $direction room=${room.substringBefore('-')} id=$id")
                 runLoop(id, spec)
@@ -231,10 +241,12 @@ class TransferService : Service() {
         private const val EXTRA_BROKER = "broker"
         private const val EXTRA_RELAY = "relay"
         private const val EXTRA_CONFIG = "config"
+        private const val EXTRA_QR = "qr"
         private const val EXTRA_ID = "id"
 
         /** `direction` is "send"/"receive"; `path` is the file to send or the
-         *  output directory to receive into; `config` is a config.toml path or "". */
+         *  output directory to receive into; `config` is a config.toml path or "";
+         *  `qrPayload` is the invite to show while waiting (null when joining). */
         fun start(
             context: Context,
             direction: String,
@@ -243,6 +255,7 @@ class TransferService : Service() {
             broker: String,
             relay: String,
             config: String,
+            qrPayload: String?,
         ) {
             context.startForegroundService(
                 Intent(context, TransferService::class.java).apply {
@@ -253,6 +266,7 @@ class TransferService : Service() {
                     putExtra(EXTRA_BROKER, broker)
                     putExtra(EXTRA_RELAY, relay)
                     putExtra(EXTRA_CONFIG, config)
+                    putExtra(EXTRA_QR, qrPayload)
                 }
             )
         }

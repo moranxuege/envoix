@@ -51,11 +51,11 @@ class MainActivity : ComponentActivity() {
                         val transfers by vm.transfers.collectAsState()
                         HomeScreen(
                             transfers = transfers,
-                            onReceive = { c, b, r -> vm.startReceive(c, b, r) },
-                            onSend = { c, b, r, uri ->
+                            onReceive = { c, b, r, qr -> vm.startReceive(c, b, r, qr) },
+                            onSend = { c, b, r, uri, qr ->
                                 lifecycleScope.launch {
                                     val path = withContext(Dispatchers.IO) { copyToCache(uri) }
-                                    if (path != null) vm.startSend(c, path, b, r)
+                                    if (path != null) vm.startSend(c, path, b, r, qr)
                                 }
                             },
                             onPauseResume = { vm.pauseResume(it) },

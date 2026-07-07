@@ -5,7 +5,6 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -39,19 +38,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.google.zxing.BarcodeFormat
-import com.google.zxing.EncodeHintType
-import com.google.zxing.qrcode.QRCodeWriter
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import dev.envoix.app.InviteCodec
@@ -64,8 +57,8 @@ import dev.envoix.app.SettingsStore
  */
 @Composable
 fun NewTransferSheet(
-    onReceive: (code: String, broker: String, relay: String) -> Unit,
-    onSend: (code: String, broker: String, relay: String, file: Uri) -> Unit,
+    onReceive: (code: String, broker: String, relay: String, qrPayload: String?) -> Unit,
+    onSend: (code: String, broker: String, relay: String, file: Uri, qrPayload: String?) -> Unit,
 ) {
     val colors = Envoix.colors
     val context = LocalContext.current
@@ -191,7 +184,9 @@ fun NewTransferSheet(
                 .background(colors.accent.copy(alpha = if (ready) 1f else 0.4f))
                 .clickable(enabled = ready) {
                     val c = code ?: return@clickable
-                    if (role == "send") onSend(c, useBroker, useRelay, fileUri!!) else onReceive(c, useBroker, useRelay)
+                    // Advertise our QR only when we initiated (not when joining a code).
+                    val qr = if (joining) null else generated?.second
+                    if (role == "send") onSend(c, useBroker, useRelay, fileUri!!, qr) else onReceive(c, useBroker, useRelay, qr)
                 },
             contentAlignment = Alignment.Center,
         ) {
@@ -261,33 +256,3 @@ private fun PathRow(label: String, value: String, placeholder: Boolean, onClick:
 private fun displayName(context: Context, uri: Uri): String =
     context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
         ?.use { c -> if (c.moveToFirst()) c.getString(0) else null } ?: "file"
-
-/** Render [data] as a QR (ZXing → Compose Canvas), dark modules on a white card. */
-@Composable
-private fun QrCode(data: String, side: Dp) {
-    val matrix = remember(data) {
-        runCatching {
-            QRCodeWriter().encode(data, BarcodeFormat.QR_CODE, 1, 1, mapOf(EncodeHintType.MARGIN to 1))
-        }.getOrNull()
-    }
-    Box(
-        Modifier.size(side).clip(RoundedCornerShape(14.dp)).background(Color.White).padding(10.dp),
-    ) {
-        Canvas(Modifier.fillMaxSize()) {
-            val m = matrix ?: return@Canvas
-            val n = m.width
-            val cell = size.width / n
-            for (y in 0 until n) {
-                for (x in 0 until n) {
-                    if (m.get(x, y)) {
-                        drawRect(
-                            Color(0xFF101820),
-                            topLeft = Offset(x * cell, y * cell),
-                            size = Size(cell + 0.7f, cell + 0.7f),
-                        )
-                    }
-                }
-            }
-        }
-    }
-}

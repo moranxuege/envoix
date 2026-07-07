@@ -80,8 +80,8 @@ import kotlin.math.roundToInt
 @Composable
 fun HomeScreen(
     transfers: List<Transfer>,
-    onReceive: (code: String, broker: String, relay: String) -> Unit,
-    onSend: (code: String, broker: String, relay: String, file: android.net.Uri) -> Unit,
+    onReceive: (code: String, broker: String, relay: String, qrPayload: String?) -> Unit,
+    onSend: (code: String, broker: String, relay: String, file: android.net.Uri, qrPayload: String?) -> Unit,
     onPauseResume: (Long) -> Unit,
     onCancel: (Long) -> Unit,
     onRemove: (Long) -> Unit,
@@ -146,8 +146,8 @@ fun HomeScreen(
             containerColor = colors.surface,
         ) {
             NewTransferSheet(
-                onReceive = { c, b, r -> sheetOpen = false; onReceive(c, b, r) },
-                onSend = { c, b, r, uri -> sheetOpen = false; onSend(c, b, r, uri) },
+                onReceive = { c, b, r, qr -> sheetOpen = false; onReceive(c, b, r, qr) },
+                onSend = { c, b, r, uri, qr -> sheetOpen = false; onSend(c, b, r, uri, qr) },
             )
         }
     }
@@ -261,6 +261,9 @@ private fun TransferCard(
                     onLongClick = { onToggleDetail(t.id) },
                 ),
         ) {
+            if (t.status == Status.Connecting && t.qrPayload != null) {
+                WaitingBody(t, onCancel)
+            } else {
             Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -307,6 +310,7 @@ private fun TransferCard(
                 }
                 Spacer(Modifier.width(10.dp))
                 CardControls(t, onPauseResume, onCancel, onOpen)
+            }
             }
             if (expanded) DetailDrawer(t)
         }
@@ -355,6 +359,49 @@ private fun CircleBtn(icon: ImageVector, filled: Boolean, onClick: () -> Unit) {
         contentAlignment = Alignment.Center,
     ) {
         Icon(icon, null, tint = if (filled) Color.White else colors.muted, modifier = Modifier.size(18.dp))
+    }
+}
+
+/** The waiting-to-pair variant of a card: shows the QR + code for a peer to scan
+ *  or type, with only a Cancel action. Used for initiated sessions until they pair,
+ *  then the card becomes the normal progress variant. */
+@Composable
+private fun WaitingBody(t: Transfer, onCancel: (Long) -> Unit) {
+    val colors = Envoix.colors
+    Column(Modifier.fillMaxWidth().padding(16.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    if (t.direction == Direction.Send) "Waiting to send" else "Waiting to receive",
+                    color = colors.text, fontSize = 16.sp, fontWeight = FontWeight.Bold,
+                )
+                Text(
+                    if (t.direction == Direction.Send) "Sending ${t.fileName ?: "a file"}" else "Saving to Downloads/Envoix",
+                    color = colors.muted, fontSize = 13.sp,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                )
+            }
+            CircleBtn(Icons.Default.Close, filled = false) { onCancel(t.id) }
+        }
+        Spacer(Modifier.height(14.dp))
+        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+            QrCode(t.qrPayload!!, 172.dp)
+        }
+        Spacer(Modifier.height(10.dp))
+        Text(
+            t.room,
+            color = colors.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+            fontFamily = FontFamily.Monospace,
+            modifier = Modifier.fillMaxWidth(),
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+        )
+        Spacer(Modifier.height(2.dp))
+        Text(
+            "Scan or enter this code",
+            color = colors.muted, fontSize = 12.sp,
+            modifier = Modifier.fillMaxWidth(),
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+        )
     }
 }
 

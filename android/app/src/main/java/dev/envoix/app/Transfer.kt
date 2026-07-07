@@ -19,6 +19,9 @@ data class Transfer(
     val error: String? = null,
     /** Where a received file ended up (a `content://` in Downloads), for opening. */
     val savedUri: String? = null,
+    /** For an initiated session, the invite payload to show as a QR while waiting
+     *  for a peer to pair (null when we joined someone else's code). */
+    val qrPayload: String? = null,
     /** Recent throughput samples (bytes/s), for the detail drawer's speed chart. */
     val speedHistory: List<Double> = emptyList(),
     /** Timestamped log lines scoped to this transfer, for the detail drawer. */
