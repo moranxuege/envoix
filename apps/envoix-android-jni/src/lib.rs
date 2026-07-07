@@ -234,7 +234,8 @@ fn emit(vm: &JavaVM, cb: &GlobalRef, json: &str) {
 /// Install a `tracing` subscriber that forwards every formatted log line to the
 /// Kotlin `sink.log(String)`, so the app can show/copy the core's logs - the same
 /// stream the CLI prints with `-v`. Safe to call once; later calls no-op. The
-/// filter defaults to `envoix=debug,warn`; override with the `ENVOIX_LOG` env.
+/// filter defaults to `envoix=debug,iroh=info,warn` (captures iroh's connection
+/// story, not just warnings); override with the `ENVOIX_LOG` env.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_envoix_app_Native_initLogging(
     env: JNIEnv,
@@ -248,7 +249,7 @@ pub extern "system" fn Java_dev_envoix_app_Native_initLogging(
     let _ = LOG_VM.set(vm);
     let _ = LOG_SINK.set(sink);
 
-    let spec = std::env::var("ENVOIX_LOG").unwrap_or_else(|_| "envoix=debug,warn".to_string());
+    let spec = std::env::var("ENVOIX_LOG").unwrap_or_else(|_| "envoix=debug,iroh=info,warn".to_string());
     let filter = tracing_subscriber::EnvFilter::try_new(&spec)
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
     let _ = tracing_subscriber::fmt()
