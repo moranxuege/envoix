@@ -158,17 +158,30 @@ private fun CameraPreview(onQr: (String) -> Unit, modifier: Modifier = Modifier)
 /** Decodes QR frames off the camera; calls [onResult] on the first hit. */
 private class QrAnalyzer(val onResult: (String) -> Unit) : ImageAnalysis.Analyzer {
     private val reader = MultiFormatReader().apply {
-        setHints(mapOf(DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE)))
+        setHints(
+            mapOf(
+                DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE),
+                DecodeHintType.TRY_HARDER to true, // handle soft / screen-captured codes
+            ),
+        )
     }
 
     override fun analyze(image: ImageProxy) {
         try {
-            val buffer = image.planes[0].buffer
-            val bytes = ByteArray(buffer.remaining()).also { buffer.get(it) }
+            val plane = image.planes[0]
+            val stride = plane.rowStride // may exceed width (row padding)
+            val bytes = ByteArray(stride * image.height)
+            plane.buffer.get(bytes, 0, minOf(plane.buffer.remaining(), bytes.size))
+            // Pass the *stride* as the data width so each luminance row lines up,
+            // then crop to the real width/height.
             val source = PlanarYUVLuminanceSource(
-                bytes, image.width, image.height, 0, 0, image.width, image.height, false,
+                bytes, stride, image.height, 0, 0, image.width, image.height, false,
             )
-            onResult(reader.decodeWithState(BinaryBitmap(HybridBinarizer(source))).text)
+            val result = runCatching { reader.decodeWithState(BinaryBitmap(HybridBinarizer(source))) }
+                // A code half-out of frame can also read from the inverted image.
+                .recoverCatching { reader.decodeWithState(BinaryBitmap(HybridBinarizer(source.invert()))) }
+                .getOrNull()
+            if (result != null) onResult(result.text)
         } catch (_: Exception) {
             // no code in this frame
         } finally {
