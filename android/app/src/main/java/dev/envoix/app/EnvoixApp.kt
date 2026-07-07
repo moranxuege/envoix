@@ -9,6 +9,7 @@ class EnvoixApp : Application() {
         SettingsStore.init(this)
         LogStore.init(filesDir)
         Native.initLogging(LogSink) // before initContext, so init logs are captured
+        SettingsStore.applyLogLevel() // restore the saved (dev) verbosity
         Native.initContext(this)
 
         // Capture uncaught exceptions into the log (foundation for crash reporting).

@@ -25,6 +25,9 @@ data class Settings(
     // native app prefs (seed per-transfer choices)
     val saveFolder: String = "Envoix",
     val defaultRole: String = "receive",
+    // developer / diagnostics
+    val devMode: Boolean = false,
+    val verboseLog: Boolean = false,
 )
 
 /** App settings, persisted in SharedPreferences and observable as a StateFlow. */
@@ -46,6 +49,8 @@ object SettingsStore {
             candidatesDeny = readList("candidatesDeny"),
             saveFolder = prefs.getString("saveFolder", "Envoix")!!,
             defaultRole = prefs.getString("defaultRole", "receive")!!,
+            devMode = prefs.getBoolean("devMode", false),
+            verboseLog = prefs.getBoolean("verboseLog", false),
         )
     }
 
@@ -62,9 +67,18 @@ object SettingsStore {
             .putString("candidatesDeny", s.candidatesDeny.joinToString("\n"))
             .putString("saveFolder", s.saveFolder)
             .putString("defaultRole", s.defaultRole)
+            .putBoolean("devMode", s.devMode)
+            .putBoolean("verboseLog", s.verboseLog)
             .apply()
         _settings.value = s
     }
+
+    private const val LOG_BASELINE = "envoix=debug,iroh=info,warn"
+    private const val LOG_VERBOSE = "envoix=trace,iroh=debug,warn"
+
+    /** Push the current verbosity down to the native reloadable filter. */
+    fun applyLogLevel() =
+        Native.setLogLevel(if (_settings.value.verboseLog) LOG_VERBOSE else LOG_BASELINE)
 
     /** The "Avoid Tailscale" toggle is a *view* over `deny`: on iff the ranges are present. */
     fun avoidsTailscale(s: Settings): Boolean = s.candidatesDeny.containsAll(TAILSCALE_CIDRS)

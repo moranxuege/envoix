@@ -130,6 +130,25 @@ fun SettingsScreen(onBack: () -> Unit) {
             MultilineField("Candidate deny · one CIDR per line", denyText) {
                 denyText = it; SettingsStore.update { s -> s.copy(candidatesDeny = cidrLines(it)) }
             }
+
+            Spacer(Modifier.height(22.dp))
+            SectionLabel("DEVELOPER")
+            ToggleRow(
+                title = "Developer mode",
+                subtitle = "Reveal diagnostics — verbose logging (and, later, log upload).",
+                checked = settings.devMode,
+            ) { SettingsStore.update { s -> s.copy(devMode = it) } }
+            if (settings.devMode) {
+                Spacer(Modifier.height(16.dp))
+                ToggleRow(
+                    title = "Verbose logging (-vv)",
+                    subtitle = "Also capture iroh internals: path selection, hole-punching. High volume.",
+                    checked = settings.verboseLog,
+                ) {
+                    SettingsStore.update { s -> s.copy(verboseLog = it) }
+                    SettingsStore.applyLogLevel()
+                }
+            }
         }
     }
 }

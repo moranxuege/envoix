@@ -34,6 +34,15 @@ fn cancels() -> &'static Mutex<HashMap<i64, Box<dyn Fn() + Send + Sync>>> {
 static LOG_VM: OnceLock<JavaVM> = OnceLock::new();
 static LOG_SINK: OnceLock<GlobalRef> = OnceLock::new();
 
+/// The always-on baseline: envoix internals + iroh's connection story.
+const DEFAULT_LOG: &str = "envoix=debug,iroh=info,warn";
+
+/// Handle to the reloadable log filter, so the app can raise/lower verbosity at
+/// runtime (the `-vv` dev toggle) without restarting.
+type LogReload =
+    tracing_subscriber::reload::Handle<tracing_subscriber::EnvFilter, tracing_subscriber::Registry>;
+static LOG_RELOAD: OnceLock<LogReload> = OnceLock::new();
+
 fn runtime() -> &'static tokio::runtime::Runtime {
     RT.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
@@ -249,15 +258,45 @@ pub extern "system" fn Java_dev_envoix_app_Native_initLogging(
     let _ = LOG_VM.set(vm);
     let _ = LOG_SINK.set(sink);
 
-    let spec = std::env::var("ENVOIX_LOG").unwrap_or_else(|_| "envoix=debug,iroh=info,warn".to_string());
+    let spec = std::env::var("ENVOIX_LOG").unwrap_or_else(|_| DEFAULT_LOG.to_string());
     let filter = tracing_subscriber::EnvFilter::try_new(&spec)
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(JniLogWriter)
-        .with_ansi(false)
-        .with_target(false)
-        .try_init();
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(DEFAULT_LOG));
+    let (filter, handle) = tracing_subscriber::reload::Layer::new(filter);
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    let installed = tracing_subscriber::registry()
+        .with(filter)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(JniLogWriter)
+                .with_ansi(false)
+                .with_target(false),
+        )
+        .try_init()
+        .is_ok();
+    if installed {
+        let _ = LOG_RELOAD.set(handle);
+    }
+}
+
+/// Change the log filter at runtime (the dev-mode `-vv` toggle). `spec` is an
+/// env-filter directive, e.g. `envoix=trace,iroh=debug` for verbose or
+/// `envoix=debug,iroh=info,warn` for the baseline. Invalid specs are ignored.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_setLogLevel(
+    mut env: JNIEnv,
+    _class: JClass,
+    spec: JString,
+) {
+    let Ok(spec) = env.get_string(&spec) else {
+        return;
+    };
+    let spec: String = spec.into();
+    if let (Some(handle), Ok(filter)) =
+        (LOG_RELOAD.get(), tracing_subscriber::EnvFilter::try_new(&spec))
+    {
+        let _ = handle.reload(filter);
+    }
 }
 
 /// Forward one formatted `tracing` line to `sink.log(...)`.
