@@ -31,8 +31,8 @@ data class Settings(
     // developer / diagnostics
     val devMode: Boolean = false,
     val verboseLog: Boolean = false,
-    /** Base URL of the rdz log-collection endpoint, e.g. http://host:8460. Empty = off. */
-    val logServer: String = "",
+    /** Base URL of the rdz log-collection endpoint. Empty = uploads off. */
+    val logServer: String = Endpoints.LOG_SERVER,
 )
 
 /** App settings, persisted in SharedPreferences and observable as a StateFlow. */
@@ -58,7 +58,7 @@ object SettingsStore {
             useMdns = prefs.getBoolean("useMdns", true),
             devMode = prefs.getBoolean("devMode", false),
             verboseLog = prefs.getBoolean("verboseLog", false),
-            logServer = prefs.getString("logServer", "")!!,
+            logServer = prefs.getString("logServer", Endpoints.LOG_SERVER)!!,
         )
     }
 

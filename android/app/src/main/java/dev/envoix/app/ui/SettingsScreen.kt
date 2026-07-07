@@ -130,6 +130,10 @@ fun SettingsScreen(onBack: () -> Unit) {
             Field("Broker", broker) { broker = it; SettingsStore.update { s -> s.copy(broker = it) } }
             Spacer(Modifier.height(12.dp))
             Field("Relay", relay) { relay = it; SettingsStore.update { s -> s.copy(relay = it) } }
+            Spacer(Modifier.height(12.dp))
+            Field("Log server · rdz /logs endpoint", logServer) {
+                logServer = it; SettingsStore.update { s -> s.copy(logServer = it) }
+            }
 
             Spacer(Modifier.height(22.dp))
             SectionLabel("CONFIG.TOML")
@@ -161,10 +165,6 @@ fun SettingsScreen(onBack: () -> Unit) {
                 ) {
                     SettingsStore.update { s -> s.copy(verboseLog = it) }
                     SettingsStore.applyLogLevel()
-                }
-                Spacer(Modifier.height(16.dp))
-                Field("Log server URL · e.g. http://host:8460", logServer) {
-                    logServer = it; SettingsStore.update { s -> s.copy(logServer = it) }
                 }
             }
         }
