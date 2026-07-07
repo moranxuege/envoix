@@ -14,6 +14,7 @@ use envoix_rendezvous::RoomRegistry;
 use envoix_rendezvous_iroh::{PeerLocator, build_endpoint, relay_mode_from_url, serve_endpoint};
 
 mod geoip;
+mod logs;
 
 #[derive(Parser)]
 #[command(
@@ -50,6 +51,13 @@ struct Cli {
     /// annotated with the peer's ISP/carrier.
     #[arg(long)]
     geoip_asn: Option<PathBuf>,
+    /// HTTP address for the per-room log-collection endpoint
+    /// (`POST /logs/<room_id>?side=…`, `GET /logs/<room_id>`). Omit to disable.
+    #[arg(long)]
+    log_bind: Option<SocketAddr>,
+    /// How long (seconds) collected logs are kept after their last update.
+    #[arg(long, default_value_t = 3600)]
+    log_ttl: u64,
 }
 
 /// How server logs are rendered.
@@ -112,6 +120,23 @@ async fn main() -> Result<()> {
             }
             None => None,
         };
+
+    // Optional per-room log-collection endpoint on its own HTTP port. Off unless
+    // --log-bind is given; a separate task that never touches the pairing endpoint.
+    if let Some(addr) = cli.log_bind {
+        let store = Arc::new(logs::RoomLogs::new(Duration::from_secs(cli.log_ttl)));
+        tokio::spawn(async move {
+            match tokio::net::TcpListener::bind(addr).await {
+                Ok(listener) => {
+                    tracing::info!(%addr, "log endpoint listening");
+                    if let Err(error) = axum::serve(listener, logs::router(store)).await {
+                        tracing::error!(%error, "log endpoint failed");
+                    }
+                }
+                Err(error) => tracing::error!(%error, %addr, "log endpoint bind failed"),
+            }
+        });
+    }
 
     serve_endpoint(
         endpoint,

@@ -60,10 +60,12 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -74,9 +76,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.envoix.app.Direction
+import dev.envoix.app.LogUpload
 import dev.envoix.app.SettingsStore
 import dev.envoix.app.Status
 import dev.envoix.app.Transfer
+import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -454,26 +458,38 @@ private fun DetailDrawer(t: Transfer) {
         if (t.log.isNotEmpty()) {
             val clip = LocalClipboardManager.current
             var copied by remember(t.id) { mutableStateOf(false) }
+            val settings by SettingsStore.settings.collectAsState()
+            val scope = rememberCoroutineScope()
+            var upload by remember(t.id) { mutableStateOf("") }
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 DrawerLabel("This transfer's log")
-                Text(
-                    if (copied) "Copied ✓" else "Copy",
-                    color = colors.accent,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable {
-                            clip.setText(AnnotatedString(t.log.joinToString("\n")))
-                            copied = true
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (settings.devMode && settings.logServer.isNotBlank()) {
+                        PillButton(upload.ifEmpty { "Upload" }) {
+                            upload = "Uploading…"
+                            scope.launch {
+                                val ok = LogUpload.upload(
+                                    settings.logServer,
+                                    t.room.substringBefore('-'),
+                                    if (t.direction == Direction.Send) "send" else "receive",
+                                    t.log.joinToString("\n"),
+                                )
+                                upload = if (ok) "Uploaded ✓" else "Failed"
+                            }
                         }
-                        .background(colors.accentSoft)
-                        .padding(horizontal = 10.dp, vertical = 5.dp),
-                )
+                    }
+                    PillButton(if (copied) "Copied ✓" else "Copy") {
+                        clip.setText(AnnotatedString(t.log.joinToString("\n")))
+                        copied = true
+                    }
+                }
             }
             Spacer(Modifier.height(6.dp))
             LogBox(t.log)
@@ -490,6 +506,17 @@ private fun DrawerLabel(text: String) {
         fontWeight = FontWeight.Bold,
         letterSpacing = 1.sp,
         modifier = Modifier.padding(top = 10.dp, bottom = 4.dp),
+    )
+}
+
+@Composable
+private fun PillButton(text: String, onClick: () -> Unit) {
+    val colors = Envoix.colors
+    Text(
+        text,
+        color = colors.accent, fontSize = 12.sp, fontWeight = FontWeight.Bold,
+        modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable(onClick = onClick)
+            .background(colors.accentSoft).padding(horizontal = 10.dp, vertical = 5.dp),
     )
 }
 

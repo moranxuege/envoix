@@ -14,6 +14,7 @@
         android:name=".EnvoixApp"
         android:allowBackup="true"
         android:extractNativeLibs="true"
+        android:usesCleartextTraffic="true"
         android:icon="@android:drawable/sym_def_app_icon"
         android:label="Envoix"
         android:supportsRtl="true"

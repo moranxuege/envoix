@@ -57,6 +57,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     var saveFolder by remember { mutableStateOf(settings.saveFolder) }
     var allowText by remember { mutableStateOf(settings.candidatesAllow.joinToString("\n")) }
     var denyText by remember { mutableStateOf(settings.candidatesDeny.joinToString("\n")) }
+    var logServer by remember { mutableStateOf(settings.logServer) }
     var showAdvanced by remember { mutableStateOf(false) }
 
     // Reflect external edits to the candidate lists (e.g. the Avoid-Tailscale
@@ -160,6 +161,10 @@ fun SettingsScreen(onBack: () -> Unit) {
                 ) {
                     SettingsStore.update { s -> s.copy(verboseLog = it) }
                     SettingsStore.applyLogLevel()
+                }
+                Spacer(Modifier.height(16.dp))
+                Field("Log server URL · e.g. http://host:8460", logServer) {
+                    logServer = it; SettingsStore.update { s -> s.copy(logServer = it) }
                 }
             }
         }
