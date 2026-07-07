@@ -6,3 +6,11 @@
 
 dist/
 node_modules/
+
+# android
+android/local.properties
+android/.gradle/
+android/build/
+android/app/build/
+.idea/
+*.iml
