@@ -29,6 +29,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -427,7 +428,23 @@ private fun DetailDrawer(t: Transfer) {
     Column(Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, bottom = 14.dp)) {
         HorizontalDivider(color = colors.line)
         if (t.speedHistory.size >= 2) {
-            DrawerLabel("Speed")
+            val peak = t.speedHistory.maxOrNull() ?: 0.0
+            val avg = t.speedHistory.average()
+            Row(
+                Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "SPEED",
+                    color = colors.muted, fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold, letterSpacing = 1.sp,
+                )
+                Text(
+                    "avg ${humanBps(avg)} · peak ${humanBps(peak)}",
+                    color = colors.muted, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+                )
+            }
             SpeedChart(t.speedHistory)
         }
         Spacer(Modifier.height(4.dp))
@@ -479,10 +496,12 @@ private fun DrawerLabel(text: String) {
 @Composable
 private fun SpeedChart(history: List<Double>) {
     val accent = Envoix.colors.accent
+    val muted = Envoix.colors.muted
     Canvas(Modifier.fillMaxWidth().height(50.dp)) {
         val n = history.size
         if (n < 2) return@Canvas
         val max = (history.maxOrNull() ?: 1.0).coerceAtLeast(1.0)
+        val avg = history.average()
         val w = size.width
         val h = size.height
         fun px(i: Int) = w * i / (n - 1)
@@ -498,6 +517,13 @@ private fun SpeedChart(history: List<Double>) {
         area.lineTo(w, h)
         area.close()
         drawPath(area, accent.copy(alpha = 0.14f))
+        // dashed avg reference line — the top edge of the chart is the peak
+        drawLine(
+            muted.copy(alpha = 0.55f),
+            Offset(0f, py(avg)), Offset(w, py(avg)),
+            strokeWidth = 1.dp.toPx(),
+            pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 6f)),
+        )
         drawPath(line, accent, style = Stroke(width = 2.5.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
         drawCircle(accent, radius = 3.dp.toPx(), center = Offset(px(n - 1), py(history.last())))
     }
@@ -627,4 +653,11 @@ private fun humanBytes(b: Long): String {
     var v = b.toDouble(); var i = 0
     while (v >= 1024 && i < units.size - 1) { v /= 1024; i++ }
     return if (i == 0) "${b} B" else "${(v * 10).roundToInt() / 10.0} ${units[i]}"
+}
+
+private fun humanBps(bps: Double): String {
+    if (bps <= 0) return "—"
+    val mbps = bps / 1_000_000.0
+    return if (mbps >= 1) "${(mbps * 10).roundToInt() / 10.0} MB/s"
+    else "${(bps / 1000).roundToInt()} KB/s"
 }

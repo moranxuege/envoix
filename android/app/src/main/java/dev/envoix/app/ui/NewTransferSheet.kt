@@ -20,10 +20,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
@@ -39,7 +41,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -143,12 +147,25 @@ fun NewTransferSheet(
                 QrCode(generated!!.second, side = 150.dp)
             }
             Spacer(Modifier.height(10.dp))
-            Text(
-                generated!!.first,
-                color = colors.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
-                fontFamily = FontFamily.Monospace,
-                modifier = Modifier.fillMaxWidth(), textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-            )
+            val clip = LocalClipboardManager.current
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    generated!!.first,
+                    color = colors.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+                    fontFamily = FontFamily.Monospace,
+                )
+                Spacer(Modifier.width(8.dp))
+                Icon(
+                    Icons.Default.ContentCopy, "Copy code",
+                    tint = colors.muted,
+                    modifier = Modifier.size(18.dp).clip(CircleShape)
+                        .clickable { clip.setText(AnnotatedString(generated!!.first)) },
+                )
+            }
         }
 
         Spacer(Modifier.height(16.dp))
