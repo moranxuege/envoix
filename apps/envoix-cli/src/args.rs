@@ -6,6 +6,7 @@ use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use envoix_client::api;
 use envoix_client::api::TransferError;
 use envoix_client::{BindAddrs, IdentityConfig, PeerDescriptor};
+use envoix_qr::render_terminal_qr;
 
 const IPV4_RECEIVE_ADDR: &str = "0.0.0.0:0";
 const IPV6_RECEIVE_ADDR: &str = "[::]:0";
@@ -73,8 +74,10 @@ pub(crate) struct SendArgs {
     #[arg(long, conflicts_with_all = ["peer", "enable_mdns", "token"])]
     pub(crate) invite: Option<String>,
     /// Pairing code for a rendezvous-room transfer, e.g. 123456-amber-comet.
-    #[arg(long, requires = "rendezvous", conflicts_with_all = ["peer", "invite", "enable_mdns", "token"])]
-    pub(crate) room: Option<String>,
+    /// Pass `--room` with no value to auto-generate a code (printed with a QR)
+    /// for the other side to use.
+    #[arg(long, num_args = 0..=1, requires = "rendezvous", conflicts_with_all = ["peer", "invite", "enable_mdns", "token"])]
+    pub(crate) room: Option<Option<String>>,
     /// Rendezvous broker address, <endpoint-id>@<ip:port> (used with --room).
     #[arg(long, requires = "room")]
     pub(crate) rendezvous: Option<String>,
@@ -118,8 +121,10 @@ pub(crate) struct ReceiveArgs {
     #[arg(long, required_unless_present_any = ["enable_mdns", "room"])]
     pub(crate) token: Option<String>,
     /// Pairing code for a rendezvous-room transfer, e.g. 123456-amber-comet.
-    #[arg(long, requires = "rendezvous", conflicts_with_all = ["token", "enable_mdns"])]
-    pub(crate) room: Option<String>,
+    /// Pass `--room` with no value to auto-generate a code (printed with a QR)
+    /// for the other side to use.
+    #[arg(long, num_args = 0..=1, requires = "rendezvous", conflicts_with_all = ["token", "enable_mdns"])]
+    pub(crate) room: Option<Option<String>>,
     /// Rendezvous broker address, <endpoint-id>@<ip:port> (used with --room).
     #[arg(long, requires = "room")]
     pub(crate) rendezvous: Option<String>,
@@ -161,18 +166,51 @@ pub(crate) struct TransferPlan {
     pub(crate) identity: IdentityConfig,
 }
 
+/// Resolve a `--room` value: use the code the user gave, or generate one via an
+/// [`api::Invite`] and build a note that shows the code + a terminal QR for the
+/// other side. `give_to` labels that side; `waiting` is the base status line.
+fn resolve_room_code(
+    room: Option<String>,
+    broker: &str,
+    relay: Option<&str>,
+    role: api::Role,
+    give_to: &str,
+    waiting: &str,
+) -> Result<(String, String), TransferError> {
+    match room {
+        Some(code) => Ok((code, waiting.to_string())),
+        None => {
+            let invite =
+                api::Invite::room(broker.to_string(), relay.map(String::from))?.with_role(role);
+            let qr = render_terminal_qr(&invite.payload())
+                .map(|q| format!("\n{q}"))
+                .unwrap_or_default();
+            let note =
+                format!("your code: {}  - give this to the {give_to}{qr}\n{waiting}", invite.code());
+            Ok((invite.code().to_string(), note))
+        }
+    }
+}
+
 impl SendArgs {
     pub(crate) fn into_plan(self) -> Result<TransferPlan, TransferError> {
         let mut options = api::TransferOptions::default();
         options.resume = self.resume;
-        options.relay = self.relay;
+        options.relay = self.relay.clone();
         options.path = path_policy(self.relay_only, self.direct_only)?;
 
-        let (source, note) = if let Some(code) = self.room {
+        let (source, note) = if let Some(room) = self.room {
             let broker = self
                 .rendezvous
                 .expect("clap requires --rendezvous with --room");
-            let note = format!("pairing in room via {broker}...");
+            let (code, note) = resolve_room_code(
+                room,
+                &broker,
+                self.relay.as_deref(),
+                api::Role::Send,
+                "receiver",
+                &format!("pairing in room via {broker}..."),
+            )?;
             (api::PeerSource::Room { code, broker }, Some(note))
         } else if let Some(invite) = self.invite {
             (api::PeerSource::Invite { invite }, None)
@@ -212,14 +250,21 @@ impl ReceiveArgs {
     pub(crate) fn into_plan(self) -> Result<TransferPlan, TransferError> {
         let mut options = api::TransferOptions::default();
         options.listen_addrs = Some(receive_addrs_for(self.ip_version));
-        options.relay = self.relay;
+        options.relay = self.relay.clone();
         options.path = path_policy(self.relay_only, self.direct_only)?;
 
-        let (source, note) = if let Some(code) = self.room {
+        let (source, note) = if let Some(room) = self.room {
             let broker = self
                 .rendezvous
                 .expect("clap requires --rendezvous with --room");
-            let note = format!("waiting for sender via rendezvous {broker}...");
+            let (code, note) = resolve_room_code(
+                room,
+                &broker,
+                self.relay.as_deref(),
+                api::Role::Receive,
+                "sender",
+                &format!("waiting for sender via rendezvous {broker}..."),
+            )?;
             (api::PeerSource::Room { code, broker }, Some(note))
         } else if self.enable_mdns {
             let source = api::PeerSource::Mdns { token: self.token };
@@ -487,7 +532,7 @@ mod tests {
 
         assert!(matches!(
             cli.command,
-            Command::Send(SendArgs { room: Some(ref r), rendezvous: Some(ref rv), .. })
+            Command::Send(SendArgs { room: Some(Some(ref r)), rendezvous: Some(ref rv), .. })
                 if r == "123456-amber-comet" && rv == "id@1.2.3.4:8445"
         ));
     }
@@ -536,7 +581,7 @@ mod tests {
 
         assert!(matches!(
             cli.command,
-            Command::Receive(ReceiveArgs { room: Some(ref r), .. }) if r == "123456-amber-comet"
+            Command::Receive(ReceiveArgs { room: Some(Some(ref r)), .. }) if r == "123456-amber-comet"
         ));
     }
 

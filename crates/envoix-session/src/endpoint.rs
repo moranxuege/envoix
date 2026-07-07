@@ -51,25 +51,37 @@ impl BindAddrs {
     /// advertised descriptor. Specific binds are kept if permitted; an empty
     /// filter (or an empty survivor set) leaves the binds untouched.
     fn resolve_interfaces(self, filter: &CandidateFilter) -> Self {
+        self.resolve_with(filter, &local_interface_addrs())
+    }
+
+    /// Testable core of [`resolve_interfaces`]. Each unspecified bind expands to
+    /// *every* permitted concrete address of its family, so `[candidates]` scopes
+    /// the candidate set (per the allow/deny policy) rather than picking one
+    /// arbitrary survivor by enumeration order. Each keeps its subnet prefix so
+    /// only the first per family is the default route (iroh permits one per
+    /// family; a `prefix_len` of 0 would also count as a default route).
+    fn resolve_with(self, filter: &CandidateFilter, locals: &[(IpAddr, u8)]) -> Self {
         if filter.is_empty() {
             return self;
         }
-        let locals = local_interface_ips();
         let mut addrs = Vec::new();
         for bind in &self.addrs {
             if bind.addr.ip().is_unspecified() {
-                // Bind one permitted interface address per family: iroh allows
-                // only one default route per family, and it discovers the
-                // reflexive/public addresses itself, so a single concrete address
-                // per family is enough for reachability.
                 let want_v6 = bind.addr.is_ipv6();
-                if let Some(ip) = locals
+                let permitted: Vec<_> = locals
                     .iter()
-                    .find(|ip| ip.is_ipv6() == want_v6 && filter.permits_ip(**ip))
-                {
+                    .filter(|(ip, _)| ip.is_ipv6() == want_v6 && filter.permits_ip(*ip))
+                    .collect();
+                // iroh rejects adding a same-family bind once a default exists, so
+                // the default route must be added last: mark the final address.
+                let last = permitted.len().saturating_sub(1);
+                for (i, (ip, prefix_len)) in permitted.into_iter().enumerate() {
                     addrs.push(BindAddr {
                         addr: SocketAddr::new(*ip, bind.addr.port()),
-                        required: bind.required,
+                        // Best-effort: a flaky NIC must not abort the endpoint.
+                        required: false,
+                        default_route: i == last,
+                        prefix_len: *prefix_len,
                     });
                 }
             } else if filter.permits_ip(bind.addr.ip()) {
@@ -86,14 +98,21 @@ impl BindAddrs {
     }
 }
 
-/// Concrete local interface IP addresses worth binding: loopback, link-local,
-/// and unspecified are dropped. Best-effort - an enumeration error yields none.
-fn local_interface_ips() -> Vec<IpAddr> {
+/// Concrete local interface addresses (with subnet prefix length) worth binding:
+/// loopback, link-local, and unspecified are dropped. Best-effort - an
+/// enumeration error yields none.
+fn local_interface_addrs() -> Vec<(IpAddr, u8)> {
     if_addrs::get_if_addrs()
         .unwrap_or_default()
         .into_iter()
-        .map(|iface| iface.ip())
-        .filter(|ip| !ip.is_loopback() && !ip.is_unspecified() && !is_link_local(ip))
+        .filter_map(|iface| {
+            let (ip, prefix) = match iface.addr {
+                if_addrs::IfAddr::V4(v4) => (IpAddr::V4(v4.ip), v4.prefixlen),
+                if_addrs::IfAddr::V6(v6) => (IpAddr::V6(v6.ip), v6.prefixlen),
+            };
+            (!ip.is_loopback() && !ip.is_unspecified() && !is_link_local(&ip))
+                .then_some((ip, prefix))
+        })
         .collect()
 }
 
@@ -108,6 +127,12 @@ fn is_link_local(ip: &IpAddr) -> bool {
 struct BindAddr {
     addr: SocketAddr,
     required: bool,
+    /// Whether this socket is the default route for its IP family. iroh permits
+    /// exactly one default route per family; extra bound addresses are not it.
+    default_route: bool,
+    /// Subnet prefix length for routing. `0` (an unspecified bind) also counts
+    /// as a default route; concrete interface binds carry their real prefix.
+    prefix_len: u8,
 }
 
 impl BindAddr {
@@ -115,6 +140,8 @@ impl BindAddr {
         Self {
             addr,
             required: true,
+            default_route: true,
+            prefix_len: 0,
         }
     }
 
@@ -122,6 +149,8 @@ impl BindAddr {
         Self {
             addr,
             required: false,
+            default_route: true,
+            prefix_len: 0,
         }
     }
 }
@@ -383,7 +412,10 @@ async fn build_endpoint(
             builder = builder
                 .bind_addr_with_opts(
                     bind_addr.addr,
-                    BindOpts::default().set_is_required(bind_addr.required),
+                    BindOpts::default()
+                        .set_is_required(bind_addr.required)
+                        .set_is_default_route(bind_addr.default_route)
+                        .set_prefix_len(bind_addr.prefix_len),
                 )
                 .map_err(|error| CoreError::Transport(error.to_string()))?;
         }
@@ -393,7 +425,10 @@ async fn build_endpoint(
             builder = builder
                 .bind_addr_with_opts(
                     bind_addr.addr,
-                    BindOpts::default().set_is_required(bind_addr.required),
+                    BindOpts::default()
+                        .set_is_required(bind_addr.required)
+                        .set_is_default_route(bind_addr.default_route)
+                        .set_prefix_len(bind_addr.prefix_len),
                 )
                 .map_err(|error| CoreError::Transport(error.to_string()))?;
         }
@@ -414,8 +449,8 @@ mod tests {
         // Deny a real local interface address; resolving the unspecified binds
         // must not include it (so iroh never binds it, never uses it as a
         // candidate) - this is what makes the filter suppress e.g. Tailscale.
-        let locals = local_interface_ips();
-        let Some(&denied) = locals.first() else {
+        let locals = local_interface_addrs();
+        let Some(&(denied, _)) = locals.first() else {
             return; // no non-loopback interfaces in this environment
         };
         let cidr = match denied {
@@ -441,6 +476,32 @@ mod tests {
             base.clone().resolve_interfaces(&CandidateFilter::default()),
             base
         );
+    }
+
+    #[test]
+    fn resolve_with_binds_all_permitted_addresses_per_family() {
+        // `[candidates]` scopes the set: two permitted IPv4 interfaces must BOTH
+        // be bound (not one arbitrary survivor by enumeration order), only the
+        // first marked as the family's default route; a denied address is dropped.
+        let a: IpAddr = "10.0.0.5".parse().unwrap();
+        let b: IpAddr = "192.168.1.5".parse().unwrap();
+        let denied: IpAddr = "100.64.0.5".parse().unwrap(); // Tailscale CGNAT
+        let locals = [(a, 24), (denied, 10), (b, 24)];
+        let filter = CandidateFilter::from_lists(&[], &["100.64.0.0/10".into()]).unwrap();
+
+        let bound = BindAddrs::dual_stack(0).resolve_with(&filter, &locals);
+        let ips: Vec<IpAddr> = bound.iter().map(|bind| bind.addr.ip()).collect();
+
+        assert!(
+            ips.contains(&a) && ips.contains(&b),
+            "both permitted IPv4 addresses must be bound, got {ips:?}"
+        );
+        assert!(!ips.contains(&denied), "denied address must be dropped");
+        let v4_default_routes = bound
+            .iter()
+            .filter(|bind| bind.addr.is_ipv4() && bind.default_route)
+            .count();
+        assert_eq!(v4_default_routes, 1, "exactly one IPv4 default route");
     }
 
     #[test]

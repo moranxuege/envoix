@@ -13,12 +13,12 @@ const PROGRESS_RENDER_INTERVAL: Duration = Duration::from_millis(250);
 /// How transfer events reach the user: human terminal rendering, or one JSON
 /// object per line on stdout for tooling (the observation-campaign driver).
 #[derive(Debug)]
-pub(crate) enum EventOutput {
+pub(crate) enum EventRenderer {
     Console(Renderer),
     Json,
 }
 
-impl EventOutput {
+impl EventRenderer {
     pub(crate) fn new(json: bool) -> Self {
         if json {
             Self::Json
@@ -38,7 +38,7 @@ impl EventOutput {
     }
 }
 
-impl Clone for EventOutput {
+impl Clone for EventRenderer {
     fn clone(&self) -> Self {
         match self {
             // A fresh renderer per transfer: progress state is per-transfer.
@@ -239,14 +239,9 @@ fn display_file_name(file_name: &str) -> String {
         return file_name.to_owned();
     }
 
-    let suffix: String = file_name
-        .chars()
-        .rev()
-        .take(MAX_LEN - 1)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
+    // Keep the last MAX_LEN-1 chars (we know the name is longer than MAX_LEN).
+    let skip = file_name.chars().count() - (MAX_LEN - 1);
+    let suffix: String = file_name.chars().skip(skip).collect();
     format!("~{suffix}")
 }
 

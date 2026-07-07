@@ -10,6 +10,7 @@
 
 mod error;
 mod event;
+mod invite;
 mod options;
 mod source;
 mod transfer;
@@ -18,6 +19,7 @@ pub use envoix_session::CandidateFilter;
 pub use envoix_types::{DataPath, PairingStep};
 pub use error::{ErrorKind, Phase, TransferError};
 pub use event::{StampedEvent, TransferEvent};
+pub use invite::{Invite, Role};
 pub use options::{PathPolicy, TransferOptions};
 pub use source::{PeerSource, TransferMode};
 pub use transfer::{Transfer, TransferStats};
@@ -39,11 +41,6 @@ use tracing::Instrument;
 use crate::{IdentityConfig, PeerDescriptor, PublicError};
 use envoix_auth::PairingConfig;
 use transfer::{EventSender, SessionEventAdapter, StatsHandle};
-
-/// Placeholder pairing for room transfers: the room flow derives the real
-/// token from the SPAKE2 exchange and overrides this before authentication;
-/// it exists only because `SessionConfig` requires a pairing.
-const ROOM_PLACEHOLDER_TOKEN: &str = "envoix-room-unused-placeholder";
 
 /// The transfer body each dispatch arm produces, run under the correlation span.
 type TransferFuture = Pin<Box<dyn Future<Output = Result<TransferSummary, PublicError>> + Send>>;
@@ -194,37 +191,40 @@ impl Client {
 
         let fut: TransferFuture = match to {
             PeerSource::Manual { peer, token } => {
-                let config = self.session_config(shared_token(&token)?, &options);
+                let pairing = shared_token(&token)?;
+                let config = self.session_config(&options);
                 let cancel = cancel.clone();
                 Box::pin(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Send,
                         mode,
                     });
-                    send_file_manual(peer, file, resume, config, sink, cancel).await
+                    send_file_manual(peer, file, resume, config, &pairing, sink, cancel).await
                 })
             }
             PeerSource::Invite { invite } => {
                 let (peer, token) = resolve_invite(&invite)?;
-                let config = self.session_config(shared_token(&token)?, &options);
+                let pairing = shared_token(&token)?;
+                let config = self.session_config(&options);
                 let cancel = cancel.clone();
                 Box::pin(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Send,
                         mode,
                     });
-                    send_file_manual(peer, file, resume, config, sink, cancel).await
+                    send_file_manual(peer, file, resume, config, &pairing, sink, cancel).await
                 })
             }
             PeerSource::Mdns { token: Some(token) } => {
-                let config = self.session_config(shared_token(&token)?, &options);
+                let pairing = shared_token(&token)?;
+                let config = self.session_config(&options);
                 let cancel = cancel.clone();
                 Box::pin(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Send,
                         mode,
                     });
-                    send_file_enable_mdns(file, resume, config, sink, cancel).await
+                    send_file_enable_mdns(file, resume, config, &pairing, sink, cancel).await
                 })
             }
             PeerSource::Mdns { token: None } => {
@@ -234,7 +234,7 @@ impl Client {
                 span.record("room", room_id_of(&code));
                 let broker =
                     parse_broker_addr(&broker, options.relay.as_deref()).map_err(setup_error)?;
-                let config = self.session_config(shared_token(ROOM_PLACEHOLDER_TOKEN)?, &options);
+                let config = self.session_config(&options);
                 let cancel = cancel.clone();
                 Box::pin(async move {
                     events.emit(TransferEvent::Binding {
@@ -291,7 +291,8 @@ impl Client {
         let fut: TransferFuture = match from {
             PeerSource::ShowManual { token } => {
                 let token = token.map_or_else(new_token, Ok)?;
-                let config = self.session_config(shared_token(&token)?, &options);
+                let pairing = shared_token(&token)?;
+                let config = self.session_config(&options);
                 let cancel = cancel.clone();
                 let on_bound = {
                     let events = events.clone();
@@ -308,12 +309,13 @@ impl Client {
                         direction: TransferDirection::Receive,
                         mode,
                     });
-                    receive_file_with_bound_peer(listen, into, config, sink, on_bound, cancel).await
+                    receive_file_with_bound_peer(listen, into, config, &pairing, sink, on_bound, cancel).await
                 })
             }
             PeerSource::ShowInvite { ttl_secs } => {
                 let token = new_token()?;
-                let config = self.session_config(shared_token(&token)?, &options);
+                let pairing = shared_token(&token)?;
+                let config = self.session_config(&options);
                 let cancel = cancel.clone();
                 let on_bound = advertise_with_invite(events.clone(), token, ttl_secs);
                 Box::pin(async move {
@@ -321,7 +323,7 @@ impl Client {
                         direction: TransferDirection::Receive,
                         mode,
                     });
-                    receive_file_with_bound_peer(listen, into, config, sink, on_bound, cancel).await
+                    receive_file_with_bound_peer(listen, into, config, &pairing, sink, on_bound, cancel).await
                 })
             }
             PeerSource::Mdns { token } => {
@@ -331,7 +333,8 @@ impl Client {
                     Some(token) => (token, None),
                     None => (new_token()?, Some(DEFAULT_INVITE_TTL_SECS)),
                 };
-                let config = self.session_config(shared_token(&token)?, &options);
+                let pairing = shared_token(&token)?;
+                let config = self.session_config(&options);
                 let identity = self.identity.clone();
                 let cancel = cancel.clone();
                 Box::pin(async move {
@@ -351,14 +354,14 @@ impl Client {
                         token: Some(token),
                         invite,
                     });
-                    receive_with_auth_retries(endpoint, into, config, sink, cancel).await
+                    receive_with_auth_retries(endpoint, into, config, &pairing, sink, cancel).await
                 })
             }
             PeerSource::Room { code, broker } => {
                 span.record("room", room_id_of(&code));
                 let broker =
                     parse_broker_addr(&broker, options.relay.as_deref()).map_err(setup_error)?;
-                let config = self.session_config(shared_token(ROOM_PLACEHOLDER_TOKEN)?, &options);
+                let config = self.session_config(&options);
                 let cancel = cancel.clone();
                 Box::pin(async move {
                     events.emit(TransferEvent::Binding {
@@ -385,10 +388,9 @@ impl Client {
         ))
     }
 
-    fn session_config(&self, pairing: PairingConfig, options: &TransferOptions) -> SessionConfig {
+    fn session_config(&self, options: &TransferOptions) -> SessionConfig {
         SessionConfig {
             chunk_size: self.chunk_size,
-            pairing,
             identity: self.identity.clone(),
             relay: options.relay.clone(),
             relay_only: options.path == PathPolicy::RelayOnly,
