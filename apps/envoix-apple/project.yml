@@ -67,6 +67,7 @@ targets:
         SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
         ASSETCATALOG_COMPILER_APPICON_NAME: ""
         CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: 6638TTB2SF
         INFOPLIST_KEY_UILaunchStoryboardName: LaunchScreen
         INFOPLIST_KEY_UIRequiresFullScreen: YES
         INFOPLIST_KEY_UIFileSharingEnabled: YES
@@ -81,3 +82,32 @@ targets:
           - "Network"
           - "-framework"
           - "Security"
+
+  Envoix-iOSUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - Tests/EnvoixIOSUITests
+    dependencies:
+      - target: Envoix-iOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app.ios.uitests
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: 6638TTB2SF
+        TEST_TARGET_NAME: Envoix-iOS
+
+schemes:
+  Envoix-iOS:
+    build:
+      targets:
+        Envoix-iOS: all
+        Envoix-iOSUITests: [test]
+    test:
+      config: Debug
+      gatherCoverageData: false
+      targets:
+        - Envoix-iOSUITests

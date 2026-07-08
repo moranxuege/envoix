@@ -42,6 +42,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -108,7 +109,7 @@ fun NewTransferSheet(
     val ready = !code.isNullOrBlank() && code.contains("-") && (role == "receive" || fileUri != null)
 
     Column(
-        Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+        Modifier.fillMaxWidth().testTag(EnvoixTestTags.NEW_TRANSFER_SHEET).verticalScroll(rememberScrollState())
             .padding(horizontal = 20.dp).padding(bottom = 28.dp),
     ) {
         Text("New transfer", color = colors.text, fontSize = 21.sp, fontWeight = FontWeight.ExtraBold)
@@ -119,8 +120,8 @@ fun NewTransferSheet(
             Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
                 .background(colors.bg).border(1.dp, colors.line, RoundedCornerShape(12.dp)).padding(3.dp),
         ) {
-            SegTab("Show QR", topMode == "show", Modifier.weight(1f)) { topMode = "show" }
-            SegTab("Scan QR", topMode == "scan", Modifier.weight(1f)) { topMode = "scan" }
+            SegTab("Show QR", topMode == "show", Modifier.weight(1f).testTag(EnvoixTestTags.SHOW_QR_TAB)) { topMode = "show" }
+            SegTab("Scan QR", topMode == "scan", Modifier.weight(1f).testTag(EnvoixTestTags.SCAN_QR_TAB)) { topMode = "scan" }
         }
 
         Spacer(Modifier.height(14.dp))
@@ -145,6 +146,7 @@ fun NewTransferSheet(
                             generated!!.first,
                             color = colors.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
                             fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.testTag(EnvoixTestTags.ROOM_CODE),
                         )
                         Spacer(Modifier.width(8.dp))
                         Icon(
@@ -166,7 +168,7 @@ fun NewTransferSheet(
             onValueChange = { typed = it.trim(); scannedBroker = null; scannedRelay = null },
             placeholder = { Text("or enter a code to join…") },
             singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth().testTag(EnvoixTestTags.JOIN_CODE_FIELD),
         )
 
         // ---- role picker ----
@@ -177,18 +179,18 @@ fun NewTransferSheet(
             Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
                 .background(colors.bg).border(1.dp, colors.line, RoundedCornerShape(12.dp)).padding(3.dp),
         ) {
-            SegTab("Send", role == "send", Modifier.weight(1f)) { role = "send" }
-            SegTab("Receive", role == "receive", Modifier.weight(1f)) { role = "receive" }
+            SegTab("Send", role == "send", Modifier.weight(1f).testTag(EnvoixTestTags.ROLE_SEND)) { role = "send" }
+            SegTab("Receive", role == "receive", Modifier.weight(1f).testTag(EnvoixTestTags.ROLE_RECEIVE)) { role = "receive" }
         }
 
         // ---- path: file to send (required) or where received files land ----
         Spacer(Modifier.height(14.dp))
         if (role == "send") {
-            PathRow("FILE TO SEND", fileName ?: "Choose a file…", placeholder = fileName == null) {
+            PathRow("FILE TO SEND", fileName ?: "Choose a file…", placeholder = fileName == null, testTag = EnvoixTestTags.FILE_PICKER_ROW) {
                 filePicker.launch(arrayOf("*/*"))
             }
         } else {
-            PathRow("SAVE TO", SettingsStore.saveLabel(context), placeholder = false) {
+            PathRow("SAVE TO", SettingsStore.saveLabel(context), placeholder = false, testTag = EnvoixTestTags.SAVE_PATH_ROW) {
                 folderPicker.launch(SettingsStore.savePickerInitialUri())
             }
         }
@@ -196,7 +198,7 @@ fun NewTransferSheet(
         // ---- start ----
         Spacer(Modifier.height(16.dp))
         Box(
-            Modifier.fillMaxWidth().height(52.dp).clip(RoundedCornerShape(14.dp))
+            Modifier.fillMaxWidth().testTag(EnvoixTestTags.START_TRANSFER_BUTTON).height(52.dp).clip(RoundedCornerShape(14.dp))
                 .background(colors.accent.copy(alpha = if (ready) 1f else 0.4f))
                 .clickable(enabled = ready) {
                     val c = code ?: return@clickable
@@ -233,12 +235,13 @@ private fun SegTab(text: String, selected: Boolean, modifier: Modifier, onClick:
 /** A labelled path row: a tappable file/folder picker (onClick != null) or a
  *  read-only value. */
 @Composable
-private fun PathRow(label: String, value: String, placeholder: Boolean, onClick: (() -> Unit)?) {
+private fun PathRow(label: String, value: String, placeholder: Boolean, testTag: String, onClick: (() -> Unit)?) {
     val colors = Envoix.colors
     Text(label, color = colors.muted, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
     Spacer(Modifier.height(6.dp))
     Row(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+            .testTag(testTag)
             .border(1.dp, colors.line, RoundedCornerShape(12.dp))
             .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
             .padding(horizontal = 14.dp, vertical = 14.dp),

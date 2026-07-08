@@ -359,6 +359,7 @@ private struct TransferSetupStageView: View {
                     RoundedRectangle(cornerRadius: Theme.cardRadius)
                         .strokeBorder(role == item ? Theme.accent.opacity(0.45) : Color.clear, lineWidth: 0.8)
                 )
+                .accessibilityIdentifier("transfer_role_\(item.rawValue)")
             }
         }
         .padding(4)

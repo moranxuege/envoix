@@ -140,6 +140,7 @@ struct SendView: View {
         .controlSize(.large)
         .tint(viewModel.isBusy ? Theme.warning : Theme.accent)
         .disabled((!canSend || concurrencyBlocked) && !viewModel.isBusy)
+        .accessibilityIdentifier("send_start_button")
     }
 
     #if os(iOS)
@@ -172,6 +173,7 @@ struct SendView: View {
             }
             .buttonStyle(.plain)
             .disabled(viewModel.isBusy)
+            .accessibilityIdentifier("send_file_picker")
 
             #if os(macOS)
             filePathTools

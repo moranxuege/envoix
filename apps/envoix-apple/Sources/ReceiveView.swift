@@ -140,6 +140,7 @@ struct ReceiveView: View {
         .controlSize(.large)
         .tint(viewModel.isBusy ? Theme.warning : Theme.accent)
         .disabled((!canStart || concurrencyBlocked) && !viewModel.isBusy)
+        .accessibilityIdentifier("receive_start_button")
     }
 
     #if os(iOS)
@@ -350,7 +351,10 @@ struct ReceiveView: View {
                 .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
             }
 
-            LinkRow(text: roomCode.trimmed.isEmpty ? AppText.value("Receive code", "接收码", language: uiLanguage) : roomCode) {
+            LinkRow(
+                text: roomCode.trimmed.isEmpty ? AppText.value("Receive code", "接收码", language: uiLanguage) : roomCode,
+                textIdentifier: "receive_room_code"
+            ) {
                 Button {
                     copyWithToast(roomCode, AppText.value("Room code copied", "接收码已复制", language: uiLanguage))
                 } label: {

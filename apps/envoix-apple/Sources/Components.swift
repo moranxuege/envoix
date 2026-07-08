@@ -304,17 +304,31 @@ extension View {
 /// A bordered row showing a value with trailing action buttons.
 struct LinkRow<Trailing: View>: View {
     var text: String
+    var textIdentifier: String?
     @ViewBuilder var trailing: Trailing
+
+    init(text: String, textIdentifier: String? = nil, @ViewBuilder trailing: () -> Trailing) {
+        self.text = text
+        self.textIdentifier = textIdentifier
+        self.trailing = trailing()
+    }
 
     var body: some View {
         HStack(spacing: 8) {
-            Text(text)
-                .font(.body.monospaced())
-                .foregroundStyle(Theme.muted)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            Group {
+                if let textIdentifier {
+                    Text(text)
+                        .accessibilityIdentifier(textIdentifier)
+                } else {
+                    Text(text)
+                }
+            }
+            .font(.body.monospaced())
+            .foregroundStyle(Theme.muted)
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
             trailing
         }
         .padding(8)

@@ -35,6 +35,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
@@ -107,6 +108,7 @@ fun HomeScreen(
         floatingActionButton = {
             ExtendedFloatingActionButton(
                 onClick = { sheetOpen = true },
+                modifier = Modifier.testTag(EnvoixTestTags.NEW_TRANSFER_BUTTON),
                 containerColor = colors.accent,
                 contentColor = androidx.compose.ui.graphics.Color.White,
             ) {
@@ -119,6 +121,7 @@ fun HomeScreen(
         Column(
             Modifier
                 .fillMaxSize()
+                .testTag(EnvoixTestTags.HOME_ROOT)
                 .padding(inner)
                 .padding(horizontal = 20.dp),
         ) {
@@ -184,6 +187,7 @@ private fun Header(active: Int, onOpenLogs: () -> Unit, onOpenSettings: () -> Un
                 fontSize = 14.sp,
                 modifier = Modifier
                     .clip(RoundedCornerShape(10.dp))
+                    .testTag(EnvoixTestTags.LOGS_BUTTON)
                     .clickable(onClick = onOpenLogs)
                     .padding(horizontal = 10.dp, vertical = 6.dp),
             )
@@ -193,6 +197,7 @@ private fun Header(active: Int, onOpenLogs: () -> Unit, onOpenSettings: () -> Un
                 tint = colors.accent,
                 modifier = Modifier
                     .clip(CircleShape)
+                    .testTag(EnvoixTestTags.SETTINGS_BUTTON)
                     .clickable(onClick = onOpenSettings)
                     .padding(6.dp)
                     .size(22.dp),
