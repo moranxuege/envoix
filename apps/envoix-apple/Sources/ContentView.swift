@@ -1,4 +1,5 @@
 import SwiftUI
+import EnvoixCore
 
 private enum AppStage: String, CaseIterable {
     case sender, receiver, transfer, settings
@@ -170,7 +171,7 @@ struct ContentView: View {
         case .receiver:
             ReceiveView(viewModel: model.receive)
         case .transfer:
-            TransferStageView(receive: model.receive, send: model.send)
+            TransferStageView(records: model.activities)
         case .settings:
             SettingsStageView()
         }
@@ -260,11 +261,26 @@ struct ContentView: View {
     }
 
     private var pendingTransferCount: Int {
-        pendingCount(for: model.receive) + pendingCount(for: model.send)
+        if !model.activities.isEmpty {
+            return model.activities.filter { isPending($0) }.count
+        }
+        return pendingCount(for: model.receive) + pendingCount(for: model.send)
     }
 
     private var hasFailedTransfer: Bool {
-        isFailed(model.receive) || isFailed(model.send)
+        if model.activities.contains(where: { $0.state == .failed }) {
+            return true
+        }
+        return isFailed(model.receive) || isFailed(model.send)
+    }
+
+    private func isPending(_ record: FfiTransferActivityRecord) -> Bool {
+        switch record.state {
+        case .queued, .binding, .waitingForPeer, .pairing, .connecting, .transferring, .verifying:
+            return true
+        case .completed, .failed, .canceled, .unknown:
+            return false
+        }
     }
 
     private func pendingCount(for viewModel: TransferViewModel) -> Int {
@@ -284,15 +300,19 @@ struct ContentView: View {
 
 private struct TransferStageView: View {
     @Environment(\.appLanguage) private var language
-    @ObservedObject var receive: TransferViewModel
-    @ObservedObject var send: TransferViewModel
+    let records: [FfiTransferActivityRecord]
 
     var body: some View {
         ScrollView {
             VStack(spacing: 12) {
                 overviewCard
-                transferCard(title: AppText.value("Receiving", "接收", language: language), systemImage: "tray.and.arrow.down", viewModel: receive)
-                transferCard(title: AppText.value("Sending", "发送", language: language), systemImage: "paperplane", viewModel: send)
+                if records.isEmpty {
+                    emptyActivityView
+                } else {
+                    ForEach(records, id: \.activityId) { record in
+                        activityCard(record)
+                    }
+                }
             }
             .padding(.vertical, 12)
         }
@@ -319,96 +339,79 @@ private struct TransferStageView: View {
         .card(raised: true, padding: 16)
     }
 
-    private func transferCard(title: String, systemImage: String, viewModel: TransferViewModel) -> some View {
+    private var emptyActivityView: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "tray")
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(Theme.muted)
+                .frame(width: 30)
+            Text(AppText.value("Transfers will appear here once started.", "开始传输后会显示在这里。", language: language))
+                .font(.title3)
+                .foregroundStyle(Theme.muted)
+            Spacer(minLength: 8)
+        }
+        .card(raised: true, padding: 14)
+    }
+
+    private func activityCard(_ record: FfiTransferActivityRecord) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top, spacing: 10) {
-                Image(systemName: systemImage)
-                    .foregroundStyle(Theme.accentStrong)
+                Image(systemName: activityIcon(for: record))
+                    .foregroundStyle(activityTint(for: record))
                     .frame(width: 22)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(title)
+                    Text(activityTitle(for: record))
                         .font(.title2.weight(.semibold))
                         .foregroundStyle(Theme.text)
-                    Text(summary(for: viewModel))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(activitySubtitle(for: record))
                         .font(.title3)
                         .foregroundStyle(Theme.muted)
                         .lineLimit(2)
                 }
                 Spacer(minLength: 8)
-                ModePill(text: modeText(for: viewModel))
+                ModePill(text: activityStateText(for: record))
             }
 
-            if viewModel.isBusy || viewModel.progressFraction > 0 {
-                ProgressBar(value: viewModel.progressFraction)
-                transferMeta(for: viewModel)
+            if record.totalBytes > 0 && !isTerminal(record) {
+                ProgressBar(value: progressFraction(for: record))
             }
+
+            HStack(spacing: 8) {
+                Text(directionText(record.direction))
+                if record.totalBytes > 0 {
+                    Text("·")
+                    Text("\(byteString(record.bytesTransferred)) / \(byteString(record.totalBytes))")
+                }
+                if record.dataPathKind != .none {
+                    Text("·")
+                    Text(dataPathText(record))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 4)
+            }
+            .font(.body.monospacedDigit())
+            .foregroundStyle(Theme.muted)
         }
         .card(raised: true, padding: 14)
     }
 
-    @ViewBuilder private func transferMeta(for viewModel: TransferViewModel) -> some View {
-        HStack(spacing: 8) {
-            Text("\(byteString(viewModel.transferred)) / \(byteString(viewModel.total))")
-            Spacer(minLength: 4)
-            if viewModel.bytesPerSec > 0 {
-                Text(rateString(viewModel.bytesPerSec))
-            }
-            if let eta = viewModel.etaSeconds {
-                Text(etaString(eta))
-            }
-        }
-        .font(.body.monospacedDigit())
-        .foregroundStyle(Theme.muted)
-    }
-
-    private func summary(for viewModel: TransferViewModel) -> String {
-        switch viewModel.phase {
-        case .idle:
-            return AppText.value("No active transfer", "没有活动传输", language: language)
-        case .waiting:
-            return AppText.value("Waiting for the other device", "正在等待另一台设备", language: language)
-        case .transferring:
-            return viewModel.fileName.isEmpty ? AppText.value("Transferring", "正在传输", language: language) : viewModel.fileName
-        case .completed(let bytes):
-            return AppText.value("Completed \(byteString(bytes))", "已完成 \(byteString(bytes))", language: language)
-        case .canceled:
-            return AppText.value("Canceled", "已取消", language: language)
-        case .failed(let reason):
-            return reason
-        }
-    }
-
-    private func modeText(for viewModel: TransferViewModel) -> String {
-        switch viewModel.phase {
-        case .idle: return AppText.value("Idle", "空闲", language: language)
-        case .waiting: return AppText.value("Wait", "等待", language: language)
-        case .transferring: return "\(Int((viewModel.progressFraction * 100).rounded()))%"
-        case .completed: return AppText.value("Done", "完成", language: language)
-        case .canceled: return AppText.value("Canceled", "取消", language: language)
-        case .failed: return AppText.value("Error", "错误", language: language)
-        }
-    }
-
     private var pendingCount: Int {
-        pendingCount(for: receive) + pendingCount(for: send)
+        records.filter { isPending($0) }.count
     }
 
     private var failedCount: Int {
-        failedCount(for: receive) + failedCount(for: send)
+        records.filter { $0.state == .failed }.count
     }
 
-    private func pendingCount(for viewModel: TransferViewModel) -> Int {
-        switch viewModel.phase {
-        case .waiting, .transferring:
-            return 1
-        case .idle, .completed, .canceled, .failed:
-            return 0
-        }
+    private var receivePendingCount: Int {
+        records.filter { isPending($0) && $0.direction == .receive }.count
     }
 
-    private func failedCount(for viewModel: TransferViewModel) -> Int {
-        if case .failed = viewModel.phase { return 1 }
-        return 0
+    private var sendPendingCount: Int {
+        records.filter { isPending($0) && $0.direction == .send }.count
     }
 
     private var overviewIcon: String {
@@ -448,16 +451,114 @@ private struct TransferStageView: View {
             }
             return AppText.value("Completed transfers stay visible below until the next operation.", "已完成的传输会保留在下方，直到下一次操作。", language: language)
         }
-        if receive.isBusy && send.isBusy {
+        if receivePendingCount > 0 && sendPendingCount > 0 {
             return AppText.value("Receiving and sending are both in progress.", "接收和发送都在进行中。", language: language)
         }
-        if receive.isBusy {
+        if receivePendingCount > 0 {
             return AppText.value("A receive task is currently waiting or transferring.", "当前有一个接收任务正在等待或传输。", language: language)
         }
-        if send.isBusy {
+        if sendPendingCount > 0 {
             return AppText.value("A send task is currently transferring.", "当前有一个发送任务正在传输。", language: language)
         }
         return AppText.value("Review failed tasks below before starting another transfer.", "开始新的传输前，请先查看下方失败任务。", language: language)
+    }
+
+    private func isPending(_ record: FfiTransferActivityRecord) -> Bool {
+        switch record.state {
+        case .queued, .binding, .waitingForPeer, .pairing, .connecting, .transferring, .verifying:
+            return true
+        case .completed, .failed, .canceled, .unknown:
+            return false
+        }
+    }
+
+    private func isTerminal(_ record: FfiTransferActivityRecord) -> Bool {
+        switch record.state {
+        case .completed, .failed, .canceled:
+            return true
+        case .queued, .binding, .waitingForPeer, .pairing, .connecting, .transferring, .verifying, .unknown:
+            return false
+        }
+    }
+
+    private func progressFraction(for record: FfiTransferActivityRecord) -> Double {
+        guard record.totalBytes > 0 else { return 0 }
+        return min(1, Double(record.bytesTransferred) / Double(record.totalBytes))
+    }
+
+    private func activityTitle(for record: FfiTransferActivityRecord) -> String {
+        if !record.fileName.isEmpty { return record.fileName }
+        return directionText(record.direction)
+    }
+
+    private func activitySubtitle(for record: FfiTransferActivityRecord) -> String {
+        if record.state == .failed && !record.diagnosticMessage.isEmpty {
+            return friendlyError(record.diagnosticMessage, language: language)
+        }
+        return "\(modeText(record.mode)) · \(activityStateText(for: record))"
+    }
+
+    private func activityStateText(for record: FfiTransferActivityRecord) -> String {
+        switch record.state {
+        case .queued: return AppText.value("Queued", "排队", language: language)
+        case .binding: return AppText.value("Preparing", "准备中", language: language)
+        case .waitingForPeer: return AppText.value("Waiting", "等待", language: language)
+        case .pairing: return AppText.value("Pairing", "配对", language: language)
+        case .connecting: return AppText.value("Connecting", "连接", language: language)
+        case .transferring: return "\(Int((progressFraction(for: record) * 100).rounded()))%"
+        case .verifying: return AppText.value("Verifying", "校验", language: language)
+        case .completed: return AppText.value("Done", "完成", language: language)
+        case .failed: return AppText.value("Error", "错误", language: language)
+        case .canceled: return AppText.value("Canceled", "取消", language: language)
+        case .unknown: return AppText.value("Unknown", "未知", language: language)
+        }
+    }
+
+    private func activityIcon(for record: FfiTransferActivityRecord) -> String {
+        switch record.state {
+        case .completed: return "checkmark.circle.fill"
+        case .failed: return "exclamationmark.triangle.fill"
+        case .canceled: return "xmark.circle"
+        default:
+            return record.direction == .receive ? "tray.and.arrow.down" : "paperplane"
+        }
+    }
+
+    private func activityTint(for record: FfiTransferActivityRecord) -> Color {
+        switch record.state {
+        case .completed: return Theme.success
+        case .failed: return Theme.danger
+        case .canceled, .unknown: return Theme.muted
+        default: return Theme.warning
+        }
+    }
+
+    private func directionText(_ direction: FfiTransferDirection) -> String {
+        switch direction {
+        case .send: return AppText.value("Send", "发送", language: language)
+        case .receive: return AppText.value("Receive", "接收", language: language)
+        case .unknown: return AppText.value("Transfer", "传输", language: language)
+        }
+    }
+
+    private func modeText(_ mode: FfiTransferMode) -> String {
+        switch mode {
+        case .manual: return "Manual"
+        case .invite, .showInvite: return "Invite"
+        case .showManual: return "Manual"
+        case .mdns: return "mDNS"
+        case .room: return "Room"
+        case .unknown: return AppText.value("Mode", "模式", language: language)
+        }
+    }
+
+    private func dataPathText(_ record: FfiTransferActivityRecord) -> String {
+        switch record.dataPathKind {
+        case .direct: return AppText.value("Direct", "直连", language: language)
+        case .relay: return AppText.value("Relay", "中继", language: language)
+        case .other: return record.dataPathDetail.isEmpty ? AppText.value("Path", "路径", language: language) : record.dataPathDetail
+        case .none: return ""
+        }
     }
 }
 
