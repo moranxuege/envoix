@@ -982,7 +982,6 @@ dependencies = [
  "envoix-error",
  "envoix-protocol",
  "envoix-qr",
- "envoix-rendezvous-iroh",
  "envoix-session",
  "envoix-types",
  "serde",

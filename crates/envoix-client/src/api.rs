@@ -63,7 +63,7 @@ fn transfer_span(direction: TransferDirection, mode: TransferMode) -> tracing::S
 /// everything before the first `-`; the remainder is the SPAKE2 password and
 /// must never reach a log.
 fn room_id_of(code: &str) -> &str {
-    code.split('-').next().unwrap_or(code)
+    envoix_session::split_code(code).0
 }
 
 /// Run a transfer body and emit one structured summary line for it (in the

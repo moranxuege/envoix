@@ -7,7 +7,7 @@
 //! are additive later - unknown payload params are ignored so newer invites stay
 //! parseable. See `docs/design/invite.md`.
 
-use envoix_rendezvous_iroh::generate_code;
+use envoix_session::generate_code;
 
 use super::{PeerSource, TransferError};
 

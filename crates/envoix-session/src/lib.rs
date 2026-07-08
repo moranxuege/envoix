@@ -19,6 +19,9 @@ pub use envoix_transfer::{
     TransferSummary, USER_INTERRUPT_MESSAGE,
 };
 pub use envoix_types::TransferDirection;
+// Re-exported so the client facade reaches rendezvous-code helpers through its
+// own service layer instead of depending on envoix-rendezvous-iroh directly.
+pub use envoix_rendezvous_iroh::{generate_code, split_code};
 use iroh::{Endpoint, EndpointAddr};
 use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
 use n0_future::StreamExt;
