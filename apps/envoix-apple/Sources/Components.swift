@@ -409,6 +409,7 @@ struct RailButton: View {
             .contentShape(RoundedRectangle(cornerRadius: 10))
         }
         .buttonStyle(.plain)
+        .frame(maxWidth: .infinity, minHeight: 54, alignment: .leading)
         .foregroundStyle(isSelected ? Theme.accentStrong : Theme.text)
         .background(
             isSelected ? Theme.accentSoft : (isHovering ? Theme.line.opacity(0.28) : Color.clear),

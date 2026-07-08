@@ -171,7 +171,11 @@ struct ContentView: View {
         case .receiver:
             ReceiveView(viewModel: model.receive)
         case .transfer:
-            TransferStageView(records: model.activities)
+            TransferStageView(
+                records: model.activities,
+                speedsByActivityID: model.activitySpeeds,
+                onDelete: model.removeActivity
+            )
         case .settings:
             SettingsStageView()
         }
@@ -302,6 +306,8 @@ private struct TransferStageView: View {
     @Environment(\.appLanguage) private var language
     @AppStorage("envoix.developerMode") private var developerMode = false
     let records: [FfiTransferActivityRecord]
+    let speedsByActivityID: [String: Double]
+    let onDelete: (String) -> Void
 
     var body: some View {
         ScrollView {
@@ -312,6 +318,15 @@ private struct TransferStageView: View {
                 } else {
                     ForEach(records, id: \.activityId) { record in
                         activityCard(record)
+                            #if os(iOS)
+                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                Button(role: .destructive) {
+                                    onDelete(record.activityId)
+                                } label: {
+                                    Label(AppText.value("Delete", "删除", language: language), systemImage: "trash")
+                                }
+                            }
+                            #endif
                     }
                 }
             }
@@ -373,6 +388,17 @@ private struct TransferStageView: View {
                 }
                 Spacer(minLength: 8)
                 ModePill(text: activityStateText(for: record))
+                Button(role: .destructive) {
+                    onDelete(record.activityId)
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.body.weight(.semibold))
+                        .frame(width: 30, height: 30)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Theme.muted)
+                .help(AppText.value("Delete activity", "删除活动", language: language))
             }
 
             if record.totalBytes > 0 && !isTerminal(record) {
@@ -396,6 +422,10 @@ private struct TransferStageView: View {
                 if record.totalBytes > 0 {
                     Text("·")
                     Text("\(byteString(record.bytesTransferred)) / \(byteString(record.totalBytes))")
+                }
+                if let speed = speedBps(for: record), speed > 0 {
+                    Text("·")
+                    Text(rateString(speed))
                 }
                 if record.dataPathKind != .none {
                     Text("·")
@@ -510,6 +540,11 @@ private struct TransferStageView: View {
     private func progressFraction(for record: FfiTransferActivityRecord) -> Double {
         guard record.totalBytes > 0 else { return 0 }
         return min(1, Double(record.bytesTransferred) / Double(record.totalBytes))
+    }
+
+    private func speedBps(for record: FfiTransferActivityRecord) -> Double? {
+        guard record.state == .transferring else { return nil }
+        return speedsByActivityID[record.activityId]
     }
 
     private func activityTitle(for record: FfiTransferActivityRecord) -> String {
@@ -637,12 +672,15 @@ private struct TransferStageView: View {
     }
 
     private func dataPathText(_ record: FfiTransferActivityRecord) -> String {
+        let pathKind: String
         switch record.dataPathKind {
-        case .direct: return AppText.value("Direct", "直连", language: language)
-        case .relay: return AppText.value("Relay", "中继", language: language)
-        case .other: return record.dataPathDetail.isEmpty ? AppText.value("Path", "路径", language: language) : record.dataPathDetail
+        case .direct: pathKind = AppText.value("Direct", "直连", language: language)
+        case .relay: pathKind = AppText.value("Relay", "中继", language: language)
+        case .other: pathKind = AppText.value("Path", "路径", language: language)
         case .none: return ""
         }
+        guard developerMode, !record.dataPathDetail.isEmpty else { return pathKind }
+        return "\(pathKind) · \(record.dataPathDetail)"
     }
 }
 
@@ -697,14 +735,15 @@ private struct SettingsStageView: View {
                     Text(AppText.value("Developer mode", "开发者模式", language: language))
                         .font(.title3.weight(.semibold))
                         .foregroundStyle(Theme.muted)
-                    Toggle(AppText.value("Enable developer mode", "开启开发者模式", language: language), isOn: $developerMode)
-                        .toggleStyle(.switch)
+                    settingToggle(
+                        AppText.value("Enable developer mode", "开启开发者模式", language: language),
+                        isOn: $developerMode
+                    )
                     if developerMode {
-                        Toggle(
+                        settingToggle(
                             AppText.value("Verbose logging", "详细日志", language: language),
                             isOn: $verboseLog
                         )
-                        .toggleStyle(.switch)
                         Text(AppText.value("Verbose logging is currently UI-only for Activity logs.", "详细日志目前仅用于活动日志展示。", language: language))
                             .font(.body)
                             .foregroundStyle(Theme.muted)
@@ -836,5 +875,26 @@ private struct SettingsStageView: View {
             }
         }
         .card(padding: 14)
+    }
+
+    private func settingToggle(_ title: String, isOn: Binding<Bool>) -> some View {
+        Button {
+            isOn.wrappedValue.toggle()
+        } label: {
+            HStack(spacing: 12) {
+                Text(title)
+                    .font(.title3)
+                    .foregroundStyle(Theme.text)
+                Spacer(minLength: 12)
+                Toggle("", isOn: isOn)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .allowsHitTesting(false)
+            }
+            .frame(maxWidth: .infinity, minHeight: 46, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isOn.wrappedValue ? .isSelected : [])
     }
 }

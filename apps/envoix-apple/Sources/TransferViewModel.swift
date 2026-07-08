@@ -13,6 +13,7 @@ final class AppModel: ObservableObject {
     let receive = TransferViewModel()
     let send = TransferViewModel()
     @Published private(set) var activities: [FfiTransferActivityRecord] = []
+    @Published private(set) var activitySpeeds: [String: Double] = [:]
 
     private var cancellables = Set<AnyCancellable>()
     private let activityCap = 50
@@ -24,7 +25,9 @@ final class AppModel: ObservableObject {
                 .store(in: &cancellables)
             vm.$transferActivity
                 .compactMap { $0 }
-                .sink { [weak self] in self?.upsertActivity($0) }
+                .sink { [weak self, weak vm] record in
+                    self?.upsertActivity(record, speedBps: vm?.bytesPerSec ?? 0)
+                }
                 .store(in: &cancellables)
         }
     }
@@ -32,15 +35,25 @@ final class AppModel: ObservableObject {
     /// True while either side has a transfer in flight.
     var isActive: Bool { receive.isBusy || send.isBusy }
 
-    private func upsertActivity(_ record: FfiTransferActivityRecord) {
+    func removeActivity(_ activityID: String) {
+        activities.removeAll { $0.activityId == activityID }
+        activitySpeeds.removeValue(forKey: activityID)
+    }
+
+    private func upsertActivity(_ record: FfiTransferActivityRecord, speedBps: Double) {
         if let index = activities.firstIndex(where: { $0.activityId == record.activityId }) {
             activities[index] = record
         } else {
             activities.append(record)
         }
+        activitySpeeds[record.activityId] = speedBps
         activities.sort { lhs, rhs in lhs.updatedAtMs > rhs.updatedAtMs }
         if activities.count > activityCap {
+            let removed = activities.suffix(activities.count - activityCap).map(\.activityId)
             activities.removeLast(activities.count - activityCap)
+            for id in removed {
+                activitySpeeds.removeValue(forKey: id)
+            }
         }
     }
 }
