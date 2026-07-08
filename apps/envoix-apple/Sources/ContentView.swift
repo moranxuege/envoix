@@ -300,6 +300,7 @@ struct ContentView: View {
 
 private struct TransferStageView: View {
     @Environment(\.appLanguage) private var language
+    @AppStorage("envoix.developerMode") private var developerMode = false
     let records: [FfiTransferActivityRecord]
 
     var body: some View {
@@ -378,6 +379,18 @@ private struct TransferStageView: View {
                 ProgressBar(value: progressFraction(for: record))
             }
 
+            if let recoveryText = recoveryText(for: record) {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "arrow.clockwise.circle")
+                        .foregroundStyle(Theme.warning)
+                    Text(recoveryText)
+                        .font(.body)
+                        .foregroundStyle(Theme.text)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 4)
+                }
+            }
+
             HStack(spacing: 8) {
                 Text(directionText(record.direction))
                 if record.totalBytes > 0 {
@@ -391,6 +404,19 @@ private struct TransferStageView: View {
                         .truncationMode(.middle)
                 }
                 Spacer(minLength: 4)
+                if developerMode && record.state == .failed {
+                    Button {
+                        copyToPasteboard(diagnosticReport(for: record))
+                        ToastCenter.shared.show(AppText.value("Diagnostics copied", "诊断信息已复制", language: language))
+                    } label: {
+                        Label(AppText.value("Copy diagnostics", "复制诊断", language: language), systemImage: "doc.on.doc")
+                            .labelStyle(.iconOnly)
+                            .frame(width: 28, height: 28)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(AppText.value("Copy diagnostics", "复制诊断", language: language))
+                }
             }
             .font(.body.monospacedDigit())
             .foregroundStyle(Theme.muted)
@@ -503,6 +529,54 @@ private struct TransferStageView: View {
             return friendlyError(record.diagnosticMessage, language: language)
         }
         return "\(modeText(record.mode)) · \(activityStateText(for: record))"
+    }
+
+    private func recoveryText(for record: FfiTransferActivityRecord) -> String? {
+        guard record.state == .failed else { return nil }
+        switch record.recoveryAction {
+        case .retry:
+            return AppText.value("Try again when both devices are online.", "请确认两台设备在线后重试。", language: language)
+        case .resume:
+            return AppText.value("Retry may resume from saved partial progress.", "重试时可能会从已保存的部分进度继续。", language: language)
+        case .chooseFolder:
+            return AppText.value("Choose another save folder, then start the receive again.", "请选择其他保存文件夹，然后重新开始接收。", language: language)
+        case .openSettings:
+            return AppText.value("Check local network or Files permission in system settings.", "请在系统设置中检查本地网络或文件权限。", language: language)
+        case .rePair:
+            return AppText.value("Generate a new code or scan the QR code again.", "请重新生成短码，或重新扫描二维码。", language: language)
+        case .updateApp:
+            return AppText.value("Update both apps before trying this transfer mode again.", "请更新两端应用后再尝试此传输模式。", language: language)
+        case .switchPairingMethod:
+            return AppText.value("Switch pairing method and try again.", "请切换配对方式后重试。", language: language)
+        case .discardPartial:
+            return AppText.value("Discard the partial file before retrying.", "请先丢弃未完成文件，再重新传输。", language: language)
+        case .none:
+            return record.retryable
+                ? AppText.value("This failure may be retryable.", "这个失败可能可以重试。", language: language)
+                : nil
+        }
+    }
+
+    private func diagnosticReport(for record: FfiTransferActivityRecord) -> String {
+        [
+            "activity_id=\(record.activityId)",
+            "attempt_id=\(record.attemptId)",
+            "state=\(record.state)",
+            "direction=\(record.direction)",
+            "mode=\(record.mode)",
+            "transfer_id=\(record.transferId)",
+            "file_name=\(record.fileName)",
+            "bytes=\(record.bytesTransferred)/\(record.totalBytes)",
+            "data_path=\(record.dataPathKind) \(record.dataPathDetail)",
+            "failure_code=\(record.failureCode)",
+            "failure_category=\(record.failureCategory)",
+            "failure_phase=\(record.failurePhase)",
+            "failure_origin=\(record.failureOrigin)",
+            "retryable=\(record.retryable)",
+            "recovery_action=\(record.recoveryAction)",
+            "user_message_key=\(record.userMessageKey)",
+            "diagnostic_message=\(record.diagnosticMessage)"
+        ].joined(separator: "\n")
     }
 
     private func activityStateText(for record: FfiTransferActivityRecord) -> String {
