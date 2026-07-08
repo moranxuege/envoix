@@ -215,8 +215,20 @@ class TransferService : Service() {
                             }
                             is CliEvent.Failed ->
                                 // A pause/cancel surfaces as a Failed event; keep the
-                                // Paused/Cancelled status the action already set.
+                                // Paused/Cancelled status the action already set. When the
+                                // peer interrupts (or the link drops) mid-transfer, the
+                                // partial on disk is resumable - show Paused, not a dead
+                                // Failed, so the user can Resume rather than restart. The
+                                // peer's exact reason (paused vs cancelled) isn't reliably
+                                // carried, so we key on "a partial exists", like most apps.
                                 if (t.status == Status.Cancelled || t.status == Status.Paused) t
+                                else if (t.bytes > 0 && (
+                                        ev.error.contains("connection lost") ||
+                                            ev.error.contains("interrupted by peer")))
+                                    t.copy(
+                                        status = Status.Paused, error = ev.error,
+                                        log = addLog(t.log, "paused · interrupted, ${t.bytes} B kept (resumable)"),
+                                    )
                                 else t.copy(status = Status.Failed, error = ev.error, log = addLog(t.log, "failed · ${ev.error}"))
                             is CliEvent.Exit ->
                                 if (t.status.isTerminal || t.status == Status.Paused) t
