@@ -13,9 +13,10 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use envoix_client::{
-    BindAddrs, TransferSummary,
+    BindAddrs, TransferDirection, TransferSummary,
     api::{
-        Client, PairingStep, PeerSource, Transfer, TransferError, TransferEvent, TransferOptions,
+        Client, FailureCategory, FailureCode, FailureOrigin, FailurePhase, PairingStep, PeerSource,
+        RecoveryAction, Transfer, TransferError, TransferEvent, TransferOptions,
     },
 };
 use envoix_rendezvous_iroh::generate_code;
@@ -31,9 +32,6 @@ const DEFAULT_RENDEZVOUS_BROKER: &str =
     "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445";
 /// Default relay used with the hosted rendezvous broker.
 const DEFAULT_RELAY_URL: &str = "https://envoix.chkxwlyh.us:8444";
-/// GUI default chunk size. The CLI can still override through ENVOIX_CHUNK_SIZE.
-const GUI_CHUNK_SIZE: usize = 1024 * 1024;
-
 /// Runtime settings supplied by native UIs.
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct EnvoixRuntimeSettings {
@@ -84,6 +82,96 @@ fn op_err(error: impl std::fmt::Display) -> EnvoixError {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum FfiTransferDirection {
+    Send,
+    Receive,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum FfiFailureCode {
+    UserCanceled,
+    PeerCanceled,
+    NetworkLost,
+    PeerUnreachable,
+    AuthenticationFailed,
+    PermissionDenied,
+    DiskFull,
+    HashMismatch,
+    ProtocolError,
+    DestinationConflict,
+    UnsupportedFeature,
+    Timeout,
+    InternalError,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum FfiFailureCategory {
+    User,
+    Network,
+    Authentication,
+    Permission,
+    Storage,
+    Integrity,
+    Protocol,
+    Unsupported,
+    Internal,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum FfiFailureOrigin {
+    Local,
+    Peer,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum FfiFailurePhase {
+    Setup,
+    Binding,
+    Advertising,
+    Pairing,
+    Connecting,
+    Authenticating,
+    Negotiating,
+    Transferring,
+    Verifying,
+    Committing,
+    Acknowledging,
+    CleaningUp,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum FfiRecoveryAction {
+    Retry,
+    Resume,
+    ChooseFolder,
+    OpenSettings,
+    RePair,
+    UpdateApp,
+    SwitchPairingMethod,
+    DiscardPartial,
+    None,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct FfiTransferFailure {
+    pub code: FfiFailureCode,
+    pub category: FfiFailureCategory,
+    pub phase: FfiFailurePhase,
+    pub origin: FfiFailureOrigin,
+    pub direction: FfiTransferDirection,
+    pub transfer_id: String,
+    pub attempt_id: String,
+    pub retryable: bool,
+    pub recovery_action: FfiRecoveryAction,
+    pub user_message_key: String,
+    pub diagnostic_message: String,
+}
+
 /// Observer implemented by the native UI to receive transfer updates.
 ///
 /// Callbacks arrive on a Rust runtime thread; the UI must marshal to its main
@@ -102,6 +190,8 @@ pub trait TransferObserver: Send + Sync {
     fn on_progress(&self, transferred: u64, total: u64);
     /// Terminal success: the transfer finished and was verified.
     fn on_completed(&self, bytes: u64);
+    /// Terminal failure with machine-readable classification.
+    fn on_transfer_failed(&self, failure: FfiTransferFailure);
     /// Terminal failure with a human-readable reason.
     fn on_failed(&self, reason: String);
     /// Free-form lifecycle/status text for display or logging.
@@ -300,9 +390,7 @@ impl EnvoixSession {
 }
 
 fn build_client(_settings: &EnvoixRuntimeSettings) -> Client {
-    let mut client = Client::new();
-    client.chunk_size = GUI_CHUNK_SIZE;
-    client
+    Client::new()
 }
 
 fn transfer_options(settings: &EnvoixRuntimeSettings) -> Result<TransferOptions, EnvoixError> {
@@ -342,10 +430,14 @@ fn relay_url(settings: &EnvoixRuntimeSettings) -> Option<String> {
 fn report_terminal(
     observer: &dyn TransferObserver,
     result: Result<TransferSummary, TransferError>,
+    direction: Option<TransferDirection>,
 ) {
     match result {
         Ok(summary) => observer.on_completed(summary.bytes_transferred),
-        Err(error) => observer.on_failed(error.to_string()),
+        Err(error) => {
+            observer.on_transfer_failed(to_ffi_failure(&error, direction));
+            observer.on_failed(error.to_string());
+        }
     }
 }
 
@@ -355,10 +447,14 @@ async fn drive_transfer(
     mut cancel: oneshot::Receiver<()>,
 ) {
     let mut cancel_requested = false;
+    let mut direction = None;
     loop {
         tokio::select! {
             event = transfer.next_event() => {
                 let Some(event) = event else { break };
+                if direction.is_none() {
+                    direction = event_direction(&event.event);
+                }
                 observe_transfer_event(&*observer, event.event);
             }
             _ = &mut cancel, if !cancel_requested => {
@@ -368,7 +464,18 @@ async fn drive_transfer(
             }
         }
     }
-    report_terminal(&*observer, transfer.wait().await);
+    report_terminal(&*observer, transfer.wait().await, direction);
+}
+
+fn event_direction(event: &TransferEvent) -> Option<TransferDirection> {
+    match event {
+        TransferEvent::Binding { direction, .. }
+        | TransferEvent::Started { direction, .. }
+        | TransferEvent::Verifying { direction, .. }
+        | TransferEvent::Verified { direction, .. }
+        | TransferEvent::Failed { direction, .. } => Some(*direction),
+        _ => None,
+    }
 }
 
 fn observe_transfer_event(observer: &dyn TransferObserver, event: TransferEvent) {
@@ -419,6 +526,107 @@ fn pairing_step_label(step: PairingStep) -> &'static str {
     }
 }
 
+fn to_ffi_failure(
+    error: &TransferError,
+    direction: Option<TransferDirection>,
+) -> FfiTransferFailure {
+    let failure = error.to_failure(direction);
+    FfiTransferFailure {
+        code: ffi_failure_code(failure.code),
+        category: ffi_failure_category(failure.category),
+        phase: ffi_failure_phase(failure.phase),
+        origin: ffi_failure_origin(failure.origin),
+        direction: ffi_direction(failure.direction),
+        transfer_id: failure.transfer_id.unwrap_or_default(),
+        attempt_id: failure.attempt_id.unwrap_or_default(),
+        retryable: failure.retryable,
+        recovery_action: ffi_recovery_action(failure.recovery_action),
+        user_message_key: failure.user_message_key,
+        diagnostic_message: failure.diagnostic_message,
+    }
+}
+
+fn ffi_direction(direction: Option<TransferDirection>) -> FfiTransferDirection {
+    match direction {
+        Some(TransferDirection::Send) => FfiTransferDirection::Send,
+        Some(TransferDirection::Receive) => FfiTransferDirection::Receive,
+        None => FfiTransferDirection::Unknown,
+    }
+}
+
+fn ffi_failure_code(code: FailureCode) -> FfiFailureCode {
+    match code {
+        FailureCode::UserCanceled => FfiFailureCode::UserCanceled,
+        FailureCode::PeerCanceled => FfiFailureCode::PeerCanceled,
+        FailureCode::NetworkLost => FfiFailureCode::NetworkLost,
+        FailureCode::PeerUnreachable => FfiFailureCode::PeerUnreachable,
+        FailureCode::AuthenticationFailed => FfiFailureCode::AuthenticationFailed,
+        FailureCode::PermissionDenied => FfiFailureCode::PermissionDenied,
+        FailureCode::DiskFull => FfiFailureCode::DiskFull,
+        FailureCode::HashMismatch => FfiFailureCode::HashMismatch,
+        FailureCode::ProtocolError => FfiFailureCode::ProtocolError,
+        FailureCode::DestinationConflict => FfiFailureCode::DestinationConflict,
+        FailureCode::UnsupportedFeature => FfiFailureCode::UnsupportedFeature,
+        FailureCode::Timeout => FfiFailureCode::Timeout,
+        FailureCode::InternalError => FfiFailureCode::InternalError,
+        FailureCode::Unknown => FfiFailureCode::Unknown,
+    }
+}
+
+fn ffi_failure_category(category: FailureCategory) -> FfiFailureCategory {
+    match category {
+        FailureCategory::User => FfiFailureCategory::User,
+        FailureCategory::Network => FfiFailureCategory::Network,
+        FailureCategory::Authentication => FfiFailureCategory::Authentication,
+        FailureCategory::Permission => FfiFailureCategory::Permission,
+        FailureCategory::Storage => FfiFailureCategory::Storage,
+        FailureCategory::Integrity => FfiFailureCategory::Integrity,
+        FailureCategory::Protocol => FfiFailureCategory::Protocol,
+        FailureCategory::Unsupported => FfiFailureCategory::Unsupported,
+        FailureCategory::Internal => FfiFailureCategory::Internal,
+        FailureCategory::Unknown => FfiFailureCategory::Unknown,
+    }
+}
+
+fn ffi_failure_origin(origin: FailureOrigin) -> FfiFailureOrigin {
+    match origin {
+        FailureOrigin::Local => FfiFailureOrigin::Local,
+        FailureOrigin::Peer => FfiFailureOrigin::Peer,
+        FailureOrigin::Unknown => FfiFailureOrigin::Unknown,
+    }
+}
+
+fn ffi_failure_phase(phase: FailurePhase) -> FfiFailurePhase {
+    match phase {
+        FailurePhase::Setup => FfiFailurePhase::Setup,
+        FailurePhase::Binding => FfiFailurePhase::Binding,
+        FailurePhase::Advertising => FfiFailurePhase::Advertising,
+        FailurePhase::Pairing => FfiFailurePhase::Pairing,
+        FailurePhase::Connecting => FfiFailurePhase::Connecting,
+        FailurePhase::Authenticating => FfiFailurePhase::Authenticating,
+        FailurePhase::Negotiating => FfiFailurePhase::Negotiating,
+        FailurePhase::Transferring => FfiFailurePhase::Transferring,
+        FailurePhase::Verifying => FfiFailurePhase::Verifying,
+        FailurePhase::Committing => FfiFailurePhase::Committing,
+        FailurePhase::Acknowledging => FfiFailurePhase::Acknowledging,
+        FailurePhase::CleaningUp => FfiFailurePhase::CleaningUp,
+    }
+}
+
+fn ffi_recovery_action(action: RecoveryAction) -> FfiRecoveryAction {
+    match action {
+        RecoveryAction::Retry => FfiRecoveryAction::Retry,
+        RecoveryAction::Resume => FfiRecoveryAction::Resume,
+        RecoveryAction::ChooseFolder => FfiRecoveryAction::ChooseFolder,
+        RecoveryAction::OpenSettings => FfiRecoveryAction::OpenSettings,
+        RecoveryAction::RePair => FfiRecoveryAction::RePair,
+        RecoveryAction::UpdateApp => FfiRecoveryAction::UpdateApp,
+        RecoveryAction::SwitchPairingMethod => FfiRecoveryAction::SwitchPairingMethod,
+        RecoveryAction::DiscardPartial => FfiRecoveryAction::DiscardPartial,
+        RecoveryAction::None => FfiRecoveryAction::None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,6 +666,7 @@ mod tests {
         fn on_completed(&self, bytes: u64) {
             let _ = self.0.send(Msg::Completed(bytes));
         }
+        fn on_transfer_failed(&self, _failure: FfiTransferFailure) {}
         fn on_failed(&self, reason: String) {
             let _ = self.0.send(Msg::Failed(reason));
         }
