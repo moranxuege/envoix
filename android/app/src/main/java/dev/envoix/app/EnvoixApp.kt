@@ -9,6 +9,7 @@ class EnvoixApp : Application() {
         SettingsStore.init(this)
         LogStore.init(filesDir)
         OpLog.init(filesDir)
+        LogStore.append("envoix-android v${BuildConfig.VERSION_NAME} (${BuildConfig.GIT_COMMIT})")
         Native.initLogging(LogSink) // before initContext, so init logs are captured
         SettingsStore.applyLogLevel() // restore the saved (dev) verbosity
         Native.initContext(this)

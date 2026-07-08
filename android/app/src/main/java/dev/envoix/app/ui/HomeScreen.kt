@@ -346,10 +346,9 @@ private fun CardControls(
                 CircleBtn(Icons.Default.PlayArrow, filled = true) { onPauseResume(t.id) }
                 CircleBtn(Icons.Default.Close, filled = false) { onCancel(t.id) }
             }
-            Status.Failed, Status.Unconfirmed ->
+            Status.Failed, Status.Unconfirmed, Status.Cancelled ->
                 CircleBtn(Icons.Default.Refresh, filled = true) { onPauseResume(t.id) }
             Status.Completed -> if (t.savedUri != null) CircleBtn(Icons.Default.OpenInNew, filled = false) { onOpen(t) }
-            Status.Cancelled -> {}
         }
     }
 }

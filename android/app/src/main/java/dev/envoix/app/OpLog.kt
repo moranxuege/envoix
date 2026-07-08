@@ -34,7 +34,7 @@ object OpLog {
         runCatching {
             if (f.exists() && f.length() > FILE_CAP) f.writeText(f.readText().takeLast(FILE_CAP))
         }
-        add("── launch ──")
+        add("── launch · v${BuildConfig.VERSION_NAME} (${BuildConfig.GIT_COMMIT}) ──")
     }
 
     @Synchronized

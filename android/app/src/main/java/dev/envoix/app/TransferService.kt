@@ -131,7 +131,9 @@ class TransferService : Service() {
                 TransferRepository.update(id) {
                     if (it.status.isTerminal) it else it.copy(status = Status.Cancelled)
                 }
-                specs.remove(id)
+                // Keep the spec: a cancel leaves the room + partial, so it stays
+                // resumable - the same as pause or a network drop. Removing the card
+                // (swipe) is the only true abandon.
                 Native.cancel(id)
             }
         }

@@ -4,6 +4,16 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// Short git SHA embedded into BuildConfig, so any uploaded log identifies exactly
+// which build produced it. Falls back to "unknown" outside a git checkout.
+val gitCommit: String = try {
+    ProcessBuilder("git", "rev-parse", "--short", "HEAD")
+        .directory(rootDir).redirectErrorStream(true).start()
+        .inputStream.bufferedReader().readText().trim().ifEmpty { "unknown" }
+} catch (e: Exception) {
+    "unknown"
+}
+
 android {
     namespace = "dev.envoix.app"
     compileSdk = 34
@@ -14,6 +24,7 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "0.1.0"
+        buildConfigField("String", "GIT_COMMIT", "\"$gitCommit\"")
         ndk {
             // Ship the envoix binary only for the ABIs we cross-compile.
             abiFilters += listOf("x86_64", "arm64-v8a")
@@ -38,7 +49,10 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
 
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+        buildConfig = true // for BuildConfig.GIT_COMMIT / VERSION_NAME
+    }
 
     // The envoix CLI ships as libenvoix.so in jniLibs; legacy packaging extracts
     // it to the app's native-lib dir, the one place Android lets us exec a file.
