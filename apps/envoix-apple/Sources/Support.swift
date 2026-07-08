@@ -17,7 +17,7 @@ typealias PlatformImage = UIImage
 let minTokenLength = 12
 let defaultRendezvousBroker = "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445"
 let defaultRelayURL = "https://envoix.chkxwlyh.us:8444"
-let appDebugBuildLabel = "Debug build 2026.07.08.3"
+let appDebugBuildLabel = "Debug build 2026.07.08.4"
 
 /// Generates a short, memorable, easy-to-type pairing token of the form
 /// `word-word-NN` (always ≥ `minTokenLength` since each word is ≥4 letters).
@@ -34,9 +34,9 @@ func friendlyToken() -> String {
 
 /// How two peers find and authenticate each other.
 enum PairingMode: Hashable {
-    case room    // rendezvous room, short code, broker-assisted pairing
-    case invite  // QR / invite link carrying the receiver's address
-    case token   // same LAN, shared token, mDNS auto-discovery
+    case room    // Android-compatible QR/code, broker-assisted pairing
+    case invite  // legacy direct invite link, kept for compatibility
+    case token   // advanced same-LAN shared token, mDNS auto-discovery
 }
 
 extension String {
@@ -689,20 +689,46 @@ struct TransferStatusView: View {
         return (AppText.value("Transfer failed", "传输失败", language: language), cleanReason)
     }
 
-    /// Reveal + copyable absolute path for a received file (handy for pasting
-    /// into an AI or another tool).
+    /// Reveal the received file. iOS hides the raw container path unless
+    /// developer mode is enabled because it is not a user-facing location.
     @ViewBuilder private func completedFileControls(_ url: URL) -> some View {
         HStack {
             Button(platformRevealTitle(language: language)) { revealInFinder(url) }
-            Button(AppText.value("Copy Path", "复制路径", language: language)) {
-                copyWithToast(url.path, AppText.value("Path copied", "路径已复制", language: language))
+            #if os(macOS)
+            copyPathButton(url)
+            #elseif os(iOS)
+            if developerMode {
+                copyPathButton(url)
             }
+            #endif
         }
+        #if os(macOS)
         Text(url.path)
             .font(.body.monospaced())
             .foregroundStyle(Theme.muted)
             .textSelection(.enabled)
             .lineLimit(1)
             .truncationMode(.middle)
+        #elseif os(iOS)
+        Text(AppText.value("Saved as \(url.lastPathComponent)", "已保存为 \(url.lastPathComponent)", language: language))
+            .font(.body)
+            .foregroundStyle(Theme.muted)
+            .lineLimit(1)
+            .truncationMode(.middle)
+        if developerMode {
+            Text(url.path)
+                .font(.body.monospaced())
+                .foregroundStyle(Theme.muted)
+                .textSelection(.enabled)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        #endif
+    }
+
+    private func copyPathButton(_ url: URL) -> some View {
+        Button(AppText.value("Copy Path", "复制路径", language: language)) {
+            copyWithToast(url.path, AppText.value("Path copied", "路径已复制", language: language))
+        }
     }
 }

@@ -87,6 +87,7 @@ struct PairingModeSelector: View {
     enum Role { case send, receive }
 
     @Environment(\.appLanguage) private var language
+    @AppStorage("envoix.developerMode") private var developerMode = false
     @Binding var selection: PairingMode
     var role: Role = .send
     var disabled: Bool
@@ -111,6 +112,8 @@ struct PairingModeSelector: View {
         }
         .card(padding: 14)
         .disabled(disabled)
+        .onAppear(perform: ensureVisibleSelection)
+        .onChange(of: developerMode) { _ in ensureVisibleSelection() }
     }
 
     #if os(iOS)
@@ -121,9 +124,10 @@ struct PairingModeSelector: View {
                 .foregroundStyle(Theme.muted)
 
             HStack(spacing: 8) {
-                mobileOption(.room, title: AppText.value("Code", "码", language: language), systemImage: "number")
-                mobileOption(.invite, title: AppText.value("Link", "链接", language: language), systemImage: "qrcode")
-                mobileOption(.token, title: AppText.value("Token", "口令", language: language), systemImage: "key")
+                mobileOption(.room, title: AppText.value("QR / Code", "扫码 / 短码", language: language), systemImage: "qrcode")
+                if developerMode {
+                    mobileOption(.token, title: AppText.value("Token", "口令", language: language), systemImage: "key")
+                }
             }
 
             Text(selectedHint)
@@ -133,6 +137,8 @@ struct PairingModeSelector: View {
         }
         .card(padding: 12)
         .disabled(disabled)
+        .onAppear(perform: ensureVisibleSelection)
+        .onChange(of: developerMode) { _ in ensureVisibleSelection() }
     }
 
     private func mobileOption(_ mode: PairingMode, title: String, systemImage: String) -> some View {
@@ -165,12 +171,10 @@ struct PairingModeSelector: View {
         switch selection {
         case .room:
             return role == .receive
-                ? AppText.value("Show a short code on this device.", "在本机显示短码。", language: language)
-                : AppText.value("Enter the receiver's short code.", "输入接收端短码。", language: language)
+                ? AppText.value("Show a QR code and short code on this device.", "在本机显示二维码和短码。", language: language)
+                : AppText.value("Scan the receiver QR or enter its short code.", "扫描接收端二维码，或输入短码。", language: language)
         case .invite:
-            return role == .receive
-                ? AppText.value("Create a link or QR invite.", "创建链接或二维码邀请。", language: language)
-                : AppText.value("Paste the receiver's invite.", "粘贴接收端邀请。", language: language)
+            return AppText.value("Legacy invite link.", "旧版邀请链接。", language: language)
         case .token:
             return AppText.value("Same network only. Hotspots may block discovery.", "仅适合同一局域网；热点可能阻止发现。", language: language)
         }
@@ -178,32 +182,30 @@ struct PairingModeSelector: View {
     #endif
 
     @ViewBuilder private var pairingOptions: some View {
-                option(
-                    mode: .room,
-                    title: role == .receive
-                        ? AppText.value("Share Receive Code", "分享接收码", language: language)
-                        : AppText.value("Enter Receiver Code", "输入接收码", language: language),
-                    subtitle: role == .receive
-                        ? AppText.value("Recommended. Give this code to the sender.", "推荐。把这个码发给发送方。", language: language)
-                        : AppText.value("Recommended. Use the code shown on the receiver.", "推荐。输入接收端屏幕上的码。", language: language),
-                    systemImage: "number"
-                )
-                option(
-                    mode: .invite,
-                    title: role == .receive
-                        ? AppText.value("Create Link / QR", "创建链接 / 二维码", language: language)
-                        : AppText.value("Use Link / QR", "使用链接 / 二维码", language: language),
-                    subtitle: role == .receive
-                        ? AppText.value("Create an invite and wait for the sender.", "创建邀请并等待发送方。", language: language)
-                        : AppText.value("Paste the receiver's invite link.", "粘贴接收端生成的邀请链接。", language: language),
-                    systemImage: "qrcode"
-                )
-                option(
-                    mode: .token,
-                    title: AppText.value("Use Shared Token", "使用共享口令", language: language),
-                    subtitle: AppText.value("Both devices use the same saved token on the same network.", "两台设备在同一网络中使用同一个已保存口令。", language: language),
-                    systemImage: "key"
-                )
+        option(
+            mode: .room,
+            title: role == .receive
+                ? AppText.value("Share QR / Code", "分享二维码 / 短码", language: language)
+                : AppText.value("Scan or Enter Code", "扫码或输入短码", language: language),
+            subtitle: role == .receive
+                ? AppText.value("Recommended. Android-compatible QR and short code.", "推荐。兼容 Android 的二维码和短码。", language: language)
+                : AppText.value("Recommended. Scan the receiver QR or type its code.", "推荐。扫描接收端二维码，或输入短码。", language: language),
+            systemImage: "qrcode"
+        )
+        if developerMode {
+            option(
+                mode: .token,
+                title: AppText.value("Use Shared Token", "使用共享口令", language: language),
+                subtitle: AppText.value("Advanced same-LAN discovery without the broker.", "高级：不通过配对服务器，仅同局域网发现。", language: language),
+                systemImage: "key"
+            )
+        }
+    }
+
+    private func ensureVisibleSelection() {
+        if selection == .invite || (selection == .token && !developerMode) {
+            selection = .room
+        }
     }
 
     private func option(

@@ -19,7 +19,6 @@ struct SendView: View {
     @AppStorage("envoix.speedLimit") private var speedLimit = 40
     @State private var invite: String = ""
     @State private var roomCode = ""
-    @State private var roomInviteSource = ""
     @State private var mode: PairingMode = .room
     @State private var dropTargeted = false
     @State private var filePathInput = ""
@@ -78,55 +77,46 @@ struct SendView: View {
     }
 
     @ViewBuilder private var roomModeSection: some View {
-        RoomCodeField(
-            code: roomCodeBinding,
-            disabled: viewModel.isBusy,
-            title: AppText.value("Receiver code", "接收码", language: uiLanguage),
-            placeholder: AppText.value("Code shown on the receiver", "接收端屏幕上的码", language: uiLanguage),
-            helper: AppText.value("Enter the code shown on the receiving device, then send this file.", "输入接收端屏幕上的码，然后发送这个文件。", language: uiLanguage)
-        )
-        .card(padding: 14)
+        VStack(alignment: .leading, spacing: 12) {
+            RoomCodeField(
+                code: roomCodeBinding,
+                disabled: viewModel.isBusy,
+                title: AppText.value("Receiver QR / code", "接收端二维码 / 短码", language: uiLanguage),
+                placeholder: AppText.value("Scan QR or enter the receiver code", "扫码或输入接收端短码", language: uiLanguage),
+                helper: AppText.value("Use the QR or short code shown on the receiving device.", "使用接收端屏幕上的二维码或短码。", language: uiLanguage)
+            )
 
-        if !roomInviteSource.isEmpty {
-            VStack(alignment: .leading, spacing: 10) {
-                Text(AppText.value("Pairing link", "配对链接", language: uiLanguage))
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(Theme.muted)
-                LinkRow(text: roomInviteSource) {
-                    Button {
-                        copyWithToast(roomInviteSource, AppText.value("Link copied", "链接已复制", language: uiLanguage))
-                    } label: {
-                        Label(AppText.value("Copy", "复制", language: uiLanguage), systemImage: "doc.on.doc")
-                            .labelStyle(.iconOnly)
-                            .frame(width: 30, height: 30)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-
-                    Button {
-                        roomInviteSource = ""
-                    } label: {
-                        Label(AppText.value("Clear", "清除", language: uiLanguage), systemImage: "xmark.circle")
-                            .labelStyle(.iconOnly)
-                            .frame(width: 30, height: 30)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
+            HStack(spacing: 8) {
+                Button {
+                    pastePairingInput()
+                } label: {
+                    Label(AppText.value("Paste", "粘贴", language: uiLanguage), systemImage: "doc.on.clipboard")
+                        .frame(minHeight: 34)
+                        .contentShape(Rectangle())
                 }
+                .disabled(viewModel.isBusy)
+
+                #if os(iOS)
+                Button {
+                    isQRScannerPresented = true
+                } label: {
+                    Label(AppText.value("Scan QR", "扫码", language: uiLanguage), systemImage: "qrcode.viewfinder")
+                        .frame(minHeight: 34)
+                        .contentShape(Rectangle())
+                }
+                .disabled(viewModel.isBusy)
+                #endif
             }
-            .card(padding: 14)
+            .buttonStyle(.bordered)
+            .controlSize(.small)
         }
+        .card(padding: 14)
     }
 
     private var roomCodeBinding: Binding<String> {
         Binding(
             get: { roomCode },
-            set: { value in
-                if value.trimmed != roomCode.trimmed {
-                    roomInviteSource = ""
-                }
-                roomCode = value
-            }
+            set: { value in roomCode = value }
         )
     }
 
@@ -367,74 +357,58 @@ struct SendView: View {
     }
 
     private func handleScannedInvite(_ value: String) {
-        let scanned = value.trimmed
-        if let parsedRoom = parseRoomInvite(scanned) {
-            roomCode = parsedRoom.code
-            if let broker = parsedRoom.broker, !broker.trimmed.isEmpty {
-                serverURL = broker.trimmed
+        applyPairingInput(value, source: .scan)
+    }
+
+    private enum PairingInputSource {
+        case paste
+        case scan
+    }
+
+    private func pastePairingInput() {
+        guard let value = pasteboardString()?.trimmed, !value.isEmpty else {
+            ToastCenter.shared.show(AppText.value("Clipboard is empty", "剪贴板为空", language: uiLanguage))
+            return
+        }
+        applyPairingInput(value, source: .paste)
+    }
+
+    private func applyPairingInput(_ value: String, source: PairingInputSource) {
+        let input = value.trimmed
+        let lowercased = input.lowercased()
+        if lowercased.hasPrefix("envoix:") && !lowercased.hasPrefix("envoix://pair/") {
+            invite = input
+            mode = .invite
+            ToastCenter.shared.show(AppText.value("Legacy invite loaded", "已载入旧版邀请", language: uiLanguage))
+            return
+        }
+
+        do {
+            let parsed = try parsePairingInvite(input: input)
+            roomCode = parsed.code
+            if !parsed.broker.trimmed.isEmpty {
+                serverURL = parsed.broker.trimmed
             }
-            if let relay = parsedRoom.relay, !relay.trimmed.isEmpty {
-                relayURL = relay.trimmed
+            if !parsed.relay.trimmed.isEmpty {
+                relayURL = parsed.relay.trimmed
             }
             mode = .room
-            roomInviteSource = scanned
             invite = ""
-            ToastCenter.shared.show(AppText.value("Room QR scanned. Switched to code mode.", "已识别为房间二维码，已切换为码配对。", language: uiLanguage))
-            return
+            let message = source == .scan
+                ? AppText.value("QR scanned", "二维码已扫描", language: uiLanguage)
+                : AppText.value("Pairing code pasted", "配对码已粘贴", language: uiLanguage)
+            ToastCenter.shared.show(message)
+        } catch {
+            ToastCenter.shared.show(AppText.value("This is not a valid Envoix pairing code.", "这不是有效的 Envoix 配对码。", language: uiLanguage))
         }
-
-        guard scanned.lowercased().hasPrefix("envoix:") else {
-            ToastCenter.shared.show(AppText.value("This QR code is not an Envoix invite.", "这个二维码不是 Envoix 邀请。", language: uiLanguage))
-            return
-        }
-        invite = scanned
-        roomInviteSource = ""
-        ToastCenter.shared.show(AppText.value("Invite scanned", "邀请已扫描", language: uiLanguage))
     }
 
-    private func parseRoomInvite(_ value: String) -> (code: String, broker: String?, relay: String?)? {
-        guard value.lowercased().hasPrefix("envoix://pair/") else { return nil }
-        guard let components = URLComponents(string: value) else { return nil }
-        let path = components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        if path.isEmpty {
-            return nil
-        }
-        var broker: String?
-        var relay: String?
-        for item in components.queryItems ?? [] {
-            guard let value = item.value else { continue }
-            switch item.name.lowercased() {
-            case "broker":
-                broker = value.removingPercentEncoding
-            case "relay":
-                relay = value.removingPercentEncoding
-            default:
-                continue
-            }
-        }
-        return (path, broker?.trimmed, relay?.trimmed)
-    }
-
-    private func makeSettings(forRoomInvite parsed: (code: String, broker: String?, relay: String?)?) throws -> EnvoixRuntimeSettings {
-        let effectiveServer: String
-        if let scanned = parsed?.broker, !scanned.trimmed.isEmpty {
-            effectiveServer = scanned.trimmed
-        } else {
-            effectiveServer = serverURL.trimmed
-        }
-
-        let effectiveRelay: String
-        if let scanned = parsed?.relay, !scanned.trimmed.isEmpty {
-            effectiveRelay = scanned.trimmed
-        } else {
-            effectiveRelay = relayURL.trimmed
-        }
-
-        return try RuntimeSettingsProvider.make(
+    private func runtimeSettings(for parsed: FfiPairingInvite) throws -> EnvoixRuntimeSettings {
+        try RuntimeSettingsProvider.make(
             concurrentTransfers: concurrentTransfers,
             language: language,
-            serverURL: effectiveServer,
-            relayURL: effectiveRelay,
+            serverURL: parsed.broker.trimmed.isEmpty ? serverURL : parsed.broker,
+            relayURL: parsed.relay.trimmed.isEmpty ? relayURL : parsed.relay,
             configChunkSize: configChunkSize,
             speedLimit: speedLimit
         )
@@ -524,26 +498,48 @@ struct SendView: View {
             )
             switch mode {
             case .room:
-                viewModel.startSendingWithRoom(
-                    filePath: file.path,
-                    code: roomCode.trimmed,
-                    settings: settings,
-                    sourceAccess: selectedFileAccess
-                )
-            case .invite:
-                if let parsedRoom = parseRoomInvite(invite.trimmed) {
-                    mode = .room
-                    roomCode = parsedRoom.code
-                    roomInviteSource = invite.trimmed
-                    let roomSettings = try makeSettings(forRoomInvite: parsedRoom)
+                let input = roomCode.trimmed
+                let lowercasedInput = input.lowercased()
+                if lowercasedInput.hasPrefix("envoix://pair/") {
+                    let parsed = try parsePairingInvite(input: input)
+                    roomCode = parsed.code
+                    let roomSettings = try runtimeSettings(for: parsed)
                     viewModel.startSendingWithRoom(
                         filePath: file.path,
-                        code: parsedRoom.code,
+                        code: parsed.code,
+                        settings: roomSettings,
+                        sourceAccess: selectedFileAccess
+                    )
+                } else if lowercasedInput.hasPrefix("envoix:") {
+                    invite = input
+                    mode = .invite
+                    viewModel.startSendingWithInvite(
+                        filePath: file.path,
+                        invite: input,
+                        settings: settings,
+                        sourceAccess: selectedFileAccess
+                    )
+                } else {
+                    viewModel.startSendingWithRoom(
+                        filePath: file.path,
+                        code: input,
+                        settings: settings,
+                        sourceAccess: selectedFileAccess
+                    )
+                }
+            case .invite:
+                if invite.trimmed.lowercased().hasPrefix("envoix://pair/") {
+                    let parsed = try parsePairingInvite(input: invite.trimmed)
+                    mode = .room
+                    roomCode = parsed.code
+                    let roomSettings = try runtimeSettings(for: parsed)
+                    viewModel.startSendingWithRoom(
+                        filePath: file.path,
+                        code: parsed.code,
                         settings: roomSettings,
                         sourceAccess: selectedFileAccess
                     )
                 } else {
-                    roomInviteSource = ""
                     viewModel.startSendingWithInvite(
                         filePath: file.path,
                         invite: invite.trimmed,

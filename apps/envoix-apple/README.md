@@ -104,10 +104,11 @@ iOS later.
    allow it, or LAN discovery/transfer will fail.
 
 For a quick demo, run the macOS app on the Mac and the iOS app on the iPhone.
-Use **Room Code** first because it avoids typing peer addresses. Start
-receiving on one device, enter that code on the other device, choose a small
-file, then send. On iOS, choose a save folder in Files before receiving;
-Downloads is recommended so the received file is easy to find later.
+Use **QR / Code** first because it avoids typing peer addresses. Start
+receiving on one device, scan or enter that code on the other device, choose a
+small file, then send. On iOS, the default receive folder is visible in Files
+as **On My iPhone > Envoix > Downloads**; choose another Files folder only when
+you need a custom location.
 
 ## UI iteration workflow
 
@@ -126,25 +127,25 @@ Canvas > Reload Canvas** before doing a full app rebuild.
 
 ## Using it
 
-Each tab has three pairing modes:
+Each tab uses **QR / Code** as the default path. The receiver shows an
+Android-compatible `envoix://pair/<code>` QR plus the same short code; the
+sender scans the QR or enters the code. The rendezvous broker only pairs
+devices, and the file still moves over the encrypted transfer path.
 
-- **Room Code**: the default path. The receiver generates a short code and
-  waits; the sender enters that code. The rendezvous broker only pairs devices,
-  and the file still moves over the encrypted transfer path.
-- **Link / QR**: the receiver publishes an `envoix:…` invite as QR + text; the
-  sender scans or pastes it.
-- **Shared Token**: both sides enter the same shared token (12+ chars); the peer
-  is discovered automatically over mDNS. This is best for same-LAN transfers.
+Developer mode exposes **Shared Token** for same-LAN mDNS discovery without the
+broker. The legacy `envoix:…` direct invite path remains as a compatibility
+fallback but is no longer part of the normal UI.
 
 On macOS, the receive folder defaults to `~/Downloads` until you pick another.
-On iOS, Envoix asks you to choose a Files folder before receiving and remembers
-that folder across launches. The first transfer may trigger a local-network
-access prompt; allow it or LAN discovery/transfer will fail.
+On iOS, Envoix defaults to its Files-visible Documents/Downloads folder and
+remembers a custom Files folder only after you choose one. The first transfer
+may trigger a local-network access prompt; allow it or LAN discovery/transfer
+will fail.
 
 Quality-of-life:
 
-- **Room Code** starts ready on the receive side with *Generate* and *Copy*.
-  The send side only asks for the receiver's code.
+- **QR / Code** starts ready on the receive side with *New* and *Copy*. The send
+  side accepts either the receiver's QR or short code.
 - **Send** accepts a file by drag-and-drop or *Paste Path* (from the clipboard),
   as well as the file panel.
 - During a transfer the status line shows live throughput and an ETA based on a

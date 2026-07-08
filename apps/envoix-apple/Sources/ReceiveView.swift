@@ -1,4 +1,5 @@
 import SwiftUI
+import EnvoixCore
 
 struct ReceiveView: View {
     @Environment(\.appLanguage) private var uiLanguage
@@ -6,6 +7,7 @@ struct ReceiveView: View {
     @ObservedObject var viewModel: TransferViewModel
     // Remembered across launches. Empty means "use the platform default".
     @AppStorage("envoix.outputDir") private var outputDirPath: String = ""
+    @AppStorage("envoix.outputDirDisplayName") private var outputDirDisplayName: String = ""
     @AppStorage("envoix.token") private var token: String = ""
     @AppStorage("envoix.concurrentTransfers") private var concurrentTransfers = true
     @AppStorage("envoix.language") private var language = "en"
@@ -15,6 +17,7 @@ struct ReceiveView: View {
     @AppStorage("envoix.speedLimit") private var speedLimit = 40
     @State private var mode: PairingMode = .room
     @State private var roomCode = newRoomCode()
+    @State private var pairingInvite: FfiPairingInvite?
     @State private var revealAddress = false
     #if os(iOS)
     @State private var isFolderPickerPresented = false
@@ -28,20 +31,34 @@ struct ReceiveView: View {
 
     private let outputDirBookmarkKey = "envoix.outputDirBookmark"
 
-    /// Defaults to ~/Downloads on macOS. On iOS, the user must grant access to
-    /// a Files folder such as Downloads before receiving.
+    /// Defaults to ~/Downloads on macOS and the app's Files-visible
+    /// Documents/Downloads folder on iOS. A user-selected Files folder is used
+    /// only when a persisted bookmark exists.
     private var outputDir: URL? {
         #if os(iOS)
-        guard let data = UserDefaults.standard.data(forKey: outputDirBookmarkKey) else {
-            return nil
+        if let data = UserDefaults.standard.data(forKey: outputDirBookmarkKey) {
+            return try? resolveSecurityScopedFolderBookmark(data)
         }
-        return try? resolveSecurityScopedFolderBookmark(data)
+        return defaultIOSOutputDir
         #else
         if !outputDirPath.isEmpty { return URL(fileURLWithPath: outputDirPath) }
         return FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser
         #endif
     }
+
+    #if os(iOS)
+    private var hasCustomOutputDir: Bool {
+        UserDefaults.standard.data(forKey: outputDirBookmarkKey) != nil
+    }
+
+    private var defaultIOSOutputDir: URL {
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+                .appendingPathComponent("Documents", isDirectory: true)
+        return documents.appendingPathComponent("Downloads", isDirectory: true)
+    }
+    #endif
 
     var body: some View {
         #if os(iOS)
@@ -94,6 +111,9 @@ struct ReceiveView: View {
             .padding(.bottom, 88)
             #endif
         }
+        .onAppear { refreshPairingInviteIfNeeded() }
+        .onChange(of: serverURL) { _ in refreshPairingInviteForSettingsChange() }
+        .onChange(of: relayURL) { _ in refreshPairingInviteForSettingsChange() }
     }
 
     @ViewBuilder private var footerMessage: some View {
@@ -149,8 +169,19 @@ struct ReceiveView: View {
                         .contentShape(Rectangle())
                 }
                 .disabled(viewModel.isBusy)
+                if hasCustomOutputDir {
+                    Button {
+                        resetOutputFolder()
+                    } label: {
+                        Label(AppText.value("Reset", "重置", language: uiLanguage), systemImage: "arrow.uturn.backward")
+                            .labelStyle(.iconOnly)
+                            .frame(width: 30, height: 30)
+                            .contentShape(Rectangle())
+                    }
+                    .disabled(viewModel.isBusy)
+                }
             }
-            Text(AppText.value("Choose a folder in Files. Downloads is recommended for easy access.", "请选择 Files 中的文件夹。推荐选择 Downloads，后续最容易找到。", language: uiLanguage))
+            Text(AppText.value("Default saves to Files > On My iPhone > Envoix > Downloads. Choose a Files folder to save elsewhere.", "默认保存到 Files > On My iPhone > Envoix > Downloads。也可以选择其他 Files 文件夹。", language: uiLanguage))
                 .font(.footnote)
                 .foregroundStyle(Theme.muted)
                 .fixedSize(horizontal: false, vertical: true)
@@ -172,10 +203,16 @@ struct ReceiveView: View {
 
     private var outputDirDisplayText: String {
         #if os(iOS)
-        guard let outputDir else {
-            return AppText.value("No folder selected", "尚未选择文件夹", language: uiLanguage)
+        if hasCustomOutputDir {
+            if !outputDirDisplayName.trimmed.isEmpty {
+                return outputDirDisplayName
+            }
+            guard let outputDir else {
+                return AppText.value("Selected Files folder unavailable", "已选 Files 文件夹不可用", language: uiLanguage)
+            }
+            return outputDir.lastPathComponent.isEmpty ? outputDir.path : outputDir.lastPathComponent
         }
-        return outputDir.lastPathComponent.isEmpty ? outputDir.path : outputDir.lastPathComponent
+        return AppText.value("On My iPhone / Envoix / Downloads", "我的 iPhone / Envoix / Downloads", language: uiLanguage)
         #else
         return outputDir?.path ?? ""
         #endif
@@ -253,25 +290,57 @@ struct ReceiveView: View {
     }
 
     private var roomSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(AppText.value("Share this code with the sender", "把这个码分享给发送方", language: uiLanguage))
+        VStack(alignment: .center, spacing: 16) {
+            VStack(spacing: 4) {
+                Text(AppText.value("Share this QR or code", "分享二维码或接收码", language: uiLanguage))
                     .font(.title2.weight(.semibold))
                     .foregroundStyle(Theme.text)
-                Text(AppText.value("1. Copy this code to the sending device.\n2. Click Start Receiving and keep this screen open.", "1. 把这个码复制到发送端设备。\n2. 点击开始接收，并保持此界面打开。", language: uiLanguage))
+                Text(AppText.value("The sender can scan the QR or enter the same short code.", "发送方可以扫码，或输入同一个短码。", language: uiLanguage))
                     .font(.body)
                     .foregroundStyle(Theme.muted)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .multilineTextAlignment(.center)
             }
 
-            RoomCodeField(
-                code: $roomCode,
-                disabled: viewModel.isBusy,
-                title: AppText.value("Receive code", "接收码", language: uiLanguage),
-                canGenerate: true,
-                generateLabel: AppText.value("New Code", "新建码", language: uiLanguage),
-                helper: AppText.value("Used only to pair both devices through the rendezvous service.", "仅用于通过配对服务让两台设备相互发现。", language: uiLanguage)
-            )
+            if let payload = pairingInvite?.payload,
+               let image = QRCode.image(from: payload) {
+                QRCard(image: image, size: 208)
+            } else {
+                VStack(spacing: 10) {
+                    Image(systemName: "qrcode")
+                        .font(.system(size: 72, weight: .medium))
+                        .foregroundStyle(Theme.muted)
+                    Text(AppText.value("QR code", "二维码", language: uiLanguage))
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(Theme.muted)
+                }
+                .frame(width: 236, height: 236)
+                .background(Theme.surface)
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.cardRadius)
+                        .strokeBorder(Theme.line.opacity(0.75), lineWidth: 0.8)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
+            }
+
+            LinkRow(text: roomCode.trimmed.isEmpty ? AppText.value("Receive code", "接收码", language: uiLanguage) : roomCode) {
+                Button {
+                    copyWithToast(roomCode, AppText.value("Room code copied", "接收码已复制", language: uiLanguage))
+                } label: {
+                    Label(AppText.value("Copy", "复制", language: uiLanguage), systemImage: "doc.on.doc")
+                        .frame(minHeight: 34)
+                        .contentShape(Rectangle())
+                }
+                .disabled(roomCode.trimmed.isEmpty)
+
+                Button {
+                    refreshPairingInvite()
+                } label: {
+                    Label(AppText.value("New", "新建", language: uiLanguage), systemImage: "arrow.clockwise")
+                        .frame(minHeight: 34)
+                        .contentShape(Rectangle())
+                }
+                .disabled(viewModel.isBusy)
+            }
         }
         .card(raised: true, padding: 18)
     }
@@ -317,6 +386,36 @@ struct ReceiveView: View {
 
     private var concurrencyBlocked: Bool {
         !concurrentTransfers && !viewModel.isBusy && model.send.isBusy
+    }
+
+    private func refreshPairingInviteIfNeeded() {
+        guard mode == .room, pairingInvite == nil else { return }
+        refreshPairingInvite()
+    }
+
+    private func refreshPairingInviteForSettingsChange() {
+        guard mode == .room, !viewModel.isBusy else { return }
+        refreshPairingInvite()
+    }
+
+    private func refreshPairingInvite() {
+        do {
+            let invite = try makePairingInvite(role: .receive, broker: serverURL, relay: relayURL)
+            pairingInvite = invite
+            roomCode = invite.code
+        } catch {
+            viewModel.handleFailed(error.localizedDescription)
+        }
+    }
+
+    private func activeRoomCode() throws -> String {
+        if let code = pairingInvite?.code.trimmed, !code.isEmpty {
+            return code
+        }
+        let invite = try makePairingInvite(role: .receive, broker: serverURL, relay: relayURL)
+        pairingInvite = invite
+        roomCode = invite.code
+        return invite.code
     }
 
     private func primaryAction() {
@@ -371,6 +470,7 @@ struct ReceiveView: View {
     private func startReceiveWithRoom() {
         do {
             let prepared = try prepareOutputDir()
+            let code = try activeRoomCode()
             let settings = try RuntimeSettingsProvider.make(
                 concurrentTransfers: concurrentTransfers,
                 language: language,
@@ -381,7 +481,7 @@ struct ReceiveView: View {
             )
             viewModel.startReceivingWithRoom(
                 outputDir: prepared.url.path,
-                code: roomCode.trimmed,
+                code: code,
                 settings: settings,
                 destinationAccess: prepared.access
             )
@@ -416,7 +516,20 @@ struct ReceiveView: View {
             throw RuntimeSettingsError(AppText.value("Choose a save folder first.", "请先选择保存文件夹。", language: uiLanguage))
         }
         #if os(iOS)
-        let access = SecurityScopedResourceAccess(url: url)
+        let access: AnyObject?
+        if hasCustomOutputDir {
+            let scopedAccess = SecurityScopedResourceAccess(url: url)
+            guard scopedAccess.isActive || FileManager.default.isWritableFile(atPath: url.path) else {
+                throw RuntimeSettingsError(AppText.value(
+                    "Envoix cannot write to the selected Files folder. Choose it again or reset to the default save folder.",
+                    "Envoix 无法写入已选择的 Files 文件夹。请重新选择，或重置为默认保存位置。",
+                    language: uiLanguage
+                ))
+            }
+            access = scopedAccess
+        } else {
+            access = nil
+        }
         #else
         let access: AnyObject? = nil
         #endif
@@ -429,7 +542,7 @@ struct ReceiveView: View {
         do {
             let bookmark = try makeSecurityScopedFolderBookmark(for: url)
             UserDefaults.standard.set(bookmark, forKey: outputDirBookmarkKey)
-            outputDirPath = url.lastPathComponent
+            outputDirDisplayName = url.lastPathComponent.isEmpty ? url.path : url.lastPathComponent
             isFolderPickerPresented = false
             ToastCenter.shared.show(AppText.value("Save folder selected", "已选择保存文件夹", language: uiLanguage))
             if shouldStartAfterFolderPick {
@@ -443,6 +556,12 @@ struct ReceiveView: View {
             isFolderPickerPresented = false
             viewModel.handleFailed(error.localizedDescription)
         }
+    }
+
+    private func resetOutputFolder() {
+        UserDefaults.standard.removeObject(forKey: outputDirBookmarkKey)
+        outputDirDisplayName = ""
+        ToastCenter.shared.show(AppText.value("Default save folder restored", "已恢复默认保存位置", language: uiLanguage))
     }
     #endif
 }

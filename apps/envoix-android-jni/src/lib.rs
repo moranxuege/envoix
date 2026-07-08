@@ -181,22 +181,30 @@ pub extern "system" fn Java_dev_envoix_app_Native_parseInvite(
     input: JString,
 ) -> jni::sys::jstring {
     let input = jstr(&mut env, &input);
-    let json = match Invite::parse(&input) {
-        Ok(inv) => {
-            let role = match inv.role() {
-                Some(Role::Send) => "\"send\"",
-                Some(Role::Receive) => "\"receive\"",
-                None => "null",
-            };
-            format!(
-                r#"{{"code":{},"broker":{},"relay":{},"role":{}}}"#,
-                json_str(inv.code()),
-                opt_json(inv.broker()),
-                opt_json(inv.relay()),
-                role,
-            )
+    let lowercased = input.trim().to_ascii_lowercase();
+    let json = if lowercased.starts_with("envoix:") && !lowercased.starts_with("envoix://pair/") {
+        format!(
+            r#"{{"error":{}}}"#,
+            json_str("unsupported Envoix pairing invite scheme")
+        )
+    } else {
+        match Invite::parse(&input) {
+            Ok(inv) => {
+                let role = match inv.role() {
+                    Some(Role::Send) => "\"send\"",
+                    Some(Role::Receive) => "\"receive\"",
+                    None => "null",
+                };
+                format!(
+                    r#"{{"code":{},"broker":{},"relay":{},"role":{}}}"#,
+                    json_str(inv.code()),
+                    opt_json(inv.broker()),
+                    opt_json(inv.relay()),
+                    role,
+                )
+            }
+            Err(e) => format!(r#"{{"error":{}}}"#, json_str(&e.to_string())),
         }
-        Err(e) => format!(r#"{{"error":{}}}"#, json_str(&e.to_string())),
     };
     to_jstring(&mut env, &json)
 }
