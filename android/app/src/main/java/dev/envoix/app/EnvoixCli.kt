@@ -2,8 +2,10 @@ package dev.envoix.app
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.launch
 import org.json.JSONObject
@@ -64,7 +66,12 @@ object NativeTransfer {
             Native.cancel(id)
             job.cancel()
         }
-    }
+        // The sender writes ~one flow-control window of chunks into the send
+        // buffer in a burst, so Progress events can arrive far faster than the UI
+        // drains them. trySend on a full BUFFERED channel drops the *newest*
+        // event, which sticks the sender's progress bar; keep the latest by
+        // dropping the oldest instead so the bar tracks the real byte count.
+    }.buffer(capacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
 
     private fun parse(line: String): CliEvent? {
         val t = line.trim()
