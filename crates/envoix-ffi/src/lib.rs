@@ -9,6 +9,7 @@
 //! callbacks, which fire on runtime threads — the UI must hop to its own main
 //! thread before touching UI state.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -43,6 +44,8 @@ pub struct EnvoixRuntimeSettings {
     pub server_url: String,
     /// Optional relay URL. Empty uses the built-in default.
     pub relay_url: String,
+    /// Optional path to a RuntimeConfig TOML file. Empty means no extra config.
+    pub config_path: String,
     /// Reserved for future throttling; currently advisory only.
     pub speed_limit_mbps: u64,
 }
@@ -54,6 +57,7 @@ impl Default for EnvoixRuntimeSettings {
             language: "en".to_string(),
             server_url: String::new(),
             relay_url: String::new(),
+            config_path: String::new(),
             speed_limit_mbps: 40,
         }
     }
@@ -238,7 +242,7 @@ impl EnvoixSession {
         output_dir: String,
         observer: Arc<dyn TransferObserver>,
     ) -> Result<(), EnvoixError> {
-        let client = build_client(&self.settings);
+        let client = build_client(&self.settings)?;
         let options = transfer_options(&self.settings)?;
         let _guard = self.runtime.enter();
         let transfer = client
@@ -265,7 +269,7 @@ impl EnvoixSession {
         file_path: String,
         observer: Arc<dyn TransferObserver>,
     ) -> Result<(), EnvoixError> {
-        let client = build_client(&self.settings);
+        let client = build_client(&self.settings)?;
         let options = transfer_options(&self.settings)?;
         let _guard = self.runtime.enter();
         let transfer = client
@@ -287,7 +291,7 @@ impl EnvoixSession {
         token: String,
         observer: Arc<dyn TransferObserver>,
     ) -> Result<(), EnvoixError> {
-        let client = build_client(&self.settings);
+        let client = build_client(&self.settings)?;
         let options = transfer_options(&self.settings)?;
         let _guard = self.runtime.enter();
         let transfer = client
@@ -312,7 +316,7 @@ impl EnvoixSession {
         token: String,
         observer: Arc<dyn TransferObserver>,
     ) -> Result<(), EnvoixError> {
-        let client = build_client(&self.settings);
+        let client = build_client(&self.settings)?;
         let options = transfer_options(&self.settings)?;
         let _guard = self.runtime.enter();
         let transfer = client
@@ -333,7 +337,7 @@ impl EnvoixSession {
         code: String,
         observer: Arc<dyn TransferObserver>,
     ) -> Result<(), EnvoixError> {
-        let client = build_client(&self.settings);
+        let client = build_client(&self.settings)?;
         let options = transfer_options(&self.settings)?;
         let broker = rendezvous_broker(&self.settings);
         let _guard = self.runtime.enter();
@@ -355,7 +359,7 @@ impl EnvoixSession {
         code: String,
         observer: Arc<dyn TransferObserver>,
     ) -> Result<(), EnvoixError> {
-        let client = build_client(&self.settings);
+        let client = build_client(&self.settings)?;
         let options = transfer_options(&self.settings)?;
         let broker = rendezvous_broker(&self.settings);
         let _guard = self.runtime.enter();
@@ -389,8 +393,16 @@ impl EnvoixSession {
     }
 }
 
-fn build_client(_settings: &EnvoixRuntimeSettings) -> Client {
-    Client::new()
+fn build_client(settings: &EnvoixRuntimeSettings) -> Result<Client, EnvoixError> {
+    let config_path = settings.config_path.trim();
+    let path = if config_path.is_empty() {
+        None
+    } else {
+        Some(Path::new(config_path))
+    };
+    Client::from_runtime_sources(path).map_err(|error| EnvoixError::Operation {
+        message: error.to_string(),
+    })
 }
 
 fn transfer_options(settings: &EnvoixRuntimeSettings) -> Result<TransferOptions, EnvoixError> {

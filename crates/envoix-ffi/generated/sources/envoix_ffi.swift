@@ -828,6 +828,11 @@ public protocol TransferObserver: AnyObject, Sendable {
     func onCompleted(bytes: UInt64) 
     
     /**
+     * Terminal failure with machine-readable classification.
+     */
+    func onTransferFailed(failure: FfiTransferFailure) 
+    
+    /**
      * Terminal failure with a human-readable reason.
      */
     func onFailed(reason: String) 
@@ -943,6 +948,17 @@ open func onCompleted(bytes: UInt64)  {try! rustCall() {
     uniffi_envoix_ffi_fn_method_transferobserver_on_completed(
             self.uniffiCloneHandle(),
         FfiConverterUInt64.lower(bytes),$0
+    )
+}
+}
+    
+    /**
+     * Terminal failure with machine-readable classification.
+     */
+open func onTransferFailed(failure: FfiTransferFailure)  {try! rustCall() {
+    uniffi_envoix_ffi_fn_method_transferobserver_on_transfer_failed(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeFfiTransferFailure_lower(failure),$0
     )
 }
 }
@@ -1097,6 +1113,30 @@ fileprivate struct UniffiCallbackInterfaceTransferObserver {
                 writeReturn: writeReturn
             )
         },
+        onTransferFailed: { (
+            uniffiHandle: UInt64,
+            failure: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypeTransferObserver.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onTransferFailed(
+                     failure: try FfiConverterTypeFfiTransferFailure_lift(failure)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
         onFailed: { (
             uniffiHandle: UInt64,
             reason: RustBuffer,
@@ -1239,6 +1279,10 @@ public struct EnvoixRuntimeSettings: Equatable, Hashable {
      */
     public var relayUrl: String
     /**
+     * Optional path to a RuntimeConfig TOML file. Empty means no extra config.
+     */
+    public var configPath: String
+    /**
      * Reserved for future throttling; currently advisory only.
      */
     public var speedLimitMbps: UInt64
@@ -1259,12 +1303,16 @@ public struct EnvoixRuntimeSettings: Equatable, Hashable {
          * Optional relay URL. Empty uses the built-in default.
          */relayUrl: String, 
         /**
+         * Optional path to a RuntimeConfig TOML file. Empty means no extra config.
+         */configPath: String, 
+        /**
          * Reserved for future throttling; currently advisory only.
          */speedLimitMbps: UInt64) {
         self.concurrentTransfers = concurrentTransfers
         self.language = language
         self.serverUrl = serverUrl
         self.relayUrl = relayUrl
+        self.configPath = configPath
         self.speedLimitMbps = speedLimitMbps
     }
 
@@ -1288,6 +1336,7 @@ public struct FfiConverterTypeEnvoixRuntimeSettings: FfiConverterRustBuffer {
                 language: FfiConverterString.read(from: &buf), 
                 serverUrl: FfiConverterString.read(from: &buf), 
                 relayUrl: FfiConverterString.read(from: &buf), 
+                configPath: FfiConverterString.read(from: &buf), 
                 speedLimitMbps: FfiConverterUInt64.read(from: &buf)
         )
     }
@@ -1297,6 +1346,7 @@ public struct FfiConverterTypeEnvoixRuntimeSettings: FfiConverterRustBuffer {
         FfiConverterString.write(value.language, into: &buf)
         FfiConverterString.write(value.serverUrl, into: &buf)
         FfiConverterString.write(value.relayUrl, into: &buf)
+        FfiConverterString.write(value.configPath, into: &buf)
         FfiConverterUInt64.write(value.speedLimitMbps, into: &buf)
     }
 }
@@ -1314,6 +1364,96 @@ public func FfiConverterTypeEnvoixRuntimeSettings_lift(_ buf: RustBuffer) throws
 #endif
 public func FfiConverterTypeEnvoixRuntimeSettings_lower(_ value: EnvoixRuntimeSettings) -> RustBuffer {
     return FfiConverterTypeEnvoixRuntimeSettings.lower(value)
+}
+
+
+public struct FfiTransferFailure: Equatable, Hashable {
+    public var code: FfiFailureCode
+    public var category: FfiFailureCategory
+    public var phase: FfiFailurePhase
+    public var origin: FfiFailureOrigin
+    public var direction: FfiTransferDirection
+    public var transferId: String
+    public var attemptId: String
+    public var retryable: Bool
+    public var recoveryAction: FfiRecoveryAction
+    public var userMessageKey: String
+    public var diagnosticMessage: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(code: FfiFailureCode, category: FfiFailureCategory, phase: FfiFailurePhase, origin: FfiFailureOrigin, direction: FfiTransferDirection, transferId: String, attemptId: String, retryable: Bool, recoveryAction: FfiRecoveryAction, userMessageKey: String, diagnosticMessage: String) {
+        self.code = code
+        self.category = category
+        self.phase = phase
+        self.origin = origin
+        self.direction = direction
+        self.transferId = transferId
+        self.attemptId = attemptId
+        self.retryable = retryable
+        self.recoveryAction = recoveryAction
+        self.userMessageKey = userMessageKey
+        self.diagnosticMessage = diagnosticMessage
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiTransferFailure: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiTransferFailure: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiTransferFailure {
+        return
+            try FfiTransferFailure(
+                code: FfiConverterTypeFfiFailureCode.read(from: &buf), 
+                category: FfiConverterTypeFfiFailureCategory.read(from: &buf), 
+                phase: FfiConverterTypeFfiFailurePhase.read(from: &buf), 
+                origin: FfiConverterTypeFfiFailureOrigin.read(from: &buf), 
+                direction: FfiConverterTypeFfiTransferDirection.read(from: &buf), 
+                transferId: FfiConverterString.read(from: &buf), 
+                attemptId: FfiConverterString.read(from: &buf), 
+                retryable: FfiConverterBool.read(from: &buf), 
+                recoveryAction: FfiConverterTypeFfiRecoveryAction.read(from: &buf), 
+                userMessageKey: FfiConverterString.read(from: &buf), 
+                diagnosticMessage: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiTransferFailure, into buf: inout [UInt8]) {
+        FfiConverterTypeFfiFailureCode.write(value.code, into: &buf)
+        FfiConverterTypeFfiFailureCategory.write(value.category, into: &buf)
+        FfiConverterTypeFfiFailurePhase.write(value.phase, into: &buf)
+        FfiConverterTypeFfiFailureOrigin.write(value.origin, into: &buf)
+        FfiConverterTypeFfiTransferDirection.write(value.direction, into: &buf)
+        FfiConverterString.write(value.transferId, into: &buf)
+        FfiConverterString.write(value.attemptId, into: &buf)
+        FfiConverterBool.write(value.retryable, into: &buf)
+        FfiConverterTypeFfiRecoveryAction.write(value.recoveryAction, into: &buf)
+        FfiConverterString.write(value.userMessageKey, into: &buf)
+        FfiConverterString.write(value.diagnosticMessage, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTransferFailure_lift(_ buf: RustBuffer) throws -> FfiTransferFailure {
+    return try FfiConverterTypeFfiTransferFailure.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTransferFailure_lower(_ value: FfiTransferFailure) -> RustBuffer {
+    return FfiConverterTypeFfiTransferFailure.lower(value)
 }
 
 
@@ -1398,6 +1538,681 @@ public func FfiConverterTypeEnvoixError_lift(_ buf: RustBuffer) throws -> Envoix
 public func FfiConverterTypeEnvoixError_lower(_ value: EnvoixError) -> RustBuffer {
     return FfiConverterTypeEnvoixError.lower(value)
 }
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum FfiFailureCategory: Equatable, Hashable {
+    
+    case user
+    case network
+    case authentication
+    case permission
+    case storage
+    case integrity
+    case `protocol`
+    case unsupported
+    case `internal`
+    case unknown
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiFailureCategory: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiFailureCategory: FfiConverterRustBuffer {
+    typealias SwiftType = FfiFailureCategory
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiFailureCategory {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .user
+        
+        case 2: return .network
+        
+        case 3: return .authentication
+        
+        case 4: return .permission
+        
+        case 5: return .storage
+        
+        case 6: return .integrity
+        
+        case 7: return .`protocol`
+        
+        case 8: return .unsupported
+        
+        case 9: return .`internal`
+        
+        case 10: return .unknown
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiFailureCategory, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .user:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .network:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .authentication:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .permission:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .storage:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .integrity:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .`protocol`:
+            writeInt(&buf, Int32(7))
+        
+        
+        case .unsupported:
+            writeInt(&buf, Int32(8))
+        
+        
+        case .`internal`:
+            writeInt(&buf, Int32(9))
+        
+        
+        case .unknown:
+            writeInt(&buf, Int32(10))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiFailureCategory_lift(_ buf: RustBuffer) throws -> FfiFailureCategory {
+    return try FfiConverterTypeFfiFailureCategory.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiFailureCategory_lower(_ value: FfiFailureCategory) -> RustBuffer {
+    return FfiConverterTypeFfiFailureCategory.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum FfiFailureCode: Equatable, Hashable {
+    
+    case userCanceled
+    case peerCanceled
+    case networkLost
+    case peerUnreachable
+    case authenticationFailed
+    case permissionDenied
+    case diskFull
+    case hashMismatch
+    case protocolError
+    case destinationConflict
+    case unsupportedFeature
+    case timeout
+    case internalError
+    case unknown
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiFailureCode: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiFailureCode: FfiConverterRustBuffer {
+    typealias SwiftType = FfiFailureCode
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiFailureCode {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .userCanceled
+        
+        case 2: return .peerCanceled
+        
+        case 3: return .networkLost
+        
+        case 4: return .peerUnreachable
+        
+        case 5: return .authenticationFailed
+        
+        case 6: return .permissionDenied
+        
+        case 7: return .diskFull
+        
+        case 8: return .hashMismatch
+        
+        case 9: return .protocolError
+        
+        case 10: return .destinationConflict
+        
+        case 11: return .unsupportedFeature
+        
+        case 12: return .timeout
+        
+        case 13: return .internalError
+        
+        case 14: return .unknown
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiFailureCode, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .userCanceled:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .peerCanceled:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .networkLost:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .peerUnreachable:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .authenticationFailed:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .permissionDenied:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .diskFull:
+            writeInt(&buf, Int32(7))
+        
+        
+        case .hashMismatch:
+            writeInt(&buf, Int32(8))
+        
+        
+        case .protocolError:
+            writeInt(&buf, Int32(9))
+        
+        
+        case .destinationConflict:
+            writeInt(&buf, Int32(10))
+        
+        
+        case .unsupportedFeature:
+            writeInt(&buf, Int32(11))
+        
+        
+        case .timeout:
+            writeInt(&buf, Int32(12))
+        
+        
+        case .internalError:
+            writeInt(&buf, Int32(13))
+        
+        
+        case .unknown:
+            writeInt(&buf, Int32(14))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiFailureCode_lift(_ buf: RustBuffer) throws -> FfiFailureCode {
+    return try FfiConverterTypeFfiFailureCode.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiFailureCode_lower(_ value: FfiFailureCode) -> RustBuffer {
+    return FfiConverterTypeFfiFailureCode.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum FfiFailureOrigin: Equatable, Hashable {
+    
+    case local
+    case peer
+    case unknown
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiFailureOrigin: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiFailureOrigin: FfiConverterRustBuffer {
+    typealias SwiftType = FfiFailureOrigin
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiFailureOrigin {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .local
+        
+        case 2: return .peer
+        
+        case 3: return .unknown
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiFailureOrigin, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .local:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .peer:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .unknown:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiFailureOrigin_lift(_ buf: RustBuffer) throws -> FfiFailureOrigin {
+    return try FfiConverterTypeFfiFailureOrigin.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiFailureOrigin_lower(_ value: FfiFailureOrigin) -> RustBuffer {
+    return FfiConverterTypeFfiFailureOrigin.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum FfiFailurePhase: Equatable, Hashable {
+    
+    case setup
+    case binding
+    case advertising
+    case pairing
+    case connecting
+    case authenticating
+    case negotiating
+    case transferring
+    case verifying
+    case committing
+    case acknowledging
+    case cleaningUp
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiFailurePhase: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiFailurePhase: FfiConverterRustBuffer {
+    typealias SwiftType = FfiFailurePhase
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiFailurePhase {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .setup
+        
+        case 2: return .binding
+        
+        case 3: return .advertising
+        
+        case 4: return .pairing
+        
+        case 5: return .connecting
+        
+        case 6: return .authenticating
+        
+        case 7: return .negotiating
+        
+        case 8: return .transferring
+        
+        case 9: return .verifying
+        
+        case 10: return .committing
+        
+        case 11: return .acknowledging
+        
+        case 12: return .cleaningUp
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiFailurePhase, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .setup:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .binding:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .advertising:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .pairing:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .connecting:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .authenticating:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .negotiating:
+            writeInt(&buf, Int32(7))
+        
+        
+        case .transferring:
+            writeInt(&buf, Int32(8))
+        
+        
+        case .verifying:
+            writeInt(&buf, Int32(9))
+        
+        
+        case .committing:
+            writeInt(&buf, Int32(10))
+        
+        
+        case .acknowledging:
+            writeInt(&buf, Int32(11))
+        
+        
+        case .cleaningUp:
+            writeInt(&buf, Int32(12))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiFailurePhase_lift(_ buf: RustBuffer) throws -> FfiFailurePhase {
+    return try FfiConverterTypeFfiFailurePhase.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiFailurePhase_lower(_ value: FfiFailurePhase) -> RustBuffer {
+    return FfiConverterTypeFfiFailurePhase.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum FfiRecoveryAction: Equatable, Hashable {
+    
+    case retry
+    case resume
+    case chooseFolder
+    case openSettings
+    case rePair
+    case updateApp
+    case switchPairingMethod
+    case discardPartial
+    case none
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiRecoveryAction: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiRecoveryAction: FfiConverterRustBuffer {
+    typealias SwiftType = FfiRecoveryAction
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiRecoveryAction {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .retry
+        
+        case 2: return .resume
+        
+        case 3: return .chooseFolder
+        
+        case 4: return .openSettings
+        
+        case 5: return .rePair
+        
+        case 6: return .updateApp
+        
+        case 7: return .switchPairingMethod
+        
+        case 8: return .discardPartial
+        
+        case 9: return .none
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiRecoveryAction, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .retry:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .resume:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .chooseFolder:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .openSettings:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .rePair:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .updateApp:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .switchPairingMethod:
+            writeInt(&buf, Int32(7))
+        
+        
+        case .discardPartial:
+            writeInt(&buf, Int32(8))
+        
+        
+        case .none:
+            writeInt(&buf, Int32(9))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiRecoveryAction_lift(_ buf: RustBuffer) throws -> FfiRecoveryAction {
+    return try FfiConverterTypeFfiRecoveryAction.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiRecoveryAction_lower(_ value: FfiRecoveryAction) -> RustBuffer {
+    return FfiConverterTypeFfiRecoveryAction.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum FfiTransferDirection: Equatable, Hashable {
+    
+    case send
+    case receive
+    case unknown
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiTransferDirection: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiTransferDirection: FfiConverterRustBuffer {
+    typealias SwiftType = FfiTransferDirection
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiTransferDirection {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .send
+        
+        case 2: return .receive
+        
+        case 3: return .unknown
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiTransferDirection, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .send:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .receive:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .unknown:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTransferDirection_lift(_ buf: RustBuffer) throws -> FfiTransferDirection {
+    return try FfiConverterTypeFfiTransferDirection.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTransferDirection_lower(_ value: FfiTransferDirection) -> RustBuffer {
+    return FfiConverterTypeFfiTransferDirection.lower(value)
+}
+
 /**
  * Generates a short room code such as `135790-amber-comet`.
  */
@@ -1459,10 +2274,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_envoix_ffi_checksum_method_transferobserver_on_completed() != 13477) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_envoix_ffi_checksum_method_transferobserver_on_failed() != 16266) {
+    if (uniffi_envoix_ffi_checksum_method_transferobserver_on_transfer_failed() != 18751) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_envoix_ffi_checksum_method_transferobserver_on_status() != 41629) {
+    if (uniffi_envoix_ffi_checksum_method_transferobserver_on_failed() != 19259) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_envoix_ffi_checksum_method_transferobserver_on_status() != 13872) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_envoix_ffi_checksum_constructor_envoixsession_new() != 45323) {

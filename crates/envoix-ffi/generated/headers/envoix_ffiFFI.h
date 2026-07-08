@@ -285,6 +285,13 @@ typedef void (*UniffiCallbackInterfaceTransferObserverMethod5)(uint64_t, RustBuf
     );
 
 #endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_TRANSFER_OBSERVER_METHOD6
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_TRANSFER_OBSERVER_METHOD6
+typedef void (*UniffiCallbackInterfaceTransferObserverMethod6)(uint64_t, RustBuffer, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
 #ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_TRANSFER_OBSERVER
 #define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_TRANSFER_OBSERVER
 typedef struct UniffiVTableCallbackInterfaceTransferObserver {
@@ -294,8 +301,9 @@ typedef struct UniffiVTableCallbackInterfaceTransferObserver {
     UniffiCallbackInterfaceTransferObserverMethod1 _Nonnull onStarted;
     UniffiCallbackInterfaceTransferObserverMethod2 _Nonnull onProgress;
     UniffiCallbackInterfaceTransferObserverMethod3 _Nonnull onCompleted;
-    UniffiCallbackInterfaceTransferObserverMethod4 _Nonnull onFailed;
-    UniffiCallbackInterfaceTransferObserverMethod5 _Nonnull onStatus;
+    UniffiCallbackInterfaceTransferObserverMethod4 _Nonnull onTransferFailed;
+    UniffiCallbackInterfaceTransferObserverMethod5 _Nonnull onFailed;
+    UniffiCallbackInterfaceTransferObserverMethod6 _Nonnull onStatus;
 } UniffiVTableCallbackInterfaceTransferObserver;
 
 #endif
@@ -388,6 +396,11 @@ void uniffi_envoix_ffi_fn_method_transferobserver_on_progress(uint64_t ptr, uint
 #ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_FN_METHOD_TRANSFEROBSERVER_ON_COMPLETED
 #define UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_FN_METHOD_TRANSFEROBSERVER_ON_COMPLETED
 void uniffi_envoix_ffi_fn_method_transferobserver_on_completed(uint64_t ptr, uint64_t bytes, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_FN_METHOD_TRANSFEROBSERVER_ON_TRANSFER_FAILED
+#define UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_FN_METHOD_TRANSFEROBSERVER_ON_TRANSFER_FAILED
+void uniffi_envoix_ffi_fn_method_transferobserver_on_transfer_failed(uint64_t ptr, RustBuffer failure, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_FN_METHOD_TRANSFEROBSERVER_ON_FAILED
@@ -735,6 +748,12 @@ uint16_t uniffi_envoix_ffi_checksum_method_transferobserver_on_progress(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_TRANSFEROBSERVER_ON_COMPLETED
 #define UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_TRANSFEROBSERVER_ON_COMPLETED
 uint16_t uniffi_envoix_ffi_checksum_method_transferobserver_on_completed(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_TRANSFEROBSERVER_ON_TRANSFER_FAILED
+#define UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_TRANSFEROBSERVER_ON_TRANSFER_FAILED
+uint16_t uniffi_envoix_ffi_checksum_method_transferobserver_on_transfer_failed(void
     
 );
 #endif

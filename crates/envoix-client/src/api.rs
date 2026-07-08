@@ -17,7 +17,10 @@ mod transfer;
 
 pub use envoix_session::CandidateFilter;
 pub use envoix_types::{DataPath, PairingStep};
-pub use error::{ErrorKind, Phase, TransferError};
+pub use error::{
+    ErrorKind, FailureCategory, FailureCode, FailureOrigin, FailurePhase, Phase, RecoveryAction,
+    TransferError, TransferFailure,
+};
 pub use event::{StampedEvent, TransferEvent};
 pub use invite::{Invite, Role};
 pub use options::{PathPolicy, TransferOptions};
