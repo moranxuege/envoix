@@ -14,10 +14,11 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use envoix_client::{
-    BindAddrs, TransferDirection, TransferSummary,
+    BindAddrs, PeerDescriptor, TransferDirection, TransferSummary,
     api::{
-        Client, FailureCategory, FailureCode, FailureOrigin, FailurePhase, PairingStep, PeerSource,
-        RecoveryAction, Transfer, TransferError, TransferEvent, TransferOptions,
+        Client, DataPath, FailureCategory, FailureCode, FailureOrigin, FailurePhase, PairingStep,
+        PathPolicy, PeerSource, RecoveryAction, StampedEvent, Transfer, TransferError,
+        TransferEvent, TransferMode, TransferOptions,
     },
 };
 use envoix_rendezvous_iroh::generate_code;
@@ -91,6 +92,94 @@ pub enum FfiTransferDirection {
     Send,
     Receive,
     Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum FfiTransferMode {
+    Manual,
+    Invite,
+    ShowManual,
+    ShowInvite,
+    Mdns,
+    Room,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum FfiPathPolicy {
+    Auto,
+    RelayOnly,
+    DirectOnly,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct FfiTransferRequest {
+    pub direction: FfiTransferDirection,
+    pub mode: FfiTransferMode,
+    pub file_path: String,
+    pub output_dir: String,
+    pub peer_descriptor: String,
+    pub invite: String,
+    pub code: String,
+    pub token: String,
+    pub broker: String,
+    pub relay: String,
+    pub config_path: String,
+    pub path_policy: FfiPathPolicy,
+    pub resume: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum FfiTransferEventKind {
+    Binding,
+    Advertised,
+    Pairing,
+    Connecting,
+    Connected,
+    PathChanged,
+    Started,
+    Progress,
+    Verifying,
+    Verified,
+    Completed,
+    Failed,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum FfiPairingStep {
+    None,
+    Joining,
+    Matched,
+    Exchanged,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum FfiDataPathKind {
+    None,
+    Direct,
+    Relay,
+    Other,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct FfiTransferEvent {
+    pub kind: FfiTransferEventKind,
+    pub ts_ms: u64,
+    pub direction: FfiTransferDirection,
+    pub mode: FfiTransferMode,
+    pub transfer_id: String,
+    pub file_name: String,
+    pub total_bytes: u64,
+    pub bytes_transferred: u64,
+    pub bytes_resumed: u64,
+    pub pairing_step: FfiPairingStep,
+    pub data_path_kind: FfiDataPathKind,
+    pub data_path_detail: String,
+    pub invite: String,
+    pub token: String,
+    pub peer_descriptor: String,
+    pub diagnostic_message: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -198,6 +287,8 @@ pub trait TransferObserver: Send + Sync {
     fn on_transfer_failed(&self, failure: FfiTransferFailure);
     /// Terminal failure with a human-readable reason.
     fn on_failed(&self, reason: String);
+    /// Structured lifecycle event for Activity, queues, and diagnostics.
+    fn on_transfer_event(&self, event: FfiTransferEvent);
     /// Free-form lifecycle/status text for display or logging.
     fn on_status(&self, message: String);
 }
@@ -242,20 +333,10 @@ impl EnvoixSession {
         output_dir: String,
         observer: Arc<dyn TransferObserver>,
     ) -> Result<(), EnvoixError> {
-        let client = build_client(&self.settings)?;
-        let options = transfer_options(&self.settings)?;
-        let _guard = self.runtime.enter();
-        let transfer = client
-            .receive(
-                output_dir.into(),
-                PeerSource::ShowInvite {
-                    ttl_secs: INVITE_TTL_SECS,
-                },
-                options,
-            )
-            .map_err(op_err)?;
-        self.spawn_transfer(transfer, observer);
-        Ok(())
+        self.start_transfer(
+            FfiTransferRequest::receive(output_dir, FfiTransferMode::ShowInvite),
+            observer,
+        )
     }
 
     /// Starts sending `file_path` to the peer encoded in `invite`.
@@ -269,14 +350,9 @@ impl EnvoixSession {
         file_path: String,
         observer: Arc<dyn TransferObserver>,
     ) -> Result<(), EnvoixError> {
-        let client = build_client(&self.settings)?;
-        let options = transfer_options(&self.settings)?;
-        let _guard = self.runtime.enter();
-        let transfer = client
-            .send(file_path.into(), PeerSource::Invite { invite }, options)
-            .map_err(op_err)?;
-        self.spawn_transfer(transfer, observer);
-        Ok(())
+        let mut request = FfiTransferRequest::send(file_path, FfiTransferMode::Invite);
+        request.invite = invite;
+        self.start_transfer(request, observer)
     }
 
     /// Starts receiving one file into `output_dir`, pairing on the local
@@ -291,18 +367,9 @@ impl EnvoixSession {
         token: String,
         observer: Arc<dyn TransferObserver>,
     ) -> Result<(), EnvoixError> {
-        let client = build_client(&self.settings)?;
-        let options = transfer_options(&self.settings)?;
-        let _guard = self.runtime.enter();
-        let transfer = client
-            .receive(
-                output_dir.into(),
-                PeerSource::Mdns { token: Some(token) },
-                options,
-            )
-            .map_err(op_err)?;
-        self.spawn_transfer(transfer, observer);
-        Ok(())
+        let mut request = FfiTransferRequest::receive(output_dir, FfiTransferMode::Mdns);
+        request.token = token;
+        self.start_transfer(request, observer)
     }
 
     /// Starts sending `file_path`, discovering the receiver on the local
@@ -316,18 +383,9 @@ impl EnvoixSession {
         token: String,
         observer: Arc<dyn TransferObserver>,
     ) -> Result<(), EnvoixError> {
-        let client = build_client(&self.settings)?;
-        let options = transfer_options(&self.settings)?;
-        let _guard = self.runtime.enter();
-        let transfer = client
-            .send(
-                file_path.into(),
-                PeerSource::Mdns { token: Some(token) },
-                options,
-            )
-            .map_err(op_err)?;
-        self.spawn_transfer(transfer, observer);
-        Ok(())
+        let mut request = FfiTransferRequest::send(file_path, FfiTransferMode::Mdns);
+        request.token = token;
+        self.start_transfer(request, observer)
     }
 
     /// Starts receiving one file by pairing in a rendezvous room with `code`.
@@ -337,19 +395,9 @@ impl EnvoixSession {
         code: String,
         observer: Arc<dyn TransferObserver>,
     ) -> Result<(), EnvoixError> {
-        let client = build_client(&self.settings)?;
-        let options = transfer_options(&self.settings)?;
-        let broker = rendezvous_broker(&self.settings);
-        let _guard = self.runtime.enter();
-        let transfer = client
-            .receive(
-                output_dir.into(),
-                PeerSource::Room { code, broker },
-                options,
-            )
-            .map_err(op_err)?;
-        self.spawn_transfer(transfer, observer);
-        Ok(())
+        let mut request = FfiTransferRequest::receive(output_dir, FfiTransferMode::Room);
+        request.code = code;
+        self.start_transfer(request, observer)
     }
 
     /// Starts sending `file_path` by pairing in a rendezvous room with `code`.
@@ -359,13 +407,45 @@ impl EnvoixSession {
         code: String,
         observer: Arc<dyn TransferObserver>,
     ) -> Result<(), EnvoixError> {
-        let client = build_client(&self.settings)?;
-        let options = transfer_options(&self.settings)?;
-        let broker = rendezvous_broker(&self.settings);
+        let mut request = FfiTransferRequest::send(file_path, FfiTransferMode::Room);
+        request.code = code;
+        self.start_transfer(request, observer)
+    }
+
+    /// Starts a transfer from one cross-platform request object.
+    ///
+    /// This is the preferred API for new native clients. The narrower methods
+    /// above are kept as compatibility wrappers while Apple/Android migrate.
+    pub fn start_transfer(
+        &self,
+        request: FfiTransferRequest,
+        observer: Arc<dyn TransferObserver>,
+    ) -> Result<(), EnvoixError> {
+        let client = build_client_for_request(&self.settings, &request)?;
+        let options = transfer_options_for_request(&self.settings, &request)?;
+        let source = peer_source_for_request(&self.settings, &request)?;
         let _guard = self.runtime.enter();
-        let transfer = client
-            .send(file_path.into(), PeerSource::Room { code, broker }, options)
-            .map_err(op_err)?;
+        let transfer = match request.direction {
+            FfiTransferDirection::Send => client
+                .send(
+                    required_path(&request.file_path, "file_path")?.into(),
+                    source,
+                    options,
+                )
+                .map_err(op_err)?,
+            FfiTransferDirection::Receive => client
+                .receive(
+                    required_path(&request.output_dir, "output_dir")?.into(),
+                    source,
+                    options,
+                )
+                .map_err(op_err)?,
+            FfiTransferDirection::Unknown => {
+                return Err(EnvoixError::Operation {
+                    message: "transfer direction must be send or receive".to_string(),
+                });
+            }
+        };
         self.spawn_transfer(transfer, observer);
         Ok(())
     }
@@ -393,8 +473,54 @@ impl EnvoixSession {
     }
 }
 
-fn build_client(settings: &EnvoixRuntimeSettings) -> Result<Client, EnvoixError> {
-    let config_path = settings.config_path.trim();
+impl FfiTransferRequest {
+    fn send(file_path: String, mode: FfiTransferMode) -> Self {
+        Self {
+            direction: FfiTransferDirection::Send,
+            mode,
+            file_path,
+            output_dir: String::new(),
+            peer_descriptor: String::new(),
+            invite: String::new(),
+            code: String::new(),
+            token: String::new(),
+            broker: String::new(),
+            relay: String::new(),
+            config_path: String::new(),
+            path_policy: FfiPathPolicy::Auto,
+            resume: true,
+        }
+    }
+
+    fn receive(output_dir: String, mode: FfiTransferMode) -> Self {
+        Self {
+            direction: FfiTransferDirection::Receive,
+            mode,
+            file_path: String::new(),
+            output_dir,
+            peer_descriptor: String::new(),
+            invite: String::new(),
+            code: String::new(),
+            token: String::new(),
+            broker: String::new(),
+            relay: String::new(),
+            config_path: String::new(),
+            path_policy: FfiPathPolicy::Auto,
+            resume: true,
+        }
+    }
+}
+
+fn build_client_for_request(
+    settings: &EnvoixRuntimeSettings,
+    request: &FfiTransferRequest,
+) -> Result<Client, EnvoixError> {
+    let config_path = request.config_path.trim();
+    let config_path = if config_path.is_empty() {
+        settings.config_path.trim()
+    } else {
+        config_path
+    };
     let path = if config_path.is_empty() {
         None
     } else {
@@ -405,9 +531,14 @@ fn build_client(settings: &EnvoixRuntimeSettings) -> Result<Client, EnvoixError>
     })
 }
 
-fn transfer_options(settings: &EnvoixRuntimeSettings) -> Result<TransferOptions, EnvoixError> {
+fn transfer_options_for_request(
+    settings: &EnvoixRuntimeSettings,
+    request: &FfiTransferRequest,
+) -> Result<TransferOptions, EnvoixError> {
     let mut options = TransferOptions::default();
-    options.relay = relay_url(settings);
+    options.relay = relay_url_for_request(settings, request);
+    options.path = path_policy(request.path_policy);
+    options.resume = request.resume;
     options.listen_addrs = Some(receive_addrs());
     Ok(options)
 }
@@ -416,8 +547,55 @@ fn receive_addrs() -> BindAddrs {
     BindAddrs::dual_stack(0)
 }
 
-fn rendezvous_broker(settings: &EnvoixRuntimeSettings) -> String {
-    let broker = settings.server_url.trim();
+fn peer_source_for_request(
+    settings: &EnvoixRuntimeSettings,
+    request: &FfiTransferRequest,
+) -> Result<PeerSource, EnvoixError> {
+    match request.mode {
+        FfiTransferMode::Manual => Ok(PeerSource::Manual {
+            peer: required_peer_descriptor(&request.peer_descriptor)?,
+            token: required_value(&request.token, "token")?,
+        }),
+        FfiTransferMode::Invite => Ok(PeerSource::Invite {
+            invite: required_value(&request.invite, "invite")?,
+        }),
+        FfiTransferMode::ShowManual => Ok(PeerSource::ShowManual {
+            token: optional_value(&request.token),
+        }),
+        FfiTransferMode::ShowInvite => Ok(PeerSource::ShowInvite {
+            ttl_secs: INVITE_TTL_SECS,
+        }),
+        FfiTransferMode::Mdns => Ok(PeerSource::Mdns {
+            token: optional_value(&request.token),
+        }),
+        FfiTransferMode::Room => Ok(PeerSource::Room {
+            code: required_value(&request.code, "code")?,
+            broker: rendezvous_broker_for_request(settings, request),
+        }),
+        FfiTransferMode::Unknown => Err(EnvoixError::Operation {
+            message: "transfer mode must not be unknown".to_string(),
+        }),
+    }
+}
+
+fn path_policy(policy: FfiPathPolicy) -> PathPolicy {
+    match policy {
+        FfiPathPolicy::Auto => PathPolicy::Auto,
+        FfiPathPolicy::RelayOnly => PathPolicy::RelayOnly,
+        FfiPathPolicy::DirectOnly => PathPolicy::DirectOnly,
+    }
+}
+
+fn rendezvous_broker_for_request(
+    settings: &EnvoixRuntimeSettings,
+    request: &FfiTransferRequest,
+) -> String {
+    let broker = request.broker.trim();
+    let broker = if broker.is_empty() {
+        settings.server_url.trim()
+    } else {
+        broker
+    };
     if broker.is_empty() {
         DEFAULT_RENDEZVOUS_BROKER.to_string()
     } else {
@@ -425,10 +603,18 @@ fn rendezvous_broker(settings: &EnvoixRuntimeSettings) -> String {
     }
 }
 
-fn relay_url(settings: &EnvoixRuntimeSettings) -> Option<String> {
-    let relay = settings.relay_url.trim();
+fn relay_url_for_request(
+    settings: &EnvoixRuntimeSettings,
+    request: &FfiTransferRequest,
+) -> Option<String> {
+    let relay = request.relay.trim();
+    let relay = if relay.is_empty() {
+        settings.relay_url.trim()
+    } else {
+        relay
+    };
     if relay.is_empty() {
-        if settings.server_url.trim().is_empty() {
+        if request.broker.trim().is_empty() && settings.server_url.trim().is_empty() {
             Some(DEFAULT_RELAY_URL.to_string())
         } else {
             None
@@ -436,6 +622,35 @@ fn relay_url(settings: &EnvoixRuntimeSettings) -> Option<String> {
     } else {
         Some(relay.to_string())
     }
+}
+
+fn required_path(value: &str, field: &str) -> Result<String, EnvoixError> {
+    required_value(value, field)
+}
+
+fn required_value(value: &str, field: &str) -> Result<String, EnvoixError> {
+    let value = value.trim();
+    if value.is_empty() {
+        Err(EnvoixError::Operation {
+            message: format!("{field} must not be empty"),
+        })
+    } else {
+        Ok(value.to_string())
+    }
+}
+
+fn optional_value(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn required_peer_descriptor(value: &str) -> Result<PeerDescriptor, EnvoixError> {
+    let value = required_value(value, "peer_descriptor")?;
+    PeerDescriptor::parse_compact(&value).map_err(op_err)
 }
 
 /// Reports the single terminal outcome from the awaited operation result.
@@ -467,7 +682,7 @@ async fn drive_transfer(
                 if direction.is_none() {
                     direction = event_direction(&event.event);
                 }
-                observe_transfer_event(&*observer, event.event);
+                observe_transfer_event(&*observer, event);
             }
             _ = &mut cancel, if !cancel_requested => {
                 cancel_requested = true;
@@ -490,7 +705,9 @@ fn event_direction(event: &TransferEvent) -> Option<TransferDirection> {
     }
 }
 
-fn observe_transfer_event(observer: &dyn TransferObserver, event: TransferEvent) {
+fn observe_transfer_event(observer: &dyn TransferObserver, event: StampedEvent) {
+    observer.on_transfer_event(to_ffi_event(&event));
+    let event = event.event;
     match event {
         TransferEvent::Binding { direction, mode } => {
             observer.on_status(format!("binding {direction:?} via {mode:?}"));
@@ -530,6 +747,134 @@ fn observe_transfer_event(observer: &dyn TransferObserver, event: TransferEvent)
     }
 }
 
+fn to_ffi_event(event: &StampedEvent) -> FfiTransferEvent {
+    let mut ffi = FfiTransferEvent::empty(event.ts_ms);
+    match &event.event {
+        TransferEvent::Binding { direction, mode } => {
+            ffi.kind = FfiTransferEventKind::Binding;
+            ffi.direction = ffi_direction(Some(*direction));
+            ffi.mode = ffi_transfer_mode(*mode);
+        }
+        TransferEvent::Advertised {
+            peer,
+            token,
+            invite,
+        } => {
+            ffi.kind = FfiTransferEventKind::Advertised;
+            ffi.peer_descriptor = peer.to_string();
+            ffi.token = token.clone().unwrap_or_default();
+            ffi.invite = invite.clone().unwrap_or_default();
+        }
+        TransferEvent::Pairing { step } => {
+            ffi.kind = FfiTransferEventKind::Pairing;
+            ffi.pairing_step = ffi_pairing_step(*step);
+        }
+        TransferEvent::Connecting => {
+            ffi.kind = FfiTransferEventKind::Connecting;
+        }
+        TransferEvent::Connected { path } => {
+            ffi.kind = FfiTransferEventKind::Connected;
+            let (kind, detail) = ffi_data_path(path);
+            ffi.data_path_kind = kind;
+            ffi.data_path_detail = detail;
+        }
+        TransferEvent::PathChanged { path } => {
+            ffi.kind = FfiTransferEventKind::PathChanged;
+            let (kind, detail) = ffi_data_path(path);
+            ffi.data_path_kind = kind;
+            ffi.data_path_detail = detail;
+        }
+        TransferEvent::Started {
+            transfer_id,
+            direction,
+            file_name,
+            total_bytes,
+            bytes_resumed,
+        } => {
+            ffi.kind = FfiTransferEventKind::Started;
+            ffi.direction = ffi_direction(Some(*direction));
+            ffi.transfer_id = transfer_id.to_string();
+            ffi.file_name = file_name.clone();
+            ffi.total_bytes = *total_bytes;
+            ffi.bytes_resumed = *bytes_resumed;
+        }
+        TransferEvent::Progress {
+            transfer_id,
+            bytes_transferred,
+            total_bytes,
+        } => {
+            ffi.kind = FfiTransferEventKind::Progress;
+            ffi.transfer_id = transfer_id.to_string();
+            ffi.bytes_transferred = *bytes_transferred;
+            ffi.total_bytes = *total_bytes;
+        }
+        TransferEvent::Verifying {
+            transfer_id,
+            direction,
+            file_name,
+            bytes_to_hash,
+        } => {
+            ffi.kind = FfiTransferEventKind::Verifying;
+            ffi.direction = ffi_direction(Some(*direction));
+            ffi.transfer_id = transfer_id.to_string();
+            ffi.file_name = file_name.clone();
+            ffi.total_bytes = *bytes_to_hash;
+        }
+        TransferEvent::Verified {
+            transfer_id,
+            direction,
+            file_name,
+            bytes_hashed,
+        } => {
+            ffi.kind = FfiTransferEventKind::Verified;
+            ffi.direction = ffi_direction(Some(*direction));
+            ffi.transfer_id = transfer_id.to_string();
+            ffi.file_name = file_name.clone();
+            ffi.bytes_transferred = *bytes_hashed;
+            ffi.total_bytes = *bytes_hashed;
+        }
+        TransferEvent::Completed {
+            transfer_id,
+            bytes_transferred,
+        } => {
+            ffi.kind = FfiTransferEventKind::Completed;
+            ffi.transfer_id = transfer_id.to_string();
+            ffi.bytes_transferred = *bytes_transferred;
+            ffi.total_bytes = *bytes_transferred;
+        }
+        TransferEvent::Failed { direction, reason } => {
+            ffi.kind = FfiTransferEventKind::Failed;
+            ffi.direction = ffi_direction(Some(*direction));
+            ffi.diagnostic_message = reason.clone();
+        }
+        _ => {}
+    }
+    ffi
+}
+
+impl FfiTransferEvent {
+    fn empty(ts_ms: u64) -> Self {
+        Self {
+            kind: FfiTransferEventKind::Unknown,
+            ts_ms,
+            direction: FfiTransferDirection::Unknown,
+            mode: FfiTransferMode::Unknown,
+            transfer_id: String::new(),
+            file_name: String::new(),
+            total_bytes: 0,
+            bytes_transferred: 0,
+            bytes_resumed: 0,
+            pairing_step: FfiPairingStep::None,
+            data_path_kind: FfiDataPathKind::None,
+            data_path_detail: String::new(),
+            invite: String::new(),
+            token: String::new(),
+            peer_descriptor: String::new(),
+            diagnostic_message: String::new(),
+        }
+    }
+}
+
 fn pairing_step_label(step: PairingStep) -> &'static str {
     match step {
         PairingStep::Joining => "joining room",
@@ -563,6 +908,33 @@ fn ffi_direction(direction: Option<TransferDirection>) -> FfiTransferDirection {
         Some(TransferDirection::Send) => FfiTransferDirection::Send,
         Some(TransferDirection::Receive) => FfiTransferDirection::Receive,
         None => FfiTransferDirection::Unknown,
+    }
+}
+
+fn ffi_transfer_mode(mode: TransferMode) -> FfiTransferMode {
+    match mode {
+        TransferMode::Manual => FfiTransferMode::Manual,
+        TransferMode::Invite => FfiTransferMode::Invite,
+        TransferMode::ShowManual => FfiTransferMode::ShowManual,
+        TransferMode::ShowInvite => FfiTransferMode::ShowInvite,
+        TransferMode::Mdns => FfiTransferMode::Mdns,
+        TransferMode::Room => FfiTransferMode::Room,
+    }
+}
+
+fn ffi_pairing_step(step: PairingStep) -> FfiPairingStep {
+    match step {
+        PairingStep::Joining => FfiPairingStep::Joining,
+        PairingStep::Matched => FfiPairingStep::Matched,
+        PairingStep::Exchanged => FfiPairingStep::Exchanged,
+    }
+}
+
+fn ffi_data_path(path: &DataPath) -> (FfiDataPathKind, String) {
+    match path {
+        DataPath::Direct { addr } => (FfiDataPathKind::Direct, addr.to_string()),
+        DataPath::Relay { url } => (FfiDataPathKind::Relay, url.clone()),
+        DataPath::Other { description } => (FfiDataPathKind::Other, description.clone()),
     }
 }
 
@@ -655,6 +1027,7 @@ mod tests {
         Invite(String),
         Completed(u64),
         Failed(String),
+        Event(FfiTransferEvent),
     }
 
     async fn ready_addr(ep: &Endpoint) -> EndpointAddr {
@@ -682,7 +1055,36 @@ mod tests {
         fn on_failed(&self, reason: String) {
             let _ = self.0.send(Msg::Failed(reason));
         }
+        fn on_transfer_event(&self, event: FfiTransferEvent) {
+            let _ = self.0.send(Msg::Event(event));
+        }
         fn on_status(&self, _message: String) {}
+    }
+
+    fn recv_invite(rx: &std::sync::mpsc::Receiver<Msg>, timeout: Duration) -> String {
+        loop {
+            match rx.recv_timeout(timeout).unwrap() {
+                Msg::Invite(invite) => return invite,
+                Msg::Failed(reason) => panic!("transfer failed before invite: {reason}"),
+                Msg::Completed(_) => panic!("transfer completed before invite"),
+                Msg::Event(_) => {}
+            }
+        }
+    }
+
+    fn recv_completed(
+        rx: &std::sync::mpsc::Receiver<Msg>,
+        timeout: Duration,
+    ) -> (u64, Vec<FfiTransferEvent>) {
+        let mut events = Vec::new();
+        loop {
+            match rx.recv_timeout(timeout).unwrap() {
+                Msg::Completed(bytes) => return (bytes, events),
+                Msg::Failed(reason) => panic!("transfer failed: {reason}"),
+                Msg::Invite(_) => {}
+                Msg::Event(event) => events.push(event),
+            }
+        }
     }
 
     /// Rewrites an invite's direct addresses to loopback, keeping the port, so
@@ -712,10 +1114,7 @@ mod tests {
             )
             .unwrap();
 
-        let invite = match rrx.recv_timeout(Duration::from_secs(10)).unwrap() {
-            Msg::Invite(invite) => loopback_invite(&invite),
-            _ => panic!("expected an invite before any other event"),
-        };
+        let invite = loopback_invite(&recv_invite(&rrx, Duration::from_secs(10)));
 
         // Let the receiver's accept loop start before dialing.
         std::thread::sleep(Duration::from_millis(300));
@@ -730,25 +1129,25 @@ mod tests {
             )
             .unwrap();
 
-        match srx.recv_timeout(Duration::from_secs(15)).unwrap() {
-            Msg::Completed(_) => {}
-            Msg::Failed(reason) => panic!("send failed: {reason}"),
-            Msg::Invite(_) => panic!("sender unexpectedly produced an invite"),
-        }
-
-        let bytes = loop {
-            match rrx
-                .recv_timeout(Duration::from_secs(15))
-                .expect("receiver timed out")
-            {
-                Msg::Completed(bytes) => break bytes,
-                Msg::Failed(reason) => panic!("receiver failed: {reason}"),
-                Msg::Invite(_) => continue,
-            }
-        };
+        let (_, sender_events) = recv_completed(&srx, Duration::from_secs(15));
+        let (bytes, receiver_events) = recv_completed(&rrx, Duration::from_secs(15));
 
         assert_eq!(bytes, text.len() as u64);
         assert_eq!(std::fs::read(output_dir.join("hello.txt")).unwrap(), text);
+        assert!(
+            sender_events
+                .iter()
+                .any(|event| event.kind == FfiTransferEventKind::Binding
+                    && event.direction == FfiTransferDirection::Send
+                    && event.mode == FfiTransferMode::Invite)
+        );
+        assert!(
+            receiver_events
+                .iter()
+                .any(|event| event.kind == FfiTransferEventKind::Started
+                    && event.direction == FfiTransferDirection::Receive
+                    && event.file_name == "hello.txt")
+        );
     }
 
     #[test]
@@ -795,44 +1194,42 @@ mod tests {
 
         let receiver = EnvoixSession::new_with_settings(settings.clone());
         let (rtx, rrx) = channel();
+        let mut receive_request = FfiTransferRequest::receive(
+            output_dir.to_str().unwrap().to_string(),
+            FfiTransferMode::Room,
+        );
+        receive_request.code = code.clone();
         receiver
-            .receive_room(
-                output_dir.to_str().unwrap().to_string(),
-                code.clone(),
-                Arc::new(TestObserver(rtx)),
-            )
+            .start_transfer(receive_request, Arc::new(TestObserver(rtx)))
             .unwrap();
 
         thread::sleep(Duration::from_millis(200));
 
         let sender = EnvoixSession::new_with_settings(settings);
         let (stx, srx) = channel();
+        let mut send_request =
+            FfiTransferRequest::send(source.to_str().unwrap().to_string(), FfiTransferMode::Room);
+        send_request.code = code;
         sender
-            .send_room(
-                source.to_str().unwrap().to_string(),
-                code,
-                Arc::new(TestObserver(stx)),
-            )
+            .start_transfer(send_request, Arc::new(TestObserver(stx)))
             .unwrap();
 
-        match srx.recv_timeout(Duration::from_secs(20)).unwrap() {
-            Msg::Completed(_) => {}
-            Msg::Failed(reason) => panic!("send failed: {reason}"),
-            Msg::Invite(_) => panic!("sender unexpectedly produced an invite"),
-        }
-
-        let bytes = loop {
-            match rrx
-                .recv_timeout(Duration::from_secs(20))
-                .expect("receiver timed out")
-            {
-                Msg::Completed(bytes) => break bytes,
-                Msg::Failed(reason) => panic!("receiver failed: {reason}"),
-                Msg::Invite(_) => continue,
-            }
-        };
+        let (_, sender_events) = recv_completed(&srx, Duration::from_secs(20));
+        let (bytes, receiver_events) = recv_completed(&rrx, Duration::from_secs(20));
 
         assert_eq!(bytes, text.len() as u64);
         assert_eq!(std::fs::read(output_dir.join("room.txt")).unwrap(), text);
+        assert!(
+            sender_events
+                .iter()
+                .any(|event| event.kind == FfiTransferEventKind::Pairing
+                    && event.pairing_step == FfiPairingStep::Exchanged)
+        );
+        assert!(
+            receiver_events
+                .iter()
+                .any(|event| event.kind == FfiTransferEventKind::Started
+                    && event.file_name == "room.txt")
+        );
     }
 }

@@ -52,6 +52,7 @@ final class TransferViewModel: ObservableObject {
     @Published var bytesPerSec: Double = 0    // rolling average, 0 until measurable
     @Published var completedFileURL: URL?     // receiver only: where the file landed
     @Published var failure: FfiTransferFailure?
+    @Published var transferEvents: [FfiTransferEvent] = []
 
     private var session: EnvoixSession?
     private var destinationDir: String?       // receiver only
@@ -89,42 +90,48 @@ final class TransferViewModel: ObservableObject {
     /// Receive on the local network using a shared token (mDNS auto-discovery).
     func startReceivingWithToken(outputDir: String, token: String, settings: EnvoixRuntimeSettings, destinationAccess: AnyObject? = nil) {
         destinationDir = outputDir
-        start(settings: settings, phase: .waiting) { try $0.receiveMdns(outputDir: outputDir, token: token, observer: $1) }
+        let request = makeRequest(direction: .receive, mode: .mdns, settings: settings, outputDir: outputDir, token: token)
+        start(settings: settings, phase: .waiting) { try $0.startTransfer(request: request, observer: $1) }
         retainResourceAccess(destinationAccess)
     }
 
     /// Receive by pairing through a rendezvous room code.
     func startReceivingWithRoom(outputDir: String, code: String, settings: EnvoixRuntimeSettings, destinationAccess: AnyObject? = nil) {
         destinationDir = outputDir
-        start(settings: settings, phase: .waiting) { try $0.receiveRoom(outputDir: outputDir, code: code, observer: $1) }
+        let request = makeRequest(direction: .receive, mode: .room, settings: settings, outputDir: outputDir, code: code)
+        start(settings: settings, phase: .waiting) { try $0.startTransfer(request: request, observer: $1) }
         retainResourceAccess(destinationAccess)
     }
 
     /// Receive by publishing an invite the sender pastes/scans.
     func startReceivingWithInvite(outputDir: String, settings: EnvoixRuntimeSettings, destinationAccess: AnyObject? = nil) {
         destinationDir = outputDir
-        start(settings: settings, phase: .waiting) { try $0.receive(outputDir: outputDir, observer: $1) }
+        let request = makeRequest(direction: .receive, mode: .showInvite, settings: settings, outputDir: outputDir)
+        start(settings: settings, phase: .waiting) { try $0.startTransfer(request: request, observer: $1) }
         retainResourceAccess(destinationAccess)
     }
 
     /// Send on the local network using a shared token (mDNS auto-discovery).
     func startSendingWithToken(filePath: String, token: String, settings: EnvoixRuntimeSettings, sourceAccess: AnyObject? = nil) {
         destinationDir = nil
-        start(settings: settings, phase: .transferring) { try $0.sendMdns(filePath: filePath, token: token, observer: $1) }
+        let request = makeRequest(direction: .send, mode: .mdns, settings: settings, filePath: filePath, token: token)
+        start(settings: settings, phase: .transferring) { try $0.startTransfer(request: request, observer: $1) }
         retainResourceAccess(sourceAccess)
     }
 
     /// Send by pairing through a rendezvous room code.
     func startSendingWithRoom(filePath: String, code: String, settings: EnvoixRuntimeSettings, sourceAccess: AnyObject? = nil) {
         destinationDir = nil
-        start(settings: settings, phase: .waiting) { try $0.sendRoom(filePath: filePath, code: code, observer: $1) }
+        let request = makeRequest(direction: .send, mode: .room, settings: settings, filePath: filePath, code: code)
+        start(settings: settings, phase: .waiting) { try $0.startTransfer(request: request, observer: $1) }
         retainResourceAccess(sourceAccess)
     }
 
     /// Send to the peer encoded in an invite string.
     func startSendingWithInvite(filePath: String, invite: String, settings: EnvoixRuntimeSettings, sourceAccess: AnyObject? = nil) {
         destinationDir = nil
-        start(settings: settings, phase: .transferring) { try $0.sendInvite(invite: invite, filePath: filePath, observer: $1) }
+        let request = makeRequest(direction: .send, mode: .invite, settings: settings, filePath: filePath, invite: invite)
+        start(settings: settings, phase: .transferring) { try $0.startTransfer(request: request, observer: $1) }
         retainResourceAccess(sourceAccess)
     }
 
@@ -166,9 +173,43 @@ final class TransferViewModel: ObservableObject {
         }
     }
 
+    private func makeRequest(
+        direction: FfiTransferDirection,
+        mode: FfiTransferMode,
+        settings: EnvoixRuntimeSettings,
+        filePath: String = "",
+        outputDir: String = "",
+        invite: String = "",
+        code: String = "",
+        token: String = ""
+    ) -> FfiTransferRequest {
+        FfiTransferRequest(
+            direction: direction,
+            mode: mode,
+            filePath: filePath,
+            outputDir: outputDir,
+            peerDescriptor: "",
+            invite: invite,
+            code: code,
+            token: token,
+            broker: settings.serverUrl,
+            relay: settings.relayUrl,
+            configPath: settings.configPath,
+            pathPolicy: .auto,
+            resume: true
+        )
+    }
+
     // MARK: Core callbacks (already on main via Observer)
 
     func handleInvite(_ invite: String) { self.invite = invite }
+
+    func handleTransferEvent(_ event: FfiTransferEvent) {
+        transferEvents.append(event)
+        if transferEvents.count > 240 {
+            transferEvents.removeFirst(transferEvents.count - 240)
+        }
+    }
 
     func handleStarted(_ name: String, _ total: UInt64) {
         appendLog("started · \(name) (\(byteString(total)))")
@@ -264,6 +305,7 @@ final class TransferViewModel: ObservableObject {
         failure = nil
         resourceAccess = nil
         eventLog.removeAll()
+        transferEvents.removeAll()
         rate.reset()
         phase = .idle
     }
@@ -374,6 +416,7 @@ final class Observer: TransferObserver, @unchecked Sendable {
     func onCompleted(bytes: UInt64) { hop { $0.handleCompleted(bytes) } }
     func onTransferFailed(failure: FfiTransferFailure) { hop { $0.handleTransferFailed(failure) } }
     func onFailed(reason: String) { hop { $0.handleFailed(reason) } }
+    func onTransferEvent(event: FfiTransferEvent) { hop { $0.handleTransferEvent(event) } }
     func onStatus(message: String) { hop { $0.handleStatus(message) } }
 
     private func hop(_ body: @escaping (TransferViewModel) -> Void) {

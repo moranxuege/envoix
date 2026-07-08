@@ -245,49 +245,56 @@ typedef void (*UniffiForeignFutureCompleteVoid)(uint64_t, UniffiForeignFutureRes
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_TRANSFER_OBSERVER_METHOD0
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_TRANSFER_OBSERVER_METHOD0
-typedef void (*UniffiCallbackInterfaceTransferObserverMethod0)(uint64_t, RustBuffer, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceTransferObserverMethod0)(uint64_t, RustBuffer, void* _Nonnull,
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_TRANSFER_OBSERVER_METHOD1
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_TRANSFER_OBSERVER_METHOD1
-typedef void (*UniffiCallbackInterfaceTransferObserverMethod1)(uint64_t, RustBuffer, uint64_t, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceTransferObserverMethod1)(uint64_t, RustBuffer, uint64_t, void* _Nonnull,
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_TRANSFER_OBSERVER_METHOD2
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_TRANSFER_OBSERVER_METHOD2
-typedef void (*UniffiCallbackInterfaceTransferObserverMethod2)(uint64_t, uint64_t, uint64_t, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceTransferObserverMethod2)(uint64_t, uint64_t, uint64_t, void* _Nonnull,
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_TRANSFER_OBSERVER_METHOD3
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_TRANSFER_OBSERVER_METHOD3
-typedef void (*UniffiCallbackInterfaceTransferObserverMethod3)(uint64_t, uint64_t, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceTransferObserverMethod3)(uint64_t, uint64_t, void* _Nonnull,
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_TRANSFER_OBSERVER_METHOD4
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_TRANSFER_OBSERVER_METHOD4
-typedef void (*UniffiCallbackInterfaceTransferObserverMethod4)(uint64_t, RustBuffer, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceTransferObserverMethod4)(uint64_t, RustBuffer, void* _Nonnull,
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_TRANSFER_OBSERVER_METHOD5
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_TRANSFER_OBSERVER_METHOD5
-typedef void (*UniffiCallbackInterfaceTransferObserverMethod5)(uint64_t, RustBuffer, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceTransferObserverMethod5)(uint64_t, RustBuffer, void* _Nonnull,
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_TRANSFER_OBSERVER_METHOD6
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_TRANSFER_OBSERVER_METHOD6
-typedef void (*UniffiCallbackInterfaceTransferObserverMethod6)(uint64_t, RustBuffer, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceTransferObserverMethod6)(uint64_t, RustBuffer, void* _Nonnull,
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_TRANSFER_OBSERVER_METHOD7
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_TRANSFER_OBSERVER_METHOD7
+typedef void (*UniffiCallbackInterfaceTransferObserverMethod7)(uint64_t, RustBuffer, void* _Nonnull,
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
@@ -303,7 +310,8 @@ typedef struct UniffiVTableCallbackInterfaceTransferObserver {
     UniffiCallbackInterfaceTransferObserverMethod3 _Nonnull onCompleted;
     UniffiCallbackInterfaceTransferObserverMethod4 _Nonnull onTransferFailed;
     UniffiCallbackInterfaceTransferObserverMethod5 _Nonnull onFailed;
-    UniffiCallbackInterfaceTransferObserverMethod6 _Nonnull onStatus;
+    UniffiCallbackInterfaceTransferObserverMethod6 _Nonnull onTransferEvent;
+    UniffiCallbackInterfaceTransferObserverMethod7 _Nonnull onStatus;
 } UniffiVTableCallbackInterfaceTransferObserver;
 
 #endif
@@ -320,7 +328,7 @@ void uniffi_envoix_ffi_fn_free_envoixsession(uint64_t handle, RustCallStatus *_N
 #ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_FN_CONSTRUCTOR_ENVOIXSESSION_NEW
 #define UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_FN_CONSTRUCTOR_ENVOIXSESSION_NEW
 uint64_t uniffi_envoix_ffi_fn_constructor_envoixsession_new(RustCallStatus *_Nonnull out_status
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_FN_CONSTRUCTOR_ENVOIXSESSION_NEW_WITH_SETTINGS
@@ -361,6 +369,11 @@ void uniffi_envoix_ffi_fn_method_envoixsession_send_mdns(uint64_t ptr, RustBuffe
 #ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_FN_METHOD_ENVOIXSESSION_SEND_ROOM
 #define UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_FN_METHOD_ENVOIXSESSION_SEND_ROOM
 void uniffi_envoix_ffi_fn_method_envoixsession_send_room(uint64_t ptr, RustBuffer file_path, RustBuffer code, uint64_t observer, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_FN_METHOD_ENVOIXSESSION_START_TRANSFER
+#define UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_FN_METHOD_ENVOIXSESSION_START_TRANSFER
+void uniffi_envoix_ffi_fn_method_envoixsession_start_transfer(uint64_t ptr, RustBuffer request, uint64_t observer, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_FN_CLONE_TRANSFEROBSERVER
@@ -408,6 +421,11 @@ void uniffi_envoix_ffi_fn_method_transferobserver_on_transfer_failed(uint64_t pt
 void uniffi_envoix_ffi_fn_method_transferobserver_on_failed(uint64_t ptr, RustBuffer reason, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_FN_METHOD_TRANSFEROBSERVER_ON_TRANSFER_EVENT
+#define UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_FN_METHOD_TRANSFEROBSERVER_ON_TRANSFER_EVENT
+void uniffi_envoix_ffi_fn_method_transferobserver_on_transfer_event(uint64_t ptr, RustBuffer event, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_FN_METHOD_TRANSFEROBSERVER_ON_STATUS
 #define UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_FN_METHOD_TRANSFEROBSERVER_ON_STATUS
 void uniffi_envoix_ffi_fn_method_transferobserver_on_status(uint64_t ptr, RustBuffer message, RustCallStatus *_Nonnull out_status
@@ -416,7 +434,7 @@ void uniffi_envoix_ffi_fn_method_transferobserver_on_status(uint64_t ptr, RustBu
 #ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_FN_FUNC_GENERATE_ROOM_CODE
 #define UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_FN_FUNC_GENERATE_ROOM_CODE
 RustBuffer uniffi_envoix_ffi_fn_func_generate_room_code(RustCallStatus *_Nonnull out_status
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_ENVOIX_FFI_RUSTBUFFER_ALLOC
@@ -682,109 +700,121 @@ void ffi_envoix_ffi_rust_future_complete_void(uint64_t handle, RustCallStatus *_
 #ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_FUNC_GENERATE_ROOM_CODE
 #define UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_FUNC_GENERATE_ROOM_CODE
 uint16_t uniffi_envoix_ffi_checksum_func_generate_room_code(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_ENVOIXSESSION_CANCEL
 #define UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_ENVOIXSESSION_CANCEL
 uint16_t uniffi_envoix_ffi_checksum_method_envoixsession_cancel(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_ENVOIXSESSION_RECEIVE
 #define UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_ENVOIXSESSION_RECEIVE
 uint16_t uniffi_envoix_ffi_checksum_method_envoixsession_receive(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_ENVOIXSESSION_RECEIVE_MDNS
 #define UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_ENVOIXSESSION_RECEIVE_MDNS
 uint16_t uniffi_envoix_ffi_checksum_method_envoixsession_receive_mdns(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_ENVOIXSESSION_RECEIVE_ROOM
 #define UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_ENVOIXSESSION_RECEIVE_ROOM
 uint16_t uniffi_envoix_ffi_checksum_method_envoixsession_receive_room(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_ENVOIXSESSION_SEND_INVITE
 #define UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_ENVOIXSESSION_SEND_INVITE
 uint16_t uniffi_envoix_ffi_checksum_method_envoixsession_send_invite(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_ENVOIXSESSION_SEND_MDNS
 #define UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_ENVOIXSESSION_SEND_MDNS
 uint16_t uniffi_envoix_ffi_checksum_method_envoixsession_send_mdns(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_ENVOIXSESSION_SEND_ROOM
 #define UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_ENVOIXSESSION_SEND_ROOM
 uint16_t uniffi_envoix_ffi_checksum_method_envoixsession_send_room(void
-    
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_ENVOIXSESSION_START_TRANSFER
+#define UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_ENVOIXSESSION_START_TRANSFER
+uint16_t uniffi_envoix_ffi_checksum_method_envoixsession_start_transfer(void
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_TRANSFEROBSERVER_ON_INVITE_READY
 #define UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_TRANSFEROBSERVER_ON_INVITE_READY
 uint16_t uniffi_envoix_ffi_checksum_method_transferobserver_on_invite_ready(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_TRANSFEROBSERVER_ON_STARTED
 #define UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_TRANSFEROBSERVER_ON_STARTED
 uint16_t uniffi_envoix_ffi_checksum_method_transferobserver_on_started(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_TRANSFEROBSERVER_ON_PROGRESS
 #define UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_TRANSFEROBSERVER_ON_PROGRESS
 uint16_t uniffi_envoix_ffi_checksum_method_transferobserver_on_progress(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_TRANSFEROBSERVER_ON_COMPLETED
 #define UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_TRANSFEROBSERVER_ON_COMPLETED
 uint16_t uniffi_envoix_ffi_checksum_method_transferobserver_on_completed(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_TRANSFEROBSERVER_ON_TRANSFER_FAILED
 #define UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_TRANSFEROBSERVER_ON_TRANSFER_FAILED
 uint16_t uniffi_envoix_ffi_checksum_method_transferobserver_on_transfer_failed(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_TRANSFEROBSERVER_ON_FAILED
 #define UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_TRANSFEROBSERVER_ON_FAILED
 uint16_t uniffi_envoix_ffi_checksum_method_transferobserver_on_failed(void
-    
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_TRANSFEROBSERVER_ON_TRANSFER_EVENT
+#define UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_TRANSFEROBSERVER_ON_TRANSFER_EVENT
+uint16_t uniffi_envoix_ffi_checksum_method_transferobserver_on_transfer_event(void
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_TRANSFEROBSERVER_ON_STATUS
 #define UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_METHOD_TRANSFEROBSERVER_ON_STATUS
 uint16_t uniffi_envoix_ffi_checksum_method_transferobserver_on_status(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_CONSTRUCTOR_ENVOIXSESSION_NEW
 #define UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_CONSTRUCTOR_ENVOIXSESSION_NEW
 uint16_t uniffi_envoix_ffi_checksum_constructor_envoixsession_new(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_CONSTRUCTOR_ENVOIXSESSION_NEW_WITH_SETTINGS
 #define UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_CONSTRUCTOR_ENVOIXSESSION_NEW_WITH_SETTINGS
 uint16_t uniffi_envoix_ffi_checksum_constructor_envoixsession_new_with_settings(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_ENVOIX_FFI_UNIFFI_CONTRACT_VERSION
 #define UNIFFI_FFIDEF_FFI_ENVOIX_FFI_UNIFFI_CONTRACT_VERSION
 uint32_t ffi_envoix_ffi_uniffi_contract_version(void
-    
+
 );
 #endif
 
