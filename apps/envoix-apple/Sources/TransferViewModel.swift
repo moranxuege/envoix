@@ -495,6 +495,11 @@ final class TransferViewModel: ObservableObject {
 
     func handleTransferActivity(_ record: FfiTransferActivityRecord) {
         transferActivity = record
+        if record.state == .completed,
+           record.direction == .receive,
+           !record.completedFilePath.isEmpty {
+            completedFileURL = URL(fileURLWithPath: record.completedFilePath)
+        }
         syncPhase(with: record)
     }
 
@@ -519,7 +524,7 @@ final class TransferViewModel: ObservableObject {
         appendLog("completed · \(byteString(bytes))")
         transferred = total
         bytesPerSec = 0
-        if let dir = destinationDir, !fileName.isEmpty {
+        if completedFileURL == nil, let dir = destinationDir, !fileName.isEmpty {
             completedFileURL = URL(fileURLWithPath: dir).appendingPathComponent(fileName)
         }
         resourceAccess = nil

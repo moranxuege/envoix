@@ -356,6 +356,7 @@ pub struct FfiTransferActivityRecord {
     pub updated_at_ms: u64,
     pub started_at_ms: u64,
     pub completed_at_ms: u64,
+    pub completed_file_path: String,
     pub data_path_kind: FfiDataPathKind,
     pub data_path_detail: String,
     pub invite: String,
@@ -1264,6 +1265,7 @@ impl FfiTransferActivityRecord {
             updated_at_ms: now_ms,
             started_at_ms: 0,
             completed_at_ms: 0,
+            completed_file_path: String::new(),
             data_path_kind: FfiDataPathKind::None,
             data_path_detail: String::new(),
             invite: request.invite.clone(),
@@ -1373,12 +1375,18 @@ impl FfiTransferActivityRecord {
         self.recovery_action = failure.recovery_action;
     }
 
-    fn apply_completed(&mut self, summary: &TransferSummary, ts_ms: u64) {
+    fn apply_completed(
+        &mut self,
+        summary: &TransferSummary,
+        ts_ms: u64,
+        completed_file_path: String,
+    ) {
         self.updated_at_ms = ts_ms;
         self.completed_at_ms = ts_ms;
         self.state = FfiTransferActivityState::Completed;
         self.bytes_transferred = summary.bytes_transferred;
         self.total_bytes = self.total_bytes.max(summary.bytes_transferred);
+        self.completed_file_path = completed_file_path;
     }
 
     fn apply_canceled(&mut self, ts_ms: u64) {
@@ -1681,17 +1689,35 @@ fn required_peer_descriptor(value: &str) -> Result<PeerDescriptor, EnvoixError> 
     PeerDescriptor::parse_compact(&value).map_err(op_err)
 }
 
+fn completed_file_path_for_request(
+    request: &FfiTransferRequest,
+    summary: &TransferSummary,
+) -> String {
+    if request.direction != FfiTransferDirection::Receive
+        || request.output_dir.trim().is_empty()
+        || summary.file_name.is_empty()
+    {
+        return String::new();
+    }
+    Path::new(&request.output_dir)
+        .join(&summary.file_name)
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// Reports the single terminal outcome from the awaited operation result.
 fn report_terminal(
     observer: &dyn TransferObserver,
     activity: &mut FfiTransferActivityRecord,
+    request: &FfiTransferRequest,
     result: Result<TransferSummary, TransferError>,
     direction: Option<TransferDirection>,
     cancel_requested: bool,
 ) {
     match result {
         Ok(summary) => {
-            activity.apply_completed(&summary, now_ms());
+            let completed_file_path = completed_file_path_for_request(request, &summary);
+            activity.apply_completed(&summary, now_ms(), completed_file_path);
             observer.on_transfer_activity(activity.clone());
             observer.on_completed(summary.bytes_transferred);
         }
@@ -1775,6 +1801,7 @@ async fn drive_transfer_request(
                 report_terminal(
                     &*observer,
                     &mut activity,
+                    &request,
                     Ok(summary),
                     outcome.direction,
                     false,
@@ -1809,6 +1836,7 @@ async fn drive_transfer_request(
                 report_terminal(
                     &*observer,
                     &mut activity,
+                    &request,
                     Err(error),
                     outcome.direction,
                     canceled,
@@ -2292,6 +2320,35 @@ mod tests {
         }
     }
 
+    fn recv_completed_activity(
+        rx: &std::sync::mpsc::Receiver<Msg>,
+        timeout: Duration,
+    ) -> (u64, Vec<FfiTransferEvent>, FfiTransferActivityRecord) {
+        let mut events = Vec::new();
+        let mut completed_activity = None;
+        loop {
+            match rx.recv_timeout(timeout).unwrap() {
+                Msg::Completed(bytes) => {
+                    return (
+                        bytes,
+                        events,
+                        completed_activity.expect("completed activity should precede callback"),
+                    );
+                }
+                Msg::Failed(reason) => panic!("transfer failed: {reason}"),
+                Msg::Invite(_) => {}
+                Msg::Event(event) => events.push(event),
+                Msg::Activity(record) => match record.state {
+                    FfiTransferActivityState::Completed => completed_activity = Some(record),
+                    FfiTransferActivityState::Failed => {
+                        panic!("transfer failed: {}", record.diagnostic_message)
+                    }
+                    _ => {}
+                },
+            }
+        }
+    }
+
     fn recv_activity(
         rx: &std::sync::mpsc::Receiver<Msg>,
         activity_id: &str,
@@ -2761,9 +2818,11 @@ mod tests {
         let canceled = recv_activity(&second_rx, "discard-second", Duration::from_secs(2));
         assert_eq!(canceled.state, FfiTransferActivityState::Canceled);
         assert!(snapshot_record(&session, "discard-second").is_none());
-        assert!(session
-            .get_transfer_activity("discard-second".to_string())
-            .is_none());
+        assert!(
+            session
+                .get_transfer_activity("discard-second".to_string())
+                .is_none()
+        );
         assert!(!session.discard_transfer_activity("discard-second".to_string()));
 
         assert!(session.cancel_activity("discard-first".to_string()));
@@ -2870,10 +2929,16 @@ mod tests {
             .unwrap();
 
         let (_, sender_events) = recv_completed(&srx, Duration::from_secs(15));
-        let (bytes, receiver_events) = recv_completed(&rrx, Duration::from_secs(15));
+        let (bytes, receiver_events, receiver_activity) =
+            recv_completed_activity(&rrx, Duration::from_secs(15));
 
+        let completed_path = output_dir.join("hello.txt");
         assert_eq!(bytes, text.len() as u64);
-        assert_eq!(std::fs::read(output_dir.join("hello.txt")).unwrap(), text);
+        assert_eq!(
+            receiver_activity.completed_file_path,
+            completed_path.to_string_lossy()
+        );
+        assert_eq!(std::fs::read(completed_path).unwrap(), text);
         assert!(
             sender_events
                 .iter()
@@ -2955,10 +3020,16 @@ mod tests {
             .unwrap();
 
         let (_, sender_events) = recv_completed(&srx, Duration::from_secs(20));
-        let (bytes, receiver_events) = recv_completed(&rrx, Duration::from_secs(20));
+        let (bytes, receiver_events, receiver_activity) =
+            recv_completed_activity(&rrx, Duration::from_secs(20));
 
+        let completed_path = output_dir.join("room.txt");
         assert_eq!(bytes, text.len() as u64);
-        assert_eq!(std::fs::read(output_dir.join("room.txt")).unwrap(), text);
+        assert_eq!(
+            receiver_activity.completed_file_path,
+            completed_path.to_string_lossy()
+        );
+        assert_eq!(std::fs::read(completed_path).unwrap(), text);
         assert!(
             sender_events
                 .iter()

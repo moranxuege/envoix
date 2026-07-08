@@ -822,6 +822,7 @@ private struct TransferStageView: View {
             "transfer_id=\(record.transferId)",
             "file_name=\(record.fileName)",
             "bytes=\(record.bytesTransferred)/\(record.totalBytes)",
+            "completed_file_path=\(record.completedFilePath)",
             "data_path=\(record.dataPathKind) \(record.dataPathDetail)",
             "failure_code=\(record.failureCode)",
             "failure_category=\(record.failureCategory)",

@@ -1798,6 +1798,7 @@ public struct FfiTransferActivityRecord: Equatable, Hashable {
     public var updatedAtMs: UInt64
     public var startedAtMs: UInt64
     public var completedAtMs: UInt64
+    public var completedFilePath: String
     public var dataPathKind: FfiDataPathKind
     public var dataPathDetail: String
     public var invite: String
@@ -1815,7 +1816,7 @@ public struct FfiTransferActivityRecord: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(activityId: String, attemptId: String, state: FfiTransferActivityState, direction: FfiTransferDirection, mode: FfiTransferMode, transferId: String, fileName: String, totalBytes: UInt64, bytesTransferred: UInt64, bytesResumed: UInt64, createdAtMs: UInt64, updatedAtMs: UInt64, startedAtMs: UInt64, completedAtMs: UInt64, dataPathKind: FfiDataPathKind, dataPathDetail: String, invite: String, token: String, peerDescriptor: String, diagnosticMessage: String, failureCode: FfiFailureCode, failureCategory: FfiFailureCategory, failurePhase: FfiFailurePhase, failureOrigin: FfiFailureOrigin, userMessageKey: String, retryable: Bool, recoveryAction: FfiRecoveryAction, limits: FfiTransferLimits) {
+    public init(activityId: String, attemptId: String, state: FfiTransferActivityState, direction: FfiTransferDirection, mode: FfiTransferMode, transferId: String, fileName: String, totalBytes: UInt64, bytesTransferred: UInt64, bytesResumed: UInt64, createdAtMs: UInt64, updatedAtMs: UInt64, startedAtMs: UInt64, completedAtMs: UInt64, completedFilePath: String, dataPathKind: FfiDataPathKind, dataPathDetail: String, invite: String, token: String, peerDescriptor: String, diagnosticMessage: String, failureCode: FfiFailureCode, failureCategory: FfiFailureCategory, failurePhase: FfiFailurePhase, failureOrigin: FfiFailureOrigin, userMessageKey: String, retryable: Bool, recoveryAction: FfiRecoveryAction, limits: FfiTransferLimits) {
         self.activityId = activityId
         self.attemptId = attemptId
         self.state = state
@@ -1830,6 +1831,7 @@ public struct FfiTransferActivityRecord: Equatable, Hashable {
         self.updatedAtMs = updatedAtMs
         self.startedAtMs = startedAtMs
         self.completedAtMs = completedAtMs
+        self.completedFilePath = completedFilePath
         self.dataPathKind = dataPathKind
         self.dataPathDetail = dataPathDetail
         self.invite = invite
@@ -1876,6 +1878,7 @@ public struct FfiConverterTypeFfiTransferActivityRecord: FfiConverterRustBuffer 
                 updatedAtMs: FfiConverterUInt64.read(from: &buf),
                 startedAtMs: FfiConverterUInt64.read(from: &buf),
                 completedAtMs: FfiConverterUInt64.read(from: &buf),
+                completedFilePath: FfiConverterString.read(from: &buf),
                 dataPathKind: FfiConverterTypeFfiDataPathKind.read(from: &buf),
                 dataPathDetail: FfiConverterString.read(from: &buf),
                 invite: FfiConverterString.read(from: &buf),
@@ -1908,6 +1911,7 @@ public struct FfiConverterTypeFfiTransferActivityRecord: FfiConverterRustBuffer 
         FfiConverterUInt64.write(value.updatedAtMs, into: &buf)
         FfiConverterUInt64.write(value.startedAtMs, into: &buf)
         FfiConverterUInt64.write(value.completedAtMs, into: &buf)
+        FfiConverterString.write(value.completedFilePath, into: &buf)
         FfiConverterTypeFfiDataPathKind.write(value.dataPathKind, into: &buf)
         FfiConverterString.write(value.dataPathDetail, into: &buf)
         FfiConverterString.write(value.invite, into: &buf)
