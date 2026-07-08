@@ -941,6 +941,7 @@ dependencies = [
  "ndk-context",
  "serde_json",
  "tokio",
+ "tracing",
  "tracing-subscriber",
 ]
 

@@ -33,6 +33,8 @@ data class Settings(
     // developer / diagnostics
     val devMode: Boolean = false,
     val verboseLog: Boolean = false,
+    /** -vvv: trace-level iroh internals (path/QUIC state machine). Very high volume. */
+    val traceIroh: Boolean = false,
     /** Base URL of the rdz log-collection endpoint. Empty = uploads off. */
     val logServer: String = Endpoints.LOG_SERVER,
 )
@@ -61,6 +63,7 @@ object SettingsStore {
             useMdns = prefs.getBoolean("useMdns", true),
             devMode = prefs.getBoolean("devMode", false),
             verboseLog = prefs.getBoolean("verboseLog", false),
+            traceIroh = prefs.getBoolean("traceIroh", false),
             logServer = prefs.getString("logServer", Endpoints.LOG_SERVER)!!,
         )
     }
@@ -83,6 +86,7 @@ object SettingsStore {
             .putBoolean("useMdns", s.useMdns)
             .putBoolean("devMode", s.devMode)
             .putBoolean("verboseLog", s.verboseLog)
+            .putBoolean("traceIroh", s.traceIroh)
             .putString("logServer", s.logServer)
             .apply()
         _settings.value = s
@@ -90,10 +94,17 @@ object SettingsStore {
 
     private const val LOG_BASELINE = "envoix=debug,iroh=info,warn"
     private const val LOG_VERBOSE = "envoix=trace,iroh=debug,warn"
+    private const val LOG_TRACE_IROH = "envoix=trace,iroh=trace,iroh_relay=debug,netwatch=debug,warn"
 
-    /** Push the current verbosity down to the native reloadable filter. */
-    fun applyLogLevel() =
-        Native.setLogLevel(if (_settings.value.verboseLog) LOG_VERBOSE else LOG_BASELINE)
+    /** Push the current verbosity down to the native reloadable filter. -vvv (trace
+     *  iroh internals) wins over -vv (verbose) wins over the baseline. */
+    fun applyLogLevel() = Native.setLogLevel(
+        when {
+            _settings.value.traceIroh -> LOG_TRACE_IROH
+            _settings.value.verboseLog -> LOG_VERBOSE
+            else -> LOG_BASELINE
+        },
+    )
 
     /** Where received files go, for display: the picked SAF folder's name, else Downloads/<folder>. */
     fun saveLabel(context: Context): String {

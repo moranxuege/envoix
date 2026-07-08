@@ -12,15 +12,25 @@ import java.io.File
  */
 object LogStore {
     private const val CAP = 4000
+    private const val FILE_CAP_BYTES = 8L * 1024 * 1024 // rotate the on-disk log past 8 MB
 
     private val buffer = ArrayDeque<String>()
     private val _lines = MutableStateFlow<List<String>>(emptyList())
     val lines: StateFlow<List<String>> = _lines.asStateFlow()
 
     private var logDir: File? = null
+    private var sink: java.io.FileOutputStream? = null
+    private var written = 0L
 
     fun init(filesDir: File) {
-        logDir = File(filesDir, "logs").apply { mkdirs() }
+        val dir = File(filesDir, "logs").apply { mkdirs() }
+        logDir = dir
+        // Preserve the previous session's log — it may have ended in a native crash
+        // that skipped the JVM handler — as core-prev.log, then start a fresh file.
+        val current = File(dir, "core.log")
+        if (current.exists()) runCatching { current.renameTo(File(dir, "core-prev.log")) }
+        sink = runCatching { java.io.FileOutputStream(current) }.getOrNull()
+        written = 0L
     }
 
     @Synchronized
@@ -28,6 +38,30 @@ object LogStore {
         buffer.addLast(line)
         while (buffer.size > CAP) buffer.removeFirst()
         _lines.value = buffer.toList()
+        persist(line)
+    }
+
+    /** Append the line to the on-disk log unbuffered, so the OS retains it even if
+     *  the process aborts (a native crash bypasses the JVM uncaught handler).
+     *  Rotates to core-prev.log past a size cap so it never grows without bound. */
+    private fun persist(line: String) {
+        val out = sink ?: return
+        runCatching {
+            val bytes = (line + "\n").toByteArray()
+            out.write(bytes)
+            written += bytes.size
+            if (written >= FILE_CAP_BYTES) rotate()
+        }
+    }
+
+    private fun rotate() {
+        val dir = logDir ?: return
+        runCatching {
+            sink?.close()
+            File(dir, "core.log").renameTo(File(dir, "core-prev.log"))
+            sink = java.io.FileOutputStream(File(dir, "core.log"))
+            written = 0L
+        }
     }
 
     @Synchronized

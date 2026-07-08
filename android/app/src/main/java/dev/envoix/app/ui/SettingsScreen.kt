@@ -176,6 +176,15 @@ fun SettingsScreen(onBack: () -> Unit) {
                     SettingsStore.update { s -> s.copy(verboseLog = it) }
                     SettingsStore.applyLogLevel()
                 }
+                Spacer(Modifier.height(12.dp))
+                ToggleRow(
+                    title = "Trace iroh internals (-vvv)",
+                    subtitle = "Deepest: iroh path/QUIC state machine at trace. Very high volume — for chasing a crash.",
+                    checked = settings.traceIroh,
+                ) {
+                    SettingsStore.update { s -> s.copy(traceIroh = it) }
+                    SettingsStore.applyLogLevel()
+                }
             }
         }
     }

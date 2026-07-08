@@ -345,6 +345,15 @@ pub extern "system" fn Java_dev_envoix_app_Native_initLogging(
         .is_ok();
     if installed {
         let _ = LOG_RELOAD.set(handle);
+        // Route Rust panics into the tracing sink so the message reaches the app
+        // log (and its on-disk copy) — a native abort otherwise leaves the panic
+        // text only in logcat / the tombstone's "Abort message". Chain the default
+        // hook so the native tombstone is still produced.
+        let default = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            tracing::error!(target: "envoix", "core panic: {info}");
+            default(info);
+        }));
     }
 }
 
