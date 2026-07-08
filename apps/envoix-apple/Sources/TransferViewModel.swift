@@ -27,6 +27,8 @@ final class AppModel: ObservableObject {
 
     private var cancellables = Set<AnyCancellable>()
     private var removedActivityIDs = Set<String>()
+    private var sharedSession: EnvoixSession?
+    private var sharedSessionSettingsKey = ""
     private let activityCap = 50
     private let activityLogTimestamp: DateFormatter = {
         let formatter = DateFormatter()
@@ -35,6 +37,13 @@ final class AppModel: ObservableObject {
     }()
 
     private init() {
+        receive.sessionProvider = { [weak self] settings in
+            self?.transferSession(for: settings) ?? EnvoixSession.newWithSettings(settings: settings)
+        }
+        send.sessionProvider = { [weak self] settings in
+            self?.transferSession(for: settings) ?? EnvoixSession.newWithSettings(settings: settings)
+        }
+
         for vm in [receive, send] {
             vm.objectWillChange
                 .sink { [weak self] in self?.objectWillChange.send() }
@@ -51,6 +60,34 @@ final class AppModel: ObservableObject {
 
     /// True while either side has a transfer in flight.
     var isActive: Bool { receive.isBusy || send.isBusy }
+
+    private func transferSession(for settings: EnvoixRuntimeSettings) -> EnvoixSession {
+        let key = sessionSettingsKey(for: settings)
+        if sharedSession == nil || (!isActive && key != sharedSessionSettingsKey) {
+            let session = EnvoixSession.newWithSettings(settings: settings)
+            sharedSession = session
+            sharedSessionSettingsKey = key
+            return session
+        }
+        if let sharedSession {
+            return sharedSession
+        }
+        let session = EnvoixSession.newWithSettings(settings: settings)
+        sharedSession = session
+        sharedSessionSettingsKey = key
+        return session
+    }
+
+    private func sessionSettingsKey(for settings: EnvoixRuntimeSettings) -> String {
+        [
+            settings.concurrentTransfers ? "parallel" : "serial",
+            settings.language,
+            settings.serverUrl,
+            settings.relayUrl,
+            settings.configPath,
+            String(settings.speedLimitMbps),
+        ].joined(separator: "\u{1f}")
+    }
 
     func pauseActivity(_ activityID: String) {
         if receive.pauseActivity(activityID) {
@@ -222,6 +259,8 @@ final class TransferViewModel: ObservableObject {
     @Published var transferEvents: [FfiTransferEvent] = []
     @Published var transferActivity: FfiTransferActivityRecord?
 
+    var sessionProvider: ((EnvoixRuntimeSettings) -> EnvoixSession)?
+
     private var session: EnvoixSession?
     private var destinationDir: String?       // receiver only
     private var resourceAccess: AnyObject?    // keeps iOS Files permission alive
@@ -364,10 +403,10 @@ final class TransferViewModel: ObservableObject {
         displayLanguage = settings.language
         operationID = UUID()
         let operationID = operationID
+        let session = sessionProvider?(settings) ?? EnvoixSession.newWithSettings(settings: settings)
+        self.session = session
         self.phase = phase
         do {
-            let session = EnvoixSession.newWithSettings(settings: settings)
-            self.session = session
             try operation(session, Observer(self, operationID: operationID))
         } catch {
             self.phase = .failed(friendlyError(error.localizedDescription, language: displayLanguage))
