@@ -52,6 +52,10 @@ struct ReceiveView: View {
         UserDefaults.standard.data(forKey: outputDirBookmarkKey) != nil
     }
 
+    private var hasUnavailableCustomOutputDir: Bool {
+        hasCustomOutputDir && outputDir == nil
+    }
+
     private var defaultIOSOutputDir: URL {
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
@@ -164,7 +168,7 @@ struct ReceiveView: View {
                 Button {
                     isFolderPickerPresented = true
                 } label: {
-                    Label(AppText.value("Choose", "选择", language: uiLanguage), systemImage: "folder")
+                    Label(outputFolderChooseLabel, systemImage: "folder")
                         .frame(minHeight: 34)
                         .contentShape(Rectangle())
                 }
@@ -181,7 +185,7 @@ struct ReceiveView: View {
                     .disabled(viewModel.isBusy)
                 }
             }
-            Text(AppText.value("Default saves to Files > On My iPhone > Envoix > Downloads. Choose a Files folder to save elsewhere.", "默认保存到 Files > On My iPhone > Envoix > Downloads。也可以选择其他 Files 文件夹。", language: uiLanguage))
+            Text(outputFolderHelperText)
                 .font(.footnote)
                 .foregroundStyle(Theme.muted)
                 .fixedSize(horizontal: false, vertical: true)
@@ -217,6 +221,29 @@ struct ReceiveView: View {
         return outputDir?.path ?? ""
         #endif
     }
+
+    #if os(iOS)
+    private var outputFolderChooseLabel: String {
+        hasUnavailableCustomOutputDir
+            ? AppText.value("Choose Again", "重新选择", language: uiLanguage)
+            : AppText.value("Choose", "选择", language: uiLanguage)
+    }
+
+    private var outputFolderHelperText: String {
+        if hasUnavailableCustomOutputDir {
+            return AppText.value(
+                "The selected Files folder permission expired. Choose it again or reset to the default folder.",
+                "已选择的 Files 文件夹权限已失效。请重新选择，或重置为默认文件夹。",
+                language: uiLanguage
+            )
+        }
+        return AppText.value(
+            "Default saves to Files > On My iPhone > Envoix > Downloads. Choose a Files folder to save elsewhere.",
+            "默认保存到 Files > On My iPhone > Envoix > Downloads。也可以选择其他 Files 文件夹。",
+            language: uiLanguage
+        )
+    }
+    #endif
 
     private var primaryLabel: String {
         if viewModel.isBusy { return AppText.value("Cancel Transfer", "取消传输", language: uiLanguage) }
@@ -513,6 +540,15 @@ struct ReceiveView: View {
 
     private func prepareOutputDir() throws -> (url: URL, access: AnyObject?) {
         guard let url = outputDir else {
+            #if os(iOS)
+            if hasCustomOutputDir {
+                throw RuntimeSettingsError(AppText.value(
+                    "The selected Files folder is unavailable. Choose it again or reset to the default save folder.",
+                    "已选择的 Files 文件夹不可用。请重新选择，或重置为默认保存位置。",
+                    language: uiLanguage
+                ))
+            }
+            #endif
             throw RuntimeSettingsError(AppText.value("Choose a save folder first.", "请先选择保存文件夹。", language: uiLanguage))
         }
         #if os(iOS)
