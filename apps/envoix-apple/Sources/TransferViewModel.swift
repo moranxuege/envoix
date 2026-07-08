@@ -36,6 +36,8 @@ final class AppModel: ObservableObject {
     var isActive: Bool { receive.isBusy || send.isBusy }
 
     func removeActivity(_ activityID: String) {
+        receive.cancelActivityForRemoval(activityID)
+        send.cancelActivityForRemoval(activityID)
         activities.removeAll { $0.activityId == activityID }
         activitySpeeds.removeValue(forKey: activityID)
     }
@@ -177,6 +179,11 @@ final class TransferViewModel: ObservableObject {
         reset()
         phase = .canceled
         statusText = AppText.value("Transfer canceled", "传输已取消", language: displayLanguage)
+    }
+
+    func cancelActivityForRemoval(_ activityID: String) {
+        guard isBusy, !activityID.isEmpty, activityID == currentActivityID else { return }
+        cancel()
     }
 
     /// Spins up a fresh session and launches `operation`, surfacing setup errors.
