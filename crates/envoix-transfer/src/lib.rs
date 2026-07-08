@@ -240,6 +240,14 @@ impl TransferEngine {
 
         let total_bytes = metadata.len();
         let transfer_id = random_transfer_id()?;
+        tracing::info!(
+            transfer_id = %transfer_id,
+            sender_chunk_size = self.chunk_size,
+            file_name = %file_name,
+            total_bytes,
+            resume_requested = resume,
+            "transfer sender configured chunk size"
+        );
 
         connection
             .send_frame(Frame::Hello(Hello {
@@ -409,6 +417,14 @@ impl TransferEngine {
         connection.send_frame(Frame::Ready(Ready)).await?;
 
         let header = expect_file_header(recv_frame_or_cancel(connection, cancel).await?)?;
+        tracing::info!(
+            transfer_id = %header.transfer_id,
+            sender_chunk_size = header.chunk_size,
+            receiver_chunk_size = self.chunk_size,
+            file_name = %header.file_name,
+            file_size = header.file_size,
+            "received file header"
+        );
         validate_header(&header, self.chunk_size)?;
         let final_path = output_dir.join(&header.file_name);
         if fs::try_exists(&final_path).await? {
@@ -1175,6 +1191,13 @@ fn validate_header(header: &FileHeader, receiver_chunk_size: usize) -> Result<()
         return Err(CoreError::Transfer("chunk size must be positive".into()));
     }
     if header.chunk_size != receiver_chunk_size as u64 {
+        tracing::warn!(
+            transfer_id = %header.transfer_id,
+            sender_chunk_size = header.chunk_size,
+            receiver_chunk_size = receiver_chunk_size,
+            file_name = %header.file_name,
+            "transfer header chunk size mismatch"
+        );
         return Err(CoreError::Transfer(format!(
             "sender chunk size {} does not match receiver chunk size {receiver_chunk_size}",
             header.chunk_size
