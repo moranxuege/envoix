@@ -7,16 +7,31 @@ import EnvoixCore
 /// Both the main window and the menu-bar popover observe the same instances, so
 /// status stays in sync everywhere. Re-emitting the children's `objectWillChange`
 /// lets a view that observes only `AppModel` still update on transfer progress.
+struct ActivityMetrics {
+    var speedBps: Double = 0
+    var avgBps: Double = 0
+    var peakBps: Double = 0
+    var speedHistory: [Double] = []
+    var log: [String] = []
+
+    fileprivate var lastLogKey: String = ""
+}
+
 final class AppModel: ObservableObject {
     static let shared = AppModel()
 
     let receive = TransferViewModel()
     let send = TransferViewModel()
     @Published private(set) var activities: [FfiTransferActivityRecord] = []
-    @Published private(set) var activitySpeeds: [String: Double] = [:]
+    @Published private(set) var activityMetrics: [String: ActivityMetrics] = [:]
 
     private var cancellables = Set<AnyCancellable>()
     private let activityCap = 50
+    private let activityLogTimestamp: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
 
     private init() {
         for vm in [receive, send] {
@@ -39,7 +54,7 @@ final class AppModel: ObservableObject {
         receive.cancelActivityForRemoval(activityID)
         send.cancelActivityForRemoval(activityID)
         activities.removeAll { $0.activityId == activityID }
-        activitySpeeds.removeValue(forKey: activityID)
+        activityMetrics.removeValue(forKey: activityID)
     }
 
     private func upsertActivity(_ record: FfiTransferActivityRecord, speedBps: Double) {
@@ -48,15 +63,96 @@ final class AppModel: ObservableObject {
         } else {
             activities.append(record)
         }
-        activitySpeeds[record.activityId] = speedBps
+        upsertMetrics(for: record, speedBps: speedBps)
         activities.sort { lhs, rhs in lhs.updatedAtMs > rhs.updatedAtMs }
         if activities.count > activityCap {
             let removed = activities.suffix(activities.count - activityCap).map(\.activityId)
             activities.removeLast(activities.count - activityCap)
             for id in removed {
-                activitySpeeds.removeValue(forKey: id)
+                activityMetrics.removeValue(forKey: id)
             }
         }
+    }
+
+    private func upsertMetrics(for record: FfiTransferActivityRecord, speedBps: Double) {
+        var metrics = activityMetrics[record.activityId] ?? ActivityMetrics()
+        let liveSpeed = record.state == .transferring ? speedBps : 0
+        metrics.speedBps = liveSpeed
+        metrics.avgBps = averageBps(for: record)
+        if liveSpeed > 0 {
+            metrics.peakBps = max(metrics.peakBps, liveSpeed)
+            metrics.speedHistory.append(liveSpeed)
+            if metrics.speedHistory.count > 90 {
+                metrics.speedHistory.removeFirst(metrics.speedHistory.count - 90)
+            }
+        }
+
+        let logKey = activityLogKey(for: record)
+        if logKey != metrics.lastLogKey {
+            metrics.lastLogKey = logKey
+            metrics.log.append(activityLogLine(for: record, speedBps: liveSpeed))
+            if metrics.log.count > 160 {
+                metrics.log.removeFirst(metrics.log.count - 160)
+            }
+        }
+
+        activityMetrics[record.activityId] = metrics
+    }
+
+    private func averageBps(for record: FfiTransferActivityRecord) -> Double {
+        let endMs = record.completedAtMs > 0 ? record.completedAtMs : record.updatedAtMs
+        guard record.startedAtMs > 0, endMs > record.startedAtMs, record.bytesTransferred > 0 else { return 0 }
+        return Double(record.bytesTransferred) * 1000 / Double(endMs - record.startedAtMs)
+    }
+
+    private func activityLogKey(for record: FfiTransferActivityRecord) -> String {
+        switch record.state {
+        case .transferring:
+            let bucket: UInt64
+            if record.totalBytes > 0 {
+                bucket = min(20, record.bytesTransferred * 20 / record.totalBytes)
+            } else {
+                bucket = record.bytesTransferred / (10 * 1024 * 1024)
+            }
+            return "progress:\(bucket):\(record.dataPathKind):\(record.dataPathDetail)"
+        default:
+            return "\(record.state):\(record.dataPathKind):\(record.dataPathDetail):\(record.diagnosticMessage):\(record.bytesTransferred):\(record.totalBytes)"
+        }
+    }
+
+    private func activityLogLine(for record: FfiTransferActivityRecord, speedBps: Double) -> String {
+        let date = Date(timeIntervalSince1970: TimeInterval(record.updatedAtMs) / 1000)
+        let prefix = "[\(activityLogTimestamp.string(from: date))]"
+        let message: String
+        switch record.state {
+        case .queued:
+            message = "queued · \(record.direction)"
+        case .binding:
+            message = "preparing · \(record.mode)"
+        case .waitingForPeer:
+            message = "waiting for peer"
+        case .pairing:
+            message = "pairing"
+        case .connecting:
+            message = record.dataPathKind == .none ? "connecting" : "connected · \(record.dataPathKind) \(record.dataPathDetail)"
+        case .transferring:
+            var parts = ["progress · \(byteString(record.bytesTransferred)) / \(byteString(record.totalBytes))"]
+            if speedBps > 0 { parts.append(rateString(speedBps)) }
+            message = parts.joined(separator: " · ")
+        case .verifying:
+            message = "verifying"
+        case .completed:
+            message = "completed · \(byteString(record.bytesTransferred))"
+        case .failed:
+            message = record.diagnosticMessage.isEmpty ? "failed" : "failed · \(record.diagnosticMessage)"
+        case .paused:
+            message = "paused"
+        case .canceled:
+            message = "canceled"
+        case .unknown:
+            message = "unknown state"
+        }
+        return "\(prefix) \(message)"
     }
 }
 

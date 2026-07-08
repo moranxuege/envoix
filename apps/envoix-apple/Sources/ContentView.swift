@@ -173,7 +173,7 @@ struct ContentView: View {
         case .transfer:
             TransferStageView(
                 records: model.activities,
-                speedsByActivityID: model.activitySpeeds,
+                metricsByActivityID: model.activityMetrics,
                 onDelete: model.removeActivity
             )
         case .settings:
@@ -305,8 +305,9 @@ struct ContentView: View {
 private struct TransferStageView: View {
     @Environment(\.appLanguage) private var language
     @AppStorage("envoix.developerMode") private var developerMode = false
+    @State private var expandedActivityIDs: Set<String> = []
     let records: [FfiTransferActivityRecord]
-    let speedsByActivityID: [String: Double]
+    let metricsByActivityID: [String: ActivityMetrics]
     let onDelete: (String) -> Void
 
     var body: some View {
@@ -370,7 +371,9 @@ private struct TransferStageView: View {
     }
 
     private func activityCard(_ record: FfiTransferActivityRecord) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        let metrics = metrics(for: record)
+        let expanded = expandedActivityIDs.contains(record.activityId)
+        return VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: activityIcon(for: record))
                     .foregroundStyle(activityTint(for: record))
@@ -388,6 +391,17 @@ private struct TransferStageView: View {
                 }
                 Spacer(minLength: 8)
                 ModePill(text: activityStateText(for: record))
+                Button {
+                    toggleActivityDetail(record.activityId)
+                } label: {
+                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                        .font(.body.weight(.semibold))
+                        .frame(width: 30, height: 30)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Theme.muted)
+                .help(AppText.value("Show activity details", "显示活动详情", language: language))
                 Button(role: .destructive) {
                     onDelete(record.activityId)
                 } label: {
@@ -423,7 +437,7 @@ private struct TransferStageView: View {
                     Text("·")
                     Text("\(byteString(record.bytesTransferred)) / \(byteString(record.totalBytes))")
                 }
-                if let speed = speedBps(for: record), speed > 0 {
+                if let speed = speedBps(for: record, metrics: metrics), speed > 0 {
                     Text("·")
                     Text(rateString(speed))
                 }
@@ -450,6 +464,10 @@ private struct TransferStageView: View {
             }
             .font(.body.monospacedDigit())
             .foregroundStyle(Theme.muted)
+
+            if expanded {
+                activityDetail(record, metrics: metrics)
+            }
         }
         .card(raised: true, padding: 14)
     }
@@ -542,9 +560,106 @@ private struct TransferStageView: View {
         return min(1, Double(record.bytesTransferred) / Double(record.totalBytes))
     }
 
-    private func speedBps(for record: FfiTransferActivityRecord) -> Double? {
+    private func speedBps(for record: FfiTransferActivityRecord, metrics: ActivityMetrics) -> Double? {
         guard record.state == .transferring else { return nil }
-        return speedsByActivityID[record.activityId]
+        return metrics.speedBps
+    }
+
+    private func metrics(for record: FfiTransferActivityRecord) -> ActivityMetrics {
+        metricsByActivityID[record.activityId] ?? ActivityMetrics()
+    }
+
+    private func toggleActivityDetail(_ activityID: String) {
+        if expandedActivityIDs.contains(activityID) {
+            expandedActivityIDs.remove(activityID)
+        } else {
+            expandedActivityIDs.insert(activityID)
+        }
+    }
+
+    private func activityDetail(_ record: FfiTransferActivityRecord, metrics: ActivityMetrics) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Divider().overlay(Theme.line.opacity(0.6))
+
+            if metrics.speedHistory.count >= 2 {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(AppText.value("Speed", "速度", language: language))
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(Theme.muted)
+                    Spacer(minLength: 8)
+                    Text(speedSummary(metrics))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(Theme.muted)
+                }
+                SpeedSparkline(history: metrics.speedHistory, averageBps: metrics.avgBps)
+            }
+
+            VStack(spacing: 6) {
+                detailRow(
+                    AppText.value("Transferred", "已传输", language: language),
+                    "\(byteString(record.bytesTransferred)) / \(byteString(record.totalBytes))"
+                )
+                if metrics.avgBps > 0 {
+                    detailRow(AppText.value("Average", "平均速度", language: language), rateString(metrics.avgBps))
+                }
+                if metrics.peakBps > 0 {
+                    detailRow(AppText.value("Peak", "峰值速度", language: language), rateString(metrics.peakBps))
+                }
+                if record.dataPathKind != .none {
+                    detailRow(AppText.value("Path", "链路", language: language), dataPathText(record))
+                }
+            }
+
+            if developerMode && !metrics.log.isEmpty {
+                HStack {
+                    Text(AppText.value("Activity log", "活动日志", language: language))
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(Theme.muted)
+                    Spacer(minLength: 8)
+                    Button {
+                        copyToPasteboard(metrics.log.joined(separator: "\n"))
+                        ToastCenter.shared.show(AppText.value("Activity log copied", "活动日志已复制", language: language))
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                            .font(.caption.weight(.semibold))
+                            .frame(width: 26, height: 26)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Theme.accentStrong)
+                    .help(AppText.value("Copy activity log", "复制活动日志", language: language))
+                }
+                ScrollView {
+                    Text(metrics.log.joined(separator: "\n"))
+                        .font(.caption.monospaced())
+                        .foregroundStyle(Theme.muted)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+                .frame(maxHeight: 120)
+            }
+        }
+    }
+
+    private func detailRow(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(Theme.muted)
+            Spacer(minLength: 8)
+            Text(value)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(Theme.text)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+    }
+
+    private func speedSummary(_ metrics: ActivityMetrics) -> String {
+        [
+            metrics.avgBps > 0 ? "avg \(rateString(metrics.avgBps))" : nil,
+            metrics.peakBps > 0 ? "peak \(rateString(metrics.peakBps))" : nil
+        ].compactMap { $0 }.joined(separator: " · ")
     }
 
     private func activityTitle(for record: FfiTransferActivityRecord) -> String {
@@ -681,6 +796,55 @@ private struct TransferStageView: View {
         }
         guard developerMode, !record.dataPathDetail.isEmpty else { return pathKind }
         return "\(pathKind) · \(record.dataPathDetail)"
+    }
+}
+
+private struct SpeedSparkline: View {
+    let history: [Double]
+    let averageBps: Double
+
+    var body: some View {
+        Canvas { context, size in
+            let values = Array(history.suffix(90)).filter { $0 >= 0 }
+            guard values.count >= 2 else { return }
+            let maxValue = max(values.max() ?? 1, 1)
+            let average = min(max(averageBps, 0), maxValue)
+            let width = size.width
+            let height = size.height
+
+            func point(_ index: Int, _ value: Double) -> CGPoint {
+                let x = width * CGFloat(index) / CGFloat(values.count - 1)
+                let y = height - height * CGFloat(value / maxValue)
+                return CGPoint(x: x, y: y)
+            }
+
+            var line = Path()
+            var area = Path()
+            area.move(to: CGPoint(x: 0, y: height))
+            for (index, value) in values.enumerated() {
+                let p = point(index, value)
+                if index == 0 {
+                    line.move(to: p)
+                } else {
+                    line.addLine(to: p)
+                }
+                area.addLine(to: p)
+            }
+            area.addLine(to: CGPoint(x: width, y: height))
+            area.closeSubpath()
+
+            context.fill(area, with: .color(Theme.accent.opacity(0.14)))
+            context.stroke(line, with: .color(Theme.accent), style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
+
+            if average > 0 {
+                var avgLine = Path()
+                let y = height - height * CGFloat(average / maxValue)
+                avgLine.move(to: CGPoint(x: 0, y: y))
+                avgLine.addLine(to: CGPoint(x: width, y: y))
+                context.stroke(avgLine, with: .color(Theme.muted.opacity(0.55)), style: StrokeStyle(lineWidth: 1, dash: [5, 5]))
+            }
+        }
+        .frame(height: 50)
     }
 }
 
