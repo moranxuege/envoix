@@ -242,13 +242,34 @@ class TransferService : Service() {
         if (t.status != Status.Completed) return
         val name = t.fileName ?: return
         val src = File(outputDir, name)
-        if (!src.exists()) return
+        if (!src.exists()) {
+            val message = "received file not found in private output: ${src.absolutePath}"
+            TransferRepository.update(id) {
+                it.copy(
+                    status = Status.Failed,
+                    error = message,
+                    log = addLog(it.log, "publish failed · missing received file"),
+                )
+            }
+            LogStore.append("app: publish failed for $name: missing private file")
+            return
+        }
         val s = SettingsStore.settings.value
         val uri = MediaStoreSaver.saveReceived(this, src, name, s.saveTreeUri, s.saveFolder)
         if (uri != null) {
             src.delete()
             TransferRepository.update(id) { it.copy(savedUri = uri.toString()) }
             LogStore.append("app: saved $name to Downloads")
+        } else {
+            val message = "failed to publish received file; private copy kept at ${src.absolutePath}"
+            TransferRepository.update(id) {
+                it.copy(
+                    status = Status.Failed,
+                    error = message,
+                    log = addLog(it.log, "publish failed · private copy kept"),
+                )
+            }
+            LogStore.append("app: publish failed for $name; private copy kept")
         }
     }
 
