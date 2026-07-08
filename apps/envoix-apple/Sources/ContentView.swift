@@ -2,23 +2,39 @@ import SwiftUI
 import EnvoixCore
 
 private enum AppStage: String, CaseIterable {
-    case sender, receiver, transfer, settings
+    case transfer, activity, settings
 
     func title(language: String) -> String {
         switch self {
-        case .sender: return AppText.value("Sender", "发送", language: language)
-        case .receiver: return AppText.value("Receiver", "接收", language: language)
-        case .transfer: return AppText.value("Activity", "活动", language: language)
+        case .transfer: return AppText.value("Transfer", "传输", language: language)
+        case .activity: return AppText.value("Activity", "活动", language: language)
         case .settings: return AppText.value("Settings", "设置", language: language)
         }
     }
 
     var icon: String {
         switch self {
-        case .sender: return "paperplane"
-        case .receiver: return "tray.and.arrow.down"
         case .transfer: return "arrow.up.arrow.down"
+        case .activity: return "list.bullet.rectangle"
         case .settings: return "gearshape"
+        }
+    }
+}
+
+private enum TransferRole: String, CaseIterable {
+    case send, receive
+
+    func title(language: String) -> String {
+        switch self {
+        case .send: return AppText.value("Send", "发送", language: language)
+        case .receive: return AppText.value("Receive", "接收", language: language)
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .send: return "paperplane"
+        case .receive: return "tray.and.arrow.down"
         }
     }
 }
@@ -27,9 +43,9 @@ struct ContentView: View {
     @EnvironmentObject private var model: AppModel
     @AppStorage("envoix.appearance") private var appearance: Appearance = .system
     @AppStorage("envoix.language") private var language = "en"
-    @State private var stage: AppStage = .sender
+    @State private var stage: AppStage = .transfer
 
-    private let primaryStages: [AppStage] = [.sender, .receiver, .transfer]
+    private let primaryStages: [AppStage] = [.transfer, .activity]
 
     var body: some View {
         ZStack {
@@ -166,11 +182,9 @@ struct ContentView: View {
 
     @ViewBuilder private func stageContent(for stage: AppStage) -> some View {
         switch stage {
-        case .sender:
-            SendView(viewModel: model.send)
-        case .receiver:
-            ReceiveView(viewModel: model.receive)
         case .transfer:
+            TransferSetupStageView(send: model.send, receive: model.receive)
+        case .activity:
             TransferStageView(
                 records: model.activities,
                 metricsByActivityID: model.activityMetrics,
@@ -201,11 +215,9 @@ struct ContentView: View {
 
     private var stageTitle: String {
         switch stage {
-        case .sender:
-            return AppText.value("Send a File", "发送文件", language: language)
-        case .receiver:
-            return AppText.value("Receive a File", "接收文件", language: language)
         case .transfer:
+            return AppText.value("Send or Receive", "发送或接收", language: language)
+        case .activity:
             return AppText.value("Activity", "活动", language: language)
         case .settings:
             return AppText.value("Settings", "设置", language: language)
@@ -214,15 +226,18 @@ struct ContentView: View {
 
     private var headerStatus: String {
         switch stage {
-        case .sender:
-            return model.send.isBusy
-                ? AppText.value("Sending", "正在发送", language: language)
-                : AppText.value("Ready to send", "可发送", language: language)
-        case .receiver:
-            return model.receive.isBusy
-                ? AppText.value("Waiting for sender", "等待发送方", language: language)
-                : AppText.value("Ready to receive", "可接收", language: language)
         case .transfer:
+            if model.send.isBusy && model.receive.isBusy {
+                return AppText.value("Send and receive active", "发送和接收进行中", language: language)
+            }
+            if model.send.isBusy {
+                return AppText.value("Sending", "正在发送", language: language)
+            }
+            if model.receive.isBusy {
+                return AppText.value("Waiting for sender", "等待发送方", language: language)
+            }
+            return AppText.value("Ready", "就绪", language: language)
+        case .activity:
             if hasFailedTransfer {
                 return AppText.value("Needs attention", "需要处理", language: language)
             }
@@ -237,20 +252,18 @@ struct ContentView: View {
 
     private var headerIcon: String {
         switch stage {
-        case .sender: return "paperplane"
-        case .receiver: return "antenna.radiowaves.left.and.right"
         case .transfer: return "arrow.up.arrow.down"
+        case .activity: return "list.bullet.rectangle"
         case .settings: return "gearshape"
         }
     }
 
     private var headerKind: StatusPill.Kind {
         switch stage {
-        case .sender:
-            return kind(for: model.send)
-        case .receiver:
-            return kind(for: model.receive)
         case .transfer:
+            if isFailed(model.send) || isFailed(model.receive) { return .error }
+            return model.isActive ? .warning : .neutral
+        case .activity:
             return hasFailedTransfer ? .error : (pendingTransferCount > 0 ? .warning : .neutral)
         case .settings:
             return .neutral
@@ -301,6 +314,55 @@ struct ContentView: View {
     private func isFailed(_ viewModel: TransferViewModel) -> Bool {
         if case .failed = viewModel.phase { return true }
         return false
+    }
+}
+
+private struct TransferSetupStageView: View {
+    @Environment(\.appLanguage) private var language
+    @State private var role: TransferRole = .send
+    @ObservedObject var send: TransferViewModel
+    @ObservedObject var receive: TransferViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            rolePicker
+            Group {
+                switch role {
+                case .send:
+                    SendView(viewModel: send)
+                case .receive:
+                    ReceiveView(viewModel: receive)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+    }
+
+    private var rolePicker: some View {
+        HStack(spacing: 4) {
+            ForEach(TransferRole.allCases, id: \.self) { item in
+                Button {
+                    role = item
+                } label: {
+                    Label(item.title(language: language), systemImage: item.icon)
+                        .font(.body.weight(.semibold))
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .foregroundStyle(role == item ? Theme.accentStrong : Theme.muted)
+                        .contentShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
+                }
+                .buttonStyle(.plain)
+                .background(
+                    role == item ? Theme.surface : Color.clear,
+                    in: RoundedRectangle(cornerRadius: Theme.cardRadius)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.cardRadius)
+                        .strokeBorder(role == item ? Theme.accent.opacity(0.45) : Color.clear, lineWidth: 0.8)
+                )
+            }
+        }
+        .padding(4)
+        .background(Theme.line.opacity(0.35), in: RoundedRectangle(cornerRadius: Theme.cardRadius))
     }
 }
 
@@ -1085,22 +1147,40 @@ private struct SettingsStageView: View {
 
     private func settingToggle(_ title: String, isOn: Binding<Bool>) -> some View {
         Button {
-            isOn.wrappedValue.toggle()
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isOn.wrappedValue.toggle()
+            }
         } label: {
             HStack(spacing: 12) {
                 Text(title)
                     .font(.title3)
                     .foregroundStyle(Theme.text)
                 Spacer(minLength: 12)
-                Toggle("", isOn: isOn)
-                    .labelsHidden()
-                    .toggleStyle(.switch)
-                    .allowsHitTesting(false)
+                SettingSwitchIndicator(isOn: isOn.wrappedValue)
             }
-            .frame(maxWidth: .infinity, minHeight: 46, alignment: .leading)
-            .contentShape(Rectangle())
+            .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+            .contentShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
         }
         .buttonStyle(.plain)
-        .accessibilityAddTraits(isOn.wrappedValue ? .isSelected : [])
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(title)
+        .accessibilityValue(isOn.wrappedValue ? "On" : "Off")
+    }
+}
+
+private struct SettingSwitchIndicator: View {
+    let isOn: Bool
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 16)
+            .fill(isOn ? Theme.accent : Theme.line)
+            .frame(width: 48, height: 28)
+            .overlay(alignment: isOn ? .trailing : .leading) {
+                Circle()
+                    .fill(Color.white)
+                    .shadow(color: Color.black.opacity(0.12), radius: 2, y: 1)
+                    .frame(width: 24, height: 24)
+                    .padding(2)
+            }
     }
 }

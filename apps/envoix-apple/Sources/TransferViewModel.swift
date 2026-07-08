@@ -26,6 +26,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var activityMetrics: [String: ActivityMetrics] = [:]
 
     private var cancellables = Set<AnyCancellable>()
+    private var removedActivityIDs = Set<String>()
     private let activityCap = 50
     private let activityLogTimestamp: DateFormatter = {
         let formatter = DateFormatter()
@@ -42,6 +43,7 @@ final class AppModel: ObservableObject {
                 .compactMap { $0 }
                 .sink { [weak self, weak vm] record in
                     self?.upsertActivity(record, speedBps: vm?.bytesPerSec ?? 0)
+                    self?.syncActivitySnapshots()
                 }
                 .store(in: &cancellables)
         }
@@ -51,23 +53,48 @@ final class AppModel: ObservableObject {
     var isActive: Bool { receive.isBusy || send.isBusy }
 
     func pauseActivity(_ activityID: String) {
-        if receive.pauseActivity(activityID) { return }
-        _ = send.pauseActivity(activityID)
+        if receive.pauseActivity(activityID) {
+            syncActivitySnapshots()
+            return
+        }
+        if send.pauseActivity(activityID) {
+            syncActivitySnapshots()
+        }
     }
 
     func resumeActivity(_ activityID: String) {
-        if receive.resumeActivity(activityID) { return }
-        _ = send.resumeActivity(activityID)
+        if receive.resumeActivity(activityID) {
+            syncActivitySnapshots()
+            return
+        }
+        if send.resumeActivity(activityID) {
+            syncActivitySnapshots()
+        }
     }
 
     func removeActivity(_ activityID: String) {
+        removedActivityIDs.insert(activityID)
         receive.cancelActivityForRemoval(activityID)
         send.cancelActivityForRemoval(activityID)
         activities.removeAll { $0.activityId == activityID }
         activityMetrics.removeValue(forKey: activityID)
     }
 
+    private func syncActivitySnapshots() {
+        let records = receive.listTransferActivities() + send.listTransferActivities()
+        for record in records where !removedActivityIDs.contains(record.activityId) {
+            upsertActivity(record, speedBps: speedBps(for: record.activityId))
+        }
+    }
+
+    private func speedBps(for activityID: String) -> Double {
+        if receive.ownsActivity(activityID) { return receive.bytesPerSec }
+        if send.ownsActivity(activityID) { return send.bytesPerSec }
+        return activityMetrics[activityID]?.speedBps ?? 0
+    }
+
     private func upsertActivity(_ record: FfiTransferActivityRecord, speedBps: Double) {
+        guard !removedActivityIDs.contains(record.activityId) else { return }
         if let index = activities.firstIndex(where: { $0.activityId == record.activityId }) {
             activities[index] = record
         } else {
@@ -291,6 +318,14 @@ final class TransferViewModel: ObservableObject {
     func cancelActivityForRemoval(_ activityID: String) {
         guard isBusy, !activityID.isEmpty, activityID == currentActivityID else { return }
         cancel()
+    }
+
+    func listTransferActivities() -> [FfiTransferActivityRecord] {
+        session?.listTransferActivities() ?? []
+    }
+
+    func ownsActivity(_ activityID: String) -> Bool {
+        !activityID.isEmpty && activityID == currentActivityID
     }
 
     @discardableResult
