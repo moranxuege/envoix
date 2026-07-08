@@ -11,6 +11,7 @@ struct ReceiveView: View {
     @AppStorage("envoix.language") private var language = "en"
     @AppStorage("envoix.serverURL") private var serverURL = ""
     @AppStorage("envoix.relayURL") private var relayURL = ""
+    @AppStorage("envoix.configChunkSize") private var configChunkSize = ""
     @AppStorage("envoix.speedLimit") private var speedLimit = 40
     @State private var mode: PairingMode = .room
     @State private var roomCode = newRoomCode()
@@ -353,6 +354,7 @@ struct ReceiveView: View {
                 language: language,
                 serverURL: serverURL,
                 relayURL: relayURL,
+                configChunkSize: configChunkSize,
                 speedLimit: speedLimit
             )
             viewModel.startReceivingWithToken(
@@ -374,6 +376,7 @@ struct ReceiveView: View {
                 language: language,
                 serverURL: serverURL,
                 relayURL: relayURL,
+                configChunkSize: configChunkSize,
                 speedLimit: speedLimit
             )
             viewModel.startReceivingWithRoom(
@@ -395,6 +398,7 @@ struct ReceiveView: View {
                 language: language,
                 serverURL: serverURL,
                 relayURL: relayURL,
+                configChunkSize: configChunkSize,
                 speedLimit: speedLimit
             )
             viewModel.startReceivingWithInvite(

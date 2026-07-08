@@ -467,6 +467,9 @@ private struct SettingsStageView: View {
     @AppStorage("envoix.language") private var language = "en"
     @AppStorage("envoix.serverURL") private var serverURL = ""
     @AppStorage("envoix.relayURL") private var relayURL = ""
+    @AppStorage("envoix.configChunkSize") private var configChunkSize = ""
+    @AppStorage("envoix.developerMode") private var developerMode = false
+    @AppStorage("envoix.verboseLog") private var verboseLog = false
     @AppStorage("envoix.speedLimit") private var speedLimit = 40
 
     var body: some View {
@@ -505,18 +508,58 @@ private struct SettingsStageView: View {
                 }
                 .card(padding: 14)
 
-                settingField(
-                    AppText.value("Rendezvous broker", "配对服务器", language: language),
-                    text: $serverURL,
-                    placeholder: defaultRendezvousBroker,
-                    helper: AppText.value("Leave empty to use the built-in Envoix broker.", "留空则使用内置 Envoix 配对服务器。", language: language)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(AppText.value("Developer mode", "开发者模式", language: language))
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(Theme.muted)
+                    Toggle(AppText.value("Enable developer mode", "开启开发者模式", language: language), isOn: $developerMode)
+                        .toggleStyle(.switch)
+                    if developerMode {
+                        Toggle(
+                            AppText.value("Verbose logging", "详细日志", language: language),
+                            isOn: $verboseLog
+                        )
+                        .toggleStyle(.switch)
+                        Text(AppText.value("Verbose logging is currently UI-only for Activity logs.", "详细日志目前仅用于活动日志展示。", language: language))
+                            .font(.body)
+                            .foregroundStyle(Theme.muted)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Theme.surface)
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.cardRadius)
+                        .strokeBorder(Theme.line.opacity(0.75), lineWidth: 0.8)
                 )
-                settingField(
-                    AppText.value("Relay URL", "中继 URL", language: language),
-                    text: $relayURL,
-                    placeholder: defaultRelayURL,
-                    helper: AppText.value("Leave empty to use the built-in relay for Room pairing.", "留空则使用内置中继服务。", language: language)
-                )
+                .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
+
+                if developerMode {
+                    settingField(
+                        AppText.value("Rendezvous broker", "配对服务器", language: language),
+                        text: $serverURL,
+                        placeholder: defaultRendezvousBroker,
+                        helper: AppText.value("Leave empty to use the built-in Envoix broker.", "留空则使用内置 Envoix 配对服务器。", language: language)
+                    )
+                    settingField(
+                        AppText.value("Relay URL", "中继 URL", language: language),
+                        text: $relayURL,
+                        placeholder: defaultRelayURL,
+                        helper: AppText.value("Leave empty to use the built-in relay for Room pairing.", "留空则使用内置中继服务。", language: language)
+                    )
+
+                    settingField(
+                        AppText.value("config.toml · chunk size", "config.toml · 块大小", language: language),
+                        text: $configChunkSize,
+                        placeholder: AppText.value("16MB / 65536", "16MB / 65536", language: language),
+                        helper: AppText.value(
+                            "Chunk size override written into runtime config.toml (leave empty to disable).",
+                            "可选块大小覆盖，写入 runtime config.toml；留空则不使用。",
+                            language: language
+                        )
+                    )
+                }
 
                 Text(AppText.value(
                     "Speed limiting is not exposed yet because current transfers do not enforce it.",

@@ -48,17 +48,21 @@ enum RuntimeSettingsProvider {
         language: String,
         serverURL: String,
         relayURL: String,
+        configChunkSize: String,
         speedLimit: Int
     ) throws -> EnvoixRuntimeSettings {
         guard speedLimit >= 0 else {
             throw RuntimeSettingsError("Speed limit cannot be negative.")
         }
 
+        let configPath = try resolveConfigPath(chunkSize: configChunkSize)
+
         return EnvoixRuntimeSettings(
             concurrentTransfers: concurrentTransfers,
             language: language,
             serverUrl: serverURL.trimmed,
             relayUrl: relayURL.trimmed,
+            configPath: configPath,
             speedLimitMbps: UInt64(speedLimit)
         )
     }
@@ -411,6 +415,32 @@ func byteString(_ bytes: UInt64) -> String {
     ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
 }
 
+/// Writes a minimal `config.toml` fragment to app storage and returns its path,
+/// or returns an empty string when no config overrides are configured.
+private let runtimeConfigFileName = "envoix-runtime-config.toml"
+
+func resolveConfigPath(chunkSize: String) throws -> String {
+    let chunkSize = chunkSize.trimmed
+    if chunkSize.isEmpty {
+        return ""
+    }
+
+    let supportDir = FileManager.default.urls(
+        for: .applicationSupportDirectory,
+        in: .userDomainMask,
+    ).first
+    guard let supportDir else {
+        throw RuntimeSettingsError("Could not locate Application Support directory.")
+    }
+    let configDir = supportDir.appendingPathComponent("envoix", isDirectory: true)
+    try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+    let configFile = configDir.appendingPathComponent(runtimeConfigFileName)
+    let escapedChunkSize = chunkSize.replacingOccurrences(of: "\"", with: "\\\"")
+    let contents = "chunk_size = \"\(escapedChunkSize)\"\n"
+    try contents.write(to: configFile, atomically: true, encoding: .utf8)
+    return configFile.path
+}
+
 /// Formats a transfer rate, picking the most fitting unit (e.g. "12.3 MB/s").
 func rateString(_ bytesPerSec: Double) -> String {
     byteString(UInt64(max(0, bytesPerSec))) + "/s"
@@ -427,6 +457,8 @@ func etaString(_ seconds: Double) -> String {
 /// Shared status / progress section used by both the send and receive views.
 struct TransferStatusView: View {
     @Environment(\.appLanguage) private var language
+    @AppStorage("envoix.developerMode") private var developerMode = false
+    @AppStorage("envoix.verboseLog") private var verboseLog = false
     @ObservedObject var viewModel: TransferViewModel
 
     var body: some View {
@@ -501,6 +533,11 @@ struct TransferStatusView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
+
+            if developerMode && !viewModel.eventLog.isEmpty {
+                Divider().overlay(Theme.line)
+                logsCard
+            }
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -510,6 +547,45 @@ struct TransferStatusView: View {
                 .strokeBorder(tint.opacity(borderOpacity), lineWidth: 0.9)
         )
         .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
+    }
+
+    @ViewBuilder private var logsCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(AppText.value("Activity log", "活动日志", language: language))
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(Theme.text)
+                Spacer(minLength: 8)
+                if verboseLog {
+                    Text(AppText.value("Verbose", "详细", language: language))
+                        .font(.caption.monospaced())
+                        .foregroundStyle(Theme.muted)
+                }
+                Button {
+                    copyToPasteboard(viewModel.eventLog.joined(separator: "\n"))
+                    ToastCenter.shared.show(AppText.value("Log copied", "日志已复制", language: language))
+                } label: {
+                    Label(AppText.value("Copy", "复制", language: language), systemImage: "doc.on.doc")
+                        .labelStyle(.iconOnly)
+                        .frame(width: 30, height: 30)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(viewModel.eventLog, id: \.self) { line in
+                        Text(line)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(Theme.muted)
+                            .lineLimit(2)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+            .frame(maxHeight: 180)
+        }
     }
 
     private var titleText: String {

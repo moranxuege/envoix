@@ -3,6 +3,7 @@ import SwiftUI
 import AppKit
 #endif
 import UniformTypeIdentifiers
+import EnvoixCore
 
 struct SendView: View {
     @Environment(\.appLanguage) private var uiLanguage
@@ -14,6 +15,7 @@ struct SendView: View {
     @AppStorage("envoix.language") private var language = "en"
     @AppStorage("envoix.serverURL") private var serverURL = ""
     @AppStorage("envoix.relayURL") private var relayURL = ""
+    @AppStorage("envoix.configChunkSize") private var configChunkSize = ""
     @AppStorage("envoix.speedLimit") private var speedLimit = 40
     @State private var invite: String = ""
     @State private var roomCode = ""
@@ -279,7 +281,7 @@ struct SendView: View {
                     .foregroundStyle(Theme.muted)
             }
             HStack(alignment: .top, spacing: 8) {
-                TextField("envoix:…", text: $invite, axis: .vertical)
+                TextField("envoix:… / envoix://pair/…", text: $invite, axis: .vertical)
                     .textFieldStyle(.plain)
                     .font(.body.monospaced())
                     .foregroundStyle(Theme.text)
@@ -319,12 +321,74 @@ struct SendView: View {
 
     private func handleScannedInvite(_ value: String) {
         let scanned = value.trimmed
+        if let parsedRoom = parseRoomInvite(scanned) {
+            roomCode = parsedRoom.code
+            if let broker = parsedRoom.broker, !broker.trimmed.isEmpty {
+                serverURL = broker.trimmed
+            }
+            if let relay = parsedRoom.relay, !relay.trimmed.isEmpty {
+                relayURL = relay.trimmed
+            }
+            mode = .room
+            invite = ""
+            ToastCenter.shared.show(AppText.value("Room QR scanned. Switched to code mode.", "已识别为房间二维码，已切换为码配对。", language: uiLanguage))
+            return
+        }
+
         guard scanned.lowercased().hasPrefix("envoix:") else {
             ToastCenter.shared.show(AppText.value("This QR code is not an Envoix invite.", "这个二维码不是 Envoix 邀请。", language: uiLanguage))
             return
         }
         invite = scanned
         ToastCenter.shared.show(AppText.value("Invite scanned", "邀请已扫描", language: uiLanguage))
+    }
+
+    private func parseRoomInvite(_ value: String) -> (code: String, broker: String?, relay: String?)? {
+        guard value.lowercased().hasPrefix("envoix://pair/") else { return nil }
+        guard let components = URLComponents(string: value) else { return nil }
+        let path = components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if path.isEmpty {
+            return nil
+        }
+        var broker: String?
+        var relay: String?
+        for item in components.queryItems ?? [] {
+            guard let value = item.value else { continue }
+            switch item.name.lowercased() {
+            case "broker":
+                broker = value.removingPercentEncoding
+            case "relay":
+                relay = value.removingPercentEncoding
+            default:
+                continue
+            }
+        }
+        return (path, broker?.trimmed, relay?.trimmed)
+    }
+
+    private func makeSettings(forRoomInvite parsed: (code: String, broker: String?, relay: String?)?) throws -> EnvoixRuntimeSettings {
+        let effectiveServer: String
+        if let scanned = parsed?.broker, !scanned.trimmed.isEmpty {
+            effectiveServer = scanned.trimmed
+        } else {
+            effectiveServer = serverURL.trimmed
+        }
+
+        let effectiveRelay: String
+        if let scanned = parsed?.relay, !scanned.trimmed.isEmpty {
+            effectiveRelay = scanned.trimmed
+        } else {
+            effectiveRelay = relayURL.trimmed
+        }
+
+        return try RuntimeSettingsProvider.make(
+            concurrentTransfers: concurrentTransfers,
+            language: language,
+            serverURL: effectiveServer,
+            relayURL: effectiveRelay,
+            configChunkSize: configChunkSize,
+            speedLimit: speedLimit
+        )
     }
 
     private var primaryLabel: String {
@@ -406,6 +470,7 @@ struct SendView: View {
                 language: language,
                 serverURL: serverURL,
                 relayURL: relayURL,
+                configChunkSize: configChunkSize,
                 speedLimit: speedLimit
             )
             switch mode {
@@ -417,12 +482,24 @@ struct SendView: View {
                     sourceAccess: selectedFileAccess
                 )
             case .invite:
-                viewModel.startSendingWithInvite(
-                    filePath: file.path,
-                    invite: invite.trimmed,
-                    settings: settings,
-                    sourceAccess: selectedFileAccess
-                )
+                if let parsedRoom = parseRoomInvite(invite.trimmed) {
+                    mode = .room
+                    roomCode = parsedRoom.code
+                    let roomSettings = try makeSettings(forRoomInvite: parsedRoom)
+                    viewModel.startSendingWithRoom(
+                        filePath: file.path,
+                        code: parsedRoom.code,
+                        settings: roomSettings,
+                        sourceAccess: selectedFileAccess
+                    )
+                } else {
+                    viewModel.startSendingWithInvite(
+                        filePath: file.path,
+                        invite: invite.trimmed,
+                        settings: settings,
+                        sourceAccess: selectedFileAccess
+                    )
+                }
             case .token:
                 viewModel.startSendingWithToken(
                     filePath: file.path,

@@ -48,14 +48,22 @@ final class TransferViewModel: ObservableObject {
     @Published var total: UInt64 = 0
     @Published var statusText: String = ""
     @Published var peerAddress: String = ""   // raw IP-bearing address, hidden by default
+    @Published var eventLog: [String] = []
     @Published var bytesPerSec: Double = 0    // rolling average, 0 until measurable
     @Published var completedFileURL: URL?     // receiver only: where the file landed
+    @Published var failure: FfiTransferFailure?
 
     private var session: EnvoixSession?
     private var destinationDir: String?       // receiver only
     private var resourceAccess: AnyObject?    // keeps iOS Files permission alive
     private var rate = RateTracker()
     private var suppressNextFailure = false
+    private var logLastProgress: Date = .distantPast
+    private var configLogTimestamp: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
     private var displayLanguage = "en"
     fileprivate var operationID = UUID()
 
@@ -163,6 +171,7 @@ final class TransferViewModel: ObservableObject {
     func handleInvite(_ invite: String) { self.invite = invite }
 
     func handleStarted(_ name: String, _ total: UInt64) {
+        appendLog("started · \(name) (\(byteString(total)))")
         fileName = name
         self.total = total
         transferred = 0
@@ -172,12 +181,14 @@ final class TransferViewModel: ObservableObject {
     }
 
     func handleProgress(_ transferred: UInt64, _ total: UInt64) {
+        appendLog("progress · \(byteString(transferred)) / \(byteString(total))", throttle: true)
         self.transferred = transferred
         self.total = total
         bytesPerSec = rate.record(transferred)
     }
 
     func handleCompleted(_ bytes: UInt64) {
+        appendLog("completed · \(byteString(bytes))")
         transferred = total
         bytesPerSec = 0
         if let dir = destinationDir, !fileName.isEmpty {
@@ -187,11 +198,26 @@ final class TransferViewModel: ObservableObject {
         phase = .completed(bytes: bytes)
     }
 
+    func handleTransferFailed(_ failure: FfiTransferFailure) {
+        appendLog("failed · \(failure.diagnosticMessage)")
+        if suppressNextFailure {
+            return
+        }
+        self.failure = failure
+        resourceAccess = nil
+        phase = .failed(friendlyFailure(failure, language: displayLanguage))
+    }
+
     func handleFailed(_ reason: String) {
+        appendLog("failed · \(reason)")
         if suppressNextFailure {
             suppressNextFailure = false
             reset()
             statusText = AppText.value("Canceled", "已取消", language: displayLanguage)
+            return
+        }
+        if let failure {
+            phase = .failed(friendlyFailure(failure, language: displayLanguage))
             return
         }
         resourceAccess = nil
@@ -204,9 +230,25 @@ final class TransferViewModel: ObservableObject {
     func handleStatus(_ message: String) {
         let prefix = "address: "
         if message.hasPrefix(prefix) {
+            appendLog("address · \(message.dropFirst(prefix.count))")
             peerAddress = String(message.dropFirst(prefix.count))
         } else {
+            appendLog("status · \(message)")
             statusText = message
+        }
+    }
+
+    private func appendLog(_ message: String, throttle: Bool = false) {
+        if throttle {
+            let now = Date()
+            if now.timeIntervalSince(logLastProgress) < 0.8 {
+                return
+            }
+            logLastProgress = now
+        }
+        eventLog.append("[\(configLogTimestamp.string(from: Date()))] \(message)")
+        if eventLog.count > 160 {
+            eventLog.removeFirst(eventLog.count - 160)
         }
     }
 
@@ -219,7 +261,9 @@ final class TransferViewModel: ObservableObject {
         peerAddress = ""
         bytesPerSec = 0
         completedFileURL = nil
+        failure = nil
         resourceAccess = nil
+        eventLog.removeAll()
         rate.reset()
         phase = .idle
     }
@@ -280,6 +324,39 @@ func friendlyError(_ reason: String, language: String = "en") -> String {
     return reason
 }
 
+func friendlyFailure(_ failure: FfiTransferFailure, language: String = "en") -> String {
+    switch failure.code {
+    case .userCanceled:
+        return AppText.value("Transfer canceled", "传输已取消", language: language)
+    case .peerCanceled:
+        return AppText.value("The other device canceled the transfer.", "另一台设备取消了传输。", language: language)
+    case .networkLost:
+        return AppText.value("The connection was lost. Try again when both devices are online.", "连接已中断。请确认两台设备在线后重试。", language: language)
+    case .peerUnreachable:
+        return AppText.value("No device found. Check that the other side is running and the code or token is correct.", "未发现设备。请确认另一端正在运行，并且配对码或口令正确。", language: language)
+    case .authenticationFailed:
+        return AppText.value("Pairing failed. Check the code or token on both devices.", "配对失败。请检查两台设备上的配对码或口令。", language: language)
+    case .permissionDenied:
+        return AppText.value("Access was denied. Choose a folder again or check local-network permissions.", "访问被拒绝。请重新选择文件夹，或检查本地网络权限。", language: language)
+    case .diskFull:
+        return AppText.value("There is not enough space to save the file.", "没有足够空间保存文件。", language: language)
+    case .hashMismatch:
+        return AppText.value("The received file did not pass verification. Please retry the transfer.", "接收的文件未通过校验。请重新传输。", language: language)
+    case .protocolError:
+        return AppText.value("The two devices did not agree on the transfer protocol. Update both apps and try again.", "两台设备的传输协议不一致。请更新两端应用后重试。", language: language)
+    case .destinationConflict:
+        return AppText.value("The file could not be saved to the selected destination. Choose another folder and try again.", "文件无法保存到当前目标位置。请选择其他文件夹后重试。", language: language)
+    case .unsupportedFeature:
+        return AppText.value("This transfer mode is not supported by the other app version.", "另一端应用版本不支持此传输模式。", language: language)
+    case .timeout:
+        return AppText.value("The transfer timed out. Try again; a retry may resume from partial progress.", "传输超时。请重试，可能会从已有进度继续。", language: language)
+    case .internalError:
+        return AppText.value("An internal transfer error occurred. Try again or copy diagnostics from Activity.", "发生内部传输错误。请重试，或从活动页复制诊断信息。", language: language)
+    case .unknown:
+        return failure.diagnosticMessage
+    }
+}
+
 /// Bridges core `TransferObserver` callbacks (delivered on Rust runtime threads)
 /// onto the main thread before touching the view model.
 final class Observer: TransferObserver, @unchecked Sendable {
@@ -295,6 +372,7 @@ final class Observer: TransferObserver, @unchecked Sendable {
     func onStarted(fileName: String, totalBytes: UInt64) { hop { $0.handleStarted(fileName, totalBytes) } }
     func onProgress(transferred: UInt64, total: UInt64) { hop { $0.handleProgress(transferred, total) } }
     func onCompleted(bytes: UInt64) { hop { $0.handleCompleted(bytes) } }
+    func onTransferFailed(failure: FfiTransferFailure) { hop { $0.handleTransferFailed(failure) } }
     func onFailed(reason: String) { hop { $0.handleFailed(reason) } }
     func onStatus(message: String) { hop { $0.handleStatus(message) } }
 
