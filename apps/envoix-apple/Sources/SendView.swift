@@ -19,6 +19,7 @@ struct SendView: View {
     @AppStorage("envoix.speedLimit") private var speedLimit = 40
     @State private var invite: String = ""
     @State private var roomCode = ""
+    @State private var roomInviteSource = ""
     @State private var mode: PairingMode = .room
     @State private var dropTargeted = false
     @State private var filePathInput = ""
@@ -61,14 +62,7 @@ struct SendView: View {
                 if mode == .invite {
                     inviteSection
                 } else if mode == .room {
-                    RoomCodeField(
-                        code: $roomCode,
-                        disabled: viewModel.isBusy,
-                        title: AppText.value("Receiver code", "接收码", language: uiLanguage),
-                        placeholder: AppText.value("Code shown on the receiver", "接收端屏幕上的码", language: uiLanguage),
-                        helper: AppText.value("Enter the code shown on the receiving device, then send this file.", "输入接收端屏幕上的码，然后发送这个文件。", language: uiLanguage)
-                    )
-                    .card(padding: 14)
+                    roomModeSection
                 } else {
                     TokenField(token: $token, disabled: viewModel.isBusy)
                         .card(padding: 14)
@@ -81,6 +75,59 @@ struct SendView: View {
             .padding(.bottom, 88)
             #endif
         }
+    }
+
+    @ViewBuilder private var roomModeSection: some View {
+        RoomCodeField(
+            code: roomCodeBinding,
+            disabled: viewModel.isBusy,
+            title: AppText.value("Receiver code", "接收码", language: uiLanguage),
+            placeholder: AppText.value("Code shown on the receiver", "接收端屏幕上的码", language: uiLanguage),
+            helper: AppText.value("Enter the code shown on the receiving device, then send this file.", "输入接收端屏幕上的码，然后发送这个文件。", language: uiLanguage)
+        )
+        .card(padding: 14)
+
+        if !roomInviteSource.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(AppText.value("Pairing link", "配对链接", language: uiLanguage))
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(Theme.muted)
+                LinkRow(text: roomInviteSource) {
+                    Button {
+                        copyWithToast(roomInviteSource, AppText.value("Link copied", "链接已复制", language: uiLanguage))
+                    } label: {
+                        Label(AppText.value("Copy", "复制", language: uiLanguage), systemImage: "doc.on.doc")
+                            .labelStyle(.iconOnly)
+                            .frame(width: 30, height: 30)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+
+                    Button {
+                        roomInviteSource = ""
+                    } label: {
+                        Label(AppText.value("Clear", "清除", language: uiLanguage), systemImage: "xmark.circle")
+                            .labelStyle(.iconOnly)
+                            .frame(width: 30, height: 30)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .card(padding: 14)
+        }
+    }
+
+    private var roomCodeBinding: Binding<String> {
+        Binding(
+            get: { roomCode },
+            set: { value in
+                if value.trimmed != roomCode.trimmed {
+                    roomInviteSource = ""
+                }
+                roomCode = value
+            }
+        )
     }
 
     @ViewBuilder private var footerMessage: some View {
@@ -330,6 +377,7 @@ struct SendView: View {
                 relayURL = relay.trimmed
             }
             mode = .room
+            roomInviteSource = scanned
             invite = ""
             ToastCenter.shared.show(AppText.value("Room QR scanned. Switched to code mode.", "已识别为房间二维码，已切换为码配对。", language: uiLanguage))
             return
@@ -340,6 +388,7 @@ struct SendView: View {
             return
         }
         invite = scanned
+        roomInviteSource = ""
         ToastCenter.shared.show(AppText.value("Invite scanned", "邀请已扫描", language: uiLanguage))
     }
 
@@ -485,6 +534,7 @@ struct SendView: View {
                 if let parsedRoom = parseRoomInvite(invite.trimmed) {
                     mode = .room
                     roomCode = parsedRoom.code
+                    roomInviteSource = invite.trimmed
                     let roomSettings = try makeSettings(forRoomInvite: parsedRoom)
                     viewModel.startSendingWithRoom(
                         filePath: file.path,
@@ -493,6 +543,7 @@ struct SendView: View {
                         sourceAccess: selectedFileAccess
                     )
                 } else {
+                    roomInviteSource = ""
                     viewModel.startSendingWithInvite(
                         filePath: file.path,
                         invite: invite.trimmed,
