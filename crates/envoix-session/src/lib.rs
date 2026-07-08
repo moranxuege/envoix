@@ -344,6 +344,30 @@ where
     receive_one_authenticated(bound_endpoint, output_dir, config, pairing, events, cancel).await
 }
 
+/// Receives one file over an mDNS-advertised endpoint: binds an mDNS endpoint,
+/// reports the bound peer descriptor through `on_bound_peer` (so the caller can
+/// advertise it), then accepts the first dialer that authenticates, ignoring
+/// failed pairings. Stops on cancellation. The mDNS counterpart of
+/// [`receive_file_with_bound_peer`].
+pub async fn receive_file_enable_mdns<F>(
+    listen_addrs: impl Into<BindAddrs>,
+    output_dir: PathBuf,
+    config: SessionConfig,
+    pairing: &PairingConfig,
+    events: Box<dyn EventSink>,
+    on_bound_peer: F,
+    cancel: TransferCancelToken,
+) -> Result<TransferSummary, SessionError>
+where
+    F: FnOnce(PeerDescriptor) + Send,
+{
+    let bound_endpoint =
+        bind_iroh_endpoint_enable_mdns(listen_addrs, &config.identity, &config.candidates).await?;
+    let peer = bound_endpoint.peer_descriptor()?;
+    on_bound_peer(peer);
+    receive_with_auth_retries(bound_endpoint, output_dir, config, pairing, events, cancel).await
+}
+
 /// Receives one file on an already-bound endpoint, stopping on cancellation.
 pub async fn receive_one_authenticated(
     bound_endpoint: BoundEndpoint,

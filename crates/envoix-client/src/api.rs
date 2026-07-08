@@ -32,9 +32,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use envoix_qr::{QrInvitePayload, generate_token};
 use envoix_session::{
     BindAddrs, DEFAULT_CHUNK_SIZE, SessionConfig, TransferCancelToken, TransferDirection,
-    TransferSummary, bind_iroh_endpoint_enable_mdns, parse_broker_addr, receive_file_via_room,
-    receive_file_with_bound_peer, receive_with_auth_retries, send_file_enable_mdns,
-    send_file_manual, send_file_via_room,
+    TransferSummary, parse_broker_addr, receive_file_enable_mdns, receive_file_via_room,
+    receive_file_with_bound_peer, send_file_enable_mdns, send_file_manual, send_file_via_room,
 };
 use tracing::Instrument;
 
@@ -294,16 +293,7 @@ impl Client {
                 let pairing = shared_token(&token)?;
                 let config = self.session_config(&options);
                 let cancel = cancel.clone();
-                let on_bound = {
-                    let events = events.clone();
-                    move |peer: PeerDescriptor| {
-                        events.emit(TransferEvent::Advertised {
-                            peer,
-                            token: Some(token),
-                            invite: None,
-                        });
-                    }
-                };
+                let on_bound = advertise(events.clone(), token, None);
                 Box::pin(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Receive,
@@ -320,7 +310,7 @@ impl Client {
                 let pairing = shared_token(&token)?;
                 let config = self.session_config(&options);
                 let cancel = cancel.clone();
-                let on_bound = advertise_with_invite(events.clone(), token, ttl_secs);
+                let on_bound = advertise(events.clone(), token, Some(ttl_secs));
                 Box::pin(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Receive,
@@ -341,26 +331,15 @@ impl Client {
                 };
                 let pairing = shared_token(&token)?;
                 let config = self.session_config(&options);
-                let identity = self.identity.clone();
                 let cancel = cancel.clone();
+                let on_bound = advertise(events.clone(), token, invite_ttl);
                 Box::pin(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Receive,
                         mode,
                     });
-                    let endpoint =
-                        bind_iroh_endpoint_enable_mdns(listen, &identity, &config.candidates)
-                            .await?;
-                    let peer = endpoint.peer_descriptor()?;
-                    let invite = invite_ttl.map(|ttl| {
-                        QrInvitePayload::new(token.clone(), peer.clone(), unix_now() + ttl).encode()
-                    });
-                    events.emit(TransferEvent::Advertised {
-                        peer,
-                        token: Some(token),
-                        invite,
-                    });
-                    receive_with_auth_retries(endpoint, into, config, &pairing, sink, cancel).await
+                    receive_file_enable_mdns(listen, into, config, &pairing, sink, on_bound, cancel)
+                        .await
                 })
             }
             PeerSource::Room { code, broker } => {
@@ -424,20 +403,22 @@ fn new_token() -> Result<String, TransferError> {
     })
 }
 
-/// An `on_bound` callback that advertises the peer together with an encoded
-/// invite expiring after `ttl_secs`.
-fn advertise_with_invite(
+/// An `on_bound` callback that advertises the bound peer with its token and,
+/// when `invite_ttl` is `Some`, an encoded invite expiring after that many
+/// seconds. Shared by every listening receive (show-manual, show-invite, mDNS).
+fn advertise(
     events: EventSender,
     token: String,
-    ttl_secs: u64,
+    invite_ttl: Option<u64>,
 ) -> impl FnOnce(PeerDescriptor) + Send {
     move |peer: PeerDescriptor| {
-        let invite =
-            QrInvitePayload::new(token.clone(), peer.clone(), unix_now() + ttl_secs).encode();
+        let invite = invite_ttl.map(|ttl| {
+            QrInvitePayload::new(token.clone(), peer.clone(), unix_now() + ttl).encode()
+        });
         events.emit(TransferEvent::Advertised {
             peer,
             token: Some(token),
-            invite: Some(invite),
+            invite,
         });
     }
 }
