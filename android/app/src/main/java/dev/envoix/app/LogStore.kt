@@ -13,6 +13,7 @@ import java.io.File
 object LogStore {
     private const val CAP = 4000
     private const val FILE_CAP_BYTES = 8L * 1024 * 1024 // rotate the on-disk log past 8 MB
+    private const val KEEP = 3 // previous-launch logs to retain: core-1.log .. core-3.log
 
     private val buffer = ArrayDeque<String>()
     private val _lines = MutableStateFlow<List<String>>(emptyList())
@@ -25,11 +26,11 @@ object LogStore {
     fun init(filesDir: File) {
         val dir = File(filesDir, "logs").apply { mkdirs() }
         logDir = dir
-        // Preserve the previous session's log — it may have ended in a native crash
-        // that skipped the JVM handler — as core-prev.log, then start a fresh file.
-        val current = File(dir, "core.log")
-        if (current.exists()) runCatching { current.renameTo(File(dir, "core-prev.log")) }
-        sink = runCatching { java.io.FileOutputStream(current) }.getOrNull()
+        // A launch boundary: retain the last KEEP sessions (core-1..core-KEEP), then
+        // start fresh. A session may end in a native crash that skips the JVM handler,
+        // so its log must survive several relaunches, not just the next one.
+        shiftRing(dir)
+        sink = runCatching { java.io.FileOutputStream(File(dir, "core.log")) }.getOrNull()
         written = 0L
     }
 
@@ -58,10 +59,24 @@ object LogStore {
         val dir = logDir ?: return
         runCatching {
             sink?.close()
-            File(dir, "core.log").renameTo(File(dir, "core-prev.log"))
+            shiftRing(dir)
             sink = java.io.FileOutputStream(File(dir, "core.log"))
             written = 0L
         }
+    }
+
+    /** Shift the retained ring one slot: core.log -> core-1 -> core-2 -> ... ->
+     *  core-KEEP, dropping the oldest. Folds the legacy single core-prev.log in on
+     *  first run so an upgrade doesn't lose the last crash log. */
+    private fun shiftRing(dir: File) {
+        File(dir, "core-prev.log").let { legacy ->
+            if (legacy.exists() && !File(dir, "core-1.log").exists())
+                legacy.renameTo(File(dir, "core-1.log"))
+            else legacy.delete()
+        }
+        File(dir, "core-$KEEP.log").delete()
+        for (i in KEEP downTo 2) File(dir, "core-${i - 1}.log").renameTo(File(dir, "core-$i.log"))
+        File(dir, "core.log").renameTo(File(dir, "core-1.log"))
     }
 
     @Synchronized
@@ -72,6 +87,24 @@ object LogStore {
         buffer.clear()
         _lines.value = emptyList()
     }
+
+    /** A retained session log: its file, a display label, and byte size. */
+    data class Session(val file: File, val label: String, val bytes: Long)
+
+    /** The retained session logs, newest first: the current session (core.log)
+     *  then the last [KEEP] launches. Only existing, non-empty files. Backs the
+     *  dev-mode "previous sessions" log UI (view / copy / upload). */
+    fun sessions(): List<Session> {
+        val dir = logDir ?: return emptyList()
+        val current = File(dir, "core.log")
+        val files = listOf(current) + (1..KEEP).map { File(dir, "core-$it.log") }
+        return files.filter { it.exists() && it.length() > 0 }.mapIndexed { i, f ->
+            Session(f, if (f == current) "Current session" else "$i launch(es) ago", f.length())
+        }
+    }
+
+    /** Read a retained session log's full text (for copy / upload). */
+    fun readSession(file: File): String = runCatching { file.readText() }.getOrDefault("")
 
     /** Persist the current buffer + an uncaught trace to a fixed path; a later
      *  "report on crash" reads this on the next launch and offers to upload it. */

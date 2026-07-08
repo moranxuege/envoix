@@ -17,14 +17,21 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -35,14 +42,20 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.envoix.app.LogStore
+import dev.envoix.app.LogUpload
+import dev.envoix.app.SettingsStore
+import kotlinx.coroutines.launch
 
 @Composable
 fun LogScreen(onBack: () -> Unit) {
     val colors = Envoix.colors
     val lines by LogStore.lines.collectAsState()
+    val settings by SettingsStore.settings.collectAsState()
     val listState = rememberLazyListState()
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var showSessions by remember { mutableStateOf(false) }
 
     LaunchedEffect(lines.size) {
         if (lines.isNotEmpty()) listState.scrollToItem(lines.size - 1)
@@ -68,6 +81,13 @@ fun LogScreen(onBack: () -> Unit) {
                 fontSize = 18.sp,
                 modifier = Modifier.weight(1f).padding(start = 4.dp),
             )
+            // Dev-mode: reach the retained previous-session logs (survive relaunches),
+            // for copy / upload — a native crash lives there, not in the live buffer.
+            if (settings.devMode) {
+                IconButton(onClick = { showSessions = true }) {
+                    Icon(Icons.Default.History, "Session logs", tint = colors.accent)
+                }
+            }
             IconButton(onClick = {
                 clipboard.setText(AnnotatedString(LogStore.dump()))
                 Toast.makeText(context, "Logs copied", Toast.LENGTH_SHORT).show()
@@ -100,6 +120,64 @@ fun LogScreen(onBack: () -> Unit) {
                 )
             }
         }
+    }
+
+    if (showSessions) {
+        // Snapshot the retained on-disk session logs when the dialog opens.
+        val sessions = remember { LogStore.sessions() }
+        val canUpload = settings.devMode && settings.logServer.isNotBlank()
+        AlertDialog(
+            onDismissRequest = { showSessions = false },
+            confirmButton = {
+                TextButton(onClick = { showSessions = false }) {
+                    Text("Close", color = colors.accent)
+                }
+            },
+            title = { Text("Session logs", color = colors.text) },
+            text = {
+                Column {
+                    if (sessions.isEmpty()) {
+                        Text("No logs on disk yet.", color = colors.muted, fontSize = 13.sp)
+                    }
+                    sessions.forEach { s ->
+                        Row(
+                            Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(s.label, color = colors.text, fontSize = 13.sp)
+                                Text(
+                                    "${(s.bytes + 1023) / 1024} KB",
+                                    color = colors.muted,
+                                    fontSize = 11.sp,
+                                )
+                            }
+                            TextButton(onClick = {
+                                clipboard.setText(AnnotatedString(LogStore.readSession(s.file)))
+                                Toast.makeText(context, "Copied ${s.label}", Toast.LENGTH_SHORT).show()
+                            }) { Text("Copy", color = colors.accent, fontSize = 13.sp) }
+                            if (canUpload) {
+                                TextButton(onClick = {
+                                    val key = "app-" + java.text.SimpleDateFormat(
+                                        "MMddHHmmss", java.util.Locale.US,
+                                    ).format(java.util.Date())
+                                    val body = LogStore.readSession(s.file)
+                                    scope.launch {
+                                        val ok = LogUpload.upload(settings.logServer, key, "app", body)
+                                        Toast.makeText(
+                                            context,
+                                            if (ok) "Uploaded → $key" else "Upload failed",
+                                            Toast.LENGTH_LONG,
+                                        ).show()
+                                    }
+                                }) { Text("Upload", color = colors.accent, fontSize = 13.sp) }
+                            }
+                        }
+                    }
+                }
+            },
+            containerColor = colors.surface,
+        )
     }
 }
 
