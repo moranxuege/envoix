@@ -42,7 +42,7 @@ class TransferViewModel(app: Application) : AndroidViewModel(app) {
     /** Pause a running transfer, or resume/retry a paused/failed one. */
     fun pauseResume(id: Long) {
         val t = TransferRepository.transfers.value.find { it.id == id } ?: return
-        if (t.status == Status.Paused || t.status == Status.Failed)
+        if (t.status == Status.Paused || t.status == Status.Failed || t.status == Status.Unconfirmed)
             TransferService.resume(getApplication(), id)
         else
             TransferService.pause(getApplication(), id)

@@ -222,6 +222,16 @@ class TransferService : Service() {
                                 // peer's exact reason (paused vs cancelled) isn't reliably
                                 // carried, so we key on "a partial exists", like most apps.
                                 if (t.status == Status.Cancelled || t.status == Status.Paused) t
+                                // A send that delivered every byte but lost the link before
+                                // the peer's CompleteAck: the file almost certainly arrived;
+                                // the sender just can't confirm it (Two-Generals). Say
+                                // "unconfirmed", not "failed" - it isn't a lost transfer.
+                                else if (t.direction == Direction.Send && t.total > 0 &&
+                                    t.bytes >= t.total && ev.error.contains("connection lost"))
+                                    t.copy(
+                                        status = Status.Unconfirmed, error = ev.error,
+                                        log = addLog(t.log, "sent · unconfirmed — all bytes sent, no CompleteAck"),
+                                    )
                                 else if (t.bytes > 0 && (
                                         ev.error.contains("connection lost") ||
                                             ev.error.contains("interrupted by peer")))

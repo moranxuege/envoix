@@ -2,7 +2,7 @@ package dev.envoix.app
 
 enum class Direction { Send, Receive }
 
-enum class Status { Connecting, Transferring, Paused, Completed, Failed, Cancelled }
+enum class Status { Connecting, Transferring, Paused, Completed, Unconfirmed, Failed, Cancelled }
 
 /** One transfer's observable state, shown as a card. */
 data class Transfer(
@@ -32,4 +32,5 @@ data class Transfer(
 )
 
 val Status.isTerminal: Boolean
-    get() = this == Status.Completed || this == Status.Failed || this == Status.Cancelled
+    get() = this == Status.Completed || this == Status.Unconfirmed ||
+        this == Status.Failed || this == Status.Cancelled

@@ -295,7 +295,7 @@ private fun TransferCard(
                         modifier = Modifier.fillMaxWidth().height(8.dp).clip(CircleShape),
                         color = when {
                             failed -> colors.danger
-                            t.status == Status.Paused -> colors.warning
+                            t.status == Status.Paused || t.status == Status.Unconfirmed -> colors.warning
                             cancelled -> colors.muted
                             else -> colors.accent
                         },
@@ -308,6 +308,13 @@ private fun TransferCard(
                     if (failed && t.error != null) {
                         Spacer(Modifier.height(6.dp))
                         Text(t.error, color = colors.danger, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
+                    if (t.status == Status.Unconfirmed) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            "All bytes sent — peer didn't confirm receipt. It likely arrived; tap ↻ to re-confirm.",
+                            color = colors.warning, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                        )
                     }
                 }
                 Spacer(Modifier.width(10.dp))
@@ -339,7 +346,8 @@ private fun CardControls(
                 CircleBtn(Icons.Default.PlayArrow, filled = true) { onPauseResume(t.id) }
                 CircleBtn(Icons.Default.Close, filled = false) { onCancel(t.id) }
             }
-            Status.Failed -> CircleBtn(Icons.Default.Refresh, filled = true) { onPauseResume(t.id) }
+            Status.Failed, Status.Unconfirmed ->
+                CircleBtn(Icons.Default.Refresh, filled = true) { onPauseResume(t.id) }
             Status.Completed -> if (t.savedUri != null) CircleBtn(Icons.Default.OpenInNew, filled = false) { onOpen(t) }
             Status.Cancelled -> {}
         }
@@ -594,6 +602,8 @@ private fun PathBadge(t: Transfer) {
     val colors = Envoix.colors
     val (label, fg, bg) = when {
         t.status == Status.Completed -> Triple("Done", colors.success, colors.successSoft)
+        t.status == Status.Unconfirmed ->
+            Triple("Sent · unconfirmed", colors.warning, colors.warning.copy(alpha = 0.14f))
         t.status == Status.Failed -> Triple("Failed", colors.danger, colors.danger.copy(alpha = 0.12f))
         t.status == Status.Cancelled -> Triple("Cancelled", colors.muted, colors.line.copy(alpha = 0.5f))
         t.status == Status.Paused -> Triple("Paused", colors.warning, colors.warning.copy(alpha = 0.14f))
@@ -649,6 +659,7 @@ private fun speedText(t: Transfer): String {
         Status.Completed -> "complete"
         Status.Paused -> "paused"
         Status.Failed -> "failed"
+        Status.Unconfirmed -> "unconfirmed"
         Status.Cancelled -> "cancelled"
         else -> "—"
     }
