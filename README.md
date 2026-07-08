@@ -4,7 +4,7 @@ Minimal CLI-first secure file transfer walking skeleton for VE441.
 
 ## Debug Build Marker
 
-Current app debug marker: `Debug build 2026.07.08.7`.
+Current app debug marker: `Debug build 2026.07.08.8`.
 
 Before pushing or installing a new Android, iOS, or macOS test build, bump this
 marker in both app clients so device testers can confirm the build actually

@@ -615,6 +615,7 @@ impl EnvoixSession {
         if request.activity_id.trim().is_empty() {
             request.activity_id = next_activity_id();
         }
+        normalize_transfer_limits(&self.settings, &mut request.limits);
         validate_transfer_request(&self.settings, &request)?;
         let activity = FfiTransferActivityRecord::from_request(&request, now_ms());
         {
@@ -709,7 +710,7 @@ fn drain_transfer_queue(
             let Some(next) = queue.pending.front() else {
                 return;
             };
-            let limit = effective_parallel_limit(&next.request.limits);
+            let limit = effective_parallel_limit(&settings, &next.request.limits);
             if !queue.can_start(limit) {
                 return;
             }
@@ -877,7 +878,14 @@ fn build_transfer_for_request(
     }
 }
 
-fn effective_parallel_limit(limits: &FfiTransferLimits) -> usize {
+fn normalize_transfer_limits(settings: &EnvoixRuntimeSettings, limits: &mut FfiTransferLimits) {
+    limits.max_parallel_transfers = effective_parallel_limit(settings, limits) as u32;
+}
+
+fn effective_parallel_limit(settings: &EnvoixRuntimeSettings, limits: &FfiTransferLimits) -> usize {
+    if !settings.concurrent_transfers {
+        return 1;
+    }
     limits.max_parallel_transfers.max(1) as usize
 }
 
@@ -1991,6 +1999,80 @@ mod tests {
         assert_eq!(failure.attempt_id, "attempt-1");
         assert_eq!(failure.direction, FfiTransferDirection::Send);
         assert_eq!(failure.code, FfiFailureCode::UnsupportedFeature);
+    }
+
+    #[test]
+    fn runtime_settings_normalize_parallel_transfer_limit() {
+        let mut limits = FfiTransferLimits {
+            max_parallel_transfers: 4,
+            ..FfiTransferLimits::default()
+        };
+        normalize_transfer_limits(
+            &EnvoixRuntimeSettings {
+                concurrent_transfers: false,
+                ..EnvoixRuntimeSettings::default()
+            },
+            &mut limits,
+        );
+        assert_eq!(limits.max_parallel_transfers, 1);
+
+        let mut limits = FfiTransferLimits {
+            max_parallel_transfers: 4,
+            ..FfiTransferLimits::default()
+        };
+        normalize_transfer_limits(&EnvoixRuntimeSettings::default(), &mut limits);
+        assert_eq!(limits.max_parallel_transfers, 4);
+
+        let mut limits = FfiTransferLimits {
+            max_parallel_transfers: 0,
+            ..FfiTransferLimits::default()
+        };
+        normalize_transfer_limits(&EnvoixRuntimeSettings::default(), &mut limits);
+        assert_eq!(limits.max_parallel_transfers, 1);
+    }
+
+    #[test]
+    fn ffi_queue_respects_serial_runtime_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let first_dir = dir.path().join("first");
+        let second_dir = dir.path().join("second");
+        std::fs::create_dir_all(&first_dir).unwrap();
+        std::fs::create_dir_all(&second_dir).unwrap();
+
+        let session = EnvoixSession::new_with_settings(EnvoixRuntimeSettings {
+            concurrent_transfers: false,
+            ..EnvoixRuntimeSettings::default()
+        });
+
+        let (first_tx, _first_rx) = channel();
+        let mut first = FfiTransferRequest::receive(
+            first_dir.to_str().unwrap().to_string(),
+            FfiTransferMode::ShowInvite,
+        );
+        first.activity_id = "serial-first".to_string();
+        first.limits.max_parallel_transfers = 2;
+        session
+            .start_transfer(first, Arc::new(TestObserver(first_tx)))
+            .unwrap();
+
+        let (second_tx, second_rx) = channel();
+        let mut second = FfiTransferRequest::receive(
+            second_dir.to_str().unwrap().to_string(),
+            FfiTransferMode::ShowInvite,
+        );
+        second.activity_id = "serial-second".to_string();
+        second.limits.max_parallel_transfers = 2;
+        session
+            .start_transfer(second, Arc::new(TestObserver(second_tx)))
+            .unwrap();
+
+        let queued = recv_activity(&second_rx, "serial-second", Duration::from_secs(2));
+        assert_eq!(queued.state, FfiTransferActivityState::Queued);
+        assert_eq!(queued.limits.max_parallel_transfers, 1);
+        assert_no_nonqueued_activity(&second_rx, "serial-second", Duration::from_millis(200));
+
+        assert!(session.cancel_activity("serial-second".to_string()));
+        assert!(session.cancel_activity("serial-first".to_string()));
     }
 
     #[test]
