@@ -40,6 +40,9 @@ pub use room::{receive_file_via_room, send_file_via_room};
 const ALPN: &[u8] = b"envoix/1";
 const MAX_AUTH_FAILURES: u32 = 50;
 const MDNS_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
+/// Per-candidate connect budget in the mDNS send loop: a stale or unreachable
+/// endpoint fails this fast instead of hanging until the full transport timeout.
+const MDNS_CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// Error type returned by session orchestration.
 pub type SessionError = CoreError;
@@ -238,32 +241,25 @@ pub async fn send_file_enable_mdns(
         .add(mdns.clone());
 
     let mut discoveries = mdns.subscribe().await;
-    let deadline = tokio::time::Instant::now() + MDNS_DISCOVERY_TIMEOUT;
+    let mut tried: std::collections::HashSet<_> = std::collections::HashSet::new();
+    let mut next_deadline = tokio::time::Instant::now() + MDNS_DISCOVERY_TIMEOUT;
     let mut last_error = None;
 
+    // Try every freshly discovered endpoint (deduped by id) with a bounded
+    // connect, so a stale/unreachable candidate can't starve the live one: a
+    // failed connect just moves on to the next candidate. Give up only when no
+    // *new* endpoint shows up within the discovery window (re-advertisements of
+    // already-tried peers don't extend it).
     loop {
-        let now = tokio::time::Instant::now();
-        if now >= deadline {
-            break;
-        }
-
         let event = tokio::select! {
-            result = tokio::time::timeout_at(deadline, discoveries.next()) => {
-                result.map_err(|_| {
-                    CoreError::Discovery(format!(
-                        "no iroh mDNS peers discovered within {} seconds",
-                        MDNS_DISCOVERY_TIMEOUT.as_secs()
-                    ))
-                })?
-            }
+            result = tokio::time::timeout_at(next_deadline, discoveries.next()) => match result {
+                Ok(Some(event)) => event,
+                Ok(None) | Err(_) => break,
+            },
             () = cancel.cancelled() => {
                 local_endpoint.close().await;
                 return Err(interrupted_error());
             }
-        };
-
-        let Some(event) = event else {
-            break;
         };
 
         let DiscoveryEvent::Discovered {
@@ -273,20 +269,22 @@ pub async fn send_file_enable_mdns(
         else {
             continue;
         };
-        if discovered_peer.endpoint_id == local_endpoint.id() {
+        if discovered_peer.endpoint_id == local_endpoint.id()
+            || !tried.insert(discovered_peer.endpoint_id)
+        {
             continue;
         }
-        let peer_addr = discovered_peer.to_endpoint_addr();
 
         match send_file_to_peer_addr(
             local_endpoint.clone(),
-            peer_addr,
+            discovered_peer.to_endpoint_addr(),
             file_path.clone(),
             resume,
             config.clone(),
             pairing,
             events.clone(),
             &cancel,
+            MDNS_CONNECT_TIMEOUT,
         )
         .await
         {
@@ -306,6 +304,7 @@ pub async fn send_file_enable_mdns(
                 last_error = Some(error);
             }
         }
+        next_deadline = tokio::time::Instant::now() + MDNS_DISCOVERY_TIMEOUT;
     }
 
     local_endpoint.close().await;
@@ -507,9 +506,25 @@ async fn send_file_to_peer_addr(
     pairing: &PairingConfig,
     events: Arc<dyn EventSink>,
     cancel: &TransferCancelToken,
+    connect_timeout: Duration,
 ) -> Result<TransferSummary, SessionError> {
     events.on_event(TransferEvent::Connecting);
-    let mut connection = dial_peer_addr(local_endpoint, peer_addr).await?;
+    // Bound the dial so a stale/unreachable mDNS candidate fails fast instead of
+    // hanging until the full transport timeout; the transfer itself is unbounded.
+    let mut connection = match tokio::time::timeout(
+        connect_timeout,
+        dial_peer_addr(local_endpoint, peer_addr),
+    )
+    .await
+    {
+        Ok(result) => result?,
+        Err(_) => {
+            return Err(CoreError::Transport(format!(
+                "connect to peer timed out after {}s",
+                connect_timeout.as_secs()
+            )));
+        }
+    };
     connection.watch_path(events.clone());
     let engine = TransferEngine::new(config.chunk_size);
     if let Err(error) = authenticate_sender(&mut connection, pairing).await {
