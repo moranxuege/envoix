@@ -33,6 +33,7 @@ class TransferViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Remove a transfer from the list, cancelling it first if it's still active. */
     fun remove(id: Long) {
+        OpLog.add("remove transfer id=$id")
         val t = TransferRepository.transfers.value.find { it.id == id }
         if (t != null && !t.status.isTerminal) TransferService.cancel(getApplication(), id)
         TransferRepository.remove(id)

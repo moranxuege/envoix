@@ -45,6 +45,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.envoix.app.LogStore
 import dev.envoix.app.LogUpload
+import dev.envoix.app.OpLog
 import dev.envoix.app.SettingsStore
 import kotlinx.coroutines.launch
 
@@ -145,6 +146,39 @@ fun LogScreen(onBack: () -> Unit) {
             title = { Text("Session logs", color = colors.text) },
             text = {
                 Column {
+                    // Operations breadcrumbs — the user-action trail, kept separate
+                    // from the core transfer trace (the session logs below).
+                    Row(
+                        Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Operations", color = colors.text, fontSize = 13.sp)
+                            Text(
+                                "what you did · recent launches",
+                                color = colors.muted, fontSize = 11.sp,
+                            )
+                        }
+                        TextButton(onClick = {
+                            copyToClipboard(clipboard, context, OpLog.report(), "operations")
+                        }) { Text("Copy", color = colors.accent, fontSize = 13.sp) }
+                        if (canUpload) {
+                            TextButton(onClick = {
+                                val key = "ops-" + java.text.SimpleDateFormat(
+                                    "MMddHHmmss", java.util.Locale.US,
+                                ).format(java.util.Date())
+                                val body = tail(OpLog.report(), UPLOAD_MAX)
+                                scope.launch {
+                                    val ok = LogUpload.upload(settings.logServer, key, "ops", body)
+                                    Toast.makeText(
+                                        context,
+                                        if (ok) "Uploaded → $key" else "Upload failed",
+                                        Toast.LENGTH_LONG,
+                                    ).show()
+                                }
+                            }) { Text("Upload", color = colors.accent, fontSize = 13.sp) }
+                        }
+                    }
                     if (sessions.isEmpty()) {
                         Text("No logs on disk yet.", color = colors.muted, fontSize = 13.sp)
                     }

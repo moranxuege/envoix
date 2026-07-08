@@ -100,7 +100,7 @@ class TransferService : Service() {
                     )
                 }
                 specs[id] = spec
-                LogStore.append("app: start $direction room=${room.substringBefore('-')} id=$id")
+                OpLog.add("start $direction room=${room.substringBefore('-')} id=$id")
                 runLoop(id, spec)
             }
             ACTION_RESUME -> {
@@ -108,18 +108,23 @@ class TransferService : Service() {
                 val spec = specs[id] ?: return stopIfIdle()
                 enterForeground()
                 TransferRepository.update(id) { it.copy(status = Status.Connecting, error = null) }
-                LogStore.append("app: resume id=$id")
+                OpLog.add("resume transfer id=$id")
                 runLoop(id, spec)
             }
             ACTION_PAUSE -> {
                 val id = intent.getLongExtra(EXTRA_ID, -1L)
-                Native.cancel(id)
+                OpLog.add("pause transfer id=$id")
+                // Mark Paused *before* cancelling: the cancel triggers an
+                // `interrupted by user` Failed event, and the event loop keeps a
+                // status that is already Paused - so a pause never flips to Failed.
                 TransferRepository.update(id) {
                     if (it.status.isTerminal) it else it.copy(status = Status.Paused, speedBps = 0.0)
                 }
+                Native.cancel(id)
             }
             ACTION_CANCEL -> {
                 val id = intent.getLongExtra(EXTRA_ID, -1L)
+                OpLog.add("cancel transfer id=$id")
                 Native.cancel(id)
                 specs.remove(id)
                 TransferRepository.update(id) {
@@ -172,7 +177,7 @@ class TransferService : Service() {
                                     fileName = ev.fileName, total = ev.totalBytes, status = Status.Transferring,
                                     log = addLog(t.log, "started · ${ev.fileName}"),
                                 )
-                            is CliEvent.Progress -> {
+                            is CliEvent.Progress -> if (t.status == Status.Paused) t else {
                                 val now = System.nanoTime()
                                 if (startTs == 0L) {
                                     startTs = now; lastTs = now; lastBytes = ev.bytesTransferred
