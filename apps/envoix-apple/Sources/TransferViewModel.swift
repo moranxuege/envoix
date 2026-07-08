@@ -53,6 +53,7 @@ final class TransferViewModel: ObservableObject {
     @Published var completedFileURL: URL?     // receiver only: where the file landed
     @Published var failure: FfiTransferFailure?
     @Published var transferEvents: [FfiTransferEvent] = []
+    @Published var transferActivity: FfiTransferActivityRecord?
 
     private var session: EnvoixSession?
     private var destinationDir: String?       // receiver only
@@ -66,6 +67,7 @@ final class TransferViewModel: ObservableObject {
         return formatter
     }()
     private var displayLanguage = "en"
+    private var currentActivityID = ""
     fileprivate var operationID = UUID()
 
     var progressFraction: Double {
@@ -91,7 +93,7 @@ final class TransferViewModel: ObservableObject {
     func startReceivingWithToken(outputDir: String, token: String, settings: EnvoixRuntimeSettings, destinationAccess: AnyObject? = nil) {
         destinationDir = outputDir
         let request = makeRequest(direction: .receive, mode: .mdns, settings: settings, outputDir: outputDir, token: token)
-        start(settings: settings, phase: .waiting) { try $0.startTransfer(request: request, observer: $1) }
+        start(settings: settings, phase: .waiting, activityID: request.activityId) { try $0.startTransfer(request: request, observer: $1) }
         retainResourceAccess(destinationAccess)
     }
 
@@ -99,7 +101,7 @@ final class TransferViewModel: ObservableObject {
     func startReceivingWithRoom(outputDir: String, code: String, settings: EnvoixRuntimeSettings, destinationAccess: AnyObject? = nil) {
         destinationDir = outputDir
         let request = makeRequest(direction: .receive, mode: .room, settings: settings, outputDir: outputDir, code: code)
-        start(settings: settings, phase: .waiting) { try $0.startTransfer(request: request, observer: $1) }
+        start(settings: settings, phase: .waiting, activityID: request.activityId) { try $0.startTransfer(request: request, observer: $1) }
         retainResourceAccess(destinationAccess)
     }
 
@@ -107,7 +109,7 @@ final class TransferViewModel: ObservableObject {
     func startReceivingWithInvite(outputDir: String, settings: EnvoixRuntimeSettings, destinationAccess: AnyObject? = nil) {
         destinationDir = outputDir
         let request = makeRequest(direction: .receive, mode: .showInvite, settings: settings, outputDir: outputDir)
-        start(settings: settings, phase: .waiting) { try $0.startTransfer(request: request, observer: $1) }
+        start(settings: settings, phase: .waiting, activityID: request.activityId) { try $0.startTransfer(request: request, observer: $1) }
         retainResourceAccess(destinationAccess)
     }
 
@@ -115,7 +117,7 @@ final class TransferViewModel: ObservableObject {
     func startSendingWithToken(filePath: String, token: String, settings: EnvoixRuntimeSettings, sourceAccess: AnyObject? = nil) {
         destinationDir = nil
         let request = makeRequest(direction: .send, mode: .mdns, settings: settings, filePath: filePath, token: token)
-        start(settings: settings, phase: .transferring) { try $0.startTransfer(request: request, observer: $1) }
+        start(settings: settings, phase: .transferring, activityID: request.activityId) { try $0.startTransfer(request: request, observer: $1) }
         retainResourceAccess(sourceAccess)
     }
 
@@ -123,7 +125,7 @@ final class TransferViewModel: ObservableObject {
     func startSendingWithRoom(filePath: String, code: String, settings: EnvoixRuntimeSettings, sourceAccess: AnyObject? = nil) {
         destinationDir = nil
         let request = makeRequest(direction: .send, mode: .room, settings: settings, filePath: filePath, code: code)
-        start(settings: settings, phase: .waiting) { try $0.startTransfer(request: request, observer: $1) }
+        start(settings: settings, phase: .waiting, activityID: request.activityId) { try $0.startTransfer(request: request, observer: $1) }
         retainResourceAccess(sourceAccess)
     }
 
@@ -131,14 +133,16 @@ final class TransferViewModel: ObservableObject {
     func startSendingWithInvite(filePath: String, invite: String, settings: EnvoixRuntimeSettings, sourceAccess: AnyObject? = nil) {
         destinationDir = nil
         let request = makeRequest(direction: .send, mode: .invite, settings: settings, filePath: filePath, invite: invite)
-        start(settings: settings, phase: .transferring) { try $0.startTransfer(request: request, observer: $1) }
+        start(settings: settings, phase: .transferring, activityID: request.activityId) { try $0.startTransfer(request: request, observer: $1) }
         retainResourceAccess(sourceAccess)
     }
 
     func cancel() {
         suppressNextFailure = true
         operationID = UUID()
-        session?.cancel()
+        if currentActivityID.isEmpty || session?.cancelActivity(activityId: currentActivityID) != true {
+            session?.cancel()
+        }
         reset()
         phase = .canceled
         statusText = AppText.value("Transfer canceled", "传输已取消", language: displayLanguage)
@@ -148,10 +152,12 @@ final class TransferViewModel: ObservableObject {
     private func start(
         settings: EnvoixRuntimeSettings,
         phase: Phase,
+        activityID: String,
         operation: (EnvoixSession, Observer) throws -> Void
     ) {
         suppressNextFailure = false
         reset()
+        currentActivityID = activityID
         displayLanguage = settings.language
         operationID = UUID()
         let operationID = operationID
@@ -184,6 +190,7 @@ final class TransferViewModel: ObservableObject {
         token: String = ""
     ) -> FfiTransferRequest {
         FfiTransferRequest(
+            activityId: UUID().uuidString,
             direction: direction,
             mode: mode,
             filePath: filePath,
@@ -196,7 +203,13 @@ final class TransferViewModel: ObservableObject {
             relay: settings.relayUrl,
             configPath: settings.configPath,
             pathPolicy: .auto,
-            resume: true
+            resume: true,
+            limits: FfiTransferLimits(
+                maxParallelTransfers: settings.concurrentTransfers ? 2 : 1,
+                maxParallelFiles: 1,
+                maxParallelChunksPerFile: 1,
+                speedLimitBps: 0
+            )
         )
     }
 
@@ -209,6 +222,10 @@ final class TransferViewModel: ObservableObject {
         if transferEvents.count > 240 {
             transferEvents.removeFirst(transferEvents.count - 240)
         }
+    }
+
+    func handleTransferActivity(_ record: FfiTransferActivityRecord) {
+        transferActivity = record
     }
 
     func handleStarted(_ name: String, _ total: UInt64) {
@@ -303,9 +320,11 @@ final class TransferViewModel: ObservableObject {
         bytesPerSec = 0
         completedFileURL = nil
         failure = nil
+        transferActivity = nil
         resourceAccess = nil
         eventLog.removeAll()
         transferEvents.removeAll()
+        currentActivityID = ""
         rate.reset()
         phase = .idle
     }
@@ -417,6 +436,7 @@ final class Observer: TransferObserver, @unchecked Sendable {
     func onTransferFailed(failure: FfiTransferFailure) { hop { $0.handleTransferFailed(failure) } }
     func onFailed(reason: String) { hop { $0.handleFailed(reason) } }
     func onTransferEvent(event: FfiTransferEvent) { hop { $0.handleTransferEvent(event) } }
+    func onTransferActivity(record: FfiTransferActivityRecord) { hop { $0.handleTransferActivity(record) } }
     func onStatus(message: String) { hop { $0.handleStatus(message) } }
 
     private func hop(_ body: @escaping (TransferViewModel) -> Void) {

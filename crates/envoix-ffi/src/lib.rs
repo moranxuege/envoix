@@ -9,9 +9,11 @@
 //! callbacks, which fire on runtime threads — the UI must hop to its own main
 //! thread before touching UI state.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use envoix_client::{
     BindAddrs, PeerDescriptor, TransferDirection, TransferSummary,
@@ -34,6 +36,7 @@ const DEFAULT_RENDEZVOUS_BROKER: &str =
     "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445";
 /// Default relay used with the hosted rendezvous broker.
 const DEFAULT_RELAY_URL: &str = "https://envoix.chkxwlyh.us:8444";
+static NEXT_ACTIVITY_ID: AtomicU64 = AtomicU64::new(1);
 /// Runtime settings supplied by native UIs.
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct EnvoixRuntimeSettings {
@@ -68,6 +71,25 @@ impl Default for EnvoixRuntimeSettings {
 #[uniffi::export]
 pub fn generate_room_code() -> Result<String, EnvoixError> {
     generate_code(2).map_err(op_err)
+}
+
+/// Creates the initial Activity/queue record for a transfer request.
+#[uniffi::export]
+pub fn make_transfer_activity_record(mut request: FfiTransferRequest) -> FfiTransferActivityRecord {
+    if request.activity_id.trim().is_empty() {
+        request.activity_id = next_activity_id();
+    }
+    FfiTransferActivityRecord::from_request(&request, now_ms())
+}
+
+/// Folds one lifecycle event into an Activity/queue record.
+#[uniffi::export]
+pub fn fold_transfer_activity(
+    mut record: FfiTransferActivityRecord,
+    event: FfiTransferEvent,
+) -> FfiTransferActivityRecord {
+    record.apply_event(&event);
+    record
 }
 
 /// Error surfaced across the FFI boundary.
@@ -113,7 +135,32 @@ pub enum FfiPathPolicy {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct FfiTransferLimits {
+    /// Maximum independent transfer tasks a native queue may run at once.
+    pub max_parallel_transfers: u32,
+    /// Reserved for directory/multi-file sends. Current engine supports one file.
+    pub max_parallel_files: u32,
+    /// Reserved for future chunk-level parallelism. Current engine supports one chunk stream.
+    pub max_parallel_chunks_per_file: u32,
+    /// Advisory speed cap in bytes/s. Zero means unlimited; current engine does not enforce it.
+    pub speed_limit_bps: u64,
+}
+
+impl Default for FfiTransferLimits {
+    fn default() -> Self {
+        Self {
+            max_parallel_transfers: 1,
+            max_parallel_files: 1,
+            max_parallel_chunks_per_file: 1,
+            speed_limit_bps: 0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct FfiTransferRequest {
+    /// Native-side activity id used to correlate pre-start events in a queue.
+    pub activity_id: String,
     pub direction: FfiTransferDirection,
     pub mode: FfiTransferMode,
     pub file_path: String,
@@ -127,6 +174,7 @@ pub struct FfiTransferRequest {
     pub config_path: String,
     pub path_policy: FfiPathPolicy,
     pub resume: bool,
+    pub limits: FfiTransferLimits,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -164,6 +212,7 @@ pub enum FfiDataPathKind {
 
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct FfiTransferEvent {
+    pub activity_id: String,
     pub kind: FfiTransferEventKind,
     pub ts_ms: u64,
     pub direction: FfiTransferDirection,
@@ -180,6 +229,47 @@ pub struct FfiTransferEvent {
     pub token: String,
     pub peer_descriptor: String,
     pub diagnostic_message: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum FfiTransferActivityState {
+    Queued,
+    Binding,
+    WaitingForPeer,
+    Pairing,
+    Connecting,
+    Transferring,
+    Verifying,
+    Completed,
+    Failed,
+    Canceled,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct FfiTransferActivityRecord {
+    pub activity_id: String,
+    pub state: FfiTransferActivityState,
+    pub direction: FfiTransferDirection,
+    pub mode: FfiTransferMode,
+    pub transfer_id: String,
+    pub file_name: String,
+    pub total_bytes: u64,
+    pub bytes_transferred: u64,
+    pub bytes_resumed: u64,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub started_at_ms: u64,
+    pub completed_at_ms: u64,
+    pub data_path_kind: FfiDataPathKind,
+    pub data_path_detail: String,
+    pub invite: String,
+    pub token: String,
+    pub peer_descriptor: String,
+    pub diagnostic_message: String,
+    pub retryable: bool,
+    pub recovery_action: FfiRecoveryAction,
+    pub limits: FfiTransferLimits,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -289,6 +379,8 @@ pub trait TransferObserver: Send + Sync {
     fn on_failed(&self, reason: String);
     /// Structured lifecycle event for Activity, queues, and diagnostics.
     fn on_transfer_event(&self, event: FfiTransferEvent);
+    /// Folded Activity/queue snapshot after each lifecycle event.
+    fn on_transfer_activity(&self, record: FfiTransferActivityRecord);
     /// Free-form lifecycle/status text for display or logging.
     fn on_status(&self, message: String);
 }
@@ -297,7 +389,7 @@ pub trait TransferObserver: Send + Sync {
 #[derive(uniffi::Object)]
 pub struct EnvoixSession {
     runtime: Runtime,
-    cancel: Mutex<Option<oneshot::Sender<()>>>,
+    cancels: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
     settings: EnvoixRuntimeSettings,
 }
 
@@ -318,7 +410,7 @@ impl EnvoixSession {
             .expect("failed to build tokio runtime");
         Arc::new(Self {
             runtime,
-            cancel: Mutex::new(None),
+            cancels: Arc::new(Mutex::new(HashMap::new())),
             settings,
         })
     }
@@ -421,9 +513,15 @@ impl EnvoixSession {
         request: FfiTransferRequest,
         observer: Arc<dyn TransferObserver>,
     ) -> Result<(), EnvoixError> {
+        let mut request = request;
+        if request.activity_id.trim().is_empty() {
+            request.activity_id = next_activity_id();
+        }
         let client = build_client_for_request(&self.settings, &request)?;
         let options = transfer_options_for_request(&self.settings, &request)?;
         let source = peer_source_for_request(&self.settings, &request)?;
+        let activity = FfiTransferActivityRecord::from_request(&request, now_ms());
+        observer.on_transfer_activity(activity.clone());
         let _guard = self.runtime.enter();
         let transfer = match request.direction {
             FfiTransferDirection::Send => client
@@ -446,13 +544,24 @@ impl EnvoixSession {
                 });
             }
         };
-        self.spawn_transfer(transfer, observer);
+        self.spawn_transfer(request.activity_id, transfer, activity, observer);
         Ok(())
+    }
+
+    /// Requests cancellation of one queued/running activity.
+    pub fn cancel_activity(&self, activity_id: String) -> bool {
+        if let Some(cancel) = self.cancels.lock().unwrap().remove(activity_id.trim()) {
+            let _ = cancel.send(());
+            true
+        } else {
+            false
+        }
     }
 
     /// Requests cancellation of the in-flight transfer, if any.
     pub fn cancel(&self) {
-        if let Some(cancel) = self.cancel.lock().unwrap().take() {
+        let cancels = std::mem::take(&mut *self.cancels.lock().unwrap());
+        for (_, cancel) in cancels {
             let _ = cancel.send(());
         }
     }
@@ -460,22 +569,39 @@ impl EnvoixSession {
 
 impl EnvoixSession {
     /// Installs a fresh cancel signal for a new operation and returns its receiver.
-    fn replace_cancel(&self) -> oneshot::Receiver<()> {
+    fn replace_cancel(&self, activity_id: &str) -> oneshot::Receiver<()> {
         let (sender, receiver) = oneshot::channel();
-        *self.cancel.lock().unwrap() = Some(sender);
+        self.cancels
+            .lock()
+            .unwrap()
+            .insert(activity_id.to_string(), sender);
         receiver
     }
 
-    fn spawn_transfer(&self, transfer: Transfer, observer: Arc<dyn TransferObserver>) {
-        let cancel = self.replace_cancel();
-        self.runtime
-            .spawn(drive_transfer(transfer, observer, cancel));
+    fn spawn_transfer(
+        &self,
+        activity_id: String,
+        transfer: Transfer,
+        activity: FfiTransferActivityRecord,
+        observer: Arc<dyn TransferObserver>,
+    ) {
+        let cancel = self.replace_cancel(&activity_id);
+        let cancels = self.cancels.clone();
+        self.runtime.spawn(drive_transfer(
+            activity_id,
+            transfer,
+            activity,
+            observer,
+            cancel,
+            cancels,
+        ));
     }
 }
 
 impl FfiTransferRequest {
     fn send(file_path: String, mode: FfiTransferMode) -> Self {
         Self {
+            activity_id: next_activity_id(),
             direction: FfiTransferDirection::Send,
             mode,
             file_path,
@@ -489,11 +615,13 @@ impl FfiTransferRequest {
             config_path: String::new(),
             path_policy: FfiPathPolicy::Auto,
             resume: true,
+            limits: FfiTransferLimits::default(),
         }
     }
 
     fn receive(output_dir: String, mode: FfiTransferMode) -> Self {
         Self {
+            activity_id: next_activity_id(),
             direction: FfiTransferDirection::Receive,
             mode,
             file_path: String::new(),
@@ -507,8 +635,165 @@ impl FfiTransferRequest {
             config_path: String::new(),
             path_policy: FfiPathPolicy::Auto,
             resume: true,
+            limits: FfiTransferLimits::default(),
         }
     }
+}
+
+impl FfiTransferActivityRecord {
+    fn from_request(request: &FfiTransferRequest, now_ms: u64) -> Self {
+        Self {
+            activity_id: request.activity_id.clone(),
+            state: FfiTransferActivityState::Queued,
+            direction: request.direction,
+            mode: request.mode,
+            transfer_id: String::new(),
+            file_name: request_file_name(request),
+            total_bytes: 0,
+            bytes_transferred: 0,
+            bytes_resumed: 0,
+            created_at_ms: now_ms,
+            updated_at_ms: now_ms,
+            started_at_ms: 0,
+            completed_at_ms: 0,
+            data_path_kind: FfiDataPathKind::None,
+            data_path_detail: String::new(),
+            invite: request.invite.clone(),
+            token: request.token.clone(),
+            peer_descriptor: request.peer_descriptor.clone(),
+            diagnostic_message: String::new(),
+            retryable: false,
+            recovery_action: FfiRecoveryAction::None,
+            limits: request.limits.clone(),
+        }
+    }
+
+    fn apply_event(&mut self, event: &FfiTransferEvent) {
+        if !event.activity_id.is_empty() {
+            self.activity_id = event.activity_id.clone();
+        }
+        self.updated_at_ms = event.ts_ms;
+        if event.direction != FfiTransferDirection::Unknown {
+            self.direction = event.direction;
+        }
+        if event.mode != FfiTransferMode::Unknown {
+            self.mode = event.mode;
+        }
+        if !event.transfer_id.is_empty() {
+            self.transfer_id = event.transfer_id.clone();
+        }
+        if !event.file_name.is_empty() {
+            self.file_name = event.file_name.clone();
+        }
+        if event.total_bytes > 0 {
+            self.total_bytes = event.total_bytes;
+        }
+        if event.bytes_transferred > 0 || event.kind == FfiTransferEventKind::Progress {
+            self.bytes_transferred = event.bytes_transferred;
+        }
+        if event.bytes_resumed > 0 {
+            self.bytes_resumed = event.bytes_resumed;
+            self.bytes_transferred = self.bytes_transferred.max(event.bytes_resumed);
+        }
+        if event.data_path_kind != FfiDataPathKind::None {
+            self.data_path_kind = event.data_path_kind;
+            self.data_path_detail = event.data_path_detail.clone();
+        }
+        if !event.invite.is_empty() {
+            self.invite = event.invite.clone();
+        }
+        if !event.token.is_empty() {
+            self.token = event.token.clone();
+        }
+        if !event.peer_descriptor.is_empty() {
+            self.peer_descriptor = event.peer_descriptor.clone();
+        }
+        if !event.diagnostic_message.is_empty() {
+            self.diagnostic_message = event.diagnostic_message.clone();
+        }
+
+        self.state = match event.kind {
+            FfiTransferEventKind::Binding => FfiTransferActivityState::Binding,
+            FfiTransferEventKind::Advertised => FfiTransferActivityState::WaitingForPeer,
+            FfiTransferEventKind::Pairing => FfiTransferActivityState::Pairing,
+            FfiTransferEventKind::Connecting
+            | FfiTransferEventKind::Connected
+            | FfiTransferEventKind::PathChanged => FfiTransferActivityState::Connecting,
+            FfiTransferEventKind::Started | FfiTransferEventKind::Progress => {
+                if self.started_at_ms == 0 {
+                    self.started_at_ms = event.ts_ms;
+                }
+                FfiTransferActivityState::Transferring
+            }
+            FfiTransferEventKind::Verifying | FfiTransferEventKind::Verified => {
+                FfiTransferActivityState::Verifying
+            }
+            FfiTransferEventKind::Completed => {
+                self.completed_at_ms = event.ts_ms;
+                FfiTransferActivityState::Completed
+            }
+            FfiTransferEventKind::Failed => {
+                self.completed_at_ms = event.ts_ms;
+                FfiTransferActivityState::Failed
+            }
+            FfiTransferEventKind::Unknown => self.state,
+        };
+    }
+
+    fn apply_failure(&mut self, failure: &FfiTransferFailure, ts_ms: u64) {
+        self.updated_at_ms = ts_ms;
+        self.completed_at_ms = ts_ms;
+        self.state = FfiTransferActivityState::Failed;
+        if failure.direction != FfiTransferDirection::Unknown {
+            self.direction = failure.direction;
+        }
+        if !failure.transfer_id.is_empty() {
+            self.transfer_id = failure.transfer_id.clone();
+        }
+        self.diagnostic_message = failure.diagnostic_message.clone();
+        self.retryable = failure.retryable;
+        self.recovery_action = failure.recovery_action;
+    }
+
+    fn apply_completed(&mut self, summary: &TransferSummary, ts_ms: u64) {
+        self.updated_at_ms = ts_ms;
+        self.completed_at_ms = ts_ms;
+        self.state = FfiTransferActivityState::Completed;
+        self.bytes_transferred = summary.bytes_transferred;
+        self.total_bytes = self.total_bytes.max(summary.bytes_transferred);
+    }
+
+    fn apply_canceled(&mut self, ts_ms: u64) {
+        self.updated_at_ms = ts_ms;
+        self.completed_at_ms = ts_ms;
+        self.state = FfiTransferActivityState::Canceled;
+        self.diagnostic_message = "canceled".to_string();
+        self.retryable = true;
+        self.recovery_action = FfiRecoveryAction::Resume;
+    }
+}
+
+fn request_file_name(request: &FfiTransferRequest) -> String {
+    let path = match request.direction {
+        FfiTransferDirection::Send => request.file_path.trim(),
+        FfiTransferDirection::Receive | FfiTransferDirection::Unknown => "",
+    };
+    Path::new(path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+fn next_activity_id() -> String {
+    let id = NEXT_ACTIVITY_ID.fetch_add(1, Ordering::Relaxed);
+    format!("ffi-{id}")
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn build_client_for_request(
@@ -656,22 +941,38 @@ fn required_peer_descriptor(value: &str) -> Result<PeerDescriptor, EnvoixError> 
 /// Reports the single terminal outcome from the awaited operation result.
 fn report_terminal(
     observer: &dyn TransferObserver,
+    activity: &mut FfiTransferActivityRecord,
     result: Result<TransferSummary, TransferError>,
     direction: Option<TransferDirection>,
+    cancel_requested: bool,
 ) {
     match result {
-        Ok(summary) => observer.on_completed(summary.bytes_transferred),
+        Ok(summary) => {
+            activity.apply_completed(&summary, now_ms());
+            observer.on_transfer_activity(activity.clone());
+            observer.on_completed(summary.bytes_transferred);
+        }
         Err(error) => {
-            observer.on_transfer_failed(to_ffi_failure(&error, direction));
+            let failure = to_ffi_failure(&error, direction);
+            if cancel_requested {
+                activity.apply_canceled(now_ms());
+            } else {
+                activity.apply_failure(&failure, now_ms());
+            }
+            observer.on_transfer_activity(activity.clone());
+            observer.on_transfer_failed(failure);
             observer.on_failed(error.to_string());
         }
     }
 }
 
 async fn drive_transfer(
+    activity_id: String,
     mut transfer: Transfer,
+    mut activity: FfiTransferActivityRecord,
     observer: Arc<dyn TransferObserver>,
     mut cancel: oneshot::Receiver<()>,
+    cancels: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
 ) {
     let mut cancel_requested = false;
     let mut direction = None;
@@ -682,7 +983,7 @@ async fn drive_transfer(
                 if direction.is_none() {
                     direction = event_direction(&event.event);
                 }
-                observe_transfer_event(&*observer, event);
+                observe_transfer_event(&*observer, &mut activity, event);
             }
             _ = &mut cancel, if !cancel_requested => {
                 cancel_requested = true;
@@ -691,7 +992,14 @@ async fn drive_transfer(
             }
         }
     }
-    report_terminal(&*observer, transfer.wait().await, direction);
+    report_terminal(
+        &*observer,
+        &mut activity,
+        transfer.wait().await,
+        direction,
+        cancel_requested,
+    );
+    cancels.lock().unwrap().remove(&activity_id);
 }
 
 fn event_direction(event: &TransferEvent) -> Option<TransferDirection> {
@@ -705,8 +1013,15 @@ fn event_direction(event: &TransferEvent) -> Option<TransferDirection> {
     }
 }
 
-fn observe_transfer_event(observer: &dyn TransferObserver, event: StampedEvent) {
-    observer.on_transfer_event(to_ffi_event(&event));
+fn observe_transfer_event(
+    observer: &dyn TransferObserver,
+    activity: &mut FfiTransferActivityRecord,
+    event: StampedEvent,
+) {
+    let ffi_event = to_ffi_event(&event, &activity.activity_id);
+    activity.apply_event(&ffi_event);
+    observer.on_transfer_event(ffi_event);
+    observer.on_transfer_activity(activity.clone());
     let event = event.event;
     match event {
         TransferEvent::Binding { direction, mode } => {
@@ -747,8 +1062,8 @@ fn observe_transfer_event(observer: &dyn TransferObserver, event: StampedEvent) 
     }
 }
 
-fn to_ffi_event(event: &StampedEvent) -> FfiTransferEvent {
-    let mut ffi = FfiTransferEvent::empty(event.ts_ms);
+fn to_ffi_event(event: &StampedEvent, activity_id: &str) -> FfiTransferEvent {
+    let mut ffi = FfiTransferEvent::empty(activity_id, event.ts_ms);
     match &event.event {
         TransferEvent::Binding { direction, mode } => {
             ffi.kind = FfiTransferEventKind::Binding;
@@ -853,8 +1168,9 @@ fn to_ffi_event(event: &StampedEvent) -> FfiTransferEvent {
 }
 
 impl FfiTransferEvent {
-    fn empty(ts_ms: u64) -> Self {
+    fn empty(activity_id: &str, ts_ms: u64) -> Self {
         Self {
+            activity_id: activity_id.to_string(),
             kind: FfiTransferEventKind::Unknown,
             ts_ms,
             direction: FfiTransferDirection::Unknown,
@@ -1028,6 +1344,7 @@ mod tests {
         Completed(u64),
         Failed(String),
         Event(FfiTransferEvent),
+        Activity(FfiTransferActivityRecord),
     }
 
     async fn ready_addr(ep: &Endpoint) -> EndpointAddr {
@@ -1058,6 +1375,9 @@ mod tests {
         fn on_transfer_event(&self, event: FfiTransferEvent) {
             let _ = self.0.send(Msg::Event(event));
         }
+        fn on_transfer_activity(&self, record: FfiTransferActivityRecord) {
+            let _ = self.0.send(Msg::Activity(record));
+        }
         fn on_status(&self, _message: String) {}
     }
 
@@ -1068,6 +1388,7 @@ mod tests {
                 Msg::Failed(reason) => panic!("transfer failed before invite: {reason}"),
                 Msg::Completed(_) => panic!("transfer completed before invite"),
                 Msg::Event(_) => {}
+                Msg::Activity(_) => {}
             }
         }
     }
@@ -1083,8 +1404,62 @@ mod tests {
                 Msg::Failed(reason) => panic!("transfer failed: {reason}"),
                 Msg::Invite(_) => {}
                 Msg::Event(event) => events.push(event),
+                Msg::Activity(record) => {
+                    if record.state == FfiTransferActivityState::Failed {
+                        panic!("transfer failed: {}", record.diagnostic_message);
+                    }
+                }
             }
         }
+    }
+
+    #[test]
+    fn activity_record_folds_transfer_events() {
+        let request = FfiTransferRequest {
+            activity_id: "activity-1".to_string(),
+            direction: FfiTransferDirection::Send,
+            mode: FfiTransferMode::Room,
+            file_path: "/tmp/report.pdf".to_string(),
+            output_dir: String::new(),
+            peer_descriptor: String::new(),
+            invite: String::new(),
+            code: "135790-amber-comet".to_string(),
+            token: String::new(),
+            broker: String::new(),
+            relay: String::new(),
+            config_path: String::new(),
+            path_policy: FfiPathPolicy::Auto,
+            resume: true,
+            limits: FfiTransferLimits {
+                max_parallel_transfers: 2,
+                ..FfiTransferLimits::default()
+            },
+        };
+        let mut record = make_transfer_activity_record(request);
+        assert_eq!(record.activity_id, "activity-1");
+        assert_eq!(record.state, FfiTransferActivityState::Queued);
+        assert_eq!(record.file_name, "report.pdf");
+        assert_eq!(record.limits.max_parallel_transfers, 2);
+
+        let mut started = FfiTransferEvent::empty("activity-1", 10);
+        started.kind = FfiTransferEventKind::Started;
+        started.direction = FfiTransferDirection::Send;
+        started.transfer_id = "tx1".to_string();
+        started.file_name = "report.pdf".to_string();
+        started.total_bytes = 100;
+        record = fold_transfer_activity(record, started);
+        assert_eq!(record.state, FfiTransferActivityState::Transferring);
+        assert_eq!(record.started_at_ms, 10);
+        assert_eq!(record.transfer_id, "tx1");
+
+        let mut completed = FfiTransferEvent::empty("activity-1", 20);
+        completed.kind = FfiTransferEventKind::Completed;
+        completed.transfer_id = "tx1".to_string();
+        completed.bytes_transferred = 100;
+        record = fold_transfer_activity(record, completed);
+        assert_eq!(record.state, FfiTransferActivityState::Completed);
+        assert_eq!(record.bytes_transferred, 100);
+        assert_eq!(record.completed_at_ms, 20);
     }
 
     /// Rewrites an invite's direct addresses to loopback, keeping the port, so

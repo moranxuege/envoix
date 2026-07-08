@@ -425,6 +425,22 @@ private let UNIFFI_CALLBACK_UNEXPECTED_ERROR: Int32 = 2
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
+    typealias FfiType = UInt32
+    typealias SwiftType = UInt32
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt32 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
     typealias FfiType = UInt64
     typealias SwiftType = UInt64
@@ -515,6 +531,11 @@ public protocol EnvoixSessionProtocol: AnyObject, Sendable {
      * Requests cancellation of the in-flight transfer, if any.
      */
     func cancel()
+
+    /**
+     * Requests cancellation of one queued/running activity.
+     */
+    func cancelActivity(activityId: String)  -> Bool
 
     /**
      * Starts receiving one file into `output_dir`.
@@ -657,6 +678,18 @@ open func cancel()  {try! rustCall() {
             self.uniffiCloneHandle(),$0
     )
 }
+}
+
+    /**
+     * Requests cancellation of one queued/running activity.
+     */
+open func cancelActivity(activityId: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_envoix_ffi_fn_method_envoixsession_cancel_activity(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(activityId),$0
+    )
+})
 }
 
     /**
@@ -866,6 +899,11 @@ public protocol TransferObserver: AnyObject, Sendable {
     func onTransferEvent(event: FfiTransferEvent)
 
     /**
+     * Folded Activity/queue snapshot after each lifecycle event.
+     */
+    func onTransferActivity(record: FfiTransferActivityRecord)
+
+    /**
      * Free-form lifecycle/status text for display or logging.
      */
     func onStatus(message: String)
@@ -1009,6 +1047,17 @@ open func onTransferEvent(event: FfiTransferEvent)  {try! rustCall() {
     uniffi_envoix_ffi_fn_method_transferobserver_on_transfer_event(
             self.uniffiCloneHandle(),
         FfiConverterTypeFfiTransferEvent_lower(event),$0
+    )
+}
+}
+
+    /**
+     * Folded Activity/queue snapshot after each lifecycle event.
+     */
+open func onTransferActivity(record: FfiTransferActivityRecord)  {try! rustCall() {
+    uniffi_envoix_ffi_fn_method_transferobserver_on_transfer_activity(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeFfiTransferActivityRecord_lower(record),$0
     )
 }
 }
@@ -1213,6 +1262,30 @@ fileprivate struct UniffiCallbackInterfaceTransferObserver {
                 }
                 return uniffiObj.onTransferEvent(
                      event: try FfiConverterTypeFfiTransferEvent_lift(event)
+                )
+            }
+
+
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        onTransferActivity: { (
+            uniffiHandle: UInt64,
+            record: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypeTransferObserver.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onTransferActivity(
+                     record: try FfiConverterTypeFfiTransferActivityRecord_lift(record)
                 )
             }
 
@@ -1430,7 +1503,142 @@ public func FfiConverterTypeEnvoixRuntimeSettings_lower(_ value: EnvoixRuntimeSe
 }
 
 
+public struct FfiTransferActivityRecord: Equatable, Hashable {
+    public var activityId: String
+    public var state: FfiTransferActivityState
+    public var direction: FfiTransferDirection
+    public var mode: FfiTransferMode
+    public var transferId: String
+    public var fileName: String
+    public var totalBytes: UInt64
+    public var bytesTransferred: UInt64
+    public var bytesResumed: UInt64
+    public var createdAtMs: UInt64
+    public var updatedAtMs: UInt64
+    public var startedAtMs: UInt64
+    public var completedAtMs: UInt64
+    public var dataPathKind: FfiDataPathKind
+    public var dataPathDetail: String
+    public var invite: String
+    public var token: String
+    public var peerDescriptor: String
+    public var diagnosticMessage: String
+    public var retryable: Bool
+    public var recoveryAction: FfiRecoveryAction
+    public var limits: FfiTransferLimits
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(activityId: String, state: FfiTransferActivityState, direction: FfiTransferDirection, mode: FfiTransferMode, transferId: String, fileName: String, totalBytes: UInt64, bytesTransferred: UInt64, bytesResumed: UInt64, createdAtMs: UInt64, updatedAtMs: UInt64, startedAtMs: UInt64, completedAtMs: UInt64, dataPathKind: FfiDataPathKind, dataPathDetail: String, invite: String, token: String, peerDescriptor: String, diagnosticMessage: String, retryable: Bool, recoveryAction: FfiRecoveryAction, limits: FfiTransferLimits) {
+        self.activityId = activityId
+        self.state = state
+        self.direction = direction
+        self.mode = mode
+        self.transferId = transferId
+        self.fileName = fileName
+        self.totalBytes = totalBytes
+        self.bytesTransferred = bytesTransferred
+        self.bytesResumed = bytesResumed
+        self.createdAtMs = createdAtMs
+        self.updatedAtMs = updatedAtMs
+        self.startedAtMs = startedAtMs
+        self.completedAtMs = completedAtMs
+        self.dataPathKind = dataPathKind
+        self.dataPathDetail = dataPathDetail
+        self.invite = invite
+        self.token = token
+        self.peerDescriptor = peerDescriptor
+        self.diagnosticMessage = diagnosticMessage
+        self.retryable = retryable
+        self.recoveryAction = recoveryAction
+        self.limits = limits
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiTransferActivityRecord: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiTransferActivityRecord: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiTransferActivityRecord {
+        return
+            try FfiTransferActivityRecord(
+                activityId: FfiConverterString.read(from: &buf),
+                state: FfiConverterTypeFfiTransferActivityState.read(from: &buf),
+                direction: FfiConverterTypeFfiTransferDirection.read(from: &buf),
+                mode: FfiConverterTypeFfiTransferMode.read(from: &buf),
+                transferId: FfiConverterString.read(from: &buf),
+                fileName: FfiConverterString.read(from: &buf),
+                totalBytes: FfiConverterUInt64.read(from: &buf),
+                bytesTransferred: FfiConverterUInt64.read(from: &buf),
+                bytesResumed: FfiConverterUInt64.read(from: &buf),
+                createdAtMs: FfiConverterUInt64.read(from: &buf),
+                updatedAtMs: FfiConverterUInt64.read(from: &buf),
+                startedAtMs: FfiConverterUInt64.read(from: &buf),
+                completedAtMs: FfiConverterUInt64.read(from: &buf),
+                dataPathKind: FfiConverterTypeFfiDataPathKind.read(from: &buf),
+                dataPathDetail: FfiConverterString.read(from: &buf),
+                invite: FfiConverterString.read(from: &buf),
+                token: FfiConverterString.read(from: &buf),
+                peerDescriptor: FfiConverterString.read(from: &buf),
+                diagnosticMessage: FfiConverterString.read(from: &buf),
+                retryable: FfiConverterBool.read(from: &buf),
+                recoveryAction: FfiConverterTypeFfiRecoveryAction.read(from: &buf),
+                limits: FfiConverterTypeFfiTransferLimits.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiTransferActivityRecord, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.activityId, into: &buf)
+        FfiConverterTypeFfiTransferActivityState.write(value.state, into: &buf)
+        FfiConverterTypeFfiTransferDirection.write(value.direction, into: &buf)
+        FfiConverterTypeFfiTransferMode.write(value.mode, into: &buf)
+        FfiConverterString.write(value.transferId, into: &buf)
+        FfiConverterString.write(value.fileName, into: &buf)
+        FfiConverterUInt64.write(value.totalBytes, into: &buf)
+        FfiConverterUInt64.write(value.bytesTransferred, into: &buf)
+        FfiConverterUInt64.write(value.bytesResumed, into: &buf)
+        FfiConverterUInt64.write(value.createdAtMs, into: &buf)
+        FfiConverterUInt64.write(value.updatedAtMs, into: &buf)
+        FfiConverterUInt64.write(value.startedAtMs, into: &buf)
+        FfiConverterUInt64.write(value.completedAtMs, into: &buf)
+        FfiConverterTypeFfiDataPathKind.write(value.dataPathKind, into: &buf)
+        FfiConverterString.write(value.dataPathDetail, into: &buf)
+        FfiConverterString.write(value.invite, into: &buf)
+        FfiConverterString.write(value.token, into: &buf)
+        FfiConverterString.write(value.peerDescriptor, into: &buf)
+        FfiConverterString.write(value.diagnosticMessage, into: &buf)
+        FfiConverterBool.write(value.retryable, into: &buf)
+        FfiConverterTypeFfiRecoveryAction.write(value.recoveryAction, into: &buf)
+        FfiConverterTypeFfiTransferLimits.write(value.limits, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTransferActivityRecord_lift(_ buf: RustBuffer) throws -> FfiTransferActivityRecord {
+    return try FfiConverterTypeFfiTransferActivityRecord.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTransferActivityRecord_lower(_ value: FfiTransferActivityRecord) -> RustBuffer {
+    return FfiConverterTypeFfiTransferActivityRecord.lower(value)
+}
+
+
 public struct FfiTransferEvent: Equatable, Hashable {
+    public var activityId: String
     public var kind: FfiTransferEventKind
     public var tsMs: UInt64
     public var direction: FfiTransferDirection
@@ -1450,7 +1658,8 @@ public struct FfiTransferEvent: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(kind: FfiTransferEventKind, tsMs: UInt64, direction: FfiTransferDirection, mode: FfiTransferMode, transferId: String, fileName: String, totalBytes: UInt64, bytesTransferred: UInt64, bytesResumed: UInt64, pairingStep: FfiPairingStep, dataPathKind: FfiDataPathKind, dataPathDetail: String, invite: String, token: String, peerDescriptor: String, diagnosticMessage: String) {
+    public init(activityId: String, kind: FfiTransferEventKind, tsMs: UInt64, direction: FfiTransferDirection, mode: FfiTransferMode, transferId: String, fileName: String, totalBytes: UInt64, bytesTransferred: UInt64, bytesResumed: UInt64, pairingStep: FfiPairingStep, dataPathKind: FfiDataPathKind, dataPathDetail: String, invite: String, token: String, peerDescriptor: String, diagnosticMessage: String) {
+        self.activityId = activityId
         self.kind = kind
         self.tsMs = tsMs
         self.direction = direction
@@ -1485,6 +1694,7 @@ public struct FfiConverterTypeFfiTransferEvent: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiTransferEvent {
         return
             try FfiTransferEvent(
+                activityId: FfiConverterString.read(from: &buf),
                 kind: FfiConverterTypeFfiTransferEventKind.read(from: &buf),
                 tsMs: FfiConverterUInt64.read(from: &buf),
                 direction: FfiConverterTypeFfiTransferDirection.read(from: &buf),
@@ -1505,6 +1715,7 @@ public struct FfiConverterTypeFfiTransferEvent: FfiConverterRustBuffer {
     }
 
     public static func write(_ value: FfiTransferEvent, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.activityId, into: &buf)
         FfiConverterTypeFfiTransferEventKind.write(value.kind, into: &buf)
         FfiConverterUInt64.write(value.tsMs, into: &buf)
         FfiConverterTypeFfiTransferDirection.write(value.direction, into: &buf)
@@ -1630,7 +1841,97 @@ public func FfiConverterTypeFfiTransferFailure_lower(_ value: FfiTransferFailure
 }
 
 
+public struct FfiTransferLimits: Equatable, Hashable {
+    /**
+     * Maximum independent transfer tasks a native queue may run at once.
+     */
+    public var maxParallelTransfers: UInt32
+    /**
+     * Reserved for directory/multi-file sends. Current engine supports one file.
+     */
+    public var maxParallelFiles: UInt32
+    /**
+     * Reserved for future chunk-level parallelism. Current engine supports one chunk stream.
+     */
+    public var maxParallelChunksPerFile: UInt32
+    /**
+     * Advisory speed cap in bytes/s. Zero means unlimited; current engine does not enforce it.
+     */
+    public var speedLimitBps: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Maximum independent transfer tasks a native queue may run at once.
+         */maxParallelTransfers: UInt32,
+        /**
+         * Reserved for directory/multi-file sends. Current engine supports one file.
+         */maxParallelFiles: UInt32,
+        /**
+         * Reserved for future chunk-level parallelism. Current engine supports one chunk stream.
+         */maxParallelChunksPerFile: UInt32,
+        /**
+         * Advisory speed cap in bytes/s. Zero means unlimited; current engine does not enforce it.
+         */speedLimitBps: UInt64) {
+        self.maxParallelTransfers = maxParallelTransfers
+        self.maxParallelFiles = maxParallelFiles
+        self.maxParallelChunksPerFile = maxParallelChunksPerFile
+        self.speedLimitBps = speedLimitBps
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiTransferLimits: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiTransferLimits: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiTransferLimits {
+        return
+            try FfiTransferLimits(
+                maxParallelTransfers: FfiConverterUInt32.read(from: &buf),
+                maxParallelFiles: FfiConverterUInt32.read(from: &buf),
+                maxParallelChunksPerFile: FfiConverterUInt32.read(from: &buf),
+                speedLimitBps: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiTransferLimits, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.maxParallelTransfers, into: &buf)
+        FfiConverterUInt32.write(value.maxParallelFiles, into: &buf)
+        FfiConverterUInt32.write(value.maxParallelChunksPerFile, into: &buf)
+        FfiConverterUInt64.write(value.speedLimitBps, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTransferLimits_lift(_ buf: RustBuffer) throws -> FfiTransferLimits {
+    return try FfiConverterTypeFfiTransferLimits.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTransferLimits_lower(_ value: FfiTransferLimits) -> RustBuffer {
+    return FfiConverterTypeFfiTransferLimits.lower(value)
+}
+
+
 public struct FfiTransferRequest: Equatable, Hashable {
+    /**
+     * Native-side activity id used to correlate pre-start events in a queue.
+     */
+    public var activityId: String
     public var direction: FfiTransferDirection
     public var mode: FfiTransferMode
     public var filePath: String
@@ -1644,10 +1945,15 @@ public struct FfiTransferRequest: Equatable, Hashable {
     public var configPath: String
     public var pathPolicy: FfiPathPolicy
     public var resume: Bool
+    public var limits: FfiTransferLimits
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(direction: FfiTransferDirection, mode: FfiTransferMode, filePath: String, outputDir: String, peerDescriptor: String, invite: String, code: String, token: String, broker: String, relay: String, configPath: String, pathPolicy: FfiPathPolicy, resume: Bool) {
+    public init(
+        /**
+         * Native-side activity id used to correlate pre-start events in a queue.
+         */activityId: String, direction: FfiTransferDirection, mode: FfiTransferMode, filePath: String, outputDir: String, peerDescriptor: String, invite: String, code: String, token: String, broker: String, relay: String, configPath: String, pathPolicy: FfiPathPolicy, resume: Bool, limits: FfiTransferLimits) {
+        self.activityId = activityId
         self.direction = direction
         self.mode = mode
         self.filePath = filePath
@@ -1661,6 +1967,7 @@ public struct FfiTransferRequest: Equatable, Hashable {
         self.configPath = configPath
         self.pathPolicy = pathPolicy
         self.resume = resume
+        self.limits = limits
     }
 
 
@@ -1679,6 +1986,7 @@ public struct FfiConverterTypeFfiTransferRequest: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiTransferRequest {
         return
             try FfiTransferRequest(
+                activityId: FfiConverterString.read(from: &buf),
                 direction: FfiConverterTypeFfiTransferDirection.read(from: &buf),
                 mode: FfiConverterTypeFfiTransferMode.read(from: &buf),
                 filePath: FfiConverterString.read(from: &buf),
@@ -1691,11 +1999,13 @@ public struct FfiConverterTypeFfiTransferRequest: FfiConverterRustBuffer {
                 relay: FfiConverterString.read(from: &buf),
                 configPath: FfiConverterString.read(from: &buf),
                 pathPolicy: FfiConverterTypeFfiPathPolicy.read(from: &buf),
-                resume: FfiConverterBool.read(from: &buf)
+                resume: FfiConverterBool.read(from: &buf),
+                limits: FfiConverterTypeFfiTransferLimits.read(from: &buf)
         )
     }
 
     public static func write(_ value: FfiTransferRequest, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.activityId, into: &buf)
         FfiConverterTypeFfiTransferDirection.write(value.direction, into: &buf)
         FfiConverterTypeFfiTransferMode.write(value.mode, into: &buf)
         FfiConverterString.write(value.filePath, into: &buf)
@@ -1709,6 +2019,7 @@ public struct FfiConverterTypeFfiTransferRequest: FfiConverterRustBuffer {
         FfiConverterString.write(value.configPath, into: &buf)
         FfiConverterTypeFfiPathPolicy.write(value.pathPolicy, into: &buf)
         FfiConverterBool.write(value.resume, into: &buf)
+        FfiConverterTypeFfiTransferLimits.write(value.limits, into: &buf)
     }
 }
 
@@ -2650,6 +2961,136 @@ public func FfiConverterTypeFfiRecoveryAction_lower(_ value: FfiRecoveryAction) 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
+public enum FfiTransferActivityState: Equatable, Hashable {
+
+    case queued
+    case binding
+    case waitingForPeer
+    case pairing
+    case connecting
+    case transferring
+    case verifying
+    case completed
+    case failed
+    case canceled
+    case unknown
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiTransferActivityState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiTransferActivityState: FfiConverterRustBuffer {
+    typealias SwiftType = FfiTransferActivityState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiTransferActivityState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .queued
+
+        case 2: return .binding
+
+        case 3: return .waitingForPeer
+
+        case 4: return .pairing
+
+        case 5: return .connecting
+
+        case 6: return .transferring
+
+        case 7: return .verifying
+
+        case 8: return .completed
+
+        case 9: return .failed
+
+        case 10: return .canceled
+
+        case 11: return .unknown
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiTransferActivityState, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .queued:
+            writeInt(&buf, Int32(1))
+
+
+        case .binding:
+            writeInt(&buf, Int32(2))
+
+
+        case .waitingForPeer:
+            writeInt(&buf, Int32(3))
+
+
+        case .pairing:
+            writeInt(&buf, Int32(4))
+
+
+        case .connecting:
+            writeInt(&buf, Int32(5))
+
+
+        case .transferring:
+            writeInt(&buf, Int32(6))
+
+
+        case .verifying:
+            writeInt(&buf, Int32(7))
+
+
+        case .completed:
+            writeInt(&buf, Int32(8))
+
+
+        case .failed:
+            writeInt(&buf, Int32(9))
+
+
+        case .canceled:
+            writeInt(&buf, Int32(10))
+
+
+        case .unknown:
+            writeInt(&buf, Int32(11))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTransferActivityState_lift(_ buf: RustBuffer) throws -> FfiTransferActivityState {
+    return try FfiConverterTypeFfiTransferActivityState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTransferActivityState_lower(_ value: FfiTransferActivityState) -> RustBuffer {
+    return FfiConverterTypeFfiTransferActivityState.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
 public enum FfiTransferDirection: Equatable, Hashable {
 
     case send
@@ -2967,11 +3408,32 @@ public func FfiConverterTypeFfiTransferMode_lower(_ value: FfiTransferMode) -> R
 }
 
 /**
+ * Folds one lifecycle event into an Activity/queue record.
+ */
+public func foldTransferActivity(record: FfiTransferActivityRecord, event: FfiTransferEvent) -> FfiTransferActivityRecord  {
+    return try!  FfiConverterTypeFfiTransferActivityRecord_lift(try! rustCall() {
+    uniffi_envoix_ffi_fn_func_fold_transfer_activity(
+        FfiConverterTypeFfiTransferActivityRecord_lower(record),
+        FfiConverterTypeFfiTransferEvent_lower(event),$0
+    )
+})
+}
+/**
  * Generates a short room code such as `135790-amber-comet`.
  */
 public func generateRoomCode()throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeEnvoixError_lift) {
     uniffi_envoix_ffi_fn_func_generate_room_code($0
+    )
+})
+}
+/**
+ * Creates the initial Activity/queue record for a transfer request.
+ */
+public func makeTransferActivityRecord(request: FfiTransferRequest) -> FfiTransferActivityRecord  {
+    return try!  FfiConverterTypeFfiTransferActivityRecord_lift(try! rustCall() {
+    uniffi_envoix_ffi_fn_func_make_transfer_activity_record(
+        FfiConverterTypeFfiTransferRequest_lower(request),$0
     )
 })
 }
@@ -2991,10 +3453,19 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if (uniffi_envoix_ffi_checksum_func_fold_transfer_activity() != 61995) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_envoix_ffi_checksum_func_generate_room_code() != 4423) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_envoix_ffi_checksum_func_make_transfer_activity_record() != 14483) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_envoix_ffi_checksum_method_envoixsession_cancel() != 28259) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_envoix_ffi_checksum_method_envoixsession_cancel_activity() != 54985) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_envoix_ffi_checksum_method_envoixsession_receive() != 30107) {
@@ -3039,7 +3510,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_envoix_ffi_checksum_method_transferobserver_on_transfer_event() != 39899) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_envoix_ffi_checksum_method_transferobserver_on_status() != 41528) {
+    if (uniffi_envoix_ffi_checksum_method_transferobserver_on_transfer_activity() != 10829) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_envoix_ffi_checksum_method_transferobserver_on_status() != 44015) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_envoix_ffi_checksum_constructor_envoixsession_new() != 45323) {
