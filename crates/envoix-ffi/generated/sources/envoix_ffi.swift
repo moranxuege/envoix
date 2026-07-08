@@ -528,7 +528,7 @@ fileprivate struct FfiConverterString: FfiConverter {
 public protocol EnvoixSessionProtocol: AnyObject, Sendable {
 
     /**
-     * Requests cancellation of the in-flight transfer, if any.
+     * Requests cancellation of all queued/running transfers, if any.
      */
     func cancel()
 
@@ -671,7 +671,7 @@ public static func newWithSettings(settings: EnvoixRuntimeSettings) -> EnvoixSes
 
 
     /**
-     * Requests cancellation of the in-flight transfer, if any.
+     * Requests cancellation of all queued/running transfers, if any.
      */
 open func cancel()  {try! rustCall() {
     uniffi_envoix_ffi_fn_method_envoixsession_cancel(
@@ -3462,7 +3462,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_envoix_ffi_checksum_func_make_transfer_activity_record() != 14483) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_envoix_ffi_checksum_method_envoixsession_cancel() != 28259) {
+    if (uniffi_envoix_ffi_checksum_method_envoixsession_cancel() != 34138) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_envoix_ffi_checksum_method_envoixsession_cancel_activity() != 54985) {

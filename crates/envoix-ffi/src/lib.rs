@@ -9,7 +9,7 @@
 //! callbacks, which fire on runtime threads — the UI must hop to its own main
 //! thread before touching UI state.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -24,7 +24,7 @@ use envoix_client::{
     },
 };
 use envoix_rendezvous_iroh::generate_code;
-use tokio::runtime::Runtime;
+use tokio::runtime::{Handle, Runtime};
 use tokio::sync::oneshot;
 
 uniffi::setup_scaffolding!();
@@ -389,8 +389,47 @@ pub trait TransferObserver: Send + Sync {
 #[derive(uniffi::Object)]
 pub struct EnvoixSession {
     runtime: Runtime,
-    cancels: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
+    queue: Arc<Mutex<TransferQueueState>>,
     settings: EnvoixRuntimeSettings,
+}
+
+#[derive(Default)]
+struct TransferQueueState {
+    pending: VecDeque<QueuedTransfer>,
+    active: HashMap<String, ActiveTransfer>,
+}
+
+struct QueuedTransfer {
+    request: FfiTransferRequest,
+    observer: Arc<dyn TransferObserver>,
+    activity: FfiTransferActivityRecord,
+}
+
+struct ActiveTransfer {
+    cancel: Option<oneshot::Sender<()>>,
+    limit: usize,
+}
+
+impl TransferQueueState {
+    fn contains_activity(&self, activity_id: &str) -> bool {
+        self.active.contains_key(activity_id)
+            || self
+                .pending
+                .iter()
+                .any(|job| job.activity.activity_id == activity_id)
+    }
+
+    fn can_start(&self, next_limit: usize) -> bool {
+        let limit = self
+            .active
+            .values()
+            .map(|active| active.limit)
+            .chain(std::iter::once(next_limit))
+            .min()
+            .unwrap_or(1)
+            .max(1);
+        self.active.len() < limit
+    }
 }
 
 #[uniffi::export]
@@ -410,7 +449,7 @@ impl EnvoixSession {
             .expect("failed to build tokio runtime");
         Arc::new(Self {
             runtime,
-            cancels: Arc::new(Mutex::new(HashMap::new())),
+            queue: Arc::new(Mutex::new(TransferQueueState::default())),
             settings,
         })
     }
@@ -517,40 +556,61 @@ impl EnvoixSession {
         if request.activity_id.trim().is_empty() {
             request.activity_id = next_activity_id();
         }
-        let client = build_client_for_request(&self.settings, &request)?;
-        let options = transfer_options_for_request(&self.settings, &request)?;
-        let source = peer_source_for_request(&self.settings, &request)?;
+        validate_transfer_request(&self.settings, &request)?;
         let activity = FfiTransferActivityRecord::from_request(&request, now_ms());
-        observer.on_transfer_activity(activity.clone());
-        let _guard = self.runtime.enter();
-        let transfer = match request.direction {
-            FfiTransferDirection::Send => client
-                .send(
-                    required_path(&request.file_path, "file_path")?.into(),
-                    source,
-                    options,
-                )
-                .map_err(op_err)?,
-            FfiTransferDirection::Receive => client
-                .receive(
-                    required_path(&request.output_dir, "output_dir")?.into(),
-                    source,
-                    options,
-                )
-                .map_err(op_err)?,
-            FfiTransferDirection::Unknown => {
+        {
+            let mut queue = self.queue.lock().unwrap();
+            if queue.contains_activity(&request.activity_id) {
                 return Err(EnvoixError::Operation {
-                    message: "transfer direction must be send or receive".to_string(),
+                    message: format!("activity_id already exists: {}", request.activity_id),
                 });
             }
-        };
-        self.spawn_transfer(request.activity_id, transfer, activity, observer);
+            queue.pending.push_back(QueuedTransfer {
+                request,
+                observer: observer.clone(),
+                activity: activity.clone(),
+            });
+        }
+        observer.on_transfer_activity(activity);
+        drain_transfer_queue(
+            self.queue.clone(),
+            self.settings.clone(),
+            self.runtime.handle().clone(),
+        );
         Ok(())
     }
 
     /// Requests cancellation of one queued/running activity.
     pub fn cancel_activity(&self, activity_id: String) -> bool {
-        if let Some(cancel) = self.cancels.lock().unwrap().remove(activity_id.trim()) {
+        let activity_id = activity_id.trim().to_string();
+        if activity_id.is_empty() {
+            return false;
+        }
+        let pending = {
+            let mut queue = self.queue.lock().unwrap();
+            if let Some(index) = queue
+                .pending
+                .iter()
+                .position(|job| job.activity.activity_id == activity_id)
+            {
+                queue.pending.remove(index)
+            } else {
+                None
+            }
+        };
+        if let Some(job) = pending {
+            report_queued_cancel(job);
+            return true;
+        }
+
+        let cancel = self
+            .queue
+            .lock()
+            .unwrap()
+            .active
+            .get_mut(&activity_id)
+            .and_then(|active| active.cancel.take());
+        if let Some(cancel) = cancel {
             let _ = cancel.send(());
             true
         } else {
@@ -558,44 +618,199 @@ impl EnvoixSession {
         }
     }
 
-    /// Requests cancellation of the in-flight transfer, if any.
+    /// Requests cancellation of all queued/running transfers, if any.
     pub fn cancel(&self) {
-        let cancels = std::mem::take(&mut *self.cancels.lock().unwrap());
-        for (_, cancel) in cancels {
+        let (pending, cancels) = {
+            let mut queue = self.queue.lock().unwrap();
+            let pending = queue.pending.drain(..).collect::<Vec<_>>();
+            let cancels = queue
+                .active
+                .values_mut()
+                .filter_map(|active| active.cancel.take())
+                .collect::<Vec<_>>();
+            (pending, cancels)
+        };
+        for job in pending {
+            report_queued_cancel(job);
+        }
+        for cancel in cancels {
             let _ = cancel.send(());
         }
     }
 }
 
-impl EnvoixSession {
-    /// Installs a fresh cancel signal for a new operation and returns its receiver.
-    fn replace_cancel(&self, activity_id: &str) -> oneshot::Receiver<()> {
-        let (sender, receiver) = oneshot::channel();
-        self.cancels
-            .lock()
-            .unwrap()
-            .insert(activity_id.to_string(), sender);
-        receiver
-    }
+fn drain_transfer_queue(
+    queue: Arc<Mutex<TransferQueueState>>,
+    settings: EnvoixRuntimeSettings,
+    handle: Handle,
+) {
+    loop {
+        let (job, cancel) = {
+            let mut queue = queue.lock().unwrap();
+            let Some(next) = queue.pending.front() else {
+                return;
+            };
+            let limit = effective_parallel_limit(&next.request.limits);
+            if !queue.can_start(limit) {
+                return;
+            }
 
-    fn spawn_transfer(
-        &self,
-        activity_id: String,
-        transfer: Transfer,
-        activity: FfiTransferActivityRecord,
-        observer: Arc<dyn TransferObserver>,
-    ) {
-        let cancel = self.replace_cancel(&activity_id);
-        let cancels = self.cancels.clone();
-        self.runtime.spawn(drive_transfer(
-            activity_id,
-            transfer,
-            activity,
-            observer,
-            cancel,
-            cancels,
-        ));
+            let job = queue.pending.pop_front().expect("pending job exists");
+            let activity_id = job.activity.activity_id.clone();
+            let (cancel_sender, cancel_receiver) = oneshot::channel();
+            queue.active.insert(
+                activity_id,
+                ActiveTransfer {
+                    cancel: Some(cancel_sender),
+                    limit,
+                },
+            );
+            (job, cancel_receiver)
+        };
+
+        let activity_id = job.activity.activity_id.clone();
+        let transfer = match build_transfer_for_request(&settings, &job.request, &handle) {
+            Ok(transfer) => transfer,
+            Err(error) => {
+                finish_transfer_activity(&activity_id, &queue);
+                report_setup_failure(job, error);
+                continue;
+            }
+        };
+
+        let queue_for_task = queue.clone();
+        let settings_for_task = settings.clone();
+        let handle_for_task = handle.clone();
+        handle.spawn(async move {
+            drive_transfer(transfer, job.activity, job.observer, cancel).await;
+            finish_transfer_activity(&activity_id, &queue_for_task);
+            drain_transfer_queue(queue_for_task, settings_for_task, handle_for_task);
+        });
     }
+}
+
+fn finish_transfer_activity(activity_id: &str, queue: &Arc<Mutex<TransferQueueState>>) {
+    queue.lock().unwrap().active.remove(activity_id);
+}
+
+fn report_queued_cancel(mut job: QueuedTransfer) {
+    job.activity.apply_canceled(now_ms());
+    job.observer.on_transfer_activity(job.activity);
+    job.observer.on_status("canceled before start".to_string());
+}
+
+fn report_setup_failure(mut job: QueuedTransfer, error: EnvoixError) {
+    let message = error.to_string();
+    let failure = setup_failure(message.clone(), job.activity.direction);
+    job.activity.apply_failure(&failure, now_ms());
+    job.observer.on_transfer_activity(job.activity);
+    job.observer.on_transfer_failed(failure);
+    job.observer.on_failed(message);
+}
+
+fn setup_failure(message: String, direction: FfiTransferDirection) -> FfiTransferFailure {
+    FfiTransferFailure {
+        code: FfiFailureCode::InternalError,
+        category: FfiFailureCategory::Internal,
+        phase: FfiFailurePhase::Setup,
+        origin: FfiFailureOrigin::Local,
+        direction,
+        transfer_id: String::new(),
+        attempt_id: String::new(),
+        retryable: true,
+        recovery_action: FfiRecoveryAction::Retry,
+        user_message_key: "transfer.setup_failed".to_string(),
+        diagnostic_message: message,
+    }
+}
+
+fn validate_transfer_request(
+    settings: &EnvoixRuntimeSettings,
+    request: &FfiTransferRequest,
+) -> Result<(), EnvoixError> {
+    validate_direction_mode(request.direction, request.mode)?;
+    match request.direction {
+        FfiTransferDirection::Send => {
+            required_path(&request.file_path, "file_path")?;
+        }
+        FfiTransferDirection::Receive => {
+            required_path(&request.output_dir, "output_dir")?;
+        }
+        FfiTransferDirection::Unknown => {
+            return Err(EnvoixError::Operation {
+                message: "transfer direction must be send or receive".to_string(),
+            });
+        }
+    }
+    build_client_for_request(settings, request)?;
+    transfer_options_for_request(settings, request)?;
+    peer_source_for_request(settings, request)?;
+    Ok(())
+}
+
+fn validate_direction_mode(
+    direction: FfiTransferDirection,
+    mode: FfiTransferMode,
+) -> Result<(), EnvoixError> {
+    match (direction, mode) {
+        (
+            FfiTransferDirection::Send,
+            FfiTransferMode::Manual
+            | FfiTransferMode::Invite
+            | FfiTransferMode::Mdns
+            | FfiTransferMode::Room,
+        )
+        | (
+            FfiTransferDirection::Receive,
+            FfiTransferMode::ShowManual
+            | FfiTransferMode::ShowInvite
+            | FfiTransferMode::Mdns
+            | FfiTransferMode::Room,
+        ) => Ok(()),
+        (FfiTransferDirection::Unknown, _) => Err(EnvoixError::Operation {
+            message: "transfer direction must be send or receive".to_string(),
+        }),
+        (_, FfiTransferMode::Unknown) => Err(EnvoixError::Operation {
+            message: "transfer mode must not be unknown".to_string(),
+        }),
+        (direction, mode) => Err(EnvoixError::Operation {
+            message: format!("transfer mode {mode:?} is not supported for {direction:?}"),
+        }),
+    }
+}
+
+fn build_transfer_for_request(
+    settings: &EnvoixRuntimeSettings,
+    request: &FfiTransferRequest,
+    handle: &Handle,
+) -> Result<Transfer, EnvoixError> {
+    let client = build_client_for_request(settings, request)?;
+    let options = transfer_options_for_request(settings, request)?;
+    let source = peer_source_for_request(settings, request)?;
+    let _guard = handle.enter();
+    match request.direction {
+        FfiTransferDirection::Send => client
+            .send(
+                required_path(&request.file_path, "file_path")?.into(),
+                source,
+                options,
+            )
+            .map_err(op_err),
+        FfiTransferDirection::Receive => client
+            .receive(
+                required_path(&request.output_dir, "output_dir")?.into(),
+                source,
+                options,
+            )
+            .map_err(op_err),
+        FfiTransferDirection::Unknown => Err(EnvoixError::Operation {
+            message: "transfer direction must be send or receive".to_string(),
+        }),
+    }
+}
+
+fn effective_parallel_limit(limits: &FfiTransferLimits) -> usize {
+    limits.max_parallel_transfers.max(1) as usize
 }
 
 impl FfiTransferRequest {
@@ -822,6 +1037,11 @@ fn transfer_options_for_request(
 ) -> Result<TransferOptions, EnvoixError> {
     let mut options = TransferOptions::default();
     options.relay = relay_url_for_request(settings, request);
+    if request.path_policy == FfiPathPolicy::RelayOnly && options.relay.is_none() {
+        return Err(EnvoixError::Operation {
+            message: "relay-only transfers require a relay URL".to_string(),
+        });
+    }
     options.path = path_policy(request.path_policy);
     options.resume = request.resume;
     options.listen_addrs = Some(receive_addrs());
@@ -967,12 +1187,10 @@ fn report_terminal(
 }
 
 async fn drive_transfer(
-    activity_id: String,
     mut transfer: Transfer,
     mut activity: FfiTransferActivityRecord,
     observer: Arc<dyn TransferObserver>,
     mut cancel: oneshot::Receiver<()>,
-    cancels: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
 ) {
     let mut cancel_requested = false;
     let mut direction = None;
@@ -999,7 +1217,6 @@ async fn drive_transfer(
         direction,
         cancel_requested,
     );
-    cancels.lock().unwrap().remove(&activity_id);
 }
 
 fn event_direction(event: &TransferEvent) -> Option<TransferDirection> {
@@ -1413,6 +1630,42 @@ mod tests {
         }
     }
 
+    fn recv_activity(
+        rx: &std::sync::mpsc::Receiver<Msg>,
+        activity_id: &str,
+        timeout: Duration,
+    ) -> FfiTransferActivityRecord {
+        loop {
+            match rx.recv_timeout(timeout).unwrap() {
+                Msg::Activity(record) if record.activity_id == activity_id => return record,
+                Msg::Failed(reason) => panic!("transfer failed: {reason}"),
+                Msg::Invite(_) | Msg::Completed(_) | Msg::Event(_) | Msg::Activity(_) => {}
+            }
+        }
+    }
+
+    fn assert_no_nonqueued_activity(
+        rx: &std::sync::mpsc::Receiver<Msg>,
+        activity_id: &str,
+        timeout: Duration,
+    ) {
+        let deadline = std::time::Instant::now() + timeout;
+        while let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) {
+            match rx.recv_timeout(remaining) {
+                Ok(Msg::Activity(record))
+                    if record.activity_id == activity_id
+                        && record.state != FfiTransferActivityState::Queued =>
+                {
+                    panic!("queued activity started unexpectedly: {:?}", record.state);
+                }
+                Ok(Msg::Failed(reason)) => panic!("transfer failed: {reason}"),
+                Ok(_) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+            }
+        }
+    }
+
     #[test]
     fn activity_record_folds_transfer_events() {
         let request = FfiTransferRequest {
@@ -1460,6 +1713,49 @@ mod tests {
         assert_eq!(record.state, FfiTransferActivityState::Completed);
         assert_eq!(record.bytes_transferred, 100);
         assert_eq!(record.completed_at_ms, 20);
+    }
+
+    #[test]
+    fn ffi_queue_holds_and_cancels_pending_activity() {
+        let dir = tempfile::tempdir().unwrap();
+        let first_dir = dir.path().join("first");
+        let second_dir = dir.path().join("second");
+        std::fs::create_dir_all(&first_dir).unwrap();
+        std::fs::create_dir_all(&second_dir).unwrap();
+
+        let session = EnvoixSession::new();
+
+        let (first_tx, _first_rx) = channel();
+        let mut first = FfiTransferRequest::receive(
+            first_dir.to_str().unwrap().to_string(),
+            FfiTransferMode::ShowInvite,
+        );
+        first.activity_id = "queue-first".to_string();
+        first.limits.max_parallel_transfers = 1;
+        session
+            .start_transfer(first, Arc::new(TestObserver(first_tx)))
+            .unwrap();
+
+        let (second_tx, second_rx) = channel();
+        let mut second = FfiTransferRequest::receive(
+            second_dir.to_str().unwrap().to_string(),
+            FfiTransferMode::ShowInvite,
+        );
+        second.activity_id = "queue-second".to_string();
+        second.limits.max_parallel_transfers = 1;
+        session
+            .start_transfer(second, Arc::new(TestObserver(second_tx)))
+            .unwrap();
+
+        let queued = recv_activity(&second_rx, "queue-second", Duration::from_secs(2));
+        assert_eq!(queued.state, FfiTransferActivityState::Queued);
+        assert_no_nonqueued_activity(&second_rx, "queue-second", Duration::from_millis(200));
+
+        assert!(session.cancel_activity("queue-second".to_string()));
+        let canceled = recv_activity(&second_rx, "queue-second", Duration::from_secs(2));
+        assert_eq!(canceled.state, FfiTransferActivityState::Canceled);
+
+        assert!(session.cancel_activity("queue-first".to_string()));
     }
 
     /// Rewrites an invite's direct addresses to loopback, keeping the port, so
