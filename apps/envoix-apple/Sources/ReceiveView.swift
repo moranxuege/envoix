@@ -18,6 +18,10 @@ struct ReceiveView: View {
     @State private var mode: PairingMode = .room
     @State private var roomCode = newRoomCode()
     @State private var pairingInvite: FfiPairingInvite?
+    @State private var roomQRCodeImage: PlatformImage?
+    @State private var roomQRCodePayload = ""
+    @State private var inviteQRCodeImage: PlatformImage?
+    @State private var inviteQRCodePayload = ""
     @State private var revealAddress = false
     #if os(iOS)
     @State private var isFolderPickerPresented = false
@@ -116,6 +120,12 @@ struct ReceiveView: View {
             #endif
         }
         .onAppear { refreshPairingInviteIfNeeded() }
+        .onChange(of: mode) { newMode in
+            if newMode == .room {
+                refreshPairingInviteIfNeeded()
+            }
+        }
+        .onChange(of: viewModel.invite) { invite in updateInviteQRCode(for: invite) }
         .onChange(of: serverURL) { _ in refreshPairingInviteForSettingsChange() }
         .onChange(of: relayURL) { _ in refreshPairingInviteForSettingsChange() }
     }
@@ -273,24 +283,10 @@ struct ReceiveView: View {
                     .multilineTextAlignment(.center)
             }
 
-            if let image = QRCode.image(from: viewModel.invite), !viewModel.invite.isEmpty {
+            if let image = inviteQRCodeImage, !viewModel.invite.isEmpty {
                 QRCard(image: image, size: 208)
             } else {
-                VStack(spacing: 10) {
-                    Image(systemName: "qrcode")
-                        .font(.system(size: 72, weight: .medium))
-                        .foregroundStyle(Theme.muted)
-                    Text(AppText.value("QR code", "二维码", language: uiLanguage))
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(Theme.muted)
-                }
-                .frame(width: 236, height: 236)
-                .background(Theme.surface)
-                .overlay(
-                    RoundedRectangle(cornerRadius: Theme.cardRadius)
-                        .strokeBorder(Theme.line.opacity(0.75), lineWidth: 0.8)
-                )
-                .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
+                qrPlaceholder
             }
             LinkRow(text: viewModel.invite.isEmpty ? AppText.value("Invite link", "邀请链接", language: uiLanguage) : viewModel.invite) {
                 Button {
@@ -330,25 +326,10 @@ struct ReceiveView: View {
                     .multilineTextAlignment(.center)
             }
 
-            if let payload = pairingInvite?.payload,
-               let image = QRCode.image(from: payload) {
+            if let image = roomQRCodeImage {
                 QRCard(image: image, size: 208)
             } else {
-                VStack(spacing: 10) {
-                    Image(systemName: "qrcode")
-                        .font(.system(size: 72, weight: .medium))
-                        .foregroundStyle(Theme.muted)
-                    Text(AppText.value("QR code", "二维码", language: uiLanguage))
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(Theme.muted)
-                }
-                .frame(width: 236, height: 236)
-                .background(Theme.surface)
-                .overlay(
-                    RoundedRectangle(cornerRadius: Theme.cardRadius)
-                        .strokeBorder(Theme.line.opacity(0.75), lineWidth: 0.8)
-                )
-                .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
+                qrPlaceholder
             }
 
             LinkRow(
@@ -375,6 +356,24 @@ struct ReceiveView: View {
             }
         }
         .card(raised: true, padding: 18)
+    }
+
+    private var qrPlaceholder: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "qrcode")
+                .font(.system(size: 72, weight: .medium))
+                .foregroundStyle(Theme.muted)
+            Text(AppText.value("QR code", "二维码", language: uiLanguage))
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(Theme.muted)
+        }
+        .frame(width: 236, height: 236)
+        .background(Theme.surface)
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.cardRadius)
+                .strokeBorder(Theme.line.opacity(0.75), lineWidth: 0.8)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
     }
 
 
@@ -435,19 +434,37 @@ struct ReceiveView: View {
             let invite = try makePairingInvite(role: .receive, broker: serverURL, relay: relayURL)
             pairingInvite = invite
             roomCode = invite.code
+            updateRoomQRCode(for: invite.payload)
         } catch {
             viewModel.handleFailed(error.localizedDescription)
         }
     }
 
     private func activeRoomCode() throws -> String {
-        if let code = pairingInvite?.code.trimmed, !code.isEmpty {
-            return code
+        if let invite = pairingInvite {
+            let code = invite.code.trimmed
+            if !code.isEmpty {
+                updateRoomQRCode(for: invite.payload)
+                return code
+            }
         }
         let invite = try makePairingInvite(role: .receive, broker: serverURL, relay: relayURL)
         pairingInvite = invite
         roomCode = invite.code
+        updateRoomQRCode(for: invite.payload)
         return invite.code
+    }
+
+    private func updateRoomQRCode(for payload: String) {
+        guard roomQRCodePayload != payload else { return }
+        roomQRCodePayload = payload
+        roomQRCodeImage = payload.isEmpty ? nil : QRCode.image(from: payload)
+    }
+
+    private func updateInviteQRCode(for invite: String) {
+        guard inviteQRCodePayload != invite else { return }
+        inviteQRCodePayload = invite
+        inviteQRCodeImage = invite.isEmpty ? nil : QRCode.image(from: invite)
     }
 
     private func primaryAction() {

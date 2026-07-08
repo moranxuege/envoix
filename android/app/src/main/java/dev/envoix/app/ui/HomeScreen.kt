@@ -358,14 +358,12 @@ private fun CircleBtn(icon: ImageVector, filled: Boolean, onClick: () -> Unit) {
         Modifier
             .size(38.dp)
             .clip(CircleShape)
-            .then(
-                if (filled) Modifier.background(colors.accent)
-                else Modifier.border(1.5.dp, colors.line, CircleShape)
-            )
+            .background(if (filled) colors.accent else colors.surfaceRaised)
+            .then(if (filled) Modifier else Modifier.border(1.5.dp, colors.line, CircleShape))
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        Icon(icon, null, tint = if (filled) Color.White else colors.muted, modifier = Modifier.size(18.dp))
+        Icon(icon, null, tint = if (filled) Color.White else colors.text, modifier = Modifier.size(18.dp))
     }
 }
 
