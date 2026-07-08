@@ -43,6 +43,7 @@ struct MenuBarView: View {
         case .transferring:
             let pct = Int((vm.progressFraction * 100).rounded())
             return vm.bytesPerSec > 0 ? "\(pct)% · \(rateString(vm.bytesPerSec))" : "\(pct)%"
+        case .paused: return AppText.value("Paused", "已暂停", language: language)
         case .completed: return AppText.value("Done", "已完成", language: language)
         case .canceled: return AppText.value("Canceled", "已取消", language: language)
         case .failed: return AppText.value("Failed", "失败", language: language)

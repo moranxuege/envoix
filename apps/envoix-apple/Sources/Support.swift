@@ -17,7 +17,7 @@ typealias PlatformImage = UIImage
 let minTokenLength = 12
 let defaultRendezvousBroker = "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445"
 let defaultRelayURL = "https://envoix.chkxwlyh.us:8444"
-let appDebugBuildLabel = "Debug build 2026.07.08.12"
+let appDebugBuildLabel = "Debug build 2026.07.08.13"
 
 /// Generates a short, memorable, easy-to-type pairing token of the form
 /// `word-word-NN` (always ≥ `minTokenLength` since each word is ≥4 letters).
@@ -505,6 +505,12 @@ struct TransferStatusView: View {
             switch viewModel.phase {
             case .idle, .waiting, .canceled, .failed:
                 EmptyView()
+            case .paused:
+                if viewModel.total > 0 {
+                    Text("\(byteString(viewModel.transferred)) / \(byteString(viewModel.total))")
+                        .font(.body.monospacedDigit())
+                        .foregroundStyle(Theme.muted)
+                }
             case .transferring:
                 ProgressBar(value: viewModel.progressFraction)
                 HStack(spacing: 6) {
@@ -597,6 +603,8 @@ struct TransferStatusView: View {
             return AppText.value("Waiting for the other device", "正在等待另一台设备", language: language)
         case .transferring:
             return viewModel.fileName.isEmpty ? AppText.value("Transferring", "正在传输", language: language) : viewModel.fileName
+        case .paused:
+            return AppText.value("Transfer paused", "传输已暂停", language: language)
         case .completed:
             return AppText.value("Transfer completed", "传输完成", language: language)
         case .canceled:
@@ -616,6 +624,8 @@ struct TransferStatusView: View {
                 : viewModel.statusText
         case .transferring:
             return AppText.value("Keep both devices awake until the transfer finishes.", "请保持两台设备唤醒，直到传输完成。", language: language)
+        case .paused:
+            return AppText.value("Resume or delete this transfer from Activity.", "请在活动页继续或删除此传输。", language: language)
         case .completed:
             return viewModel.statusText.isEmpty ? AppText.value("The file is ready.", "文件已准备好。", language: language) : viewModel.statusText
         case .canceled:
@@ -639,6 +649,7 @@ struct TransferStatusView: View {
         case .idle: return "info.circle"
         case .waiting: return "antenna.radiowaves.left.and.right"
         case .transferring: return "arrow.up.arrow.down.circle"
+        case .paused: return "pause.circle"
         case .completed: return "checkmark.circle.fill"
         case .canceled: return "xmark.circle"
         case .failed: return "exclamationmark.triangle.fill"
@@ -648,7 +659,7 @@ struct TransferStatusView: View {
     private var tint: Color {
         switch viewModel.phase {
         case .idle: return Theme.muted
-        case .waiting, .transferring: return Theme.warning
+        case .waiting, .transferring, .paused: return Theme.warning
         case .completed: return Theme.success
         case .canceled: return Theme.muted
         case .failed: return Theme.danger
@@ -658,7 +669,7 @@ struct TransferStatusView: View {
     private var backgroundTint: Color {
         switch viewModel.phase {
         case .failed: return Theme.dangerSoft.opacity(0.55)
-        case .waiting, .transferring: return Theme.warning.opacity(0.06)
+        case .waiting, .transferring, .paused: return Theme.warning.opacity(0.06)
         case .completed: return Theme.success.opacity(0.06)
         case .idle, .canceled: return Theme.surface
         }

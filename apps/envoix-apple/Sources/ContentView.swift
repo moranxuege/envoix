@@ -174,6 +174,8 @@ struct ContentView: View {
             TransferStageView(
                 records: model.activities,
                 metricsByActivityID: model.activityMetrics,
+                onPause: model.pauseActivity,
+                onResume: model.resumeActivity,
                 onDelete: model.removeActivity
             )
         case .settings:
@@ -259,7 +261,7 @@ struct ContentView: View {
         switch viewModel.phase {
         case .completed: return .success
         case .failed: return .error
-        case .waiting, .transferring: return .warning
+        case .waiting, .transferring, .paused: return .warning
         case .idle, .canceled: return .neutral
         }
     }
@@ -289,7 +291,7 @@ struct ContentView: View {
 
     private func pendingCount(for viewModel: TransferViewModel) -> Int {
         switch viewModel.phase {
-        case .waiting, .transferring:
+        case .waiting, .transferring, .paused:
             return 1
         case .idle, .completed, .canceled, .failed:
             return 0
@@ -308,6 +310,8 @@ private struct TransferStageView: View {
     @State private var expandedActivityIDs: Set<String> = []
     let records: [FfiTransferActivityRecord]
     let metricsByActivityID: [String: ActivityMetrics]
+    let onPause: (String) -> Void
+    let onResume: (String) -> Void
     let onDelete: (String) -> Void
 
     var body: some View {
@@ -391,6 +395,31 @@ private struct TransferStageView: View {
                 }
                 Spacer(minLength: 8)
                 ModePill(text: activityStateText(for: record))
+                if canResume(record) {
+                    Button {
+                        onResume(record.activityId)
+                    } label: {
+                        Image(systemName: "play.fill")
+                            .font(.body.weight(.semibold))
+                            .frame(width: 30, height: 30)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Theme.accentStrong)
+                    .help(AppText.value("Resume transfer", "继续传输", language: language))
+                } else if canPause(record) {
+                    Button {
+                        onPause(record.activityId)
+                    } label: {
+                        Image(systemName: "pause.fill")
+                            .font(.body.weight(.semibold))
+                            .frame(width: 30, height: 30)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Theme.muted)
+                    .help(AppText.value("Pause transfer", "暂停传输", language: language))
+                }
                 Button {
                     toggleActivityDetail(record.activityId)
                 } label: {
@@ -539,9 +568,9 @@ private struct TransferStageView: View {
 
     private func isPending(_ record: FfiTransferActivityRecord) -> Bool {
         switch record.state {
-        case .queued, .binding, .waitingForPeer, .pairing, .connecting, .transferring, .verifying:
+        case .queued, .binding, .waitingForPeer, .pairing, .connecting, .transferring, .verifying, .paused:
             return true
-        case .completed, .failed, .paused, .canceled, .unknown:
+        case .completed, .failed, .canceled, .unknown:
             return false
         }
     }
@@ -558,6 +587,19 @@ private struct TransferStageView: View {
     private func progressFraction(for record: FfiTransferActivityRecord) -> Double {
         guard record.totalBytes > 0 else { return 0 }
         return min(1, Double(record.bytesTransferred) / Double(record.totalBytes))
+    }
+
+    private func canPause(_ record: FfiTransferActivityRecord) -> Bool {
+        switch record.state {
+        case .queued, .binding, .waitingForPeer, .pairing, .connecting, .transferring, .verifying:
+            return true
+        case .completed, .failed, .paused, .canceled, .unknown:
+            return false
+        }
+    }
+
+    private func canResume(_ record: FfiTransferActivityRecord) -> Bool {
+        record.state == .paused
     }
 
     private func speedBps(for record: FfiTransferActivityRecord, metrics: ActivityMetrics) -> Double? {

@@ -50,6 +50,16 @@ final class AppModel: ObservableObject {
     /// True while either side has a transfer in flight.
     var isActive: Bool { receive.isBusy || send.isBusy }
 
+    func pauseActivity(_ activityID: String) {
+        if receive.pauseActivity(activityID) { return }
+        _ = send.pauseActivity(activityID)
+    }
+
+    func resumeActivity(_ activityID: String) {
+        if receive.resumeActivity(activityID) { return }
+        _ = send.resumeActivity(activityID)
+    }
+
     func removeActivity(_ activityID: String) {
         receive.cancelActivityForRemoval(activityID)
         send.cancelActivityForRemoval(activityID)
@@ -165,6 +175,7 @@ final class TransferViewModel: ObservableObject {
         case idle
         case waiting          // receiver: endpoint up, invite shown, awaiting sender
         case transferring
+        case paused
         case completed(bytes: UInt64)
         case canceled
         case failed(String)
@@ -211,7 +222,7 @@ final class TransferViewModel: ObservableObject {
 
     var isBusy: Bool {
         switch phase {
-        case .waiting, .transferring: return true
+        case .waiting, .transferring, .paused: return true
         default: return false
         }
     }
@@ -280,6 +291,29 @@ final class TransferViewModel: ObservableObject {
     func cancelActivityForRemoval(_ activityID: String) {
         guard isBusy, !activityID.isEmpty, activityID == currentActivityID else { return }
         cancel()
+    }
+
+    @discardableResult
+    func pauseActivity(_ activityID: String) -> Bool {
+        guard isBusy, !activityID.isEmpty, activityID == currentActivityID else { return false }
+        let paused = session?.pauseActivity(activityId: activityID) ?? false
+        if paused {
+            bytesPerSec = 0
+            statusText = AppText.value("Pausing…", "正在暂停…", language: displayLanguage)
+        }
+        return paused
+    }
+
+    @discardableResult
+    func resumeActivity(_ activityID: String) -> Bool {
+        guard !activityID.isEmpty, activityID == currentActivityID else { return false }
+        let resumed = session?.resumeActivity(activityId: activityID) ?? false
+        if resumed {
+            suppressNextFailure = false
+            phase = .waiting
+            statusText = AppText.value("Resuming…", "正在继续…", language: displayLanguage)
+        }
+        return resumed
     }
 
     /// Spins up a fresh session and launches `operation`, surfacing setup errors.
@@ -372,6 +406,7 @@ final class TransferViewModel: ObservableObject {
 
     func handleTransferActivity(_ record: FfiTransferActivityRecord) {
         transferActivity = record
+        syncPhase(with: record)
     }
 
     func handleStarted(_ name: String, _ total: UInt64) {
@@ -473,6 +508,30 @@ final class TransferViewModel: ObservableObject {
         currentActivityID = ""
         rate.reset()
         phase = .idle
+    }
+
+    private func syncPhase(with record: FfiTransferActivityRecord) {
+        guard record.activityId == currentActivityID else { return }
+        switch record.state {
+        case .queued, .binding, .waitingForPeer, .pairing, .connecting, .verifying:
+            if phase == .paused || phase == .idle {
+                phase = .waiting
+            }
+        case .transferring:
+            phase = .transferring
+        case .paused:
+            bytesPerSec = 0
+            phase = .paused
+            statusText = AppText.value("Paused", "已暂停", language: displayLanguage)
+        case .canceled:
+            bytesPerSec = 0
+            phase = .canceled
+        case .completed:
+            bytesPerSec = 0
+            phase = .completed(bytes: record.bytesTransferred)
+        case .failed, .unknown:
+            break
+        }
     }
 }
 
