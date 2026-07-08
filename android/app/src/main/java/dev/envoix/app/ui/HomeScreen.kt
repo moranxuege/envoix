@@ -653,6 +653,15 @@ private fun fraction(t: Transfer): Float {
     return (t.bytes.toFloat() / t.total.toFloat()).coerceIn(0f, 1f)
 }
 
+/** Trailing-window average of the 250 ms-sampled rate (~3 s), so the shown speed
+ *  and ETA don't jump with every burst. The raw instantaneous samples still feed
+ *  the detail chart and the finished card's avg/peak; only the headline is smoothed. */
+private const val SPEED_WINDOW = 12
+private fun smoothedBps(t: Transfer): Double {
+    val window = t.speedHistory.takeLast(SPEED_WINDOW)
+    return if (window.isEmpty()) t.avgBps else window.average()
+}
+
 private fun speedText(t: Transfer): String {
     if (t.status != Status.Transferring || t.speedBps <= 0) return when (t.status) {
         Status.Connecting -> "connecting"
@@ -663,15 +672,17 @@ private fun speedText(t: Transfer): String {
         Status.Cancelled -> "cancelled"
         else -> "—"
     }
-    val mbps = t.speedBps / 1_000_000.0
+    val bps = smoothedBps(t)
+    val mbps = bps / 1_000_000.0
     return if (mbps >= 1) "${(mbps * 10).roundToInt() / 10.0} MB/s"
-    else "${(t.speedBps / 1000).roundToInt()} KB/s"
+    else "${(bps / 1000).roundToInt()} KB/s"
 }
 
 private fun etaText(t: Transfer): String {
-    if (t.status != Status.Transferring || t.speedBps <= 0 || t.total <= 0) return "—"
+    val bps = smoothedBps(t)
+    if (t.status != Status.Transferring || bps <= 0 || t.total <= 0) return "—"
     val remain = (t.total - t.bytes).coerceAtLeast(0)
-    val secs = (remain / t.speedBps).roundToInt()
+    val secs = (remain / bps).roundToInt()
     val m = secs / 60
     val s = secs % 60
     return "%02d:%02d ETA".format(m, s)
