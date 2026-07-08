@@ -13,7 +13,8 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
-use envoix_client::api::{Client, Invite, PeerSource, Role, TransferEvent, TransferOptions};
+use envoix_client::TransferDirection;
+use envoix_client::api::{Client, Invite, PeerSource, Role, TransferOptions, TransferRequest};
 use jni::JNIEnv;
 use jni::JavaVM;
 use jni::objects::{GlobalRef, JClass, JObject, JString, JValue};
@@ -248,12 +249,12 @@ async fn drive(req: DriveRequest, vm: &JavaVM, cb: &GlobalRef) -> Result<(), Str
     let allow = split_csv(&req.candidates_allow);
     let deny = split_csv(&req.candidates_deny);
     let chunk_size = (!req.chunk_size.is_empty()).then_some(req.chunk_size.as_str());
-    let client = Client::from_config_fields(chunk_size, &allow, &deny).map_err(|e| e.to_string())?;
-    let into = PathBuf::from(&req.path);
+    let client =
+        Client::from_config_fields(chunk_size, &allow, &deny).map_err(|e| e.to_string())?;
 
     // Try each enabled rendezvous in order (Room, then mDNS via the code as its
-    // token). Fall back to the next only on a *pre-connection* failure, so a
-    // transfer that already started is never re-sent.
+    // token); the client's fallback loop advances to the next only on a
+    // pre-connection failure, so a transfer that already started is never re-sent.
     let mut sources: Vec<PeerSource> = Vec::new();
     if req.use_room {
         sources.push(PeerSource::Room {
@@ -266,48 +267,34 @@ async fn drive(req: DriveRequest, vm: &JavaVM, cb: &GlobalRef) -> Result<(), Str
             token: Some(req.code),
         });
     }
-    if sources.is_empty() {
-        return Err("no rendezvous mode enabled".to_string());
-    }
 
-    let count = sources.len();
-    let mut last_err = "transfer failed".to_string();
-    for (i, source) in sources.into_iter().enumerate() {
-        let mut options = TransferOptions::default();
-        options.relay = Some(req.relay.clone());
-        let mut transfer = match req.direction.as_str() {
-            "send" => client.send(into.clone(), source, options),
-            _ => client.receive(into.clone(), source, options),
-        }
+    let mut options = TransferOptions::default();
+    options.relay = Some(req.relay);
+    let direction = match req.direction.as_str() {
+        "send" => TransferDirection::Send,
+        _ => TransferDirection::Receive,
+    };
+    let mut transfer = client
+        .run(TransferRequest {
+            direction,
+            path: PathBuf::from(&req.path),
+            sources,
+            options,
+        })
         .map_err(|e| e.to_string())?;
 
-        // Register a cancel handle so `cancel(id)` can stop this transfer.
-        let handle = transfer.cancel_handle();
-        if let Ok(mut map) = cancels().lock() {
-            map.insert(req.id, Box::new(move || handle.cancel()));
-        }
+    // Register a cancel handle so `cancel(id)` can stop the transfer.
+    let handle = transfer.cancel_handle();
+    if let Ok(mut map) = cancels().lock() {
+        map.insert(req.id, Box::new(move || handle.cancel()));
+    }
 
-        let mut connected = false;
-        while let Some(event) = transfer.next_event().await {
-            if matches!(event.event, TransferEvent::Connected { .. }) {
-                connected = true;
-            }
-            if let Ok(json) = serde_json::to_string(&event) {
-                emit(vm, cb, &json);
-            }
-        }
-        match transfer.wait().await {
-            Ok(_) => return Ok(()),
-            Err(err) => {
-                last_err = err.to_string();
-                // Fall back only if we never reached a live connection.
-                if connected || i + 1 == count {
-                    return Err(last_err);
-                }
-            }
+    while let Some(event) = transfer.next_event().await {
+        if let Ok(json) = serde_json::to_string(&event) {
+            emit(vm, cb, &json);
         }
     }
-    Err(last_err)
+    transfer.wait().await.map(|_| ()).map_err(|e| e.to_string())
 }
 
 /// Read a Java string into a Rust `String` (empty on any error).

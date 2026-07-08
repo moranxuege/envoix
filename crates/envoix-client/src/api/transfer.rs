@@ -120,6 +120,13 @@ impl StatsHandle {
             paths: s.paths.clone(),
         }
     }
+
+    /// Whether a `Connected` event has been observed - i.e. the transfer
+    /// reached a live peer connection. The fallback loop reads this to tell a
+    /// pre-connection failure (retry the next source) from a mid-transfer one.
+    pub(crate) fn connected(&self) -> bool {
+        self.0.lock().expect("stats mutex").connected_ms.is_some()
+    }
 }
 
 /// Lock-free cell holding the phase the transfer has reached, updated as

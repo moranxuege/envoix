@@ -134,6 +134,21 @@ impl Default for Client {
     }
 }
 
+/// A transfer to run via [`Client::run`]: a direction, the file/output path, an
+/// ordered list of peer sources to try (falling back to the next only on a
+/// pre-connection failure), and the per-transfer options.
+#[derive(Debug)]
+pub struct TransferRequest {
+    /// Send a file or receive into a directory.
+    pub direction: TransferDirection,
+    /// The file to send, or the directory to receive into.
+    pub path: PathBuf,
+    /// Rendezvous sources to attempt in order (e.g. Room, then mDNS).
+    pub sources: Vec<PeerSource>,
+    /// Per-transfer options (relay, resume, bind addrs, path policy).
+    pub options: TransferOptions,
+}
+
 impl Client {
     /// A client with the default chunk size and an ephemeral identity.
     pub fn new() -> Self {
@@ -201,6 +216,29 @@ impl Client {
         let events_phase = events.phase_cell();
         let events_stats = events.stats_handle();
         let cancel = TransferCancelToken::new();
+        let (fut, span) = self.build_send(to, file, &options, &events, &cancel)?;
+        let task = tokio::spawn(with_summary(fut, events_stats.clone()).instrument(span));
+        Ok(Transfer::new(
+            event_receiver,
+            cancel,
+            events_phase,
+            events_stats,
+            task,
+        ))
+    }
+
+    /// Builds one send attempt's future + tracing span, emitting through the
+    /// given event channel and honoring the given cancel token. Shared by
+    /// [`Self::send`] (a single source) and [`Self::run`] (fallback across
+    /// sources on one channel), so all attempts stream to the same caller.
+    fn build_send(
+        &self,
+        to: PeerSource,
+        file: PathBuf,
+        options: &TransferOptions,
+        events: &EventSender,
+        cancel: &TransferCancelToken,
+    ) -> Result<(TransferFuture, tracing::Span), TransferError> {
         let sink = Box::new(SessionEventAdapter(events.clone()));
         let resume = options.resume;
         let mode = to.mode();
@@ -209,8 +247,9 @@ impl Client {
         let fut: TransferFuture = match to {
             PeerSource::Manual { peer, token } => {
                 let pairing = shared_token(&token)?;
-                let config = self.session_config(&options);
+                let config = self.session_config(options);
                 let cancel = cancel.clone();
+                let events = events.clone();
                 Box::pin(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Send,
@@ -222,8 +261,9 @@ impl Client {
             PeerSource::Invite { invite } => {
                 let (peer, token) = resolve_invite(&invite)?;
                 let pairing = shared_token(&token)?;
-                let config = self.session_config(&options);
+                let config = self.session_config(options);
                 let cancel = cancel.clone();
+                let events = events.clone();
                 Box::pin(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Send,
@@ -234,8 +274,9 @@ impl Client {
             }
             PeerSource::Mdns { token: Some(token) } => {
                 let pairing = shared_token(&token)?;
-                let config = self.session_config(&options);
+                let config = self.session_config(options);
                 let cancel = cancel.clone();
+                let events = events.clone();
                 Box::pin(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Send,
@@ -251,8 +292,9 @@ impl Client {
                 span.record("room", room_id_of(&code));
                 let broker =
                     parse_broker_addr(&broker, options.relay.as_deref()).map_err(setup_error)?;
-                let config = self.session_config(&options);
+                let config = self.session_config(options);
                 let cancel = cancel.clone();
+                let events = events.clone();
                 Box::pin(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Send,
@@ -268,14 +310,7 @@ impl Client {
                 ));
             }
         };
-        let task = tokio::spawn(with_summary(fut, events_stats.clone()).instrument(span));
-        Ok(Transfer::new(
-            event_receiver,
-            cancel,
-            events_phase,
-            events_stats,
-            task,
-        ))
+        Ok((fut, span))
     }
 
     /// Receives one file into the `into` directory from the peer described
@@ -297,6 +332,28 @@ impl Client {
         let events_phase = events.phase_cell();
         let events_stats = events.stats_handle();
         let cancel = TransferCancelToken::new();
+        let (fut, span) = self.build_receive(from, into, &options, &events, &cancel)?;
+        let task = tokio::spawn(with_summary(fut, events_stats.clone()).instrument(span));
+        Ok(Transfer::new(
+            event_receiver,
+            cancel,
+            events_phase,
+            events_stats,
+            task,
+        ))
+    }
+
+    /// Builds one receive attempt's future + tracing span, emitting through the
+    /// given event channel. The receive-side counterpart to [`Self::build_send`],
+    /// shared by [`Self::receive`] and [`Self::run`].
+    fn build_receive(
+        &self,
+        from: PeerSource,
+        into: PathBuf,
+        options: &TransferOptions,
+        events: &EventSender,
+        cancel: &TransferCancelToken,
+    ) -> Result<(TransferFuture, tracing::Span), TransferError> {
         let sink = Box::new(SessionEventAdapter(events.clone()));
         let listen = options
             .listen_addrs
@@ -309,9 +366,10 @@ impl Client {
             PeerSource::ShowManual { token } => {
                 let token = token.map_or_else(new_token, Ok)?;
                 let pairing = shared_token(&token)?;
-                let config = self.session_config(&options);
+                let config = self.session_config(options);
                 let cancel = cancel.clone();
                 let on_bound = advertise(events.clone(), token, None);
+                let events = events.clone();
                 Box::pin(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Receive,
@@ -326,9 +384,10 @@ impl Client {
             PeerSource::ShowInvite { ttl_secs } => {
                 let token = new_token()?;
                 let pairing = shared_token(&token)?;
-                let config = self.session_config(&options);
+                let config = self.session_config(options);
                 let cancel = cancel.clone();
                 let on_bound = advertise(events.clone(), token, Some(ttl_secs));
+                let events = events.clone();
                 Box::pin(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Receive,
@@ -348,9 +407,10 @@ impl Client {
                     None => (new_token()?, Some(DEFAULT_INVITE_TTL_SECS)),
                 };
                 let pairing = shared_token(&token)?;
-                let config = self.session_config(&options);
+                let config = self.session_config(options);
                 let cancel = cancel.clone();
                 let on_bound = advertise(events.clone(), token, invite_ttl);
+                let events = events.clone();
                 Box::pin(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Receive,
@@ -364,8 +424,9 @@ impl Client {
                 span.record("room", room_id_of(&code));
                 let broker =
                     parse_broker_addr(&broker, options.relay.as_deref()).map_err(setup_error)?;
-                let config = self.session_config(&options);
+                let config = self.session_config(options);
                 let cancel = cancel.clone();
+                let events = events.clone();
                 Box::pin(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Receive,
@@ -381,7 +442,74 @@ impl Client {
                 ));
             }
         };
-        let task = tokio::spawn(with_summary(fut, events_stats.clone()).instrument(span));
+        Ok((fut, span))
+    }
+
+    /// Runs a transfer, trying each source in [`TransferRequest::sources`] in
+    /// order and falling back to the next **only** on a pre-connection failure -
+    /// so a transfer that reached a live connection is never re-attempted. The
+    /// returned [`Transfer`]'s event stream carries every attempt, on one
+    /// channel; `cancel` stops whichever attempt is in flight.
+    pub fn run(&self, request: TransferRequest) -> Result<Transfer, TransferError> {
+        let TransferRequest {
+            direction,
+            path,
+            sources,
+            options,
+        } = request;
+        if sources.is_empty() {
+            return Err(TransferError::input(
+                "a transfer needs at least one peer source",
+            ));
+        }
+        crate::validate_chunk_size(self.chunk_size).map_err(setup_error)?;
+        validate_path_policy(&options)?;
+        let (events, event_receiver) = EventSender::channel();
+        let events_phase = events.phase_cell();
+        let events_stats = events.stats_handle();
+        let cancel = TransferCancelToken::new();
+        let client = self.clone();
+        let stats = events_stats.clone();
+        let loop_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            let count = sources.len();
+            let mut last: Result<TransferSummary, PublicError> = Err(PublicError::Transfer(
+                "no peer source attempted".to_string(),
+            ));
+            for (i, source) in sources.into_iter().enumerate() {
+                let built = match direction {
+                    TransferDirection::Send => {
+                        client.build_send(source, path.clone(), &options, &events, &loop_cancel)
+                    }
+                    TransferDirection::Receive => {
+                        client.build_receive(source, path.clone(), &options, &events, &loop_cancel)
+                    }
+                };
+                let (fut, span) = match built {
+                    Ok(pair) => pair,
+                    Err(error) => {
+                        // A source that fails to even build (bad invite, missing
+                        // token, unsupported role) is a pre-connection failure.
+                        last = Err(PublicError::InvalidInput(error.to_string()));
+                        if i + 1 == count {
+                            break;
+                        }
+                        continue;
+                    }
+                };
+                match with_summary(fut, stats.clone()).instrument(span).await {
+                    Ok(summary) => return Ok(summary),
+                    Err(error) => {
+                        last = Err(error);
+                        // Fall back only if we never reached a live connection.
+                        if stats.connected() || i + 1 == count {
+                            break;
+                        }
+                    }
+                }
+            }
+            last
+        });
         Ok(Transfer::new(
             event_receiver,
             cancel,
@@ -631,6 +759,56 @@ mod tests {
                 },
                 TransferOptions::default(),
             )
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Input);
+    }
+
+    #[test]
+    fn run_rejects_empty_sources() {
+        let error = client()
+            .run(TransferRequest {
+                direction: TransferDirection::Send,
+                path: "f.txt".into(),
+                sources: vec![],
+                options: TransferOptions::default(),
+            })
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Input);
+    }
+
+    #[test]
+    fn run_validates_chunk_size_up_front() {
+        let mut client = Client::new();
+        client.chunk_size = 0;
+        let error = client
+            .run(TransferRequest {
+                direction: TransferDirection::Send,
+                path: "f.txt".into(),
+                sources: vec![PeerSource::Mdns {
+                    token: Some("abcdefghijkl".into()),
+                }],
+                options: TransferOptions::default(),
+            })
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Input);
+    }
+
+    #[tokio::test]
+    async fn run_surfaces_a_source_failure_through_wait() {
+        // A lone unbuildable source (garbage invite) has no fallback, so the
+        // error surfaces on the returned handle rather than synchronously.
+        let error = client()
+            .run(TransferRequest {
+                direction: TransferDirection::Send,
+                path: "f.txt".into(),
+                sources: vec![PeerSource::Invite {
+                    invite: "not-an-invite".into(),
+                }],
+                options: TransferOptions::default(),
+            })
+            .expect("run spawns the transfer")
+            .wait()
+            .await
             .unwrap_err();
         assert_eq!(error.kind, ErrorKind::Input);
     }

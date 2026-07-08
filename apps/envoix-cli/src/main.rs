@@ -81,10 +81,14 @@ async fn execute(
         eprintln!("{note}");
     }
     let client = api_client(plan.config.as_deref(), plan.identity)?;
-    let transfer = match direction {
-        TransferDirection::Send => client.send(plan.path, plan.source, plan.options)?,
-        TransferDirection::Receive => client.receive(plan.path, plan.source, plan.options)?,
-    };
+    // One source today (no fallback); routing through `run` unifies the path
+    // with the app and makes multi-source fallback a matter of the source list.
+    let transfer = client.run(api::TransferRequest {
+        direction,
+        path: plan.path,
+        sources: vec![plan.source],
+        options: plan.options,
+    })?;
     run_transfer(transfer, output).await
 }
 
