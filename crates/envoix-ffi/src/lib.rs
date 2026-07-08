@@ -18,9 +18,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use envoix_client::{
     BindAddrs, PeerDescriptor, TransferDirection, TransferSummary,
     api::{
-        Client, DataPath, FailureCategory, FailureCode, FailureOrigin, FailurePhase, PairingStep,
-        PathPolicy, PeerSource, RecoveryAction, StampedEvent, Transfer, TransferError,
-        TransferEvent, TransferMode, TransferOptions,
+        Client, DataPath, FailureCategory, FailureCode, FailureOrigin, FailurePhase, Invite,
+        PairingStep, PathPolicy, PeerSource, RecoveryAction, Role, StampedEvent, Transfer,
+        TransferError, TransferEvent, TransferMode, TransferOptions,
     },
 };
 use envoix_rendezvous_iroh::generate_code;
@@ -73,6 +73,37 @@ pub fn generate_room_code() -> Result<String, EnvoixError> {
     generate_code(2).map_err(op_err)
 }
 
+/// Creates a cross-platform room invite whose payload is safe to render as a QR.
+#[uniffi::export]
+pub fn make_pairing_invite(
+    role: FfiInviteRole,
+    broker: String,
+    relay: String,
+) -> Result<FfiPairingInvite, EnvoixError> {
+    let broker_input = broker.trim();
+    let relay = relay_for_pairing_invite(broker_input, &relay);
+    let broker = broker_for_pairing_invite(broker_input);
+    let mut invite = Invite::room(broker, relay).map_err(op_err)?;
+    if let Some(role) = core_invite_role(role) {
+        invite = invite.with_role(role);
+    }
+    Ok(FfiPairingInvite::from_invite(&invite))
+}
+
+/// Parses a typed room code or scanned `envoix://pair/...` payload.
+#[uniffi::export]
+pub fn parse_pairing_invite(input: String) -> Result<FfiPairingInvite, EnvoixError> {
+    let input = input.trim();
+    let lowercased = input.to_ascii_lowercase();
+    if lowercased.starts_with("envoix:") && !lowercased.starts_with("envoix://pair/") {
+        return Err(EnvoixError::Operation {
+            message: "unsupported Envoix pairing invite scheme".to_string(),
+        });
+    }
+    let invite = Invite::parse(input).map_err(op_err)?;
+    Ok(FfiPairingInvite::from_invite(&invite))
+}
+
 /// Creates the initial Activity/queue record for a transfer request.
 #[uniffi::export]
 pub fn make_transfer_activity_record(mut request: FfiTransferRequest) -> FfiTransferActivityRecord {
@@ -107,6 +138,27 @@ fn op_err(error: impl std::fmt::Display) -> EnvoixError {
     EnvoixError::Operation {
         message: error.to_string(),
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum FfiInviteRole {
+    Send,
+    Receive,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct FfiPairingInvite {
+    /// Short pairing code typed by users and reused as the mDNS token.
+    pub code: String,
+    /// `envoix://pair/...` payload rendered into the QR code.
+    pub payload: String,
+    /// Broker advertised by the QR payload, empty when the input was a bare code.
+    pub broker: String,
+    /// Relay advertised by the QR payload, empty when not supplied.
+    pub relay: String,
+    /// Role advertised by the payload creator; scanners should choose the opposite.
+    pub role: FfiInviteRole,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -855,6 +907,18 @@ impl FfiTransferRequest {
     }
 }
 
+impl FfiPairingInvite {
+    fn from_invite(invite: &Invite) -> Self {
+        Self {
+            code: invite.code().to_string(),
+            payload: invite.payload(),
+            broker: invite.broker().unwrap_or_default().to_string(),
+            relay: invite.relay().unwrap_or_default().to_string(),
+            role: ffi_invite_role(invite.role()),
+        }
+    }
+}
+
 impl FfiTransferActivityRecord {
     fn from_request(request: &FfiTransferRequest, now_ms: u64) -> Self {
         Self {
@@ -1150,6 +1214,42 @@ fn optional_value(value: &str) -> Option<String> {
         None
     } else {
         Some(value.to_string())
+    }
+}
+
+fn broker_for_pairing_invite(broker: &str) -> String {
+    let broker = broker.trim();
+    if broker.is_empty() {
+        DEFAULT_RENDEZVOUS_BROKER.to_string()
+    } else {
+        broker.to_string()
+    }
+}
+
+fn relay_for_pairing_invite(broker: &str, relay: &str) -> Option<String> {
+    let relay = relay.trim();
+    if !relay.is_empty() {
+        Some(relay.to_string())
+    } else if broker.trim().is_empty() {
+        Some(DEFAULT_RELAY_URL.to_string())
+    } else {
+        None
+    }
+}
+
+fn core_invite_role(role: FfiInviteRole) -> Option<Role> {
+    match role {
+        FfiInviteRole::Send => Some(Role::Send),
+        FfiInviteRole::Receive => Some(Role::Receive),
+        FfiInviteRole::Unknown => None,
+    }
+}
+
+fn ffi_invite_role(role: Option<Role>) -> FfiInviteRole {
+    match role {
+        Some(Role::Send) => FfiInviteRole::Send,
+        Some(Role::Receive) => FfiInviteRole::Receive,
+        None => FfiInviteRole::Unknown,
     }
 }
 
@@ -1664,6 +1764,63 @@ mod tests {
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
             }
         }
+    }
+
+    #[test]
+    fn pairing_invite_payload_round_trips_for_native_clients() {
+        let invite = make_pairing_invite(
+            FfiInviteRole::Receive,
+            "id@127.0.0.1:8445".to_string(),
+            "https://relay.example".to_string(),
+        )
+        .unwrap();
+
+        assert!(invite.payload.starts_with("envoix://pair/"));
+        assert_eq!(invite.role, FfiInviteRole::Receive);
+        assert_eq!(invite.broker, "id@127.0.0.1:8445");
+        assert_eq!(invite.relay, "https://relay.example");
+
+        let parsed = parse_pairing_invite(invite.payload).unwrap();
+        assert_eq!(parsed.code, invite.code);
+        assert_eq!(parsed.broker, "id@127.0.0.1:8445");
+        assert_eq!(parsed.relay, "https://relay.example");
+        assert_eq!(parsed.role, FfiInviteRole::Receive);
+    }
+
+    #[test]
+    fn pairing_invite_uses_hosted_defaults_when_settings_are_blank() {
+        let invite =
+            make_pairing_invite(FfiInviteRole::Send, String::new(), String::new()).unwrap();
+        assert_eq!(invite.broker, DEFAULT_RENDEZVOUS_BROKER);
+        assert_eq!(invite.relay, DEFAULT_RELAY_URL);
+
+        let parsed = parse_pairing_invite(invite.code.clone()).unwrap();
+        assert_eq!(parsed.code, invite.code);
+        assert!(parsed.broker.is_empty());
+        assert!(parsed.relay.is_empty());
+        assert_eq!(parsed.role, FfiInviteRole::Unknown);
+    }
+
+    #[test]
+    fn custom_pairing_broker_does_not_force_default_relay() {
+        let invite = make_pairing_invite(
+            FfiInviteRole::Unknown,
+            "custom@10.0.0.1:8445".to_string(),
+            String::new(),
+        )
+        .unwrap();
+        assert_eq!(invite.broker, "custom@10.0.0.1:8445");
+        assert!(invite.relay.is_empty());
+        assert_eq!(invite.role, FfiInviteRole::Unknown);
+    }
+
+    #[test]
+    fn pairing_invite_rejects_legacy_direct_invites() {
+        let err = parse_pairing_invite("envoix:legacy-direct-payload".to_string()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unsupported Envoix pairing invite scheme")
+        );
     }
 
     #[test]

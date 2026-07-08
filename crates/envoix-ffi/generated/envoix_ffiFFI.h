@@ -460,9 +460,19 @@ RustBuffer uniffi_envoix_ffi_fn_func_generate_room_code(RustCallStatus *_Nonnull
 
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_FN_FUNC_MAKE_PAIRING_INVITE
+#define UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_FN_FUNC_MAKE_PAIRING_INVITE
+RustBuffer uniffi_envoix_ffi_fn_func_make_pairing_invite(RustBuffer role, RustBuffer broker, RustBuffer relay, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_FN_FUNC_MAKE_TRANSFER_ACTIVITY_RECORD
 #define UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_FN_FUNC_MAKE_TRANSFER_ACTIVITY_RECORD
 RustBuffer uniffi_envoix_ffi_fn_func_make_transfer_activity_record(RustBuffer request, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_FN_FUNC_PARSE_PAIRING_INVITE
+#define UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_FN_FUNC_PARSE_PAIRING_INVITE
+RustBuffer uniffi_envoix_ffi_fn_func_parse_pairing_invite(RustBuffer input, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_ENVOIX_FFI_RUSTBUFFER_ALLOC
@@ -737,9 +747,21 @@ uint16_t uniffi_envoix_ffi_checksum_func_generate_room_code(void
 
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_FUNC_MAKE_PAIRING_INVITE
+#define UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_FUNC_MAKE_PAIRING_INVITE
+uint16_t uniffi_envoix_ffi_checksum_func_make_pairing_invite(void
+
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_FUNC_MAKE_TRANSFER_ACTIVITY_RECORD
 #define UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_FUNC_MAKE_TRANSFER_ACTIVITY_RECORD
 uint16_t uniffi_envoix_ffi_checksum_func_make_transfer_activity_record(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_FUNC_PARSE_PAIRING_INVITE
+#define UNIFFI_FFIDEF_UNIFFI_ENVOIX_FFI_CHECKSUM_FUNC_PARSE_PAIRING_INVITE
+uint16_t uniffi_envoix_ffi_checksum_func_parse_pairing_invite(void
 
 );
 #endif

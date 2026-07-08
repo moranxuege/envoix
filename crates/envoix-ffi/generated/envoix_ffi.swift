@@ -1503,6 +1503,102 @@ public func FfiConverterTypeEnvoixRuntimeSettings_lower(_ value: EnvoixRuntimeSe
 }
 
 
+public struct FfiPairingInvite: Equatable, Hashable {
+    /**
+     * Short pairing code typed by users and reused as the mDNS token.
+     */
+    public var code: String
+    /**
+     * `envoix://pair/...` payload rendered into the QR code.
+     */
+    public var payload: String
+    /**
+     * Broker advertised by the QR payload, empty when the input was a bare code.
+     */
+    public var broker: String
+    /**
+     * Relay advertised by the QR payload, empty when not supplied.
+     */
+    public var relay: String
+    /**
+     * Role advertised by the payload creator; scanners should choose the opposite.
+     */
+    public var role: FfiInviteRole
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Short pairing code typed by users and reused as the mDNS token.
+         */code: String,
+        /**
+         * `envoix://pair/...` payload rendered into the QR code.
+         */payload: String,
+        /**
+         * Broker advertised by the QR payload, empty when the input was a bare code.
+         */broker: String,
+        /**
+         * Relay advertised by the QR payload, empty when not supplied.
+         */relay: String,
+        /**
+         * Role advertised by the payload creator; scanners should choose the opposite.
+         */role: FfiInviteRole) {
+        self.code = code
+        self.payload = payload
+        self.broker = broker
+        self.relay = relay
+        self.role = role
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiPairingInvite: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiPairingInvite: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiPairingInvite {
+        return
+            try FfiPairingInvite(
+                code: FfiConverterString.read(from: &buf),
+                payload: FfiConverterString.read(from: &buf),
+                broker: FfiConverterString.read(from: &buf),
+                relay: FfiConverterString.read(from: &buf),
+                role: FfiConverterTypeFfiInviteRole.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiPairingInvite, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.code, into: &buf)
+        FfiConverterString.write(value.payload, into: &buf)
+        FfiConverterString.write(value.broker, into: &buf)
+        FfiConverterString.write(value.relay, into: &buf)
+        FfiConverterTypeFfiInviteRole.write(value.role, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPairingInvite_lift(_ buf: RustBuffer) throws -> FfiPairingInvite {
+    return try FfiConverterTypeFfiPairingInvite.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiPairingInvite_lower(_ value: FfiPairingInvite) -> RustBuffer {
+    return FfiConverterTypeFfiPairingInvite.lower(value)
+}
+
+
 public struct FfiTransferActivityRecord: Equatable, Hashable {
     public var activityId: String
     public var state: FfiTransferActivityState
@@ -2690,6 +2786,80 @@ public func FfiConverterTypeFfiFailurePhase_lower(_ value: FfiFailurePhase) -> R
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
+public enum FfiInviteRole: Equatable, Hashable {
+
+    case send
+    case receive
+    case unknown
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiInviteRole: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiInviteRole: FfiConverterRustBuffer {
+    typealias SwiftType = FfiInviteRole
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiInviteRole {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .send
+
+        case 2: return .receive
+
+        case 3: return .unknown
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiInviteRole, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .send:
+            writeInt(&buf, Int32(1))
+
+
+        case .receive:
+            writeInt(&buf, Int32(2))
+
+
+        case .unknown:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiInviteRole_lift(_ buf: RustBuffer) throws -> FfiInviteRole {
+    return try FfiConverterTypeFfiInviteRole.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiInviteRole_lower(_ value: FfiInviteRole) -> RustBuffer {
+    return FfiConverterTypeFfiInviteRole.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
 public enum FfiPairingStep: Equatable, Hashable {
 
     case none
@@ -3428,12 +3598,34 @@ public func generateRoomCode()throws  -> String  {
 })
 }
 /**
+ * Creates a cross-platform room invite whose payload is safe to render as a QR.
+ */
+public func makePairingInvite(role: FfiInviteRole, broker: String, relay: String)throws  -> FfiPairingInvite  {
+    return try  FfiConverterTypeFfiPairingInvite_lift(try rustCallWithError(FfiConverterTypeEnvoixError_lift) {
+    uniffi_envoix_ffi_fn_func_make_pairing_invite(
+        FfiConverterTypeFfiInviteRole_lower(role),
+        FfiConverterString.lower(broker),
+        FfiConverterString.lower(relay),$0
+    )
+})
+}
+/**
  * Creates the initial Activity/queue record for a transfer request.
  */
 public func makeTransferActivityRecord(request: FfiTransferRequest) -> FfiTransferActivityRecord  {
     return try!  FfiConverterTypeFfiTransferActivityRecord_lift(try! rustCall() {
     uniffi_envoix_ffi_fn_func_make_transfer_activity_record(
         FfiConverterTypeFfiTransferRequest_lower(request),$0
+    )
+})
+}
+/**
+ * Parses a typed room code or scanned `envoix://pair/...` payload.
+ */
+public func parsePairingInvite(input: String)throws  -> FfiPairingInvite  {
+    return try  FfiConverterTypeFfiPairingInvite_lift(try rustCallWithError(FfiConverterTypeEnvoixError_lift) {
+    uniffi_envoix_ffi_fn_func_parse_pairing_invite(
+        FfiConverterString.lower(input),$0
     )
 })
 }
@@ -3459,7 +3651,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_envoix_ffi_checksum_func_generate_room_code() != 4423) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_envoix_ffi_checksum_func_make_pairing_invite() != 53690) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_envoix_ffi_checksum_func_make_transfer_activity_record() != 14483) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_envoix_ffi_checksum_func_parse_pairing_invite() != 23535) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_envoix_ffi_checksum_method_envoixsession_cancel() != 34138) {
