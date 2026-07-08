@@ -278,7 +278,7 @@ struct ContentView: View {
         switch record.state {
         case .queued, .binding, .waitingForPeer, .pairing, .connecting, .transferring, .verifying:
             return true
-        case .completed, .failed, .canceled, .unknown:
+        case .completed, .failed, .paused, .canceled, .unknown:
             return false
         }
     }
@@ -493,7 +493,7 @@ private struct TransferStageView: View {
         switch record.state {
         case .queued, .binding, .waitingForPeer, .pairing, .connecting, .transferring, .verifying:
             return true
-        case .completed, .failed, .canceled, .unknown:
+        case .completed, .failed, .paused, .canceled, .unknown:
             return false
         }
     }
@@ -502,7 +502,7 @@ private struct TransferStageView: View {
         switch record.state {
         case .completed, .failed, .canceled:
             return true
-        case .queued, .binding, .waitingForPeer, .pairing, .connecting, .transferring, .verifying, .unknown:
+        case .queued, .binding, .waitingForPeer, .pairing, .connecting, .transferring, .verifying, .paused, .unknown:
             return false
         }
     }
@@ -590,6 +590,7 @@ private struct TransferStageView: View {
         case .verifying: return AppText.value("Verifying", "校验", language: language)
         case .completed: return AppText.value("Done", "完成", language: language)
         case .failed: return AppText.value("Error", "错误", language: language)
+        case .paused: return AppText.value("Paused", "已暂停", language: language)
         case .canceled: return AppText.value("Canceled", "取消", language: language)
         case .unknown: return AppText.value("Unknown", "未知", language: language)
         }
@@ -599,6 +600,7 @@ private struct TransferStageView: View {
         switch record.state {
         case .completed: return "checkmark.circle.fill"
         case .failed: return "exclamationmark.triangle.fill"
+        case .paused: return "pause.circle"
         case .canceled: return "xmark.circle"
         default:
             return record.direction == .receive ? "tray.and.arrow.down" : "paperplane"
@@ -609,6 +611,7 @@ private struct TransferStageView: View {
         switch record.state {
         case .completed: return Theme.success
         case .failed: return Theme.danger
+        case .paused: return Theme.warning
         case .canceled, .unknown: return Theme.muted
         default: return Theme.warning
         }

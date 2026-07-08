@@ -538,6 +538,11 @@ public protocol EnvoixSessionProtocol: AnyObject, Sendable {
     func cancelActivity(activityId: String)  -> Bool
 
     /**
+     * Pauses a queued/running activity while keeping its request for resume.
+     */
+    func pauseActivity(activityId: String)  -> Bool
+
+    /**
      * Starts receiving one file into `output_dir`.
      *
      * Returns immediately. A fresh pairing token is generated and the invite
@@ -560,6 +565,11 @@ public protocol EnvoixSessionProtocol: AnyObject, Sendable {
      * Starts receiving one file by pairing in a rendezvous room with `code`.
      */
     func receiveRoom(outputDir: String, code: String, observer: TransferObserver) throws
+
+    /**
+     * Requeues a paused activity with its original request and observer.
+     */
+    func resumeActivity(activityId: String)  -> Bool
 
     /**
      * Starts sending `file_path` to the peer encoded in `invite`.
@@ -693,6 +703,18 @@ open func cancelActivity(activityId: String) -> Bool  {
 }
 
     /**
+     * Pauses a queued/running activity while keeping its request for resume.
+     */
+open func pauseActivity(activityId: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_envoix_ffi_fn_method_envoixsession_pause_activity(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(activityId),$0
+    )
+})
+}
+
+    /**
      * Starts receiving one file into `output_dir`.
      *
      * Returns immediately. A fresh pairing token is generated and the invite
@@ -737,6 +759,18 @@ open func receiveRoom(outputDir: String, code: String, observer: TransferObserve
         FfiConverterTypeTransferObserver_lower(observer),$0
     )
 }
+}
+
+    /**
+     * Requeues a paused activity with its original request and observer.
+     */
+open func resumeActivity(activityId: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_envoix_ffi_fn_method_envoixsession_resume_activity(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(activityId),$0
+    )
+})
 }
 
     /**
@@ -3246,6 +3280,7 @@ public enum FfiTransferActivityState: Equatable, Hashable {
     case verifying
     case completed
     case failed
+    case paused
     case canceled
     case unknown
 
@@ -3287,9 +3322,11 @@ public struct FfiConverterTypeFfiTransferActivityState: FfiConverterRustBuffer {
 
         case 9: return .failed
 
-        case 10: return .canceled
+        case 10: return .paused
 
-        case 11: return .unknown
+        case 11: return .canceled
+
+        case 12: return .unknown
 
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -3335,12 +3372,16 @@ public struct FfiConverterTypeFfiTransferActivityState: FfiConverterRustBuffer {
             writeInt(&buf, Int32(9))
 
 
-        case .canceled:
+        case .paused:
             writeInt(&buf, Int32(10))
 
 
-        case .unknown:
+        case .canceled:
             writeInt(&buf, Int32(11))
+
+
+        case .unknown:
+            writeInt(&buf, Int32(12))
 
         }
     }
@@ -3770,6 +3811,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_envoix_ffi_checksum_method_envoixsession_cancel_activity() != 54985) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_envoix_ffi_checksum_method_envoixsession_pause_activity() != 8034) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_envoix_ffi_checksum_method_envoixsession_receive() != 30107) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3777,6 +3821,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_envoix_ffi_checksum_method_envoixsession_receive_room() != 45632) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_envoix_ffi_checksum_method_envoixsession_resume_activity() != 10115) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_envoix_ffi_checksum_method_envoixsession_send_invite() != 47501) {

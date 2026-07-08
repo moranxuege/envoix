@@ -334,6 +334,7 @@ pub enum FfiTransferActivityState {
     Verifying,
     Completed,
     Failed,
+    Paused,
     Canceled,
     Unknown,
 }
@@ -495,6 +496,7 @@ pub struct EnvoixSession {
 struct TransferQueueState {
     pending: VecDeque<QueuedTransfer>,
     active: HashMap<String, ActiveTransfer>,
+    paused: HashMap<String, QueuedTransfer>,
 }
 
 struct QueuedTransfer {
@@ -513,12 +515,18 @@ struct TransferAttemptOutcome {
     result: Result<TransferSummary, TransferError>,
     direction: Option<TransferDirection>,
     connected: bool,
-    cancel_requested: bool,
+    stop_requested: Option<TransferStop>,
 }
 
 struct ActiveTransfer {
-    cancel: Option<oneshot::Sender<()>>,
+    control: Option<oneshot::Sender<TransferStop>>,
     limit: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TransferStop {
+    Cancel,
+    Pause,
 }
 
 impl TransferQueueState {
@@ -528,6 +536,7 @@ impl TransferQueueState {
                 .pending
                 .iter()
                 .any(|job| job.activity.activity_id == activity_id)
+            || self.paused.contains_key(activity_id)
     }
 
     fn can_start(&self, next_limit: usize) -> bool {
@@ -698,7 +707,7 @@ impl EnvoixSession {
         if activity_id.is_empty() {
             return false;
         }
-        let pending = {
+        let stored = {
             let mut queue = self.queue.lock().unwrap();
             if let Some(index) = queue
                 .pending
@@ -707,46 +716,123 @@ impl EnvoixSession {
             {
                 queue.pending.remove(index)
             } else {
-                None
+                queue.paused.remove(&activity_id)
             }
         };
-        if let Some(job) = pending {
+        if let Some(job) = stored {
             report_queued_cancel(job);
             return true;
         }
 
-        let cancel = self
+        let control = self
             .queue
             .lock()
             .unwrap()
             .active
             .get_mut(&activity_id)
-            .and_then(|active| active.cancel.take());
-        if let Some(cancel) = cancel {
-            let _ = cancel.send(());
+            .and_then(|active| active.control.take());
+        if let Some(control) = control {
+            let _ = control.send(TransferStop::Cancel);
             true
         } else {
             false
         }
     }
 
+    /// Pauses a queued/running activity while keeping its request for resume.
+    pub fn pause_activity(&self, activity_id: String) -> bool {
+        let activity_id = activity_id.trim().to_string();
+        if activity_id.is_empty() {
+            return false;
+        }
+        let pending = {
+            let mut queue = self.queue.lock().unwrap();
+            if queue.paused.contains_key(&activity_id) {
+                return true;
+            }
+            queue
+                .pending
+                .iter()
+                .position(|job| job.activity.activity_id == activity_id)
+                .and_then(|index| queue.pending.remove(index))
+        };
+        if let Some(mut job) = pending {
+            job.activity.apply_paused(now_ms());
+            let observer = job.observer.clone();
+            let activity = job.activity.clone();
+            self.queue.lock().unwrap().paused.insert(activity_id, job);
+            observer.on_transfer_activity(activity);
+            observer.on_status("paused".to_string());
+            return true;
+        }
+
+        let control = self
+            .queue
+            .lock()
+            .unwrap()
+            .active
+            .get_mut(&activity_id)
+            .and_then(|active| active.control.take());
+        if let Some(control) = control {
+            let _ = control.send(TransferStop::Pause);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Requeues a paused activity with its original request and observer.
+    pub fn resume_activity(&self, activity_id: String) -> bool {
+        let activity_id = activity_id.trim().to_string();
+        if activity_id.is_empty() {
+            return false;
+        }
+        let mut job = {
+            let mut queue = self.queue.lock().unwrap();
+            match queue.paused.remove(&activity_id) {
+                Some(job) => job,
+                None => return false,
+            }
+        };
+        job.activity.apply_requeued(now_ms());
+        let observer = job.observer.clone();
+        let activity = job.activity.clone();
+        {
+            let mut queue = self.queue.lock().unwrap();
+            if queue.contains_activity(&activity_id) {
+                queue.paused.insert(activity_id, job);
+                return false;
+            }
+            queue.pending.push_back(job);
+        }
+        observer.on_transfer_activity(activity);
+        observer.on_status("resuming".to_string());
+        drain_transfer_queue(
+            self.queue.clone(),
+            self.settings.clone(),
+            self.runtime.handle().clone(),
+        );
+        true
+    }
+
     /// Requests cancellation of all queued/running transfers, if any.
     pub fn cancel(&self) {
-        let (pending, cancels) = {
+        let (stored, controls) = {
             let mut queue = self.queue.lock().unwrap();
-            let pending = queue.pending.drain(..).collect::<Vec<_>>();
-            let cancels = queue
+            let mut stored = queue.pending.drain(..).collect::<Vec<_>>();
+            stored.extend(queue.paused.drain().map(|(_, job)| job));
+            let controls = queue
                 .active
                 .values_mut()
-                .filter_map(|active| active.cancel.take())
+                .filter_map(|active| active.control.take())
                 .collect::<Vec<_>>();
-            (pending, cancels)
+            (stored, controls)
         };
-        for job in pending {
+        for job in stored {
             report_queued_cancel(job);
         }
-        for cancel in cancels {
-            let _ = cancel.send(());
+        for control in controls {
+            let _ = control.send(TransferStop::Cancel);
         }
     }
 }
@@ -757,7 +843,7 @@ fn drain_transfer_queue(
     handle: Handle,
 ) {
     loop {
-        let (job, cancel) = {
+        let (job, control) = {
             let mut queue = queue.lock().unwrap();
             let Some(next) = queue.pending.front() else {
                 return;
@@ -773,15 +859,15 @@ fn drain_transfer_queue(
                 job.activity.updated_at_ms = now_ms();
             }
             let activity_id = job.activity.activity_id.clone();
-            let (cancel_sender, cancel_receiver) = oneshot::channel();
+            let (control_sender, control_receiver) = oneshot::channel();
             queue.active.insert(
                 activity_id,
                 ActiveTransfer {
-                    cancel: Some(cancel_sender),
+                    control: Some(control_sender),
                     limit,
                 },
             );
-            (job, cancel_receiver)
+            (job, control_receiver)
         };
 
         let activity_id = job.activity.activity_id.clone();
@@ -791,16 +877,27 @@ fn drain_transfer_queue(
         let settings_for_task = settings.clone();
         let handle_for_task = handle.clone();
         handle.spawn(async move {
-            drive_transfer_request(
+            let paused_job = drive_transfer_request(
                 settings_for_task.clone(),
                 job.request,
                 job.activity,
                 job.observer,
-                cancel,
+                control,
                 handle_for_task.clone(),
             )
             .await;
             finish_transfer_activity(&activity_id, &queue_for_task);
+            if let Some(job) = paused_job {
+                let observer = job.observer.clone();
+                let activity = job.activity.clone();
+                queue_for_task
+                    .lock()
+                    .unwrap()
+                    .paused
+                    .insert(activity_id.clone(), job);
+                observer.on_transfer_activity(activity);
+                observer.on_status("paused".to_string());
+            }
             drain_transfer_queue(queue_for_task, settings_for_task, handle_for_task);
         });
     }
@@ -811,9 +908,14 @@ fn finish_transfer_activity(activity_id: &str, queue: &Arc<Mutex<TransferQueueSt
 }
 
 fn report_queued_cancel(mut job: QueuedTransfer) {
+    let message = if job.activity.state == FfiTransferActivityState::Paused {
+        "canceled paused transfer"
+    } else {
+        "canceled before start"
+    };
     job.activity.apply_canceled(now_ms());
     job.observer.on_transfer_activity(job.activity);
-    job.observer.on_status("canceled before start".to_string());
+    job.observer.on_status(message.to_string());
 }
 
 fn report_activity_setup_failure(
@@ -1148,6 +1250,34 @@ impl FfiTransferActivityRecord {
         self.retryable = true;
         self.recovery_action = FfiRecoveryAction::Resume;
     }
+
+    fn apply_paused(&mut self, ts_ms: u64) {
+        self.updated_at_ms = ts_ms;
+        self.state = FfiTransferActivityState::Paused;
+        self.diagnostic_message = "paused".to_string();
+        self.failure_code = FfiFailureCode::UserCanceled;
+        self.failure_category = FfiFailureCategory::User;
+        self.failure_phase = FfiFailurePhase::Transferring;
+        self.failure_origin = FfiFailureOrigin::Local;
+        self.user_message_key = "transfer.paused".to_string();
+        self.retryable = true;
+        self.recovery_action = FfiRecoveryAction::Resume;
+    }
+
+    fn apply_requeued(&mut self, ts_ms: u64) {
+        self.updated_at_ms = ts_ms;
+        self.completed_at_ms = 0;
+        self.attempt_id.clear();
+        self.state = FfiTransferActivityState::Queued;
+        self.diagnostic_message.clear();
+        self.failure_code = FfiFailureCode::Unknown;
+        self.failure_category = FfiFailureCategory::Unknown;
+        self.failure_phase = FfiFailurePhase::Setup;
+        self.failure_origin = FfiFailureOrigin::Unknown;
+        self.user_message_key.clear();
+        self.retryable = false;
+        self.recovery_action = FfiRecoveryAction::None;
+    }
 }
 
 fn request_file_name(request: &FfiTransferRequest) -> String {
@@ -1440,21 +1570,21 @@ async fn drive_transfer_request(
     request: FfiTransferRequest,
     mut activity: FfiTransferActivityRecord,
     observer: Arc<dyn TransferObserver>,
-    mut cancel: oneshot::Receiver<()>,
+    mut control: oneshot::Receiver<TransferStop>,
     handle: Handle,
-) {
+) -> Option<QueuedTransfer> {
     let attempts = match peer_sources_for_request(&settings, &request) {
         Ok(attempts) => attempts,
         Err(error) => {
             report_activity_setup_failure(&*observer, &mut activity, error);
-            return;
+            return None;
         }
     };
     let modes = attempts
         .iter()
         .map(|attempt| attempt.mode)
         .collect::<Vec<_>>();
-    let mut cancel_requested = false;
+    let mut stop_requested = None;
     for (index, attempt) in attempts.into_iter().enumerate() {
         if index > 0 {
             activity.attempt_id = next_attempt_id();
@@ -1474,7 +1604,7 @@ async fn drive_transfer_request(
                     continue;
                 }
                 report_activity_setup_failure(&*observer, &mut activity, error);
-                return;
+                return None;
             }
         };
 
@@ -1482,12 +1612,13 @@ async fn drive_transfer_request(
             transfer,
             &mut activity,
             &*observer,
-            &mut cancel,
-            &mut cancel_requested,
+            &mut control,
+            &mut stop_requested,
         )
         .await;
-        let can_fallback =
-            !outcome.cancel_requested && !outcome.connected && modes.get(index + 1).is_some();
+        let can_fallback = outcome.stop_requested.is_none()
+            && !outcome.connected
+            && modes.get(index + 1).is_some();
         match outcome.result {
             Ok(summary) => {
                 report_terminal(
@@ -1495,9 +1626,19 @@ async fn drive_transfer_request(
                     &mut activity,
                     Ok(summary),
                     outcome.direction,
-                    outcome.cancel_requested,
+                    false,
                 );
-                return;
+                return None;
+            }
+            Err(_) if outcome.stop_requested == Some(TransferStop::Pause) => {
+                activity.apply_paused(now_ms());
+                observer.on_transfer_activity(activity.clone());
+                observer.on_status("paused".to_string());
+                return Some(QueuedTransfer {
+                    request,
+                    observer,
+                    activity,
+                });
             }
             Err(error) if can_fallback => {
                 let next_mode = modes[index + 1];
@@ -1510,25 +1651,27 @@ async fn drive_transfer_request(
                 continue;
             }
             Err(error) => {
+                let canceled = outcome.stop_requested == Some(TransferStop::Cancel);
                 report_terminal(
                     &*observer,
                     &mut activity,
                     Err(error),
                     outcome.direction,
-                    outcome.cancel_requested,
+                    canceled,
                 );
-                return;
+                return None;
             }
         }
     }
+    None
 }
 
 async fn drive_transfer_attempt(
     mut transfer: Transfer,
     activity: &mut FfiTransferActivityRecord,
     observer: &dyn TransferObserver,
-    cancel: &mut oneshot::Receiver<()>,
-    cancel_requested: &mut bool,
+    control: &mut oneshot::Receiver<TransferStop>,
+    stop_requested: &mut Option<TransferStop>,
 ) -> TransferAttemptOutcome {
     let mut direction = None;
     let mut connected = false;
@@ -1544,10 +1687,14 @@ async fn drive_transfer_attempt(
                 }
                 observe_transfer_event(observer, activity, event);
             }
-            _ = &mut *cancel, if !*cancel_requested => {
-                *cancel_requested = true;
+            stop = &mut *control, if stop_requested.is_none() => {
+                let stop = stop.unwrap_or(TransferStop::Cancel);
+                *stop_requested = Some(stop);
                 transfer.cancel();
-                observer.on_status("cancelling".to_string());
+                observer.on_status(match stop {
+                    TransferStop::Cancel => "cancelling".to_string(),
+                    TransferStop::Pause => "pausing".to_string(),
+                });
             }
         }
     }
@@ -1555,7 +1702,7 @@ async fn drive_transfer_attempt(
         result: transfer.wait().await,
         direction,
         connected,
-        cancel_requested: *cancel_requested,
+        stop_requested: *stop_requested,
     }
 }
 
@@ -2383,6 +2530,56 @@ mod tests {
         assert_eq!(canceled.state, FfiTransferActivityState::Canceled);
 
         assert!(session.cancel_activity("queue-first".to_string()));
+    }
+
+    #[test]
+    fn ffi_queue_pauses_and_resumes_pending_activity() {
+        let dir = tempfile::tempdir().unwrap();
+        let first_dir = dir.path().join("first");
+        let second_dir = dir.path().join("second");
+        std::fs::create_dir_all(&first_dir).unwrap();
+        std::fs::create_dir_all(&second_dir).unwrap();
+
+        let session = EnvoixSession::new();
+
+        let (first_tx, _first_rx) = channel();
+        let mut first = FfiTransferRequest::receive(
+            first_dir.to_str().unwrap().to_string(),
+            FfiTransferMode::ShowInvite,
+        );
+        first.activity_id = "pause-first".to_string();
+        first.limits.max_parallel_transfers = 1;
+        session
+            .start_transfer(first, Arc::new(TestObserver(first_tx)))
+            .unwrap();
+
+        let (second_tx, second_rx) = channel();
+        let mut second = FfiTransferRequest::receive(
+            second_dir.to_str().unwrap().to_string(),
+            FfiTransferMode::ShowInvite,
+        );
+        second.activity_id = "pause-second".to_string();
+        second.limits.max_parallel_transfers = 1;
+        session
+            .start_transfer(second, Arc::new(TestObserver(second_tx)))
+            .unwrap();
+
+        let queued = recv_activity(&second_rx, "pause-second", Duration::from_secs(2));
+        assert_eq!(queued.state, FfiTransferActivityState::Queued);
+
+        assert!(session.pause_activity("pause-second".to_string()));
+        let paused = recv_activity(&second_rx, "pause-second", Duration::from_secs(2));
+        assert_eq!(paused.state, FfiTransferActivityState::Paused);
+        assert_eq!(paused.recovery_action, FfiRecoveryAction::Resume);
+
+        assert!(session.resume_activity("pause-second".to_string()));
+        let requeued = recv_activity(&second_rx, "pause-second", Duration::from_secs(2));
+        assert_eq!(requeued.state, FfiTransferActivityState::Queued);
+        assert!(requeued.attempt_id.is_empty());
+        assert_no_nonqueued_activity(&second_rx, "pause-second", Duration::from_millis(200));
+
+        assert!(session.cancel_activity("pause-second".to_string()));
+        assert!(session.cancel_activity("pause-first".to_string()));
     }
 
     /// Rewrites an invite's direct addresses to loopback, keeping the port, so
