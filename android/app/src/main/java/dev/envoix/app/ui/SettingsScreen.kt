@@ -47,6 +47,7 @@ import androidx.compose.ui.unit.sp
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.platform.LocalContext
+import dev.envoix.app.DebugBuild
 import dev.envoix.app.SettingsStore
 
 @Composable
@@ -178,6 +179,15 @@ fun SettingsScreen(onBack: () -> Unit) {
                 }
             }
         }
+
+        Spacer(Modifier.height(28.dp))
+        Text(
+            DebugBuild.LABEL,
+            color = colors.muted,
+            fontSize = 11.sp,
+            fontFamily = FontFamily.Monospace,
+            modifier = Modifier.align(Alignment.CenterHorizontally),
+        )
     }
 }
 

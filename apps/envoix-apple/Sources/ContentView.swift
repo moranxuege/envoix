@@ -569,6 +569,12 @@ private struct SettingsStageView: View {
                 .font(.body)
                 .foregroundStyle(Theme.muted)
                 .card(padding: 14)
+
+                Text(appDebugBuildLabel)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(Theme.muted)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.top, 2)
             }
             .padding(.vertical, 12)
         }
