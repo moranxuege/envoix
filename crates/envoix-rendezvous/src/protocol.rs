@@ -5,6 +5,9 @@
 use serde::{Deserialize, Serialize};
 
 /// SPAKE2 role assigned by the broker, decided by join order (first = initiator).
+/// The handshake role (who speaks first in SPAKE2), orthogonal to the transfer
+/// direction (`envoix_types::PeerRole`, who sends the file): a sender may be
+/// either the initiator or the responder, depending on who joined the room first.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
