@@ -15,8 +15,9 @@ use envoix_error::CoreError;
 use envoix_protocol::{FrameConnection, PeerDescriptor};
 pub use envoix_transfer::TransferEngine;
 pub use envoix_transfer::{
-    DEFAULT_CHUNK_SIZE, EventSink, NoopEventSink, TransferCancelToken, TransferEvent,
-    TransferSummary, USER_INTERRUPT_MESSAGE,
+    DEFAULT_CHUNK_SIZE, EventSink, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE, NoopEventSink,
+    TransferCancelToken, TransferEvent, TransferSummary, USER_INTERRUPT_MESSAGE,
+    validate_chunk_size,
 };
 pub use envoix_types::TransferDirection;
 // Re-exported so the client facade reaches rendezvous-code helpers through its

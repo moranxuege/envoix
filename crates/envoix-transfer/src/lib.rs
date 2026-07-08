@@ -22,6 +22,46 @@ use tokio::sync::Notify;
 
 /// Default sequential chunk size used by clients that do not override it.
 pub const DEFAULT_CHUNK_SIZE: usize = 64 * 1024;
+/// Minimum accepted transfer chunk size.
+pub const MIN_CHUNK_SIZE: usize = 16 * 1024;
+/// Maximum accepted transfer chunk size.
+pub const MAX_CHUNK_SIZE: usize = 16 * 1024 * 1024;
+
+/// Validate a chunk size against the transfer engine's constraints: it must fall
+/// within [`MIN_CHUNK_SIZE`]..=[`MAX_CHUNK_SIZE`] and be a power of two.
+pub fn validate_chunk_size(chunk_size: usize) -> Result<(), CoreError> {
+    if !(MIN_CHUNK_SIZE..=MAX_CHUNK_SIZE).contains(&chunk_size) {
+        return Err(CoreError::InvalidInput(format!(
+            "chunk size must be between {MIN_CHUNK_SIZE} and {MAX_CHUNK_SIZE} bytes"
+        )));
+    }
+    if !chunk_size.is_power_of_two() {
+        return Err(CoreError::InvalidInput(
+            "chunk size must be a power of two".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod chunk_size_validation_tests {
+    use super::{MAX_CHUNK_SIZE, MIN_CHUNK_SIZE, validate_chunk_size};
+
+    #[test]
+    fn accepts_in_range_powers_of_two() {
+        assert!(validate_chunk_size(MIN_CHUNK_SIZE).is_ok());
+        assert!(validate_chunk_size(64 * 1024).is_ok());
+        assert!(validate_chunk_size(MAX_CHUNK_SIZE).is_ok());
+    }
+
+    #[test]
+    fn rejects_out_of_range_or_non_power_of_two() {
+        assert!(validate_chunk_size(MIN_CHUNK_SIZE - 1).is_err());
+        assert!(validate_chunk_size(MAX_CHUNK_SIZE * 2).is_err());
+        assert!(validate_chunk_size(24 * 1024).is_err()); // in range, not a power of two
+    }
+}
+
 /// Protocol error text sent when a local user interrupts a transfer.
 pub const USER_INTERRUPT_MESSAGE: &str = "transfer interrupted by user";
 const RESUME_STATE_WRITE_INTERVAL: u64 = 8 * 1024 * 1024;

@@ -14,14 +14,13 @@ pub use envoix_auth::SPAKE2_EXPERIMENTAL_WARNING;
 use envoix_error::CoreError;
 pub use envoix_protocol::PeerDescriptor;
 pub use envoix_session::{BindAddrs, IdentityConfig, TransferDirection, TransferSummary};
+// Chunk-size bounds + validation are a transfer-engine constraint; they live in
+// envoix-transfer next to DEFAULT_CHUNK_SIZE and are reached through session.
+use envoix_session::validate_chunk_size;
 use serde::Deserialize;
 
 /// Environment variable overriding the runtime transfer chunk size.
 pub const ENVOIX_CHUNK_SIZE: &str = "ENVOIX_CHUNK_SIZE";
-/// Minimum accepted transfer chunk size.
-pub const MIN_CHUNK_SIZE: usize = 16 * 1024;
-/// Maximum accepted transfer chunk size.
-pub const MAX_CHUNK_SIZE: usize = 16 * 1024 * 1024;
 
 /// Internal alias for the error type shared with the lower layers; the
 /// public API surfaces [`api::TransferError`] instead.
@@ -88,21 +87,6 @@ fn parse_chunk_size(value: &str) -> Result<usize, PublicError> {
     })?;
     validate_chunk_size(bytes)?;
     Ok(bytes)
-}
-
-fn validate_chunk_size(chunk_size: usize) -> Result<(), PublicError> {
-    if !(MIN_CHUNK_SIZE..=MAX_CHUNK_SIZE).contains(&chunk_size) {
-        return Err(CoreError::InvalidInput(format!(
-            "chunk size must be between {MIN_CHUNK_SIZE} and {MAX_CHUNK_SIZE} bytes"
-        )));
-    }
-    if !chunk_size.is_power_of_two() {
-        return Err(CoreError::InvalidInput(
-            "chunk size must be a power of two".into(),
-        ));
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
