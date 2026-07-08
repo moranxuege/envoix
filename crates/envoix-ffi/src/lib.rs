@@ -9,7 +9,7 @@
 //! callbacks, which fire on runtime threads — the UI must hop to its own main
 //! thread before touching UI state.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -499,6 +499,7 @@ struct TransferQueueState {
     active: HashMap<String, ActiveTransfer>,
     paused: HashMap<String, QueuedTransfer>,
     history: VecDeque<FfiTransferActivityRecord>,
+    discarded: HashSet<String>,
 }
 
 struct QueuedTransfer {
@@ -546,23 +547,32 @@ impl TransferQueueState {
         let mut seen = HashMap::new();
         let mut records = Vec::new();
         for record in self.history.iter() {
+            if self.discarded.contains(&record.activity_id) {
+                continue;
+            }
             seen.insert(record.activity_id.clone(), ());
             records.push(record.clone());
         }
         for record in self.active.values().map(|active| &active.activity) {
-            if !seen.contains_key(&record.activity_id) {
+            if !self.discarded.contains(&record.activity_id)
+                && !seen.contains_key(&record.activity_id)
+            {
                 seen.insert(record.activity_id.clone(), ());
                 records.push(record.clone());
             }
         }
         for job in self.pending.iter() {
-            if !seen.contains_key(&job.activity.activity_id) {
+            if !self.discarded.contains(&job.activity.activity_id)
+                && !seen.contains_key(&job.activity.activity_id)
+            {
                 seen.insert(job.activity.activity_id.clone(), ());
                 records.push(job.activity.clone());
             }
         }
         for job in self.paused.values() {
-            if !seen.contains_key(&job.activity.activity_id) {
+            if !self.discarded.contains(&job.activity.activity_id)
+                && !seen.contains_key(&job.activity.activity_id)
+            {
                 seen.insert(job.activity.activity_id.clone(), ());
                 records.push(job.activity.clone());
             }
@@ -571,7 +581,16 @@ impl TransferQueueState {
         records
     }
 
+    fn activity(&self, activity_id: &str) -> Option<FfiTransferActivityRecord> {
+        self.activities()
+            .into_iter()
+            .find(|record| record.activity_id == activity_id)
+    }
+
     fn push_history(&mut self, activity: FfiTransferActivityRecord) {
+        if self.discarded.contains(&activity.activity_id) {
+            return;
+        }
         self.history
             .retain(|record| record.activity_id != activity.activity_id);
         self.history.push_front(activity);
@@ -618,6 +637,63 @@ impl EnvoixSession {
     /// Returns the current in-memory transfer queue and recent terminal records.
     pub fn list_transfer_activities(&self) -> Vec<FfiTransferActivityRecord> {
         self.queue.lock().unwrap().activities()
+    }
+
+    /// Returns one visible transfer activity by id.
+    pub fn get_transfer_activity(&self, activity_id: String) -> Option<FfiTransferActivityRecord> {
+        let activity_id = activity_id.trim();
+        if activity_id.is_empty() {
+            return None;
+        }
+        self.queue.lock().unwrap().activity(activity_id)
+    }
+
+    /// Removes a transfer activity from the shared queue/history.
+    ///
+    /// Pending or paused items are canceled before removal. Active items receive
+    /// a cancel signal and are hidden immediately; their terminal callbacks may
+    /// still arrive at the observer, but the shared queue will not list them.
+    pub fn discard_transfer_activity(&self, activity_id: String) -> bool {
+        let activity_id = activity_id.trim().to_string();
+        if activity_id.is_empty() {
+            return false;
+        }
+        let (stored, control, removed_history) = {
+            let mut queue = self.queue.lock().unwrap();
+            queue.discarded.insert(activity_id.clone());
+            let pending = queue
+                .pending
+                .iter()
+                .position(|job| job.activity.activity_id == activity_id)
+                .and_then(|index| queue.pending.remove(index));
+            let paused = queue.paused.remove(&activity_id);
+            let control = queue
+                .active
+                .get_mut(&activity_id)
+                .and_then(|active| active.control.take());
+            let before = queue.history.len();
+            queue
+                .history
+                .retain(|record| record.activity_id != activity_id);
+            (pending.or(paused), control, queue.history.len() != before)
+        };
+        let removed_stored = stored.is_some();
+        let removed_active = control.is_some();
+        if let Some(job) = stored {
+            report_queued_cancel(job);
+        }
+        if let Some(control) = control {
+            let _ = control.send(TransferStop::Cancel);
+        }
+        removed_stored || removed_active || removed_history
+    }
+
+    /// Clears terminal transfer history while preserving active, pending, and paused items.
+    pub fn clear_transfer_history(&self) -> u32 {
+        let mut queue = self.queue.lock().unwrap();
+        let removed = queue.history.len();
+        queue.history.clear();
+        removed.min(u32::MAX as usize) as u32
     }
 
     /// Starts receiving one file into `output_dir`.
@@ -2633,8 +2709,64 @@ mod tests {
             snapshot_record(&session, "queue-second").map(|record| record.state),
             Some(FfiTransferActivityState::Canceled)
         );
+        assert_eq!(
+            session
+                .get_transfer_activity("queue-second".to_string())
+                .map(|record| record.state),
+            Some(FfiTransferActivityState::Canceled)
+        );
+        assert_eq!(session.clear_transfer_history(), 1);
+        assert!(snapshot_record(&session, "queue-second").is_none());
 
         assert!(session.cancel_activity("queue-first".to_string()));
+    }
+
+    #[test]
+    fn ffi_queue_discards_pending_activity() {
+        let dir = tempfile::tempdir().unwrap();
+        let first_dir = dir.path().join("first");
+        let second_dir = dir.path().join("second");
+        std::fs::create_dir_all(&first_dir).unwrap();
+        std::fs::create_dir_all(&second_dir).unwrap();
+
+        let session = EnvoixSession::new();
+
+        let (first_tx, _first_rx) = channel();
+        let mut first = FfiTransferRequest::receive(
+            first_dir.to_str().unwrap().to_string(),
+            FfiTransferMode::ShowInvite,
+        );
+        first.activity_id = "discard-first".to_string();
+        first.limits.max_parallel_transfers = 1;
+        session
+            .start_transfer(first, Arc::new(TestObserver(first_tx)))
+            .unwrap();
+
+        let (second_tx, second_rx) = channel();
+        let mut second = FfiTransferRequest::receive(
+            second_dir.to_str().unwrap().to_string(),
+            FfiTransferMode::ShowInvite,
+        );
+        second.activity_id = "discard-second".to_string();
+        second.limits.max_parallel_transfers = 1;
+        session
+            .start_transfer(second, Arc::new(TestObserver(second_tx)))
+            .unwrap();
+
+        let queued = recv_activity(&second_rx, "discard-second", Duration::from_secs(2));
+        assert_eq!(queued.state, FfiTransferActivityState::Queued);
+        assert!(snapshot_record(&session, "discard-second").is_some());
+
+        assert!(session.discard_transfer_activity("discard-second".to_string()));
+        let canceled = recv_activity(&second_rx, "discard-second", Duration::from_secs(2));
+        assert_eq!(canceled.state, FfiTransferActivityState::Canceled);
+        assert!(snapshot_record(&session, "discard-second").is_none());
+        assert!(session
+            .get_transfer_activity("discard-second".to_string())
+            .is_none());
+        assert!(!session.discard_transfer_activity("discard-second".to_string()));
+
+        assert!(session.cancel_activity("discard-first".to_string()));
     }
 
     #[test]

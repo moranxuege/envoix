@@ -538,6 +538,25 @@ public protocol EnvoixSessionProtocol: AnyObject, Sendable {
     func cancelActivity(activityId: String)  -> Bool
 
     /**
+     * Clears terminal transfer history while preserving active, pending, and paused items.
+     */
+    func clearTransferHistory()  -> UInt32
+
+    /**
+     * Removes a transfer activity from the shared queue/history.
+     *
+     * Pending or paused items are canceled before removal. Active items receive
+     * a cancel signal and are hidden immediately; their terminal callbacks may
+     * still arrive at the observer, but the shared queue will not list them.
+     */
+    func discardTransferActivity(activityId: String)  -> Bool
+
+    /**
+     * Returns one visible transfer activity by id.
+     */
+    func getTransferActivity(activityId: String)  -> FfiTransferActivityRecord?
+
+    /**
      * Returns the current in-memory transfer queue and recent terminal records.
      */
     func listTransferActivities()  -> [FfiTransferActivityRecord]
@@ -701,6 +720,45 @@ open func cancel()  {try! rustCall() {
 open func cancelActivity(activityId: String) -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
     uniffi_envoix_ffi_fn_method_envoixsession_cancel_activity(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(activityId),$0
+    )
+})
+}
+
+    /**
+     * Clears terminal transfer history while preserving active, pending, and paused items.
+     */
+open func clearTransferHistory() -> UInt32  {
+    return try!  FfiConverterUInt32.lift(try! rustCall() {
+    uniffi_envoix_ffi_fn_method_envoixsession_clear_transfer_history(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+    /**
+     * Removes a transfer activity from the shared queue/history.
+     *
+     * Pending or paused items are canceled before removal. Active items receive
+     * a cancel signal and are hidden immediately; their terminal callbacks may
+     * still arrive at the observer, but the shared queue will not list them.
+     */
+open func discardTransferActivity(activityId: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_envoix_ffi_fn_method_envoixsession_discard_transfer_activity(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(activityId),$0
+    )
+})
+}
+
+    /**
+     * Returns one visible transfer activity by id.
+     */
+open func getTransferActivity(activityId: String) -> FfiTransferActivityRecord?  {
+    return try!  FfiConverterOptionTypeFfiTransferActivityRecord.lift(try! rustCall() {
+    uniffi_envoix_ffi_fn_method_envoixsession_get_transfer_activity(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(activityId),$0
     )
@@ -3742,6 +3800,30 @@ public func FfiConverterTypeFfiTransferMode_lower(_ value: FfiTransferMode) -> R
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeFfiTransferActivityRecord: FfiConverterRustBuffer {
+    typealias SwiftType = FfiTransferActivityRecord?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiTransferActivityRecord.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiTransferActivityRecord.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeFfiTransferActivityRecord: FfiConverterRustBuffer {
     typealias SwiftType = [FfiTransferActivityRecord]
 
@@ -3850,6 +3932,15 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_envoix_ffi_checksum_method_envoixsession_cancel_activity() != 54985) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_envoix_ffi_checksum_method_envoixsession_clear_transfer_history() != 31960) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_envoix_ffi_checksum_method_envoixsession_discard_transfer_activity() != 37289) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_envoix_ffi_checksum_method_envoixsession_get_transfer_activity() != 24566) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_envoix_ffi_checksum_method_envoixsession_list_transfer_activities() != 59519) {

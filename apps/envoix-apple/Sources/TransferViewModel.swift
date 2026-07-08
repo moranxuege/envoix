@@ -111,8 +111,9 @@ final class AppModel: ObservableObject {
 
     func removeActivity(_ activityID: String) {
         removedActivityIDs.insert(activityID)
-        receive.cancelActivityForRemoval(activityID)
-        send.cancelActivityForRemoval(activityID)
+        if !receive.discardActivityForRemoval(activityID) {
+            _ = send.discardActivityForRemoval(activityID)
+        }
         activities.removeAll { $0.activityId == activityID }
         activityMetrics.removeValue(forKey: activityID)
     }
@@ -357,6 +358,20 @@ final class TransferViewModel: ObservableObject {
     func cancelActivityForRemoval(_ activityID: String) {
         guard isBusy, !activityID.isEmpty, activityID == currentActivityID else { return }
         cancel()
+    }
+
+    @discardableResult
+    func discardActivityForRemoval(_ activityID: String) -> Bool {
+        guard !activityID.isEmpty else { return false }
+        let discarded = session?.discardTransferActivity(activityId: activityID) ?? false
+        if activityID == currentActivityID {
+            suppressNextFailure = true
+            operationID = UUID()
+            reset()
+            phase = .canceled
+            statusText = AppText.value("Transfer removed", "传输已删除", language: displayLanguage)
+        }
+        return discarded
     }
 
     func listTransferActivities() -> [FfiTransferActivityRecord] {
