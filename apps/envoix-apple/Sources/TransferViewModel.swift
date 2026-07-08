@@ -404,7 +404,15 @@ func friendlyError(_ reason: String, language: String = "en") -> String {
 }
 
 func friendlyFailure(_ failure: FfiTransferFailure, language: String = "en") -> String {
-    switch failure.code {
+    friendlyFailure(
+        code: failure.code,
+        diagnosticMessage: failure.diagnosticMessage,
+        language: language
+    )
+}
+
+func friendlyFailure(code: FfiFailureCode, diagnosticMessage: String, language: String = "en") -> String {
+    switch code {
     case .userCanceled:
         return AppText.value("Transfer canceled", "传输已取消", language: language)
     case .peerCanceled:
@@ -432,7 +440,7 @@ func friendlyFailure(_ failure: FfiTransferFailure, language: String = "en") -> 
     case .internalError:
         return AppText.value("An internal transfer error occurred. Try again or copy diagnostics from Activity.", "发生内部传输错误。请重试，或从活动页复制诊断信息。", language: language)
     case .unknown:
-        return failure.diagnosticMessage
+        return diagnosticMessage
     }
 }
 

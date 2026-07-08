@@ -37,6 +37,7 @@ const DEFAULT_RENDEZVOUS_BROKER: &str =
 /// Default relay used with the hosted rendezvous broker.
 const DEFAULT_RELAY_URL: &str = "https://envoix.chkxwlyh.us:8444";
 static NEXT_ACTIVITY_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_ATTEMPT_ID: AtomicU64 = AtomicU64::new(1);
 /// Runtime settings supplied by native UIs.
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct EnvoixRuntimeSettings {
@@ -301,6 +302,7 @@ pub enum FfiTransferActivityState {
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct FfiTransferActivityRecord {
     pub activity_id: String,
+    pub attempt_id: String,
     pub state: FfiTransferActivityState,
     pub direction: FfiTransferDirection,
     pub mode: FfiTransferMode,
@@ -319,6 +321,11 @@ pub struct FfiTransferActivityRecord {
     pub token: String,
     pub peer_descriptor: String,
     pub diagnostic_message: String,
+    pub failure_code: FfiFailureCode,
+    pub failure_category: FfiFailureCategory,
+    pub failure_phase: FfiFailurePhase,
+    pub failure_origin: FfiFailureOrigin,
+    pub user_message_key: String,
     pub retryable: bool,
     pub recovery_action: FfiRecoveryAction,
     pub limits: FfiTransferLimits,
@@ -707,7 +714,11 @@ fn drain_transfer_queue(
                 return;
             }
 
-            let job = queue.pending.pop_front().expect("pending job exists");
+            let mut job = queue.pending.pop_front().expect("pending job exists");
+            if job.activity.attempt_id.trim().is_empty() {
+                job.activity.attempt_id = next_attempt_id();
+                job.activity.updated_at_ms = now_ms();
+            }
             let activity_id = job.activity.activity_id.clone();
             let (cancel_sender, cancel_receiver) = oneshot::channel();
             queue.active.insert(
@@ -721,6 +732,7 @@ fn drain_transfer_queue(
         };
 
         let activity_id = job.activity.activity_id.clone();
+        job.observer.on_transfer_activity(job.activity.clone());
         let transfer = match build_transfer_for_request(&settings, &job.request, &handle) {
             Ok(transfer) => transfer,
             Err(error) => {
@@ -753,14 +765,18 @@ fn report_queued_cancel(mut job: QueuedTransfer) {
 
 fn report_setup_failure(mut job: QueuedTransfer, error: EnvoixError) {
     let message = error.to_string();
-    let failure = setup_failure(message.clone(), job.activity.direction);
+    let failure = setup_failure(message.clone(), job.activity.direction, &job.activity);
     job.activity.apply_failure(&failure, now_ms());
     job.observer.on_transfer_activity(job.activity);
     job.observer.on_transfer_failed(failure);
     job.observer.on_failed(message);
 }
 
-fn setup_failure(message: String, direction: FfiTransferDirection) -> FfiTransferFailure {
+fn setup_failure(
+    message: String,
+    direction: FfiTransferDirection,
+    activity: &FfiTransferActivityRecord,
+) -> FfiTransferFailure {
     FfiTransferFailure {
         code: FfiFailureCode::InternalError,
         category: FfiFailureCategory::Internal,
@@ -768,7 +784,7 @@ fn setup_failure(message: String, direction: FfiTransferDirection) -> FfiTransfe
         origin: FfiFailureOrigin::Local,
         direction,
         transfer_id: String::new(),
-        attempt_id: String::new(),
+        attempt_id: activity.attempt_id.clone(),
         retryable: true,
         recovery_action: FfiRecoveryAction::Retry,
         user_message_key: "transfer.setup_failed".to_string(),
@@ -923,6 +939,7 @@ impl FfiTransferActivityRecord {
     fn from_request(request: &FfiTransferRequest, now_ms: u64) -> Self {
         Self {
             activity_id: request.activity_id.clone(),
+            attempt_id: String::new(),
             state: FfiTransferActivityState::Queued,
             direction: request.direction,
             mode: request.mode,
@@ -941,6 +958,11 @@ impl FfiTransferActivityRecord {
             token: request.token.clone(),
             peer_descriptor: request.peer_descriptor.clone(),
             diagnostic_message: String::new(),
+            failure_code: FfiFailureCode::Unknown,
+            failure_category: FfiFailureCategory::Unknown,
+            failure_phase: FfiFailurePhase::Setup,
+            failure_origin: FfiFailureOrigin::Unknown,
+            user_message_key: String::new(),
             retryable: false,
             recovery_action: FfiRecoveryAction::None,
             limits: request.limits.clone(),
@@ -1030,6 +1052,11 @@ impl FfiTransferActivityRecord {
             self.transfer_id = failure.transfer_id.clone();
         }
         self.diagnostic_message = failure.diagnostic_message.clone();
+        self.failure_code = failure.code;
+        self.failure_category = failure.category;
+        self.failure_phase = failure.phase;
+        self.failure_origin = failure.origin;
+        self.user_message_key = failure.user_message_key.clone();
         self.retryable = failure.retryable;
         self.recovery_action = failure.recovery_action;
     }
@@ -1047,6 +1074,11 @@ impl FfiTransferActivityRecord {
         self.completed_at_ms = ts_ms;
         self.state = FfiTransferActivityState::Canceled;
         self.diagnostic_message = "canceled".to_string();
+        self.failure_code = FfiFailureCode::UserCanceled;
+        self.failure_category = FfiFailureCategory::User;
+        self.failure_phase = FfiFailurePhase::Transferring;
+        self.failure_origin = FfiFailureOrigin::Local;
+        self.user_message_key = "transfer.user_canceled".to_string();
         self.retryable = true;
         self.recovery_action = FfiRecoveryAction::Resume;
     }
@@ -1066,6 +1098,11 @@ fn request_file_name(request: &FfiTransferRequest) -> String {
 fn next_activity_id() -> String {
     let id = NEXT_ACTIVITY_ID.fetch_add(1, Ordering::Relaxed);
     format!("ffi-{id}")
+}
+
+fn next_attempt_id() -> String {
+    let id = NEXT_ATTEMPT_ID.fetch_add(1, Ordering::Relaxed);
+    format!("attempt-{id}")
 }
 
 fn now_ms() -> u64 {
@@ -1273,7 +1310,7 @@ fn report_terminal(
             observer.on_completed(summary.bytes_transferred);
         }
         Err(error) => {
-            let failure = to_ffi_failure(&error, direction);
+            let failure = to_ffi_failure(&error, direction, activity);
             if cancel_requested {
                 activity.apply_canceled(now_ms());
             } else {
@@ -1519,6 +1556,7 @@ fn pairing_step_label(step: PairingStep) -> &'static str {
 fn to_ffi_failure(
     error: &TransferError,
     direction: Option<TransferDirection>,
+    activity: &FfiTransferActivityRecord,
 ) -> FfiTransferFailure {
     let failure = error.to_failure(direction);
     FfiTransferFailure {
@@ -1527,8 +1565,12 @@ fn to_ffi_failure(
         phase: ffi_failure_phase(failure.phase),
         origin: ffi_failure_origin(failure.origin),
         direction: ffi_direction(failure.direction),
-        transfer_id: failure.transfer_id.unwrap_or_default(),
-        attempt_id: failure.attempt_id.unwrap_or_default(),
+        transfer_id: failure
+            .transfer_id
+            .unwrap_or_else(|| activity.transfer_id.clone()),
+        attempt_id: failure
+            .attempt_id
+            .unwrap_or_else(|| activity.attempt_id.clone()),
         retryable: failure.retryable,
         recovery_action: ffi_recovery_action(failure.recovery_action),
         user_message_key: failure.user_message_key,
@@ -1847,6 +1889,7 @@ mod tests {
         };
         let mut record = make_transfer_activity_record(request);
         assert_eq!(record.activity_id, "activity-1");
+        assert!(record.attempt_id.is_empty());
         assert_eq!(record.state, FfiTransferActivityState::Queued);
         assert_eq!(record.file_name, "report.pdf");
         assert_eq!(record.limits.max_parallel_transfers, 2);
@@ -1870,6 +1913,84 @@ mod tests {
         assert_eq!(record.state, FfiTransferActivityState::Completed);
         assert_eq!(record.bytes_transferred, 100);
         assert_eq!(record.completed_at_ms, 20);
+    }
+
+    #[test]
+    fn activity_record_keeps_structured_failure_metadata() {
+        let request = FfiTransferRequest {
+            activity_id: "activity-fail".to_string(),
+            direction: FfiTransferDirection::Receive,
+            mode: FfiTransferMode::Room,
+            file_path: String::new(),
+            output_dir: "/tmp/envoix".to_string(),
+            peer_descriptor: String::new(),
+            invite: String::new(),
+            code: "135790-amber-comet".to_string(),
+            token: String::new(),
+            broker: String::new(),
+            relay: String::new(),
+            config_path: String::new(),
+            path_policy: FfiPathPolicy::Auto,
+            resume: true,
+            limits: FfiTransferLimits::default(),
+        };
+        let mut record = make_transfer_activity_record(request);
+        let failure = FfiTransferFailure {
+            code: FfiFailureCode::PermissionDenied,
+            category: FfiFailureCategory::Permission,
+            phase: FfiFailurePhase::Committing,
+            origin: FfiFailureOrigin::Local,
+            direction: FfiTransferDirection::Receive,
+            transfer_id: "tx-fail".to_string(),
+            attempt_id: "attempt-1".to_string(),
+            retryable: true,
+            recovery_action: FfiRecoveryAction::ChooseFolder,
+            user_message_key: "transfer.permission_denied".to_string(),
+            diagnostic_message: "permission denied opening destination folder".to_string(),
+        };
+
+        record.apply_failure(&failure, 42);
+
+        assert_eq!(record.state, FfiTransferActivityState::Failed);
+        assert_eq!(record.failure_code, FfiFailureCode::PermissionDenied);
+        assert_eq!(record.failure_category, FfiFailureCategory::Permission);
+        assert_eq!(record.failure_phase, FfiFailurePhase::Committing);
+        assert_eq!(record.failure_origin, FfiFailureOrigin::Local);
+        assert_eq!(record.user_message_key, "transfer.permission_denied");
+        assert_eq!(record.recovery_action, FfiRecoveryAction::ChooseFolder);
+        assert!(record.retryable);
+    }
+
+    #[test]
+    fn ffi_failure_keeps_current_attempt_identity() {
+        let request = FfiTransferRequest {
+            activity_id: "activity-attempt".to_string(),
+            direction: FfiTransferDirection::Send,
+            mode: FfiTransferMode::Room,
+            file_path: "/tmp/report.pdf".to_string(),
+            output_dir: String::new(),
+            peer_descriptor: String::new(),
+            invite: String::new(),
+            code: "135790-amber-comet".to_string(),
+            token: String::new(),
+            broker: String::new(),
+            relay: String::new(),
+            config_path: String::new(),
+            path_policy: FfiPathPolicy::Auto,
+            resume: true,
+            limits: FfiTransferLimits::default(),
+        };
+        let mut record = make_transfer_activity_record(request);
+        record.attempt_id = "attempt-1".to_string();
+        record.transfer_id = "tx-1".to_string();
+
+        let error = TransferError::input("unsupported transfer mode");
+        let failure = to_ffi_failure(&error, Some(TransferDirection::Send), &record);
+
+        assert_eq!(failure.transfer_id, "tx-1");
+        assert_eq!(failure.attempt_id, "attempt-1");
+        assert_eq!(failure.direction, FfiTransferDirection::Send);
+        assert_eq!(failure.code, FfiFailureCode::UnsupportedFeature);
     }
 
     #[test]

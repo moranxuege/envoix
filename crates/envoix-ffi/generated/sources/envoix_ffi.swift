@@ -1601,6 +1601,7 @@ public func FfiConverterTypeFfiPairingInvite_lower(_ value: FfiPairingInvite) ->
 
 public struct FfiTransferActivityRecord: Equatable, Hashable {
     public var activityId: String
+    public var attemptId: String
     public var state: FfiTransferActivityState
     public var direction: FfiTransferDirection
     public var mode: FfiTransferMode
@@ -1619,14 +1620,20 @@ public struct FfiTransferActivityRecord: Equatable, Hashable {
     public var token: String
     public var peerDescriptor: String
     public var diagnosticMessage: String
+    public var failureCode: FfiFailureCode
+    public var failureCategory: FfiFailureCategory
+    public var failurePhase: FfiFailurePhase
+    public var failureOrigin: FfiFailureOrigin
+    public var userMessageKey: String
     public var retryable: Bool
     public var recoveryAction: FfiRecoveryAction
     public var limits: FfiTransferLimits
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(activityId: String, state: FfiTransferActivityState, direction: FfiTransferDirection, mode: FfiTransferMode, transferId: String, fileName: String, totalBytes: UInt64, bytesTransferred: UInt64, bytesResumed: UInt64, createdAtMs: UInt64, updatedAtMs: UInt64, startedAtMs: UInt64, completedAtMs: UInt64, dataPathKind: FfiDataPathKind, dataPathDetail: String, invite: String, token: String, peerDescriptor: String, diagnosticMessage: String, retryable: Bool, recoveryAction: FfiRecoveryAction, limits: FfiTransferLimits) {
+    public init(activityId: String, attemptId: String, state: FfiTransferActivityState, direction: FfiTransferDirection, mode: FfiTransferMode, transferId: String, fileName: String, totalBytes: UInt64, bytesTransferred: UInt64, bytesResumed: UInt64, createdAtMs: UInt64, updatedAtMs: UInt64, startedAtMs: UInt64, completedAtMs: UInt64, dataPathKind: FfiDataPathKind, dataPathDetail: String, invite: String, token: String, peerDescriptor: String, diagnosticMessage: String, failureCode: FfiFailureCode, failureCategory: FfiFailureCategory, failurePhase: FfiFailurePhase, failureOrigin: FfiFailureOrigin, userMessageKey: String, retryable: Bool, recoveryAction: FfiRecoveryAction, limits: FfiTransferLimits) {
         self.activityId = activityId
+        self.attemptId = attemptId
         self.state = state
         self.direction = direction
         self.mode = mode
@@ -1645,6 +1652,11 @@ public struct FfiTransferActivityRecord: Equatable, Hashable {
         self.token = token
         self.peerDescriptor = peerDescriptor
         self.diagnosticMessage = diagnosticMessage
+        self.failureCode = failureCode
+        self.failureCategory = failureCategory
+        self.failurePhase = failurePhase
+        self.failureOrigin = failureOrigin
+        self.userMessageKey = userMessageKey
         self.retryable = retryable
         self.recoveryAction = recoveryAction
         self.limits = limits
@@ -1667,6 +1679,7 @@ public struct FfiConverterTypeFfiTransferActivityRecord: FfiConverterRustBuffer 
         return
             try FfiTransferActivityRecord(
                 activityId: FfiConverterString.read(from: &buf),
+                attemptId: FfiConverterString.read(from: &buf),
                 state: FfiConverterTypeFfiTransferActivityState.read(from: &buf),
                 direction: FfiConverterTypeFfiTransferDirection.read(from: &buf),
                 mode: FfiConverterTypeFfiTransferMode.read(from: &buf),
@@ -1685,6 +1698,11 @@ public struct FfiConverterTypeFfiTransferActivityRecord: FfiConverterRustBuffer 
                 token: FfiConverterString.read(from: &buf),
                 peerDescriptor: FfiConverterString.read(from: &buf),
                 diagnosticMessage: FfiConverterString.read(from: &buf),
+                failureCode: FfiConverterTypeFfiFailureCode.read(from: &buf),
+                failureCategory: FfiConverterTypeFfiFailureCategory.read(from: &buf),
+                failurePhase: FfiConverterTypeFfiFailurePhase.read(from: &buf),
+                failureOrigin: FfiConverterTypeFfiFailureOrigin.read(from: &buf),
+                userMessageKey: FfiConverterString.read(from: &buf),
                 retryable: FfiConverterBool.read(from: &buf),
                 recoveryAction: FfiConverterTypeFfiRecoveryAction.read(from: &buf),
                 limits: FfiConverterTypeFfiTransferLimits.read(from: &buf)
@@ -1693,6 +1711,7 @@ public struct FfiConverterTypeFfiTransferActivityRecord: FfiConverterRustBuffer 
 
     public static func write(_ value: FfiTransferActivityRecord, into buf: inout [UInt8]) {
         FfiConverterString.write(value.activityId, into: &buf)
+        FfiConverterString.write(value.attemptId, into: &buf)
         FfiConverterTypeFfiTransferActivityState.write(value.state, into: &buf)
         FfiConverterTypeFfiTransferDirection.write(value.direction, into: &buf)
         FfiConverterTypeFfiTransferMode.write(value.mode, into: &buf)
@@ -1711,6 +1730,11 @@ public struct FfiConverterTypeFfiTransferActivityRecord: FfiConverterRustBuffer 
         FfiConverterString.write(value.token, into: &buf)
         FfiConverterString.write(value.peerDescriptor, into: &buf)
         FfiConverterString.write(value.diagnosticMessage, into: &buf)
+        FfiConverterTypeFfiFailureCode.write(value.failureCode, into: &buf)
+        FfiConverterTypeFfiFailureCategory.write(value.failureCategory, into: &buf)
+        FfiConverterTypeFfiFailurePhase.write(value.failurePhase, into: &buf)
+        FfiConverterTypeFfiFailureOrigin.write(value.failureOrigin, into: &buf)
+        FfiConverterString.write(value.userMessageKey, into: &buf)
         FfiConverterBool.write(value.retryable, into: &buf)
         FfiConverterTypeFfiRecoveryAction.write(value.recoveryAction, into: &buf)
         FfiConverterTypeFfiTransferLimits.write(value.limits, into: &buf)

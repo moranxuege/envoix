@@ -493,6 +493,13 @@ private struct TransferStageView: View {
 
     private func activitySubtitle(for record: FfiTransferActivityRecord) -> String {
         if record.state == .failed && !record.diagnosticMessage.isEmpty {
+            if record.failureCode != .unknown {
+                return friendlyFailure(
+                    code: record.failureCode,
+                    diagnosticMessage: record.diagnosticMessage,
+                    language: language
+                )
+            }
             return friendlyError(record.diagnosticMessage, language: language)
         }
         return "\(modeText(record.mode)) · \(activityStateText(for: record))"
