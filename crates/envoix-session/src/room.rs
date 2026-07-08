@@ -133,7 +133,9 @@ where
 {
     let result = tokio::select! {
         result = pair_in_room_retrying(rdz, broker, room_id, password, mine, events) => result,
-        _ = cancel.cancelled() => Err(CoreError::Transfer(crate::USER_INTERRUPT_MESSAGE.into())),
+        _ = cancel.cancelled() => Err(CoreError::Transfer(
+            if cancel.is_pause() { crate::USER_PAUSE_MESSAGE } else { crate::USER_INTERRUPT_MESSAGE }.into(),
+        )),
     };
     if result.is_err() {
         rdz.close().await;

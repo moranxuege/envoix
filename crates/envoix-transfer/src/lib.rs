@@ -64,6 +64,14 @@ mod chunk_size_validation_tests {
 
 /// Protocol error text sent when a local user interrupts a transfer.
 pub const USER_INTERRUPT_MESSAGE: &str = "transfer interrupted by user";
+/// Protocol error text sent when a local user pauses a transfer (same wire frame
+/// as an interrupt — delivery is best-effort; a degraded path may drop it, so
+/// receivers must not depend on it and fall back to connection-lost handling).
+pub const USER_PAUSE_MESSAGE: &str = "transfer paused by user";
+/// Local error text when the peer reported an interrupt.
+pub const PEER_INTERRUPT_MESSAGE: &str = "transfer interrupted by peer";
+/// Local error text when the peer reported a pause.
+pub const PEER_PAUSE_MESSAGE: &str = "transfer paused by peer";
 const RESUME_STATE_WRITE_INTERVAL: u64 = 8 * 1024 * 1024;
 
 /// Error type returned by the transfer state machine.
@@ -92,6 +100,9 @@ pub struct TransferCancelToken {
 #[derive(Debug, Default)]
 struct CancelInner {
     cancelled: AtomicBool,
+    /// Set (before `cancelled`) when the interrupt is a pause, so the engine can
+    /// tell the peer — and report locally — "paused" rather than "interrupted".
+    paused: AtomicBool,
     notify: Notify,
 }
 
@@ -106,6 +117,19 @@ impl TransferCancelToken {
         if !self.inner.cancelled.swap(true, Ordering::SeqCst) {
             self.inner.notify.notify_waiters();
         }
+    }
+
+    /// Requests a pause: same interrupt mechanics as [`cancel`](Self::cancel),
+    /// but flagged so the stop is reported as a pause (resumable intent) on both
+    /// sides. Peer delivery of the reason is best-effort.
+    pub fn pause(&self) {
+        self.inner.paused.store(true, Ordering::SeqCst);
+        self.cancel();
+    }
+
+    /// Returns whether the requested interrupt was a pause.
+    pub fn is_pause(&self) -> bool {
+        self.inner.paused.load(Ordering::SeqCst)
     }
 
     /// Returns whether cancellation has been requested.
@@ -327,7 +351,7 @@ impl TransferEngine {
             .await
             {
                 if cancel.is_cancelled() {
-                    notify_interrupted(connection).await;
+                    notify_interrupted(connection, cancel).await;
                 }
                 return Err(error);
             }
@@ -657,8 +681,8 @@ async fn recv_frame_or_cancel(
     tokio::select! {
         frame = connection.recv_frame() => frame,
         () = cancel.cancelled() => {
-            notify_interrupted(connection).await;
-            Err(interrupted_error())
+            notify_interrupted(connection, cancel).await;
+            Err(interrupted_error(cancel))
         }
     }
 }
@@ -668,8 +692,8 @@ async fn check_cancelled(
     cancel: &TransferCancelToken,
 ) -> Result<(), TransferError> {
     if cancel.is_cancelled() {
-        notify_interrupted(connection).await;
-        return Err(interrupted_error());
+        notify_interrupted(connection, cancel).await;
+        return Err(interrupted_error(cancel));
     }
 
     Ok(())
@@ -733,21 +757,26 @@ async fn notify_error(connection: &mut dyn FrameConnection, error: &TransferErro
         .await;
 }
 
-async fn notify_interrupted(connection: &mut dyn FrameConnection) {
+async fn notify_interrupted(connection: &mut dyn FrameConnection, cancel: &TransferCancelToken) {
+    let message = if cancel.is_pause() { USER_PAUSE_MESSAGE } else { USER_INTERRUPT_MESSAGE };
     let _ = connection
         .send_frame(Frame::Error(ErrorFrame {
-            message: USER_INTERRUPT_MESSAGE.into(),
+            message: message.into(),
         }))
         .await;
 }
 
-fn interrupted_error() -> TransferError {
-    CoreError::Transfer(USER_INTERRUPT_MESSAGE.into())
+fn interrupted_error(cancel: &TransferCancelToken) -> TransferError {
+    let message = if cancel.is_pause() { USER_PAUSE_MESSAGE } else { USER_INTERRUPT_MESSAGE };
+    CoreError::Transfer(message.into())
 }
 
 fn peer_error(error: ErrorFrame) -> TransferError {
     if error.message == USER_INTERRUPT_MESSAGE {
-        return CoreError::Transfer("transfer interrupted by peer".into());
+        return CoreError::Transfer(PEER_INTERRUPT_MESSAGE.into());
+    }
+    if error.message == USER_PAUSE_MESSAGE {
+        return CoreError::Transfer(PEER_PAUSE_MESSAGE.into());
     }
     CoreError::Transfer(format!("peer reported error: {}", error.message))
 }
@@ -1152,7 +1181,7 @@ async fn hash_file_prefix(
     let mut buffer = vec![0_u8; buffer_size.max(1)];
     while remaining > 0 {
         if cancel.is_cancelled() {
-            return Err(interrupted_error());
+            return Err(interrupted_error(cancel));
         }
         let limit = remaining.min(buffer.len() as u64) as usize;
         let bytes_read = file.read(&mut buffer[..limit]).await?;
@@ -1547,6 +1576,83 @@ mod tests {
         assert!(matches!(
             error,
             CoreError::Transfer(message) if message == USER_INTERRUPT_MESSAGE
+        ));
+    }
+
+    #[tokio::test]
+    async fn pause_notifies_peer_with_pause_message() {
+        let root = unique_test_dir();
+        let output_dir = root.join("output");
+        tokio::fs::create_dir_all(&output_dir).await.unwrap();
+
+        let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
+        let cancel = TransferCancelToken::new();
+        let receiver_cancel = cancel.clone();
+        let receiver = tokio::spawn({
+            let output_dir = output_dir.clone();
+            async move {
+                TransferEngine::new(4)
+                    .receive_file_with_cancel(
+                        &mut receiver_connection,
+                        output_dir,
+                        &NoopEventSink,
+                        &receiver_cancel,
+                    )
+                    .await
+            }
+        });
+
+        let transfer_id = TransferId::new("pause-transfer");
+        sender_connection
+            .send_frame(Frame::Hello(Hello {
+                protocol_version: PROTOCOL_VERSION,
+                role: PeerRole::Sender,
+            }))
+            .await
+            .unwrap();
+        expect_ready(sender_connection.recv_frame().await.unwrap()).unwrap();
+        sender_connection
+            .send_frame(Frame::FileHeader(FileHeader {
+                transfer_id: transfer_id.clone(),
+                file_name: "pause.txt".into(),
+                file_size: 8,
+                chunk_size: 4,
+                resume_requested: false,
+            }))
+            .await
+            .unwrap();
+        expect_resume_status(
+            sender_connection.recv_frame().await.unwrap(),
+            &transfer_id,
+            4,
+        )
+        .unwrap();
+
+        cancel.pause();
+
+        // The peer learns it was a pause, not a cancel (best-effort frame).
+        let frame = sender_connection.recv_frame().await.unwrap();
+        assert!(matches!(
+            frame,
+            Frame::Error(ErrorFrame { message }) if message == USER_PAUSE_MESSAGE
+        ));
+        // Locally the stop is reported as a pause too.
+        let error = receiver.await.unwrap().unwrap_err();
+        assert!(matches!(
+            error,
+            CoreError::Transfer(message) if message == USER_PAUSE_MESSAGE
+        ));
+    }
+
+    #[tokio::test]
+    async fn peer_pause_message_maps_to_paused_by_peer() {
+        // peer_error turns the peer's pause frame into the canonical local text.
+        let error = peer_error(ErrorFrame {
+            message: USER_PAUSE_MESSAGE.into(),
+        });
+        assert!(matches!(
+            error,
+            CoreError::Transfer(message) if message == PEER_PAUSE_MESSAGE
         ));
     }
 

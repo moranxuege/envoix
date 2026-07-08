@@ -114,13 +114,14 @@ class TransferService : Service() {
             ACTION_PAUSE -> {
                 val id = intent.getLongExtra(EXTRA_ID, -1L)
                 OpLog.add("pause transfer id=$id")
-                // Mark Paused *before* cancelling: the cancel triggers an
-                // `interrupted by user` Failed event, and the event loop keeps a
-                // status that is already Paused - so a pause never flips to Failed.
+                // Mark Paused *before* stopping: the stop triggers a Failed event,
+                // and the event loop keeps a status that is already Paused - so a
+                // pause never flips to Failed. Native.pause also tells the core
+                // (and, best-effort, the peer) this stop is a pause, not a cancel.
                 TransferRepository.update(id) {
                     if (it.status.isTerminal) it else it.copy(status = Status.Paused, speedBps = 0.0)
                 }
-                Native.cancel(id)
+                Native.pause(id)
             }
             ACTION_CANCEL -> {
                 val id = intent.getLongExtra(EXTRA_ID, -1L)
@@ -226,32 +227,44 @@ class TransferService : Service() {
                                 )
                             }
                             is CliEvent.Failed ->
-                                // A pause/cancel surfaces as a Failed event; keep the
-                                // Paused/Cancelled status the action already set. When the
-                                // peer interrupts (or the link drops) mid-transfer, the
-                                // partial on disk is resumable - show Paused, not a dead
-                                // Failed, so the user can Resume rather than restart. The
-                                // peer's exact reason (paused vs cancelled) isn't reliably
-                                // carried, so we key on "a partial exists", like most apps.
+                                // A local pause/cancel surfaces as a Failed event; keep the
+                                // status the action already set. Otherwise classify by the
+                                // core's typed reason_code - peer delivery of the code is
+                                // BEST-EFFORT (a degraded path drops it), so the legacy
+                                // prose heuristics remain as the fallback, and durable
+                                // facts (bytes on disk) decide resumability.
                                 if (t.status == Status.Cancelled || t.status == Status.Paused) t
-                                // A send that delivered every byte but lost the link before
-                                // the peer's CompleteAck: the file almost certainly arrived;
-                                // the sender just can't confirm it (Two-Generals). Say
-                                // "unconfirmed", not "failed" - it isn't a lost transfer.
-                                else if (t.direction == Direction.Send && t.total > 0 &&
-                                    t.bytes >= t.total && ev.error.contains("connection lost"))
-                                    t.copy(
-                                        status = Status.Unconfirmed, error = ev.error,
-                                        log = addLog(t.log, "sent · unconfirmed — all bytes sent, no CompleteAck"),
-                                    )
-                                else if (t.bytes > 0 && (
-                                        ev.error.contains("connection lost") ||
-                                            ev.error.contains("interrupted by peer")))
-                                    t.copy(
-                                        status = Status.Paused, error = ev.error,
-                                        log = addLog(t.log, "paused · interrupted, ${t.bytes} B kept (resumable)"),
-                                    )
-                                else t.copy(status = Status.Failed, error = ev.error, log = addLog(t.log, "failed · ${ev.error}"))
+                                else {
+                                    val lost = ev.reasonCode == "connection_lost" ||
+                                        (ev.reasonCode.isEmpty() && ev.error.contains("connection lost"))
+                                    val peerStop = ev.reasonCode == "peer_paused" ||
+                                        ev.reasonCode == "peer_cancelled" ||
+                                        (ev.reasonCode.isEmpty() && ev.error.contains("interrupted by peer"))
+                                    when {
+                                        // All bytes sent but the ack was lost (Two-Generals):
+                                        // the file almost certainly arrived - not a failure.
+                                        t.direction == Direction.Send && t.total > 0 &&
+                                            t.bytes >= t.total && lost ->
+                                            t.copy(
+                                                status = Status.Unconfirmed, error = ev.error,
+                                                log = addLog(t.log, "sent · unconfirmed — all bytes sent, no CompleteAck"),
+                                            )
+                                        // The peer said it paused: mirror it as Paused.
+                                        ev.reasonCode == "peer_paused" ->
+                                            t.copy(
+                                                status = Status.Paused, error = null, speedBps = 0.0,
+                                                log = addLog(t.log, "paused by peer (resumable)"),
+                                            )
+                                        // Peer cancel or a dropped link with a partial on
+                                        // disk: resumable - show Paused, not a dead Failed.
+                                        (peerStop || lost) && t.bytes > 0 ->
+                                            t.copy(
+                                                status = Status.Paused, error = ev.error,
+                                                log = addLog(t.log, "paused · interrupted, ${t.bytes} B kept (resumable)"),
+                                            )
+                                        else -> t.copy(status = Status.Failed, error = ev.error, log = addLog(t.log, "failed · ${ev.error}"))
+                                    }
+                                }
                             is CliEvent.Exit ->
                                 if (t.status.isTerminal || t.status == Status.Paused) t
                                 else t.copy(status = if (ev.code == 0) Status.Completed else Status.Failed)

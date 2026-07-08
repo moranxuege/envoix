@@ -22,8 +22,9 @@ use jni::sys::{jboolean, jlong};
 
 static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
-/// Cancel closures for in-flight transfers, keyed by the Kotlin-side transfer id.
-type CancelMap = HashMap<i64, Box<dyn Fn() + Send + Sync>>;
+/// Cancel tokens for in-flight transfers, keyed by the Kotlin-side transfer id.
+/// The token distinguishes pause (resumable intent) from cancel.
+type CancelMap = HashMap<i64, envoix_client::TransferCancelToken>;
 static CANCELS: OnceLock<Mutex<CancelMap>> = OnceLock::new();
 
 fn cancels() -> &'static Mutex<CancelMap> {
@@ -139,9 +140,21 @@ pub extern "system" fn Java_dev_envoix_app_Native_runTransfer(
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_envoix_app_Native_cancel(_env: JNIEnv, _class: JClass, id: jlong) {
     if let Ok(map) = cancels().lock()
-        && let Some(cancel) = map.get(&id)
+        && let Some(token) = map.get(&id)
     {
-        cancel();
+        token.cancel();
+    }
+}
+
+/// Pause the in-flight transfer with the given id: same stop mechanics as
+/// `cancel`, but reported — locally and (best-effort) to the peer — as a pause,
+/// so both sides can show a resumable state. No-op if it already ended.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_pause(_env: JNIEnv, _class: JClass, id: jlong) {
+    if let Ok(map) = cancels().lock()
+        && let Some(token) = map.get(&id)
+    {
+        token.pause();
     }
 }
 
@@ -283,10 +296,9 @@ async fn drive(req: DriveRequest, vm: &JavaVM, cb: &GlobalRef) -> Result<(), Str
         })
         .map_err(|e| e.to_string())?;
 
-    // Register a cancel handle so `cancel(id)` can stop the transfer.
-    let handle = transfer.cancel_handle();
+    // Register the cancel token so `cancel(id)` / `pause(id)` can stop the transfer.
     if let Ok(mut map) = cancels().lock() {
-        map.insert(req.id, Box::new(move || handle.cancel()));
+        map.insert(req.id, transfer.cancel_handle());
     }
 
     while let Some(event) = transfer.next_event().await {

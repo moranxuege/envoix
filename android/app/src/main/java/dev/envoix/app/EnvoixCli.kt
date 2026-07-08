@@ -18,7 +18,10 @@ sealed interface CliEvent {
     data class Started(val transferId: String, val fileName: String, val totalBytes: Long) : CliEvent
     data class Progress(val bytesTransferred: Long, val totalBytes: Long) : CliEvent
     data class Completed(val bytesTransferred: Long) : CliEvent
-    data class Failed(val error: String) : CliEvent
+    /** [reasonCode] is the core's typed failure classification (snake_case:
+     *  "paused" / "cancelled" / "peer_paused" / "peer_cancelled" /
+     *  "connection_lost" / "other"); empty on synthetic or legacy events. */
+    data class Failed(val error: String, val reasonCode: String = "") : CliEvent
     data class Exit(val code: Int) : CliEvent
 }
 
@@ -94,8 +97,13 @@ object NativeTransfer {
                     o.optLong("total_bytes"),
                 )
                 "completed" -> CliEvent.Completed(o.optLong("bytes_transferred"))
+                // The client event stream carries the message as "reason"; the
+                // JNI's synthetic terminal event uses "error".
                 "failed" -> CliEvent.Failed(
-                    o.optString("error").ifEmpty { o.optString("message", "transfer failed") }
+                    o.optString("reason").ifEmpty {
+                        o.optString("error").ifEmpty { o.optString("message", "transfer failed") }
+                    },
+                    o.optString("reason_code"),
                 )
                 else -> null
             }

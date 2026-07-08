@@ -16,7 +16,8 @@ use envoix_protocol::{FrameConnection, PeerDescriptor};
 pub use envoix_transfer::TransferEngine;
 pub use envoix_transfer::{
     DEFAULT_CHUNK_SIZE, EventSink, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE, NoopEventSink,
-    TransferCancelToken, TransferEvent, TransferSummary, USER_INTERRUPT_MESSAGE,
+    PEER_INTERRUPT_MESSAGE, PEER_PAUSE_MESSAGE, TransferCancelToken, TransferEvent,
+    TransferSummary, USER_INTERRUPT_MESSAGE, USER_PAUSE_MESSAGE,
     validate_chunk_size,
 };
 pub use envoix_types::TransferDirection;
@@ -258,7 +259,7 @@ pub async fn send_file_enable_mdns(
             },
             () = cancel.cancelled() => {
                 local_endpoint.close().await;
-                return Err(interrupted_error());
+                return Err(interrupted_error(&cancel));
             }
         };
 
@@ -544,10 +545,11 @@ async fn accept_or_cancel(
 ) -> Result<IrohFrameConnection, SessionError> {
     tokio::select! {
         result = bound_endpoint.accept() => result,
-        () = cancel.cancelled() => Err(interrupted_error()),
+        () = cancel.cancelled() => Err(interrupted_error(cancel)),
     }
 }
 
-fn interrupted_error() -> SessionError {
-    CoreError::Transfer(USER_INTERRUPT_MESSAGE.into())
+fn interrupted_error(cancel: &TransferCancelToken) -> SessionError {
+    let message = if cancel.is_pause() { USER_PAUSE_MESSAGE } else { USER_INTERRUPT_MESSAGE };
+    CoreError::Transfer(message.into())
 }

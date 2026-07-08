@@ -226,6 +226,13 @@ impl Transfer {
         self.cancel.cancel();
     }
 
+    /// Requests a pause: the same graceful stop as [`cancel`](Self::cancel),
+    /// but reported — locally and (best-effort) to the peer — as a pause, so
+    /// both sides can present a resumable state instead of a failure.
+    pub fn pause(&self) {
+        self.cancel.pause();
+    }
+
     /// A clonable handle that cancels this transfer, for callers that drive the
     /// event loop on one thread and want to cancel from another (e.g. the JNI
     /// bridge). Triggering it is equivalent to [`Transfer::cancel`].
@@ -373,7 +380,8 @@ impl From<SessionEvent> for TransferEvent {
                 bytes_transferred,
             },
             SessionEvent::Failed { direction, reason } => {
-                TransferEvent::Failed { direction, reason }
+                let reason_code = super::event::FailureCode::classify(&reason);
+                TransferEvent::Failed { direction, reason, reason_code }
             }
             SessionEvent::Pairing { step } => TransferEvent::Pairing { step },
             SessionEvent::Connecting => TransferEvent::Connecting,

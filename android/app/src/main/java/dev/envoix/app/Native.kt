@@ -50,6 +50,11 @@ object Native {
     /** Request cancellation of the in-flight transfer with the given [id]. */
     external fun cancel(id: Long)
 
+    /** Request a pause of the in-flight transfer with the given [id]: same stop
+     *  mechanics as [cancel], but reported — locally and (best-effort) to the
+     *  peer — as a pause, so both sides can show a resumable state. */
+    external fun pause(id: Long)
+
     /** Generate a room invite for [role] ("send"/"receive"). Returns JSON
      *  `{"code":..,"payload":..}` (payload = the QR string), or `{"error":..}`. */
     external fun generateInvite(role: String, broker: String, relay: String): String

@@ -124,5 +124,100 @@ pub enum TransferEvent {
         direction: TransferDirection,
         /// Human-readable failure reason.
         reason: String,
+        /// Typed classification of the failure, so frontends branch on an enum
+        /// instead of matching the prose in `reason`.
+        reason_code: FailureCode,
     },
+}
+
+/// Typed classification of a transfer failure. The peer-reported codes ride the
+/// same best-effort error frame as the message — a degraded path can drop them,
+/// in which case the failure surfaces as [`ConnectionLost`](Self::ConnectionLost).
+/// Frontends should treat these as a hint and keep durable facts (a partial on
+/// disk) as the fallback signal for resumability.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureCode {
+    /// The local user cancelled the transfer.
+    Cancelled,
+    /// The local user paused the transfer (resumable intent).
+    Paused,
+    /// The peer reported cancelling the transfer.
+    PeerCancelled,
+    /// The peer reported pausing the transfer (resumable intent).
+    PeerPaused,
+    /// The connection dropped without a peer-reported reason.
+    ConnectionLost,
+    /// Any other failure; `reason` carries the detail.
+    Other,
+}
+
+impl FailureCode {
+    /// Classify a failure reason string. This is the ONE place the canonical
+    /// interrupt messages (and the connection-drop phrasings the session layer
+    /// produces) are matched — frontends must branch on the resulting enum,
+    /// never on the prose.
+    pub(crate) fn classify(reason: &str) -> Self {
+        use envoix_session::{
+            PEER_INTERRUPT_MESSAGE, PEER_PAUSE_MESSAGE, USER_INTERRUPT_MESSAGE,
+            USER_PAUSE_MESSAGE,
+        };
+        match reason {
+            r if r.contains(USER_PAUSE_MESSAGE) => Self::Paused,
+            r if r.contains(USER_INTERRUPT_MESSAGE) => Self::Cancelled,
+            r if r.contains(PEER_PAUSE_MESSAGE) => Self::PeerPaused,
+            r if r.contains(PEER_INTERRUPT_MESSAGE) => Self::PeerCancelled,
+            r if r.contains("connection lost") || r.contains("connection closed by peer") => {
+                Self::ConnectionLost
+            }
+            _ => Self::Other,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FailureCode;
+
+    #[test]
+    fn classify_maps_canonical_messages_to_codes() {
+        // The session layer prefixes/wraps these, so classify uses contains.
+        assert_eq!(
+            FailureCode::classify("transfer paused by user"),
+            FailureCode::Paused
+        );
+        assert_eq!(
+            FailureCode::classify("transfer interrupted by user"),
+            FailureCode::Cancelled
+        );
+        assert_eq!(
+            FailureCode::classify("transfer paused by peer"),
+            FailureCode::PeerPaused
+        );
+        assert_eq!(
+            FailureCode::classify("transfer interrupted by peer"),
+            FailureCode::PeerCancelled
+        );
+        assert_eq!(
+            FailureCode::classify("io error: connection lost"),
+            FailureCode::ConnectionLost
+        );
+        assert_eq!(
+            FailureCode::classify("connection closed by peer"),
+            FailureCode::ConnectionLost
+        );
+        assert_eq!(
+            FailureCode::classify("hash mismatch"),
+            FailureCode::Other
+        );
+    }
+
+    #[test]
+    fn reason_code_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&FailureCode::PeerPaused).unwrap(),
+            r#""peer_paused""#
+        );
+    }
 }
