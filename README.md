@@ -2,6 +2,20 @@
 
 Minimal CLI-first secure file transfer walking skeleton for VE441.
 
+## Debug Build Marker
+
+Current app debug marker: `Debug build 2026.07.08.3`.
+
+Before pushing or installing a new Android, iOS, or macOS test build, bump this
+marker in both app clients so device testers can confirm the build actually
+updated:
+
+- Apple: `apps/envoix-apple/Sources/Support.swift`
+- Android: `android/app/src/main/java/dev/envoix/app/DebugBuild.kt`
+
+Keep both labels identical. Treat this as part of any user-visible app,
+UniFFI, transfer, or settings change that needs real-device verification.
+
 ## Usage
 
 ### QR invite flow (recommended)
