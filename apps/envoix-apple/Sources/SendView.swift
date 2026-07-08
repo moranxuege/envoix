@@ -148,6 +148,7 @@ struct SendView: View {
             footerMessage
             primaryButton
         }
+        .padding(.horizontal, 16)
         .padding(.top, 10)
         .padding(.bottom, 8)
         .background(.regularMaterial)

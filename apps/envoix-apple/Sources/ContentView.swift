@@ -282,9 +282,9 @@ struct ContentView: View {
 
     private func isPending(_ record: FfiTransferActivityRecord) -> Bool {
         switch record.state {
-        case .queued, .binding, .waitingForPeer, .pairing, .connecting, .transferring, .verifying:
+        case .queued, .binding, .waitingForPeer, .pairing, .connecting, .transferring, .verifying, .paused:
             return true
-        case .completed, .failed, .paused, .canceled, .unknown:
+        case .completed, .failed, .canceled, .unknown:
             return false
         }
     }

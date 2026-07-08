@@ -17,7 +17,7 @@ typealias PlatformImage = UIImage
 let minTokenLength = 12
 let defaultRendezvousBroker = "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445"
 let defaultRelayURL = "https://envoix.chkxwlyh.us:8444"
-let appDebugBuildLabel = "Debug build 2026.07.08.13"
+let appDebugBuildLabel = "Debug build 2026.07.08.14"
 
 /// Generates a short, memorable, easy-to-type pairing token of the form
 /// `word-word-NN` (always ≥ `minTokenLength` since each word is ≥4 letters).
@@ -507,23 +507,17 @@ struct TransferStatusView: View {
                 EmptyView()
             case .paused:
                 if viewModel.total > 0 {
-                    Text("\(byteString(viewModel.transferred)) / \(byteString(viewModel.total))")
-                        .font(.body.monospacedDigit())
-                        .foregroundStyle(Theme.muted)
+                    transferProgressLine
+                }
+                if let path = currentDataPathText {
+                    pathLine(path)
                 }
             case .transferring:
                 ProgressBar(value: viewModel.progressFraction)
-                HStack(spacing: 6) {
-                    Text("\(byteString(viewModel.transferred)) / \(byteString(viewModel.total))")
-                    if viewModel.bytesPerSec > 0 {
-                        Text("·"); Text(rateString(viewModel.bytesPerSec))
-                    }
-                    if let eta = viewModel.etaSeconds {
-                        Text("·"); Text(etaString(eta))
-                    }
+                transferProgressLine
+                if let path = currentDataPathText {
+                    pathLine(path)
                 }
-                .font(.body.monospacedDigit())
-                .foregroundStyle(Theme.muted)
             case .completed(let bytes):
                 Text(byteString(bytes))
                     .font(.body.monospacedDigit())
@@ -554,6 +548,52 @@ struct TransferStatusView: View {
                 .strokeBorder(tint.opacity(borderOpacity), lineWidth: 0.9)
         )
         .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
+    }
+
+    private var transferProgressLine: some View {
+        HStack(spacing: 6) {
+            Text("\(byteString(viewModel.transferred)) / \(byteString(viewModel.total))")
+            if viewModel.bytesPerSec > 0 {
+                Text("·")
+                Text(rateString(viewModel.bytesPerSec))
+            }
+            if let eta = viewModel.etaSeconds {
+                Text("·")
+                Text(etaString(eta))
+            }
+        }
+        .font(.body.monospacedDigit())
+        .foregroundStyle(Theme.muted)
+    }
+
+    private func pathLine(_ path: String) -> some View {
+        HStack(spacing: 6) {
+            Text(AppText.value("Path", "链路", language: language))
+                .fontWeight(.semibold)
+            Text("·")
+            Text(path)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .font(.body.monospacedDigit())
+        .foregroundStyle(Theme.muted)
+    }
+
+    private var currentDataPathText: String? {
+        guard let record = viewModel.transferActivity, record.dataPathKind != .none else { return nil }
+        let pathKind: String
+        switch record.dataPathKind {
+        case .direct:
+            pathKind = AppText.value("Direct", "直连", language: language)
+        case .relay:
+            pathKind = AppText.value("Relay", "中继", language: language)
+        case .other:
+            pathKind = AppText.value("Path", "路径", language: language)
+        case .none:
+            return nil
+        }
+        guard developerMode, !record.dataPathDetail.isEmpty else { return pathKind }
+        return "\(pathKind) · \(record.dataPathDetail)"
     }
 
     @ViewBuilder private var logsCard: some View {
