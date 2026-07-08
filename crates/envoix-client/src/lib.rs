@@ -27,7 +27,7 @@ pub const ENVOIX_CHUNK_SIZE: &str = "ENVOIX_CHUNK_SIZE";
 pub(crate) type PublicError = CoreError;
 
 /// The recognized contents of the optional TOML config file.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RuntimeConfig {
     pub(crate) chunk_size: Option<String>,

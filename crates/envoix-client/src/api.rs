@@ -144,17 +144,35 @@ impl Client {
     /// overrides (`ENVOIX_CHUNK_SIZE`) - the runtime sources the CLI reads,
     /// without the legacy requirement of supplying a pairing up front.
     pub fn from_runtime_sources(config_path: Option<&Path>) -> Result<Self, TransferError> {
+        let config = config_path
+            .map(crate::RuntimeConfig::read)
+            .transpose()
+            .map_err(setup_error)?
+            .unwrap_or_default();
+        let candidates = config.candidates.unwrap_or_default();
+        Self::from_config_fields(
+            config.chunk_size.as_deref(),
+            &candidates.allow,
+            &candidates.deny,
+        )
+    }
+
+    /// A client assembled from discrete config fields - the shape the Android
+    /// FFI passes across the boundary - plus the `ENVOIX_CHUNK_SIZE` override.
+    /// This is the shared assembler behind [`Self::from_runtime_sources`], which
+    /// only adds reading the fields from a TOML file first.
+    pub fn from_config_fields(
+        chunk_size: Option<&str>,
+        candidates_allow: &[String],
+        candidates_deny: &[String],
+    ) -> Result<Self, TransferError> {
         let mut client = Self::new();
-        if let Some(path) = config_path {
-            let config = crate::RuntimeConfig::read(path).map_err(setup_error)?;
-            if let Some(chunk_size) = config.chunk_size {
-                client.chunk_size = crate::parse_chunk_size(&chunk_size).map_err(setup_error)?;
-            }
-            if let Some(candidates) = config.candidates {
-                client.candidates =
-                    CandidateFilter::from_lists(&candidates.allow, &candidates.deny)
-                        .map_err(setup_error)?;
-            }
+        if let Some(chunk_size) = chunk_size {
+            client.chunk_size = crate::parse_chunk_size(chunk_size).map_err(setup_error)?;
+        }
+        if !candidates_allow.is_empty() || !candidates_deny.is_empty() {
+            client.candidates = CandidateFilter::from_lists(candidates_allow, candidates_deny)
+                .map_err(setup_error)?;
         }
         if let Some(value) = std::env::var_os(crate::ENVOIX_CHUNK_SIZE) {
             let value = value.into_string().map_err(|_| {
@@ -582,6 +600,25 @@ mod tests {
 
         assert_eq!(client.chunk_size, 1024 * 1024);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn config_fields_apply_chunk_size_and_candidate_cidrs() {
+        // The FFI path passes discrete fields (no file) and must assemble the
+        // same client as the equivalent config.toml above.
+        let deny = vec!["10.0.0.0/8".to_string(), "fe80::/10".to_string()];
+        let client = Client::from_config_fields(Some("1M"), &[], &deny).unwrap();
+
+        assert_eq!(client.chunk_size, 1024 * 1024);
+        let kept = client
+            .candidates
+            .apply(["10.0.0.5:1".parse().unwrap(), "1.2.3.4:2".parse().unwrap()]);
+        assert_eq!(kept, vec!["1.2.3.4:2".parse().unwrap()]);
+    }
+
+    #[test]
+    fn config_fields_reject_invalid_candidate_cidr() {
+        assert!(Client::from_config_fields(None, &[], &["not-a-cidr".to_string()]).is_err());
     }
 
     #[test]

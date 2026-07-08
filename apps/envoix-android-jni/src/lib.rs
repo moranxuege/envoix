@@ -88,7 +88,9 @@ pub extern "system" fn Java_dev_envoix_app_Native_runTransfer(
     broker: JString,
     relay: JString,
     path: JString,
-    config_path: JString,
+    chunk_size: JString,
+    candidates_allow: JString,
+    candidates_deny: JString,
     use_room: jboolean,
     use_mdns: jboolean,
     callback: JObject,
@@ -98,7 +100,9 @@ pub extern "system" fn Java_dev_envoix_app_Native_runTransfer(
     let broker = jstr(&mut env, &broker);
     let relay = jstr(&mut env, &relay);
     let path = jstr(&mut env, &path);
-    let config_path = jstr(&mut env, &config_path);
+    let chunk_size = jstr(&mut env, &chunk_size);
+    let candidates_allow = jstr(&mut env, &candidates_allow);
+    let candidates_deny = jstr(&mut env, &candidates_deny);
 
     let vm = env.get_java_vm().expect("java vm");
     let cb = env.new_global_ref(&callback).expect("callback ref");
@@ -110,7 +114,9 @@ pub extern "system" fn Java_dev_envoix_app_Native_runTransfer(
         broker,
         relay,
         path,
-        config_path,
+        chunk_size,
+        candidates_allow,
+        candidates_deny,
         use_room: use_room != 0,
         use_mdns: use_mdns != 0,
     };
@@ -220,14 +226,29 @@ struct DriveRequest {
     broker: String,
     relay: String,
     path: String,
-    config_path: String,
+    chunk_size: String,
+    candidates_allow: String,
+    candidates_deny: String,
     use_room: bool,
     use_mdns: bool,
 }
 
+/// Split a comma-joined FFI config field into trimmed, non-empty entries.
+/// Commas never appear in CIDR prefixes, so this round-trips the Kotlin lists.
+fn split_csv(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect()
+}
+
 async fn drive(req: DriveRequest, vm: &JavaVM, cb: &GlobalRef) -> Result<(), String> {
-    let config = (!req.config_path.is_empty()).then(|| PathBuf::from(&req.config_path));
-    let client = Client::from_runtime_sources(config.as_deref()).map_err(|e| e.to_string())?;
+    let allow = split_csv(&req.candidates_allow);
+    let deny = split_csv(&req.candidates_deny);
+    let chunk_size = (!req.chunk_size.is_empty()).then_some(req.chunk_size.as_str());
+    let client = Client::from_config_fields(chunk_size, &allow, &deny).map_err(|e| e.to_string())?;
     let into = PathBuf::from(&req.path);
 
     // Try each enabled rendezvous in order (Room, then mDNS via the code as its

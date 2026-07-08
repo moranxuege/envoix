@@ -21,8 +21,12 @@ class TransferViewModel(app: Application) : AndroidViewModel(app) {
         start("send", room, filePath, broker, relay, qrPayload)
 
     private fun start(direction: String, room: String, path: String, broker: String, relay: String, qrPayload: String?) {
-        val config = SettingsStore.renderConfig(getApplication()) ?: ""
-        TransferService.start(getApplication(), direction, room, path, broker, relay, config, qrPayload)
+        val cfg = SettingsStore.settings.value
+        TransferService.start(
+            getApplication(), direction, room, path, broker, relay,
+            cfg.chunkSize, cfg.candidatesAllow.joinToString(","), cfg.candidatesDeny.joinToString(","),
+            qrPayload,
+        )
     }
 
     fun cancel(id: Long) = TransferService.cancel(getApplication(), id)

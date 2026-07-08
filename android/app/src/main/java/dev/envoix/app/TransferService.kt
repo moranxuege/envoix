@@ -24,7 +24,9 @@ private data class Spec(
     val path: String,
     val broker: String,
     val relay: String,
-    val config: String,
+    val chunkSize: String,
+    val candidatesAllow: String,
+    val candidatesDeny: String,
     /** Invite payload to advertise as a QR while waiting (initiated sessions only). */
     val qrPayload: String?,
     /** Rendezvous modes to attempt, in order Room → mDNS. */
@@ -81,7 +83,9 @@ class TransferService : Service() {
                     direction, room, path,
                     intent.getStringExtra(EXTRA_BROKER) ?: Endpoints.BROKER,
                     intent.getStringExtra(EXTRA_RELAY) ?: Endpoints.RELAY,
-                    intent.getStringExtra(EXTRA_CONFIG) ?: "",
+                    intent.getStringExtra(EXTRA_CHUNK_SIZE) ?: "",
+                    intent.getStringExtra(EXTRA_CAND_ALLOW) ?: "",
+                    intent.getStringExtra(EXTRA_CAND_DENY) ?: "",
                     intent.getStringExtra(EXTRA_QR),
                     SettingsStore.settings.value.useRoom && hasInternet(),
                     SettingsStore.settings.value.useMdns,
@@ -144,7 +148,7 @@ class TransferService : Service() {
             var lastNotif = 0L
             var startTs = 0L
             if (spec.useMdns) runCatching { multicastLock.acquire() }
-            NativeTransfer.run(id, spec.direction, spec.room, spec.broker, spec.relay, spec.path, spec.config, spec.useRoom, spec.useMdns)
+            NativeTransfer.run(id, spec.direction, spec.room, spec.broker, spec.relay, spec.path, spec.chunkSize, spec.candidatesAllow, spec.candidatesDeny, spec.useRoom, spec.useMdns)
                 .collect { ev ->
                     TransferRepository.update(id) { t ->
                         when (ev) {
@@ -328,12 +332,15 @@ class TransferService : Service() {
         private const val EXTRA_PATH = "path"
         private const val EXTRA_BROKER = "broker"
         private const val EXTRA_RELAY = "relay"
-        private const val EXTRA_CONFIG = "config"
+        private const val EXTRA_CHUNK_SIZE = "chunk_size"
+        private const val EXTRA_CAND_ALLOW = "candidates_allow"
+        private const val EXTRA_CAND_DENY = "candidates_deny"
         private const val EXTRA_QR = "qr"
         private const val EXTRA_ID = "id"
 
         /** `direction` is "send"/"receive"; `path` is the file to send or the
-         *  output directory to receive into; `config` is a config.toml path or "";
+         *  output directory to receive into; the config fields carry chunk_size +
+         *  the candidate CIDR allow/deny lists (comma-joined, "" when unset);
          *  `qrPayload` is the invite to show while waiting (null when joining). */
         fun start(
             context: Context,
@@ -342,7 +349,9 @@ class TransferService : Service() {
             path: String,
             broker: String,
             relay: String,
-            config: String,
+            chunkSize: String,
+            candidatesAllow: String,
+            candidatesDeny: String,
             qrPayload: String?,
         ) {
             context.startForegroundService(
@@ -353,7 +362,9 @@ class TransferService : Service() {
                     putExtra(EXTRA_PATH, path)
                     putExtra(EXTRA_BROKER, broker)
                     putExtra(EXTRA_RELAY, relay)
-                    putExtra(EXTRA_CONFIG, config)
+                    putExtra(EXTRA_CHUNK_SIZE, chunkSize)
+                    putExtra(EXTRA_CAND_ALLOW, candidatesAllow)
+                    putExtra(EXTRA_CAND_DENY, candidatesDeny)
                     putExtra(EXTRA_QR, qrPayload)
                 }
             )

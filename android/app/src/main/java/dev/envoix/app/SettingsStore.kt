@@ -5,7 +5,6 @@ import android.content.SharedPreferences
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import java.io.File
 
 /**
  * Two layers, one flat holder:
@@ -159,25 +158,4 @@ object SettingsStore {
         s.copy(candidatesDeny = deny)
     }
 
-    /**
-     * Render a `config.toml` for the core from the config-tier fields, or null
-     * when none are set. Same schema as the CLI's `RuntimeConfig`.
-     */
-    fun renderConfig(context: Context): String? {
-        val s = _settings.value
-        val lines = mutableListOf<String>()
-        if (s.chunkSize.isNotBlank()) lines += "chunk_size = ${tomlStr(s.chunkSize.trim())}"
-        if (s.candidatesAllow.isNotEmpty() || s.candidatesDeny.isNotEmpty()) {
-            lines += "[candidates]"
-            if (s.candidatesAllow.isNotEmpty()) lines += "allow = ${tomlArr(s.candidatesAllow)}"
-            if (s.candidatesDeny.isNotEmpty()) lines += "deny = ${tomlArr(s.candidatesDeny)}"
-        }
-        if (lines.isEmpty()) return null
-        return File(context.filesDir, "config.toml")
-            .apply { writeText(lines.joinToString("\n") + "\n") }
-            .absolutePath
-    }
-
-    private fun tomlStr(s: String) = "\"" + s.replace("\"", "") + "\""
-    private fun tomlArr(items: List<String>) = "[" + items.joinToString(", ") { tomlStr(it) } + "]"
 }
