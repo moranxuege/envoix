@@ -17,7 +17,7 @@ typealias PlatformImage = UIImage
 let minTokenLength = 12
 let defaultRendezvousBroker = "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445"
 let defaultRelayURL = "https://envoix.chkxwlyh.us:8444"
-let appDebugBuildLabel = "Debug build 2026.07.08.14"
+let appDebugBuildLabel = "Debug build 2026.07.08.15"
 
 /// Generates a short, memorable, easy-to-type pairing token of the form
 /// `word-word-NN` (always ≥ `minTokenLength` since each word is ≥4 letters).
@@ -650,7 +650,7 @@ struct TransferStatusView: View {
         case .canceled:
             return AppText.value("Transfer canceled", "传输已取消", language: language)
         case .failed(let reason):
-            return friendlyFailure(reason).title
+            return failureText(reason: reason).title
         }
     }
 
@@ -671,7 +671,7 @@ struct TransferStatusView: View {
         case .canceled:
             return AppText.value("Ready to start another transfer.", "可以开始新的传输。", language: language)
         case .failed(let reason):
-            return friendlyFailure(reason).detail
+            return failureText(reason: reason).detail
         }
     }
 
@@ -722,7 +722,41 @@ struct TransferStatusView: View {
         }
     }
 
-    private func friendlyFailure(_ reason: String) -> (title: String, detail: String) {
+    private func failureText(reason: String) -> (title: String, detail: String) {
+        if let failure = viewModel.failure {
+            return structuredFailureText(failure)
+        }
+        return fallbackFailureText(reason)
+    }
+
+    private func structuredFailureText(_ failure: FfiTransferFailure) -> (title: String, detail: String) {
+        let title: String
+        switch failure.code {
+        case .userCanceled, .peerCanceled:
+            title = AppText.value("Transfer canceled", "传输已取消", language: language)
+        case .networkLost, .peerUnreachable, .timeout:
+            title = AppText.value("Connection failed", "连接失败", language: language)
+        case .authenticationFailed:
+            title = AppText.value("Pairing failed", "配对失败", language: language)
+        case .permissionDenied:
+            title = AppText.value("Permission needed", "需要权限", language: language)
+        case .diskFull:
+            title = AppText.value("Not enough space", "空间不足", language: language)
+        case .hashMismatch:
+            title = AppText.value("Verification failed", "校验失败", language: language)
+        case .protocolError:
+            title = AppText.value("Protocol mismatch", "协议不匹配", language: language)
+        case .destinationConflict:
+            title = AppText.value("Destination conflict", "目标位置冲突", language: language)
+        case .unsupportedFeature:
+            title = AppText.value("Update required", "需要更新", language: language)
+        case .internalError, .unknown:
+            title = AppText.value("Transfer failed", "传输失败", language: language)
+        }
+        return (title, friendlyFailure(failure, language: language))
+    }
+
+    private func fallbackFailureText(_ reason: String) -> (title: String, detail: String) {
         let cleanReason = reason.trimmed
         let lower = cleanReason.lowercased()
         if lower.contains("mdns") && lower.contains("peers discovered") {
