@@ -125,11 +125,14 @@ class TransferService : Service() {
             ACTION_CANCEL -> {
                 val id = intent.getLongExtra(EXTRA_ID, -1L)
                 OpLog.add("cancel transfer id=$id")
-                Native.cancel(id)
-                specs.remove(id)
+                // Mark Cancelled *before* cancelling, like ACTION_PAUSE: during
+                // pairing the abort's Failed event is near-instant and would beat
+                // this update, turning the card terminal-Failed (which this then skips).
                 TransferRepository.update(id) {
                     if (it.status.isTerminal) it else it.copy(status = Status.Cancelled)
                 }
+                specs.remove(id)
+                Native.cancel(id)
             }
         }
         return START_NOT_STICKY
@@ -177,7 +180,7 @@ class TransferService : Service() {
                                     fileName = ev.fileName, total = ev.totalBytes, status = Status.Transferring,
                                     log = addLog(t.log, "started · ${ev.fileName}"),
                                 )
-                            is CliEvent.Progress -> if (t.status == Status.Paused) t else {
+                            is CliEvent.Progress -> if (t.status.isTerminal || t.status == Status.Paused) t else {
                                 val now = System.nanoTime()
                                 if (startTs == 0L) {
                                     startTs = now; lastTs = now; lastBytes = ev.bytesTransferred
