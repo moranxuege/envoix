@@ -538,6 +538,11 @@ public protocol EnvoixSessionProtocol: AnyObject, Sendable {
     func cancelActivity(activityId: String)  -> Bool
 
     /**
+     * Returns the current in-memory transfer queue and recent terminal records.
+     */
+    func listTransferActivities()  -> [FfiTransferActivityRecord]
+
+    /**
      * Pauses a queued/running activity while keeping its request for resume.
      */
     func pauseActivity(activityId: String)  -> Bool
@@ -698,6 +703,17 @@ open func cancelActivity(activityId: String) -> Bool  {
     uniffi_envoix_ffi_fn_method_envoixsession_cancel_activity(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(activityId),$0
+    )
+})
+}
+
+    /**
+     * Returns the current in-memory transfer queue and recent terminal records.
+     */
+open func listTransferActivities() -> [FfiTransferActivityRecord]  {
+    return try!  FfiConverterSequenceTypeFfiTransferActivityRecord.lift(try! rustCall() {
+    uniffi_envoix_ffi_fn_method_envoixsession_list_transfer_activities(
+            self.uniffiCloneHandle(),$0
     )
 })
 }
@@ -3722,6 +3738,31 @@ public func FfiConverterTypeFfiTransferMode_lower(_ value: FfiTransferMode) -> R
     return FfiConverterTypeFfiTransferMode.lower(value)
 }
 
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiTransferActivityRecord: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiTransferActivityRecord]
+
+    public static func write(_ value: [FfiTransferActivityRecord], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiTransferActivityRecord.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiTransferActivityRecord] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiTransferActivityRecord]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiTransferActivityRecord.read(from: &buf))
+        }
+        return seq
+    }
+}
 /**
  * Folds one lifecycle event into an Activity/queue record.
  */
@@ -3809,6 +3850,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_envoix_ffi_checksum_method_envoixsession_cancel_activity() != 54985) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_envoix_ffi_checksum_method_envoixsession_list_transfer_activities() != 59519) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_envoix_ffi_checksum_method_envoixsession_pause_activity() != 8034) {

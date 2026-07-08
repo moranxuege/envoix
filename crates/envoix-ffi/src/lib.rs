@@ -38,6 +38,7 @@ const DEFAULT_RENDEZVOUS_BROKER: &str =
 const DEFAULT_RELAY_URL: &str = "https://envoix.chkxwlyh.us:8444";
 static NEXT_ACTIVITY_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_ATTEMPT_ID: AtomicU64 = AtomicU64::new(1);
+const TRANSFER_ACTIVITY_HISTORY_CAP: usize = 50;
 /// Runtime settings supplied by native UIs.
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct EnvoixRuntimeSettings {
@@ -497,6 +498,7 @@ struct TransferQueueState {
     pending: VecDeque<QueuedTransfer>,
     active: HashMap<String, ActiveTransfer>,
     paused: HashMap<String, QueuedTransfer>,
+    history: VecDeque<FfiTransferActivityRecord>,
 }
 
 struct QueuedTransfer {
@@ -521,6 +523,7 @@ struct TransferAttemptOutcome {
 struct ActiveTransfer {
     control: Option<oneshot::Sender<TransferStop>>,
     limit: usize,
+    activity: FfiTransferActivityRecord,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -537,6 +540,44 @@ impl TransferQueueState {
                 .iter()
                 .any(|job| job.activity.activity_id == activity_id)
             || self.paused.contains_key(activity_id)
+    }
+
+    fn activities(&self) -> Vec<FfiTransferActivityRecord> {
+        let mut seen = HashMap::new();
+        let mut records = Vec::new();
+        for record in self.history.iter() {
+            seen.insert(record.activity_id.clone(), ());
+            records.push(record.clone());
+        }
+        for record in self.active.values().map(|active| &active.activity) {
+            if !seen.contains_key(&record.activity_id) {
+                seen.insert(record.activity_id.clone(), ());
+                records.push(record.clone());
+            }
+        }
+        for job in self.pending.iter() {
+            if !seen.contains_key(&job.activity.activity_id) {
+                seen.insert(job.activity.activity_id.clone(), ());
+                records.push(job.activity.clone());
+            }
+        }
+        for job in self.paused.values() {
+            if !seen.contains_key(&job.activity.activity_id) {
+                seen.insert(job.activity.activity_id.clone(), ());
+                records.push(job.activity.clone());
+            }
+        }
+        records.sort_by(|lhs, rhs| rhs.updated_at_ms.cmp(&lhs.updated_at_ms));
+        records
+    }
+
+    fn push_history(&mut self, activity: FfiTransferActivityRecord) {
+        self.history
+            .retain(|record| record.activity_id != activity.activity_id);
+        self.history.push_front(activity);
+        if self.history.len() > TRANSFER_ACTIVITY_HISTORY_CAP {
+            self.history.truncate(TRANSFER_ACTIVITY_HISTORY_CAP);
+        }
     }
 
     fn can_start(&self, next_limit: usize) -> bool {
@@ -572,6 +613,11 @@ impl EnvoixSession {
             queue: Arc::new(Mutex::new(TransferQueueState::default())),
             settings,
         })
+    }
+
+    /// Returns the current in-memory transfer queue and recent terminal records.
+    pub fn list_transfer_activities(&self) -> Vec<FfiTransferActivityRecord> {
+        self.queue.lock().unwrap().activities()
     }
 
     /// Starts receiving one file into `output_dir`.
@@ -720,7 +766,8 @@ impl EnvoixSession {
             }
         };
         if let Some(job) = stored {
-            report_queued_cancel(job);
+            let activity = report_queued_cancel(job);
+            self.queue.lock().unwrap().push_history(activity);
             return true;
         }
 
@@ -829,7 +876,8 @@ impl EnvoixSession {
             (stored, controls)
         };
         for job in stored {
-            report_queued_cancel(job);
+            let activity = report_queued_cancel(job);
+            self.queue.lock().unwrap().push_history(activity);
         }
         for control in controls {
             let _ = control.send(TransferStop::Cancel);
@@ -865,6 +913,7 @@ fn drain_transfer_queue(
                 ActiveTransfer {
                     control: Some(control_sender),
                     limit,
+                    activity: job.activity.clone(),
                 },
             );
             (job, control_receiver)
@@ -883,6 +932,7 @@ fn drain_transfer_queue(
                 job.activity,
                 job.observer,
                 control,
+                queue_for_task.clone(),
                 handle_for_task.clone(),
             )
             .await;
@@ -907,15 +957,33 @@ fn finish_transfer_activity(activity_id: &str, queue: &Arc<Mutex<TransferQueueSt
     queue.lock().unwrap().active.remove(activity_id);
 }
 
-fn report_queued_cancel(mut job: QueuedTransfer) {
+fn store_active_activity(
+    queue: &Arc<Mutex<TransferQueueState>>,
+    activity: &FfiTransferActivityRecord,
+) {
+    if let Some(active) = queue.lock().unwrap().active.get_mut(&activity.activity_id) {
+        active.activity = activity.clone();
+    }
+}
+
+fn push_activity_history(
+    queue: &Arc<Mutex<TransferQueueState>>,
+    activity: &FfiTransferActivityRecord,
+) {
+    queue.lock().unwrap().push_history(activity.clone());
+}
+
+fn report_queued_cancel(mut job: QueuedTransfer) -> FfiTransferActivityRecord {
     let message = if job.activity.state == FfiTransferActivityState::Paused {
         "canceled paused transfer"
     } else {
         "canceled before start"
     };
     job.activity.apply_canceled(now_ms());
-    job.observer.on_transfer_activity(job.activity);
+    let activity = job.activity.clone();
+    job.observer.on_transfer_activity(activity.clone());
     job.observer.on_status(message.to_string());
+    activity
 }
 
 fn report_activity_setup_failure(
@@ -1571,12 +1639,15 @@ async fn drive_transfer_request(
     mut activity: FfiTransferActivityRecord,
     observer: Arc<dyn TransferObserver>,
     mut control: oneshot::Receiver<TransferStop>,
+    queue: Arc<Mutex<TransferQueueState>>,
     handle: Handle,
 ) -> Option<QueuedTransfer> {
     let attempts = match peer_sources_for_request(&settings, &request) {
         Ok(attempts) => attempts,
         Err(error) => {
             report_activity_setup_failure(&*observer, &mut activity, error);
+            store_active_activity(&queue, &activity);
+            push_activity_history(&queue, &activity);
             return None;
         }
     };
@@ -1589,6 +1660,7 @@ async fn drive_transfer_request(
         if index > 0 {
             activity.attempt_id = next_attempt_id();
             activity.updated_at_ms = now_ms();
+            store_active_activity(&queue, &activity);
             observer.on_transfer_activity(activity.clone());
         }
         let transfer = match build_transfer_for_source(&settings, &request, attempt.source, &handle)
@@ -1604,6 +1676,8 @@ async fn drive_transfer_request(
                     continue;
                 }
                 report_activity_setup_failure(&*observer, &mut activity, error);
+                store_active_activity(&queue, &activity);
+                push_activity_history(&queue, &activity);
                 return None;
             }
         };
@@ -1614,6 +1688,7 @@ async fn drive_transfer_request(
             &*observer,
             &mut control,
             &mut stop_requested,
+            &queue,
         )
         .await;
         let can_fallback = outcome.stop_requested.is_none()
@@ -1628,10 +1703,13 @@ async fn drive_transfer_request(
                     outcome.direction,
                     false,
                 );
+                store_active_activity(&queue, &activity);
+                push_activity_history(&queue, &activity);
                 return None;
             }
             Err(_) if outcome.stop_requested == Some(TransferStop::Pause) => {
                 activity.apply_paused(now_ms());
+                store_active_activity(&queue, &activity);
                 observer.on_transfer_activity(activity.clone());
                 observer.on_status("paused".to_string());
                 return Some(QueuedTransfer {
@@ -1659,6 +1737,8 @@ async fn drive_transfer_request(
                     outcome.direction,
                     canceled,
                 );
+                store_active_activity(&queue, &activity);
+                push_activity_history(&queue, &activity);
                 return None;
             }
         }
@@ -1672,6 +1752,7 @@ async fn drive_transfer_attempt(
     observer: &dyn TransferObserver,
     control: &mut oneshot::Receiver<TransferStop>,
     stop_requested: &mut Option<TransferStop>,
+    queue: &Arc<Mutex<TransferQueueState>>,
 ) -> TransferAttemptOutcome {
     let mut direction = None;
     let mut connected = false;
@@ -1686,6 +1767,7 @@ async fn drive_transfer_attempt(
                     connected = true;
                 }
                 observe_transfer_event(observer, activity, event);
+                store_active_activity(queue, activity);
             }
             stop = &mut *control, if stop_requested.is_none() => {
                 let stop = stop.unwrap_or(TransferStop::Cancel);
@@ -2170,6 +2252,16 @@ mod tests {
         }
     }
 
+    fn snapshot_record(
+        session: &EnvoixSession,
+        activity_id: &str,
+    ) -> Option<FfiTransferActivityRecord> {
+        session
+            .list_transfer_activities()
+            .into_iter()
+            .find(|record| record.activity_id == activity_id)
+    }
+
     #[test]
     fn pairing_invite_payload_round_trips_for_native_clients() {
         let invite = make_pairing_invite(
@@ -2483,6 +2575,10 @@ mod tests {
         let queued = recv_activity(&second_rx, "serial-second", Duration::from_secs(2));
         assert_eq!(queued.state, FfiTransferActivityState::Queued);
         assert_eq!(queued.limits.max_parallel_transfers, 1);
+        assert_eq!(
+            snapshot_record(&session, "serial-second").map(|record| record.state),
+            Some(FfiTransferActivityState::Queued)
+        );
         assert_no_nonqueued_activity(&second_rx, "serial-second", Duration::from_millis(200));
 
         assert!(session.cancel_activity("serial-second".to_string()));
@@ -2523,11 +2619,20 @@ mod tests {
 
         let queued = recv_activity(&second_rx, "queue-second", Duration::from_secs(2));
         assert_eq!(queued.state, FfiTransferActivityState::Queued);
+        assert!(snapshot_record(&session, "queue-first").is_some());
+        assert_eq!(
+            snapshot_record(&session, "queue-second").map(|record| record.state),
+            Some(FfiTransferActivityState::Queued)
+        );
         assert_no_nonqueued_activity(&second_rx, "queue-second", Duration::from_millis(200));
 
         assert!(session.cancel_activity("queue-second".to_string()));
         let canceled = recv_activity(&second_rx, "queue-second", Duration::from_secs(2));
         assert_eq!(canceled.state, FfiTransferActivityState::Canceled);
+        assert_eq!(
+            snapshot_record(&session, "queue-second").map(|record| record.state),
+            Some(FfiTransferActivityState::Canceled)
+        );
 
         assert!(session.cancel_activity("queue-first".to_string()));
     }
@@ -2571,11 +2676,19 @@ mod tests {
         let paused = recv_activity(&second_rx, "pause-second", Duration::from_secs(2));
         assert_eq!(paused.state, FfiTransferActivityState::Paused);
         assert_eq!(paused.recovery_action, FfiRecoveryAction::Resume);
+        assert_eq!(
+            snapshot_record(&session, "pause-second").map(|record| record.state),
+            Some(FfiTransferActivityState::Paused)
+        );
 
         assert!(session.resume_activity("pause-second".to_string()));
         let requeued = recv_activity(&second_rx, "pause-second", Duration::from_secs(2));
         assert_eq!(requeued.state, FfiTransferActivityState::Queued);
         assert!(requeued.attempt_id.is_empty());
+        assert_eq!(
+            snapshot_record(&session, "pause-second").map(|record| record.state),
+            Some(FfiTransferActivityState::Queued)
+        );
         assert_no_nonqueued_activity(&second_rx, "pause-second", Duration::from_millis(200));
 
         assert!(session.cancel_activity("pause-second".to_string()));
