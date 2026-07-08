@@ -159,7 +159,14 @@ class TransferService : Service() {
             NativeTransfer.run(id, spec.direction, spec.room, spec.broker, spec.relay, spec.path, spec.chunkSize, spec.candidatesAllow, spec.candidatesDeny, spec.useRoom, spec.useMdns)
                 .collect { ev ->
                     TransferRepository.update(id) { t ->
-                        when (ev) {
+                        // Once a card is terminal or user-paused, ignore every late
+                        // in-flight event. During pairing the core keeps emitting
+                        // Connecting, which would otherwise revive a just-Cancelled card
+                        // (Connecting is set unconditionally below) and let the abort's
+                        // Failed relabel it. The user's Cancel/Pause and the final
+                        // outcome are the last word.
+                        if (t.status.isTerminal || t.status == Status.Paused) t
+                        else when (ev) {
                             CliEvent.Binding, CliEvent.Connecting ->
                                 t.copy(
                                     status = Status.Connecting,
