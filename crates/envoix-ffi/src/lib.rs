@@ -199,6 +199,16 @@ pub struct FfiTransferLimits {
     pub speed_limit_bps: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct FfiRendezvousPlan {
+    /// Try the hosted rendezvous room before any local-network fallback.
+    pub use_room: bool,
+    /// Reuse the room code as the mDNS token when room pairing is unavailable.
+    pub use_mdns: bool,
+    /// Whether the native shell currently considers broker access viable.
+    pub internet_available: bool,
+}
+
 impl Default for FfiTransferLimits {
     fn default() -> Self {
         Self {
@@ -206,6 +216,34 @@ impl Default for FfiTransferLimits {
             max_parallel_files: 1,
             max_parallel_chunks_per_file: 1,
             speed_limit_bps: 0,
+        }
+    }
+}
+
+impl Default for FfiRendezvousPlan {
+    fn default() -> Self {
+        Self {
+            use_room: true,
+            use_mdns: true,
+            internet_available: true,
+        }
+    }
+}
+
+impl FfiRendezvousPlan {
+    fn for_mode(mode: FfiTransferMode) -> Self {
+        match mode {
+            FfiTransferMode::Room => Self::default(),
+            FfiTransferMode::Mdns => Self {
+                use_room: false,
+                use_mdns: true,
+                internet_available: true,
+            },
+            _ => Self {
+                use_room: false,
+                use_mdns: false,
+                internet_available: true,
+            },
         }
     }
 }
@@ -228,6 +266,7 @@ pub struct FfiTransferRequest {
     pub path_policy: FfiPathPolicy,
     pub resume: bool,
     pub limits: FfiTransferLimits,
+    pub rendezvous: FfiRendezvousPlan,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -462,6 +501,19 @@ struct QueuedTransfer {
     request: FfiTransferRequest,
     observer: Arc<dyn TransferObserver>,
     activity: FfiTransferActivityRecord,
+}
+
+#[derive(Debug)]
+struct TransferAttemptSource {
+    mode: FfiTransferMode,
+    source: PeerSource,
+}
+
+struct TransferAttemptOutcome {
+    result: Result<TransferSummary, TransferError>,
+    direction: Option<TransferDirection>,
+    connected: bool,
+    cancel_requested: bool,
 }
 
 struct ActiveTransfer {
@@ -734,20 +786,20 @@ fn drain_transfer_queue(
 
         let activity_id = job.activity.activity_id.clone();
         job.observer.on_transfer_activity(job.activity.clone());
-        let transfer = match build_transfer_for_request(&settings, &job.request, &handle) {
-            Ok(transfer) => transfer,
-            Err(error) => {
-                finish_transfer_activity(&activity_id, &queue);
-                report_setup_failure(job, error);
-                continue;
-            }
-        };
 
         let queue_for_task = queue.clone();
         let settings_for_task = settings.clone();
         let handle_for_task = handle.clone();
         handle.spawn(async move {
-            drive_transfer(transfer, job.activity, job.observer, cancel).await;
+            drive_transfer_request(
+                settings_for_task.clone(),
+                job.request,
+                job.activity,
+                job.observer,
+                cancel,
+                handle_for_task.clone(),
+            )
+            .await;
             finish_transfer_activity(&activity_id, &queue_for_task);
             drain_transfer_queue(queue_for_task, settings_for_task, handle_for_task);
         });
@@ -764,13 +816,17 @@ fn report_queued_cancel(mut job: QueuedTransfer) {
     job.observer.on_status("canceled before start".to_string());
 }
 
-fn report_setup_failure(mut job: QueuedTransfer, error: EnvoixError) {
+fn report_activity_setup_failure(
+    observer: &dyn TransferObserver,
+    activity: &mut FfiTransferActivityRecord,
+    error: EnvoixError,
+) {
     let message = error.to_string();
-    let failure = setup_failure(message.clone(), job.activity.direction, &job.activity);
-    job.activity.apply_failure(&failure, now_ms());
-    job.observer.on_transfer_activity(job.activity);
-    job.observer.on_transfer_failed(failure);
-    job.observer.on_failed(message);
+    let failure = setup_failure(message.clone(), activity.direction, activity);
+    activity.apply_failure(&failure, now_ms());
+    observer.on_transfer_activity(activity.clone());
+    observer.on_transfer_failed(failure);
+    observer.on_failed(message);
 }
 
 fn setup_failure(
@@ -813,7 +869,7 @@ fn validate_transfer_request(
     }
     build_client_for_request(settings, request)?;
     transfer_options_for_request(settings, request)?;
-    peer_source_for_request(settings, request)?;
+    peer_sources_for_request(settings, request)?;
     Ok(())
 }
 
@@ -848,14 +904,14 @@ fn validate_direction_mode(
     }
 }
 
-fn build_transfer_for_request(
+fn build_transfer_for_source(
     settings: &EnvoixRuntimeSettings,
     request: &FfiTransferRequest,
+    source: PeerSource,
     handle: &Handle,
 ) -> Result<Transfer, EnvoixError> {
     let client = build_client_for_request(settings, request)?;
     let options = transfer_options_for_request(settings, request)?;
-    let source = peer_source_for_request(settings, request)?;
     let _guard = handle.enter();
     match request.direction {
         FfiTransferDirection::Send => client
@@ -907,6 +963,7 @@ impl FfiTransferRequest {
             path_policy: FfiPathPolicy::Auto,
             resume: true,
             limits: FfiTransferLimits::default(),
+            rendezvous: FfiRendezvousPlan::for_mode(mode),
         }
     }
 
@@ -927,6 +984,7 @@ impl FfiTransferRequest {
             path_policy: FfiPathPolicy::Auto,
             resume: true,
             limits: FfiTransferLimits::default(),
+            rendezvous: FfiRendezvousPlan::for_mode(mode),
         }
     }
 }
@@ -1161,31 +1219,77 @@ fn receive_addrs() -> BindAddrs {
     BindAddrs::dual_stack(0)
 }
 
-fn peer_source_for_request(
+fn peer_sources_for_request(
     settings: &EnvoixRuntimeSettings,
     request: &FfiTransferRequest,
-) -> Result<PeerSource, EnvoixError> {
+) -> Result<Vec<TransferAttemptSource>, EnvoixError> {
+    let single = |mode, source| Ok(vec![TransferAttemptSource { mode, source }]);
     match request.mode {
-        FfiTransferMode::Manual => Ok(PeerSource::Manual {
-            peer: required_peer_descriptor(&request.peer_descriptor)?,
-            token: required_value(&request.token, "token")?,
-        }),
-        FfiTransferMode::Invite => Ok(PeerSource::Invite {
-            invite: required_value(&request.invite, "invite")?,
-        }),
-        FfiTransferMode::ShowManual => Ok(PeerSource::ShowManual {
-            token: optional_value(&request.token),
-        }),
-        FfiTransferMode::ShowInvite => Ok(PeerSource::ShowInvite {
-            ttl_secs: INVITE_TTL_SECS,
-        }),
-        FfiTransferMode::Mdns => Ok(PeerSource::Mdns {
-            token: optional_value(&request.token),
-        }),
-        FfiTransferMode::Room => Ok(PeerSource::Room {
-            code: required_value(&request.code, "code")?,
-            broker: rendezvous_broker_for_request(settings, request),
-        }),
+        FfiTransferMode::Manual => single(
+            FfiTransferMode::Manual,
+            PeerSource::Manual {
+                peer: required_peer_descriptor(&request.peer_descriptor)?,
+                token: required_value(&request.token, "token")?,
+            },
+        ),
+        FfiTransferMode::Invite => single(
+            FfiTransferMode::Invite,
+            PeerSource::Invite {
+                invite: required_value(&request.invite, "invite")?,
+            },
+        ),
+        FfiTransferMode::ShowManual => single(
+            FfiTransferMode::ShowManual,
+            PeerSource::ShowManual {
+                token: optional_value(&request.token),
+            },
+        ),
+        FfiTransferMode::ShowInvite => single(
+            FfiTransferMode::ShowInvite,
+            PeerSource::ShowInvite {
+                ttl_secs: INVITE_TTL_SECS,
+            },
+        ),
+        FfiTransferMode::Mdns => single(
+            FfiTransferMode::Mdns,
+            PeerSource::Mdns {
+                token: optional_value(&request.token),
+            },
+        ),
+        FfiTransferMode::Room => {
+            let code = required_value(&request.code, "code")?;
+            let mut sources = Vec::new();
+            if request.rendezvous.use_room && request.rendezvous.internet_available {
+                sources.push(TransferAttemptSource {
+                    mode: FfiTransferMode::Room,
+                    source: PeerSource::Room {
+                        code: code.clone(),
+                        broker: rendezvous_broker_for_request(settings, request),
+                    },
+                });
+            }
+            if request.rendezvous.use_mdns {
+                sources.push(TransferAttemptSource {
+                    mode: FfiTransferMode::Mdns,
+                    source: PeerSource::Mdns { token: Some(code) },
+                });
+            }
+            if sources.is_empty() {
+                let message = if request.rendezvous.use_room
+                    && !request.rendezvous.internet_available
+                    && !request.rendezvous.use_mdns
+                {
+                    "room rendezvous is disabled while internet is unavailable and mDNS fallback is disabled"
+                } else {
+                    "at least one rendezvous route must be enabled"
+                };
+                Err(EnvoixError::Operation {
+                    message: message.to_string(),
+                })
+            } else {
+                Ok(sources)
+            }
+        }
         FfiTransferMode::Unknown => Err(EnvoixError::Operation {
             message: "transfer mode must not be unknown".to_string(),
         }),
@@ -1331,14 +1435,103 @@ fn report_terminal(
     }
 }
 
-async fn drive_transfer(
-    mut transfer: Transfer,
+async fn drive_transfer_request(
+    settings: EnvoixRuntimeSettings,
+    request: FfiTransferRequest,
     mut activity: FfiTransferActivityRecord,
     observer: Arc<dyn TransferObserver>,
     mut cancel: oneshot::Receiver<()>,
+    handle: Handle,
 ) {
+    let attempts = match peer_sources_for_request(&settings, &request) {
+        Ok(attempts) => attempts,
+        Err(error) => {
+            report_activity_setup_failure(&*observer, &mut activity, error);
+            return;
+        }
+    };
+    let modes = attempts
+        .iter()
+        .map(|attempt| attempt.mode)
+        .collect::<Vec<_>>();
     let mut cancel_requested = false;
+    for (index, attempt) in attempts.into_iter().enumerate() {
+        if index > 0 {
+            activity.attempt_id = next_attempt_id();
+            activity.updated_at_ms = now_ms();
+            observer.on_transfer_activity(activity.clone());
+        }
+        let transfer = match build_transfer_for_source(&settings, &request, attempt.source, &handle)
+        {
+            Ok(transfer) => transfer,
+            Err(error) => {
+                if let Some(next_mode) = modes.get(index + 1) {
+                    observer.on_status(format!(
+                        "{} setup failed; trying {}",
+                        transfer_mode_label(attempt.mode),
+                        transfer_mode_label(*next_mode)
+                    ));
+                    continue;
+                }
+                report_activity_setup_failure(&*observer, &mut activity, error);
+                return;
+            }
+        };
+
+        let outcome = drive_transfer_attempt(
+            transfer,
+            &mut activity,
+            &*observer,
+            &mut cancel,
+            &mut cancel_requested,
+        )
+        .await;
+        let can_fallback =
+            !outcome.cancel_requested && !outcome.connected && modes.get(index + 1).is_some();
+        match outcome.result {
+            Ok(summary) => {
+                report_terminal(
+                    &*observer,
+                    &mut activity,
+                    Ok(summary),
+                    outcome.direction,
+                    outcome.cancel_requested,
+                );
+                return;
+            }
+            Err(error) if can_fallback => {
+                let next_mode = modes[index + 1];
+                observer.on_status(format!(
+                    "{} failed before connection ({}); trying {}",
+                    transfer_mode_label(attempt.mode),
+                    error,
+                    transfer_mode_label(next_mode)
+                ));
+                continue;
+            }
+            Err(error) => {
+                report_terminal(
+                    &*observer,
+                    &mut activity,
+                    Err(error),
+                    outcome.direction,
+                    outcome.cancel_requested,
+                );
+                return;
+            }
+        }
+    }
+}
+
+async fn drive_transfer_attempt(
+    mut transfer: Transfer,
+    activity: &mut FfiTransferActivityRecord,
+    observer: &dyn TransferObserver,
+    cancel: &mut oneshot::Receiver<()>,
+    cancel_requested: &mut bool,
+) -> TransferAttemptOutcome {
     let mut direction = None;
+    let mut connected = false;
     loop {
         tokio::select! {
             event = transfer.next_event() => {
@@ -1346,22 +1539,24 @@ async fn drive_transfer(
                 if direction.is_none() {
                     direction = event_direction(&event.event);
                 }
-                observe_transfer_event(&*observer, &mut activity, event);
+                if matches!(event.event, TransferEvent::Connected { .. }) {
+                    connected = true;
+                }
+                observe_transfer_event(observer, activity, event);
             }
-            _ = &mut cancel, if !cancel_requested => {
-                cancel_requested = true;
+            _ = &mut *cancel, if !*cancel_requested => {
+                *cancel_requested = true;
                 transfer.cancel();
                 observer.on_status("cancelling".to_string());
             }
         }
     }
-    report_terminal(
-        &*observer,
-        &mut activity,
-        transfer.wait().await,
+    TransferAttemptOutcome {
+        result: transfer.wait().await,
         direction,
-        cancel_requested,
-    );
+        connected,
+        cancel_requested: *cancel_requested,
+    }
 }
 
 fn event_direction(event: &TransferEvent) -> Option<TransferDirection> {
@@ -1558,6 +1753,18 @@ fn pairing_step_label(step: PairingStep) -> &'static str {
         PairingStep::Joining => "joining room",
         PairingStep::Matched => "peer matched",
         PairingStep::Exchanged => "keys exchanged",
+    }
+}
+
+fn transfer_mode_label(mode: FfiTransferMode) -> &'static str {
+    match mode {
+        FfiTransferMode::Manual => "manual",
+        FfiTransferMode::Invite => "invite",
+        FfiTransferMode::ShowManual => "show-manual",
+        FfiTransferMode::ShowInvite => "show-invite",
+        FfiTransferMode::Mdns => "mDNS",
+        FfiTransferMode::Room => "room",
+        FfiTransferMode::Unknown => "unknown",
     }
 }
 
@@ -1894,6 +2101,7 @@ mod tests {
                 max_parallel_transfers: 2,
                 ..FfiTransferLimits::default()
             },
+            rendezvous: FfiRendezvousPlan::default(),
         };
         let mut record = make_transfer_activity_record(request);
         assert_eq!(record.activity_id, "activity-1");
@@ -1941,6 +2149,7 @@ mod tests {
             path_policy: FfiPathPolicy::Auto,
             resume: true,
             limits: FfiTransferLimits::default(),
+            rendezvous: FfiRendezvousPlan::default(),
         };
         let mut record = make_transfer_activity_record(request);
         let failure = FfiTransferFailure {
@@ -1987,6 +2196,7 @@ mod tests {
             path_policy: FfiPathPolicy::Auto,
             resume: true,
             limits: FfiTransferLimits::default(),
+            rendezvous: FfiRendezvousPlan::default(),
         };
         let mut record = make_transfer_activity_record(request);
         record.attempt_id = "attempt-1".to_string();
@@ -2029,6 +2239,63 @@ mod tests {
         };
         normalize_transfer_limits(&EnvoixRuntimeSettings::default(), &mut limits);
         assert_eq!(limits.max_parallel_transfers, 1);
+    }
+
+    #[test]
+    fn room_rendezvous_plan_uses_room_then_mdns() {
+        let mut request =
+            FfiTransferRequest::receive("/tmp/envoix".to_string(), FfiTransferMode::Room);
+        request.code = "135790-amber-comet".to_string();
+
+        let sources = peer_sources_for_request(&EnvoixRuntimeSettings::default(), &request)
+            .expect("room request should build rendezvous sources");
+
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources[0].mode, FfiTransferMode::Room);
+        assert_eq!(sources[1].mode, FfiTransferMode::Mdns);
+        match &sources[1].source {
+            PeerSource::Mdns { token } => assert_eq!(token.as_deref(), Some("135790-amber-comet")),
+            other => panic!("expected mDNS fallback source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn room_rendezvous_plan_skips_room_without_internet() {
+        let mut request =
+            FfiTransferRequest::receive("/tmp/envoix".to_string(), FfiTransferMode::Room);
+        request.code = "135790-amber-comet".to_string();
+        request.rendezvous = FfiRendezvousPlan {
+            use_room: true,
+            use_mdns: true,
+            internet_available: false,
+        };
+
+        let sources = peer_sources_for_request(&EnvoixRuntimeSettings::default(), &request)
+            .expect("mDNS fallback should remain available without internet");
+
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].mode, FfiTransferMode::Mdns);
+        match &sources[0].source {
+            PeerSource::Mdns { token } => assert_eq!(token.as_deref(), Some("135790-amber-comet")),
+            other => panic!("expected mDNS source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn room_rendezvous_plan_rejects_disabled_routes() {
+        let mut request =
+            FfiTransferRequest::receive("/tmp/envoix".to_string(), FfiTransferMode::Room);
+        request.code = "135790-amber-comet".to_string();
+        request.rendezvous = FfiRendezvousPlan {
+            use_room: true,
+            use_mdns: false,
+            internet_available: false,
+        };
+
+        let error = peer_sources_for_request(&EnvoixRuntimeSettings::default(), &request)
+            .expect_err("room without internet and without mDNS must be rejected");
+
+        assert!(error.to_string().contains("internet is unavailable"));
     }
 
     #[test]

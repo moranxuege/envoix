@@ -1599,6 +1599,82 @@ public func FfiConverterTypeFfiPairingInvite_lower(_ value: FfiPairingInvite) ->
 }
 
 
+public struct FfiRendezvousPlan: Equatable, Hashable {
+    /**
+     * Try the hosted rendezvous room before any local-network fallback.
+     */
+    public var useRoom: Bool
+    /**
+     * Reuse the room code as the mDNS token when room pairing is unavailable.
+     */
+    public var useMdns: Bool
+    /**
+     * Whether the native shell currently considers broker access viable.
+     */
+    public var internetAvailable: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Try the hosted rendezvous room before any local-network fallback.
+         */useRoom: Bool,
+        /**
+         * Reuse the room code as the mDNS token when room pairing is unavailable.
+         */useMdns: Bool,
+        /**
+         * Whether the native shell currently considers broker access viable.
+         */internetAvailable: Bool) {
+        self.useRoom = useRoom
+        self.useMdns = useMdns
+        self.internetAvailable = internetAvailable
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiRendezvousPlan: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiRendezvousPlan: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiRendezvousPlan {
+        return
+            try FfiRendezvousPlan(
+                useRoom: FfiConverterBool.read(from: &buf),
+                useMdns: FfiConverterBool.read(from: &buf),
+                internetAvailable: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiRendezvousPlan, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.useRoom, into: &buf)
+        FfiConverterBool.write(value.useMdns, into: &buf)
+        FfiConverterBool.write(value.internetAvailable, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiRendezvousPlan_lift(_ buf: RustBuffer) throws -> FfiRendezvousPlan {
+    return try FfiConverterTypeFfiRendezvousPlan.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiRendezvousPlan_lower(_ value: FfiRendezvousPlan) -> RustBuffer {
+    return FfiConverterTypeFfiRendezvousPlan.lower(value)
+}
+
+
 public struct FfiTransferActivityRecord: Equatable, Hashable {
     public var activityId: String
     public var attemptId: String
@@ -2066,13 +2142,14 @@ public struct FfiTransferRequest: Equatable, Hashable {
     public var pathPolicy: FfiPathPolicy
     public var resume: Bool
     public var limits: FfiTransferLimits
+    public var rendezvous: FfiRendezvousPlan
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(
         /**
          * Native-side activity id used to correlate pre-start events in a queue.
-         */activityId: String, direction: FfiTransferDirection, mode: FfiTransferMode, filePath: String, outputDir: String, peerDescriptor: String, invite: String, code: String, token: String, broker: String, relay: String, configPath: String, pathPolicy: FfiPathPolicy, resume: Bool, limits: FfiTransferLimits) {
+         */activityId: String, direction: FfiTransferDirection, mode: FfiTransferMode, filePath: String, outputDir: String, peerDescriptor: String, invite: String, code: String, token: String, broker: String, relay: String, configPath: String, pathPolicy: FfiPathPolicy, resume: Bool, limits: FfiTransferLimits, rendezvous: FfiRendezvousPlan) {
         self.activityId = activityId
         self.direction = direction
         self.mode = mode
@@ -2088,6 +2165,7 @@ public struct FfiTransferRequest: Equatable, Hashable {
         self.pathPolicy = pathPolicy
         self.resume = resume
         self.limits = limits
+        self.rendezvous = rendezvous
     }
 
 
@@ -2120,7 +2198,8 @@ public struct FfiConverterTypeFfiTransferRequest: FfiConverterRustBuffer {
                 configPath: FfiConverterString.read(from: &buf),
                 pathPolicy: FfiConverterTypeFfiPathPolicy.read(from: &buf),
                 resume: FfiConverterBool.read(from: &buf),
-                limits: FfiConverterTypeFfiTransferLimits.read(from: &buf)
+                limits: FfiConverterTypeFfiTransferLimits.read(from: &buf),
+                rendezvous: FfiConverterTypeFfiRendezvousPlan.read(from: &buf)
         )
     }
 
@@ -2140,6 +2219,7 @@ public struct FfiConverterTypeFfiTransferRequest: FfiConverterRustBuffer {
         FfiConverterTypeFfiPathPolicy.write(value.pathPolicy, into: &buf)
         FfiConverterBool.write(value.resume, into: &buf)
         FfiConverterTypeFfiTransferLimits.write(value.limits, into: &buf)
+        FfiConverterTypeFfiRendezvousPlan.write(value.rendezvous, into: &buf)
     }
 }
 

@@ -1,5 +1,5 @@
 package dev.envoix.app
 
 object DebugBuild {
-    const val LABEL = "Debug build 2026.07.08.8"
+    const val LABEL = "Debug build 2026.07.08.9"
 }

@@ -227,8 +227,20 @@ final class TransferViewModel: ObservableObject {
                 maxParallelFiles: 1,
                 maxParallelChunksPerFile: 1,
                 speedLimitBps: 0
-            )
+            ),
+            rendezvous: rendezvousPlan(for: mode)
         )
+    }
+
+    private func rendezvousPlan(for mode: FfiTransferMode) -> FfiRendezvousPlan {
+        switch mode {
+        case .room:
+            return FfiRendezvousPlan(useRoom: true, useMdns: true, internetAvailable: true)
+        case .mdns:
+            return FfiRendezvousPlan(useRoom: false, useMdns: true, internetAvailable: true)
+        default:
+            return FfiRendezvousPlan(useRoom: false, useMdns: false, internetAvailable: true)
+        }
     }
 
     // MARK: Core callbacks (already on main via Observer)
