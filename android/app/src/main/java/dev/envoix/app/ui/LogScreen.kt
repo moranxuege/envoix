@@ -43,6 +43,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.envoix.app.Diagnostics
 import dev.envoix.app.LogStore
 import dev.envoix.app.LogUpload
 import dev.envoix.app.OpLog
@@ -52,8 +53,8 @@ import kotlinx.coroutines.launch
 // The clipboard/share go over a Binder transaction (~1 MB hard cap), and the rdz
 // log endpoint rejects bodies over MAX_BODY (512 KB). A -vvv session log is several
 // MB, so both must be bounded to the tail — a crash always lives at the end.
-private const val CLIP_MAX = 256 * 1024
-private const val UPLOAD_MAX = 480 * 1024
+private const val CLIP_MAX = Diagnostics.CLIP_MAX
+private const val UPLOAD_MAX = Diagnostics.UPLOAD_MAX
 
 @Composable
 fun LogScreen(onBack: () -> Unit) {
@@ -65,6 +66,7 @@ fun LogScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var showSessions by remember { mutableStateOf(false) }
+    var crashPending by remember { mutableStateOf(Diagnostics.pendingCrash()) }
 
     LaunchedEffect(lines.size) {
         if (lines.isNotEmpty()) listState.scrollToItem(lines.size - 1)
@@ -90,6 +92,17 @@ fun LogScreen(onBack: () -> Unit) {
                 fontSize = 18.sp,
                 modifier = Modifier.weight(1f).padding(start = 4.dp),
             )
+            TextButton(onClick = {
+                val server = settings.logServer.trimEnd('/')
+                scope.launch {
+                    val key = "app-" + java.text.SimpleDateFormat("MMddHHmmss", java.util.Locale.US)
+                        .format(java.util.Date())
+                    val ok = server.isNotEmpty() && LogUpload.upload(
+                        server, key, "app", Diagnostics.build(Diagnostics.Kind.App),
+                    )
+                    Toast.makeText(context, if (ok) "Report sent → $key" else "Upload failed", Toast.LENGTH_LONG).show()
+                }
+            }) { Text("Report", color = colors.accent, fontSize = 13.sp) }
             // Dev-mode: reach the retained previous-session logs (survive relaunches),
             // for copy / upload — a native crash lives there, not in the live buffer.
             if (settings.devMode) {
@@ -111,6 +124,36 @@ fun LogScreen(onBack: () -> Unit) {
             }) { Icon(Icons.Default.Share, "Share", tint = colors.accent) }
             IconButton(onClick = { LogStore.clear() }) {
                 Icon(Icons.Default.DeleteOutline, "Clear", tint = colors.muted)
+            }
+        }
+
+        if (crashPending) {
+            Row(
+                Modifier.fillMaxWidth().background(colors.warning.copy(alpha = 0.15f))
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Previous session crashed",
+                    color = colors.warning, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = {
+                    val server = settings.logServer.trimEnd('/')
+                    scope.launch {
+                        val key = "crash-" + java.text.SimpleDateFormat("MMddHHmmss", java.util.Locale.US)
+                            .format(java.util.Date())
+                        val ok = server.isNotEmpty() && LogUpload.upload(
+                            server, key, "crash",
+                            Diagnostics.build(Diagnostics.Kind.Crash),
+                        )
+                        Toast.makeText(context, if (ok) "Uploaded → $key" else "Upload failed", Toast.LENGTH_LONG).show()
+                        if (ok) { Diagnostics.ackCrash(); crashPending = false }
+                    }
+                }) { Text("Upload report", color = colors.warning, fontSize = 13.sp) }
+                TextButton(onClick = { Diagnostics.ackCrash(); crashPending = false }) {
+                    Text("Dismiss", color = colors.muted, fontSize = 13.sp)
+                }
             }
         }
 

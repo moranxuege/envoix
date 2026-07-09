@@ -142,7 +142,7 @@ class TransferService : Service() {
             ACTION_RESUME -> {
                 val id = intent.getLongExtra(EXTRA_ID, -1L)
                 enterForeground()
-                OpLog.add("resume transfer id=$id")
+                OpLog.add("resume transfer id=$id", id)
                 if (jobs.containsKey(id)) {
                     // Live session: the machine handles the attempt bump.
                     Native.sessionIntent(id, "resume")
@@ -155,18 +155,18 @@ class TransferService : Service() {
             }
             ACTION_PAUSE -> {
                 val id = intent.getLongExtra(EXTRA_ID, -1L)
-                OpLog.add("pause transfer id=$id")
+                OpLog.add("pause transfer id=$id", id)
                 Native.sessionIntent(id, "pause")
             }
             ACTION_CANCEL -> {
                 val id = intent.getLongExtra(EXTRA_ID, -1L)
-                OpLog.add("cancel transfer id=$id")
+                OpLog.add("cancel transfer id=$id", id)
                 Native.sessionIntent(id, "cancel")
             }
             ACTION_RESTORE_ALL -> restoreAllRecords()
             ACTION_REMOVE -> {
                 val id = intent.getLongExtra(EXTRA_ID, -1L)
-                OpLog.add("remove transfer id=$id")
+                OpLog.add("remove transfer id=$id", id)
                 // D2, the one true abandon: discard partial + resume state +
                 // receipt, then tear the session and card down. A send's staged
                 // cache copy goes too (they are as big as the file itself).
@@ -177,6 +177,7 @@ class TransferService : Service() {
                     }
                 }
                 Native.destroySession(id, true)
+                TransferLogs.delete(id)
                 jobs.remove(id)?.cancel()
                 specs.remove(id)
                 lastSeq.remove(id)

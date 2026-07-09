@@ -76,8 +76,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.envoix.app.Diagnostics
 import dev.envoix.app.Direction
 import dev.envoix.app.LogUpload
+import dev.envoix.app.Room
 import dev.envoix.app.SettingsStore
 import dev.envoix.app.Status
 import dev.envoix.app.Transfer
@@ -489,16 +491,21 @@ private fun DetailDrawer(t: Transfer) {
                             scope.launch {
                                 val ok = LogUpload.upload(
                                     settings.logServer,
-                                    t.room.substringBefore('-'),
+                                    Room(t.room).id,
                                     if (t.direction == Direction.Send) "send" else "receive",
-                                    t.log.joinToString("\n"),
+                                    Diagnostics.build(Diagnostics.Kind.Transfer, t.id),
                                 )
                                 upload = if (ok) "Uploaded ✓" else "Failed"
                             }
                         }
                     }
                     PillButton(if (copied) "Copied ✓" else "Copy") {
-                        clip.setText(AnnotatedString(t.log.joinToString("\n")))
+                        // The full durable log via the one assembler (clip-capped).
+                        runCatching {
+                            clip.setText(AnnotatedString(
+                                Diagnostics.build(Diagnostics.Kind.Transfer, t.id, Diagnostics.CLIP_MAX)
+                            ))
+                        }
                         copied = true
                     }
                 }

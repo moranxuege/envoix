@@ -45,13 +45,14 @@ object TransferRepository {
      *  whose room matches [roomPrefix], so the core's per-transfer logs show up
      *  in that transfer's detail drawer. No-op if no transfer matches. */
     @Synchronized
-    fun appendCoreLog(roomPrefix: String, line: String) {
+    fun appendCoreLog(roomId: String, line: String): Long? {
         val id = _transfers.value
-            .filter { it.room.substringBefore('-') == roomPrefix }
-            .maxByOrNull { it.id }?.id ?: return
+            .filter { Room(it.room).id == roomId }
+            .maxByOrNull { it.id }?.id ?: return null
         _transfers.value = _transfers.value.map {
             if (it.id == id) it.copy(log = (it.log + line).takeLast(LOG_CAP)) else it
         }
+        return id
     }
 
     @Synchronized

@@ -153,7 +153,11 @@ Design (two layers that compose; user-proposed mailbox evaluated and adopted):
    records coerce to Paused(Lost); restored Unconfirmed resumes its mailbox poll — receipt
    confirmation survives restarts); app restores cards at launch via their durable ids;
    Remove deletes the record (D2). Completed records persist = transfer history in-list.
-6. Logging/diagnostics formalization. Requirement learned 2026-07-08: at TRACE the
+6. Logging/diagnostics formalization.
+   ✅ DONE 2026-07-09 (design: docs/design/diagnostics.md; review tweaks: 32MB ring,
+   op↔core correspondence via UTC-ISO stamps + OP-mirroring into the trace and into
+   the transfer file, crash banner for everyone, upload+copy as the transports).
+   Requirement learned 2026-07-08: at TRACE the
    4×8 MB core-log ring churns in minutes (a needed room's story rotated away mid-
    debug) — retention must be per-room/per-transfer, not a byte ring. Also surface
    the PRIMARY source's error in client::run multi-source fallback, not the last

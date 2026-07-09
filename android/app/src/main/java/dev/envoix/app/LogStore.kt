@@ -12,7 +12,7 @@ import java.io.File
  */
 object LogStore {
     private const val CAP = 4000
-    private const val FILE_CAP_BYTES = 8L * 1024 * 1024 // rotate the on-disk log past 8 MB
+    private const val FILE_CAP_BYTES = 32L * 1024 * 1024 // rotate past 32 MB (-vvv fills 8 MB in minutes)
     private const val KEEP = 3 // previous-launch logs to retain: core-1.log .. core-3.log
 
     private val buffer = ArrayDeque<String>()
@@ -125,21 +125,24 @@ object LogStore {
  * log, so the detail drawer shows the real core story, not just lifecycle events.
  */
 object LogSink : LogCallback {
-    private val ROOM = Regex("""room="([^"]+)"""")
-    // "<LEVEL> <spans>: <message>" — we re-stamp in local time so core lines line
-    // up with the app's own event lines instead of the core's UTC timestamp.
+    // "<LEVEL> <spans>: <message>" — re-stamped in local time so core lines
+    // line up with the app's own event lines.
     private val LEVEL = Regex("""\s(TRACE|DEBUG|INFO|WARN|ERROR)\s+(.*)""")
     // the outer transfer{…} span is redundant in a per-transfer log — drop it
     private val TRANSFER_SPAN = Regex("""^transfer\{[^}]*\}:\s*""")
     private val clock =
         java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss").withZone(java.time.ZoneId.systemDefault())
 
-    override fun log(line: String) {
+    /** [room] is the span field, extracted STRUCTURALLY by the JNI tracing
+     *  layer (see docs/design/diagnostics.md) — no more regex on formatted text. */
+    override fun log(room: String?, line: String) {
         LogStore.append(line)
-        val room = ROOM.find(line)?.groupValues?.get(1) ?: return
+        if (room.isNullOrEmpty()) return
         val m = LEVEL.find(line) ?: return
         val (level, tail) = m.destructured
         val stamp = clock.format(java.time.Instant.now())
-        TransferRepository.appendCoreLog(room, "$stamp  $level  ${tail.replaceFirst(TRANSFER_SPAN, "")}")
+        val compact = "$stamp  $level  ${tail.replaceFirst(TRANSFER_SPAN, "")}"
+        val id = TransferRepository.appendCoreLog(room, compact) ?: return
+        TransferLogs.append(id, compact)
     }
 }

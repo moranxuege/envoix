@@ -213,6 +213,7 @@ pub extern "system" fn Java_dev_envoix_app_Native_initLogging(
     use tracing_subscriber::util::SubscriberInitExt;
     let installed = tracing_subscriber::registry()
         .with(filter)
+        .with(RoomTag) // must precede fmt: it hands the room to the writer
         .with(
             tracing_subscriber::fmt::layer()
                 .with_writer(JniLogWriter)
@@ -264,8 +265,96 @@ fn log_line(line: &str) {
     let Ok(mut env) = vm.attach_current_thread() else {
         return;
     };
+    // The room captured by RoomTag for THIS event (same thread, synchronous).
+    let room = CURRENT_ROOM.with(|r| r.borrow_mut().take());
+    let room_obj = match room.as_deref().map(|r| env.new_string(r)) {
+        Some(Ok(js)) => js,
+        _ => jni::objects::JString::default(),
+    };
     if let Ok(js) = env.new_string(line) {
-        let _ = env.call_method(sink, "log", "(Ljava/lang/String;)V", &[JValue::Object(&js)]);
+        let _ = env.call_method(
+            sink,
+            "log",
+            "(Ljava/lang/String;Ljava/lang/String;)V",
+            &[JValue::Object(&room_obj), JValue::Object(&js)],
+        );
+    }
+}
+
+thread_local! {
+    /// Handoff from [`RoomTag`] to [`log_line`]: the `room` span field of the
+    /// event currently being formatted (fmt writes synchronously after us).
+    static CURRENT_ROOM: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The `room` value recorded on a span (see docs/observability.md: room and
+/// transfer_id are span fields on every line — this extracts them
+/// STRUCTURALLY, replacing the Kotlin-side regex on formatted text).
+struct RoomField(String);
+
+/// Captures `room` at span creation AND on later `Span::record` calls (the
+/// transfer span records it once known), then tags each event with the
+/// nearest enclosing room.
+struct RoomTag;
+
+struct RoomVisitor(Option<String>);
+
+impl tracing::field::Visit for RoomVisitor {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "room" {
+            self.0 = Some(value.trim_matches('"').to_string());
+        }
+    }
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "room" {
+            self.0 = Some(format!("{value:?}").trim_matches('"').to_string());
+        }
+    }
+}
+
+impl<S> tracing_subscriber::layer::Layer<S> for RoomTag
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let mut visitor = RoomVisitor(None);
+        attrs.record(&mut visitor);
+        if let (Some(room), Some(span)) = (visitor.0, ctx.span(id)) {
+            span.extensions_mut().replace(RoomField(room));
+        }
+    }
+
+    fn on_record(
+        &self,
+        id: &tracing::span::Id,
+        values: &tracing::span::Record<'_>,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let mut visitor = RoomVisitor(None);
+        values.record(&mut visitor);
+        if let (Some(room), Some(span)) = (visitor.0, ctx.span(id)) {
+            span.extensions_mut().replace(RoomField(room));
+        }
+    }
+
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let room = ctx.event_scope(event).and_then(|scope| {
+            // innermost-first iteration: the first hit is the nearest room
+            scope
+                .filter_map(|span| span.extensions().get::<RoomField>().map(|r| r.0.clone()))
+                .next()
+        });
+        CURRENT_ROOM.with(|r| *r.borrow_mut() = room);
     }
 }
 

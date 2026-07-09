@@ -7,7 +7,7 @@ interface EventCallback {
 
 /** Sink for the core's `tracing` log lines. */
 interface LogCallback {
-    fun log(line: String)
+    fun log(room: String?, line: String)
 }
 
 /** JNI bridge to the in-process Envoix core (libenvoix_jni.so). */

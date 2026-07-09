@@ -24,8 +24,9 @@ object OpLog {
     val lines: StateFlow<List<String>> = _lines.asStateFlow()
 
     private var file: File? = null
-    private val clock = java.time.format.DateTimeFormatter
-        .ofPattern("HH:mm:ss").withZone(java.time.ZoneId.systemDefault())
+    // The SAME clock family as the core trace (UTC ISO), so op lines and core
+    // lines correspond 1:1 when read side by side or interleaved.
+    private val clock = java.time.format.DateTimeFormatter.ISO_INSTANT
 
     fun init(filesDir: File) {
         val f = File(File(filesDir, "logs").apply { mkdirs() }, "op.log")
@@ -38,12 +39,17 @@ object OpLog {
     }
 
     @Synchronized
-    fun add(op: String) {
+    fun add(op: String, transferId: Long? = null) {
         val line = "${clock.format(java.time.Instant.now())}  $op"
         buffer.addLast(line)
         while (buffer.size > CAP) buffer.removeFirst()
         _lines.value = buffer.toList()
         file?.let { runCatching { it.appendText(line + "\n") } }
+        // Correspondence: every breadcrumb also lands in the core trace
+        // (greppable "OP " inline with the tracing lines it explains), and in
+        // the transfer's durable log when it targets a card.
+        LogStore.append("OP  $op")
+        if (transferId != null) TransferLogs.append(transferId, "OP  $op")
     }
 
     /** The persisted breadcrumbs across recent launches (for copy / upload); falls
