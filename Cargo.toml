@@ -6,6 +6,7 @@ members = [
     "crates/envoix-auth",
     "crates/envoix-client",
     "crates/envoix-error",
+    "crates/envoix-ffi",
     "crates/envoix-pairing",
     "crates/envoix-protocol",
     "crates/envoix-rendezvous",
@@ -27,6 +28,7 @@ license = "MIT"
 envoix-auth = { path = "crates/envoix-auth" }
 envoix-client = { path = "crates/envoix-client" }
 envoix-error = { path = "crates/envoix-error" }
+envoix-ffi = { path = "crates/envoix-ffi" }
 envoix-pairing = { path = "crates/envoix-pairing" }
 envoix-protocol = { path = "crates/envoix-protocol" }
 envoix-rendezvous = { path = "crates/envoix-rendezvous" }
@@ -60,5 +62,6 @@ tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 toml = "0.8"
+uniffi = "0.31"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
