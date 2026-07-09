@@ -666,9 +666,9 @@ private fun Stat(text: String) {
 /* ---- formatting helpers ---- */
 
 private fun title(t: Transfer): String {
-    val verb = if (t.direction == Direction.Send) "Upload" else "Download"
+    val arrow = if (t.direction == Direction.Send) "↑" else "↓"
     val name = t.fileName ?: if (t.direction == Direction.Send) "file" else "incoming"
-    return "$verb · $name"
+    return "$arrow $name"
 }
 
 private fun subtitle(t: Transfer): String = when {
