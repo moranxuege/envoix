@@ -20,16 +20,33 @@ use envoix_storage::TransferReceipt;
 
 use super::error::{ErrorKind, Phase, TransferError};
 
-/// AAD binding a sealed blob to this scheme (and its version).
-const RECEIPT_AAD: &[u8] = b"envoix-receipt-v1";
+/// The mailbox kind for completion receipts (see `docs/design/peer-mailbox.md`
+/// — the kind namespaces the slot key and is bound into the AAD, so a blob of
+/// one kind can never be replayed as another).
+const KIND_RECEIPT: &str = "receipt";
 /// Key-derivation context (blake3 `derive_key` domain separation).
 const RECEIPT_KDF_CONTEXT: &str = "envoix 2026-07-09 receipt-seal v1";
 
-/// The mailbox key a receipt is stored under: hex of `blake3(transfer id)`.
-/// Possession of the transfer id — random, shared only by the two peers over
-/// the authenticated channel — is what gates retrieval.
+/// The mailbox slot key for a (transfer, kind): hex of
+/// `blake3(transfer id ‖ "\n" ‖ kind)`. Possession of the transfer id —
+/// random, shared only by the two peers over the authenticated channel — is
+/// what gates retrieval; the kind keeps message types in separate slots.
+fn mailbox_key(transfer_id: &str, kind: &str) -> String {
+    let mut material = Vec::with_capacity(transfer_id.len() + kind.len() + 1);
+    material.extend_from_slice(transfer_id.as_bytes());
+    material.push(b'\n');
+    material.extend_from_slice(kind.as_bytes());
+    blake3::hash(&material).to_hex().to_string()
+}
+
+/// The AAD for a mailbox kind: binds scheme version + kind into the seal.
+fn mailbox_aad(kind: &str) -> Vec<u8> {
+    format!("envoix-mailbox-v1:{kind}").into_bytes()
+}
+
+/// The mailbox slot key a completion receipt is stored under.
 pub fn receipt_mailbox_key(transfer_id: &str) -> String {
-    blake3::hash(transfer_id.as_bytes()).to_hex().to_string()
+    mailbox_key(transfer_id, KIND_RECEIPT)
 }
 
 /// The symmetric seal key for a receipt blob.
@@ -55,7 +72,11 @@ pub fn seal_receipt(
     code: &str,
     receipt: &TransferReceipt,
 ) -> Result<Vec<u8>, TransferError> {
-    envoix_pairing::seal_json(&receipt_seal_key(transfer_id, code), RECEIPT_AAD, receipt)
+    envoix_pairing::seal_json(
+        &receipt_seal_key(transfer_id, code),
+        &mailbox_aad(KIND_RECEIPT),
+        receipt,
+    )
         .map_err(|e| crypto_error(format!("sealing receipt: {e}")))
 }
 
@@ -66,7 +87,11 @@ pub fn open_receipt(
     code: &str,
     blob: &[u8],
 ) -> Result<TransferReceipt, TransferError> {
-    envoix_pairing::open_json(&receipt_seal_key(transfer_id, code), RECEIPT_AAD, blob)
+    envoix_pairing::open_json(
+        &receipt_seal_key(transfer_id, code),
+        &mailbox_aad(KIND_RECEIPT),
+        blob,
+    )
         .map_err(|e| crypto_error(format!("opening receipt: {e}")))
 }
 

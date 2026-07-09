@@ -226,7 +226,18 @@ destroySession(sessionId)   (Remove; deletes partials per D1/D2 semantics)
 - **C.** Delete the Kotlin fold, the guards, and the classification; remove the
   Spec map (the driver owns attempts). CLI adoption optional later.
 
-## Open decisions (need explicit answers before A)
+## Decisions (RESOLVED 2026-07-09, design review with the user)
+
+All four decided as recommended; D1 with the lost-message ruling; plus one
+addition from review: **mailbox retention** — receipts (and future kinds) are
+NEVER deleted on read; expiry is by TTL only. Delete-on-read would
+reintroduce the one-shot fragility the mailbox exists to cure (a lost GET
+response would destroy the only proof). See `peer-mailbox.md` rule 2.
+
+The async channel itself is now formalized in `docs/design/peer-mailbox.md`
+(slot keys namespaced by kind, AAD binds scheme+kind, trust and containment
+rules, kind registry: `receipt` v1, `cancel` v2).
+
 
 - **D1 — Cancel semantics** (user-proposed, reverses the earlier
   "cancel keeps partial" decision): Cancel tells the peer `peer_cancelled` and
