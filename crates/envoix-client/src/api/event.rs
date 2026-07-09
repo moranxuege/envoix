@@ -168,8 +168,7 @@ impl FailureCode {
     /// never on the prose.
     pub(crate) fn classify(reason: &str) -> Self {
         use envoix_session::{
-            PEER_INTERRUPT_MESSAGE, PEER_PAUSE_MESSAGE, USER_INTERRUPT_MESSAGE,
-            USER_PAUSE_MESSAGE,
+            PEER_INTERRUPT_MESSAGE, PEER_PAUSE_MESSAGE, USER_INTERRUPT_MESSAGE, USER_PAUSE_MESSAGE,
         };
         match reason {
             r if r.contains(USER_PAUSE_MESSAGE) => Self::Paused,
@@ -215,10 +214,7 @@ mod tests {
             FailureCode::classify("connection closed by peer"),
             FailureCode::ConnectionLost
         );
-        assert_eq!(
-            FailureCode::classify("hash mismatch"),
-            FailureCode::Other
-        );
+        assert_eq!(FailureCode::classify("hash mismatch"), FailureCode::Other);
     }
 
     #[test]

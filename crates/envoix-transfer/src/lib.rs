@@ -803,7 +803,11 @@ async fn notify_error(connection: &mut dyn FrameConnection, error: &TransferErro
 }
 
 async fn notify_interrupted(connection: &mut dyn FrameConnection, cancel: &TransferCancelToken) {
-    let message = if cancel.is_pause() { USER_PAUSE_MESSAGE } else { USER_INTERRUPT_MESSAGE };
+    let message = if cancel.is_pause() {
+        USER_PAUSE_MESSAGE
+    } else {
+        USER_INTERRUPT_MESSAGE
+    };
     let _ = connection
         .send_frame(Frame::Error(ErrorFrame {
             message: message.into(),
@@ -812,7 +816,11 @@ async fn notify_interrupted(connection: &mut dyn FrameConnection, cancel: &Trans
 }
 
 fn interrupted_error(cancel: &TransferCancelToken) -> TransferError {
-    let message = if cancel.is_pause() { USER_PAUSE_MESSAGE } else { USER_INTERRUPT_MESSAGE };
+    let message = if cancel.is_pause() {
+        USER_PAUSE_MESSAGE
+    } else {
+        USER_INTERRUPT_MESSAGE
+    };
     CoreError::Transfer(message.into())
 }
 
@@ -1461,7 +1469,10 @@ mod tests {
             .expect("finalize writes a receipt");
         assert_eq!(receipt.file_name, "receipt.txt");
         assert_eq!(receipt.file_size, 10);
-        assert_eq!(receipt.file_hash, blake3::hash(b"receipt me").to_hex().to_string());
+        assert_eq!(
+            receipt.file_hash,
+            blake3::hash(b"receipt me").to_hex().to_string()
+        );
     }
 
     #[tokio::test]
@@ -1478,7 +1489,9 @@ mod tests {
         complete_transfer_once(&source_path, &output_dir).await;
         // The app publishes the file elsewhere and deletes the output copy
         // (what Android does); only the receipt remains.
-        tokio::fs::remove_file(output_dir.join("moved.bin")).await.unwrap();
+        tokio::fs::remove_file(output_dir.join("moved.bin"))
+            .await
+            .unwrap();
 
         // Re-offer: both sides complete, re-delivering the CompleteAck...
         let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
@@ -1494,7 +1507,10 @@ mod tests {
             .send_file(&mut sender_connection, source_path, true, &NoopEventSink)
             .await
             .expect("re-offer against a receipt completes");
-        let receive_summary = receiver.await.unwrap().expect("receipted receive completes");
+        let receive_summary = receiver
+            .await
+            .unwrap()
+            .expect("receipted receive completes");
         assert_eq!(send_summary.bytes_transferred, 24);
         assert_eq!(receive_summary.bytes_transferred, 24);
 
@@ -1523,7 +1539,9 @@ mod tests {
 
         // Transfer once: receipt written; then the file is published away.
         complete_transfer_once(&source_path, &output_dir).await;
-        tokio::fs::remove_file(output_dir.join("again.bin")).await.unwrap();
+        tokio::fs::remove_file(output_dir.join("again.bin"))
+            .await
+            .unwrap();
 
         // A NEW transfer of the same file is mid-flight: plant its partial
         // (first 8 bytes) + resume state, as a pause would leave them.
@@ -1538,7 +1556,9 @@ mod tests {
             hash_bytes: 0,
             hash_checkpoint: None,
         };
-        LocalFileStorage::write_resume_state(&output_dir, &state).await.unwrap();
+        LocalFileStorage::write_resume_state(&output_dir, &state)
+            .await
+            .unwrap();
         let temp = LocalFileStorage::resumable_temp_path(&output_dir, "again.bin", &tid).unwrap();
         tokio::fs::write(&temp, &content[..8]).await.unwrap();
 
@@ -1573,12 +1593,18 @@ mod tests {
         let output_dir = root.join("output");
         tokio::fs::create_dir_all(&source_dir).await.unwrap();
         let source_path = source_dir.join("swap.bin");
-        tokio::fs::write(&source_path, b"original content").await.unwrap();
+        tokio::fs::write(&source_path, b"original content")
+            .await
+            .unwrap();
 
         complete_transfer_once(&source_path, &output_dir).await;
-        tokio::fs::remove_file(output_dir.join("swap.bin")).await.unwrap();
+        tokio::fs::remove_file(output_dir.join("swap.bin"))
+            .await
+            .unwrap();
         // Same name, same size, different bytes.
-        tokio::fs::write(&source_path, b"altered contents").await.unwrap();
+        tokio::fs::write(&source_path, b"altered contents")
+            .await
+            .unwrap();
 
         let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
         let receiver = tokio::spawn({
@@ -1609,10 +1635,14 @@ mod tests {
         let output_dir = root.join("output");
         tokio::fs::create_dir_all(&source_dir).await.unwrap();
         let source_path = source_dir.join("fresh.bin");
-        tokio::fs::write(&source_path, b"fresh again").await.unwrap();
+        tokio::fs::write(&source_path, b"fresh again")
+            .await
+            .unwrap();
 
         complete_transfer_once(&source_path, &output_dir).await;
-        tokio::fs::remove_file(output_dir.join("fresh.bin")).await.unwrap();
+        tokio::fs::remove_file(output_dir.join("fresh.bin"))
+            .await
+            .unwrap();
 
         // resume=false (--fresh): the receipt is ignored, the file re-transfers.
         let (mut sender_connection, mut receiver_connection) = memory_connection_pair();

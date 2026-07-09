@@ -127,7 +127,9 @@ impl Renderer {
                 Some(state) => render_progress_line(&state, bytes_transferred, true),
                 None => eprintln!("completed {bytes_transferred} bytes"),
             },
-            E::Failed { direction, reason, .. } => match self.progress.take() {
+            E::Failed {
+                direction, reason, ..
+            } => match self.progress.take() {
                 Some(state) => render_transfer_failure_line(&state, &reason),
                 None => render_attempt_failure_line(direction, &reason),
             },

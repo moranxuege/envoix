@@ -149,7 +149,12 @@ async fn main() -> Result<()> {
             match tokio::net::TcpListener::bind(addr).await {
                 Ok(listener) => {
                     tracing::info!(%addr, "log endpoint listening");
-                    if let Err(error) = axum::serve(listener, logs::router(store).merge(receipts::router(receipt_store))).await {
+                    if let Err(error) = axum::serve(
+                        listener,
+                        logs::router(store).merge(receipts::router(receipt_store)),
+                    )
+                    .await
+                    {
                         tracing::error!(%error, "log endpoint failed");
                     }
                 }

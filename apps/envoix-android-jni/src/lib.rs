@@ -343,11 +343,7 @@ where
         }
     }
 
-    fn on_event(
-        &self,
-        event: &tracing::Event<'_>,
-        ctx: tracing_subscriber::layer::Context<'_, S>,
-    ) {
+    fn on_event(&self, event: &tracing::Event<'_>, ctx: tracing_subscriber::layer::Context<'_, S>) {
         let room = ctx.event_scope(event).and_then(|scope| {
             // innermost-first iteration: the first hit is the nearest room
             scope
@@ -579,12 +575,8 @@ pub extern "system" fn Java_dev_envoix_app_Native_restoreSession(
     let Some(record) = record else { return };
     let client = Client::from_config_fields(None, &[], &[]).unwrap_or_default();
     let _guard = runtime().enter();
-    let (session, notices) = TransferSession::restore(
-        client,
-        record.params,
-        record.session,
-        record_for(id),
-    );
+    let (session, notices) =
+        TransferSession::restore(client, record.params, record.session, record_for(id));
     if let Ok(mut map) = sessions().lock() {
         map.insert(id, session);
     }

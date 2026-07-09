@@ -133,7 +133,9 @@ pub enum Input {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Effect {
     /// Spawn a new attempt (the session's `attempt` was already incremented).
-    StartAttempt { resume: bool },
+    StartAttempt {
+        resume: bool,
+    },
     /// Pause the current attempt's cancel token.
     PauseToken,
     /// Cancel the current attempt's cancel token.
@@ -501,7 +503,10 @@ mod tests {
         assert_eq!(effects, vec![Effect::PauseToken]);
         // The attempt's own Failed echo (attempt-current!) has no edge out.
         assert!(s.reduce(ev(1, failed(FailureCode::Cancelled))).is_empty());
-        assert!(s.reduce(ev(1, failed(FailureCode::ConnectionLost))).is_empty());
+        assert!(
+            s.reduce(ev(1, failed(FailureCode::ConnectionLost)))
+                .is_empty()
+        );
         assert_eq!(s.state, State::Paused(PauseOrigin::Local));
     }
 
@@ -650,7 +655,10 @@ mod tests {
         let effects = s.reduce(Input::Resume);
         assert_eq!(
             effects,
-            vec![Effect::StopMailboxPoll, Effect::StartAttempt { resume: true }]
+            vec![
+                Effect::StopMailboxPoll,
+                Effect::StartAttempt { resume: true }
+            ]
         );
     }
 
@@ -699,7 +707,11 @@ mod tests {
     fn run_ended_is_a_belt_never_a_silent_success() {
         let mut s = transferring(Send);
         s.reduce(ev(1, E::RunEnded { failure: None }));
-        assert_eq!(s.state, State::Failed, "clean end without Completed is a failure");
+        assert_eq!(
+            s.state,
+            State::Failed,
+            "clean end without Completed is a failure"
+        );
 
         let mut s = transferring(Receive);
         s.reduce(ev(

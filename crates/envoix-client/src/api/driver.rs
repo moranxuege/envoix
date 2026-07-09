@@ -20,12 +20,12 @@ use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
+use super::error::TransferError;
 use super::event::FailureCode;
 use super::machine::{AttemptEvent, Effect, Input, Session};
 use super::receipt;
 use super::record::{RecordStore, TransferRecord, unix_now_ms};
 use super::{Client, PeerSource, TransferEvent, TransferOptions, TransferRequest};
-use super::error::TransferError;
 
 /// How long a send waits in Confirming before escalating to the mailbox.
 const CONFIRM_TIMEOUT: Duration = Duration::from_secs(20);
@@ -72,9 +72,14 @@ pub enum SessionNotice {
     Snapshot(SessionSnapshot),
     /// GET `<server>/receipts/<key>` and call
     /// [`TransferSession::receipt_response`] with the body (or None on 404).
-    FetchReceipt { key: String },
+    FetchReceipt {
+        key: String,
+    },
     /// POST the sealed blob to `<server>/receipts/<key>` (retry on failure).
-    PostReceipt { key: String, blob: Vec<u8> },
+    PostReceipt {
+        key: String,
+        blob: Vec<u8>,
+    },
 }
 
 enum Cmd {
@@ -363,7 +368,8 @@ impl Actor {
                     tracing::info!("serving re-verify (courier tier; card untouched)");
                     tokio::spawn(async move {
                         // Bounded: one shot; outcome only logged.
-                        match tokio::time::timeout(Duration::from_secs(120), transfer.wait()).await {
+                        match tokio::time::timeout(Duration::from_secs(120), transfer.wait()).await
+                        {
                             Ok(Ok(_)) => tracing::info!("re-verify served"),
                             other => tracing::info!(?other, "re-verify ended without serving"),
                         }
@@ -750,8 +756,11 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_wins_over_the_attempt() {
-        let (session, mut notices) =
-            TransferSession::start(Client::new(), failing_params(TransferDirection::Receive), None);
+        let (session, mut notices) = TransferSession::start(
+            Client::new(),
+            failing_params(TransferDirection::Receive),
+            None,
+        );
         session.cancel();
         let snapshot = wait_for_state(&mut notices, State::Cancelled).await;
         // Whatever the racing attempt reported, the user's cancel is final.

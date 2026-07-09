@@ -8,12 +8,12 @@
 //! Binding-friendly by construction: no generics, closures, or lifetimes in
 //! public signatures, so the surface can be exposed through UniFFI later.
 
+pub mod driver;
 mod error;
 mod event;
 mod invite;
-pub mod driver;
-mod options;
 pub mod machine;
+mod options;
 pub mod receipt;
 pub mod record;
 mod source;

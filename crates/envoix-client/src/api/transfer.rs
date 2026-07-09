@@ -383,7 +383,11 @@ impl From<SessionEvent> for TransferEvent {
             },
             SessionEvent::Failed { direction, reason } => {
                 let reason_code = super::event::FailureCode::classify(&reason);
-                TransferEvent::Failed { direction, reason, reason_code }
+                TransferEvent::Failed {
+                    direction,
+                    reason,
+                    reason_code,
+                }
             }
             SessionEvent::Pairing { step } => TransferEvent::Pairing { step },
             SessionEvent::Connecting => TransferEvent::Connecting,

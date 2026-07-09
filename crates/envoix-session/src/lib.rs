@@ -17,8 +17,7 @@ pub use envoix_transfer::TransferEngine;
 pub use envoix_transfer::{
     DEFAULT_CHUNK_SIZE, EventSink, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE, NoopEventSink,
     PEER_INTERRUPT_MESSAGE, PEER_PAUSE_MESSAGE, TransferCancelToken, TransferEvent,
-    TransferSummary, USER_INTERRUPT_MESSAGE, USER_PAUSE_MESSAGE,
-    validate_chunk_size,
+    TransferSummary, USER_INTERRUPT_MESSAGE, USER_PAUSE_MESSAGE, validate_chunk_size,
 };
 pub use envoix_types::TransferDirection;
 // Re-exported so the client facade reaches rendezvous-code helpers through its
@@ -550,6 +549,10 @@ async fn accept_or_cancel(
 }
 
 fn interrupted_error(cancel: &TransferCancelToken) -> SessionError {
-    let message = if cancel.is_pause() { USER_PAUSE_MESSAGE } else { USER_INTERRUPT_MESSAGE };
+    let message = if cancel.is_pause() {
+        USER_PAUSE_MESSAGE
+    } else {
+        USER_INTERRUPT_MESSAGE
+    };
     CoreError::Transfer(message.into())
 }

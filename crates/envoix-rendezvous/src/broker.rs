@@ -102,7 +102,13 @@ impl RoomRegistry {
                     None => {
                         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
                         let (ready_tx, ready_rx) = oneshot::channel();
-                        waiting.insert(room_id.clone(), Waiter { ready: ready_tx, id });
+                        waiting.insert(
+                            room_id.clone(),
+                            Waiter {
+                                ready: ready_tx,
+                                id,
+                            },
+                        );
                         tracing::debug!(id, "parked (waiting for partner)");
                         Decision::Parked(ready_rx, id)
                     }

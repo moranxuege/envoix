@@ -132,10 +132,7 @@ mod tests {
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].id, 3, "sorted by id");
         assert_eq!(loaded[1].session.state, State::Unconfirmed);
-        assert_eq!(
-            loaded[1].session.transfer_id.as_deref(),
-            Some("transfer-x"),
-        );
+        assert_eq!(loaded[1].session.transfer_id.as_deref(), Some("transfer-x"),);
         assert_eq!(
             loaded[1].params.sources,
             record(7).params.sources,
@@ -146,7 +143,9 @@ mod tests {
         assert_eq!(store.load_all().await.len(), 1);
 
         // A corrupt file is skipped, never fatal.
-        tokio::fs::write(dir.join("record-9.json"), b"{nope").await.unwrap();
+        tokio::fs::write(dir.join("record-9.json"), b"{nope")
+            .await
+            .unwrap();
         assert_eq!(store.load_all().await.len(), 1);
     }
 }

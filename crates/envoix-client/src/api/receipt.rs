@@ -77,7 +77,7 @@ pub fn seal_receipt(
         &mailbox_aad(KIND_RECEIPT),
         receipt,
     )
-        .map_err(|e| crypto_error(format!("sealing receipt: {e}")))
+    .map_err(|e| crypto_error(format!("sealing receipt: {e}")))
 }
 
 /// Open and authenticate a mailbox blob. Failure means the blob was not sealed
@@ -92,7 +92,7 @@ pub fn open_receipt(
         &mailbox_aad(KIND_RECEIPT),
         blob,
     )
-        .map_err(|e| crypto_error(format!("opening receipt: {e}")))
+    .map_err(|e| crypto_error(format!("opening receipt: {e}")))
 }
 
 /// Open a mailbox blob and verify it against the local source file: the
