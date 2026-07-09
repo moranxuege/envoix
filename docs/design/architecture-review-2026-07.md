@@ -66,6 +66,36 @@ Two boundary sins explain most bugs:
   `waiting` immediately. Registry entries must be invalidated by the resource they
   represent, not by timers alone. Test on :8446 first, then prod (:8445).
 
+### 4b. Completion receipts (agreed 2026-07-08, after the Unconfirmed dead-end)
+Observed failure: CompleteAck lost → sender "Unconfirmed"; receiver is Done and never
+rejoins → sender's Retry joins an empty room (dead end). Forcing both back in re-sends
+the whole file, because finalize deletes resume state AND the app deletes the core's
+output copy after publishing (TransferService.kt src.delete()).
+
+Design (two layers that compose; user-proposed mailbox evaluated and adopted):
+1. **Local completion receipts (foundation).** On finalize the receiver writes a small
+   receipt (file name, size, final blake3) instead of just deleting resume state — the
+   durable "I finished this" proof that survives the file being moved/published. On a
+   re-offer matching a receipt, the receiver replies "at 100%" → sender sends only the
+   Complete frame → hash compared against the receipt → CompleteAck in seconds, zero
+   bytes re-sent. No server changes. This is the first slice of #4/TransferRecord.
+2. **rdz receipt mailbox (async layer — the magic-wormhole mailbox pattern).** The rdz
+   is the party that's always online: the receiver POSTs the receipt there (with
+   retry — the one-shot ack dies on a dying connection, but the post can retry for
+   hours; same network domain, different TIME domain), and the sender polls on
+   retry/launch → Unconfirmed flips to Done with NO receiver presence or action.
+   - **Privacy: the receipt must be sealed** (rdz stays blind — no file names/hashes
+     in the clear; a plaintext hash also enables confirmation attacks). Use the
+     envoix-pairing seal primitives. **OPEN QUESTION (needs a design pass): key
+     derivation** — the SPAKE2 session key dies with the connection; a pairing-code-
+     derived key is the natural choice but its entropy vs. the rdz operator needs a
+     deliberate look.
+   - Server: small store keyed by room/transfer id, TTL a few days, GC. This makes
+     the rdz officially a third thing (matchmaker + dev log collector + receipt
+     mailbox) — a deliberate architectural step.
+   - Cross-restart confirmation on the sender needs the durable TransferRecord (#4);
+     within one app session it works without it.
+
 ### 5. Keep hand-written JNI; no speculative UniFFI
 - The client API is already binding-friendly (no generics/closures/lifetimes) — that IS
   the iOS prep. Wire UniFFI only when iOS work actually starts. Items 1–3 are the real
@@ -104,8 +134,14 @@ Two boundary sins explain most bugs:
 
 ## Roadmap (agreed order)
 1. Typed outcome/cancel-reason (core + client + JNI + Kotlin) — best-effort on wire.
+   ✅ DONE 2026-07-08 (a246b87).
 2. Broker dead-slot fix (small; :8446 then prod).
-3. Transfer state machine in `envoix-client` (design doc first, then implement).
-4. Durable `TransferRecord` (cancel keeps, remove deletes).
-5. Logging/diagnostics formalization.
-6. Hygiene batch.
+3. Completion receipts: local (foundation) then rdz mailbox (async layer) — see §4b.
+4. Transfer state machine in `envoix-client` (design doc first, then implement).
+5. Durable `TransferRecord` (cancel keeps, remove deletes; receipts are its first slice).
+6. Logging/diagnostics formalization. Requirement learned 2026-07-08: at TRACE the
+   4×8 MB core-log ring churns in minutes (a needed room's story rotated away mid-
+   debug) — retention must be per-room/per-transfer, not a byte ring. Also surface
+   the PRIMARY source's error in client::run multi-source fallback, not the last
+   fallback's noise (mDNS "no peers in 5s" buried the real Room failure).
+7. Hygiene batch.
