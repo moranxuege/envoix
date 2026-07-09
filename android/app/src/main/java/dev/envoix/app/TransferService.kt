@@ -183,6 +183,13 @@ class TransferService : Service() {
     /** Create the Rust session and render its notice stream. */
     private fun startSession(id: Long, spec: Spec, resume: Boolean) {
         lastSeq[id] = 0L
+        // Drain any residue BEFORE the transfer: a finalized file left in
+        // staging (e.g. by a failed publish) makes the core's existing-final
+        // path answer a fresh send of that file instantly - and invisibly,
+        // since the user only sees Downloads. Field bug: room 104519.
+        if (spec.dir() == Direction.Receive) {
+            scope.launch(Dispatchers.IO) { sweepStaging(spec.path, attributeTo = null) }
+        }
         val job = scope.launch {
             if (spec.useMdns) runCatching { multicastLock.acquire() }
             try {
@@ -253,7 +260,7 @@ class TransferService : Service() {
             else -> throttledNotification()
         }
         if (state == "completed" && spec.dir() == Direction.Receive) {
-            publishReceived(id, spec.path)
+            sweepStaging(spec.path, attributeTo = id)
         }
         if (!jobsActive()) stopForegroundKeepCards()
     }
@@ -310,19 +317,33 @@ class TransferService : Service() {
         }
     }
 
-    /** Move a completed received file from the private output dir into Downloads. */
-    private fun publishReceived(id: Long, outputDir: String) {
-        val t = TransferRepository.transfers.value.find { it.id == id } ?: return
-        if (t.status != Status.Completed) return
-        val name = t.fileName ?: return
-        val src = File(outputDir, name)
-        if (!src.exists()) return
+    /**
+     * Publish EVERY finalized file in the staging dir to Downloads (the card's
+     * own file plus any residue from an earlier failed publish), deleting the
+     * staging copy on success. The staging dir must never retain finals: the
+     * core treats an existing final as "already have it" and answers future
+     * sends of that file instantly - correct for the CLI (a real output dir),
+     * wrong for the app (staging is invisible; the user only sees Downloads).
+     * [attributeTo] names the card that gets fileName/savedUri (completion
+     * sweeps only; a start-of-session sweep publishes without attribution -
+     * the residue belongs to some older card).
+     */
+    private fun sweepStaging(outputDir: String, attributeTo: Long?) {
+        val finals = File(outputDir)
+            .listFiles { f -> f.isFile && !f.name.startsWith(".") } ?: return
         val s = SettingsStore.settings.value
-        val uri = MediaStoreSaver.saveReceived(this, src, name, s.saveTreeUri, s.saveFolder)
-        if (uri != null) {
+        for (src in finals) {
+            val uri = MediaStoreSaver.saveReceived(this, src, src.name, s.saveTreeUri, s.saveFolder)
+                ?: continue
             src.delete()
-            TransferRepository.update(id) { it.copy(savedUri = uri.toString()) }
-            LogStore.append("app: saved $name to Downloads")
+            if (attributeTo != null) {
+                TransferRepository.update(attributeTo) {
+                    if (it.fileName == null || it.fileName == src.name)
+                        it.copy(fileName = it.fileName ?: src.name, savedUri = uri.toString())
+                    else it
+                }
+            }
+            LogStore.append("app: saved ${src.name} to Downloads")
         }
     }
 
