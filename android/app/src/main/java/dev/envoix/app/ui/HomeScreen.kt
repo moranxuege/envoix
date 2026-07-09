@@ -267,7 +267,7 @@ private fun TransferCard(
                     onLongClick = { onToggleDetail(t.id) },
                 ),
         ) {
-            if (t.status == Status.Connecting && t.qrPayload != null) {
+            if ((t.status == Status.Waiting || t.status == Status.Connecting) && t.qrPayload != null) {
                 WaitingBody(t, onCancel)
             } else {
             Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -342,7 +342,8 @@ private fun CardControls(
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         when (t.status) {
-            Status.Connecting, Status.Transferring -> {
+            Status.Waiting, Status.Connecting, Status.Verifying,
+            Status.Transferring, Status.Confirming -> {
                 CircleBtn(Icons.Default.Pause, filled = true) { onPauseResume(t.id) }
                 CircleBtn(Icons.Default.Close, filled = false) { onCancel(t.id) }
             }
@@ -623,9 +624,13 @@ private fun PathBadge(t: Transfer) {
         t.status == Status.Failed -> Triple("Failed", colors.danger, colors.danger.copy(alpha = 0.12f))
         t.status == Status.Cancelled -> Triple("Cancelled", colors.muted, colors.line.copy(alpha = 0.5f))
         t.status == Status.Paused -> Triple("Paused", colors.warning, colors.warning.copy(alpha = 0.14f))
+        t.status == Status.Waiting -> Triple("Waiting", colors.accent, colors.accentSoft)
+        t.status == Status.Verifying -> Triple("Verifying", colors.accent, colors.accentSoft)
+        t.status == Status.Confirming -> Triple("Confirming", colors.accent, colors.accentSoft)
         t.pathType == "relay" -> Triple("Relay", colors.accent, colors.accentSoft)
         t.pathType == "direct" -> Triple("Direct", colors.accent, colors.accentSoft)
-        else -> Triple("…", colors.muted, colors.line.copy(alpha = 0.5f))
+        // pre-connection, path unknown: say what is HAPPENING, never "…"
+        else -> Triple("Pairing", colors.accent, colors.accentSoft)
     }
     Pill(label, fg, bg)
 }
@@ -671,7 +676,10 @@ private fun fraction(t: Transfer): Float {
 
 private fun speedText(t: Transfer): String {
     if (t.status != Status.Transferring || t.speedBps <= 0) return when (t.status) {
+        Status.Waiting -> "waiting for peer"
         Status.Connecting -> "connecting"
+        Status.Verifying -> "verifying"
+        Status.Confirming -> "confirming"
         Status.Completed -> "complete"
         Status.Paused -> "paused"
         Status.Failed -> "failed"

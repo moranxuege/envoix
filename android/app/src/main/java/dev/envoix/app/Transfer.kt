@@ -2,7 +2,7 @@ package dev.envoix.app
 
 enum class Direction { Send, Receive }
 
-enum class Status { Connecting, Transferring, Paused, Completed, Unconfirmed, Failed, Cancelled }
+enum class Status { Waiting, Connecting, Verifying, Transferring, Confirming, Paused, Completed, Unconfirmed, Failed, Cancelled }
 
 /** One transfer's observable state, shown as a card. */
 data class Transfer(
@@ -10,6 +10,8 @@ data class Transfer(
     val direction: Direction,
     val room: String,
     val fileName: String? = null,
+    /** Machine attempt number (resume bumps it). */
+    val attempt: Int = 1,
     /** Core transfer id (from Started) — keys the rdz receipt mailbox. */
     val transferId: String? = null,
     val pathType: String? = null,

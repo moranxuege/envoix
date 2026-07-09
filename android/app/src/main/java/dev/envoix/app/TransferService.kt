@@ -343,8 +343,11 @@ class TransferService : Service() {
 
         val state = s.optString("state")
         val status = when (state) {
-            "waiting", "connecting", "verifying" -> Status.Connecting
-            "transferring", "confirming" -> Status.Transferring
+            "waiting" -> Status.Waiting
+            "connecting" -> Status.Connecting
+            "verifying" -> Status.Verifying
+            "transferring" -> Status.Transferring
+            "confirming" -> Status.Confirming
             "paused" -> Status.Paused
             "unconfirmed" -> Status.Unconfirmed
             "completed" -> Status.Completed
@@ -364,6 +367,7 @@ class TransferService : Service() {
             entered = if (t.status != status) stateLogLine(state, s, bytes) else null
             t.copy(
                 status = status,
+                attempt = s.optInt("attempt", t.attempt),
                 transferId = s.optString("transfer_id").ifEmpty { t.transferId },
                 fileName = s.optString("file_name").ifEmpty { t.fileName },
                 bytes = bytes,
@@ -477,9 +481,7 @@ class TransferService : Service() {
             this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val active = TransferRepository.transfers.value.filter {
-            it.status == Status.Transferring || it.status == Status.Connecting
-        }
+        val active = TransferRepository.transfers.value.filter { !it.status.isTerminal && it.status != Status.Paused && it.status != Status.Unconfirmed }
         val b = NotificationCompat.Builder(this, CHANNEL)
             .setSmallIcon(android.R.drawable.stat_sys_upload)
             .setOngoing(active.isNotEmpty())
@@ -525,8 +527,7 @@ class TransferService : Service() {
 
     /** Whether any card still has a live attempt or a pending proof. */
     private fun jobsActive(): Boolean = TransferRepository.transfers.value.any {
-        it.status == Status.Connecting || it.status == Status.Transferring ||
-            it.status == Status.Unconfirmed
+        !it.status.isTerminal && it.status != Status.Paused
     }
 
     /** All cards at rest: drop the foreground state (notification dismissible)
