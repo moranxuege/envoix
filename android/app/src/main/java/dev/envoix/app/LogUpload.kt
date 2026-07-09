@@ -26,4 +26,36 @@ object LogUpload {
                 }
             }.getOrDefault(false)
         }
+
+    /** POST raw [body] bytes to [url]; true on a 2xx reply. */
+    suspend fun postBytes(url: String, body: ByteArray): Boolean =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                (URL(url).openConnection() as HttpURLConnection).run {
+                    requestMethod = "POST"
+                    doOutput = true
+                    connectTimeout = 8000
+                    readTimeout = 8000
+                    setRequestProperty("Content-Type", "application/octet-stream")
+                    outputStream.use { it.write(body) }
+                    val ok = responseCode in 200..299
+                    disconnect()
+                    ok
+                }
+            }.getOrDefault(false)
+        }
+
+    /** GET [url]; the response bytes on 200, else null. */
+    suspend fun getBytes(url: String): ByteArray? =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                (URL(url).openConnection() as HttpURLConnection).run {
+                    connectTimeout = 8000
+                    readTimeout = 8000
+                    val bytes = if (responseCode == 200) inputStream.use { it.readBytes() } else null
+                    disconnect()
+                    bytes
+                }
+            }.getOrNull()
+        }
 }

@@ -9,6 +9,7 @@ name = "envoix_jni"
 
 [dependencies]
 envoix-client = { path = "../../crates/envoix-client" }
+base64.workspace = true
 jni = "0.21"
 ndk-context = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread"] }

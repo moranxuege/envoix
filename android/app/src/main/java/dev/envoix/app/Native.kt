@@ -56,6 +56,17 @@ object Native {
      *  peer — as a pause, so both sides can show a resumable state. */
     external fun pause(id: Long)
 
+    /** The rdz mailbox key this transfer's completion receipt is stored under. */
+    external fun receiptMailboxKey(transferId: String): String
+
+    /** Seal a completion receipt (its local JSON) for the rdz mailbox.
+     *  Returns `{"key":"<hex>","blob":"<base64>"}` or `{"error":..}`. */
+    external fun sealReceipt(transferId: String, code: String, receiptJson: String): String
+
+    /** Open a mailbox blob and verify it against the local source file.
+     *  Returns `{"ok":true}` or `{"error":..}`. */
+    external fun verifyReceipt(transferId: String, code: String, blobB64: String, filePath: String): String
+
     /** Generate a room invite for [role] ("send"/"receive"). Returns JSON
      *  `{"code":..,"payload":..}` (payload = the QR string), or `{"error":..}`. */
     external fun generateInvite(role: String, broker: String, relay: String): String

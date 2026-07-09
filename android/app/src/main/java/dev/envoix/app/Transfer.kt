@@ -10,6 +10,8 @@ data class Transfer(
     val direction: Direction,
     val room: String,
     val fileName: String? = null,
+    /** Core transfer id (from Started) — keys the rdz receipt mailbox. */
+    val transferId: String? = null,
     val pathType: String? = null,
     val pathAddr: String? = null,
     val bytes: Long = 0,

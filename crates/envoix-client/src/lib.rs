@@ -13,6 +13,7 @@ use std::path::Path;
 pub use envoix_auth::SPAKE2_EXPERIMENTAL_WARNING;
 use envoix_error::CoreError;
 pub use envoix_protocol::PeerDescriptor;
+pub use envoix_storage::TransferReceipt;
 pub use envoix_session::{BindAddrs, IdentityConfig, TransferCancelToken, TransferDirection, TransferSummary};
 // Chunk-size bounds + validation are a transfer-engine constraint; they live in
 // envoix-transfer next to DEFAULT_CHUNK_SIZE and are reached through session.

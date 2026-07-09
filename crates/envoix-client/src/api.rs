@@ -12,6 +12,7 @@ mod error;
 mod event;
 mod invite;
 mod options;
+pub mod receipt;
 mod source;
 mod transfer;
 

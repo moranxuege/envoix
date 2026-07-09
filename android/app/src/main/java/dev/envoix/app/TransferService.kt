@@ -14,8 +14,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 import java.io.File
+import java.util.Base64
 
 /** Params needed to (re)launch a transfer, kept so a paused/failed one can resume. */
 private data class Spec(
@@ -192,6 +195,7 @@ class TransferService : Service() {
                             is CliEvent.Started ->
                                 t.copy(
                                     fileName = ev.fileName, total = ev.totalBytes, status = Status.Transferring,
+                                    transferId = ev.transferId,
                                     log = addLog(t.log, "started · ${ev.fileName}"),
                                 )
                             is CliEvent.Progress -> if (t.status.isTerminal || t.status == Status.Paused) t else {
@@ -295,12 +299,70 @@ class TransferService : Service() {
                 }
             if (spec.useMdns) runCatching { multicastLock.release() }
             if (spec.dir() == Direction.Receive) publishReceived(id, spec.path)
+            handleReceiptMailbox(id, spec)
             active.decrementAndGet()
             // Refresh only while transfers remain; when idle, let stopIfIdle's
             // stopForeground(REMOVE) clear the notification — reposting here would
             // detach it and leave a stale status-bar icon.
             if (active.get() > 0) updateNotification()
             stopIfIdle()
+        }
+    }
+
+    /**
+     * The rdz receipt mailbox (async re-confirmation, no peer presence needed):
+     * after a receive completes, post the sealed completion receipt so an
+     * unconfirmed sender can re-confirm from the mailbox alone; after a send
+     * ends "Sent · unconfirmed", poll the mailbox and flip to Done once the
+     * receipt proves the peer finalized exactly our bytes. Blobs are sealed
+     * under transfer id + code — the rdz stores bytes it cannot read.
+     */
+    private suspend fun handleReceiptMailbox(id: Long, spec: Spec) {
+        val t = TransferRepository.transfers.value.find { it.id == id } ?: return
+        val tid = t.transferId ?: return
+        val server = SettingsStore.settings.value.logServer.trimEnd('/')
+        if (server.isEmpty()) return
+        if (spec.dir() == Direction.Receive && t.status == Status.Completed) {
+            val name = t.fileName ?: return
+            val json = runCatching { File(spec.path, ".envoix-receipt.$name.json").readText() }
+                .getOrNull() ?: return
+            val sealed = runCatching { JSONObject(Native.sealReceipt(tid, spec.room, json)) }
+                .getOrNull() ?: return
+            val key = sealed.optString("key")
+            val blob = sealed.optString("blob")
+            if (key.isEmpty() || blob.isEmpty()) return
+            val bytes = Base64.getDecoder().decode(blob)
+            for (backoff in listOf(0L, 5_000L, 30_000L)) {
+                if (backoff > 0) delay(backoff)
+                if (LogUpload.postBytes("$server/receipts/$key", bytes)) {
+                    OpLog.add("receipt posted id=$id")
+                    return
+                }
+            }
+            OpLog.add("receipt post failed id=$id")
+        } else if (spec.dir() == Direction.Send && t.status == Status.Unconfirmed) {
+            val key = Native.receiptMailboxKey(tid)
+            for (backoff in listOf(2_000L, 10_000L, 30_000L)) {
+                delay(backoff)
+                val blob = LogUpload.getBytes("$server/receipts/$key") ?: continue
+                val b64 = Base64.getEncoder().encodeToString(blob)
+                val verdict = runCatching { JSONObject(Native.verifyReceipt(tid, spec.room, b64, spec.path)) }
+                    .getOrNull()
+                if (verdict?.optBoolean("ok") == true) {
+                    TransferRepository.update(id) {
+                        if (it.status == Status.Unconfirmed)
+                            it.copy(
+                                status = Status.Completed, error = null,
+                                log = addLog(it.log, "confirmed via receipt — peer finalized the file"),
+                            )
+                        else it
+                    }
+                    OpLog.add("receipt confirmed id=$id")
+                } else {
+                    OpLog.add("receipt verify failed id=$id")
+                }
+                return // found a blob: verified or authenticated mismatch — done either way
+            }
         }
     }
 

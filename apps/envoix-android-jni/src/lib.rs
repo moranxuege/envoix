@@ -160,6 +160,85 @@ pub extern "system" fn Java_dev_envoix_app_Native_pause(_env: JNIEnv, _class: JC
     }
 }
 
+/// The rdz mailbox key a transfer's receipt is stored under (hex).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_receiptMailboxKey<'a>(
+    mut env: JNIEnv<'a>,
+    _class: JClass,
+    transfer_id: JString,
+) -> jni::sys::jstring {
+    let transfer_id = jstr(&mut env, &transfer_id);
+    let key = envoix_client::api::receipt::receipt_mailbox_key(&transfer_id);
+    env.new_string(key).expect("jstring").into_raw()
+}
+
+/// Seal a completion receipt (its local JSON form) for the rdz mailbox.
+/// Returns JSON `{"key":"<hex>","blob":"<base64>"}` or `{"error":..}`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_sealReceipt<'a>(
+    mut env: JNIEnv<'a>,
+    _class: JClass,
+    transfer_id: JString,
+    code: JString,
+    receipt_json: JString,
+) -> jni::sys::jstring {
+    use base64::Engine;
+    let transfer_id = jstr(&mut env, &transfer_id);
+    let code = jstr(&mut env, &code);
+    let receipt_json = jstr(&mut env, &receipt_json);
+    let out = match serde_json::from_str::<envoix_client::TransferReceipt>(&receipt_json) {
+        Ok(receipt) => {
+            match envoix_client::api::receipt::seal_receipt(&transfer_id, &code, &receipt) {
+                Ok(blob) => format!(
+                    r#"{{"key":{},"blob":{}}}"#,
+                    json_str(&envoix_client::api::receipt::receipt_mailbox_key(&transfer_id)),
+                    json_str(&base64::engine::general_purpose::STANDARD.encode(blob)),
+                ),
+                Err(e) => format!(r#"{{"error":{}}}"#, json_str(&e.to_string())),
+            }
+        }
+        Err(e) => format!(r#"{{"error":{}}}"#, json_str(&e.to_string())),
+    };
+    env.new_string(out).expect("jstring").into_raw()
+}
+
+/// Open a mailbox blob (base64) and verify it against the local source file
+/// (size + BLAKE3). Returns `{"ok":true}` or `{"error":..}` — an error means
+/// the blob was not sealed by the paired peer for this exact file.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_verifyReceipt<'a>(
+    mut env: JNIEnv<'a>,
+    _class: JClass,
+    transfer_id: JString,
+    code: JString,
+    blob_b64: JString,
+    file_path: JString,
+) -> jni::sys::jstring {
+    use base64::Engine;
+    let transfer_id = jstr(&mut env, &transfer_id);
+    let code = jstr(&mut env, &code);
+    let blob_b64 = jstr(&mut env, &blob_b64);
+    let file_path = jstr(&mut env, &file_path);
+    let out = match base64::engine::general_purpose::STANDARD.decode(blob_b64.trim()) {
+        Ok(blob) => {
+            let result = runtime().block_on(
+                envoix_client::api::receipt::verify_receipt_against_file(
+                    &transfer_id,
+                    &code,
+                    &blob,
+                    std::path::Path::new(&file_path),
+                ),
+            );
+            match result {
+                Ok(_) => r#"{"ok":true}"#.to_string(),
+                Err(e) => format!(r#"{{"error":{}}}"#, json_str(&e.to_string())),
+            }
+        }
+        Err(e) => format!(r#"{{"error":{}}}"#, json_str(&e.to_string())),
+    };
+    env.new_string(out).expect("jstring").into_raw()
+}
+
 #[allow(clippy::too_many_arguments)]
 /// Generate a room invite for `role` ("send"/"receive"). Returns JSON
 /// `{"code":..,"payload":..}` (the payload is the QR string), or `{"error":..}`.
