@@ -52,6 +52,7 @@ object NativeTransfer {
         configPath: String,
         qrPayload: String?,
         transferInvite: String?,
+        internetAvailable: Boolean,
         useRoom: Boolean,
         useMdns: Boolean,
     ): Flow<CliEvent> = callbackFlow {
@@ -125,6 +126,7 @@ object NativeTransfer {
                     configPath = configPath,
                     qrPayload = qrPayload,
                     transferInvite = transferInvite,
+                    internetAvailable = internetAvailable,
                     useRoom = useRoom,
                     useMdns = useMdns,
                 ),
@@ -161,6 +163,7 @@ object NativeTransfer {
         configPath: String,
         qrPayload: String?,
         transferInvite: String?,
+        internetAvailable: Boolean,
         useRoom: Boolean,
         useMdns: Boolean,
     ): FfiTransferRequest {
@@ -170,11 +173,7 @@ object NativeTransfer {
             else -> throw IllegalArgumentException("unsupported transfer direction: $direction")
         }
         val invite = transferInvite.orEmpty()
-        val mode = when {
-            invite.isNotBlank() -> FfiTransferMode.INVITE
-            ffiDirection == FfiTransferDirection.RECEIVE && qrPayload != null -> FfiTransferMode.SHOW_INVITE
-            else -> FfiTransferMode.ROOM
-        }
+        val mode = if (invite.isNotBlank()) FfiTransferMode.INVITE else FfiTransferMode.ROOM
         return FfiTransferRequest(
             activityId = activityId,
             direction = ffiDirection,
@@ -199,7 +198,7 @@ object NativeTransfer {
             rendezvous = FfiRendezvousPlan(
                 useRoom = mode == FfiTransferMode.ROOM && useRoom,
                 useMdns = mode == FfiTransferMode.ROOM && useMdns,
-                internetAvailable = true,
+                internetAvailable = internetAvailable,
             ),
         )
     }
