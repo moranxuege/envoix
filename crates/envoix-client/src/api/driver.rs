@@ -472,8 +472,12 @@ impl Actor {
             TransferEvent::Verified { .. } => Some(AttemptEvent::Verified),
             TransferEvent::Confirming { .. } => Some(AttemptEvent::Confirming),
             TransferEvent::Completed {
-                bytes_transferred, ..
+                transfer_id,
+                file_name,
+                bytes_transferred,
             } => Some(AttemptEvent::Completed {
+                transfer_id: transfer_id.to_string(),
+                file_name,
                 bytes: bytes_transferred,
             }),
             // D4: mid-run Failed events are retry reports, not attempt
@@ -699,8 +703,9 @@ async fn sleep_until(at: Option<Instant>) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::machine::State;
+    use super::super::machine::{AttemptEvent, Input, State};
     use super::*;
+    use envoix_storage::{LocalFileStorage, TransferReceipt};
 
     fn failing_params(direction: TransferDirection) -> SessionParams {
         SessionParams {
@@ -727,6 +732,33 @@ mod tests {
             context: failing_context(direction),
             session,
         }
+    }
+
+    fn actor_for_context(
+        context: SessionContext,
+    ) -> (Actor, mpsc::UnboundedReceiver<SessionNotice>) {
+        let (cmds, cmd_rx) = mpsc::unbounded_channel();
+        drop(cmds);
+        let (notice_tx, notice_rx) = mpsc::unbounded_channel();
+        (
+            Actor {
+                client: Client::new(),
+                session: Session::new(context.params.direction),
+                context,
+                cmds: cmd_rx,
+                notices: notice_tx,
+                current: None,
+                seq: 0,
+                confirm_deadline: None,
+                polls: Vec::new(),
+                poll_key: None,
+                rate: RateTracker::default(),
+                last_progress_snapshot: None,
+                record: None,
+                launch: false,
+            },
+            notice_rx,
+        )
     }
 
     /// Drain notices until a snapshot in the wanted state arrives.
@@ -818,6 +850,51 @@ mod tests {
         record.context.client.chunk_size = Some("not-a-size".into());
 
         assert!(TransferSession::restore(record, None).is_err());
+    }
+
+    #[tokio::test]
+    async fn completed_without_started_still_posts_receipt() {
+        let dir =
+            std::env::temp_dir().join(format!("envoix-driver-receipt-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        LocalFileStorage::write_receipt(
+            &dir,
+            &TransferReceipt {
+                file_name: "done.bin".into(),
+                file_size: 77,
+                file_hash: "hash".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let mut context = failing_context(TransferDirection::Receive);
+        context.params.path = dir.clone();
+        context.params.sources = vec![PeerSource::Room {
+            code: "123456-kelp-coral".into(),
+            broker: "id@1.2.3.4:5".into(),
+        }];
+        let (mut actor, mut notices) = actor_for_context(context);
+
+        actor
+            .apply(Input::Event {
+                attempt: 1,
+                event: AttemptEvent::Completed {
+                    transfer_id: "transfer-fast".into(),
+                    file_name: "done.bin".into(),
+                    bytes: 77,
+                },
+            })
+            .await;
+
+        match notices.recv().await.expect("receipt posted") {
+            SessionNotice::PostReceipt { key, blob } => {
+                assert_eq!(key.len(), 64);
+                assert!(!blob.is_empty());
+            }
+            notice => panic!("expected receipt post, got {notice:?}"),
+        }
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]

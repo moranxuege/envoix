@@ -212,6 +212,8 @@ pub enum TransferEvent {
     Completed {
         /// Transfer identifier for correlating events.
         transfer_id: TransferId,
+        /// File name that completed.
+        file_name: String,
         /// Final plaintext byte count.
         bytes_transferred: u64,
     },
@@ -449,6 +451,7 @@ impl TransferEngine {
         expect_complete_ack(ack, &transfer_id)?;
         events.on_event(TransferEvent::Completed {
             transfer_id: transfer_id.clone(),
+            file_name: file_name.clone(),
             bytes_transferred: offset,
         });
 
@@ -630,6 +633,7 @@ impl TransferEngine {
                     send_complete_ack(connection, &header.transfer_id).await?;
                     events.on_event(TransferEvent::Completed {
                         transfer_id: header.transfer_id.clone(),
+                        file_name: header.file_name.clone(),
                         bytes_transferred: expected_offset,
                     });
 
@@ -1147,6 +1151,7 @@ async fn receive_existing_final(
 
     events.on_event(TransferEvent::Completed {
         transfer_id: header.transfer_id.clone(),
+        file_name: header.file_name.clone(),
         bytes_transferred: header.file_size,
     });
 
@@ -1208,6 +1213,7 @@ async fn receive_from_receipt(
 
     events.on_event(TransferEvent::Completed {
         transfer_id: header.transfer_id.clone(),
+        file_name: header.file_name.clone(),
         bytes_transferred: header.file_size,
     });
 

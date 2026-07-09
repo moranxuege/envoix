@@ -95,6 +95,8 @@ pub enum AttemptEvent {
     Verified,
     Confirming,
     Completed {
+        transfer_id: String,
+        file_name: String,
         bytes: u64,
     },
     Failed {
@@ -349,14 +351,19 @@ impl Session {
                 // of after the full confirm timeout.
                 vec![Effect::StartConfirmTimer, Effect::StartMailboxPoll]
             }
-            E::Completed { bytes }
-                if matches!(
-                    self.state,
-                    S::Waiting | S::Connecting | S::Verifying | S::Transferring | S::Confirming
-                ) =>
+            E::Completed {
+                transfer_id,
+                file_name,
+                bytes,
+            } if matches!(
+                self.state,
+                S::Waiting | S::Connecting | S::Verifying | S::Transferring | S::Confirming
+            ) =>
             {
                 let mut effects = self.exit_effects();
                 self.state = S::Completed;
+                self.transfer_id = Some(transfer_id);
+                self.file_name = Some(file_name);
                 self.bytes = bytes;
                 if self.total == 0 {
                     self.total = bytes; // receipt/existing-final paths skip Started
@@ -444,6 +451,14 @@ mod tests {
         }
     }
 
+    fn completed(bytes: u64) -> AttemptEvent {
+        E::Completed {
+            transfer_id: "transfer-t1".into(),
+            file_name: "a.zip".into(),
+            bytes,
+        }
+    }
+
     fn failed(code: FailureCode) -> AttemptEvent {
         E::Failed {
             reason_code: code,
@@ -470,7 +485,7 @@ mod tests {
         assert_eq!(s.state, State::Connecting);
         s.reduce(ev(1, started()));
         s.reduce(ev(1, E::Progress { bytes: 100 }));
-        let effects = s.reduce(ev(1, E::Completed { bytes: 100 }));
+        let effects = s.reduce(ev(1, completed(100)));
         assert_eq!(s.state, State::Completed);
         assert_eq!(effects, vec![Effect::PostReceipt]);
     }
@@ -485,7 +500,7 @@ mod tests {
             effects,
             vec![Effect::StartConfirmTimer, Effect::StartMailboxPoll]
         );
-        let effects = s.reduce(ev(1, E::Completed { bytes: 100 }));
+        let effects = s.reduce(ev(1, completed(100)));
         assert_eq!(s.state, State::Completed);
         assert_eq!(
             effects,
@@ -531,7 +546,7 @@ mod tests {
         let mut s = transferring(Send);
         s.reduce(ev(1, E::Progress { bytes: 100 }));
         s.reduce(ev(1, E::Confirming));
-        s.reduce(ev(1, E::Completed { bytes: 100 }));
+        s.reduce(ev(1, completed(100)));
         assert_eq!(s.state, State::Completed);
         // A send's Resume from Completed is ignored (nothing to re-join)…
         assert!(s.reduce(Input::Resume).is_empty());
@@ -544,7 +559,7 @@ mod tests {
     fn completed_is_terminal_resume_is_a_noop() {
         for direction in [Send, Receive] {
             let mut s = transferring(direction);
-            s.reduce(ev(1, E::Completed { bytes: 100 }));
+            s.reduce(ev(1, completed(100)));
             assert!(s.reduce(Input::Resume).is_empty(), "{direction:?}");
             assert_eq!(s.state, State::Completed);
             assert_eq!(s.attempt, 1);
@@ -603,7 +618,7 @@ mod tests {
             ]
         );
         // The attempt's late echoes land on a resting state and are dropped.
-        assert!(s.reduce(ev(1, E::Completed { bytes: 100 })).is_empty());
+        assert!(s.reduce(ev(1, completed(100))).is_empty());
         assert!(s.reduce(ev(1, E::RunEnded { failure: None })).is_empty());
         assert_eq!(s.state, State::Completed);
     }
@@ -684,9 +699,11 @@ mod tests {
     fn completed_without_started_fills_total() {
         // receipt / existing-final short-circuits skip Started entirely.
         let mut s = Session::new(Receive);
-        s.reduce(ev(1, E::Completed { bytes: 77 }));
+        s.reduce(ev(1, completed(77)));
         assert_eq!(s.state, State::Completed);
         assert_eq!((s.bytes, s.total), (77, 77));
+        assert_eq!(s.transfer_id.as_deref(), Some("transfer-t1"));
+        assert_eq!(s.file_name.as_deref(), Some("a.zip"));
     }
 
     #[test]
@@ -699,7 +716,7 @@ mod tests {
         // Completed straight from Verifying is also legal (existing-final path).
         let mut s = Session::new(Receive);
         s.reduce(ev(1, E::Verifying));
-        s.reduce(ev(1, E::Completed { bytes: 10 }));
+        s.reduce(ev(1, completed(10)));
         assert_eq!(s.state, State::Completed);
     }
 
@@ -772,7 +789,7 @@ mod tests {
             E::Verifying,
             E::Verified,
             E::Confirming,
-            E::Completed { bytes: 999 },
+            completed(999),
             failed(FailureCode::PeerCancelled),
             E::RunEnded { failure: None },
         ] {
@@ -797,7 +814,7 @@ mod tests {
                 ev(attempt, started()),
                 ev(attempt, E::Progress { bytes: 50 }),
                 ev(attempt, E::Confirming),
-                ev(attempt, E::Completed { bytes: 100 }),
+                ev(attempt, completed(100)),
                 ev(attempt, failed(FailureCode::ConnectionLost)),
                 ev(attempt, failed(FailureCode::PeerCancelled)),
                 ev(attempt, E::RunEnded { failure: None }),

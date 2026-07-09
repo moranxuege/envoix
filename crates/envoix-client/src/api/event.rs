@@ -123,6 +123,8 @@ pub enum TransferEvent {
     Completed {
         /// Transfer identifier for correlating events.
         transfer_id: TransferId,
+        /// File name that completed.
+        file_name: String,
         /// Plaintext bytes transferred in total.
         bytes_transferred: u64,
     },
