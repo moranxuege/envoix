@@ -348,7 +348,12 @@ private fun CardControls(
             }
             Status.Failed, Status.Unconfirmed, Status.Cancelled ->
                 CircleBtn(Icons.Default.Refresh, filled = true) { onPauseResume(t.id) }
-            Status.Completed -> if (t.savedUri != null) CircleBtn(Icons.Default.OpenInNew, filled = false) { onOpen(t) }
+            Status.Completed -> {
+                if (t.savedUri != null) CircleBtn(Icons.Default.OpenInNew, filled = false) { onOpen(t) }
+                // Re-join the room to serve a peer's re-verify: its lost
+                // CompleteAck is re-delivered from the receipt, no bytes re-sent.
+                CircleBtn(Icons.Default.Refresh, filled = false) { onPauseResume(t.id) }
+            }
         }
     }
 }

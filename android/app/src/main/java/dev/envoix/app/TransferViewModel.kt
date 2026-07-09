@@ -43,7 +43,10 @@ class TransferViewModel(app: Application) : AndroidViewModel(app) {
     fun pauseResume(id: Long) {
         val t = TransferRepository.transfers.value.find { it.id == id } ?: return
         if (t.status == Status.Paused || t.status == Status.Failed ||
-            t.status == Status.Unconfirmed || t.status == Status.Cancelled)
+            t.status == Status.Unconfirmed || t.status == Status.Cancelled ||
+            // A Done card can re-join too: the completion receipt lets the peer
+            // re-confirm (recover its lost CompleteAck) with zero bytes re-sent.
+            t.status == Status.Completed)
             TransferService.resume(getApplication(), id)
         else
             TransferService.pause(getApplication(), id)

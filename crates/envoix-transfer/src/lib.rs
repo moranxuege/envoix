@@ -12,7 +12,7 @@ use envoix_protocol::{
     Chunk, Complete, CompleteAck, ErrorFrame, FileHeader, Frame, FrameConnection, Hello, Ready,
     ResumeStatus,
 };
-use envoix_storage::{LocalFileStorage, TransferResumeState};
+use envoix_storage::{LocalFileStorage, TransferReceipt, TransferResumeState};
 use envoix_types::{
     DataPath, PROTOCOL_VERSION, PairingStep, PeerRole, TransferDirection, TransferId,
 };
@@ -472,6 +472,16 @@ impl TransferEngine {
         if fs::try_exists(&final_path).await? {
             return receive_existing_final(connection, header, final_path, events).await;
         }
+        // The file itself may have been moved/published away after completion;
+        // its receipt then re-confirms a re-offer without any bytes re-sent.
+        // Gated on resume_requested so a --fresh send forces a real re-receive.
+        if header.resume_requested
+            && let Some(receipt) =
+                LocalFileStorage::read_receipt(&output_dir, &header.file_name).await?
+            && receipt.file_size == header.file_size
+        {
+            return receive_from_receipt(connection, header, receipt, events).await;
+        }
 
         let prepared = prepare_receive_state(&output_dir, &header, events, self.chunk_size).await?;
         let temp_path = prepared.temp_path;
@@ -743,6 +753,18 @@ async fn finalize_received_file(
     LocalFileStorage::finalize_temp_file(temp_path, final_path).await?;
     LocalFileStorage::delete_resume_state(output_dir, &header.file_name, &header.transfer_id)
         .await?;
+    // Durable completion receipt: survives the final file being moved/published
+    // away, so a re-offer of this file can be re-confirmed (a lost CompleteAck
+    // re-delivered) without the file and without re-transfer.
+    LocalFileStorage::write_receipt(
+        output_dir,
+        &TransferReceipt {
+            file_name: header.file_name.clone(),
+            file_size: header.file_size,
+            file_hash: actual_hash,
+        },
+    )
+    .await?;
     Ok(())
 }
 
@@ -1080,6 +1102,67 @@ async fn receive_existing_final(
     })
 }
 
+/// Serve a re-offer of a file we hold a completion receipt for (the file itself
+/// may already be moved/published away): claim "received in full" with the
+/// receipt's hash, expect the sender's `Complete`, verify it against the
+/// receipt, and ack — re-delivering a lost CompleteAck with zero bytes re-sent.
+/// A sender whose content does not match its own claimed prefix restarts from
+/// chunk 0 instead of sending `Complete`; that means a DIFFERENT file under
+/// this name, which we refuse (mirroring [`receive_existing_final`]).
+async fn receive_from_receipt(
+    connection: &mut dyn FrameConnection,
+    header: FileHeader,
+    receipt: TransferReceipt,
+    events: &dyn EventSink,
+) -> Result<TransferSummary, TransferError> {
+    send_resume_status(
+        connection,
+        &header.transfer_id,
+        next_chunk_index(header.file_size, header.chunk_size),
+        header.file_size,
+        receipt.file_hash.clone(),
+    )
+    .await?;
+
+    match connection.recv_frame().await? {
+        Frame::Complete(complete) if complete.transfer_id == header.transfer_id => {
+            if complete.file_hash != receipt.file_hash {
+                return Err(CoreError::Storage(format!(
+                    "completed earlier with different content: {}",
+                    header.file_name
+                )));
+            }
+        }
+        Frame::Chunk(chunk)
+            if chunk.transfer_id == header.transfer_id && chunk.index == 0 && chunk.offset == 0 =>
+        {
+            return Err(CoreError::Storage(format!(
+                "completed earlier with different content: {}",
+                header.file_name
+            )));
+        }
+        Frame::Error(error) => return Err(peer_error(error)),
+        frame => {
+            return Err(CoreError::Transfer(format!(
+                "unexpected frame for receipted file: {frame:?}"
+            )));
+        }
+    }
+
+    send_complete_ack(connection, &header.transfer_id).await?;
+
+    events.on_event(TransferEvent::Completed {
+        transfer_id: header.transfer_id.clone(),
+        bytes_transferred: header.file_size,
+    });
+
+    Ok(TransferSummary {
+        transfer_id: header.transfer_id,
+        file_name: header.file_name,
+        bytes_transferred: header.file_size,
+    })
+}
+
 async fn hash_receive_file_with_events(
     path: &Path,
     events: &dyn EventSink,
@@ -1312,6 +1395,163 @@ mod tests {
         assert_eq!(
             tokio::fs::read(output_dir.join("hello.txt")).await.unwrap(),
             b"hello over frames"
+        );
+    }
+
+    /// Complete a transfer of `contents` as `file_name` into `output_dir`.
+    async fn complete_transfer_once(source_path: &Path, output_dir: &Path) {
+        let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
+        let receiver = tokio::spawn({
+            let output_dir = output_dir.to_path_buf();
+            async move {
+                TransferEngine::new(4)
+                    .receive_file(&mut receiver_connection, output_dir, &NoopEventSink)
+                    .await
+            }
+        });
+        TransferEngine::new(4)
+            .send_file(
+                &mut sender_connection,
+                source_path.to_path_buf(),
+                true,
+                &NoopEventSink,
+            )
+            .await
+            .unwrap();
+        receiver.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn finalize_writes_completion_receipt() {
+        let root = unique_test_dir();
+        let source_dir = root.join("source");
+        let output_dir = root.join("output");
+        tokio::fs::create_dir_all(&source_dir).await.unwrap();
+        let source_path = source_dir.join("receipt.txt");
+        tokio::fs::write(&source_path, b"receipt me").await.unwrap();
+
+        complete_transfer_once(&source_path, &output_dir).await;
+
+        let receipt = LocalFileStorage::read_receipt(&output_dir, "receipt.txt")
+            .await
+            .unwrap()
+            .expect("finalize writes a receipt");
+        assert_eq!(receipt.file_name, "receipt.txt");
+        assert_eq!(receipt.file_size, 10);
+        assert_eq!(receipt.file_hash, blake3::hash(b"receipt me").to_hex().to_string());
+    }
+
+    #[tokio::test]
+    async fn reoffer_with_receipt_completes_without_resend() {
+        let root = unique_test_dir();
+        let source_dir = root.join("source");
+        let output_dir = root.join("output");
+        tokio::fs::create_dir_all(&source_dir).await.unwrap();
+        let source_path = source_dir.join("moved.bin");
+        tokio::fs::write(&source_path, b"published and moved away")
+            .await
+            .unwrap();
+
+        complete_transfer_once(&source_path, &output_dir).await;
+        // The app publishes the file elsewhere and deletes the output copy
+        // (what Android does); only the receipt remains.
+        tokio::fs::remove_file(output_dir.join("moved.bin")).await.unwrap();
+
+        // Re-offer: both sides complete, re-delivering the CompleteAck...
+        let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
+        let receiver = tokio::spawn({
+            let output_dir = output_dir.clone();
+            async move {
+                TransferEngine::new(4)
+                    .receive_file(&mut receiver_connection, output_dir, &NoopEventSink)
+                    .await
+            }
+        });
+        let send_summary = TransferEngine::new(4)
+            .send_file(&mut sender_connection, source_path, true, &NoopEventSink)
+            .await
+            .expect("re-offer against a receipt completes");
+        let receive_summary = receiver.await.unwrap().expect("receipted receive completes");
+        assert_eq!(send_summary.bytes_transferred, 24);
+        assert_eq!(receive_summary.bytes_transferred, 24);
+
+        // ...without recreating the file or writing any temp — zero bytes moved.
+        let mut entries = tokio::fs::read_dir(&output_dir).await.unwrap();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            assert!(
+                name.starts_with(".envoix-receipt."),
+                "unexpected file recreated by receipted re-offer: {name}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn reoffer_with_different_content_is_refused() {
+        let root = unique_test_dir();
+        let source_dir = root.join("source");
+        let output_dir = root.join("output");
+        tokio::fs::create_dir_all(&source_dir).await.unwrap();
+        let source_path = source_dir.join("swap.bin");
+        tokio::fs::write(&source_path, b"original content").await.unwrap();
+
+        complete_transfer_once(&source_path, &output_dir).await;
+        tokio::fs::remove_file(output_dir.join("swap.bin")).await.unwrap();
+        // Same name, same size, different bytes.
+        tokio::fs::write(&source_path, b"altered contents").await.unwrap();
+
+        let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
+        let receiver = tokio::spawn({
+            let output_dir = output_dir.clone();
+            async move {
+                TransferEngine::new(4)
+                    .receive_file(&mut receiver_connection, output_dir, &NoopEventSink)
+                    .await
+            }
+        });
+        let send_result = TransferEngine::new(4)
+            .send_file(&mut sender_connection, source_path, true, &NoopEventSink)
+            .await;
+        let receive_result = receiver.await.unwrap();
+
+        assert!(send_result.is_err(), "sender must not report success");
+        let error = receive_result.unwrap_err();
+        assert!(
+            matches!(&error, CoreError::Storage(m) if m.contains("different content")),
+            "unexpected receiver error: {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_send_ignores_receipt_and_retransfers() {
+        let root = unique_test_dir();
+        let source_dir = root.join("source");
+        let output_dir = root.join("output");
+        tokio::fs::create_dir_all(&source_dir).await.unwrap();
+        let source_path = source_dir.join("fresh.bin");
+        tokio::fs::write(&source_path, b"fresh again").await.unwrap();
+
+        complete_transfer_once(&source_path, &output_dir).await;
+        tokio::fs::remove_file(output_dir.join("fresh.bin")).await.unwrap();
+
+        // resume=false (--fresh): the receipt is ignored, the file re-transfers.
+        let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
+        let receiver = tokio::spawn({
+            let output_dir = output_dir.clone();
+            async move {
+                TransferEngine::new(4)
+                    .receive_file(&mut receiver_connection, output_dir, &NoopEventSink)
+                    .await
+            }
+        });
+        TransferEngine::new(4)
+            .send_file(&mut sender_connection, source_path, false, &NoopEventSink)
+            .await
+            .unwrap();
+        receiver.await.unwrap().unwrap();
+        assert_eq!(
+            tokio::fs::read(output_dir.join("fresh.bin")).await.unwrap(),
+            b"fresh again"
         );
     }
 

@@ -136,7 +136,10 @@ Design (two layers that compose; user-proposed mailbox evaluated and adopted):
 1. Typed outcome/cancel-reason (core + client + JNI + Kotlin) — best-effort on wire.
    ✅ DONE 2026-07-08 (a246b87).
 2. Broker dead-slot fix (small; :8446 then prod).
+   ✅ DONE 2026-07-08 (7586a8c); field-verified on :8446, promoted to prod :8445 2026-07-09.
 3. Completion receipts: local (foundation) then rdz mailbox (async layer) — see §4b.
+   ✅ Local foundation DONE 2026-07-09 (receipt on finalize + receive_from_receipt
+   short-circuit + Done-card re-join in the app). rdz mailbox still pending.
 4. Transfer state machine in `envoix-client` (design doc first, then implement).
 5. Durable `TransferRecord` (cancel keeps, remove deletes; receipts are its first slice).
 6. Logging/diagnostics formalization. Requirement learned 2026-07-08: at TRACE the
