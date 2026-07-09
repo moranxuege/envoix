@@ -640,12 +640,12 @@ pub extern "system" fn Java_dev_envoix_app_Native_destroySession(
     id: jlong,
     discard: jboolean,
 ) {
-    let session = sessions().lock().ok().and_then(|mut m| m.remove(&id));
-    if let Some(session) = session {
-        if discard != 0 {
-            session.discard();
-        }
-        // Dropping the handle closes the command channel; the actor drains the
-        // queued discard first, cancels any live attempt, and exits.
+    let Some(session) = sessions().lock().ok().and_then(|mut m| m.remove(&id)) else {
+        return;
+    };
+    if discard != 0 {
+        session.discard();
     }
+    // Dropping the handle closes the command channel; the actor drains the
+    // queued discard first, cancels any live attempt, and exits.
 }
