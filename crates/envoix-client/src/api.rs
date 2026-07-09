@@ -11,6 +11,7 @@
 mod error;
 mod event;
 mod invite;
+pub mod driver;
 mod options;
 pub mod machine;
 pub mod receipt;
