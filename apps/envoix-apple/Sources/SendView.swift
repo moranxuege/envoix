@@ -19,6 +19,9 @@ struct SendView: View {
     @AppStorage("envoix.speedLimit") private var speedLimit = 40
     @State private var invite: String = ""
     @State private var roomCode = ""
+    @State private var pairingInvite: FfiPairingInvite?
+    @State private var roomQRCodeImage: PlatformImage?
+    @State private var roomQRCodePayload = ""
     @State private var mode: PairingMode = .room
     @State private var dropTargeted = false
     @State private var filePathInput = ""
@@ -55,7 +58,6 @@ struct SendView: View {
     private var scrollContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                fileSection
                 modeSelector
 
                 if mode == .invite {
@@ -67,6 +69,7 @@ struct SendView: View {
                         .card(padding: 14)
                 }
 
+                fileSection
                 TransferStatusView(viewModel: viewModel)
             }
             .padding(.vertical, 12)
@@ -74,16 +77,69 @@ struct SendView: View {
             .padding(.bottom, 88)
             #endif
         }
+        .onAppear { refreshPairingInviteIfNeeded() }
+        .onChange(of: mode) { newMode in
+            if newMode == .room {
+                refreshPairingInviteIfNeeded()
+            }
+        }
+        .onChange(of: serverURL) { _ in refreshPairingInviteForSettingsChange() }
+        .onChange(of: relayURL) { _ in refreshPairingInviteForSettingsChange() }
     }
 
     @ViewBuilder private var roomModeSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .center, spacing: 16) {
+            VStack(spacing: 4) {
+                Text(AppText.value("Share this QR or code", "分享二维码或发送码", language: uiLanguage))
+                    .font(.title2.weight(.semibold))
+                    .foregroundStyle(Theme.text)
+                Text(AppText.value(
+                    "The receiver can scan this QR or enter the short code. You can also scan a receiver code below.",
+                    "接收端可以扫码或输入短码；你也可以在下方扫描接收端的码。",
+                    language: uiLanguage
+                ))
+                .font(.body)
+                .foregroundStyle(Theme.muted)
+                .multilineTextAlignment(.center)
+            }
+
+            if let image = roomQRCodeImage {
+                QRCard(image: image, size: 208)
+                    .accessibilityIdentifier("send_room_qr")
+            } else {
+                qrPlaceholder
+            }
+
+            LinkRow(
+                text: pairingInvite?.code ?? AppText.value("Send code", "发送码", language: uiLanguage),
+                textIdentifier: "send_room_code"
+            ) {
+                Button {
+                    copyWithToast(pairingInvite?.code ?? "", AppText.value("Send code copied", "发送码已复制", language: uiLanguage))
+                } label: {
+                    Label(AppText.value("Copy", "复制", language: uiLanguage), systemImage: "doc.on.doc")
+                        .frame(minHeight: 34)
+                        .contentShape(Rectangle())
+                }
+                .disabled(pairingInvite == nil)
+
+                Button {
+                    roomCode = ""
+                    refreshPairingInvite()
+                } label: {
+                    Label(AppText.value("New", "新建", language: uiLanguage), systemImage: "arrow.clockwise")
+                        .frame(minHeight: 34)
+                        .contentShape(Rectangle())
+                }
+                .disabled(viewModel.isBusy)
+            }
+
             RoomCodeField(
                 code: roomCodeBinding,
                 disabled: viewModel.isBusy,
-                title: AppText.value("Receiver QR / code", "接收端二维码 / 短码", language: uiLanguage),
-                placeholder: AppText.value("Scan QR or enter the receiver code", "扫码或输入接收端短码", language: uiLanguage),
-                helper: AppText.value("Use the QR or short code shown on the receiving device.", "使用接收端屏幕上的二维码或短码。", language: uiLanguage)
+                title: AppText.value("Join receiver instead", "改为加入接收端", language: uiLanguage),
+                placeholder: AppText.value("Scan QR or enter receiver code", "扫码或输入接收端短码", language: uiLanguage),
+                helper: AppText.value("Leave this empty to use your send code above.", "留空则使用上方发送码。", language: uiLanguage)
             )
 
             HStack(spacing: 8) {
@@ -110,7 +166,7 @@ struct SendView: View {
             .buttonStyle(.bordered)
             .controlSize(.small)
         }
-        .card(padding: 14)
+        .card(raised: true, padding: 18)
     }
 
     private var roomCodeBinding: Binding<String> {
@@ -359,6 +415,24 @@ struct SendView: View {
         .card(padding: 14)
     }
 
+    private var qrPlaceholder: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "qrcode")
+                .font(.system(size: 72, weight: .medium))
+                .foregroundStyle(Theme.muted)
+            Text(AppText.value("QR code", "二维码", language: uiLanguage))
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(Theme.muted)
+        }
+        .frame(width: 236, height: 236)
+        .background(Theme.surface)
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.cardRadius)
+                .strokeBorder(Theme.line.opacity(0.75), lineWidth: 0.8)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
+    }
+
     private func handleScannedInvite(_ value: String) {
         applyPairingInput(value, source: .scan)
     }
@@ -388,6 +462,14 @@ struct SendView: View {
 
         do {
             let parsed = try parsePairingInvite(input: input)
+            guard parsed.role != .send else {
+                ToastCenter.shared.show(AppText.value(
+                    "This QR belongs to another sender. Switch to Receive or scan a receiver code.",
+                    "这是另一个发送端的二维码。请切到接收，或扫描接收端的码。",
+                    language: uiLanguage
+                ))
+                return
+            }
             roomCode = parsed.code
             if !parsed.broker.trimmed.isEmpty {
                 serverURL = parsed.broker.trimmed
@@ -404,6 +486,46 @@ struct SendView: View {
         } catch {
             ToastCenter.shared.show(AppText.value("This is not a valid Envoix pairing code.", "这不是有效的 Envoix 配对码。", language: uiLanguage))
         }
+    }
+
+    private func refreshPairingInviteIfNeeded() {
+        guard mode == .room, pairingInvite == nil else { return }
+        refreshPairingInvite()
+    }
+
+    private func refreshPairingInviteForSettingsChange() {
+        guard mode == .room, !viewModel.isBusy else { return }
+        refreshPairingInvite()
+    }
+
+    private func refreshPairingInvite() {
+        do {
+            let invite = try makePairingInvite(role: .send, broker: serverURL, relay: relayURL)
+            pairingInvite = invite
+            updateRoomQRCode(for: invite.payload)
+        } catch {
+            viewModel.handleFailed(error.localizedDescription)
+        }
+    }
+
+    private func activeSendRoomCode() throws -> String {
+        if let invite = pairingInvite {
+            let code = invite.code.trimmed
+            if !code.isEmpty {
+                updateRoomQRCode(for: invite.payload)
+                return code
+            }
+        }
+        let invite = try makePairingInvite(role: .send, broker: serverURL, relay: relayURL)
+        pairingInvite = invite
+        updateRoomQRCode(for: invite.payload)
+        return invite.code
+    }
+
+    private func updateRoomQRCode(for payload: String) {
+        guard roomQRCodePayload != payload else { return }
+        roomQRCodePayload = payload
+        roomQRCodeImage = payload.isEmpty ? nil : QRCode.image(from: payload)
     }
 
     private func runtimeSettings(for parsed: FfiPairingInvite) throws -> EnvoixRuntimeSettings {
@@ -429,7 +551,7 @@ struct SendView: View {
         guard file != nil else { return false }
         switch mode {
         case .room:
-            return !roomCode.trimmed.isEmpty
+            return !roomCode.trimmed.isEmpty || pairingInvite != nil
         case .invite:
             return !invite.trimmed.isEmpty
         case .token:
@@ -503,8 +625,22 @@ struct SendView: View {
             case .room:
                 let input = roomCode.trimmed
                 let lowercasedInput = input.lowercased()
-                if lowercasedInput.hasPrefix("envoix://pair/") {
+                if input.isEmpty {
+                    viewModel.startSendingWithRoom(
+                        filePath: file.path,
+                        code: try activeSendRoomCode(),
+                        settings: settings,
+                        sourceAccess: selectedFileAccess
+                    )
+                } else if lowercasedInput.hasPrefix("envoix://pair/") {
                     let parsed = try parsePairingInvite(input: input)
+                    guard parsed.role != .send else {
+                        throw RuntimeSettingsError(AppText.value(
+                            "This QR belongs to another sender. Switch to Receive or scan a receiver code.",
+                            "这是另一个发送端的二维码。请切到接收，或扫描接收端的码。",
+                            language: uiLanguage
+                        ))
+                    }
                     roomCode = parsed.code
                     let roomSettings = try runtimeSettings(for: parsed)
                     viewModel.startSendingWithRoom(
@@ -533,6 +669,13 @@ struct SendView: View {
             case .invite:
                 if invite.trimmed.lowercased().hasPrefix("envoix://pair/") {
                     let parsed = try parsePairingInvite(input: invite.trimmed)
+                    guard parsed.role != .send else {
+                        throw RuntimeSettingsError(AppText.value(
+                            "This QR belongs to another sender. Switch to Receive or scan a receiver code.",
+                            "这是另一个发送端的二维码。请切到接收，或扫描接收端的码。",
+                            language: uiLanguage
+                        ))
+                    }
                     mode = .room
                     roomCode = parsed.code
                     let roomSettings = try runtimeSettings(for: parsed)

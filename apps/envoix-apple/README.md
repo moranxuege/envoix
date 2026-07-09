@@ -127,10 +127,10 @@ Canvas > Reload Canvas** before doing a full app rebuild.
 
 ## Using it
 
-Each tab uses **QR / Code** as the default path. The receiver shows an
-Android-compatible `envoix://pair/<code>` QR plus the same short code; the
-sender scans the QR or enters the code. The rendezvous broker only pairs
-devices, and the file still moves over the encrypted transfer path.
+Each tab uses **QR / Code** as the default path. Both send and receive can show
+an Android-compatible `envoix://pair/<code>` QR plus the same short code, and
+the opposite side can scan the QR or enter the code. The rendezvous broker only
+pairs devices, and the file still moves over the encrypted transfer path.
 
 Developer mode exposes **Shared Token** for same-LAN mDNS discovery without the
 broker. The legacy `envoix:…` direct invite path remains as a compatibility
@@ -144,8 +144,8 @@ will fail.
 
 Quality-of-life:
 
-- **QR / Code** starts ready on the receive side with *New* and *Copy*. The send
-  side accepts either the receiver's QR or short code.
+- **QR / Code** starts ready on both sides with *New* and *Copy*. The send side
+  can either share its own QR/code or join the receiver's QR/code.
 - **Send** accepts a file by drag-and-drop or *Paste Path* (from the clipboard),
   as well as the file panel.
 - During a transfer the status line shows live throughput and an ETA based on a
