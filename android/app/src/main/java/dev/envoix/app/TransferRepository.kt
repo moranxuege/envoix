@@ -20,7 +20,10 @@ object TransferRepository {
 
     /** Allocate an id + seed a Connecting card; returns the id. */
     @Synchronized
-    fun create(direction: Direction, room: String): Long {
+    fun create(
+        direction: Direction,
+        room: String,
+    ): Long {
         val id = nextId++
         _transfers.value = _transfers.value + Transfer(id = id, direction = direction, room = room)
         return id
@@ -29,7 +32,11 @@ object TransferRepository {
     /** Seed a card with a FIXED id (restoring a persisted record); keeps new
      *  ids from colliding with restored ones. No-op if the id already exists. */
     @Synchronized
-    fun restoreCard(id: Long, direction: Direction, room: String): Boolean {
+    fun restoreCard(
+        id: Long,
+        direction: Direction,
+        room: String,
+    ): Boolean {
         if (_transfers.value.any { it.id == id }) return false
         nextId = maxOf(nextId, id + 1)
         _transfers.value = _transfers.value + Transfer(id = id, direction = direction, room = room)
@@ -37,7 +44,10 @@ object TransferRepository {
     }
 
     @Synchronized
-    fun update(id: Long, transform: (Transfer) -> Transfer) {
+    fun update(
+        id: Long,
+        transform: (Transfer) -> Transfer,
+    ) {
         _transfers.value = _transfers.value.map { if (it.id == id) transform(it) else it }
     }
 
@@ -45,13 +55,19 @@ object TransferRepository {
      *  whose room matches [roomPrefix], so the core's per-transfer logs show up
      *  in that transfer's detail drawer. No-op if no transfer matches. */
     @Synchronized
-    fun appendCoreLog(roomId: String, line: String): Long? {
-        val id = _transfers.value
-            .filter { Room(it.room).id == roomId }
-            .maxByOrNull { it.id }?.id ?: return null
-        _transfers.value = _transfers.value.map {
-            if (it.id == id) it.copy(log = (it.log + line).takeLast(LOG_CAP)) else it
-        }
+    fun appendCoreLog(
+        roomId: String,
+        line: String,
+    ): Long? {
+        val id =
+            _transfers.value
+                .filter { Room(it.room).id == roomId }
+                .maxByOrNull { it.id }
+                ?.id ?: return null
+        _transfers.value =
+            _transfers.value.map {
+                if (it.id == id) it.copy(log = (it.log + line).takeLast(LOG_CAP)) else it
+            }
         return id
     }
 
@@ -61,8 +77,7 @@ object TransferRepository {
     }
 
     /** Ids of transfers still in flight (drive the foreground notification). */
-    fun activeCount(): Int =
-        _transfers.value.count { !it.status.isTerminal }
+    fun activeCount(): Int = _transfers.value.count { !it.status.isTerminal }
 }
 
 /** Deployed Envoix broker + relay defaults (overridable in Settings later). */

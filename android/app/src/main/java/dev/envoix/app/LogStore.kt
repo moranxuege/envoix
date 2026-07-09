@@ -70,9 +70,11 @@ object LogStore {
      *  first run so an upgrade doesn't lose the last crash log. */
     private fun shiftRing(dir: File) {
         File(dir, "core-prev.log").let { legacy ->
-            if (legacy.exists() && !File(dir, "core-1.log").exists())
+            if (legacy.exists() && !File(dir, "core-1.log").exists()) {
                 legacy.renameTo(File(dir, "core-1.log"))
-            else legacy.delete()
+            } else {
+                legacy.delete()
+            }
         }
         File(dir, "core-$KEEP.log").delete()
         for (i in KEEP downTo 2) File(dir, "core-${i - 1}.log").renameTo(File(dir, "core-$i.log"))
@@ -89,7 +91,11 @@ object LogStore {
     }
 
     /** A retained session log: its file, a display label, and byte size. */
-    data class Session(val file: File, val label: String, val bytes: Long)
+    data class Session(
+        val file: File,
+        val label: String,
+        val bytes: Long,
+    )
 
     /** The retained session logs, newest first: the current session (core.log)
      *  then the last [KEEP] launches. Only existing, non-empty files. Backs the
@@ -128,14 +134,20 @@ object LogSink : LogCallback {
     // "<LEVEL> <spans>: <message>" — re-stamped in local time so core lines
     // line up with the app's own event lines.
     private val LEVEL = Regex("""\s(TRACE|DEBUG|INFO|WARN|ERROR)\s+(.*)""")
+
     // the outer transfer{…} span is redundant in a per-transfer log — drop it
     private val TRANSFER_SPAN = Regex("""^transfer\{[^}]*\}:\s*""")
     private val clock =
-        java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss").withZone(java.time.ZoneId.systemDefault())
+        java.time.format.DateTimeFormatter
+            .ofPattern("HH:mm:ss")
+            .withZone(java.time.ZoneId.systemDefault())
 
     /** [room] is the span field, extracted STRUCTURALLY by the JNI tracing
      *  layer (see docs/design/diagnostics.md) — no more regex on formatted text. */
-    override fun log(room: String?, line: String) {
+    override fun log(
+        room: String?,
+        line: String,
+    ) {
         LogStore.append(line)
         if (room.isNullOrEmpty()) return
         val m = LEVEL.find(line) ?: return

@@ -2,17 +2,25 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("org.jlleitschuh.gradle.ktlint")
 }
 
 // Short git SHA embedded into BuildConfig, so any uploaded log identifies exactly
 // which build produced it. Falls back to "unknown" outside a git checkout.
-val gitCommit: String = try {
-    ProcessBuilder("git", "rev-parse", "--short", "HEAD")
-        .directory(rootDir).redirectErrorStream(true).start()
-        .inputStream.bufferedReader().readText().trim().ifEmpty { "unknown" }
-} catch (e: Exception) {
-    "unknown"
-}
+val gitCommit: String =
+    try {
+        ProcessBuilder("git", "rev-parse", "--short", "HEAD")
+            .directory(rootDir)
+            .redirectErrorStream(true)
+            .start()
+            .inputStream
+            .bufferedReader()
+            .readText()
+            .trim()
+            .ifEmpty { "unknown" }
+    } catch (e: Exception) {
+        "unknown"
+    }
 
 android {
     namespace = "dev.envoix.app"
@@ -63,6 +71,10 @@ android {
     }
 }
 
+ktlint {
+    android = true
+}
+
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2024.09.02")
     implementation(composeBom)
@@ -77,7 +89,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.6")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.6")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
-    implementation("com.google.zxing:core:3.5.3")               // QR encode + decode
+    implementation("com.google.zxing:core:3.5.3") // QR encode + decode
     // CameraX for the custom QR scanner (preview + frame analysis)
     implementation("androidx.camera:camera-core:1.3.4")
     implementation("androidx.camera:camera-camera2:1.3.4")

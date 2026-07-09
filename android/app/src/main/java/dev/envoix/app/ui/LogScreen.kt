@@ -95,11 +95,19 @@ fun LogScreen(onBack: () -> Unit) {
             TextButton(onClick = {
                 val server = settings.logServer.trimEnd('/')
                 scope.launch {
-                    val key = "app-" + java.text.SimpleDateFormat("MMddHHmmss", java.util.Locale.US)
-                        .format(java.util.Date())
-                    val ok = server.isNotEmpty() && LogUpload.upload(
-                        server, key, "app", Diagnostics.build(Diagnostics.Kind.App),
-                    )
+                    val key =
+                        "app-" +
+                            java.text
+                                .SimpleDateFormat("MMddHHmmss", java.util.Locale.US)
+                                .format(java.util.Date())
+                    val ok =
+                        server.isNotEmpty() &&
+                            LogUpload.upload(
+                                server,
+                                key,
+                                "app",
+                                Diagnostics.build(Diagnostics.Kind.App),
+                            )
                     Toast.makeText(context, if (ok) "Report sent → $key" else "Upload failed", Toast.LENGTH_LONG).show()
                 }
             }) { Text("Report", color = colors.accent, fontSize = 13.sp) }
@@ -115,10 +123,11 @@ fun LogScreen(onBack: () -> Unit) {
             }) { Icon(Icons.Default.ContentCopy, "Copy", tint = colors.accent) }
             IconButton(onClick = {
                 runCatching {
-                    val intent = Intent(Intent.ACTION_SEND).apply {
-                        type = "text/plain"
-                        putExtra(Intent.EXTRA_TEXT, tail(LogStore.dump(), CLIP_MAX))
-                    }
+                    val intent =
+                        Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_TEXT, tail(LogStore.dump(), CLIP_MAX))
+                        }
                     context.startActivity(Intent.createChooser(intent, "Share logs"))
                 }
             }) { Icon(Icons.Default.Share, "Share", tint = colors.accent) }
@@ -129,29 +138,46 @@ fun LogScreen(onBack: () -> Unit) {
 
         if (crashPending) {
             Row(
-                Modifier.fillMaxWidth().background(colors.warning.copy(alpha = 0.15f))
+                Modifier
+                    .fillMaxWidth()
+                    .background(colors.warning.copy(alpha = 0.15f))
                     .padding(horizontal = 12.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
                     "Previous session crashed",
-                    color = colors.warning, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                    color = colors.warning,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.weight(1f),
                 )
                 TextButton(onClick = {
                     val server = settings.logServer.trimEnd('/')
                     scope.launch {
-                        val key = "crash-" + java.text.SimpleDateFormat("MMddHHmmss", java.util.Locale.US)
-                            .format(java.util.Date())
-                        val ok = server.isNotEmpty() && LogUpload.upload(
-                            server, key, "crash",
-                            Diagnostics.build(Diagnostics.Kind.Crash),
-                        )
+                        val key =
+                            "crash-" +
+                                java.text
+                                    .SimpleDateFormat("MMddHHmmss", java.util.Locale.US)
+                                    .format(java.util.Date())
+                        val ok =
+                            server.isNotEmpty() &&
+                                LogUpload.upload(
+                                    server,
+                                    key,
+                                    "crash",
+                                    Diagnostics.build(Diagnostics.Kind.Crash),
+                                )
                         Toast.makeText(context, if (ok) "Uploaded → $key" else "Upload failed", Toast.LENGTH_LONG).show()
-                        if (ok) { Diagnostics.ackCrash(); crashPending = false }
+                        if (ok) {
+                            Diagnostics.ackCrash()
+                            crashPending = false
+                        }
                     }
                 }) { Text("Upload report", color = colors.warning, fontSize = 13.sp) }
-                TextButton(onClick = { Diagnostics.ackCrash(); crashPending = false }) {
+                TextButton(onClick = {
+                    Diagnostics.ackCrash()
+                    crashPending = false
+                }) {
                     Text("Dismiss", color = colors.muted, fontSize = 13.sp)
                 }
             }
@@ -199,7 +225,8 @@ fun LogScreen(onBack: () -> Unit) {
                             Text("Operations", color = colors.text, fontSize = 13.sp)
                             Text(
                                 "what you did · recent launches",
-                                color = colors.muted, fontSize = 11.sp,
+                                color = colors.muted,
+                                fontSize = 11.sp,
                             )
                         }
                         TextButton(onClick = {
@@ -207,17 +234,22 @@ fun LogScreen(onBack: () -> Unit) {
                         }) { Text("Copy", color = colors.accent, fontSize = 13.sp) }
                         if (canUpload) {
                             TextButton(onClick = {
-                                val key = "ops-" + java.text.SimpleDateFormat(
-                                    "MMddHHmmss", java.util.Locale.US,
-                                ).format(java.util.Date())
+                                val key =
+                                    "ops-" +
+                                        java.text
+                                            .SimpleDateFormat(
+                                                "MMddHHmmss",
+                                                java.util.Locale.US,
+                                            ).format(java.util.Date())
                                 val body = tail(OpLog.report(), UPLOAD_MAX)
                                 scope.launch {
                                     val ok = LogUpload.upload(settings.logServer, key, "ops", body)
-                                    Toast.makeText(
-                                        context,
-                                        if (ok) "Uploaded → $key" else "Upload failed",
-                                        Toast.LENGTH_LONG,
-                                    ).show()
+                                    Toast
+                                        .makeText(
+                                            context,
+                                            if (ok) "Uploaded → $key" else "Upload failed",
+                                            Toast.LENGTH_LONG,
+                                        ).show()
                                 }
                             }) { Text("Upload", color = colors.accent, fontSize = 13.sp) }
                         }
@@ -243,17 +275,22 @@ fun LogScreen(onBack: () -> Unit) {
                             }) { Text("Copy", color = colors.accent, fontSize = 13.sp) }
                             if (canUpload) {
                                 TextButton(onClick = {
-                                    val key = "app-" + java.text.SimpleDateFormat(
-                                        "MMddHHmmss", java.util.Locale.US,
-                                    ).format(java.util.Date())
+                                    val key =
+                                        "app-" +
+                                            java.text
+                                                .SimpleDateFormat(
+                                                    "MMddHHmmss",
+                                                    java.util.Locale.US,
+                                                ).format(java.util.Date())
                                     val body = tail(LogStore.readSession(s.file), UPLOAD_MAX)
                                     scope.launch {
                                         val ok = LogUpload.upload(settings.logServer, key, "app", body)
-                                        Toast.makeText(
-                                            context,
-                                            if (ok) "Uploaded → $key" else "Upload failed",
-                                            Toast.LENGTH_LONG,
-                                        ).show()
+                                        Toast
+                                            .makeText(
+                                                context,
+                                                if (ok) "Uploaded → $key" else "Upload failed",
+                                                Toast.LENGTH_LONG,
+                                            ).show()
                                     }
                                 }) { Text("Upload", color = colors.accent, fontSize = 13.sp) }
                             }
@@ -269,7 +306,10 @@ fun LogScreen(onBack: () -> Unit) {
 /** The last [maxBytes] UTF-8 bytes of [text], prefixed with a note when clipped.
  *  A crash lives at the end of a log, so the tail is what matters — and both the
  *  clipboard (Binder) and the rdz POST reject bodies over ~0.5-1 MB. */
-private fun tail(text: String, maxBytes: Int): String {
+private fun tail(
+    text: String,
+    maxBytes: Int,
+): String {
     val bytes = text.toByteArray(Charsets.UTF_8)
     if (bytes.size <= maxBytes) return text
     val note = "[… truncated — last ${maxBytes / 1024} KB of ${bytes.size / 1024} KB]\n"
@@ -278,21 +318,28 @@ private fun tail(text: String, maxBytes: Int): String {
 
 /** Copy the log's tail to the clipboard, guarded so a multi-MB log can never throw
  *  TransactionTooLargeException (the crash the naive copy caused). */
-private fun copyToClipboard(clipboard: ClipboardManager, context: Context, text: String, label: String) {
+private fun copyToClipboard(
+    clipboard: ClipboardManager,
+    context: Context,
+    text: String,
+    label: String,
+) {
     val body = tail(text, CLIP_MAX)
     val ok = runCatching { clipboard.setText(AnnotatedString(body)) }.isSuccess
-    val msg = when {
-        !ok -> "Copy failed"
-        body.length != text.length -> "Copied last ${CLIP_MAX / 1024} KB of $label"
-        else -> "Copied $label"
-    }
+    val msg =
+        when {
+            !ok -> "Copy failed"
+            body.length != text.length -> "Copied last ${CLIP_MAX / 1024} KB of $label"
+            else -> "Copied $label"
+        }
     Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
 }
 
 @Composable
-private fun lineColor(line: String) = when {
-    line.contains(" ERROR ") || line.startsWith("FATAL") -> Envoix.colors.danger
-    line.contains(" WARN ") -> Envoix.colors.warning
-    line.contains(" INFO ") -> Envoix.colors.text
-    else -> Envoix.colors.muted
-}
+private fun lineColor(line: String) =
+    when {
+        line.contains(" ERROR ") || line.startsWith("FATAL") -> Envoix.colors.danger
+        line.contains(" WARN ") -> Envoix.colors.warning
+        line.contains(" INFO ") -> Envoix.colors.text
+        else -> Envoix.colors.muted
+    }

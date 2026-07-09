@@ -24,6 +24,7 @@ object OpLog {
     val lines: StateFlow<List<String>> = _lines.asStateFlow()
 
     private var file: File? = null
+
     // The SAME clock family as the core trace (UTC ISO), so op lines and core
     // lines correspond 1:1 when read side by side or interleaved.
     private val clock = java.time.format.DateTimeFormatter.ISO_INSTANT
@@ -39,7 +40,10 @@ object OpLog {
     }
 
     @Synchronized
-    fun add(op: String, transferId: Long? = null) {
+    fun add(
+        op: String,
+        transferId: Long? = null,
+    ) {
         val line = "${clock.format(java.time.Instant.now())}  $op"
         buffer.addLast(line)
         while (buffer.size > CAP) buffer.removeFirst()
@@ -54,6 +58,7 @@ object OpLog {
 
     /** The persisted breadcrumbs across recent launches (for copy / upload); falls
      *  back to the in-memory buffer if the file is unreadable. */
-    fun report(): String = file?.let { runCatching { it.readText() }.getOrNull() }?.ifBlank { null }
-        ?: buffer.joinToString("\n")
+    fun report(): String =
+        file?.let { runCatching { it.readText() }.getOrNull() }?.ifBlank { null }
+            ?: buffer.joinToString("\n")
 }

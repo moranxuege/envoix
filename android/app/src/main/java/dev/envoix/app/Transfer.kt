@@ -38,16 +38,20 @@ data class Transfer(
 )
 
 val Status.isTerminal: Boolean
-    get() = this == Status.Completed || this == Status.Unconfirmed ||
-        this == Status.Failed || this == Status.Cancelled
+    get() =
+        this == Status.Completed ||
+            this == Status.Unconfirmed ||
+            this == Status.Failed ||
+            this == Status.Cancelled
 
 /** Human-readable byte count (the ONE implementation - was duplicated). */
-fun humanBytes(n: Long): String = when {
-    n < 1024 -> "$n B"
-    n < 1024 * 1024 -> "%.0f KB".format(n / 1024.0)
-    n < 1024L * 1024 * 1024 -> "%.1f MB".format(n / 1048576.0)
-    else -> "%.2f GB".format(n / 1073741824.0)
-}
+fun humanBytes(n: Long): String =
+    when {
+        n < 1024 -> "$n B"
+        n < 1024 * 1024 -> "%.0f KB".format(n / 1024.0)
+        n < 1024L * 1024 * 1024 -> "%.1f MB".format(n / 1048576.0)
+        else -> "%.2f GB".format(n / 1073741824.0)
+    }
 
 /** Trailing-window average of the 250 ms-sampled rate (~3 s): the headline
  *  speed/ETA smoothing policy, kept beside the model (not in a composable). */

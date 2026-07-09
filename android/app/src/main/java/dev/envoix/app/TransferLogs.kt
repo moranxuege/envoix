@@ -26,7 +26,10 @@ object TransferLogs {
 
     /** Append one (already formatted) line to a transfer's durable log. */
     @Synchronized
-    fun append(id: Long, line: String) {
+    fun append(
+        id: Long,
+        line: String,
+    ) {
         if (!::dir.isInitialized) return
         val f = file(id)
         runCatching { f.appendText(line + "\n") }
@@ -41,8 +44,7 @@ object TransferLogs {
     }
 
     /** The complete durable log for a card, or "" when none. */
-    fun read(id: Long): String =
-        if (::dir.isInitialized) runCatching { file(id).readText() }.getOrDefault("") else ""
+    fun read(id: Long): String = if (::dir.isInitialized) runCatching { file(id).readText() }.getOrDefault("") else ""
 
     /** D2: Remove deletes the card's log with the card. */
     fun delete(id: Long) {

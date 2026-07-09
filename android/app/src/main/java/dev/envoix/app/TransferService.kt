@@ -9,8 +9,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.net.Uri
-import android.provider.OpenableColumns
 import android.os.IBinder
+import android.provider.OpenableColumns
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -43,19 +43,21 @@ private data class Spec(
     /** The session params JSON for [Native.createSession]. `resume` false for a
      *  user-initiated NEW transfer (fresh semantics); true when re-creating a
      *  session that should honor partials/receipts. */
-    fun paramsJson(resume: Boolean): String = JSONObject().apply {
-        put("direction", direction)
-        put("code", room)
-        put("broker", broker)
-        put("relay", relay)
-        put("path", path)
-        put("chunk_size", chunkSize)
-        put("candidates_allow", candidatesAllow)
-        put("candidates_deny", candidatesDeny)
-        put("use_room", useRoom)
-        put("use_mdns", useMdns)
-        put("resume", resume)
-    }.toString()
+    fun paramsJson(resume: Boolean): String =
+        JSONObject()
+            .apply {
+                put("direction", direction)
+                put("code", room)
+                put("broker", broker)
+                put("relay", relay)
+                put("path", path)
+                put("chunk_size", chunkSize)
+                put("candidates_allow", candidatesAllow)
+                put("candidates_deny", candidatesDeny)
+                put("use_room", useRoom)
+                put("use_mdns", useMdns)
+                put("resume", resume)
+            }.toString()
 }
 
 /**
@@ -81,7 +83,8 @@ class TransferService : Service() {
     /** Held while an mDNS-enabled session runs; Android gates multicast behind it. */
     private val multicastLock by lazy {
         (getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager)
-            .createMulticastLock("envoix-mdns").apply { setReferenceCounted(true) }
+            .createMulticastLock("envoix-mdns")
+            .apply { setReferenceCounted(true) }
     }
 
     /** True when the active network actually reaches the internet (not just a
@@ -101,36 +104,47 @@ class TransferService : Service() {
         super.onCreate()
         val mgr = getSystemService(NotificationManager::class.java)
         mgr.createNotificationChannel(
-            NotificationChannel(CHANNEL, "Transfers", NotificationManager.IMPORTANCE_LOW)
+            NotificationChannel(CHANNEL, "Transfers", NotificationManager.IMPORTANCE_LOW),
         )
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+    override fun onStartCommand(
+        intent: Intent?,
+        flags: Int,
+        startId: Int,
+    ): Int {
         when (intent?.action) {
             ACTION_START -> {
                 val direction = intent.getStringExtra(EXTRA_DIRECTION)
                 val room = intent.getStringExtra(EXTRA_ROOM)
                 val path = intent.getStringExtra(EXTRA_PATH)
                 if (direction == null || room == null || path == null) return START_NOT_STICKY
-                val spec = Spec(
-                    direction, room, path,
-                    intent.getStringExtra(EXTRA_BROKER) ?: Endpoints.BROKER,
-                    intent.getStringExtra(EXTRA_RELAY) ?: Endpoints.RELAY,
-                    intent.getStringExtra(EXTRA_CHUNK_SIZE) ?: "",
-                    intent.getStringExtra(EXTRA_CAND_ALLOW) ?: "",
-                    intent.getStringExtra(EXTRA_CAND_DENY) ?: "",
-                    intent.getStringExtra(EXTRA_QR),
-                    SettingsStore.settings.value.useRoom && hasInternet(),
-                    SettingsStore.settings.value.useMdns,
-                )
+                val spec =
+                    Spec(
+                        direction,
+                        room,
+                        path,
+                        intent.getStringExtra(EXTRA_BROKER) ?: Endpoints.BROKER,
+                        intent.getStringExtra(EXTRA_RELAY) ?: Endpoints.RELAY,
+                        intent.getStringExtra(EXTRA_CHUNK_SIZE) ?: "",
+                        intent.getStringExtra(EXTRA_CAND_ALLOW) ?: "",
+                        intent.getStringExtra(EXTRA_CAND_DENY) ?: "",
+                        intent.getStringExtra(EXTRA_QR),
+                        SettingsStore.settings.value.useRoom && hasInternet(),
+                        SettingsStore.settings.value.useMdns,
+                    )
                 enterForeground()
                 val id = TransferRepository.create(spec.dir(), room)
                 TransferRepository.update(id) {
                     it.copy(
                         qrPayload = spec.qrPayload,
                         // Show the outgoing file name right away; receives learn it on Started.
-                        fileName = if (spec.dir() == Direction.Send && spec.path.isNotEmpty())
-                            File(spec.path).name else it.fileName,
+                        fileName =
+                            if (spec.dir() == Direction.Send && spec.path.isNotEmpty()) {
+                                File(spec.path).name
+                            } else {
+                                it.fileName
+                            },
                     )
                 }
                 specs[id] = spec
@@ -193,14 +207,15 @@ class TransferService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun enterForeground() =
-        startForeground(NOTIF_ID, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+    private fun enterForeground() = startForeground(NOTIF_ID, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
 
     private val logTime = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
 
     /** Append a timestamped line to a transfer's log, keeping the last 60. */
-    private fun addLog(cur: List<String>, line: String): List<String> =
-        (cur + "${logTime.format(java.util.Date())}  $line").takeLast(TransferRepository.LOG_CAP)
+    private fun addLog(
+        cur: List<String>,
+        line: String,
+    ): List<String> = (cur + "${logTime.format(java.util.Date())}  $line").takeLast(TransferRepository.LOG_CAP)
 
     /**
      * Restore persisted transfer records (roadmap #5): recreate each card with
@@ -217,31 +232,54 @@ class TransferService : Service() {
             val params = rec.optJSONObject("params") ?: continue
             val direction = if (params.optString("direction") == "Send") "send" else "receive"
             val sources = params.optJSONArray("sources")
-            var code = ""; var broker = ""; var useRoom = false; var useMdns = false
+            var code = ""
+            var broker = ""
+            var useRoom = false
+            var useMdns = false
             for (j in 0 until (sources?.length() ?: 0)) {
                 val src = sources!!.optJSONObject(j) ?: continue
-                src.optJSONObject("Room")?.let { useRoom = true; code = it.optString("code"); broker = it.optString("broker") }
-                src.optJSONObject("Mdns")?.let { useMdns = true; if (code.isEmpty()) code = it.optString("token") }
+                src.optJSONObject("Room")?.let {
+                    useRoom = true
+                    code = it.optString("code")
+                    broker = it.optString("broker")
+                }
+                src.optJSONObject("Mdns")?.let {
+                    useMdns = true
+                    if (code.isEmpty()) code = it.optString("token")
+                }
             }
             if (code.isEmpty()) continue
             if (!TransferRepository.restoreCard(id, if (direction == "send") Direction.Send else Direction.Receive, code)) continue
-            val spec = Spec(
-                direction, code, params.optString("path"),
-                broker.ifEmpty { Endpoints.BROKER },
-                params.optJSONObject("options")?.optString("relay").orEmpty().ifEmpty { Endpoints.RELAY },
-                "", "", "", null, useRoom, useMdns,
-            )
+            val spec =
+                Spec(
+                    direction,
+                    code,
+                    params.optString("path"),
+                    broker.ifEmpty { Endpoints.BROKER },
+                    params
+                        .optJSONObject("options")
+                        ?.optString("relay")
+                        .orEmpty()
+                        .ifEmpty { Endpoints.RELAY },
+                    "",
+                    "",
+                    "",
+                    null,
+                    useRoom,
+                    useMdns,
+                )
             specs[id] = spec
             lastSeq[id] = 0L
-            val job = scope.launch {
-                NativeSession.restore(id).collect { notice ->
-                    when (notice.optString("notice")) {
-                        "snapshot" -> onSnapshot(id, spec, notice)
-                        "fetch_receipt" -> onFetchReceipt(id, notice.optString("key"))
-                        "post_receipt" -> onPostReceipt(id, notice)
+            val job =
+                scope.launch {
+                    NativeSession.restore(id).collect { notice ->
+                        when (notice.optString("notice")) {
+                            "snapshot" -> onSnapshot(id, spec, notice)
+                            "fetch_receipt" -> onFetchReceipt(id, notice.optString("key"))
+                            "post_receipt" -> onPostReceipt(id, notice)
+                        }
                     }
                 }
-            }
             jobs[id] = job
             OpLog.add("restored transfer id=$id")
         }
@@ -254,7 +292,11 @@ class TransferService : Service() {
      * is seconds - hiding it made Send look dead). Runs in the service scope,
      * so a rotation mid-copy no longer kills the send.
      */
-    private fun stageAndStart(id: Long, spec0: Spec, uri: Uri) {
+    private fun stageAndStart(
+        id: Long,
+        spec0: Spec,
+        uri: Uri,
+    ) {
         scope.launch(Dispatchers.IO) {
             val name = displayName(uri) ?: "upload.bin"
             val size = querySize(uri)
@@ -262,31 +304,33 @@ class TransferService : Service() {
                 it.copy(fileName = name, total = size, log = addLog(it.log, "preparing · staging $name…"))
             }
             val out = File(File(cacheDir, "send").apply { mkdirs() }, name)
-            val ok = runCatching {
-                contentResolver.openInputStream(uri)!!.use { input ->
-                    out.outputStream().use { o ->
-                        val buf = ByteArray(1 shl 20)
-                        var copied = 0L
-                        var last = 0L
-                        while (true) {
-                            val n = input.read(buf)
-                            if (n < 0) break
-                            o.write(buf, 0, n)
-                            copied += n
-                            val now = System.currentTimeMillis()
-                            if (now - last > 150) {
-                                last = now
-                                TransferRepository.update(id) { it.copy(bytes = copied) }
+            val ok =
+                runCatching {
+                    contentResolver.openInputStream(uri)!!.use { input ->
+                        out.outputStream().use { o ->
+                            val buf = ByteArray(1 shl 20)
+                            var copied = 0L
+                            var last = 0L
+                            while (true) {
+                                val n = input.read(buf)
+                                if (n < 0) break
+                                o.write(buf, 0, n)
+                                copied += n
+                                val now = System.currentTimeMillis()
+                                if (now - last > 150) {
+                                    last = now
+                                    TransferRepository.update(id) { it.copy(bytes = copied) }
+                                }
                             }
                         }
                     }
-                }
-            }.isSuccess
+                }.isSuccess
             if (!ok) {
                 out.delete()
                 TransferRepository.update(id) {
                     it.copy(
-                        status = Status.Failed, error = "couldn't read the picked file",
+                        status = Status.Failed,
+                        error = "couldn't read the picked file",
                         log = addLog(it.log, "failed · staging the picked file"),
                     )
                 }
@@ -301,15 +345,21 @@ class TransferService : Service() {
     }
 
     private fun displayName(uri: Uri): String? =
-        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+        contentResolver
+            .query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
             ?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
 
     private fun querySize(uri: Uri): Long =
-        contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)
+        contentResolver
+            .query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)
             ?.use { c -> if (c.moveToFirst()) c.getLong(0) else 0L } ?: 0L
 
     /** Create the Rust session and render its notice stream. */
-    private fun startSession(id: Long, spec: Spec, resume: Boolean) {
+    private fun startSession(
+        id: Long,
+        spec: Spec,
+        resume: Boolean,
+    ) {
         lastSeq[id] = 0L
         // Drain any residue BEFORE the transfer: a finalized file left in
         // staging (e.g. by a failed publish) makes the core's existing-final
@@ -318,46 +368,52 @@ class TransferService : Service() {
         if (spec.dir() == Direction.Receive) {
             scope.launch(Dispatchers.IO) { sweepStaging(spec.path, attributeTo = null) }
         }
-        val job = scope.launch {
-            if (spec.useMdns) runCatching { multicastLock.acquire() }
-            try {
-                NativeSession.start(id, spec.paramsJson(resume)).collect { notice ->
-                    when (notice.optString("notice")) {
-                        "snapshot" -> onSnapshot(id, spec, notice)
-                        "fetch_receipt" -> onFetchReceipt(id, notice.optString("key"))
-                        "post_receipt" -> onPostReceipt(id, notice)
+        val job =
+            scope.launch {
+                if (spec.useMdns) runCatching { multicastLock.acquire() }
+                try {
+                    NativeSession.start(id, spec.paramsJson(resume)).collect { notice ->
+                        when (notice.optString("notice")) {
+                            "snapshot" -> onSnapshot(id, spec, notice)
+                            "fetch_receipt" -> onFetchReceipt(id, notice.optString("key"))
+                            "post_receipt" -> onPostReceipt(id, notice)
+                        }
                     }
+                } finally {
+                    if (spec.useMdns) runCatching { multicastLock.release() }
                 }
-            } finally {
-                if (spec.useMdns) runCatching { multicastLock.release() }
             }
-        }
         jobs[id] = job
         updateNotification()
     }
 
     /** Map one machine snapshot onto the card. The machine is authoritative:
      *  no interpretation, no guards — just rendering. */
-    private fun onSnapshot(id: Long, spec: Spec, s: JSONObject) {
+    private fun onSnapshot(
+        id: Long,
+        spec: Spec,
+        s: JSONObject,
+    ) {
         val seq = s.optLong("seq")
         val prev = lastSeq[id] ?: 0L
         if (seq <= prev) return
         lastSeq[id] = seq
 
         val state = s.optString("state")
-        val status = when (state) {
-            "waiting" -> Status.Waiting
-            "connecting" -> Status.Connecting
-            "verifying" -> Status.Verifying
-            "transferring" -> Status.Transferring
-            "confirming" -> Status.Confirming
-            "paused" -> Status.Paused
-            "unconfirmed" -> Status.Unconfirmed
-            "completed" -> Status.Completed
-            "failed" -> Status.Failed
-            "cancelled" -> Status.Cancelled
-            else -> return
-        }
+        val status =
+            when (state) {
+                "waiting" -> Status.Waiting
+                "connecting" -> Status.Connecting
+                "verifying" -> Status.Verifying
+                "transferring" -> Status.Transferring
+                "confirming" -> Status.Confirming
+                "paused" -> Status.Paused
+                "unconfirmed" -> Status.Unconfirmed
+                "completed" -> Status.Completed
+                "failed" -> Status.Failed
+                "cancelled" -> Status.Cancelled
+                else -> return
+            }
         val reason = s.optString("reason").ifEmpty { null }
         val bytes = s.optLong("bytes")
         val total = s.optLong("total")
@@ -371,19 +427,25 @@ class TransferService : Service() {
             t.copy(
                 status = status,
                 attempt = s.optInt("attempt", t.attempt),
-                proofDelivered = s.optJSONObject("facts")?.optBoolean("proof_delivered")
-                    ?: t.proofDelivered,
+                proofDelivered =
+                    s.optJSONObject("facts")?.optBoolean("proof_delivered")
+                        ?: t.proofDelivered,
                 transferId = s.optString("transfer_id").ifEmpty { t.transferId },
                 fileName = s.optString("file_name").ifEmpty { t.fileName },
                 bytes = bytes,
                 total = if (total > 0) total else t.total,
                 speedBps = if (status == Status.Transferring) speed else 0.0,
                 avgBps = avg,
-                speedHistory = if (status == Status.Transferring && speed > 0)
-                    (t.speedHistory + speed).takeLast(90) else t.speedHistory,
+                speedHistory =
+                    if (status == Status.Transferring && speed > 0) {
+                        (t.speedHistory + speed).takeLast(90)
+                    } else {
+                        t.speedHistory
+                    },
                 pathType = path?.substringBefore(' ') ?: t.pathType,
-                pathAddr = path?.substringAfter('(', "")?.removeSuffix(")")?.ifEmpty { null }
-                    ?: t.pathAddr,
+                pathAddr =
+                    path?.substringAfter('(', "")?.removeSuffix(")")?.ifEmpty { null }
+                        ?: t.pathAddr,
                 error = if (status == Status.Failed || status == Status.Unconfirmed) reason else null,
                 log = entered?.let { addLog(t.log, it) } ?: t.log,
             )
@@ -407,45 +469,71 @@ class TransferService : Service() {
     }
 
     /** Human line for a state transition, for the card's log drawer. */
-    private fun stateLogLine(state: String, s: JSONObject, bytes: Long): String = when (state) {
-        "waiting" -> "waiting for peer…"
-        "connecting" -> "pairing in room…"
-        "verifying" -> "verifying…"
-        "transferring" -> "started · ${s.optString("file_name")}"
-        "confirming" -> "confirming delivery…"
-        "paused" -> when (s.optString("origin")) {
-            "peer" -> "paused by peer (resumable)"
-            "lost" -> "paused · interrupted, $bytes B kept (resumable)"
-            else -> "paused"
+    private fun stateLogLine(
+        state: String,
+        s: JSONObject,
+        bytes: Long,
+    ): String =
+        when (state) {
+            "waiting" -> "waiting for peer…"
+            "connecting" -> "pairing in room…"
+            "verifying" -> "verifying…"
+            "transferring" -> "started · ${s.optString("file_name")}"
+            "confirming" -> "confirming delivery…"
+            "paused" ->
+                when (s.optString("origin")) {
+                    "peer" -> "paused by peer (resumable)"
+                    "lost" -> "paused · interrupted, $bytes B kept (resumable)"
+                    else -> "paused"
+                }
+            "unconfirmed" -> "sent · unconfirmed — awaiting proof (mailbox)"
+            "completed" -> "complete"
+            "failed" -> "failed · ${s.optString("reason")}"
+            "cancelled" -> "cancelled"
+            else -> state
         }
-        "unconfirmed" -> "sent · unconfirmed — awaiting proof (mailbox)"
-        "completed" -> "complete"
-        "failed" -> "failed · ${s.optString("reason")}"
-        "cancelled" -> "cancelled"
-        else -> state
-    }
 
     /** Courier: GET the mailbox slot and hand the blob back to the driver. */
-    private fun onFetchReceipt(id: Long, key: String) {
+    private fun onFetchReceipt(
+        id: Long,
+        key: String,
+    ) {
         if (key.isEmpty()) return
-        val server = SettingsStore.settings.value.logServer.trimEnd('/')
+        val server =
+            SettingsStore.settings.value.logServer
+                .trimEnd('/')
         if (server.isEmpty()) return
         scope.launch {
             val blob = LogUpload.getBytes("$server/receipts/$key")
-            val b64 = blob?.let { java.util.Base64.getEncoder().encodeToString(it) } ?: ""
+            val b64 =
+                blob?.let {
+                    java.util.Base64
+                        .getEncoder()
+                        .encodeToString(it)
+                } ?: ""
             Native.receiptResponse(id, b64)
         }
     }
 
     /** Courier: POST the sealed receipt blob (with backoff — the whole point
      *  of the mailbox is that this can retry long after the ack could not). */
-    private fun onPostReceipt(id: Long, notice: JSONObject) {
+    private fun onPostReceipt(
+        id: Long,
+        notice: JSONObject,
+    ) {
         val key = notice.optString("key")
         val b64 = notice.optString("blob")
         if (key.isEmpty() || b64.isEmpty()) return
-        val server = SettingsStore.settings.value.logServer.trimEnd('/')
+        val server =
+            SettingsStore.settings.value.logServer
+                .trimEnd('/')
         if (server.isEmpty()) return
-        val bytes = runCatching { java.util.Base64.getDecoder().decode(b64) }.getOrNull() ?: return
+        val bytes =
+            runCatching {
+                java.util.Base64
+                    .getDecoder()
+                    .decode(b64)
+            }.getOrNull() ?: return
         scope.launch {
             for (backoff in listOf(0L, 5_000L, 30_000L)) {
                 if (backoff > 0) delay(backoff)
@@ -470,19 +558,26 @@ class TransferService : Service() {
      * sweeps only; a start-of-session sweep publishes without attribution -
      * the residue belongs to some older card).
      */
-    private fun sweepStaging(outputDir: String, attributeTo: Long?) {
-        val finals = File(outputDir)
-            .listFiles { f -> f.isFile && !f.name.startsWith(".") } ?: return
+    private fun sweepStaging(
+        outputDir: String,
+        attributeTo: Long?,
+    ) {
+        val finals =
+            File(outputDir)
+                .listFiles { f -> f.isFile && !f.name.startsWith(".") } ?: return
         val s = SettingsStore.settings.value
         for (src in finals) {
-            val uri = MediaStoreSaver.saveReceived(this, src, src.name, s.saveTreeUri, s.saveFolder)
-                ?: continue
+            val uri =
+                MediaStoreSaver.saveReceived(this, src, src.name, s.saveTreeUri, s.saveFolder)
+                    ?: continue
             src.delete()
             if (attributeTo != null) {
                 TransferRepository.update(attributeTo) {
-                    if (it.fileName == null || it.fileName == src.name)
+                    if (it.fileName == null || it.fileName == src.name) {
                         it.copy(fileName = it.fileName ?: src.name, savedUri = uri.toString())
-                    else it
+                    } else {
+                        it
+                    }
                 }
             }
             LogStore.append("app: saved ${src.name} to Downloads")
@@ -491,24 +586,28 @@ class TransferService : Service() {
 
     /** Active machine states pin the tray; everything else rests. */
     private fun isActive(st: Status) =
-        st == Status.Waiting || st == Status.Connecting || st == Status.Verifying ||
-            st == Status.Transferring || st == Status.Confirming
+        st == Status.Waiting ||
+            st == Status.Connecting ||
+            st == Status.Verifying ||
+            st == Status.Transferring ||
+            st == Status.Confirming
 
     private fun arrow(t: Transfer) = if (t.direction == Direction.Send) "↑" else "↓"
 
-    private fun trayWord(t: Transfer): String = when (t.status) {
-        Status.Waiting -> "Waiting for peer"
-        Status.Connecting -> "Pairing…"
-        Status.Verifying -> "Verifying"
-        Status.Confirming -> "Confirming"
-        Status.Transferring ->
-            if (t.total > 0) "${((t.bytes * 100) / t.total).toInt().coerceIn(0, 100)}%" else "…"
-        Status.Paused -> "Paused"
-        Status.Unconfirmed -> "Unconfirmed"
-        Status.Completed -> "Done"
-        Status.Failed -> "Failed"
-        Status.Cancelled -> "Cancelled"
-    }
+    private fun trayWord(t: Transfer): String =
+        when (t.status) {
+            Status.Waiting -> "Waiting for peer"
+            Status.Connecting -> "Pairing…"
+            Status.Verifying -> "Verifying"
+            Status.Confirming -> "Confirming"
+            Status.Transferring ->
+                if (t.total > 0) "${((t.bytes * 100) / t.total).toInt().coerceIn(0, 100)}%" else "…"
+            Status.Paused -> "Paused"
+            Status.Unconfirmed -> "Unconfirmed"
+            Status.Completed -> "Done"
+            Status.Failed -> "Failed"
+            Status.Cancelled -> "Cancelled"
+        }
 
     /**
      * The tray is a THIRD renderer of the repository cards (after the list and
@@ -516,41 +615,57 @@ class TransferService : Service() {
      * disagree with the cards (the old tray said "transferring" forever).
      */
     private fun notification(): Notification {
-        val open = PendingIntent.getActivity(
-            this, 0, Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
+        val open =
+            PendingIntent.getActivity(
+                this,
+                0,
+                Intent(this, MainActivity::class.java),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
         val cards = TransferRepository.transfers.value
         val active = cards.filter { isActive(it.status) }
-        val b = NotificationCompat.Builder(this, CHANNEL)
-            .setSmallIcon(android.R.drawable.stat_sys_upload)
-            .setOngoing(active.isNotEmpty())
-            .setOnlyAlertOnce(true)
-            .setContentIntent(open)
+        val b =
+            NotificationCompat
+                .Builder(this, CHANNEL)
+                .setSmallIcon(android.R.drawable.stat_sys_upload)
+                .setOngoing(active.isNotEmpty())
+                .setOnlyAlertOnce(true)
+                .setContentIntent(open)
         when {
             active.isEmpty() -> {
                 // Final summary: outcomes, never a stale "transferring".
                 val done = cards.count { it.status == Status.Completed }
                 val paused = cards.count { it.status == Status.Paused || it.status == Status.Unconfirmed }
                 val failed = cards.count { it.status == Status.Failed }
-                val parts = buildList {
-                    if (done > 0) add("$done done")
-                    if (paused > 0) add("$paused paused")
-                    if (failed > 0) add("$failed failed")
-                }
+                val parts =
+                    buildList {
+                        if (done > 0) add("$done done")
+                        if (paused > 0) add("$paused paused")
+                        if (failed > 0) add("$failed failed")
+                    }
                 b.setContentTitle("Envoix").setContentText(
-                    if (parts.isEmpty()) "No transfers"
-                    else "All transfers finished · ${parts.joinToString(", ")}"
+                    if (parts.isEmpty()) {
+                        "No transfers"
+                    } else {
+                        "All transfers finished · ${parts.joinToString(", ")}"
+                    },
                 )
             }
             active.size == 1 -> {
                 val t = active.single()
                 b.setSmallIcon(
-                    if (t.direction == Direction.Send) android.R.drawable.stat_sys_upload
-                    else android.R.drawable.stat_sys_download,
+                    if (t.direction == Direction.Send) {
+                        android.R.drawable.stat_sys_upload
+                    } else {
+                        android.R.drawable.stat_sys_download
+                    },
                 )
-                val speed = if (t.status == Status.Transferring && t.speedBps > 0)
-                    " · ${humanBytes(t.speedBps.toLong())}/s" else ""
+                val speed =
+                    if (t.status == Status.Transferring && t.speedBps > 0) {
+                        " · ${humanBytes(t.speedBps.toLong())}/s"
+                    } else {
+                        ""
+                    }
                 b.setContentTitle("${arrow(t)} ${t.fileName ?: "…"}")
                 b.setContentText(trayWord(t) + speed)
                 if (t.status == Status.Transferring && t.total > 0) {
@@ -561,11 +676,15 @@ class TransferService : Service() {
             }
             else -> {
                 val up = active.count { it.direction == Direction.Send }
-                b.setContentTitle("${active.size} transfers · ${up}↑ ${active.size - up}↓")
+                b.setContentTitle("${active.size} transfers · $up↑ ${active.size - up}↓")
                 val style = NotificationCompat.InboxStyle()
                 for (t in active.take(5)) {
-                    val speed = if (t.status == Status.Transferring && t.speedBps > 0)
-                        " · ${humanBytes(t.speedBps.toLong())}/s" else ""
+                    val speed =
+                        if (t.status == Status.Transferring && t.speedBps > 0) {
+                            " · ${humanBytes(t.speedBps.toLong())}/s"
+                        } else {
+                            ""
+                        }
                     style.addLine("${arrow(t)} ${t.fileName ?: "…"} · ${trayWord(t)}$speed")
                 }
                 b.setStyle(style)
@@ -664,64 +783,79 @@ class TransferService : Service() {
                     putExtra(EXTRA_CAND_DENY, candidatesDeny)
                     putExtra(EXTRA_QR, qrPayload)
                     putExtra(EXTRA_SOURCE_URI, sourceUri)
-                }
+                },
             )
         }
 
-        fun cancel(context: Context, id: Long) {
+        fun cancel(
+            context: Context,
+            id: Long,
+        ) {
             context.startService(
                 Intent(context, TransferService::class.java).apply {
                     action = ACTION_CANCEL
                     putExtra(EXTRA_ID, id)
-                }
+                },
             )
         }
 
         /** Stop a transfer but keep its partial + spec, so it can be resumed. */
-        fun pause(context: Context, id: Long) {
+        fun pause(
+            context: Context,
+            id: Long,
+        ) {
             context.startService(
                 Intent(context, TransferService::class.java).apply {
                     action = ACTION_PAUSE
                     putExtra(EXTRA_ID, id)
-                }
+                },
             )
         }
 
         /** Resume/retry: a live session bumps its attempt; a dead one is
          *  re-created from its spec with resume semantics. */
-        fun resume(context: Context, id: Long) {
+        fun resume(
+            context: Context,
+            id: Long,
+        ) {
             context.startForegroundService(
                 Intent(context, TransferService::class.java).apply {
                     action = ACTION_RESUME
                     putExtra(EXTRA_ID, id)
-                }
+                },
             )
         }
 
         /** Serve a peer's re-verify from a Completed card (service, not resume). */
-        fun reverify(context: Context, id: Long) {
+        fun reverify(
+            context: Context,
+            id: Long,
+        ) {
             context.startService(
                 Intent(context, TransferService::class.java).apply {
                     action = ACTION_REVERIFY
                     putExtra(EXTRA_ID, id)
-                }
+                },
             )
         }
 
         /** Restore persisted transfer records into cards + idle sessions. */
         fun restoreAll(context: Context) {
             context.startService(
-                Intent(context, TransferService::class.java).apply { action = ACTION_RESTORE_ALL }
+                Intent(context, TransferService::class.java).apply { action = ACTION_RESTORE_ALL },
             )
         }
 
         /** Remove the card AND its on-disk leftovers (D2: the one true abandon). */
-        fun remove(context: Context, id: Long) {
+        fun remove(
+            context: Context,
+            id: Long,
+        ) {
             context.startService(
                 Intent(context, TransferService::class.java).apply {
                     action = ACTION_REMOVE
                     putExtra(EXTRA_ID, id)
-                }
+                },
             )
         }
     }

@@ -24,7 +24,6 @@ import kotlinx.coroutines.launch
 private enum class Screen { Home, Logs, Settings }
 
 class MainActivity : ComponentActivity() {
-
     private val vm: TransferViewModel by viewModels()
 
     private val requestNotif =
@@ -67,11 +66,11 @@ class MainActivity : ComponentActivity() {
     /** Open a received file (a Downloads content Uri) in whatever app handles it. */
     private fun openReceived(t: Transfer) {
         val uri = t.savedUri?.let { Uri.parse(it) } ?: return
-        val view = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, "*/*")
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
+        val view =
+            Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "*/*")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
         runCatching { startActivity(Intent.createChooser(view, "Open with")) }
     }
-
 }

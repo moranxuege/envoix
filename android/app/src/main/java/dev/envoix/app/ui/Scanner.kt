@@ -16,7 +16,6 @@ import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -68,11 +67,19 @@ import java.util.concurrent.Executors
  * [onScanned] fires once with the decoded text.
  */
 @Composable
-fun InlineScanner(onScanned: (String) -> Unit, modifier: Modifier = Modifier) {
+fun InlineScanner(
+    onScanned: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val colors = Envoix.colors
     val context = LocalContext.current
     var handled by remember { mutableStateOf(false) }
-    val deliver: (String) -> Unit = { if (!handled) { handled = true; onScanned(it) } }
+    val deliver: (String) -> Unit = {
+        if (!handled) {
+            handled = true
+            onScanned(it)
+        }
+    }
 
     var hasCamera by remember {
         mutableStateOf(
@@ -80,19 +87,25 @@ fun InlineScanner(onScanned: (String) -> Unit, modifier: Modifier = Modifier) {
                 PackageManager.PERMISSION_GRANTED,
         )
     }
-    val permLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { hasCamera = it }
+    val permLauncher =
+        rememberLauncherForActivityResult(
+            ActivityResultContracts.RequestPermission(),
+        ) { hasCamera = it }
     LaunchedEffect(Unit) { if (!hasCamera) permLauncher.launch(Manifest.permission.CAMERA) }
 
     var pickError by remember { mutableStateOf(false) }
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri != null) decodeQrFromUri(context, uri)?.let(deliver) ?: run { pickError = true }
-    }
+    val picker =
+        rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+            if (uri != null) decodeQrFromUri(context, uri)?.let(deliver) ?: run { pickError = true }
+        }
 
     Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
         Box(
-            Modifier.fillMaxWidth().height(210.dp).clip(RoundedCornerShape(16.dp)).background(Color.Black),
+            Modifier
+                .fillMaxWidth()
+                .height(210.dp)
+                .clip(RoundedCornerShape(16.dp))
+                .background(Color.Black),
             contentAlignment = Alignment.Center,
         ) {
             if (hasCamera) {
@@ -101,7 +114,8 @@ fun InlineScanner(onScanned: (String) -> Unit, modifier: Modifier = Modifier) {
             } else {
                 Text(
                     "Camera access is off —\nchoose a QR image below",
-                    color = Color.White.copy(alpha = 0.75f), fontSize = 13.sp,
+                    color = Color.White.copy(alpha = 0.75f),
+                    fontSize = 13.sp,
                     modifier = Modifier.padding(16.dp),
                 )
             }
@@ -109,13 +123,18 @@ fun InlineScanner(onScanned: (String) -> Unit, modifier: Modifier = Modifier) {
         Spacer(Modifier.height(10.dp))
         Text(
             if (pickError) "No QR code found in that image" else "Point at an Envoix QR code",
-            color = if (pickError) Color(0xFFE05B5B) else colors.muted, fontSize = 12.sp,
+            color = if (pickError) Color(0xFFE05B5B) else colors.muted,
+            fontSize = 12.sp,
         )
         Spacer(Modifier.height(8.dp))
         Row(
-            Modifier.clip(RoundedCornerShape(20.dp)).background(colors.accentSoft)
-                .clickable { pickError = false; picker.launch("image/*") }
-                .padding(horizontal = 16.dp, vertical = 8.dp),
+            Modifier
+                .clip(RoundedCornerShape(20.dp))
+                .background(colors.accentSoft)
+                .clickable {
+                    pickError = false
+                    picker.launch("image/*")
+                }.padding(horizontal = 16.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(Icons.Default.Image, null, tint = colors.accent, modifier = Modifier.size(18.dp))
@@ -126,7 +145,10 @@ fun InlineScanner(onScanned: (String) -> Unit, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun CameraPreview(onQr: (String) -> Unit, modifier: Modifier = Modifier) {
+private fun CameraPreview(
+    onQr: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val lifecycleOwner = LocalLifecycleOwner.current
     val executor = remember { Executors.newSingleThreadExecutor() }
     DisposableEffect(Unit) { onDispose { executor.shutdown() } }
@@ -137,16 +159,24 @@ private fun CameraPreview(onQr: (String) -> Unit, modifier: Modifier = Modifier)
             val future = ProcessCameraProvider.getInstance(ctx)
             future.addListener({
                 val provider = future.get()
-                val preview = Preview.Builder().build()
-                    .also { it.setSurfaceProvider(previewView.surfaceProvider) }
-                val analysis = ImageAnalysis.Builder()
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .build()
-                    .also { it.setAnalyzer(executor, QrAnalyzer(onQr)) }
+                val preview =
+                    Preview
+                        .Builder()
+                        .build()
+                        .also { it.setSurfaceProvider(previewView.surfaceProvider) }
+                val analysis =
+                    ImageAnalysis
+                        .Builder()
+                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                        .build()
+                        .also { it.setAnalyzer(executor, QrAnalyzer(onQr)) }
                 runCatching {
                     provider.unbindAll()
                     provider.bindToLifecycle(
-                        lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis,
+                        lifecycleOwner,
+                        CameraSelector.DEFAULT_BACK_CAMERA,
+                        preview,
+                        analysis,
                     )
                 }
             }, ContextCompat.getMainExecutor(ctx))
@@ -156,15 +186,18 @@ private fun CameraPreview(onQr: (String) -> Unit, modifier: Modifier = Modifier)
 }
 
 /** Decodes QR frames off the camera; calls [onResult] on the first hit. */
-private class QrAnalyzer(val onResult: (String) -> Unit) : ImageAnalysis.Analyzer {
-    private val reader = MultiFormatReader().apply {
-        setHints(
-            mapOf(
-                DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE),
-                DecodeHintType.TRY_HARDER to true, // handle soft / screen-captured codes
-            ),
-        )
-    }
+private class QrAnalyzer(
+    val onResult: (String) -> Unit,
+) : ImageAnalysis.Analyzer {
+    private val reader =
+        MultiFormatReader().apply {
+            setHints(
+                mapOf(
+                    DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE),
+                    DecodeHintType.TRY_HARDER to true, // handle soft / screen-captured codes
+                ),
+            )
+        }
 
     override fun analyze(image: ImageProxy) {
         try {
@@ -174,13 +207,22 @@ private class QrAnalyzer(val onResult: (String) -> Unit) : ImageAnalysis.Analyze
             plane.buffer.get(bytes, 0, minOf(plane.buffer.remaining(), bytes.size))
             // Pass the *stride* as the data width so each luminance row lines up,
             // then crop to the real width/height.
-            val source = PlanarYUVLuminanceSource(
-                bytes, stride, image.height, 0, 0, image.width, image.height, false,
-            )
-            val result = runCatching { reader.decodeWithState(BinaryBitmap(HybridBinarizer(source))) }
-                // A code half-out of frame can also read from the inverted image.
-                .recoverCatching { reader.decodeWithState(BinaryBitmap(HybridBinarizer(source.invert()))) }
-                .getOrNull()
+            val source =
+                PlanarYUVLuminanceSource(
+                    bytes,
+                    stride,
+                    image.height,
+                    0,
+                    0,
+                    image.width,
+                    image.height,
+                    false,
+                )
+            val result =
+                runCatching { reader.decodeWithState(BinaryBitmap(HybridBinarizer(source))) }
+                    // A code half-out of frame can also read from the inverted image.
+                    .recoverCatching { reader.decodeWithState(BinaryBitmap(HybridBinarizer(source.invert()))) }
+                    .getOrNull()
             if (result != null) onResult(result.text)
         } catch (_: Exception) {
             // no code in this frame
@@ -192,17 +234,22 @@ private class QrAnalyzer(val onResult: (String) -> Unit) : ImageAnalysis.Analyze
 }
 
 /** Decode a QR out of the image at [uri]; null if there isn't one. */
-private fun decodeQrFromUri(context: Context, uri: Uri): String? {
-    val bitmap = context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) }
-        ?: return null
+private fun decodeQrFromUri(
+    context: Context,
+    uri: Uri,
+): String? {
+    val bitmap =
+        context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) }
+            ?: return null
     val w = bitmap.width
     val h = bitmap.height
     val pixels = IntArray(w * h)
     bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
     val source = RGBLuminanceSource(w, h, pixels)
-    val reader = MultiFormatReader().apply {
-        setHints(mapOf(DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE)))
-    }
+    val reader =
+        MultiFormatReader().apply {
+            setHints(mapOf(DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE)))
+        }
     return runCatching { reader.decode(BinaryBitmap(HybridBinarizer(source))).text }
         .recoverCatching { reader.decode(BinaryBitmap(HybridBinarizer(source.invert()))).text }
         .getOrNull()
@@ -210,7 +257,10 @@ private fun decodeQrFromUri(context: Context, uri: Uri): String? {
 
 /** Accent corner brackets hugging the viewfinder box. */
 @Composable
-private fun CornerBrackets(accent: Color, modifier: Modifier = Modifier) {
+private fun CornerBrackets(
+    accent: Color,
+    modifier: Modifier = Modifier,
+) {
     Canvas(modifier) {
         val inset = 14.dp.toPx()
         val len = size.minDimension * 0.14f
@@ -219,10 +269,18 @@ private fun CornerBrackets(accent: Color, modifier: Modifier = Modifier) {
         val t = inset
         val r = size.width - inset
         val b = size.height - inset
-        fun line(a: Offset, c: Offset) = drawLine(accent, a, c, sw, StrokeCap.Round)
-        line(Offset(l, t), Offset(l + len, t)); line(Offset(l, t), Offset(l, t + len))
-        line(Offset(r, t), Offset(r - len, t)); line(Offset(r, t), Offset(r, t + len))
-        line(Offset(l, b), Offset(l + len, b)); line(Offset(l, b), Offset(l, b - len))
-        line(Offset(r, b), Offset(r - len, b)); line(Offset(r, b), Offset(r, b - len))
+
+        fun line(
+            a: Offset,
+            c: Offset,
+        ) = drawLine(accent, a, c, sw, StrokeCap.Round)
+        line(Offset(l, t), Offset(l + len, t))
+        line(Offset(l, t), Offset(l, t + len))
+        line(Offset(r, t), Offset(r - len, t))
+        line(Offset(r, t), Offset(r, t + len))
+        line(Offset(l, b), Offset(l + len, b))
+        line(Offset(l, b), Offset(l, b - len))
+        line(Offset(r, b), Offset(r - len, b))
+        line(Offset(r, b), Offset(r, b - len))
     }
 }

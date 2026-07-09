@@ -11,6 +11,7 @@ import java.io.File
 object Diagnostics {
     /** Clipboard cap (Binder transactions die near 1 MB). */
     const val CLIP_MAX = 256 * 1024
+
     /** rdz log endpoint body cap. */
     const val UPLOAD_MAX = 480 * 1024
     private const val OPS_MAX = 32 * 1024
@@ -20,11 +21,13 @@ object Diagnostics {
     enum class Kind { Transfer, App, Crash }
 
     private lateinit var filesDir: File
+
     fun init(dir: File) {
         filesDir = dir
     }
 
     private fun crashFile() = File(File(filesDir, "logs"), "crash-latest.log")
+
     private fun ackFile() = File(File(filesDir, "logs"), "crash-acked")
 
     /** A crash newer than the last acknowledgement is pending report. */
@@ -41,15 +44,21 @@ object Diagnostics {
     }
 
     /** Build one report, within [budget] bytes. */
-    fun build(kind: Kind, transferId: Long? = null, budget: Int = UPLOAD_MAX): String {
-        val sections = buildList {
-            add("── envoix-android v${BuildConfig.VERSION_NAME} (${BuildConfig.GIT_COMMIT}) · $kind ──" to 512)
-            if (kind == Kind.Crash) add(section("crash", runCatching { crashFile().readText() }.getOrDefault("")) to CRASH_MAX)
-            if (kind == Kind.Transfer && transferId != null)
-                add(section("transfer $transferId", TransferLogs.read(transferId)) to TRANSFER_MAX)
-            add(section("operations", OpLog.report()) to OPS_MAX)
-            add(section("core trace (tail)", LogStore.dump()) to Int.MAX_VALUE)
-        }
+    fun build(
+        kind: Kind,
+        transferId: Long? = null,
+        budget: Int = UPLOAD_MAX,
+    ): String {
+        val sections =
+            buildList {
+                add("── envoix-android v${BuildConfig.VERSION_NAME} (${BuildConfig.GIT_COMMIT}) · $kind ──" to 512)
+                if (kind == Kind.Crash) add(section("crash", runCatching { crashFile().readText() }.getOrDefault("")) to CRASH_MAX)
+                if (kind == Kind.Transfer && transferId != null) {
+                    add(section("transfer $transferId", TransferLogs.read(transferId)) to TRANSFER_MAX)
+                }
+                add(section("operations", OpLog.report()) to OPS_MAX)
+                add(section("core trace (tail)", LogStore.dump()) to Int.MAX_VALUE)
+            }
         // Fixed-cap sections first; core gets whatever budget remains.
         var remaining = budget
         val out = StringBuilder()
@@ -63,11 +72,16 @@ object Diagnostics {
         return out.toString()
     }
 
-    private fun section(name: String, body: String) =
-        "\n══════ $name ══════\n" + body.ifBlank { "(empty)" }
+    private fun section(
+        name: String,
+        body: String,
+    ) = "\n══════ $name ══════\n" + body.ifBlank { "(empty)" }
 
     /** Last [maxBytes] UTF-8 bytes, marked when clipped — failures live at the tail. */
-    fun tail(text: String, maxBytes: Int): String {
+    fun tail(
+        text: String,
+        maxBytes: Int,
+    ): String {
         val bytes = text.toByteArray(Charsets.UTF_8)
         if (bytes.size <= maxBytes) return text
         val note = "[… trimmed — last ${maxBytes / 1024} KB of ${bytes.size / 1024} KB]\n"

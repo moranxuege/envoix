@@ -9,26 +9,50 @@ import java.io.File
  * Thin bridge between the UI and the [TransferService] + [TransferRepository]:
  * the service owns the transfers, this just issues commands and exposes state.
  */
-class TransferViewModel(app: Application) : AndroidViewModel(app) {
+class TransferViewModel(
+    app: Application,
+) : AndroidViewModel(app) {
     private val incomingDir = File(app.filesDir, "incoming").apply { mkdirs() }
 
     val transfers: StateFlow<List<Transfer>> = TransferRepository.transfers
 
-    fun startReceive(room: String, broker: String, relay: String, qrPayload: String?) =
-        start("receive", room, incomingDir.absolutePath, broker, relay, qrPayload)
+    fun startReceive(
+        room: String,
+        broker: String,
+        relay: String,
+        qrPayload: String?,
+    ) = start("receive", room, incomingDir.absolutePath, broker, relay, qrPayload)
 
-    fun startSend(room: String, sourceUri: String, broker: String, relay: String, qrPayload: String?) =
-        start("send", room, "", broker, relay, qrPayload, sourceUri)
+    fun startSend(
+        room: String,
+        sourceUri: String,
+        broker: String,
+        relay: String,
+        qrPayload: String?,
+    ) = start("send", room, "", broker, relay, qrPayload, sourceUri)
 
     private fun start(
-        direction: String, room: String, path: String, broker: String, relay: String,
-        qrPayload: String?, sourceUri: String? = null,
+        direction: String,
+        room: String,
+        path: String,
+        broker: String,
+        relay: String,
+        qrPayload: String?,
+        sourceUri: String? = null,
     ) {
         val cfg = SettingsStore.settings.value
         TransferService.start(
-            getApplication(), direction, room, path, broker, relay,
-            cfg.chunkSize, cfg.candidatesAllow.joinToString(","), cfg.candidatesDeny.joinToString(","),
-            qrPayload, sourceUri,
+            getApplication(),
+            direction,
+            room,
+            path,
+            broker,
+            relay,
+            cfg.chunkSize,
+            cfg.candidatesAllow.joinToString(","),
+            cfg.candidatesDeny.joinToString(","),
+            qrPayload,
+            sourceUri,
         )
     }
 
@@ -44,14 +68,18 @@ class TransferViewModel(app: Application) : AndroidViewModel(app) {
     /** Pause a running transfer, or resume/retry a paused/failed one. */
     fun pauseResume(id: Long) {
         val t = TransferRepository.transfers.value.find { it.id == id } ?: return
-        if (t.status == Status.Paused || t.status == Status.Failed ||
-            t.status == Status.Unconfirmed || t.status == Status.Cancelled)
+        if (t.status == Status.Paused ||
+            t.status == Status.Failed ||
+            t.status == Status.Unconfirmed ||
+            t.status == Status.Cancelled
+        ) {
             TransferService.resume(getApplication(), id)
-        else if (t.status == Status.Completed && t.direction == Direction.Receive)
+        } else if (t.status == Status.Completed && t.direction == Direction.Receive) {
             // Courier-tier service: serves the peer's re-verify; the card and
             // the machine stay Completed (mailbox-unreachable fallback).
             TransferService.reverify(getApplication(), id)
-        else
+        } else {
             TransferService.pause(getApplication(), id)
+        }
     }
 }

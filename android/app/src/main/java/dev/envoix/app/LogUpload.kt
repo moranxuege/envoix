@@ -9,7 +9,12 @@ import java.net.URL
  *  so it lands alongside the peer's log (and the rdz's own). Dev-mode only. */
 object LogUpload {
     /** POST [body] to `<server>/logs/<roomId>?side=<side>`; true on a 2xx reply. */
-    suspend fun upload(server: String, roomId: String, side: String, body: String): Boolean =
+    suspend fun upload(
+        server: String,
+        roomId: String,
+        side: String,
+        body: String,
+    ): Boolean =
         withContext(Dispatchers.IO) {
             runCatching {
                 val url = URL("${server.trimEnd('/')}/logs/$roomId?side=$side")
@@ -28,7 +33,10 @@ object LogUpload {
         }
 
     /** POST raw [body] bytes to [url]; true on a 2xx reply. */
-    suspend fun postBytes(url: String, body: ByteArray): Boolean =
+    suspend fun postBytes(
+        url: String,
+        body: ByteArray,
+    ): Boolean =
         withContext(Dispatchers.IO) {
             runCatching {
                 (URL(url).openConnection() as HttpURLConnection).run {
