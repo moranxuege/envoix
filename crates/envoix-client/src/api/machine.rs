@@ -124,6 +124,9 @@ pub enum Input {
     ConfirmTimeout { attempt: u32 },
     /// The mailbox receipt was fetched and VERIFIED against the local file.
     ReceiptVerified,
+    /// Receiver: the sealed receipt POST was acknowledged by the rdz - the
+    /// confirmation duty is discharged (monotone fact, any state).
+    ReceiptPosted,
 }
 
 /// Side effects for the driver. The machine never performs them.
@@ -145,6 +148,16 @@ pub enum Effect {
     DiscardPartial,
 }
 
+/// Monotone accomplishments: set-once, never cleared, serialized with the
+/// record. State is DERIVED from facts, never the reverse (design addendum).
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Facts {
+    /// Receiver: the sender's proof is deliverably placed - the sealed receipt
+    /// POST was acknowledged by the rdz (or, future: a clean close showed the
+    /// ack arrived). Gates the "still on duty" UI and restore re-posting.
+    pub proof_delivered: bool,
+}
+
 /// One transfer session (one card): the machine state plus the observable
 /// data a frontend renders. Serializable — this is the snapshot payload, and
 /// the future durable TransferRecord.
@@ -163,6 +176,8 @@ pub struct Session {
     pub path: Option<DataPath>,
     pub reason: Option<String>,
     pub reason_code: Option<FailureCode>,
+    #[serde(default)]
+    pub facts: Facts,
 }
 
 impl Session {
@@ -180,6 +195,7 @@ impl Session {
             path: None,
             reason: None,
             reason_code: None,
+            facts: Facts::default(),
         }
     }
 
@@ -204,6 +220,10 @@ impl Session {
                 // running in parallel) continue as the remaining proof channel.
                 self.state = State::Unconfirmed;
                 vec![Effect::CancelToken, Effect::StartMailboxPoll]
+            }
+            Input::ReceiptPosted => {
+                self.facts.proof_delivered = true;
+                Vec::new()
             }
             Input::ReceiptVerified => {
                 let was_confirming = self.state == State::Confirming;

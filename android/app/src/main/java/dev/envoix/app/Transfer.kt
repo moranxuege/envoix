@@ -12,6 +12,8 @@ data class Transfer(
     val fileName: String? = null,
     /** Machine attempt number (resume bumps it). */
     val attempt: Int = 1,
+    /** Receiver: the confirmation duty is discharged (receipt on the rdz). */
+    val proofDelivered: Boolean = false,
     /** Core transfer id (from Started) — keys the rdz receipt mailbox. */
     val transferId: String? = null,
     val pathType: String? = null,

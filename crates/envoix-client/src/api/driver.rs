@@ -82,6 +82,8 @@ enum Cmd {
     Cancel,
     Resume,
     ReceiptResponse(Option<Vec<u8>>),
+    /// Courier ack-back: the receipt POST got its 2xx.
+    ReceiptPosted,
     /// D2 (Remove): delete the partial, resume state, and receipt sidecars.
     Discard,
     /// Serve the peer's re-verify (courier tier: one-shot, bounded, never
@@ -180,6 +182,12 @@ impl TransferSession {
         let _ = self.cmds.send(Cmd::ReceiptResponse(blob));
     }
 
+    /// Courier ack-back: the receipt POST was acknowledged - the receiver's
+    /// confirmation duty is discharged (drives ↻ retirement + stops re-posts).
+    pub fn receipt_posted(&self) {
+        let _ = self.cmds.send(Cmd::ReceiptPosted);
+    }
+
     /// D2 (Remove, the one true abandon): delete this transfer's partial,
     /// resume state, and receipt sidecars. Call before dropping the handle.
     pub fn discard(&self) {
@@ -266,6 +274,12 @@ impl Actor {
             self.launch_attempt(resume);
         } else if self.session.state == super::machine::State::Unconfirmed {
             self.run_effect(Effect::StartMailboxPoll).await;
+        } else if self.session.state == super::machine::State::Completed
+            && self.session.direction == TransferDirection::Receive
+            && !self.session.facts.proof_delivered
+        {
+            // Restored with the confirmation duty undischarged: re-post.
+            self.run_effect(Effect::PostReceipt).await;
         }
         self.emit_snapshot(false);
         self.persist().await;
@@ -326,6 +340,7 @@ impl Actor {
                     }
                 }
             }
+            Cmd::ReceiptPosted => self.apply(Input::ReceiptPosted).await,
             Cmd::ReceiptResponse(None) => {} // empty slot; later polls may hit
             Cmd::ServeReverify => {
                 let mut options = self.params.options.clone();

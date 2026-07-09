@@ -368,6 +368,8 @@ class TransferService : Service() {
             t.copy(
                 status = status,
                 attempt = s.optInt("attempt", t.attempt),
+                proofDelivered = s.optJSONObject("facts")?.optBoolean("proof_delivered")
+                    ?: t.proofDelivered,
                 transferId = s.optString("transfer_id").ifEmpty { t.transferId },
                 fileName = s.optString("file_name").ifEmpty { t.fileName },
                 bytes = bytes,
@@ -438,7 +440,8 @@ class TransferService : Service() {
             for (backoff in listOf(0L, 5_000L, 30_000L)) {
                 if (backoff > 0) delay(backoff)
                 if (LogUpload.postBytes("$server/receipts/$key", bytes)) {
-                    OpLog.add("receipt posted id=$id")
+                    OpLog.add("receipt posted id=$id", id)
+                    Native.sessionIntent(id, "receipt_posted")
                     return@launch
                 }
             }

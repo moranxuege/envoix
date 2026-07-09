@@ -608,6 +608,7 @@ pub extern "system" fn Java_dev_envoix_app_Native_sessionIntent(
             "resume" => session.resume(),
             "cancel" => session.cancel(),
             "reverify" => session.serve_reverify(),
+            "receipt_posted" => session.receipt_posted(),
             _ => {}
         }
     }
