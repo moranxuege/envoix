@@ -139,7 +139,13 @@ Design (two layers that compose; user-proposed mailbox evaluated and adopted):
    ✅ DONE 2026-07-08 (7586a8c); field-verified on :8446, promoted to prod :8445 2026-07-09.
 3. Completion receipts: local (foundation) then rdz mailbox (async layer) — see §4b.
    ✅ Local foundation DONE 2026-07-09 (receipt on finalize + receive_from_receipt
-   short-circuit + Done-card re-join in the app). rdz mailbox still pending.
+   short-circuit + Done-card re-join in the app; new transfers are FRESH — receipts
+   only serve Retry/re-verify flows, f010749).
+   ✅ rdz mailbox DONE 2026-07-09 (e603058): key question RESOLVED — mailbox key =
+   blake3(transfer id), blob sealed under KDF(transfer id + code); the transfer id
+   contributes the entropy the two-word code lacks. Server: /receipts/{key} on the
+   log HTTP port, 4 KB cap, 7-day TTL, in-memory. Sender auto-confirms within an
+   app session; cross-restart needs TransferRecord (#5).
 4. Transfer state machine in `envoix-client` (design doc first, then implement).
 5. Durable `TransferRecord` (cancel keeps, remove deletes; receipts are its first slice).
 6. Logging/diagnostics formalization. Requirement learned 2026-07-08: at TRACE the
