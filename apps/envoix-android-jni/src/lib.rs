@@ -10,26 +10,16 @@
 
 use std::collections::HashMap;
 use std::io::Write;
-use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use envoix_client::TransferDirection;
-use envoix_client::api::{Client, Invite, PeerSource, Role, TransferOptions, TransferRequest};
+use envoix_client::api::{Client, Invite, PeerSource, Role, TransferOptions};
 use jni::JNIEnv;
 use jni::JavaVM;
 use jni::objects::{GlobalRef, JClass, JObject, JString, JValue};
 use jni::sys::{jboolean, jlong};
 
 static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-
-/// Cancel tokens for in-flight transfers, keyed by the Kotlin-side transfer id.
-/// The token distinguishes pause (resumable intent) from cancel.
-type CancelMap = HashMap<i64, envoix_client::TransferCancelToken>;
-static CANCELS: OnceLock<Mutex<CancelMap>> = OnceLock::new();
-
-fn cancels() -> &'static Mutex<CancelMap> {
-    CANCELS.get_or_init(|| Mutex::new(HashMap::new()))
-}
 
 /// Live transfer sessions (the state-machine driver), keyed by the Kotlin id.
 type SessionMap = HashMap<i64, envoix_client::api::driver::TransferSession>;
@@ -83,168 +73,6 @@ pub extern "system" fn Java_dev_envoix_app_Native_initContext(
     // Keep the global ref alive for the whole process, since ndk_context holds a
     // raw pointer to it.
     std::mem::forget(ctx);
-}
-
-/// Run one transfer to completion, forwarding each event's JSON to
-/// `callback.onEvent(String)`. Blocks the calling thread, so invoke it from a
-/// background thread on the Kotlin side.
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_envoix_app_Native_runTransfer(
-    mut env: JNIEnv,
-    _class: JClass,
-    id: jlong,
-    direction: JString,
-    code: JString,
-    broker: JString,
-    relay: JString,
-    path: JString,
-    chunk_size: JString,
-    candidates_allow: JString,
-    candidates_deny: JString,
-    use_room: jboolean,
-    use_mdns: jboolean,
-    resume: jboolean,
-    callback: JObject,
-) {
-    let direction = jstr(&mut env, &direction);
-    let code = jstr(&mut env, &code);
-    let broker = jstr(&mut env, &broker);
-    let relay = jstr(&mut env, &relay);
-    let path = jstr(&mut env, &path);
-    let chunk_size = jstr(&mut env, &chunk_size);
-    let candidates_allow = jstr(&mut env, &candidates_allow);
-    let candidates_deny = jstr(&mut env, &candidates_deny);
-
-    let vm = env.get_java_vm().expect("java vm");
-    let cb = env.new_global_ref(&callback).expect("callback ref");
-
-    let req = DriveRequest {
-        id,
-        direction,
-        code,
-        broker,
-        relay,
-        path,
-        chunk_size,
-        candidates_allow,
-        candidates_deny,
-        use_room: use_room != 0,
-        use_mdns: use_mdns != 0,
-        resume: resume != 0,
-    };
-    runtime().block_on(async move {
-        if let Err(err) = drive(req, &vm, &cb).await {
-            emit(
-                &vm,
-                &cb,
-                &format!(r#"{{"event":"failed","error":{}}}"#, json_str(&err)),
-            );
-        }
-    });
-    if let Ok(mut map) = cancels().lock() {
-        map.remove(&id);
-    }
-}
-
-/// Cancel the in-flight transfer with the given id (no-op if it already ended).
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_envoix_app_Native_cancel(_env: JNIEnv, _class: JClass, id: jlong) {
-    if let Ok(map) = cancels().lock()
-        && let Some(token) = map.get(&id)
-    {
-        token.cancel();
-    }
-}
-
-/// Pause the in-flight transfer with the given id: same stop mechanics as
-/// `cancel`, but reported — locally and (best-effort) to the peer — as a pause,
-/// so both sides can show a resumable state. No-op if it already ended.
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_envoix_app_Native_pause(_env: JNIEnv, _class: JClass, id: jlong) {
-    if let Ok(map) = cancels().lock()
-        && let Some(token) = map.get(&id)
-    {
-        token.pause();
-    }
-}
-
-/// The rdz mailbox key a transfer's receipt is stored under (hex).
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_envoix_app_Native_receiptMailboxKey<'a>(
-    mut env: JNIEnv<'a>,
-    _class: JClass,
-    transfer_id: JString,
-) -> jni::sys::jstring {
-    let transfer_id = jstr(&mut env, &transfer_id);
-    let key = envoix_client::api::receipt::receipt_mailbox_key(&transfer_id);
-    env.new_string(key).expect("jstring").into_raw()
-}
-
-/// Seal a completion receipt (its local JSON form) for the rdz mailbox.
-/// Returns JSON `{"key":"<hex>","blob":"<base64>"}` or `{"error":..}`.
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_envoix_app_Native_sealReceipt<'a>(
-    mut env: JNIEnv<'a>,
-    _class: JClass,
-    transfer_id: JString,
-    code: JString,
-    receipt_json: JString,
-) -> jni::sys::jstring {
-    use base64::Engine;
-    let transfer_id = jstr(&mut env, &transfer_id);
-    let code = jstr(&mut env, &code);
-    let receipt_json = jstr(&mut env, &receipt_json);
-    let out = match serde_json::from_str::<envoix_client::TransferReceipt>(&receipt_json) {
-        Ok(receipt) => {
-            match envoix_client::api::receipt::seal_receipt(&transfer_id, &code, &receipt) {
-                Ok(blob) => format!(
-                    r#"{{"key":{},"blob":{}}}"#,
-                    json_str(&envoix_client::api::receipt::receipt_mailbox_key(&transfer_id)),
-                    json_str(&base64::engine::general_purpose::STANDARD.encode(blob)),
-                ),
-                Err(e) => format!(r#"{{"error":{}}}"#, json_str(&e.to_string())),
-            }
-        }
-        Err(e) => format!(r#"{{"error":{}}}"#, json_str(&e.to_string())),
-    };
-    env.new_string(out).expect("jstring").into_raw()
-}
-
-/// Open a mailbox blob (base64) and verify it against the local source file
-/// (size + BLAKE3). Returns `{"ok":true}` or `{"error":..}` — an error means
-/// the blob was not sealed by the paired peer for this exact file.
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_envoix_app_Native_verifyReceipt<'a>(
-    mut env: JNIEnv<'a>,
-    _class: JClass,
-    transfer_id: JString,
-    code: JString,
-    blob_b64: JString,
-    file_path: JString,
-) -> jni::sys::jstring {
-    use base64::Engine;
-    let transfer_id = jstr(&mut env, &transfer_id);
-    let code = jstr(&mut env, &code);
-    let blob_b64 = jstr(&mut env, &blob_b64);
-    let file_path = jstr(&mut env, &file_path);
-    let out = match base64::engine::general_purpose::STANDARD.decode(blob_b64.trim()) {
-        Ok(blob) => {
-            let result = runtime().block_on(
-                envoix_client::api::receipt::verify_receipt_against_file(
-                    &transfer_id,
-                    &code,
-                    &blob,
-                    std::path::Path::new(&file_path),
-                ),
-            );
-            match result {
-                Ok(_) => r#"{"ok":true}"#.to_string(),
-                Err(e) => format!(r#"{{"error":{}}}"#, json_str(&e.to_string())),
-            }
-        }
-        Err(e) => format!(r#"{{"error":{}}}"#, json_str(&e.to_string())),
-    };
-    env.new_string(out).expect("jstring").into_raw()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -321,22 +149,6 @@ fn opt_json(s: Option<&str>) -> String {
 }
 
 /// Everything one native transfer needs, bundled so the JNI entry point and
-/// [`drive`] stay readable (and clippy-clean).
-struct DriveRequest {
-    id: i64,
-    direction: String,
-    code: String,
-    broker: String,
-    relay: String,
-    path: String,
-    chunk_size: String,
-    candidates_allow: String,
-    candidates_deny: String,
-    use_room: bool,
-    use_mdns: bool,
-    resume: bool,
-}
-
 /// Split a comma-joined FFI config field into trimmed, non-empty entries.
 /// Commas never appear in CIDR prefixes, so this round-trips the Kotlin lists.
 fn split_csv(value: &str) -> Vec<String> {
@@ -348,62 +160,6 @@ fn split_csv(value: &str) -> Vec<String> {
         .collect()
 }
 
-async fn drive(req: DriveRequest, vm: &JavaVM, cb: &GlobalRef) -> Result<(), String> {
-    let allow = split_csv(&req.candidates_allow);
-    let deny = split_csv(&req.candidates_deny);
-    let chunk_size = (!req.chunk_size.is_empty()).then_some(req.chunk_size.as_str());
-    let client =
-        Client::from_config_fields(chunk_size, &allow, &deny).map_err(|e| e.to_string())?;
-
-    // Try each enabled rendezvous in order (Room, then mDNS via the code as its
-    // token); the client's fallback loop advances to the next only on a
-    // pre-connection failure, so a transfer that already started is never re-sent.
-    let mut sources: Vec<PeerSource> = Vec::new();
-    if req.use_room {
-        sources.push(PeerSource::Room {
-            code: req.code.clone(),
-            broker: req.broker,
-        });
-    }
-    if req.use_mdns {
-        sources.push(PeerSource::Mdns {
-            token: Some(req.code),
-        });
-    }
-
-    let mut options = TransferOptions::default();
-    options.relay = Some(req.relay);
-    // False for a user-initiated NEW transfer (fresh copy wanted even if this
-    // file was received before); true when relaunched via Resume/re-verify, so
-    // partials and completion receipts are honored.
-    options.resume = req.resume;
-    let direction = match req.direction.as_str() {
-        "send" => TransferDirection::Send,
-        _ => TransferDirection::Receive,
-    };
-    let mut transfer = client
-        .run(TransferRequest {
-            direction,
-            path: PathBuf::from(&req.path),
-            sources,
-            options,
-        })
-        .map_err(|e| e.to_string())?;
-
-    // Register the cancel token so `cancel(id)` / `pause(id)` can stop the transfer.
-    if let Ok(mut map) = cancels().lock() {
-        map.insert(req.id, transfer.cancel_handle());
-    }
-
-    while let Some(event) = transfer.next_event().await {
-        if let Ok(json) = serde_json::to_string(&event) {
-            emit(vm, cb, &json);
-        }
-    }
-    transfer.wait().await.map(|_| ()).map_err(|e| e.to_string())
-}
-
-/// Read a Java string into a Rust `String` (empty on any error).
 fn jstr(env: &mut JNIEnv, s: &JString) -> String {
     env.get_string(s).map(|s| s.into()).unwrap_or_default()
 }
