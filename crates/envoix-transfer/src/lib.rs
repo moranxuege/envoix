@@ -165,6 +165,13 @@ pub enum TransferEvent {
         /// Plaintext bytes already present before this attempt started.
         bytes_resumed: u64,
     },
+    /// SEND only: every byte and the Complete frame have been sent; awaiting
+    /// the receiver's CompleteAck (the final round trip - real, failure-prone,
+    /// and previously invisible inside "100%%"). See the state-machine design.
+    Confirming {
+        /// Transfer identifier for correlating events.
+        transfer_id: TransferId,
+    },
     /// More plaintext bytes have been sent or persisted.
     Progress {
         /// Transfer identifier for correlating events.
@@ -421,6 +428,9 @@ impl TransferEngine {
             }))
             .await
             .map_err(peer_closed_error)?;
+        events.on_event(TransferEvent::Confirming {
+            transfer_id: transfer_id.clone(),
+        });
         // The whole file plus the Complete frame (which carries the file hash the
         // receiver verifies before finalizing) have been sent. Require the
         // receiver's CompleteAck: it is the receiver's proof that it finalized.

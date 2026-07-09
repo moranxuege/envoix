@@ -167,6 +167,7 @@ fn phase_of(event: &TransferEvent) -> Phase {
         | TransferEvent::Progress { .. }
         | TransferEvent::Verifying { .. }
         | TransferEvent::Verified { .. }
+        | TransferEvent::Confirming { .. }
         | TransferEvent::Completed { .. }
         | TransferEvent::Failed { .. } => Phase::Transfer,
     }
@@ -372,6 +373,7 @@ impl From<SessionEvent> for TransferEvent {
                 file_name,
                 bytes_hashed,
             },
+            SessionEvent::Confirming { transfer_id } => TransferEvent::Confirming { transfer_id },
             SessionEvent::Completed {
                 transfer_id,
                 bytes_transferred,

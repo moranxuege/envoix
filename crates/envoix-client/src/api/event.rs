@@ -111,6 +111,14 @@ pub enum TransferEvent {
         /// Number of plaintext bytes hashed.
         bytes_hashed: u64,
     },
+    /// SEND only: every byte and the Complete frame are sent; awaiting the
+    /// receiver's CompleteAck (the final round trip). A failure in this phase
+    /// means the file very likely arrived - see `FailureCode::ConnectionLost`
+    /// handling in the state machine.
+    Confirming {
+        /// Transfer identifier for correlating events.
+        transfer_id: TransferId,
+    },
     /// Transfer completed and, on receive, the file was finalized.
     Completed {
         /// Transfer identifier for correlating events.
