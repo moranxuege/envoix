@@ -24,6 +24,8 @@ final class AppModel: ObservableObject {
     let send = TransferViewModel()
     @Published private(set) var activities: [FfiTransferActivityRecord] = []
     @Published private(set) var activityMetrics: [String: ActivityMetrics] = [:]
+    private var transferEventLinesByActivityID: [String: [String]] = [:]
+    private var transferLogByActivityID: [String: [String]] = [:]
 
     private var cancellables = Set<AnyCancellable>()
     private var removedActivityIDs = Set<String>()
@@ -47,6 +49,24 @@ final class AppModel: ObservableObject {
         for vm in [receive, send] {
             vm.objectWillChange
                 .sink { [weak self] in self?.objectWillChange.send() }
+                .store(in: &cancellables)
+            vm.$eventLog
+                .sink { [weak self, weak vm] lines in
+                    self?.syncDiagnosticsSnapshot(
+                        activityID: vm?.activeActivityID,
+                        eventLog: lines,
+                        transferEvents: nil
+                    )
+                }
+                .store(in: &cancellables)
+            vm.$transferEvents
+                .sink { [weak self, weak vm] events in
+                    self?.syncDiagnosticsSnapshot(
+                        activityID: vm?.activeActivityID,
+                        eventLog: nil,
+                        transferEvents: events
+                    )
+                }
                 .store(in: &cancellables)
             vm.$transferActivity
                 .compactMap { $0 }
@@ -122,12 +142,36 @@ final class AppModel: ObservableObject {
         }
         activities.removeAll { $0.activityId == activityID }
         activityMetrics.removeValue(forKey: activityID)
+        transferEventLinesByActivityID.removeValue(forKey: activityID)
+        transferLogByActivityID.removeValue(forKey: activityID)
     }
 
     private func syncActivitySnapshots() {
         let records = receive.listTransferActivities() + send.listTransferActivities()
         for record in records where !removedActivityIDs.contains(record.activityId) {
             upsertActivity(record, speedBps: speedBps(for: record.activityId))
+        }
+    }
+
+    func diagnosticReport(for record: FfiTransferActivityRecord) -> String {
+        return TransferDiagnostics.report(
+            for: record,
+            eventLog: transferLogByActivityID[record.activityId] ?? [],
+            transferEventLines: transferEventLinesByActivityID[record.activityId] ?? [],
+        )
+    }
+
+    private func syncDiagnosticsSnapshot(
+        activityID: String?,
+        eventLog: [String]?,
+        transferEvents: [FfiTransferEvent]?
+    ) {
+        guard let activityID, !activityID.isEmpty else { return }
+        if let eventLog {
+            transferLogByActivityID[activityID] = eventLog
+        }
+        if let transferEvents {
+            transferEventLinesByActivityID[activityID] = transferEvents.map(TransferDiagnostics.transferEventLine)
         }
     }
 
@@ -151,6 +195,8 @@ final class AppModel: ObservableObject {
             activities.removeLast(activities.count - activityCap)
             for id in removed {
                 activityMetrics.removeValue(forKey: id)
+                transferEventLinesByActivityID.removeValue(forKey: id)
+                transferLogByActivityID.removeValue(forKey: id)
             }
         }
     }
@@ -281,6 +327,7 @@ final class TransferViewModel: ObservableObject {
     }()
     private var displayLanguage = "en"
     private var currentActivityID = ""
+    var activeActivityID: String { currentActivityID }
     fileprivate var operationID = UUID()
 
     var progressFraction: Double {

@@ -495,6 +495,184 @@ func etaString(_ seconds: Double) -> String {
     return String(format: "ETA %d:%02d", m, sec)
 }
 
+/// Builds a compact, bounded diagnostic report for a transfer and its snapshots.
+struct TransferDiagnostics {
+    static let clipboardMaxBytes = 256 * 1024
+    private static let headerMaxBytes = 2048
+    private static let failureMaxBytes = 48 * 1024
+    private static let eventLinesMaxBytes = 80 * 1024
+    private static let eventLogMaxBytes = 96 * 1024
+
+    static func report(
+        for record: FfiTransferActivityRecord,
+        eventLog: [String] = [],
+        transferEventLines: [String] = []
+    ) -> String {
+        var remaining = clipboardMaxBytes
+        var lines: [String] = []
+
+        append(
+            section: section("header", headerText(for: record)),
+            cap: headerMaxBytes,
+            into: &lines,
+            remaining: &remaining
+        )
+
+        if record.state == .failed || !record.diagnosticMessage.isEmpty || !record.userMessageKey.isEmpty {
+            append(
+                section: section("failure", failureText(for: record)),
+                cap: failureMaxBytes,
+                into: &lines,
+                remaining: &remaining
+            )
+        }
+
+        append(
+            section: section("activity", activityText(for: record)),
+            cap: remaining,
+            into: &lines,
+            remaining: &remaining
+        )
+
+        append(
+            section: section("transfer_events", transferEventLines.joined(separator: "\n")),
+            cap: eventLinesMaxBytes,
+            into: &lines,
+            remaining: &remaining
+        )
+
+        append(
+            section: section("activity_log", eventLog.joined(separator: "\n")),
+            cap: eventLogMaxBytes,
+            into: &lines,
+            remaining: &remaining
+        )
+
+        return lines.joined(separator: "\n")
+    }
+
+    static func transferEventLine(_ event: FfiTransferEvent) -> String {
+        let date = formatTime(event.tsMs)
+        var parts = [
+            "[\(date)]",
+            "\(event.kind)",
+            "\(event.direction)",
+            "\(event.mode)",
+            "\(event.pairingStep)",
+        ]
+        let file = event.fileName.isEmpty ? "unknown" : event.fileName
+        parts.append("file=\(file)")
+        parts.append("bytes=\(event.bytesTransferred)/\(event.totalBytes)")
+        if !event.dataPathDetail.isEmpty {
+            parts.append("path=\(event.dataPathKind) \(event.dataPathDetail)")
+        }
+        if !event.diagnosticMessage.isEmpty {
+            parts.append("message=\(event.diagnosticMessage)")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private static func append(
+        section: String,
+        cap: Int,
+        into report: inout [String],
+        remaining: inout Int
+    ) {
+        guard cap > 0 else { return }
+        let allowed = min(cap, remaining)
+        if allowed <= 0 { return }
+        let piece = tail(section, maxBytes: allowed)
+        guard !piece.isEmpty else { return }
+        if piece.utf8.count > remaining { return }
+        report.append(piece)
+        remaining -= piece.utf8.count
+        if remaining > 0 { remaining -= 1 }
+    }
+
+    private static func section(_ title: String, _ body: String) -> String {
+        if body.isEmpty { return "[\(title)]\n(empty)" }
+        return "[\(title)]\n\(body)"
+    }
+
+    private static func headerText(for record: FfiTransferActivityRecord) -> String {
+        [
+            "app=envoix-ios",
+            "version=\(appVersion)",
+            "build=\(appBuild)",
+            "record_id=\(record.activityId)",
+            "attempt_id=\(record.attemptId)",
+            "generated=\(isoDate())",
+        ].joined(separator: "\n")
+    }
+
+    private static func failureText(for record: FfiTransferActivityRecord) -> String {
+        [
+            "failure_code=\(record.failureCode)",
+            "failure_category=\(record.failureCategory)",
+            "failure_phase=\(record.failurePhase)",
+            "failure_origin=\(record.failureOrigin)",
+            "user_message_key=\(record.userMessageKey)",
+            "retryable=\(record.retryable)",
+            "recovery_action=\(record.recoveryAction)",
+            "diagnostic_message=\(record.diagnosticMessage)",
+        ].joined(separator: "\n")
+    }
+
+    private static func activityText(for record: FfiTransferActivityRecord) -> String {
+        [
+            "activity_id=\(record.activityId)",
+            "attempt_id=\(record.attemptId)",
+            "state=\(record.state)",
+            "direction=\(record.direction)",
+            "mode=\(record.mode)",
+            "created_at=\(formatTime(record.createdAtMs))",
+            "updated_at=\(formatTime(record.updatedAtMs))",
+            "started_at=\(formatTime(record.startedAtMs))",
+            "completed_at=\(formatTime(record.completedAtMs))",
+            "transfer_id=\(record.transferId)",
+            "file_name=\(record.fileName)",
+            "bytes=\(record.bytesTransferred)/\(record.totalBytes)",
+            "resumed_bytes=\(record.bytesResumed)",
+            "invite=\(record.invite)",
+            "token=\(record.token)",
+            "peer=\(record.peerDescriptor)",
+            "data_path=\(record.dataPathKind) \(record.dataPathDetail)",
+            "limits=\(record.limits)",
+            "completed_file_path=\(record.completedFilePath)",
+        ].joined(separator: "\n")
+    }
+
+    private static var appVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+    }
+
+    private static var appBuild: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "dev"
+    }
+
+    private static func formatTime(_ ms: UInt64) -> String {
+        guard ms > 0 else { return "0" }
+        let date = Date(timeIntervalSince1970: TimeInterval(ms) / 1000)
+        let formatter = ISO8601DateFormatter()
+        return formatter.string(from: date)
+    }
+
+    private static func isoDate() -> String {
+        ISO8601DateFormatter().string(from: Date())
+    }
+
+    private static func tail(_ text: String, maxBytes: Int) -> String {
+        let bytes = Array(text.utf8)
+        if bytes.count <= maxBytes { return text }
+        let head = "[… trimmed — last \(maxBytes / 1024) KB]\n"
+        let headBytes = Array(head.utf8)
+        let remaining = max(0, maxBytes - headBytes.count)
+        if remaining == 0 { return head }
+        let tailBytes = bytes.suffix(remaining)
+        return head + String(decoding: tailBytes, as: UTF8.self)
+    }
+}
+
 /// Shared status / progress section used by both the send and receive views.
 struct TransferStatusView: View {
     @Environment(\.appLanguage) private var language

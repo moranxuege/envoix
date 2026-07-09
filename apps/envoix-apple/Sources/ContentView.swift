@@ -193,6 +193,7 @@ struct ContentView: View {
             TransferStageView(
                 records: model.activities,
                 metricsByActivityID: model.activityMetrics,
+                onCopyDiagnostics: model.diagnosticReport,
                 onPause: model.pauseActivity,
                 onResume: model.resumeActivity,
                 onCancel: model.cancelActivity,
@@ -458,6 +459,7 @@ private struct TransferStageView: View {
     @State private var expandedActivityIDs: Set<String> = []
     let records: [FfiTransferActivityRecord]
     let metricsByActivityID: [String: ActivityMetrics]
+    let onCopyDiagnostics: (FfiTransferActivityRecord) -> String
     let onPause: (String) -> Void
     let onResume: (String) -> Void
     let onCancel: (String) -> Void
@@ -626,9 +628,9 @@ private struct TransferStageView: View {
                         .truncationMode(.middle)
                 }
                 Spacer(minLength: 4)
-                if developerMode && record.state == .failed {
+                if developerMode || record.state == .failed {
                     Button {
-                        copyToPasteboard(diagnosticReport(for: record))
+                        copyToPasteboard(onCopyDiagnostics(record))
                         ToastCenter.shared.show(AppText.value("Diagnostics copied", "诊断信息已复制", language: language))
                     } label: {
                         Label(AppText.value("Copy diagnostics", "复制诊断", language: language), systemImage: "doc.on.doc")
@@ -852,29 +854,6 @@ private struct TransferStageView: View {
                 ? AppText.value("This failure may be retryable.", "这个失败可能可以重试。", language: language)
                 : nil
         }
-    }
-
-    private func diagnosticReport(for record: FfiTransferActivityRecord) -> String {
-        [
-            "activity_id=\(record.activityId)",
-            "attempt_id=\(record.attemptId)",
-            "state=\(record.state)",
-            "direction=\(record.direction)",
-            "mode=\(record.mode)",
-            "transfer_id=\(record.transferId)",
-            "file_name=\(record.fileName)",
-            "bytes=\(record.bytesTransferred)/\(record.totalBytes)",
-            "completed_file_path=\(record.completedFilePath)",
-            "data_path=\(record.dataPathKind) \(record.dataPathDetail)",
-            "failure_code=\(record.failureCode)",
-            "failure_category=\(record.failureCategory)",
-            "failure_phase=\(record.failurePhase)",
-            "failure_origin=\(record.failureOrigin)",
-            "retryable=\(record.retryable)",
-            "recovery_action=\(record.recoveryAction)",
-            "user_message_key=\(record.userMessageKey)",
-            "diagnostic_message=\(record.diagnosticMessage)"
-        ].joined(separator: "\n")
     }
 
     private func activityStateText(for record: FfiTransferActivityRecord) -> String {
