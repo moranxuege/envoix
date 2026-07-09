@@ -54,12 +54,17 @@ Waiting        advertising an invite / parked in the room, no peer yet
 Connecting     pairing + connecting (peer known or joining)
 Verifying      hashing (resume prefix / final verification), no bytes moving
 Transferring   bytes moving
-Confirming     SEND only: all bytes + Complete frame sent, awaiting the
-               receiver's CompleteAck over the live connection (the
-               Two-Generals round-trip — real, failure-prone, previously
-               hidden inside "Transferring 100%"). Bounded by a confirm
-               timer (~15-20s): on expiry the driver cancels the attempt and
-               escalates to Unconfirmed (out-of-band proof) proactively.
+Confirming     SEND only: all bytes + Complete frame sent, awaiting proof.
+               PARALLEL PROOFS (design review): the mailbox is polled WHILE
+               the in-band ack is awaited — whichever proof lands first wins.
+               A healthy ack (~RTT) beats the first poll (2s) and no HTTP
+               fires; on a dead ack path the receipt confirms in ~2-5s instead
+               of after the confirm timeout. The actor's select keeps the ack
+               wait armed continuously — the interleaved-checking pattern with
+               zero listening gaps. The confirm timer (~20s) still bounds the
+               state: on expiry the attempt is cancelled and the card moves to
+               Unconfirmed (= BOTH channels have produced nothing yet; polls
+               continue their bounded schedule).
 Paused(origin) resumable stop; origin ∈ {Local, Peer, Lost}
 Unconfirmed    send delivered every byte, ack unknown; mailbox poll active
 Completed      done (receiver may re-enter Connecting to serve a re-verify)

@@ -200,19 +200,27 @@ impl Session {
                 if attempt != self.attempt || self.state != State::Confirming {
                     return Vec::new(); // stale timer, or already resolved
                 }
-                // Stop waiting on a dying path; escalate to out-of-band proof.
+                // Stop waiting on the dying ack; the mailbox polls (already
+                // running in parallel) continue as the remaining proof channel.
                 self.state = State::Unconfirmed;
                 vec![Effect::CancelToken, Effect::StartMailboxPoll]
             }
             Input::ReceiptVerified => {
-                if self.state != State::Unconfirmed {
+                let was_confirming = self.state == State::Confirming;
+                if self.state != State::Unconfirmed && !was_confirming {
                     return Vec::new();
                 }
+                let mut effects = self.exit_effects();
                 self.state = State::Completed;
                 self.bytes = self.total;
                 self.reason = None;
                 self.reason_code = None;
-                vec![Effect::StopMailboxPoll]
+                if was_confirming {
+                    // The receipt is sufficient proof; stop the doomed ack wait
+                    // instead of letting it hang into the QUIC idle timeout.
+                    effects.push(Effect::CancelToken);
+                }
+                effects
             }
         }
     }
@@ -312,7 +320,12 @@ impl Session {
             }
             E::Confirming if self.state == S::Transferring => {
                 self.state = S::Confirming;
-                vec![Effect::StartConfirmTimer]
+                // Parallel proofs (design review): the mailbox is polled WHILE
+                // the in-band ack is awaited - whichever proof lands first wins.
+                // On a healthy path the ack beats the first poll and no HTTP
+                // fires; on a dead path the receipt confirms in seconds instead
+                // of after the full confirm timeout.
+                vec![Effect::StartConfirmTimer, Effect::StartMailboxPoll]
             }
             E::Completed { bytes }
                 if matches!(
@@ -383,7 +396,7 @@ impl Session {
     /// Effects owed when leaving the current state (timers, pollers).
     fn exit_effects(&self) -> Vec<Effect> {
         match self.state {
-            State::Confirming => vec![Effect::StopConfirmTimer],
+            State::Confirming => vec![Effect::StopConfirmTimer, Effect::StopMailboxPoll],
             State::Unconfirmed => vec![Effect::StopMailboxPoll],
             _ => Vec::new(),
         }
@@ -446,10 +459,16 @@ mod tests {
         s.reduce(ev(1, E::Progress { bytes: 100 }));
         let effects = s.reduce(ev(1, E::Confirming));
         assert_eq!(s.state, State::Confirming);
-        assert_eq!(effects, vec![Effect::StartConfirmTimer]);
+        assert_eq!(
+            effects,
+            vec![Effect::StartConfirmTimer, Effect::StartMailboxPoll]
+        );
         let effects = s.reduce(ev(1, E::Completed { bytes: 100 }));
         assert_eq!(s.state, State::Completed);
-        assert_eq!(effects, vec![Effect::StopConfirmTimer]); // no receipt on send
+        assert_eq!(
+            effects,
+            vec![Effect::StopConfirmTimer, Effect::StopMailboxPoll] // no receipt on send
+        );
     }
 
     /// THE July regression: pause must never flip to Failed when the attempt's
@@ -517,7 +536,11 @@ mod tests {
         assert_eq!(s.state, State::Unconfirmed);
         assert_eq!(
             effects,
-            vec![Effect::StopConfirmTimer, Effect::StartMailboxPoll]
+            vec![
+                Effect::StopConfirmTimer,
+                Effect::StopMailboxPoll,
+                Effect::StartMailboxPoll
+            ]
         );
         let effects = s.reduce(Input::ReceiptVerified);
         assert_eq!(s.state, State::Completed);
@@ -537,6 +560,28 @@ mod tests {
         assert_eq!(effects, vec![Effect::CancelToken, Effect::StartMailboxPoll]);
         // A second timeout is a no-op (state already resolved).
         assert!(s.reduce(Input::ConfirmTimeout { attempt: 1 }).is_empty());
+    }
+
+    /// Parallel proofs: the receipt can win WHILE the ack is still awaited.
+    #[test]
+    fn receipt_verified_during_confirming_completes_and_stops_the_wait() {
+        let mut s = transferring(Send);
+        s.reduce(ev(1, E::Progress { bytes: 100 }));
+        s.reduce(ev(1, E::Confirming));
+        let effects = s.reduce(Input::ReceiptVerified);
+        assert_eq!(s.state, State::Completed);
+        assert_eq!(
+            effects,
+            vec![
+                Effect::StopConfirmTimer,
+                Effect::StopMailboxPoll,
+                Effect::CancelToken
+            ]
+        );
+        // The attempt's late echoes land on a resting state and are dropped.
+        assert!(s.reduce(ev(1, E::Completed { bytes: 100 })).is_empty());
+        assert!(s.reduce(ev(1, E::RunEnded { failure: None })).is_empty());
+        assert_eq!(s.state, State::Completed);
     }
 
     #[test]

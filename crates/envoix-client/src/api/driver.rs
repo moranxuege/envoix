@@ -28,11 +28,14 @@ use super::error::TransferError;
 
 /// How long a send waits in Confirming before escalating to the mailbox.
 const CONFIRM_TIMEOUT: Duration = Duration::from_secs(20);
-/// The state-scoped mailbox poll schedule for Unconfirmed (design: bounded).
-const POLL_SCHEDULE: [Duration; 3] = [
+/// The state-scoped mailbox poll schedule (design: bounded). Runs in PARALLEL
+/// with the Confirming ack wait - whichever proof lands first wins - and is
+/// restarted on entering Unconfirmed.
+const POLL_SCHEDULE: [Duration; 4] = [
     Duration::from_secs(2),
-    Duration::from_secs(10),
-    Duration::from_secs(30),
+    Duration::from_secs(5),
+    Duration::from_secs(15),
+    Duration::from_secs(40),
 ];
 /// Minimum interval between progress-only snapshots.
 const PROGRESS_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(100);
