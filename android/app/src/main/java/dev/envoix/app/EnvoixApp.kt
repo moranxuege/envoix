@@ -8,6 +8,7 @@ class EnvoixApp : Application() {
         super.onCreate()
         SettingsStore.init(this)
         LogStore.init(filesDir)
+        TransferLogs.init(filesDir)
         NativeBootstrap.initLogging(LogSink) // before initContext, so init logs are captured
         SettingsStore.applyLogLevel() // restore the saved (dev) verbosity
         NativeBootstrap.initContext(this)

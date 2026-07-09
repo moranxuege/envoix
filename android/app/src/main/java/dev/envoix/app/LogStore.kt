@@ -20,6 +20,12 @@ object LogStore {
 
     private var logDir: File? = null
 
+    data class SessionLog(
+        val label: String,
+        val file: String,
+        val bytes: Long,
+    )
+
     fun init(filesDir: File) {
         logDir = File(filesDir, "logs").apply { mkdirs() }
     }
@@ -39,6 +45,25 @@ object LogStore {
         buffer.clear()
         _lines.value = emptyList()
     }
+
+    @Synchronized
+    fun sessions(): List<SessionLog> {
+        val dir = logDir ?: return emptyList()
+        val transferDir = File(dir, "transfers")
+        if (!transferDir.exists()) return emptyList()
+        return runCatching {
+            transferDir
+                .listFiles { f -> f.isFile && f.extension == "log" && f.name.startsWith("transfer-") }
+                ?.sortedByDescending { it.lastModified() }
+                ?.map { f ->
+                    val suffix = f.name.removePrefix("transfer-").removeSuffix(".log")
+                    SessionLog("Transfer $suffix", f.absolutePath, f.length())
+                }
+                ?: emptyList()
+        }.getOrDefault(emptyList())
+    }
+
+    fun readSession(file: String): String = runCatching { File(file).readText() }.getOrDefault("")
 
     /** Persist the current buffer + an uncaught trace to a fixed path; a later
      *  "report on crash" reads this on the next launch and offers to upload it. */

@@ -427,6 +427,7 @@ private fun hasCardControls(t: Transfer): Boolean =
     when (t.status) {
         Status.Connecting, Status.Transferring, Status.Paused, Status.Failed -> true
         Status.Completed -> t.savedUri != null
+        Status.Waiting, Status.Verifying, Status.Confirming, Status.Unconfirmed -> false
         Status.Cancelled -> false
     }
 
@@ -446,12 +447,16 @@ private fun CardControls(
                 CircleBtn(Icons.Default.Pause, filled = true) { onPauseResume(t.id) }
                 CircleBtn(Icons.Default.Close, filled = false) { onCancel(t.id) }
             }
+            Status.Waiting,
+            Status.Verifying,
+            Status.Confirming,
+            Status.Unconfirmed,
+            Status.Completed -> if (t.savedUri != null) CircleBtn(Icons.AutoMirrored.Filled.OpenInNew, filled = false) { onOpen(t) }
             Status.Paused -> {
                 CircleBtn(Icons.Default.PlayArrow, filled = true) { onPauseResume(t.id) }
                 CircleBtn(Icons.Default.Close, filled = false) { onCancel(t.id) }
             }
             Status.Failed -> CircleBtn(Icons.Default.Refresh, filled = true) { onPauseResume(t.id) }
-            Status.Completed -> if (t.savedUri != null) CircleBtn(Icons.AutoMirrored.Filled.OpenInNew, filled = false) { onOpen(t) }
             Status.Cancelled -> {}
         }
     }
