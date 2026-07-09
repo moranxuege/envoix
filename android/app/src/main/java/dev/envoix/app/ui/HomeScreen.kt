@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -61,6 +62,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -104,6 +106,13 @@ fun HomeScreen(
     val colors = Envoix.colors
     var sheetOpen by remember { mutableStateOf(false) }
     val expanded = remember { mutableStateListOf<Long>() }
+    val listState = rememberLazyListState()
+    // A just-created transfer lands at the top (newest-first sort); bring it
+    // into view instead of leaving it above the fold.
+    val newestId = transfers.maxOfOrNull { it.id } ?: -1L
+    LaunchedEffect(newestId) {
+        if (newestId >= 0) listState.animateScrollToItem(0)
+    }
     val active = transfers.count { it.status == Status.Connecting || it.status == Status.Transferring }
 
     Scaffold(
@@ -132,6 +141,7 @@ fun HomeScreen(
                 EmptyState()
             } else {
                 LazyColumn(
+                    state = listState,
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                     contentPadding = PaddingValues(top = 4.dp, bottom = 96.dp),
                 ) {
