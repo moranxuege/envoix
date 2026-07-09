@@ -17,15 +17,18 @@ class TransferViewModel(app: Application) : AndroidViewModel(app) {
     fun startReceive(room: String, broker: String, relay: String, qrPayload: String?) =
         start("receive", room, incomingDir.absolutePath, broker, relay, qrPayload)
 
-    fun startSend(room: String, filePath: String, broker: String, relay: String, qrPayload: String?) =
-        start("send", room, filePath, broker, relay, qrPayload)
+    fun startSend(room: String, sourceUri: String, broker: String, relay: String, qrPayload: String?) =
+        start("send", room, "", broker, relay, qrPayload, sourceUri)
 
-    private fun start(direction: String, room: String, path: String, broker: String, relay: String, qrPayload: String?) {
+    private fun start(
+        direction: String, room: String, path: String, broker: String, relay: String,
+        qrPayload: String?, sourceUri: String? = null,
+    ) {
         val cfg = SettingsStore.settings.value
         TransferService.start(
             getApplication(), direction, room, path, broker, relay,
             cfg.chunkSize, cfg.candidatesAllow.joinToString(","), cfg.candidatesDeny.joinToString(","),
-            qrPayload,
+            qrPayload, sourceUri,
         )
     }
 

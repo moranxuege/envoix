@@ -5,7 +5,6 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -16,15 +15,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.lifecycle.lifecycleScope
 import dev.envoix.app.ui.EnvoixTheme
 import dev.envoix.app.ui.HomeScreen
 import dev.envoix.app.ui.LogScreen
 import dev.envoix.app.ui.SettingsScreen
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import java.io.File
 
 private enum class Screen { Home, Logs, Settings }
 
@@ -52,12 +47,9 @@ class MainActivity : ComponentActivity() {
                         HomeScreen(
                             transfers = transfers,
                             onReceive = { c, b, r, qr -> vm.startReceive(c, b, r, qr) },
-                            onSend = { c, b, r, uri, qr ->
-                                lifecycleScope.launch {
-                                    val path = withContext(Dispatchers.IO) { copyToCache(uri) }
-                                    if (path != null) vm.startSend(c, path, b, r, qr)
-                                }
-                            },
+                            // Staging (the content:// -> real-path copy) happens in
+                            // the service, visibly, so the card appears instantly.
+                            onSend = { c, b, r, uri, qr -> vm.startSend(c, uri.toString(), b, r, qr) },
                             onPauseResume = { vm.pauseResume(it) },
                             onCancel = { vm.cancel(it) },
                             onRemove = { vm.remove(it) },
@@ -81,20 +73,4 @@ class MainActivity : ComponentActivity() {
         runCatching { startActivity(Intent.createChooser(view, "Open with")) }
     }
 
-    /** Copy a picked content Uri into a real cache path the core can read. */
-    private fun copyToCache(uri: Uri): String? {
-        val name = displayName(uri) ?: "upload.bin"
-        val dir = File(cacheDir, "send").apply { mkdirs() }
-        val out = File(dir, name)
-        return runCatching {
-            contentResolver.openInputStream(uri)!!.use { input ->
-                out.outputStream().use { input.copyTo(it) }
-            }
-            out.absolutePath
-        }.getOrNull()
-    }
-
-    private fun displayName(uri: Uri): String? =
-        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
-            ?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
 }

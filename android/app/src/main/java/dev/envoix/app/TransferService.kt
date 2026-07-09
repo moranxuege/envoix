@@ -8,6 +8,8 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.Uri
+import android.provider.OpenableColumns
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.CoroutineScope
@@ -124,12 +126,18 @@ class TransferService : Service() {
                     it.copy(
                         qrPayload = spec.qrPayload,
                         // Show the outgoing file name right away; receives learn it on Started.
-                        fileName = if (spec.dir() == Direction.Send) File(spec.path).name else it.fileName,
+                        fileName = if (spec.dir() == Direction.Send && spec.path.isNotEmpty())
+                            File(spec.path).name else it.fileName,
                     )
                 }
                 specs[id] = spec
                 OpLog.add("start $direction room=${room.substringBefore('-')} id=$id")
-                startSession(id, spec, resume = false)
+                val sourceUri = intent.getStringExtra(EXTRA_SOURCE_URI)
+                if (spec.dir() == Direction.Send && !sourceUri.isNullOrEmpty()) {
+                    stageAndStart(id, spec, Uri.parse(sourceUri))
+                } else {
+                    startSession(id, spec, resume = false)
+                }
             }
             ACTION_RESUME -> {
                 val id = intent.getLongExtra(EXTRA_ID, -1L)
@@ -159,7 +167,14 @@ class TransferService : Service() {
                 val id = intent.getLongExtra(EXTRA_ID, -1L)
                 OpLog.add("remove transfer id=$id")
                 // D2, the one true abandon: discard partial + resume state +
-                // receipt, then tear the session and card down.
+                // receipt, then tear the session and card down. A send's staged
+                // cache copy goes too (they are as big as the file itself).
+                specs[id]?.let { sp ->
+                    val staged = File(cacheDir, "send").absolutePath
+                    if (sp.dir() == Direction.Send && sp.path.startsWith(staged)) {
+                        File(sp.path).delete()
+                    }
+                }
                 Native.destroySession(id, true)
                 jobs.remove(id)?.cancel()
                 specs.remove(id)
@@ -179,6 +194,67 @@ class TransferService : Service() {
     /** Append a timestamped line to a transfer's log, keeping the last 60. */
     private fun addLog(cur: List<String>, line: String): List<String> =
         (cur + "${logTime.format(java.util.Date())}  $line").takeLast(TransferRepository.LOG_CAP)
+
+    /**
+     * Stage a picked content:// into a real path the core can (re)open across
+     * attempts, VISIBLY: the card exists from the moment of the tap, and the
+     * copy shows as "preparing" with a live bar (for a large file this phase
+     * is seconds - hiding it made Send look dead). Runs in the service scope,
+     * so a rotation mid-copy no longer kills the send.
+     */
+    private fun stageAndStart(id: Long, spec0: Spec, uri: Uri) {
+        scope.launch(Dispatchers.IO) {
+            val name = displayName(uri) ?: "upload.bin"
+            val size = querySize(uri)
+            TransferRepository.update(id) {
+                it.copy(fileName = name, total = size, log = addLog(it.log, "preparing · staging $name…"))
+            }
+            val out = File(File(cacheDir, "send").apply { mkdirs() }, name)
+            val ok = runCatching {
+                contentResolver.openInputStream(uri)!!.use { input ->
+                    out.outputStream().use { o ->
+                        val buf = ByteArray(1 shl 20)
+                        var copied = 0L
+                        var last = 0L
+                        while (true) {
+                            val n = input.read(buf)
+                            if (n < 0) break
+                            o.write(buf, 0, n)
+                            copied += n
+                            val now = System.currentTimeMillis()
+                            if (now - last > 150) {
+                                last = now
+                                TransferRepository.update(id) { it.copy(bytes = copied) }
+                            }
+                        }
+                    }
+                }
+            }.isSuccess
+            if (!ok) {
+                out.delete()
+                TransferRepository.update(id) {
+                    it.copy(
+                        status = Status.Failed, error = "couldn't read the picked file",
+                        log = addLog(it.log, "failed · staging the picked file"),
+                    )
+                }
+                return@launch
+            }
+            // Reset the bar for the real transfer; the machine owns it from here.
+            TransferRepository.update(id) { it.copy(bytes = 0) }
+            val spec = spec0.copy(path = out.absolutePath)
+            specs[id] = spec
+            startSession(id, spec, resume = false)
+        }
+    }
+
+    private fun displayName(uri: Uri): String? =
+        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+            ?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+
+    private fun querySize(uri: Uri): Long =
+        contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)
+            ?.use { c -> if (c.moveToFirst()) c.getLong(0) else 0L } ?: 0L
 
     /** Create the Rust session and render its notice stream. */
     private fun startSession(id: Long, spec: Spec, resume: Boolean) {
@@ -452,6 +528,7 @@ class TransferService : Service() {
         private const val EXTRA_CAND_ALLOW = "candidates_allow"
         private const val EXTRA_CAND_DENY = "candidates_deny"
         private const val EXTRA_QR = "qr"
+        private const val EXTRA_SOURCE_URI = "source_uri"
         private const val EXTRA_ID = "id"
 
         /** `direction` is "send"/"receive"; `path` is the file to send or the
@@ -469,6 +546,7 @@ class TransferService : Service() {
             candidatesAllow: String,
             candidatesDeny: String,
             qrPayload: String?,
+            sourceUri: String? = null,
         ) {
             context.startForegroundService(
                 Intent(context, TransferService::class.java).apply {
@@ -482,6 +560,7 @@ class TransferService : Service() {
                     putExtra(EXTRA_CAND_ALLOW, candidatesAllow)
                     putExtra(EXTRA_CAND_DENY, candidatesDeny)
                     putExtra(EXTRA_QR, qrPayload)
+                    putExtra(EXTRA_SOURCE_URI, sourceUri)
                 }
             )
         }
