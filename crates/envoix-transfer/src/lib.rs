@@ -484,8 +484,21 @@ impl TransferEngine {
         }
         // The file itself may have been moved/published away after completion;
         // its receipt then re-confirms a re-offer without any bytes re-sent.
-        // Gated on resume_requested so a --fresh send forces a real re-receive.
+        // Gated on resume_requested so a --fresh send forces a real re-receive,
+        // and PRE-EMPTED by an in-flight partial: a receipt re-confirms an
+        // ALREADY-completed transfer - it must never override one that is
+        // mid-flight (field bug: pause+resume of a fresh re-send of a
+        // previously-completed file "completed" instantly off the old receipt,
+        // orphaning the partial and delivering nothing).
         if header.resume_requested
+            && LocalFileStorage::find_resume_state(
+                &output_dir,
+                &header.file_name,
+                header.file_size,
+                header.chunk_size,
+            )
+            .await?
+            .is_none()
             && let Some(receipt) =
                 LocalFileStorage::read_receipt(&output_dir, &header.file_name).await?
             && receipt.file_size == header.file_size
@@ -1494,6 +1507,63 @@ mod tests {
                 "unexpected file recreated by receipted re-offer: {name}"
             );
         }
+    }
+
+    /// Field bug: a receipt from an EARLIER completed transfer must not
+    /// pre-empt the resume of a NEW in-flight partial of the same file.
+    #[tokio::test]
+    async fn receipt_does_not_preempt_an_in_flight_partial() {
+        let root = unique_test_dir();
+        let source_dir = root.join("source");
+        let output_dir = root.join("output");
+        tokio::fs::create_dir_all(&source_dir).await.unwrap();
+        let source_path = source_dir.join("again.bin");
+        let content = b"resume beats receipt";
+        tokio::fs::write(&source_path, content).await.unwrap();
+
+        // Transfer once: receipt written; then the file is published away.
+        complete_transfer_once(&source_path, &output_dir).await;
+        tokio::fs::remove_file(output_dir.join("again.bin")).await.unwrap();
+
+        // A NEW transfer of the same file is mid-flight: plant its partial
+        // (first 8 bytes) + resume state, as a pause would leave them.
+        let tid = TransferId::new("transfer-partial");
+        let state = TransferResumeState {
+            transfer_id: tid.clone(),
+            file_name: "again.bin".into(),
+            file_size: content.len() as u64,
+            chunk_size: 4,
+            bytes_received: 8,
+            next_chunk_index: 2,
+            hash_bytes: 0,
+            hash_checkpoint: None,
+        };
+        LocalFileStorage::write_resume_state(&output_dir, &state).await.unwrap();
+        let temp = LocalFileStorage::resumable_temp_path(&output_dir, "again.bin", &tid).unwrap();
+        tokio::fs::write(&temp, &content[..8]).await.unwrap();
+
+        // Resume: the partial must continue (producing the real file), not the
+        // receipt path (which produces nothing).
+        let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
+        let receiver = tokio::spawn({
+            let output_dir = output_dir.clone();
+            async move {
+                TransferEngine::new(4)
+                    .receive_file(&mut receiver_connection, output_dir, &NoopEventSink)
+                    .await
+            }
+        });
+        let summary = TransferEngine::new(4)
+            .send_file(&mut sender_connection, source_path, true, &NoopEventSink)
+            .await
+            .expect("resume completes");
+        receiver.await.unwrap().expect("receive completes");
+        assert_eq!(summary.bytes_transferred, content.len() as u64);
+        assert_eq!(
+            tokio::fs::read(output_dir.join("again.bin")).await.unwrap(),
+            content,
+            "the partial path must produce the real file - the receipt path produces none"
+        );
     }
 
     #[tokio::test]
