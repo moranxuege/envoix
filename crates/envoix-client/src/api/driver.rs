@@ -138,10 +138,18 @@ impl TransferSession {
     fn spawn(
         client: Client,
         params: SessionParams,
-        session: Session,
+        mut session: Session,
         record: Option<(RecordStore, u64)>,
         launch: bool,
     ) -> (Self, mpsc::UnboundedReceiver<SessionNotice>) {
+        // A sender always knows its file: seed the name from the source path
+        // instead of waiting for Started (pairing-stage cards showed "file").
+        if session.file_name.is_none() && session.direction == TransferDirection::Send {
+            session.file_name = params
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned());
+        }
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (notice_tx, notice_rx) = mpsc::unbounded_channel();
         let actor = Actor {
