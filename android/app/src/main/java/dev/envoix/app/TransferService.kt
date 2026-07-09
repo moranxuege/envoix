@@ -143,15 +143,11 @@ class TransferService : Service() {
                 val id = intent.getLongExtra(EXTRA_ID, -1L)
                 enterForeground()
                 OpLog.add("resume transfer id=$id", id)
-                if (jobs.containsKey(id)) {
-                    // Live session: the machine handles the attempt bump.
-                    Native.sessionIntent(id, "resume")
-                } else {
-                    // Session died with the service; re-create it with resume
-                    // semantics (partials/receipts honored).
-                    val spec = specs[id] ?: return START_NOT_STICKY
-                    startSession(id, spec, resume = true)
-                }
+                // Restore-then-intent: rehydrate any dead sessions from their
+                // records FIRST, then let the machine's legality table decide.
+                // Never reconstruct from a shadow copy (the Q3 bypass bug).
+                if (!jobs.containsKey(id)) restoreAllRecords()
+                Native.sessionIntent(id, "resume")
             }
             ACTION_PAUSE -> {
                 val id = intent.getLongExtra(EXTRA_ID, -1L)
@@ -164,6 +160,12 @@ class TransferService : Service() {
                 Native.sessionIntent(id, "cancel")
             }
             ACTION_RESTORE_ALL -> restoreAllRecords()
+            ACTION_REVERIFY -> {
+                val id = intent.getLongExtra(EXTRA_ID, -1L)
+                OpLog.add("serve re-verify id=$id", id)
+                if (!jobs.containsKey(id)) restoreAllRecords()
+                Native.sessionIntent(id, "reverify")
+            }
             ACTION_REMOVE -> {
                 val id = intent.getLongExtra(EXTRA_ID, -1L)
                 OpLog.add("remove transfer id=$id", id)
@@ -556,6 +558,7 @@ class TransferService : Service() {
         private const val ACTION_RESUME = "dev.envoix.app.RESUME"
         private const val ACTION_REMOVE = "dev.envoix.app.REMOVE"
         private const val ACTION_RESTORE_ALL = "dev.envoix.app.RESTORE_ALL"
+        private const val ACTION_REVERIFY = "dev.envoix.app.REVERIFY"
 
         /** Launch specs by id, so a session can be re-created after the service
          *  (or process) restarted. */
@@ -631,6 +634,16 @@ class TransferService : Service() {
             context.startForegroundService(
                 Intent(context, TransferService::class.java).apply {
                     action = ACTION_RESUME
+                    putExtra(EXTRA_ID, id)
+                }
+            )
+        }
+
+        /** Serve a peer's re-verify from a Completed card (service, not resume). */
+        fun reverify(context: Context, id: Long) {
+            context.startService(
+                Intent(context, TransferService::class.java).apply {
+                    action = ACTION_REVERIFY
                     putExtra(EXTRA_ID, id)
                 }
             )

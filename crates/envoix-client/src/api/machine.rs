@@ -258,9 +258,9 @@ impl Session {
             State::Paused(_) | State::Unconfirmed | State::Failed => true,
             // D1: a cancelled transfer restarts FRESH (partials were discarded).
             State::Cancelled => false,
-            // Receive only: re-join to serve the peer's re-verify. A confirmed
-            // sender has nothing to re-join (the f010749 lesson).
-            State::Completed if self.direction == TransferDirection::Receive => true,
+            // Completed is TERMINAL: serving a peer's re-verify is a courier-
+            // tier service (driver ServeReverify), never a lifecycle transition
+            // - so no state exists that can lose the completion fact.
             _ => return Vec::new(),
         };
         let mut effects = self.exit_effects();
@@ -513,18 +513,17 @@ mod tests {
         assert_eq!(s.state, State::Completed);
     }
 
+    /// Completed is terminal for BOTH directions: re-verify is a courier-tier
+    /// service, not a resurrection (design addendum 2026-07-09).
     #[test]
-    fn receiver_can_rejoin_from_completed_to_serve_reverify() {
-        let mut s = transferring(Receive);
-        s.reduce(ev(1, E::Completed { bytes: 100 }));
-        let effects = s.reduce(Input::Resume);
-        assert_eq!(s.state, State::Connecting);
-        assert_eq!(s.attempt, 2);
-        assert_eq!(effects, vec![Effect::StartAttempt { resume: true }]);
-        // …and the OLD attempt's late events are stale now.
-        assert!(s.reduce(ev(1, E::Progress { bytes: 50 })).is_empty());
-        assert!(s.reduce(ev(1, failed(FailureCode::ConnectionLost))).is_empty());
-        assert_eq!(s.state, State::Connecting);
+    fn completed_is_terminal_resume_is_a_noop() {
+        for direction in [Send, Receive] {
+            let mut s = transferring(direction);
+            s.reduce(ev(1, E::Completed { bytes: 100 }));
+            assert!(s.reduce(Input::Resume).is_empty(), "{direction:?}");
+            assert_eq!(s.state, State::Completed);
+            assert_eq!(s.attempt, 1);
+        }
     }
 
     #[test]

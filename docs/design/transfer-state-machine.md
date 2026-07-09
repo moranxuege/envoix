@@ -288,3 +288,20 @@ rules, kind registry: `receipt` v1, `cancel` v2).
   retry reports as non-terminal (new event kind or suppression in the driver
   until `RunEnded`). **Recommended: suppress in driver; only the run-terminal
   Failed (7153682) reaches the machine.**
+
+## Addendum (2026-07-09 field review): terminal Completed, facts principle
+
+Field bugs Q2/Q3 traced to two root causes, fixed structurally:
+- **Single authority**: resume paths are restore-then-intent — the machine is
+  rehydrated from the record and its legality table decides; nothing may
+  reconstruct a session from shadow params. (Full Spec deletion + record
+  platform-extras remains as follow-up.)
+- **Completed is TERMINAL (both directions)**: the Resume edge is deleted.
+  Serving a peer's re-verify is a COURIER-TIER service (`ServeReverify`):
+  one-shot, bounded (120s), traced into the log, and invisible to the
+  machine, the record, and the card. A service, not a resurrection.
+- **Principle (recorded, not yet implemented): state derives from durable
+  facts, never the reverse.** Already embodied twice (receipts; the D1
+  ruling). A `Facts` struct enters `Session` only when a real edge needs it —
+  with terminal Completed, the coercion case that motivated it is
+  unrepresentable.

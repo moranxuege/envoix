@@ -607,6 +607,7 @@ pub extern "system" fn Java_dev_envoix_app_Native_sessionIntent(
             "pause" => session.pause(),
             "resume" => session.resume(),
             "cancel" => session.cancel(),
+            "reverify" => session.serve_reverify(),
             _ => {}
         }
     }

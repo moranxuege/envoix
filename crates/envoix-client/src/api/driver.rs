@@ -84,6 +84,9 @@ enum Cmd {
     ReceiptResponse(Option<Vec<u8>>),
     /// D2 (Remove): delete the partial, resume state, and receipt sidecars.
     Discard,
+    /// Serve the peer's re-verify (courier tier: one-shot, bounded, never
+    /// touches the machine, the record, or the card).
+    ServeReverify,
 }
 
 /// Handle to a running transfer session (one card).
@@ -181,6 +184,13 @@ impl TransferSession {
     /// resume state, and receipt sidecars. Call before dropping the handle.
     pub fn discard(&self) {
         let _ = self.cmds.send(Cmd::Discard);
+    }
+
+    /// Serve the peer's re-verify from a Completed card: the mailbox-
+    /// unreachable fallback. A service, not a resurrection - the card and the
+    /// machine are untouched.
+    pub fn serve_reverify(&self) {
+        let _ = self.cmds.send(Cmd::ServeReverify);
     }
 }
 
@@ -317,6 +327,26 @@ impl Actor {
                 }
             }
             Cmd::ReceiptResponse(None) => {} // empty slot; later polls may hit
+            Cmd::ServeReverify => {
+                let mut options = self.params.options.clone();
+                options.resume = true;
+                let request = TransferRequest {
+                    direction: self.params.direction,
+                    path: self.params.path.clone(),
+                    sources: self.params.sources.clone(),
+                    options,
+                };
+                if let Ok(transfer) = self.client.run(request) {
+                    tracing::info!("serving re-verify (courier tier; card untouched)");
+                    tokio::spawn(async move {
+                        // Bounded: one shot; outcome only logged.
+                        match tokio::time::timeout(Duration::from_secs(120), transfer.wait()).await {
+                            Ok(Ok(_)) => tracing::info!("re-verify served"),
+                            other => tracing::info!(?other, "re-verify ended without serving"),
+                        }
+                    });
+                }
+            }
             Cmd::Discard => {
                 self.discard_partial().await;
                 if let Some(name) = &self.session.file_name
