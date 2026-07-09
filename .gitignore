@@ -25,5 +25,5 @@ android/app/build/
 .idea/
 *.iml
 # native libs are built by cargo-ndk (see .github/workflows/release.yml); not tracked
-android/app/src/main/jniLibs/*/libenvoix_jni.so
+android/app/src/main/jniLibs/
 android/.kotlin/

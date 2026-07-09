@@ -16,6 +16,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import dev.envoix.app.ui.EnvoixTheme
 import dev.envoix.app.ui.HomeScreen
@@ -37,7 +38,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
             requestNotif.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
         setContent {
@@ -52,10 +57,10 @@ class MainActivity : ComponentActivity() {
                         HomeScreen(
                             transfers = transfers,
                             onReceive = { c, b, r, qr -> vm.startReceive(c, b, r, qr) },
-                            onSend = { c, b, r, uri, qr ->
+                            onSend = { c, b, r, uri, qr, invite ->
                                 lifecycleScope.launch {
                                     val path = withContext(Dispatchers.IO) { copyToCache(uri) }
-                                    if (path != null) vm.startSend(c, path, b, r, qr)
+                                    if (path != null) vm.startSend(c, path, b, r, qr, invite)
                                 }
                             },
                             onPauseResume = { vm.pauseResume(it) },

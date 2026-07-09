@@ -1090,9 +1090,12 @@ dependencies = [
  "envoix-rendezvous",
  "envoix-rendezvous-iroh",
  "iroh",
+ "jni 0.21.1",
+ "ndk-context",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tracing-subscriber",
  "uniffi",
 ]
 

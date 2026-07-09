@@ -23,7 +23,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.rememberScrollState
@@ -41,11 +40,11 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
@@ -78,6 +77,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.envoix.app.Direction
+import dev.envoix.app.InviteCodec
 import dev.envoix.app.LogUpload
 import dev.envoix.app.SettingsStore
 import dev.envoix.app.Status
@@ -90,7 +90,7 @@ import kotlin.math.roundToInt
 fun HomeScreen(
     transfers: List<Transfer>,
     onReceive: (code: String, broker: String, relay: String, qrPayload: String?) -> Unit,
-    onSend: (code: String, broker: String, relay: String, file: android.net.Uri, qrPayload: String?) -> Unit,
+    onSend: (code: String, broker: String, relay: String, file: android.net.Uri, qrPayload: String?, transferInvite: String?) -> Unit,
     onPauseResume: (Long) -> Unit,
     onCancel: (Long) -> Unit,
     onRemove: (Long) -> Unit,
@@ -158,7 +158,7 @@ fun HomeScreen(
         ) {
             NewTransferSheet(
                 onReceive = { c, b, r, qr -> sheetOpen = false; onReceive(c, b, r, qr) },
-                onSend = { c, b, r, uri, qr -> sheetOpen = false; onSend(c, b, r, uri, qr) },
+                onSend = { c, b, r, uri, qr, invite -> sheetOpen = false; onSend(c, b, r, uri, qr, invite) },
             )
         }
     }
@@ -261,10 +261,13 @@ private fun TransferCard(
                 .background(if (cancelled) colors.line else colors.surface)
                 .border(1.dp, colors.line, RoundedCornerShape(16.dp))
                 .combinedClickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null, // the drawer expanding is feedback enough; the
-                    // default ripple fills the whole card, which looks heavy
-                    onClick = { if (t.status == Status.Completed && t.savedUri != null) onOpen(t) },
+                    onClick = {
+                        if (t.status == Status.Completed && t.savedUri != null) {
+                            onOpen(t)
+                        } else {
+                            onToggleDetail(t.id)
+                        }
+                    },
                     onLongClick = { onToggleDetail(t.id) },
                 ),
         ) {
@@ -345,7 +348,7 @@ private fun CardControls(
                 CircleBtn(Icons.Default.Close, filled = false) { onCancel(t.id) }
             }
             Status.Failed -> CircleBtn(Icons.Default.Refresh, filled = true) { onPauseResume(t.id) }
-            Status.Completed -> if (t.savedUri != null) CircleBtn(Icons.Default.OpenInNew, filled = false) { onOpen(t) }
+            Status.Completed -> if (t.savedUri != null) CircleBtn(Icons.AutoMirrored.Filled.OpenInNew, filled = false) { onOpen(t) }
             Status.Cancelled -> {}
         }
     }
@@ -374,6 +377,8 @@ private fun CircleBtn(icon: ImageVector, filled: Boolean, onClick: () -> Unit) {
 private fun WaitingBody(t: Transfer, onCancel: (Long) -> Unit) {
     val colors = Envoix.colors
     val settings by SettingsStore.settings.collectAsState()
+    val directInvite = InviteCodec.isTransferInvite(t.qrPayload.orEmpty())
+    val copiedText = if (directInvite) t.qrPayload.orEmpty() else t.room
     Column(Modifier.fillMaxWidth().padding(16.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
             Column(Modifier.weight(1f)) {
@@ -402,7 +407,7 @@ private fun WaitingBody(t: Transfer, onCancel: (Long) -> Unit) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                t.room,
+                if (directInvite) "Invite link" else t.room,
                 color = colors.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
                 fontFamily = FontFamily.Monospace,
             )
@@ -411,13 +416,13 @@ private fun WaitingBody(t: Transfer, onCancel: (Long) -> Unit) {
                 Icons.Default.ContentCopy, "Copy code",
                 tint = colors.muted,
                 modifier = Modifier.clip(CircleShape)
-                    .clickable { clip.setText(AnnotatedString(t.room)) }
+                    .clickable { clip.setText(AnnotatedString(copiedText)) }
                     .padding(6.dp).size(18.dp),
             )
         }
         Spacer(Modifier.height(2.dp))
         Text(
-            "Scan or enter this code",
+            if (directInvite) "Scan this invite" else "Scan or enter this code",
             color = colors.muted, fontSize = 12.sp,
             modifier = Modifier.fillMaxWidth(),
             textAlign = androidx.compose.ui.text.style.TextAlign.Center,

@@ -99,7 +99,7 @@ pub fn parse_pairing_invite(input: String) -> Result<FfiPairingInvite, EnvoixErr
     let lowercased = input.to_ascii_lowercase();
     if lowercased.starts_with("envoix:") && !lowercased.starts_with("envoix://pair/") {
         return Err(EnvoixError::Operation {
-            message: "unsupported Envoix pairing invite scheme".to_string(),
+            reason: "unsupported Envoix pairing invite scheme".to_string(),
         });
     }
     let invite = Invite::parse(input).map_err(op_err)?;
@@ -128,17 +128,161 @@ pub fn fold_transfer_activity(
 /// Error surfaced across the FFI boundary.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum EnvoixError {
-    /// An operation failed; `message` is a human-readable reason.
-    #[error("{message}")]
+    /// An operation failed; `reason` is a human-readable reason.
+    #[error("{reason}")]
     Operation {
-        /// Human-readable failure reason.
-        message: String,
+        /// Human-readable operation failure reason.
+        reason: String,
     },
 }
 
 fn op_err(error: impl std::fmt::Display) -> EnvoixError {
     EnvoixError::Operation {
-        message: error.to_string(),
+        reason: error.to_string(),
+    }
+}
+
+#[cfg(target_os = "android")]
+mod android_bootstrap {
+    use std::io::Write;
+    use std::sync::OnceLock;
+
+    use jni::JNIEnv;
+    use jni::JavaVM;
+    use jni::objects::{GlobalRef, JClass, JObject, JString, JValue};
+
+    static LOG_VM: OnceLock<JavaVM> = OnceLock::new();
+    static LOG_SINK: OnceLock<GlobalRef> = OnceLock::new();
+    type LogReload = tracing_subscriber::reload::Handle<
+        tracing_subscriber::EnvFilter,
+        tracing_subscriber::Registry,
+    >;
+    static LOG_RELOAD: OnceLock<LogReload> = OnceLock::new();
+
+    const DEFAULT_LOG: &str = "envoix=debug,iroh=info,warn";
+
+    /// Wire the Android VM + app context into dependencies that use ndk_context.
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_dev_envoix_app_Native_initContext(
+        env: JNIEnv,
+        _class: JClass,
+        context: JObject,
+    ) {
+        let Ok(vm) = env.get_java_vm() else { return };
+        let Ok(ctx) = env.new_global_ref(&context) else {
+            return;
+        };
+        unsafe {
+            ndk_context::initialize_android_context(
+                vm.get_java_vm_pointer() as *mut _,
+                ctx.as_obj().as_raw() as *mut _,
+            );
+        }
+        // ndk_context stores raw pointers, so the Java context must live for the
+        // process lifetime.
+        std::mem::forget(ctx);
+    }
+
+    /// Forward Rust tracing output into the app's LogStore.
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_dev_envoix_app_Native_initLogging(
+        env: JNIEnv,
+        _class: JClass,
+        sink: JObject,
+    ) {
+        let Ok(vm) = env.get_java_vm() else { return };
+        let Ok(sink) = env.new_global_ref(&sink) else {
+            return;
+        };
+        let _ = LOG_VM.set(vm);
+        let _ = LOG_SINK.set(sink);
+
+        let spec = std::env::var("ENVOIX_LOG").unwrap_or_else(|_| DEFAULT_LOG.to_string());
+        let filter = tracing_subscriber::EnvFilter::try_new(&spec)
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(DEFAULT_LOG));
+        let (filter, handle) = tracing_subscriber::reload::Layer::new(filter);
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+        let installed = tracing_subscriber::registry()
+            .with(filter)
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(JniLogWriter)
+                    .with_ansi(false)
+                    .with_target(false),
+            )
+            .try_init()
+            .is_ok();
+        if installed {
+            let _ = LOG_RELOAD.set(handle);
+        }
+    }
+
+    /// Change the log filter used by the Android developer verbosity toggle.
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_dev_envoix_app_Native_setLogLevel(
+        mut env: JNIEnv,
+        _class: JClass,
+        spec: JString,
+    ) {
+        let Ok(spec) = env.get_string(&spec) else {
+            return;
+        };
+        let spec: String = spec.into();
+        if let (Some(handle), Ok(filter)) = (
+            LOG_RELOAD.get(),
+            tracing_subscriber::EnvFilter::try_new(&spec),
+        ) {
+            let _ = handle.reload(filter);
+        }
+    }
+
+    fn log_line(line: &str) {
+        let (Some(vm), Some(sink)) = (LOG_VM.get(), LOG_SINK.get()) else {
+            return;
+        };
+        let Ok(mut env) = vm.attach_current_thread() else {
+            return;
+        };
+        if let Ok(js) = env.new_string(line) {
+            let _ = env.call_method(sink, "log", "(Ljava/lang/String;)V", &[JValue::Object(&js)]);
+        }
+    }
+
+    #[derive(Clone)]
+    struct JniLogWriter;
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for JniLogWriter {
+        type Writer = LineBuf;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            LineBuf(Vec::new())
+        }
+    }
+
+    struct LineBuf(Vec<u8>);
+
+    impl Write for LineBuf {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            if !self.0.is_empty() {
+                if let Ok(s) = std::str::from_utf8(&self.0) {
+                    log_line(s.trim_end());
+                }
+                self.0.clear();
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for LineBuf {
+        fn drop(&mut self) {
+            let _ = self.flush();
+        }
     }
 }
 
@@ -806,7 +950,7 @@ impl EnvoixSession {
             let mut queue = self.queue.lock().unwrap();
             if queue.contains_activity(&request.activity_id) {
                 return Err(EnvoixError::Operation {
-                    message: format!("activity_id already exists: {}", request.activity_id),
+                    reason: format!("activity_id already exists: {}", request.activity_id),
                 });
             }
             queue.pending.push_back(QueuedTransfer {
@@ -1077,7 +1221,7 @@ fn report_activity_setup_failure(
 }
 
 fn setup_failure(
-    message: String,
+    reason: String,
     direction: FfiTransferDirection,
     activity: &FfiTransferActivityRecord,
 ) -> FfiTransferFailure {
@@ -1092,7 +1236,7 @@ fn setup_failure(
         retryable: true,
         recovery_action: FfiRecoveryAction::Retry,
         user_message_key: "transfer.setup_failed".to_string(),
-        diagnostic_message: message,
+        diagnostic_message: reason,
     }
 }
 
@@ -1110,7 +1254,7 @@ fn validate_transfer_request(
         }
         FfiTransferDirection::Unknown => {
             return Err(EnvoixError::Operation {
-                message: "transfer direction must be send or receive".to_string(),
+                reason: "transfer direction must be send or receive".to_string(),
             });
         }
     }
@@ -1140,13 +1284,13 @@ fn validate_direction_mode(
             | FfiTransferMode::Room,
         ) => Ok(()),
         (FfiTransferDirection::Unknown, _) => Err(EnvoixError::Operation {
-            message: "transfer direction must be send or receive".to_string(),
+            reason: "transfer direction must be send or receive".to_string(),
         }),
         (_, FfiTransferMode::Unknown) => Err(EnvoixError::Operation {
-            message: "transfer mode must not be unknown".to_string(),
+            reason: "transfer mode must not be unknown".to_string(),
         }),
         (direction, mode) => Err(EnvoixError::Operation {
-            message: format!("transfer mode {mode:?} is not supported for {direction:?}"),
+            reason: format!("transfer mode {mode:?} is not supported for {direction:?}"),
         }),
     }
 }
@@ -1176,7 +1320,7 @@ fn build_transfer_for_source(
             )
             .map_err(op_err),
         FfiTransferDirection::Unknown => Err(EnvoixError::Operation {
-            message: "transfer direction must be send or receive".to_string(),
+            reason: "transfer direction must be send or receive".to_string(),
         }),
     }
 }
@@ -1476,7 +1620,7 @@ fn build_client_for_request(
         Some(Path::new(config_path))
     };
     Client::from_runtime_sources(path).map_err(|error| EnvoixError::Operation {
-        message: error.to_string(),
+        reason: error.to_string(),
     })
 }
 
@@ -1488,7 +1632,7 @@ fn transfer_options_for_request(
     options.relay = relay_url_for_request(settings, request);
     if request.path_policy == FfiPathPolicy::RelayOnly && options.relay.is_none() {
         return Err(EnvoixError::Operation {
-            message: "relay-only transfers require a relay URL".to_string(),
+            reason: "relay-only transfers require a relay URL".to_string(),
         });
     }
     options.path = path_policy(request.path_policy);
@@ -1566,14 +1710,14 @@ fn peer_sources_for_request(
                     "at least one rendezvous route must be enabled"
                 };
                 Err(EnvoixError::Operation {
-                    message: message.to_string(),
+                    reason: message.to_string(),
                 })
             } else {
                 Ok(sources)
             }
         }
         FfiTransferMode::Unknown => Err(EnvoixError::Operation {
-            message: "transfer mode must not be unknown".to_string(),
+            reason: "transfer mode must not be unknown".to_string(),
         }),
     }
 }
@@ -1632,7 +1776,7 @@ fn required_value(value: &str, field: &str) -> Result<String, EnvoixError> {
     let value = value.trim();
     if value.is_empty() {
         Err(EnvoixError::Operation {
-            message: format!("{field} must not be empty"),
+            reason: format!("{field} must not be empty"),
         })
     } else {
         Ok(value.to_string())
@@ -2243,6 +2387,7 @@ mod tests {
     use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::mpsc::{Sender, channel};
+    use std::sync::{Mutex, OnceLock};
     use std::thread;
     use std::time::Duration;
 
@@ -2286,6 +2431,15 @@ mod tests {
             let _ = self.0.send(Msg::Activity(record));
         }
         fn on_status(&self, _message: String) {}
+    }
+
+    static LOOPBACK_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn lock_loopback_tests() -> std::sync::MutexGuard<'static, ()> {
+        LOOPBACK_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap()
     }
 
     fn recv_invite(rx: &std::sync::mpsc::Receiver<Msg>, timeout: Duration) -> String {
@@ -2897,6 +3051,7 @@ mod tests {
 
     #[test]
     fn ffi_qr_invite_loopback() {
+        let _loopback_guard = lock_loopback_tests();
         let dir = tempfile::tempdir().unwrap();
         let output_dir = dir.path().join("received");
         std::fs::create_dir_all(&output_dir).unwrap();
@@ -2957,6 +3112,7 @@ mod tests {
 
     #[test]
     fn ffi_room_loopback() {
+        let _loopback_guard = lock_loopback_tests();
         let (broker_tx, broker_rx) = channel();
         let _server = thread::spawn(move || {
             let runtime = Runtime::new().unwrap();

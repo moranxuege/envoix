@@ -27,6 +27,8 @@ private data class Spec(
     val config: String,
     /** Invite payload to advertise as a QR while waiting (initiated sessions only). */
     val qrPayload: String?,
+    /** Direct transfer invite scanned from a receiver, used by senders only. */
+    val transferInvite: String?,
     /** Rendezvous modes to attempt, in order Room → mDNS. */
     val useRoom: Boolean,
     val useMdns: Boolean,
@@ -83,6 +85,7 @@ class TransferService : Service() {
                     intent.getStringExtra(EXTRA_RELAY) ?: Endpoints.RELAY,
                     intent.getStringExtra(EXTRA_CONFIG) ?: "",
                     intent.getStringExtra(EXTRA_QR),
+                    intent.getStringExtra(EXTRA_TRANSFER_INVITE),
                     SettingsStore.settings.value.useRoom && hasInternet(),
                     SettingsStore.settings.value.useMdns,
                 )
@@ -109,14 +112,14 @@ class TransferService : Service() {
             }
             ACTION_PAUSE -> {
                 val id = intent.getLongExtra(EXTRA_ID, -1L)
-                Native.cancel(id)
+                NativeTransfer.cancel(id)
                 TransferRepository.update(id) {
                     if (it.status.isTerminal) it else it.copy(status = Status.Paused, speedBps = 0.0)
                 }
             }
             ACTION_CANCEL -> {
                 val id = intent.getLongExtra(EXTRA_ID, -1L)
-                Native.cancel(id)
+                NativeTransfer.cancel(id)
                 specs.remove(id)
                 TransferRepository.update(id) {
                     if (it.status.isTerminal) it else it.copy(status = Status.Cancelled)
@@ -144,10 +147,27 @@ class TransferService : Service() {
             var lastNotif = 0L
             var startTs = 0L
             if (spec.useMdns) runCatching { multicastLock.acquire() }
-            NativeTransfer.run(id, spec.direction, spec.room, spec.broker, spec.relay, spec.path, spec.config, spec.useRoom, spec.useMdns)
+            NativeTransfer.run(
+                id,
+                spec.direction,
+                spec.room,
+                spec.broker,
+                spec.relay,
+                spec.path,
+                spec.config,
+                spec.qrPayload,
+                spec.transferInvite,
+                spec.useRoom,
+                spec.useMdns,
+            )
                 .collect { ev ->
                     TransferRepository.update(id) { t ->
                         when (ev) {
+                            is CliEvent.InviteReady ->
+                                t.copy(
+                                    qrPayload = ev.invite,
+                                    log = addLog(t.log, "invite ready"),
+                                )
                             CliEvent.Binding, CliEvent.Connecting ->
                                 t.copy(
                                     status = Status.Connecting,
@@ -351,6 +371,7 @@ class TransferService : Service() {
         private const val EXTRA_RELAY = "relay"
         private const val EXTRA_CONFIG = "config"
         private const val EXTRA_QR = "qr"
+        private const val EXTRA_TRANSFER_INVITE = "transfer_invite"
         private const val EXTRA_ID = "id"
 
         /** `direction` is "send"/"receive"; `path` is the file to send or the
@@ -365,6 +386,7 @@ class TransferService : Service() {
             relay: String,
             config: String,
             qrPayload: String?,
+            transferInvite: String?,
         ) {
             context.startForegroundService(
                 Intent(context, TransferService::class.java).apply {
@@ -376,6 +398,7 @@ class TransferService : Service() {
                     putExtra(EXTRA_RELAY, relay)
                     putExtra(EXTRA_CONFIG, config)
                     putExtra(EXTRA_QR, qrPayload)
+                    putExtra(EXTRA_TRANSFER_INVITE, transferInvite)
                 }
             )
         }

@@ -1,0 +1,5 @@
+[bindings.kotlin]
+package_name = "dev.envoix.app.ffi"
+cdylib_name = "envoix_ffi"
+android = true
+kotlin_target_version = "2.0.20"

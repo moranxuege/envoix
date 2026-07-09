@@ -15,14 +15,22 @@ class TransferViewModel(app: Application) : AndroidViewModel(app) {
     val transfers: StateFlow<List<Transfer>> = TransferRepository.transfers
 
     fun startReceive(room: String, broker: String, relay: String, qrPayload: String?) =
-        start("receive", room, incomingDir.absolutePath, broker, relay, qrPayload)
+        start("receive", room, incomingDir.absolutePath, broker, relay, qrPayload, null)
 
-    fun startSend(room: String, filePath: String, broker: String, relay: String, qrPayload: String?) =
-        start("send", room, filePath, broker, relay, qrPayload)
+    fun startSend(room: String, filePath: String, broker: String, relay: String, qrPayload: String?, transferInvite: String?) =
+        start("send", room, filePath, broker, relay, qrPayload, transferInvite)
 
-    private fun start(direction: String, room: String, path: String, broker: String, relay: String, qrPayload: String?) {
+    private fun start(
+        direction: String,
+        room: String,
+        path: String,
+        broker: String,
+        relay: String,
+        qrPayload: String?,
+        transferInvite: String?,
+    ) {
         val config = SettingsStore.renderConfig(getApplication()) ?: ""
-        TransferService.start(getApplication(), direction, room, path, broker, relay, config, qrPayload)
+        TransferService.start(getApplication(), direction, room, path, broker, relay, config, qrPayload, transferInvite)
     }
 
     fun cancel(id: Long) = TransferService.cancel(getApplication(), id)

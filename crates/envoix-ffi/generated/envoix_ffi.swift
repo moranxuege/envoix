@@ -2359,12 +2359,12 @@ public enum EnvoixError: Swift.Error, Equatable, Hashable, Foundation.LocalizedE
 
 
     /**
-     * An operation failed; `message` is a human-readable reason.
+     * An operation failed; `reason` is a human-readable reason.
      */
     case Operation(
         /**
-         * Human-readable failure reason.
-         */message: String
+         * Human-readable operation failure reason.
+         */reason: String
     )
 
 
@@ -2396,7 +2396,7 @@ public struct FfiConverterTypeEnvoixError: FfiConverterRustBuffer {
 
 
         case 1: return .Operation(
-            message: try FfiConverterString.read(from: &buf)
+            reason: try FfiConverterString.read(from: &buf)
             )
 
          default: throw UniffiInternalError.unexpectedEnumCase
@@ -2410,9 +2410,9 @@ public struct FfiConverterTypeEnvoixError: FfiConverterRustBuffer {
 
 
 
-        case let .Operation(message):
+        case let .Operation(reason):
             writeInt(&buf, Int32(1))
-            FfiConverterString.write(message, into: &buf)
+            FfiConverterString.write(reason, into: &buf)
 
         }
     }
