@@ -95,6 +95,7 @@ pub extern "system" fn Java_dev_envoix_app_Native_runTransfer(
     candidates_deny: JString,
     use_room: jboolean,
     use_mdns: jboolean,
+    resume: jboolean,
     callback: JObject,
 ) {
     let direction = jstr(&mut env, &direction);
@@ -121,6 +122,7 @@ pub extern "system" fn Java_dev_envoix_app_Native_runTransfer(
         candidates_deny,
         use_room: use_room != 0,
         use_mdns: use_mdns != 0,
+        resume: resume != 0,
     };
     runtime().block_on(async move {
         if let Err(err) = drive(req, &vm, &cb).await {
@@ -245,6 +247,7 @@ struct DriveRequest {
     candidates_deny: String,
     use_room: bool,
     use_mdns: bool,
+    resume: bool,
 }
 
 /// Split a comma-joined FFI config field into trimmed, non-empty entries.
@@ -283,6 +286,10 @@ async fn drive(req: DriveRequest, vm: &JavaVM, cb: &GlobalRef) -> Result<(), Str
 
     let mut options = TransferOptions::default();
     options.relay = Some(req.relay);
+    // False for a user-initiated NEW transfer (fresh copy wanted even if this
+    // file was received before); true when relaunched via Resume/re-verify, so
+    // partials and completion receipts are honored.
+    options.resume = req.resume;
     let direction = match req.direction.as_str() {
         "send" => TransferDirection::Send,
         _ => TransferDirection::Receive,

@@ -44,6 +44,7 @@ object Native {
         candidatesDeny: String,
         useRoom: Boolean,
         useMdns: Boolean,
+        resume: Boolean,
         callback: EventCallback,
     )
 

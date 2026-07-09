@@ -43,6 +43,7 @@ object NativeTransfer {
         candidatesDeny: String,
         useRoom: Boolean,
         useMdns: Boolean,
+        resume: Boolean,
     ): Flow<CliEvent> = callbackFlow {
         val callback = object : EventCallback {
             override fun onEvent(json: String) {
@@ -54,7 +55,7 @@ object NativeTransfer {
         // terminal state rather than a blanket Exit(0).
         val job = launch(Dispatchers.IO) {
             val result = runCatching {
-                Native.runTransfer(id, direction, code, broker, relay, path, chunkSize, candidatesAllow, candidatesDeny, useRoom, useMdns, callback)
+                Native.runTransfer(id, direction, code, broker, relay, path, chunkSize, candidatesAllow, candidatesDeny, useRoom, useMdns, resume, callback)
             }
             result.exceptionOrNull()?.let { t ->
                 if (t !is CancellationException) trySend(CliEvent.Failed(t.message ?: "native error"))

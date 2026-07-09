@@ -44,9 +44,10 @@ class TransferViewModel(app: Application) : AndroidViewModel(app) {
         val t = TransferRepository.transfers.value.find { it.id == id } ?: return
         if (t.status == Status.Paused || t.status == Status.Failed ||
             t.status == Status.Unconfirmed || t.status == Status.Cancelled ||
-            // A Done card can re-join too: the completion receipt lets the peer
-            // re-confirm (recover its lost CompleteAck) with zero bytes re-sent.
-            t.status == Status.Completed)
+            // A Done RECEIVER can re-join to serve the peer's re-verify: the
+            // completion receipt re-delivers its lost CompleteAck, no bytes
+            // re-sent. (A Done sender is already confirmed - nothing to re-join.)
+            (t.status == Status.Completed && t.direction == Direction.Receive))
             TransferService.resume(getApplication(), id)
         else
             TransferService.pause(getApplication(), id)

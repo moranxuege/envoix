@@ -32,6 +32,10 @@ private data class Spec(
     /** Rendezvous modes to attempt, in order Room → mDNS. */
     val useRoom: Boolean,
     val useMdns: Boolean,
+    /** Honor receiver-side resume state and completion receipts. False for a
+     *  user-initiated NEW transfer (a fresh copy is wanted even if this file
+     *  was received before); flipped true when relaunched via Resume/re-verify. */
+    val resume: Boolean = false,
 ) {
     fun dir(): Direction = if (direction == "send") Direction.Send else Direction.Receive
 }
@@ -109,7 +113,7 @@ class TransferService : Service() {
                 enterForeground()
                 TransferRepository.update(id) { it.copy(status = Status.Connecting, error = null) }
                 OpLog.add("resume transfer id=$id")
-                runLoop(id, spec)
+                runLoop(id, spec.copy(resume = true))
             }
             ACTION_PAUSE -> {
                 val id = intent.getLongExtra(EXTRA_ID, -1L)
@@ -159,7 +163,7 @@ class TransferService : Service() {
             var lastNotif = 0L
             var startTs = 0L
             if (spec.useMdns) runCatching { multicastLock.acquire() }
-            NativeTransfer.run(id, spec.direction, spec.room, spec.broker, spec.relay, spec.path, spec.chunkSize, spec.candidatesAllow, spec.candidatesDeny, spec.useRoom, spec.useMdns)
+            NativeTransfer.run(id, spec.direction, spec.room, spec.broker, spec.relay, spec.path, spec.chunkSize, spec.candidatesAllow, spec.candidatesDeny, spec.useRoom, spec.useMdns, spec.resume)
                 .collect { ev ->
                     TransferRepository.update(id) { t ->
                         // Once a card is terminal or user-paused, ignore every late
@@ -247,7 +251,11 @@ class TransferService : Service() {
                                     when {
                                         // All bytes sent but the ack was lost (Two-Generals):
                                         // the file almost certainly arrived - not a failure.
-                                        t.direction == Direction.Send && t.total > 0 &&
+                                        // Requires an actively Transferring run: a failed
+                                        // RE-join still carries the finished run's stale
+                                        // bytes/total and must not fake an Unconfirmed.
+                                        t.status == Status.Transferring &&
+                                            t.direction == Direction.Send && t.total > 0 &&
                                             t.bytes >= t.total && lost ->
                                             t.copy(
                                                 status = Status.Unconfirmed, error = ev.error,

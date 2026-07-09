@@ -350,9 +350,12 @@ private fun CardControls(
                 CircleBtn(Icons.Default.Refresh, filled = true) { onPauseResume(t.id) }
             Status.Completed -> {
                 if (t.savedUri != null) CircleBtn(Icons.Default.OpenInNew, filled = false) { onOpen(t) }
-                // Re-join the room to serve a peer's re-verify: its lost
-                // CompleteAck is re-delivered from the receipt, no bytes re-sent.
-                CircleBtn(Icons.Default.Refresh, filled = false) { onPauseResume(t.id) }
+                // RECEIVER only: re-join the room to serve the peer's re-verify
+                // (its lost CompleteAck re-delivers from the receipt, no bytes
+                // re-sent). A Done SENDER is already confirmed - re-joining
+                // could only wait in an empty room and degrade the card.
+                if (t.direction == Direction.Receive)
+                    CircleBtn(Icons.Default.Refresh, filled = false) { onPauseResume(t.id) }
             }
         }
     }
