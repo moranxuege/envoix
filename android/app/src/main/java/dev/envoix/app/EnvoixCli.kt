@@ -177,7 +177,12 @@ object UniffiTransferRunner {
             else -> throw IllegalArgumentException("unsupported transfer direction: $direction")
         }
         val invite = transferInvite.orEmpty()
-        val mode = if (invite.isNotBlank()) FfiTransferMode.INVITE else FfiTransferMode.ROOM
+        val mode = transferMode(
+            direction = ffiDirection,
+            invite = invite,
+            useRoom = useRoom,
+            useMdns = useMdns,
+        )
         return FfiTransferRequest(
             activityId = activityId,
             direction = ffiDirection,
@@ -206,6 +211,18 @@ object UniffiTransferRunner {
             ),
         )
     }
+
+    private fun transferMode(
+        direction: FfiTransferDirection,
+        invite: String,
+        useRoom: Boolean,
+        useMdns: Boolean,
+    ): FfiTransferMode =
+        when {
+            direction == FfiTransferDirection.SEND && invite.isNotBlank() -> FfiTransferMode.INVITE
+            direction == FfiTransferDirection.RECEIVE && !useRoom && !useMdns -> FfiTransferMode.SHOW_INVITE
+            else -> FfiTransferMode.ROOM
+        }
 
     private fun mapEvent(event: FfiTransferEvent): CliEvent? =
         when (event.kind) {
