@@ -2,7 +2,24 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("org.jlleitschuh.gradle.ktlint")
 }
+
+// Short git SHA embedded into BuildConfig, so uploaded logs identify the build.
+val gitCommit: String =
+    try {
+        ProcessBuilder("git", "rev-parse", "--short", "HEAD")
+            .directory(rootDir)
+            .redirectErrorStream(true)
+            .start()
+            .inputStream
+            .bufferedReader()
+            .readText()
+            .trim()
+            .ifEmpty { "unknown" }
+    } catch (_: Exception) {
+        "unknown"
+    }
 
 val envoixAndroidAbis = (
     providers.gradleProperty("envoix.android.abis").orNull
@@ -74,6 +91,7 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "0.1.0"
+        buildConfigField("String", "GIT_COMMIT", "\"$gitCommit\"")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
             // Ship only ABIs that the Rust UniFFI core is built for.
@@ -99,7 +117,10 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
 
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
 
     sourceSets.getByName("main") {
         jniLibs.setSrcDirs(listOf(generatedJniLibsDir.get().asFile))
@@ -117,6 +138,10 @@ tasks.configureEach {
     if (name.startsWith("merge") && name.endsWith("JniLibFolders")) {
         dependsOn(buildEnvoixFfiAndroid)
     }
+}
+
+ktlint {
+    android = true
 }
 
 dependencies {

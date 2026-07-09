@@ -1,4 +1,11 @@
-//! Pairing and peer-authentication configuration.
+//! Data-plane peer authentication: SPAKE2 run over the live peer connection and
+//! bound to it - the transcript is confirmed with HMAC-SHA256 keyed by the QUIC
+//! TLS exporter, so a man-in-the-middle on the transport cannot pass.
+//!
+//! Distinct from `envoix-pairing`, which runs the same SPAKE2 primitive on the
+//! *control* plane - over the untrusted rendezvous mailbox, before any
+//! connection - to exchange sealed peer descriptors. Same code-to-key primitive,
+//! two planes: this one binds to the channel it authenticates.
 
 use envoix_error::CoreError;
 use envoix_protocol::{

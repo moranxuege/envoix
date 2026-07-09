@@ -41,6 +41,9 @@ jobs:
       - name: Install SDK components
         run: sdkmanager --install "platforms;android-34" "build-tools;34.0.0"
       # Lint only needs the Kotlin/resources, not the native .so, so skip the JNI build.
+      - name: Kotlin style
+        working-directory: android
+        run: ./gradlew :app:ktlintCheck --no-daemon --stacktrace
       - name: Lint
         working-directory: android
         run: ./gradlew :app:lintDebug --no-daemon --stacktrace

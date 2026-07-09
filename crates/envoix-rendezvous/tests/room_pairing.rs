@@ -181,3 +181,66 @@ async fn over_long_room_id_is_rejected() {
         Err(envoix_rendezvous::RendezvousError::Rejected(_))
     ));
 }
+
+/// The dead-slot bug (observed in the field): a peer that joins and then
+/// disconnects while parked must be evicted immediately - not linger until the
+/// TTL, consume the next join, and leave the real partner parked in an emptied
+/// room. Sequence: A joins and dies; B then C join the same room; B and C must
+/// pair with each other.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dead_waiter_is_evicted_and_next_two_peers_pair() {
+    let registry = Arc::new(RoomRegistry::with_ttl(Duration::from_secs(30)));
+
+    // A joins, then its connection dies (both halves dropped -> broker EOF).
+    let (a_client, a_broker) = tokio::io::duplex(4096);
+    let ra = registry.clone();
+    let serve_a = tokio::spawn(async move { ra.serve(broker_conn(a_broker)).await });
+    {
+        let (_reader, mut writer) = tokio::io::split(a_client);
+        write_framed(
+            &mut writer,
+            &Join {
+                room_id: "room-dead".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    } // a_client dropped here
+
+    // A's serve task must end promptly with an eviction error - well before
+    // the 30s TTL, which is the pre-fix behavior.
+    let a_result = tokio::time::timeout(Duration::from_secs(2), serve_a)
+        .await
+        .expect("dead waiter was not evicted promptly (dead-slot bug)")
+        .unwrap();
+    assert!(matches!(
+        a_result,
+        Err(envoix_rendezvous::RendezvousError::Rejected(_))
+    ));
+
+    // B and C join the same room and must pair with each other, not the corpse.
+    let (client_b, broker_b) = tokio::io::duplex(64 * 1024);
+    let (client_c, broker_c) = tokio::io::duplex(64 * 1024);
+    let rb = registry.clone();
+    let sb = tokio::spawn(async move { rb.serve(broker_conn(broker_b)).await });
+    let rc = registry.clone();
+    let sc = tokio::spawn(async move { rc.serve(broker_conn(broker_c)).await });
+
+    let b = tokio::spawn(async move {
+        run_initiator(client_b, "room-dead", "12-kelp-coral", "endpoint-B").await
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let c = tokio::spawn(async move {
+        run_responder(client_c, "room-dead", "12-kelp-coral", "endpoint-C").await
+    });
+
+    let (role_b, b_got) = b.await.unwrap().expect("B pairs despite the corpse");
+    let (role_c, c_got) = c.await.unwrap().expect("C pairs despite the corpse");
+    assert_eq!(role_b, Role::Initiator);
+    assert_eq!(role_c, Role::Responder);
+    assert_eq!(b_got, "endpoint-C");
+    assert_eq!(c_got, "endpoint-B");
+
+    sb.await.unwrap().expect("broker serves B");
+    sc.await.unwrap().expect("broker serves C");
+}

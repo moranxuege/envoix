@@ -13,10 +13,12 @@ use std::time::Duration;
 pub use envoix_auth::{PairingConfig, authenticate_receiver, authenticate_sender};
 use envoix_error::CoreError;
 use envoix_protocol::{FrameConnection, PeerDescriptor};
+pub use envoix_rendezvous_iroh::{generate_code, split_code};
 pub use envoix_transfer::TransferEngine;
 pub use envoix_transfer::{
-    DEFAULT_CHUNK_SIZE, EventSink, NoopEventSink, TransferCancelToken, TransferEvent,
-    TransferSummary, USER_INTERRUPT_MESSAGE,
+    DEFAULT_CHUNK_SIZE, EventSink, NoopEventSink, PEER_INTERRUPT_MESSAGE, PEER_PAUSE_MESSAGE,
+    TransferCancelToken, TransferEvent, TransferSummary, USER_INTERRUPT_MESSAGE,
+    USER_PAUSE_MESSAGE, validate_chunk_size,
 };
 pub use envoix_types::TransferDirection;
 use iroh::Endpoint;
@@ -36,7 +38,9 @@ pub use room::{receive_file_via_room, send_file_via_room};
 
 const ALPN: &[u8] = b"envoix/1";
 const MAX_AUTH_FAILURES: u32 = 50;
-const MDNS_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
+const MDNS_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
+/// Per-candidate connect budget for mDNS sends, so stale candidates fail fast.
+const MDNS_CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// Error type returned by session orchestration.
 pub type SessionError = CoreError;
@@ -261,7 +265,7 @@ pub async fn send_file_enable_mdns(
             }
             () = cancel.cancelled() => {
                 local_endpoint.close().await;
-                return Err(interrupted_error());
+                return Err(interrupted_error(&cancel));
             }
         };
 
@@ -352,6 +356,28 @@ where
         .collect::<Vec<_>>();
     on_bound_peer(peer, relay_urls);
     receive_one_authenticated(bound_endpoint, output_dir, config, pairing, events, cancel).await
+}
+
+/// Receives one file over an mDNS-advertised endpoint: binds an mDNS endpoint,
+/// reports the bound peer descriptor through `on_bound_peer`, then accepts the
+/// first dialer that authenticates. Stops on cancellation.
+pub async fn receive_file_enable_mdns<F>(
+    listen_addrs: impl Into<BindAddrs>,
+    output_dir: PathBuf,
+    config: SessionConfig,
+    pairing: &PairingConfig,
+    events: Box<dyn EventSink>,
+    on_bound_peer: F,
+    cancel: TransferCancelToken,
+) -> Result<TransferSummary, SessionError>
+where
+    F: FnOnce(PeerDescriptor, Vec<String>) + Send,
+{
+    let bound_endpoint =
+        bind_iroh_endpoint_enable_mdns(listen_addrs, &config.identity, &config.candidates).await?;
+    let peer = bound_endpoint.peer_descriptor()?;
+    on_bound_peer(peer, Vec::new());
+    receive_with_auth_retries(bound_endpoint, output_dir, config, pairing, events, cancel).await
 }
 
 /// Receives one file on an already-bound endpoint, stopping on cancellation.
@@ -501,9 +527,24 @@ async fn send_file_to_peer_addr(
         message: format!("dial start {}", endpoint_addr_shape(&peer_addr)),
     });
     events.on_event(TransferEvent::Connecting);
-    let mut connection = match dial_peer_addr(local_endpoint, peer_addr).await {
-        Ok(connection) => connection,
-        Err(error) => {
+    let mut connection = match tokio::time::timeout(
+        MDNS_CONNECT_TIMEOUT,
+        dial_peer_addr(local_endpoint, peer_addr),
+    )
+    .await
+    {
+        Ok(Ok(connection)) => connection,
+        Ok(Err(error)) => {
+            events.on_event(TransferEvent::Diagnostic {
+                message: format!("dial failed: {error}"),
+            });
+            return Err(error);
+        }
+        Err(_) => {
+            let error = CoreError::Transport(format!(
+                "connect to peer timed out after {}s",
+                MDNS_CONNECT_TIMEOUT.as_secs()
+            ));
             events.on_event(TransferEvent::Diagnostic {
                 message: format!("dial failed: {error}"),
             });
@@ -530,7 +571,7 @@ async fn accept_or_cancel(
 ) -> Result<IrohFrameConnection, SessionError> {
     tokio::select! {
         result = bound_endpoint.accept_with_events(events) => result,
-        () = cancel.cancelled() => Err(interrupted_error()),
+        () = cancel.cancelled() => Err(interrupted_error(cancel)),
     }
 }
 
@@ -548,6 +589,11 @@ fn short_endpoint_id(id: &str) -> &str {
     &id[..end]
 }
 
-fn interrupted_error() -> SessionError {
-    CoreError::Transfer(USER_INTERRUPT_MESSAGE.into())
+fn interrupted_error(cancel: &TransferCancelToken) -> SessionError {
+    let message = if cancel.is_pause() {
+        USER_PAUSE_MESSAGE
+    } else {
+        USER_INTERRUPT_MESSAGE
+    };
+    CoreError::Transfer(message.into())
 }

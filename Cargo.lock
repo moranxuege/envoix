@@ -1019,11 +1019,13 @@ dependencies = [
 name = "envoix-android-jni"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "envoix-client",
  "jni 0.21.1",
  "ndk-context",
  "serde_json",
  "tokio",
+ "tracing",
  "tracing-subscriber",
 ]
 
@@ -1061,14 +1063,17 @@ dependencies = [
 name = "envoix-client"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "envoix-auth",
  "envoix-error",
+ "envoix-pairing",
  "envoix-protocol",
  "envoix-qr",
- "envoix-rendezvous-iroh",
  "envoix-session",
+ "envoix-storage",
  "envoix-types",
  "serde",
+ "serde_json",
  "tokio",
  "toml 0.8.23",
  "tracing",

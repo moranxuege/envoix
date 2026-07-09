@@ -2402,6 +2402,7 @@ fn observe_transfer_event(
         } => observer.on_progress(bytes_transferred, total_bytes),
         TransferEvent::Verifying { .. } => observer.on_status("verifying".to_string()),
         TransferEvent::Verified { .. } => observer.on_status("verified".to_string()),
+        TransferEvent::Confirming { .. } => observer.on_status("confirming".to_string()),
         TransferEvent::Completed { .. } | TransferEvent::Failed { .. } => {}
         _ => {}
     }
@@ -2497,6 +2498,11 @@ fn to_ffi_event(event: &StampedEvent, activity_id: &str) -> FfiTransferEvent {
             ffi.bytes_transferred = *bytes_hashed;
             ffi.total_bytes = *bytes_hashed;
         }
+        TransferEvent::Confirming { transfer_id } => {
+            ffi.kind = FfiTransferEventKind::Unknown;
+            ffi.transfer_id = transfer_id.to_string();
+            ffi.diagnostic_message = "confirming".to_string();
+        }
         TransferEvent::Completed {
             transfer_id,
             bytes_transferred,
@@ -2506,7 +2512,9 @@ fn to_ffi_event(event: &StampedEvent, activity_id: &str) -> FfiTransferEvent {
             ffi.bytes_transferred = *bytes_transferred;
             ffi.total_bytes = *bytes_transferred;
         }
-        TransferEvent::Failed { direction, reason } => {
+        TransferEvent::Failed {
+            direction, reason, ..
+        } => {
             ffi.kind = FfiTransferEventKind::Failed;
             ffi.direction = ffi_direction(Some(*direction));
             ffi.diagnostic_message = reason.clone();

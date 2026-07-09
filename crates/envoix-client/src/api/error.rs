@@ -5,7 +5,10 @@
 use std::fmt;
 
 use envoix_error::CoreError;
-use envoix_session::{TransferDirection, USER_INTERRUPT_MESSAGE};
+use envoix_session::{
+    PEER_INTERRUPT_MESSAGE, PEER_PAUSE_MESSAGE, TransferDirection, USER_INTERRUPT_MESSAGE,
+    USER_PAUSE_MESSAGE,
+};
 use serde::Serialize;
 
 /// Where in a transfer's life an error occurred, derived from the last
@@ -59,6 +62,8 @@ pub enum ErrorKind {
     Transfer,
     /// The user cancelled the transfer.
     Cancelled,
+    /// The user paused the transfer (resumable intent, not a failure).
+    Paused,
 }
 
 impl fmt::Display for ErrorKind {
@@ -73,6 +78,7 @@ impl fmt::Display for ErrorKind {
             Self::Discovery => "discovery error",
             Self::Transfer => "transfer error",
             Self::Cancelled => "cancelled",
+            Self::Paused => "paused",
         })
     }
 }
@@ -226,8 +232,14 @@ impl TransferError {
             CoreError::Transfer(message) if message == USER_INTERRUPT_MESSAGE => {
                 (ErrorKind::Cancelled, message)
             }
-            CoreError::Transfer(message) if message == "transfer interrupted by peer" => {
+            CoreError::Transfer(message) if message == PEER_INTERRUPT_MESSAGE => {
                 (ErrorKind::Cancelled, message)
+            }
+            CoreError::Transfer(message) if message == USER_PAUSE_MESSAGE => {
+                (ErrorKind::Paused, message)
+            }
+            CoreError::Transfer(message) if message == PEER_PAUSE_MESSAGE => {
+                (ErrorKind::Paused, message)
             }
             CoreError::Transfer(message) => (ErrorKind::Transfer, message),
             CoreError::Cancelled => (ErrorKind::Cancelled, "operation cancelled".into()),
@@ -264,6 +276,7 @@ impl TransferError {
                 FailureCode::PeerCanceled
             }
             ErrorKind::Cancelled => FailureCode::UserCanceled,
+            ErrorKind::Paused => FailureCode::UserCanceled,
             ErrorKind::Input if contains_any(&message, &["not supported", "unsupported"]) => {
                 FailureCode::UnsupportedFeature
             }

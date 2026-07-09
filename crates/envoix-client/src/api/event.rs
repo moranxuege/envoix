@@ -7,7 +7,7 @@
 use envoix_protocol::PeerDescriptor;
 use envoix_session::TransferDirection;
 use envoix_types::{DataPath, PairingStep, TransferId};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::TransferMode;
 
@@ -117,6 +117,14 @@ pub enum TransferEvent {
         /// Number of plaintext bytes hashed.
         bytes_hashed: u64,
     },
+    /// SEND only: every byte and the Complete frame are sent; awaiting the
+    /// receiver's CompleteAck (the final round trip). A failure in this phase
+    /// means the file very likely arrived - see `SessionFailureCode::ConnectionLost`
+    /// handling in the state machine.
+    Confirming {
+        /// Transfer identifier for correlating events.
+        transfer_id: TransferId,
+    },
     /// Transfer completed and, on receive, the file was finalized.
     Completed {
         /// Transfer identifier for correlating events.
@@ -130,5 +138,99 @@ pub enum TransferEvent {
         direction: TransferDirection,
         /// Human-readable failure reason.
         reason: String,
+        /// Typed classification of the failure, so frontends branch on an enum
+        /// instead of matching the prose in `reason`.
+        reason_code: SessionFailureCode,
     },
+}
+
+/// Typed classification of a transfer failure. The peer-reported codes ride the
+/// same best-effort error frame as the message — a degraded path can drop them,
+/// in which case the failure surfaces as [`ConnectionLost`](Self::ConnectionLost).
+/// Frontends should treat these as a hint and keep durable facts (a partial on
+/// disk) as the fallback signal for resumability.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionFailureCode {
+    /// The local user cancelled the transfer.
+    Cancelled,
+    /// The local user paused the transfer (resumable intent).
+    Paused,
+    /// The peer reported cancelling the transfer.
+    PeerCancelled,
+    /// The peer reported pausing the transfer (resumable intent).
+    PeerPaused,
+    /// The connection dropped without a peer-reported reason.
+    ConnectionLost,
+    /// Any other failure; `reason` carries the detail.
+    Other,
+}
+
+impl SessionFailureCode {
+    /// Classify a failure reason string. This is the ONE place the canonical
+    /// interrupt messages (and the connection-drop phrasings the session layer
+    /// produces) are matched — frontends must branch on the resulting enum,
+    /// never on the prose.
+    pub(crate) fn classify(reason: &str) -> Self {
+        use envoix_session::{
+            PEER_INTERRUPT_MESSAGE, PEER_PAUSE_MESSAGE, USER_INTERRUPT_MESSAGE, USER_PAUSE_MESSAGE,
+        };
+        match reason {
+            r if r.contains(USER_PAUSE_MESSAGE) => Self::Paused,
+            r if r.contains(USER_INTERRUPT_MESSAGE) => Self::Cancelled,
+            r if r.contains(PEER_PAUSE_MESSAGE) => Self::PeerPaused,
+            r if r.contains(PEER_INTERRUPT_MESSAGE) => Self::PeerCancelled,
+            r if r.contains("connection lost") || r.contains("connection closed by peer") => {
+                Self::ConnectionLost
+            }
+            _ => Self::Other,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SessionFailureCode;
+
+    #[test]
+    fn classify_maps_canonical_messages_to_codes() {
+        // The session layer prefixes/wraps these, so classify uses contains.
+        assert_eq!(
+            SessionFailureCode::classify("transfer paused by user"),
+            SessionFailureCode::Paused
+        );
+        assert_eq!(
+            SessionFailureCode::classify("transfer interrupted by user"),
+            SessionFailureCode::Cancelled
+        );
+        assert_eq!(
+            SessionFailureCode::classify("transfer paused by peer"),
+            SessionFailureCode::PeerPaused
+        );
+        assert_eq!(
+            SessionFailureCode::classify("transfer interrupted by peer"),
+            SessionFailureCode::PeerCancelled
+        );
+        assert_eq!(
+            SessionFailureCode::classify("io error: connection lost"),
+            SessionFailureCode::ConnectionLost
+        );
+        assert_eq!(
+            SessionFailureCode::classify("connection closed by peer"),
+            SessionFailureCode::ConnectionLost
+        );
+        assert_eq!(
+            SessionFailureCode::classify("hash mismatch"),
+            SessionFailureCode::Other
+        );
+    }
+
+    #[test]
+    fn reason_code_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&SessionFailureCode::PeerPaused).unwrap(),
+            r#""peer_paused""#
+        );
+    }
 }

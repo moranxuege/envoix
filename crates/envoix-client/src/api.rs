@@ -8,10 +8,14 @@
 //! Binding-friendly by construction: no generics, closures, or lifetimes in
 //! public signatures, so the surface can be exposed through UniFFI later.
 
+pub mod driver;
 mod error;
 mod event;
 mod invite;
+pub mod machine;
 mod options;
+pub mod receipt;
+pub mod record;
 mod source;
 mod transfer;
 
@@ -21,7 +25,7 @@ pub use error::{
     ErrorKind, FailureCategory, FailureCode, FailureOrigin, FailurePhase, Phase, RecoveryAction,
     TransferError, TransferFailure,
 };
-pub use event::{StampedEvent, TransferEvent};
+pub use event::{SessionFailureCode, StampedEvent, TransferEvent};
 pub use invite::{Invite, Role};
 pub use options::{PathPolicy, TransferOptions};
 pub use source::{PeerSource, TransferMode};
@@ -35,9 +39,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use envoix_qr::{QrInvitePayload, generate_token};
 use envoix_session::{
     BindAddrs, DEFAULT_CHUNK_SIZE, EndpointAddr, SessionConfig, TransferCancelToken,
-    TransferDirection, TransferSummary, bind_iroh_endpoint_enable_mdns, parse_broker_addr,
-    receive_file_via_room, receive_file_with_bound_peer, receive_with_auth_retries,
-    send_file_enable_mdns, send_file_manual, send_file_to_endpoint_addr, send_file_via_room,
+    TransferDirection, TransferSummary, parse_broker_addr, receive_file_enable_mdns,
+    receive_file_via_room, receive_file_with_bound_peer, send_file_enable_mdns, send_file_manual,
+    send_file_to_endpoint_addr, send_file_via_room,
 };
 use tracing::Instrument;
 
@@ -66,7 +70,7 @@ fn transfer_span(direction: TransferDirection, mode: TransferMode) -> tracing::S
 /// everything before the first `-`; the remainder is the SPAKE2 password and
 /// must never reach a log.
 fn room_id_of(code: &str) -> &str {
-    code.split('-').next().unwrap_or(code)
+    envoix_session::split_code(code).0
 }
 
 /// Run a transfer body and emit one structured summary line for it (in the
@@ -138,6 +142,21 @@ impl Default for Client {
     }
 }
 
+/// A transfer to run via [`Client::run`]: a direction, the file/output path, an
+/// ordered list of peer sources to try (falling back to the next only on a
+/// pre-connection failure), and the per-transfer options.
+#[derive(Debug)]
+pub struct TransferRequest {
+    /// Send a file or receive into a directory.
+    pub direction: TransferDirection,
+    /// The file to send, or the directory to receive into.
+    pub path: PathBuf,
+    /// Rendezvous sources to attempt in order (e.g. Room, then mDNS).
+    pub sources: Vec<PeerSource>,
+    /// Per-transfer options (relay, resume, bind addrs, path policy).
+    pub options: TransferOptions,
+}
+
 impl Client {
     /// A client with the default chunk size and an ephemeral identity.
     pub fn new() -> Self {
@@ -148,17 +167,35 @@ impl Client {
     /// overrides (`ENVOIX_CHUNK_SIZE`) - the runtime sources the CLI reads,
     /// without the legacy requirement of supplying a pairing up front.
     pub fn from_runtime_sources(config_path: Option<&Path>) -> Result<Self, TransferError> {
+        let config = config_path
+            .map(crate::RuntimeConfig::read)
+            .transpose()
+            .map_err(setup_error)?
+            .unwrap_or_default();
+        let candidates = config.candidates.unwrap_or_default();
+        Self::from_config_fields(
+            config.chunk_size.as_deref(),
+            &candidates.allow,
+            &candidates.deny,
+        )
+    }
+
+    /// A client assembled from discrete config fields - the shape the Android
+    /// FFI passes across the boundary - plus the `ENVOIX_CHUNK_SIZE` override.
+    /// This is the shared assembler behind [`Self::from_runtime_sources`], which
+    /// only adds reading the fields from a TOML file first.
+    pub fn from_config_fields(
+        chunk_size: Option<&str>,
+        candidates_allow: &[String],
+        candidates_deny: &[String],
+    ) -> Result<Self, TransferError> {
         let mut client = Self::new();
-        if let Some(path) = config_path {
-            let config = crate::RuntimeConfig::read(path).map_err(setup_error)?;
-            if let Some(chunk_size) = config.chunk_size {
-                client.chunk_size = crate::parse_chunk_size(&chunk_size).map_err(setup_error)?;
-            }
-            if let Some(candidates) = config.candidates {
-                client.candidates =
-                    CandidateFilter::from_lists(&candidates.allow, &candidates.deny)
-                        .map_err(setup_error)?;
-            }
+        if let Some(chunk_size) = chunk_size {
+            client.chunk_size = crate::parse_chunk_size(chunk_size).map_err(setup_error)?;
+        }
+        if !candidates_allow.is_empty() || !candidates_deny.is_empty() {
+            client.candidates = CandidateFilter::from_lists(candidates_allow, candidates_deny)
+                .map_err(setup_error)?;
         }
         if let Some(value) = std::env::var_os(crate::ENVOIX_CHUNK_SIZE) {
             let value = value.into_string().map_err(|_| {
@@ -187,6 +224,29 @@ impl Client {
         let events_phase = events.phase_cell();
         let events_stats = events.stats_handle();
         let cancel = TransferCancelToken::new();
+        let (fut, span) = self.build_send(to, file, &options, &events, &cancel)?;
+        let task = tokio::spawn(with_summary(fut, events_stats.clone()).instrument(span));
+        Ok(Transfer::new(
+            event_receiver,
+            cancel,
+            events_phase,
+            events_stats,
+            task,
+        ))
+    }
+
+    /// Builds one send attempt's future + tracing span, emitting through the
+    /// given event channel and honoring the given cancel token. Shared by
+    /// [`Self::send`] (a single source) and [`Self::run`] (fallback across
+    /// sources on one channel), so all attempts stream to the same caller.
+    fn build_send(
+        &self,
+        to: PeerSource,
+        file: PathBuf,
+        options: &TransferOptions,
+        events: &EventSender,
+        cancel: &TransferCancelToken,
+    ) -> Result<(TransferFuture, tracing::Span), TransferError> {
         let sink = Box::new(SessionEventAdapter(events.clone()));
         let resume = options.resume;
         let mode = to.mode();
@@ -195,8 +255,9 @@ impl Client {
         let fut: TransferFuture = match to {
             PeerSource::Manual { peer, token } => {
                 let pairing = shared_token(&token)?;
-                let config = self.session_config(&options);
+                let config = self.session_config(options);
                 let cancel = cancel.clone();
+                let events = events.clone();
                 Box::pin(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Send,
@@ -208,8 +269,9 @@ impl Client {
             PeerSource::Invite { invite } => {
                 let (peer_addr, token) = resolve_invite(&invite)?;
                 let pairing = shared_token(&token)?;
-                let config = self.session_config(&options);
+                let config = self.session_config(options);
                 let cancel = cancel.clone();
+                let events = events.clone();
                 Box::pin(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Send,
@@ -223,8 +285,9 @@ impl Client {
             }
             PeerSource::Mdns { token: Some(token) } => {
                 let pairing = shared_token(&token)?;
-                let config = self.session_config(&options);
+                let config = self.session_config(options);
                 let cancel = cancel.clone();
+                let events = events.clone();
                 Box::pin(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Send,
@@ -240,8 +303,9 @@ impl Client {
                 span.record("room", room_id_of(&code));
                 let broker =
                     parse_broker_addr(&broker, options.relay.as_deref()).map_err(setup_error)?;
-                let config = self.session_config(&options);
+                let config = self.session_config(options);
                 let cancel = cancel.clone();
+                let events = events.clone();
                 Box::pin(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Send,
@@ -257,14 +321,7 @@ impl Client {
                 ));
             }
         };
-        let task = tokio::spawn(with_summary(fut, events_stats.clone()).instrument(span));
-        Ok(Transfer::new(
-            event_receiver,
-            cancel,
-            events_phase,
-            events_stats,
-            task,
-        ))
+        Ok((fut, span))
     }
 
     /// Receives one file into the `into` directory from the peer described
@@ -286,6 +343,28 @@ impl Client {
         let events_phase = events.phase_cell();
         let events_stats = events.stats_handle();
         let cancel = TransferCancelToken::new();
+        let (fut, span) = self.build_receive(from, into, &options, &events, &cancel)?;
+        let task = tokio::spawn(with_summary(fut, events_stats.clone()).instrument(span));
+        Ok(Transfer::new(
+            event_receiver,
+            cancel,
+            events_phase,
+            events_stats,
+            task,
+        ))
+    }
+
+    /// Builds one receive attempt's future + tracing span, emitting through the
+    /// given event channel. The receive-side counterpart to [`Self::build_send`],
+    /// shared by [`Self::receive`] and [`Self::run`].
+    fn build_receive(
+        &self,
+        from: PeerSource,
+        into: PathBuf,
+        options: &TransferOptions,
+        events: &EventSender,
+        cancel: &TransferCancelToken,
+    ) -> Result<(TransferFuture, tracing::Span), TransferError> {
         let sink = Box::new(SessionEventAdapter(events.clone()));
         let listen = options
             .listen_addrs
@@ -298,18 +377,10 @@ impl Client {
             PeerSource::ShowManual { token } => {
                 let token = token.map_or_else(new_token, Ok)?;
                 let pairing = shared_token(&token)?;
-                let config = self.session_config(&options);
+                let config = self.session_config(options);
                 let cancel = cancel.clone();
-                let on_bound = {
-                    let events = events.clone();
-                    move |peer: PeerDescriptor, _relay_urls: Vec<String>| {
-                        events.emit(TransferEvent::Advertised {
-                            peer,
-                            token: Some(token),
-                            invite: None,
-                        });
-                    }
-                };
+                let on_bound = advertise(events.clone(), token, None);
+                let events = events.clone();
                 Box::pin(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Receive,
@@ -324,9 +395,10 @@ impl Client {
             PeerSource::ShowInvite { ttl_secs } => {
                 let token = new_token()?;
                 let pairing = shared_token(&token)?;
-                let config = self.session_config(&options);
+                let config = self.session_config(options);
                 let cancel = cancel.clone();
-                let on_bound = advertise_with_invite(events.clone(), token, ttl_secs);
+                let on_bound = advertise(events.clone(), token, Some(ttl_secs));
+                let events = events.clone();
                 Box::pin(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Receive,
@@ -346,35 +418,26 @@ impl Client {
                     None => (new_token()?, Some(DEFAULT_INVITE_TTL_SECS)),
                 };
                 let pairing = shared_token(&token)?;
-                let config = self.session_config(&options);
-                let identity = self.identity.clone();
+                let config = self.session_config(options);
                 let cancel = cancel.clone();
+                let on_bound = advertise(events.clone(), token, invite_ttl);
+                let events = events.clone();
                 Box::pin(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Receive,
                         mode,
                     });
-                    let endpoint =
-                        bind_iroh_endpoint_enable_mdns(listen, &identity, &config.candidates)
-                            .await?;
-                    let peer = endpoint.peer_descriptor()?;
-                    let invite = invite_ttl.map(|ttl| {
-                        QrInvitePayload::new(token.clone(), peer.clone(), unix_now() + ttl).encode()
-                    });
-                    events.emit(TransferEvent::Advertised {
-                        peer,
-                        token: Some(token),
-                        invite,
-                    });
-                    receive_with_auth_retries(endpoint, into, config, &pairing, sink, cancel).await
+                    receive_file_enable_mdns(listen, into, config, &pairing, sink, on_bound, cancel)
+                        .await
                 })
             }
             PeerSource::Room { code, broker } => {
                 span.record("room", room_id_of(&code));
                 let broker =
                     parse_broker_addr(&broker, options.relay.as_deref()).map_err(setup_error)?;
-                let config = self.session_config(&options);
+                let config = self.session_config(options);
                 let cancel = cancel.clone();
+                let events = events.clone();
                 Box::pin(async move {
                     events.emit(TransferEvent::Binding {
                         direction: TransferDirection::Receive,
@@ -390,7 +453,86 @@ impl Client {
                 ));
             }
         };
-        let task = tokio::spawn(with_summary(fut, events_stats.clone()).instrument(span));
+        Ok((fut, span))
+    }
+
+    /// Runs a transfer, trying each source in [`TransferRequest::sources`] in
+    /// order and falling back to the next **only** on a pre-connection failure -
+    /// so a transfer that reached a live connection is never re-attempted. The
+    /// returned [`Transfer`]'s event stream carries every attempt, on one
+    /// channel; `cancel` stops whichever attempt is in flight.
+    pub fn run(&self, request: TransferRequest) -> Result<Transfer, TransferError> {
+        let TransferRequest {
+            direction,
+            path,
+            sources,
+            options,
+        } = request;
+        if sources.is_empty() {
+            return Err(TransferError::input(
+                "a transfer needs at least one peer source",
+            ));
+        }
+        crate::validate_chunk_size(self.chunk_size).map_err(setup_error)?;
+        validate_path_policy(&options)?;
+        let (events, event_receiver) = EventSender::channel();
+        let events_phase = events.phase_cell();
+        let events_stats = events.stats_handle();
+        let cancel = TransferCancelToken::new();
+        let client = self.clone();
+        let stats = events_stats.clone();
+        let loop_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            let count = sources.len();
+            let mut last: Result<TransferSummary, PublicError> = Err(PublicError::Transfer(
+                "no peer source attempted".to_string(),
+            ));
+            for (i, source) in sources.into_iter().enumerate() {
+                let built = match direction {
+                    TransferDirection::Send => {
+                        client.build_send(source, path.clone(), &options, &events, &loop_cancel)
+                    }
+                    TransferDirection::Receive => {
+                        client.build_receive(source, path.clone(), &options, &events, &loop_cancel)
+                    }
+                };
+                let (fut, span) = match built {
+                    Ok(pair) => pair,
+                    Err(error) => {
+                        // A source that fails to even build (bad invite, missing
+                        // token, unsupported role) is a pre-connection failure.
+                        last = Err(PublicError::InvalidInput(error.to_string()));
+                        if i + 1 == count {
+                            break;
+                        }
+                        continue;
+                    }
+                };
+                match with_summary(fut, stats.clone()).instrument(span).await {
+                    Ok(summary) => return Ok(summary),
+                    Err(error) => {
+                        last = Err(error);
+                        // Fall back only if we never reached a live connection.
+                        if stats.connected() || i + 1 == count {
+                            break;
+                        }
+                    }
+                }
+            }
+            // The event stream must tell the whole story on its own: emit the
+            // terminal Failed (with its typed reason_code) here, because the
+            // lower layers only return the error - the one session-level Failed
+            // event is the mDNS multi-peer loop's per-attempt report.
+            if let Err(error) = &last {
+                let reason = error.to_string();
+                events.emit(TransferEvent::Failed {
+                    direction,
+                    reason_code: event::SessionFailureCode::classify(&reason),
+                    reason,
+                });
+            }
+            last
+        });
         Ok(Transfer::new(
             event_receiver,
             cancel,
@@ -430,25 +572,28 @@ fn new_token() -> Result<String, TransferError> {
     })
 }
 
-/// An `on_bound` callback that advertises the peer together with an encoded
-/// invite expiring after `ttl_secs`.
-fn advertise_with_invite(
+/// An `on_bound` callback that advertises the bound peer with its token and,
+/// when `invite_ttl` is `Some`, an encoded invite expiring after that many
+/// seconds. Shared by every listening receive (show-manual, show-invite, mDNS).
+fn advertise(
     events: EventSender,
     token: String,
-    ttl_secs: u64,
+    invite_ttl: Option<u64>,
 ) -> impl FnOnce(PeerDescriptor, Vec<String>) + Send {
     move |peer: PeerDescriptor, relay_urls: Vec<String>| {
-        let invite = QrInvitePayload::new_with_relay_urls(
-            token.clone(),
-            peer.clone(),
-            relay_urls,
-            unix_now() + ttl_secs,
-        )
-        .encode();
+        let invite = invite_ttl.map(|ttl| {
+            QrInvitePayload::new_with_relay_urls(
+                token.clone(),
+                peer.clone(),
+                relay_urls,
+                unix_now() + ttl,
+            )
+            .encode()
+        });
         events.emit(TransferEvent::Advertised {
             peer,
             token: Some(token),
-            invite: Some(invite),
+            invite,
         });
     }
 }
@@ -462,8 +607,7 @@ fn validate_path_policy(options: &TransferOptions) -> Result<(), TransferError> 
     Ok(())
 }
 
-/// Decodes and validates an invite, returning the endpoint address to dial and
-/// the token.
+/// Decodes and validates an invite, returning the endpoint address to dial and the token.
 fn resolve_invite(invite: &str) -> Result<(EndpointAddr, String), TransferError> {
     let to_err = |e| TransferError::input(format!("invalid invite: {e}"));
     let payload = QrInvitePayload::decode(invite).map_err(to_err)?;
@@ -616,6 +760,25 @@ mod tests {
     }
 
     #[test]
+    fn config_fields_apply_chunk_size_and_candidate_cidrs() {
+        // The FFI path passes discrete fields (no file) and must assemble the
+        // same client as the equivalent config.toml above.
+        let deny = vec!["10.0.0.0/8".to_string(), "fe80::/10".to_string()];
+        let client = Client::from_config_fields(Some("1M"), &[], &deny).unwrap();
+
+        assert_eq!(client.chunk_size, 1024 * 1024);
+        let kept = client
+            .candidates
+            .apply(["10.0.0.5:1".parse().unwrap(), "1.2.3.4:2".parse().unwrap()]);
+        assert_eq!(kept, vec!["1.2.3.4:2".parse().unwrap()]);
+    }
+
+    #[test]
+    fn config_fields_reject_invalid_candidate_cidr() {
+        assert!(Client::from_config_fields(None, &[], &["not-a-cidr".to_string()]).is_err());
+    }
+
+    #[test]
     fn send_rejects_garbage_invite() {
         let error = client()
             .send(
@@ -627,5 +790,79 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(error.kind, ErrorKind::Input);
+    }
+
+    #[test]
+    fn run_rejects_empty_sources() {
+        let error = client()
+            .run(TransferRequest {
+                direction: TransferDirection::Send,
+                path: "f.txt".into(),
+                sources: vec![],
+                options: TransferOptions::default(),
+            })
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Input);
+    }
+
+    #[test]
+    fn run_validates_chunk_size_up_front() {
+        let mut client = Client::new();
+        client.chunk_size = 0;
+        let error = client
+            .run(TransferRequest {
+                direction: TransferDirection::Send,
+                path: "f.txt".into(),
+                sources: vec![PeerSource::Mdns {
+                    token: Some("abcdefghijkl".into()),
+                }],
+                options: TransferOptions::default(),
+            })
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Input);
+    }
+
+    #[tokio::test]
+    async fn run_surfaces_a_source_failure_through_wait() {
+        // A lone unbuildable source (garbage invite) has no fallback, so the
+        // error surfaces on the returned handle rather than synchronously.
+        let error = client()
+            .run(TransferRequest {
+                direction: TransferDirection::Send,
+                path: "f.txt".into(),
+                sources: vec![PeerSource::Invite {
+                    invite: "not-an-invite".into(),
+                }],
+                options: TransferOptions::default(),
+            })
+            .expect("run spawns the transfer")
+            .wait()
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Input);
+    }
+
+    #[tokio::test]
+    async fn run_emits_a_terminal_failed_event_with_reason_code() {
+        // The event stream must tell the whole story on its own: a failed run
+        // ends with a Failed event carrying the typed reason_code (frontends
+        // branch on it; the operation's Result is a separate channel).
+        let mut transfer = client()
+            .run(TransferRequest {
+                direction: TransferDirection::Send,
+                path: "f.txt".into(),
+                sources: vec![PeerSource::Invite {
+                    invite: "not-an-invite".into(),
+                }],
+                options: TransferOptions::default(),
+            })
+            .expect("run spawns the transfer");
+        let mut terminal = None;
+        while let Some(stamped) = transfer.next_event().await {
+            if let TransferEvent::Failed { reason_code, .. } = stamped.event {
+                terminal = Some(reason_code);
+            }
+        }
+        assert_eq!(terminal, Some(SessionFailureCode::Other));
     }
 }

@@ -17,7 +17,7 @@ const RELAY_HOME_WAIT_ATTEMPTS: usize = 100;
 const RELAY_HOME_WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Local socket addresses an accepting iroh endpoint should bind.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct BindAddrs {
     addrs: Vec<BindAddr>,
 }
@@ -126,7 +126,7 @@ fn is_link_local(ip: &IpAddr) -> bool {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 struct BindAddr {
     addr: SocketAddr,
     required: bool,

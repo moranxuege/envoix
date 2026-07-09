@@ -15,6 +15,7 @@ use envoix_rendezvous_iroh::{PeerLocator, build_endpoint, relay_mode_from_url, s
 
 mod geoip;
 mod logs;
+mod receipts;
 
 #[derive(Parser)]
 #[command(
@@ -58,6 +59,9 @@ struct Cli {
     /// How long (seconds) collected logs are kept after their last update.
     #[arg(long, default_value_t = 3600)]
     log_ttl: u64,
+    /// How long (seconds) mailbox completion receipts are kept.
+    #[arg(long, default_value_t = 7 * 24 * 3600)]
+    receipt_ttl: u64,
 }
 
 /// How server logs are rendered.
@@ -74,6 +78,9 @@ async fn main() -> Result<()> {
     // Shared per-room log store: fed by the capture layer below, served by the
     // optional HTTP endpoint.
     let log_store = Arc::new(logs::RoomLogs::new(Duration::from_secs(cli.log_ttl)));
+    let receipt_store = Arc::new(receipts::ReceiptStore::new(Duration::from_secs(
+        cli.receipt_ttl,
+    )));
 
     // Include the broker crate (`envoix_rendezvous`) at info, not just the iroh
     // wiring - otherwise pairings/expiries (its target) fall to the global warn
@@ -137,11 +144,17 @@ async fn main() -> Result<()> {
     // --log-bind is given; a separate task that never touches the pairing endpoint.
     if let Some(addr) = cli.log_bind {
         let store = log_store.clone();
+        let receipt_store = receipt_store.clone();
         tokio::spawn(async move {
             match tokio::net::TcpListener::bind(addr).await {
                 Ok(listener) => {
                     tracing::info!(%addr, "log endpoint listening");
-                    if let Err(error) = axum::serve(listener, logs::router(store)).await {
+                    if let Err(error) = axum::serve(
+                        listener,
+                        logs::router(store).merge(receipts::router(receipt_store)),
+                    )
+                    .await
+                    {
                         tracing::error!(%error, "log endpoint failed");
                     }
                 }

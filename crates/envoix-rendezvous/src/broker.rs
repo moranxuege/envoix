@@ -28,11 +28,13 @@ const MAX_ROOM_ID_LEN: usize = 128;
 /// Cap on concurrently waiting (unpaired) rooms, to bound memory under abuse.
 const MAX_WAITING_ROOMS: usize = 4096;
 
-/// A peer parked in a room, waiting for a partner. `ready` lets the matching
-/// peer's task signal this peer's task to return once it has taken over.
+/// A peer parked in a room, waiting for a partner. The parked task KEEPS its
+/// own connection (so it can watch it die and evict itself immediately —
+/// registry entries are invalidated by the resource they represent, not by the
+/// TTL alone); `ready` is the slot through which the second peer hands over
+/// its connection, after which the parked task drives the relay.
 struct Waiter {
-    conn: PeerConn,
-    ready: oneshot::Sender<()>,
+    ready: oneshot::Sender<PeerConn>,
     id: u64,
 }
 
@@ -66,8 +68,9 @@ impl RoomRegistry {
 
     /// Serve one peer connection: read its [`Join`], then either park it as the
     /// first peer of a room or, if a peer already waits there, pair the two and
-    /// relay between them. The first peer's task returns once the second takes
-    /// over the relay; the second peer's task drives it.
+    /// relay between them. The parked (first) peer's task keeps its connection
+    /// and drives the relay once the second hands its connection over; the
+    /// second peer's task returns after the handoff.
     pub async fn serve(&self, mut conn: PeerConn) -> Result<(), RendezvousError> {
         let Join { room_id } = tokio::time::timeout(JOIN_TIMEOUT, conn.read_control())
             .await
@@ -84,75 +87,139 @@ impl RoomRegistry {
         // Decide under the lock (no await held), then act once it's released, so
         // two peers arriving at once can't both park and miss each other.
         enum Decision {
-            Matched(Waiter, PeerConn),
-            Parked(oneshot::Receiver<()>, u64),
+            Matched(Waiter),
+            Parked(oneshot::Receiver<PeerConn>, u64),
             Rejected(&'static str),
         }
-        let decision = {
-            let mut waiting = self.waiting.lock().expect("registry mutex");
-            match waiting.remove(&room_id) {
-                Some(first) => Decision::Matched(first, conn),
-                None if waiting.len() >= MAX_WAITING_ROOMS => {
-                    Decision::Rejected("too many waiting rooms")
-                }
-                None => {
-                    let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-                    let (ready_tx, ready_rx) = oneshot::channel();
-                    waiting.insert(
-                        room_id.clone(),
-                        Waiter {
-                            conn,
-                            ready: ready_tx,
-                            id,
-                        },
-                    );
-                    tracing::debug!(id, "parked (waiting for partner)");
-                    Decision::Parked(ready_rx, id)
-                }
-            }
-        };
-
-        match decision {
-            // We are the second peer; release the first's task and run the relay.
-            Decision::Matched(first, conn) => {
-                tracing::info!("matched two peers");
-                let _ = first.ready.send(());
-                run_pair(first.conn, conn).await
-            }
-            // We are the first peer; wait for a partner, or expire.
-            Decision::Parked(ready_rx, id) => {
-                match tokio::time::timeout(self.ttl, ready_rx).await {
-                    Ok(_) => Ok(()),
-                    Err(_) => {
-                        // Only drop our own waiter: a concurrent match + re-park can
-                        // have replaced us with a newer waiter under the same room id.
-                        let expired = {
-                            let mut waiting = self.waiting.lock().expect("registry mutex");
-                            if waiting.get(&room_id).is_some_and(|w| w.id == id) {
-                                waiting.remove(&room_id)
-                            } else {
-                                None
-                            }
-                        };
-                        if let Some(mut waiter) = expired {
-                            // Tell the parked peer *why* we are closing, so it can
-                            // report "no peer joined" instead of a bare connection
-                            // drop. Best-effort: if it is lost the peer falls back
-                            // to the connection-closed path.
-                            let _ = waiter.conn.write_control(&Reply::Expired).await;
-                            let (mut writer, _reader, close) = waiter.conn.into_parts();
-                            let _ = writer.shutdown().await;
-                            let _ = tokio::time::timeout(CLOSE_GRACE, close.wait_closed()).await;
-                        }
-                        tracing::info!(id, "expired (no partner within ttl)");
-                        Err(RendezvousError::Expired)
+        loop {
+            let decision = {
+                let mut waiting = self.waiting.lock().expect("registry mutex");
+                match waiting.remove(&room_id) {
+                    Some(first) => Decision::Matched(first),
+                    None if waiting.len() >= MAX_WAITING_ROOMS => {
+                        Decision::Rejected("too many waiting rooms")
+                    }
+                    None => {
+                        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+                        let (ready_tx, ready_rx) = oneshot::channel();
+                        waiting.insert(
+                            room_id.clone(),
+                            Waiter {
+                                ready: ready_tx,
+                                id,
+                            },
+                        );
+                        tracing::debug!(id, "parked (waiting for partner)");
+                        Decision::Parked(ready_rx, id)
                     }
                 }
+            };
+
+            match decision {
+                // We are the second peer: hand our connection to the parked
+                // task, which drives the relay. If the waiter vanished between
+                // the map removal and the handoff (its connection died at that
+                // instant), loop around and park ourselves instead of failing a
+                // live peer against a corpse.
+                Decision::Matched(first) => match first.ready.send(conn) {
+                    Ok(()) => {
+                        tracing::info!("matched two peers");
+                        return Ok(());
+                    }
+                    Err(returned) => {
+                        tracing::debug!("waiter left during handoff; retrying");
+                        conn = returned;
+                        continue;
+                    }
+                },
+                // We are the first peer: wait for a partner while watching our
+                // own connection, or expire.
+                Decision::Parked(ready_rx, id) => {
+                    return self.wait_for_partner(conn, ready_rx, id, &room_id).await;
+                }
+                Decision::Rejected(reason) => {
+                    tracing::warn!(reason, "rejected");
+                    return Err(RendezvousError::Rejected(reason));
+                }
             }
-            Decision::Rejected(reason) => {
-                tracing::warn!(reason, "rejected");
-                Err(RendezvousError::Rejected(reason))
+        }
+    }
+
+    /// Parked-peer wait: a partner's connection arrives through `ready_rx` (we
+    /// then drive the relay), the TTL elapses, or our own connection dies. The
+    /// peer must stay silent between `Join` and `Paired`, so anything read from
+    /// it while parked - data or EOF - evicts the waiter immediately: a room
+    /// slot must never outlive the connection it represents (the "dead slot"
+    /// bug: a cancelled peer lingered until the TTL, consumed the next join,
+    /// and left its real partner parked in an emptied room).
+    async fn wait_for_partner(
+        &self,
+        mut conn: PeerConn,
+        mut ready_rx: oneshot::Receiver<PeerConn>,
+        id: u64,
+        room_id: &str,
+    ) -> Result<(), RendezvousError> {
+        tokio::select! {
+            // Prefer the handoff when several branches are ready at once.
+            biased;
+            handoff = &mut ready_rx => match handoff {
+                Ok(partner) => {
+                    tracing::info!("matched two peers");
+                    run_pair(conn, partner).await
+                }
+                // The sender half only drops without a send if the registry
+                // itself is being torn down.
+                Err(_) => Err(RendezvousError::Rejected("registry shut down")),
+            },
+            probe = conn.read_control::<Join>() => {
+                if !self.evict(room_id, id)
+                    && let Ok(partner) = ready_rx.try_recv()
+                {
+                    // Lost the race: a partner was handed over while we were
+                    // evicting. Serve it rather than dropping it; if our side is
+                    // truly dead the relay fails fast and the partner sees a
+                    // clean error instead of a silent orphan.
+                    return run_pair(conn, partner).await;
+                }
+                match probe {
+                    Ok(_) => {
+                        tracing::info!(id, "evicted (sent data while waiting)");
+                        Err(RendezvousError::Rejected("sent data while waiting"))
+                    }
+                    Err(_) => {
+                        tracing::info!(id, "evicted (connection closed while waiting)");
+                        Err(RendezvousError::Rejected("connection closed while waiting"))
+                    }
+                }
+            },
+            () = tokio::time::sleep(self.ttl) => {
+                if !self.evict(room_id, id)
+                    && let Ok(partner) = ready_rx.try_recv()
+                {
+                    return run_pair(conn, partner).await;
+                }
+                // Tell the peer *why* we are closing, so it can report "no peer
+                // joined" instead of a bare connection drop. Best-effort: if it
+                // is lost the peer falls back to the connection-closed path.
+                let _ = conn.write_control(&Reply::Expired).await;
+                let (mut writer, _reader, close) = conn.into_parts();
+                let _ = writer.shutdown().await;
+                let _ = tokio::time::timeout(CLOSE_GRACE, close.wait_closed()).await;
+                tracing::info!(id, "expired (no partner within ttl)");
+                Err(RendezvousError::Expired)
             }
+        }
+    }
+
+    /// Remove our own waiter entry; `false` if a match already claimed it (or a
+    /// newer waiter reused the room id).
+    fn evict(&self, room_id: &str, id: u64) -> bool {
+        let mut waiting = self.waiting.lock().expect("registry mutex");
+        if waiting.get(room_id).is_some_and(|w| w.id == id) {
+            waiting.remove(room_id);
+            true
+        } else {
+            false
         }
     }
 }

@@ -22,13 +22,23 @@ import com.google.zxing.qrcode.QRCodeWriter
 
 /** Render [data] as a QR (ZXing -> Compose Canvas), dark modules on a white card. */
 @Composable
-fun QrCode(data: String, side: Dp) {
-    val matrix = remember(data) {
-        runCatching {
-            QRCodeWriter().encode(data, BarcodeFormat.QR_CODE, 1, 1, mapOf(EncodeHintType.MARGIN to 1))
-        }.getOrNull()
-    }
-    Box(Modifier.size(side).clip(RoundedCornerShape(14.dp)).background(Color.White).padding(10.dp)) {
+fun QrCode(
+    data: String,
+    side: Dp,
+) {
+    val matrix =
+        remember(data) {
+            runCatching {
+                QRCodeWriter().encode(data, BarcodeFormat.QR_CODE, 1, 1, mapOf(EncodeHintType.MARGIN to 1))
+            }.getOrNull()
+        }
+    Box(
+        Modifier
+            .size(side)
+            .clip(RoundedCornerShape(14.dp))
+            .background(Color.White)
+            .padding(10.dp),
+    ) {
         Canvas(Modifier.fillMaxSize()) {
             val m = matrix ?: return@Canvas
             val n = m.width

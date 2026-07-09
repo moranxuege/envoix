@@ -101,7 +101,7 @@ where
     let result = if let Some(timeout) = timeout {
         tokio::select! {
             result = pair_in_room_retrying(rdz, broker, room_id, password, mine, events) => result,
-            _ = cancel.cancelled() => Err(CoreError::Transfer(crate::USER_INTERRUPT_MESSAGE.into())),
+            _ = cancel.cancelled() => Err(CoreError::Transfer(interrupt_message(cancel).into())),
             _ = tokio::time::sleep(timeout) => {
                 Err(CoreError::Transport("rendezvous pairing timed out".into()))
             }
@@ -109,13 +109,21 @@ where
     } else {
         tokio::select! {
             result = pair_in_room_retrying(rdz, broker, room_id, password, mine, events) => result,
-            _ = cancel.cancelled() => Err(CoreError::Transfer(crate::USER_INTERRUPT_MESSAGE.into())),
+            _ = cancel.cancelled() => Err(CoreError::Transfer(interrupt_message(cancel).into())),
         }
     };
     if result.is_err() {
         rdz.close().await;
     }
     result
+}
+
+fn interrupt_message(cancel: &TransferCancelToken) -> &'static str {
+    if cancel.is_pause() {
+        crate::USER_PAUSE_MESSAGE
+    } else {
+        crate::USER_INTERRUPT_MESSAGE
+    }
 }
 
 /// Receive a file by pairing in a room: bind the data endpoint, exchange its

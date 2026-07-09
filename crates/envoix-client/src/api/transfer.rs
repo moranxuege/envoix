@@ -121,6 +121,13 @@ impl StatsHandle {
             paths: s.paths.clone(),
         }
     }
+
+    /// Whether a `Connected` event has been observed - i.e. the transfer
+    /// reached a live peer connection. The fallback loop reads this to tell a
+    /// pre-connection failure (retry the next source) from a mid-transfer one.
+    pub(crate) fn connected(&self) -> bool {
+        self.0.lock().expect("stats mutex").connected_ms.is_some()
+    }
 }
 
 /// Lock-free cell holding the phase the transfer has reached, updated as
@@ -162,6 +169,7 @@ fn phase_of(event: &TransferEvent) -> Phase {
         | TransferEvent::Progress { .. }
         | TransferEvent::Verifying { .. }
         | TransferEvent::Verified { .. }
+        | TransferEvent::Confirming { .. }
         | TransferEvent::Completed { .. }
         | TransferEvent::Failed { .. } => Phase::Transfer,
     }
@@ -219,6 +227,13 @@ impl Transfer {
     /// Requests a graceful stop; the transfer ends with a cancellation error.
     pub fn cancel(&self) {
         self.cancel.cancel();
+    }
+
+    /// Requests a pause: the same graceful stop as [`cancel`](Self::cancel),
+    /// but reported — locally and (best-effort) to the peer — as a pause, so
+    /// both sides can present a resumable state instead of a failure.
+    pub fn pause(&self) {
+        self.cancel.pause();
     }
 
     /// A clonable handle that cancels this transfer, for callers that drive the
@@ -361,6 +376,7 @@ impl From<SessionEvent> for TransferEvent {
                 file_name,
                 bytes_hashed,
             },
+            SessionEvent::Confirming { transfer_id } => TransferEvent::Confirming { transfer_id },
             SessionEvent::Completed {
                 transfer_id,
                 bytes_transferred,
@@ -369,7 +385,12 @@ impl From<SessionEvent> for TransferEvent {
                 bytes_transferred,
             },
             SessionEvent::Failed { direction, reason } => {
-                TransferEvent::Failed { direction, reason }
+                let reason_code = super::event::SessionFailureCode::classify(&reason);
+                TransferEvent::Failed {
+                    direction,
+                    reason,
+                    reason_code,
+                }
             }
             SessionEvent::Pairing { step } => TransferEvent::Pairing { step },
             SessionEvent::Connecting => TransferEvent::Connecting,
