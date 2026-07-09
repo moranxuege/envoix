@@ -54,6 +54,12 @@ Waiting        advertising an invite / parked in the room, no peer yet
 Connecting     pairing + connecting (peer known or joining)
 Verifying      hashing (resume prefix / final verification), no bytes moving
 Transferring   bytes moving
+Confirming     SEND only: all bytes + Complete frame sent, awaiting the
+               receiver's CompleteAck over the live connection (the
+               Two-Generals round-trip — real, failure-prone, previously
+               hidden inside "Transferring 100%"). Bounded by a confirm
+               timer (~15-20s): on expiry the driver cancels the attempt and
+               escalates to Unconfirmed (out-of-band proof) proactively.
 Paused(origin) resumable stop; origin ∈ {Local, Peer, Lost}
 Unconfirmed    send delivered every byte, ack unknown; mailbox poll active
 Completed      done (receiver may re-enter Connecting to serve a re-verify)
@@ -68,6 +74,15 @@ Notes:
   affordance (Resume) is identical; only the subtitle differs.
 - `Verifying` is visible (it is real, multi-second work on big files; the
   events already exist; the CLI already renders it).
+- `Confirming` (user-requested during design review) requires ONE new core
+  event: the engine emits `Confirming` right after sending the `Complete`
+  frame (additive, local-only, no wire change). Its payoff: the Unconfirmed
+  classification stops being a fact-bundle proxy (`Transferring ∧ Send ∧
+  bytes=total ∧ connection_lost`) and becomes a single edge — `connection_lost`
+  while Confirming → Unconfirmed. In-band proof (Confirming) and out-of-band
+  proof (Unconfirmed + mailbox) are two rungs of one explicit escalation
+  ladder. The receiver needs no mirror state: its finalize is milliseconds
+  (incremental hash + rename).
 - Terminality is explicit per state: `Failed`/`Cancelled` are terminal for the
   session (Retry starts a NEW attempt from them); `Completed` is terminal but
   re-enterable (receiver re-verify); `Unconfirmed` is pseudo-terminal (mailbox
@@ -79,8 +94,9 @@ Notes:
 User:      Start(params) · Pause · Cancel · Resume · Remove
 Attempt n: Advertised · Pairing(step) · Connecting · Connected(path) ·
            PathChanged(path) · Started{tid, name, total, resumed} ·
-           Progress(bytes) · Verifying · Verified · Completed(bytes) ·
-           Failed{reason_code, reason} · RunEnded(result)
+           Progress(bytes) · Verifying · Verified · Confirming ·
+           Completed(bytes) · Failed{reason_code, reason} · RunEnded(result)
+Driver:    ConfirmTimeout (the confirm timer expired)
 External:  ReceiptVerified(tid) · ReceiptMismatch(tid)
 ```
 
@@ -100,6 +116,7 @@ before the table applies. `n+1` marks edges that launch a new attempt
 | **Connecting** | Paused(L) ¹ | Cancelled ¹ | — | Waiting | — | Transferring ² | — | Verifying | Completed⁴ | classify³ | — |
 | **Verifying** | Paused(L) ¹ | Cancelled ¹ | — | — | — | Transferring ² | — | (Verified→ last phase) | Completed | classify³ | — |
 | **Transferring** | Paused(L) ¹ | Cancelled ¹ | — | — | — | — | update bytes | Verifying | Completed | classify³ | — |
+| **Confirming** ⁸ | Paused(L) ¹ | Cancelled ¹ | — | — | — | — | — | — | Completed | classify³ | — |
 | **Paused(any)** | — | Cancelled | Connecting *n+1, resume* | — | — | — | — | — | — | — ⁵ | — |
 | **Unconfirmed** | — | Cancelled | Connecting *n+1, resume* | — | — | — | — | — | — | — ⁵ | **Completed** |
 | **Completed** | — | — | Connecting *n+1, resume* ⁶ | — | — | — | — | — | — | — ⁵ | — |
@@ -121,7 +138,7 @@ bytes from a previous attempt cannot leak into this one.
 | code = `paused` / `cancelled` (echo of local intent — normally unreachable, see ¹) | keep state |
 | code = `peer_paused` | Paused(Peer) |
 | code = `peer_cancelled` | *decision D1 below* |
-| state was Transferring ∧ direction = Send ∧ bytes = total ∧ code = `connection_lost` | Unconfirmed (effect: `StartMailboxPoll`) |
+| state = Confirming ∧ code = `connection_lost` | Unconfirmed (effect: `StartMailboxPoll`) |
 | code ∈ {`peer_cancelled`, `connection_lost`} ∧ bytes > 0 | Paused(Lost) |
 | otherwise | Failed |
 
@@ -139,11 +156,19 @@ Completed is illegal (nothing to re-join — the f010749 lesson).
 
 ⁷ Pending decision D1; if Cancel discards partials, restart must be fresh.
 
+⁸ Entered from Transferring on the new `Confirming` event. Entry effect:
+`StartConfirmTimer`. `ConfirmTimeout` while Confirming ⇒ effect `CancelToken`
+(silently stop waiting on the dying path) and → Unconfirmed +
+`StartMailboxPoll` — escalation is proactive, not a 30s QUIC-idle hang. The
+timer is cancelled on exit. (Receivers that finalized but lost the ack path
+still post their receipt: finalize is local, so the mailbox rung is sound.)
+
 ## Effects (returned by the reducer, executed by the driver)
 
 ```
 StartAttempt{resume: bool}   spawn Client::run, attempt += 1
 PauseToken / CancelToken     on the current attempt's cancel handle
+StartConfirmTimer / StopConfirmTimer
 StartMailboxPoll / StopMailboxPoll
 PostReceipt                  (receive completed; driver seals + posts, retries)
 ```
