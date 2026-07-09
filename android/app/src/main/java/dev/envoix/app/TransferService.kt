@@ -507,13 +507,6 @@ class TransferService : Service() {
         return b.build()
     }
 
-    private fun humanBytes(n: Long): String = when {
-        n < 1024 -> "$n B"
-        n < 1024 * 1024 -> "%.0f KB".format(n / 1024.0)
-        n < 1024L * 1024 * 1024 -> "%.1f MB".format(n / 1048576.0)
-        else -> "%.2f GB".format(n / 1073741824.0)
-    }
-
     private var lastNotif = 0L
 
     private fun throttledNotification() {

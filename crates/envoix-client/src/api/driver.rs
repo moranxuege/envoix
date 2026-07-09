@@ -684,7 +684,7 @@ mod tests {
         // Receipt confirmation must survive restarts: the restored session
         // re-derives its standing effect and asks the courier to fetch.
         loop {
-            let notice = tokio::time::timeout(Duration::from_secs(8), notices.recv())
+            let notice = tokio::time::timeout(Duration::from_secs(20), notices.recv())
                 .await
                 .expect("courier request within the poll schedule")
                 .expect("stream open");

@@ -78,6 +78,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.envoix.app.Diagnostics
 import dev.envoix.app.Direction
+import dev.envoix.app.humanBytes
+import dev.envoix.app.smoothedBps
 import dev.envoix.app.LogUpload
 import dev.envoix.app.Room
 import dev.envoix.app.SettingsStore
@@ -665,15 +667,6 @@ private fun fraction(t: Transfer): Float {
     if (t.status == Status.Completed) return 1f
     if (t.total <= 0) return 0f
     return (t.bytes.toFloat() / t.total.toFloat()).coerceIn(0f, 1f)
-}
-
-/** Trailing-window average of the 250 ms-sampled rate (~3 s), so the shown speed
- *  and ETA don't jump with every burst. The raw instantaneous samples still feed
- *  the detail chart and the finished card's avg/peak; only the headline is smoothed. */
-private const val SPEED_WINDOW = 12
-private fun smoothedBps(t: Transfer): Double {
-    val window = t.speedHistory.takeLast(SPEED_WINDOW)
-    return if (window.isEmpty()) t.avgBps else window.average()
 }
 
 private fun speedText(t: Transfer): String {

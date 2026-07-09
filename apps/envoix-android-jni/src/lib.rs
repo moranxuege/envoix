@@ -498,7 +498,8 @@ pub extern "system" fn Java_dev_envoix_app_Native_createSession(
         sources.push(PeerSource::Mdns { token: Some(code) });
     }
     let mut options = TransferOptions::default();
-    options.relay = Some(get("relay"));
+    let relay = get("relay");
+    options.relay = (!relay.is_empty()).then_some(relay); // empty = default, like the CLI
     options.resume = v["resume"].as_bool().unwrap_or(false);
     let direction = match get("direction").as_str() {
         "send" => TransferDirection::Send,

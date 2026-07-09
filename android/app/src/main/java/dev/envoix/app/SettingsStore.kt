@@ -9,7 +9,7 @@ import kotlinx.coroutines.flow.asStateFlow
 /**
  * Two layers, one flat holder:
  *  - core config — mirrors the CLI's `config.toml` schema (chunk_size, candidates)
- *    plus the connection defaults (broker/relay). Rendered by [SettingsStore.renderConfig].
+ *    plus the connection defaults (broker/relay). Rendered by [SettingsStore.paramsJson (TransferService.Spec)].
  *  - native prefs — platform-only defaults that seed a transfer request (save
  *    folder, default role); never sent to the core.
  */
