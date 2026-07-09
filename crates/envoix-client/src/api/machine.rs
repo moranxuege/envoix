@@ -237,7 +237,7 @@ impl Session {
             }
             // A resting-but-unfinished card can still be abandoned.
             State::Paused(_) | State::Unconfirmed => {
-                let mut effects = self.exit_effects();
+                let effects = self.exit_effects();
                 self.state = State::Cancelled;
                 effects
             }
