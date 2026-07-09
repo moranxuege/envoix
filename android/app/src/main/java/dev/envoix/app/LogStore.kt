@@ -52,7 +52,7 @@ object LogStore {
 }
 
 /**
- * The native log sink, wired via [Native.initLogging]. Every core line goes to
+ * The native log sink, wired via [NativeBootstrap.initLogging]. Every core line goes to
  * the whole-app [LogStore]; lines scoped to a transfer (the `tracing` span
  * carries `room="…"`) are also compacted and routed into that transfer's own
  * log, so the detail drawer shows the real core story, not just lifecycle events.

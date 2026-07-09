@@ -17,6 +17,7 @@ struct ReceiveView: View {
     @AppStorage("envoix.speedLimit") private var speedLimit = 40
     @State private var mode: PairingMode = .room
     @State private var roomCode = newRoomCode()
+    @State private var joinRoomCode = ""
     @State private var pairingInvite: FfiPairingInvite?
     @State private var roomQRCodeImage: PlatformImage?
     @State private var roomQRCodePayload = ""
@@ -25,6 +26,7 @@ struct ReceiveView: View {
     @State private var revealAddress = false
     #if os(iOS)
     @State private var isFolderPickerPresented = false
+    @State private var isQRScannerPresented = false
     @State private var shouldStartAfterFolderPick = false
     #endif
 
@@ -82,6 +84,11 @@ struct ReceiveView: View {
                     isFolderPickerPresented = false
                 }
             )
+        }
+        .sheet(isPresented: $isQRScannerPresented) {
+            QRCodeScannerSheet(language: uiLanguage) { value in
+                handleScannedInvite(value)
+            }
         }
         #else
         VStack(spacing: 0) {
@@ -354,8 +361,47 @@ struct ReceiveView: View {
                 }
                 .disabled(viewModel.isBusy)
             }
+
+            RoomCodeField(
+                code: joinRoomCodeBinding,
+                disabled: viewModel.isBusy,
+                title: AppText.value("Join sender instead", "改为加入发送端", language: uiLanguage),
+                placeholder: AppText.value("Scan QR or enter sender code", "扫码或输入发送端短码", language: uiLanguage),
+                helper: AppText.value("Leave this empty to use your receive code above.", "留空则使用上方接收码。", language: uiLanguage)
+            )
+
+            HStack(spacing: 8) {
+                Button {
+                    pastePairingInput()
+                } label: {
+                    Label(AppText.value("Paste", "粘贴", language: uiLanguage), systemImage: "doc.on.clipboard")
+                        .frame(minHeight: 34)
+                        .contentShape(Rectangle())
+                }
+                .disabled(viewModel.isBusy)
+
+                #if os(iOS)
+                Button {
+                    isQRScannerPresented = true
+                } label: {
+                    Label(AppText.value("Scan QR", "扫码", language: uiLanguage), systemImage: "qrcode.viewfinder")
+                        .frame(minHeight: 34)
+                        .contentShape(Rectangle())
+                }
+                .disabled(viewModel.isBusy)
+                #endif
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
         }
         .card(raised: true, padding: 18)
+    }
+
+    private var joinRoomCodeBinding: Binding<String> {
+        Binding(
+            get: { joinRoomCode },
+            set: { value in joinRoomCode = value }
+        )
     }
 
     private var qrPlaceholder: some View {
@@ -407,7 +453,7 @@ struct ReceiveView: View {
     private var canStart: Bool {
         switch mode {
         case .room:
-            return !roomCode.trimmed.isEmpty
+            return !joinRoomCode.trimmed.isEmpty || !roomCode.trimmed.isEmpty
         case .invite:
             return true
         case .token:
@@ -434,6 +480,7 @@ struct ReceiveView: View {
             let invite = try makePairingInvite(role: .receive, broker: serverURL, relay: relayURL)
             pairingInvite = invite
             roomCode = invite.code
+            joinRoomCode = ""
             updateRoomQRCode(for: invite.payload)
         } catch {
             viewModel.handleFailed(error.localizedDescription)
@@ -441,6 +488,10 @@ struct ReceiveView: View {
     }
 
     private func activeRoomCode() throws -> String {
+        let joinedCode = joinRoomCode.trimmed
+        if !joinedCode.isEmpty {
+            return try roomCodeFromJoinInput(joinedCode)
+        }
         if let invite = pairingInvite {
             let code = invite.code.trimmed
             if !code.isEmpty {
@@ -453,6 +504,78 @@ struct ReceiveView: View {
         roomCode = invite.code
         updateRoomQRCode(for: invite.payload)
         return invite.code
+    }
+
+    private func roomCodeFromJoinInput(_ input: String) throws -> String {
+        let lowercasedInput = input.lowercased()
+        guard lowercasedInput.hasPrefix("envoix:") else {
+            return input
+        }
+        guard lowercasedInput.hasPrefix("envoix://pair/") else {
+            throw RuntimeSettingsError(AppText.value(
+                "Legacy invite links are for senders. Use Room pairing for this receive flow.",
+                "旧版邀请链接供发送端使用。当前接收流程请使用 Room 配对。",
+                language: uiLanguage
+            ))
+        }
+        let parsed = try parsePairingInvite(input: input)
+        guard parsed.role == .send else {
+            throw RuntimeSettingsError(AppText.value(
+                "Scan a sender code or share your receive code.",
+                "请扫描发送端的码，或分享你的接收码。",
+                language: uiLanguage
+            ))
+        }
+        applyRuntimeSettings(from: parsed)
+        joinRoomCode = parsed.code
+        return parsed.code
+    }
+
+    private func handleScannedInvite(_ value: String) {
+        applyPairingInput(value, source: .scan)
+    }
+
+    private enum PairingInputSource {
+        case paste
+        case scan
+    }
+
+    private func pastePairingInput() {
+        guard let value = pasteboardString()?.trimmed, !value.isEmpty else {
+            ToastCenter.shared.show(AppText.value("Clipboard is empty", "剪贴板为空", language: uiLanguage))
+            return
+        }
+        applyPairingInput(value, source: .paste)
+    }
+
+    private func applyPairingInput(_ value: String, source: PairingInputSource) {
+        let input = value.trimmed
+        let lowercasedInput = input.lowercased()
+        guard lowercasedInput.hasPrefix("envoix:") else {
+            joinRoomCode = input
+            ToastCenter.shared.show(AppText.value("Pairing code pasted", "配对码已粘贴", language: uiLanguage))
+            return
+        }
+        do {
+            let code = try roomCodeFromJoinInput(input)
+            joinRoomCode = code
+            mode = .room
+            let message = source == .scan
+                ? AppText.value("QR scanned", "二维码已扫描", language: uiLanguage)
+                : AppText.value("Pairing code pasted", "配对码已粘贴", language: uiLanguage)
+            ToastCenter.shared.show(message)
+        } catch {
+            ToastCenter.shared.show(error.localizedDescription)
+        }
+    }
+
+    private func applyRuntimeSettings(from parsed: FfiPairingInvite) {
+        if !parsed.broker.trimmed.isEmpty {
+            serverURL = parsed.broker.trimmed
+        }
+        if !parsed.relay.trimmed.isEmpty {
+            relayURL = parsed.relay.trimmed
+        }
     }
 
     private func updateRoomQRCode(for payload: String) {

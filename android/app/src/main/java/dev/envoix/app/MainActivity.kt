@@ -21,13 +21,12 @@ import androidx.lifecycle.lifecycleScope
 import dev.envoix.app.ui.EnvoixTheme
 import dev.envoix.app.ui.HomeScreen
 import dev.envoix.app.ui.LogScreen
-import dev.envoix.app.ui.SettingsScreen
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
-private enum class Screen { Home, Logs, Settings }
+private enum class Screen { Home, Logs }
 
 class MainActivity : ComponentActivity() {
 
@@ -51,7 +50,6 @@ class MainActivity : ComponentActivity() {
                 if (screen != Screen.Home) BackHandler { screen = Screen.Home }
                 when (screen) {
                     Screen.Logs -> LogScreen(onBack = { screen = Screen.Home })
-                    Screen.Settings -> SettingsScreen(onBack = { screen = Screen.Home })
                     Screen.Home -> {
                         val transfers by vm.transfers.collectAsState()
                         HomeScreen(
@@ -67,7 +65,6 @@ class MainActivity : ComponentActivity() {
                             onCancel = { vm.cancel(it) },
                             onRemove = { vm.remove(it) },
                             onOpenLogs = { screen = Screen.Logs },
-                            onOpenSettings = { screen = Screen.Settings },
                             onOpen = { openReceived(it) },
                         )
                     }

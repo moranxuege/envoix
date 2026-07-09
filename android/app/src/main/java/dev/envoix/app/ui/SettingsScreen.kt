@@ -51,7 +51,7 @@ import dev.envoix.app.DebugBuild
 import dev.envoix.app.SettingsStore
 
 @Composable
-fun SettingsScreen(onBack: () -> Unit) {
+fun SettingsScreen(onBack: () -> Unit, showBack: Boolean = true) {
     val colors = Envoix.colors
     val settings by SettingsStore.settings.collectAsState()
 
@@ -92,13 +92,15 @@ fun SettingsScreen(onBack: () -> Unit) {
             Modifier.fillMaxWidth().padding(top = 20.dp, bottom = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(
-                Icons.AutoMirrored.Filled.ArrowBack,
-                contentDescription = "Back",
-                tint = colors.accent,
-                modifier = Modifier.clip(CircleShape).clickable(onClick = onBack).padding(6.dp),
-            )
-            Spacer(Modifier.width(8.dp))
+            if (showBack) {
+                Icon(
+                    Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Back",
+                    tint = colors.accent,
+                    modifier = Modifier.clip(CircleShape).clickable(onClick = onBack).padding(6.dp),
+                )
+                Spacer(Modifier.width(8.dp))
+            }
             Text("Settings", color = colors.text, fontSize = 26.sp, fontWeight = FontWeight.ExtraBold)
         }
 

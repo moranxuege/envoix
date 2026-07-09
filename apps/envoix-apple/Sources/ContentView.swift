@@ -183,13 +183,16 @@ struct ContentView: View {
     @ViewBuilder private func stageContent(for stage: AppStage) -> some View {
         switch stage {
         case .transfer:
-            TransferSetupStageView(send: model.send, receive: model.receive)
+            TransferSetupStageView(send: model.send, receive: model.receive) {
+                self.stage = .activity
+            }
         case .activity:
             TransferStageView(
                 records: model.activities,
                 metricsByActivityID: model.activityMetrics,
                 onPause: model.pauseActivity,
                 onResume: model.resumeActivity,
+                onCancel: model.cancelActivity,
                 onDelete: model.removeActivity
             )
         case .settings:
@@ -322,9 +325,21 @@ private struct TransferSetupStageView: View {
     @State private var role: TransferRole = .send
     @ObservedObject var send: TransferViewModel
     @ObservedObject var receive: TransferViewModel
+    let onShowActivity: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
+            if showsActivityShortcut {
+                Button(action: onShowActivity) {
+                    Label(AppText.value("View Activity", "查看活动", language: language), systemImage: "list.bullet.rectangle")
+                        .font(.body.weight(.semibold))
+                        .frame(maxWidth: .infinity, minHeight: 40)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.regular)
+                .accessibilityIdentifier("transfer_view_activity_button")
+            }
             rolePicker
             Group {
                 switch role {
@@ -365,6 +380,15 @@ private struct TransferSetupStageView: View {
         .padding(4)
         .background(Theme.line.opacity(0.35), in: RoundedRectangle(cornerRadius: Theme.cardRadius))
     }
+
+    private var showsActivityShortcut: Bool {
+        !isIdle(send) || !isIdle(receive)
+    }
+
+    private func isIdle(_ viewModel: TransferViewModel) -> Bool {
+        if case .idle = viewModel.phase { return true }
+        return false
+    }
 }
 
 private struct TransferStageView: View {
@@ -375,6 +399,7 @@ private struct TransferStageView: View {
     let metricsByActivityID: [String: ActivityMetrics]
     let onPause: (String) -> Void
     let onResume: (String) -> Void
+    let onCancel: (String) -> Void
     let onDelete: (String) -> Void
 
     var body: some View {
@@ -387,11 +412,19 @@ private struct TransferStageView: View {
                     ForEach(records, id: \.activityId) { record in
                         activityCard(record)
                             #if os(iOS)
-                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                                Button(role: .destructive) {
-                                    onDelete(record.activityId)
-                                } label: {
-                                    Label(AppText.value("Delete", "删除", language: language), systemImage: "trash")
+                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                if canDelete(record) {
+                                    Button(role: .destructive) {
+                                        onDelete(record.activityId)
+                                    } label: {
+                                        Label(AppText.value("Delete", "删除", language: language), systemImage: "trash")
+                                    }
+                                } else if canCancel(record) {
+                                    Button(role: .destructive) {
+                                        onCancel(record.activityId)
+                                    } label: {
+                                        Label(AppText.value("Cancel", "取消", language: language), systemImage: "xmark")
+                                    }
                                 }
                             }
                             #endif
@@ -494,17 +527,31 @@ private struct TransferStageView: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(Theme.muted)
                 .help(AppText.value("Show activity details", "显示活动详情", language: language))
-                Button(role: .destructive) {
-                    onDelete(record.activityId)
-                } label: {
-                    Image(systemName: "trash")
-                        .font(.body.weight(.semibold))
-                        .frame(width: 30, height: 30)
-                        .contentShape(Rectangle())
+                if canCancel(record) {
+                    Button(role: .destructive) {
+                        onCancel(record.activityId)
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.body.weight(.semibold))
+                            .frame(width: 30, height: 30)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Theme.muted)
+                    .help(AppText.value("Cancel transfer", "取消传输", language: language))
+                } else if canDelete(record) {
+                    Button(role: .destructive) {
+                        onDelete(record.activityId)
+                    } label: {
+                        Image(systemName: "trash")
+                            .font(.body.weight(.semibold))
+                            .frame(width: 30, height: 30)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Theme.muted)
+                    .help(AppText.value("Delete activity", "删除活动", language: language))
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(Theme.muted)
-                .help(AppText.value("Delete activity", "删除活动", language: language))
             }
 
             if record.totalBytes > 0 && !isTerminal(record) {
@@ -562,6 +609,9 @@ private struct TransferStageView: View {
             }
         }
         .card(raised: true, padding: 14)
+        .onLongPressGesture {
+            toggleActivityDetail(record.activityId)
+        }
     }
 
     private var pendingCount: Int {
@@ -663,6 +713,24 @@ private struct TransferStageView: View {
 
     private func canResume(_ record: FfiTransferActivityRecord) -> Bool {
         record.state == .paused
+    }
+
+    private func canCancel(_ record: FfiTransferActivityRecord) -> Bool {
+        switch record.state {
+        case .queued, .binding, .waitingForPeer, .pairing, .connecting, .transferring, .verifying, .paused:
+            return true
+        case .completed, .failed, .canceled, .unknown:
+            return false
+        }
+    }
+
+    private func canDelete(_ record: FfiTransferActivityRecord) -> Bool {
+        switch record.state {
+        case .completed, .failed, .canceled:
+            return true
+        case .queued, .binding, .waitingForPeer, .pairing, .connecting, .transferring, .verifying, .paused, .unknown:
+            return false
+        }
     }
 
     private func speedBps(for record: FfiTransferActivityRecord, metrics: ActivityMetrics) -> Double? {
@@ -956,36 +1024,15 @@ private struct SpeedSparkline: View {
 
 private struct SettingsStageView: View {
     @AppStorage("envoix.appearance") private var appearance: Appearance = .system
-    @AppStorage("envoix.concurrentTransfers") private var concurrentTransfers = true
     @AppStorage("envoix.language") private var language = "en"
     @AppStorage("envoix.serverURL") private var serverURL = ""
     @AppStorage("envoix.relayURL") private var relayURL = ""
     @AppStorage("envoix.configChunkSize") private var configChunkSize = ""
     @AppStorage("envoix.developerMode") private var developerMode = false
-    @AppStorage("envoix.verboseLog") private var verboseLog = false
-    @AppStorage("envoix.speedLimit") private var speedLimit = 40
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                Button {
-                    concurrentTransfers.toggle()
-                } label: {
-                    HStack {
-                        Text(AppText.value("Allow simultaneous send and receive", "允许同时发送和接收", language: language))
-                            .font(.title3)
-                        Spacer()
-                        Text(concurrentTransfers
-                             ? AppText.value("On", "开启", language: language)
-                             : AppText.value("Off", "关闭", language: language))
-                            .fontWeight(.bold)
-                            .foregroundStyle(Theme.accentStrong)
-                    }
-                    .frame(minHeight: 42)
-                }
-                .buttonStyle(.plain)
-                .card(raised: true, padding: 14)
-
                 appearanceSection
 
                 VStack(alignment: .leading, spacing: 8) {
@@ -1009,15 +1056,6 @@ private struct SettingsStageView: View {
                         AppText.value("Enable developer mode", "开启开发者模式", language: language),
                         isOn: $developerMode
                     )
-                    if developerMode {
-                        settingToggle(
-                            AppText.value("Verbose logging", "详细日志", language: language),
-                            isOn: $verboseLog
-                        )
-                        Text(AppText.value("Verbose logging is currently UI-only for Activity logs.", "详细日志目前仅用于活动日志展示。", language: language))
-                            .font(.body)
-                            .foregroundStyle(Theme.muted)
-                    }
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 12)
@@ -1034,13 +1072,15 @@ private struct SettingsStageView: View {
                         AppText.value("Rendezvous broker", "配对服务器", language: language),
                         text: $serverURL,
                         placeholder: defaultRendezvousBroker,
-                        helper: AppText.value("Leave empty to use the built-in Envoix broker.", "留空则使用内置 Envoix 配对服务器。", language: language)
+                        helper: AppText.value("Leave empty to use the built-in Envoix broker.", "留空则使用内置 Envoix 配对服务器。", language: language),
+                        isURL: true
                     )
                     settingField(
                         AppText.value("Relay URL", "中继 URL", language: language),
                         text: $relayURL,
                         placeholder: defaultRelayURL,
-                        helper: AppText.value("Leave empty to use the built-in relay for Room pairing.", "留空则使用内置中继服务。", language: language)
+                        helper: AppText.value("Leave empty to use the built-in relay for Room pairing.", "留空则使用内置中继服务。", language: language),
+                        isURL: true
                     )
 
                     settingField(
@@ -1054,15 +1094,6 @@ private struct SettingsStageView: View {
                         )
                     )
                 }
-
-                Text(AppText.value(
-                    "Speed limiting is not exposed yet because current transfers do not enforce it.",
-                    "当前传输尚未强制执行限速，因此暂不展示速度限制设置。",
-                    language: language
-                ))
-                .font(.body)
-                .foregroundStyle(Theme.muted)
-                .card(padding: 14)
 
                 Text(appDebugBuildLabel)
                     .font(.caption.monospaced())
@@ -1119,24 +1150,14 @@ private struct SettingsStageView: View {
         _ title: String,
         text: Binding<String>,
         placeholder: String = "",
-        helper: String? = nil
+        helper: String? = nil,
+        isURL: Bool = false
     ) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title)
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(Theme.muted)
-            TextField(placeholder.isEmpty ? title : placeholder, text: text)
-                .textFieldStyle(.plain)
-                .font(.body.monospaced())
-                .foregroundStyle(Theme.text)
-                .padding(.horizontal, 10)
-                .frame(minHeight: 44)
-                .background(Theme.surface)
-                .overlay(
-                    RoundedRectangle(cornerRadius: Theme.cardRadius)
-                        .strokeBorder(Theme.line.opacity(0.75), lineWidth: 0.8)
-                )
-                .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
+            settingInput(title: title, text: text, placeholder: placeholder, isURL: isURL)
             if let helper {
                 Text(helper)
                     .font(.body)
@@ -1145,6 +1166,48 @@ private struct SettingsStageView: View {
             }
         }
         .card(padding: 14)
+    }
+
+    @ViewBuilder
+    private func settingInput(
+        title: String,
+        text: Binding<String>,
+        placeholder: String,
+        isURL: Bool
+    ) -> some View {
+        let prompt = placeholder.isEmpty ? title : placeholder
+        #if os(iOS)
+        TextField(prompt, text: text)
+            .textFieldStyle(.plain)
+            .font(.body.monospaced())
+            .foregroundStyle(Theme.text)
+            .lineLimit(1)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .keyboardType(isURL ? .URL : .default)
+            .padding(.horizontal, 10)
+            .frame(minHeight: 44)
+            .background(Theme.surface)
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.cardRadius)
+                    .strokeBorder(Theme.line.opacity(0.75), lineWidth: 0.8)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
+        #else
+        TextField(prompt, text: text)
+            .textFieldStyle(.plain)
+            .font(.body.monospaced())
+            .foregroundStyle(Theme.text)
+            .lineLimit(1)
+            .padding(.horizontal, 10)
+            .frame(minHeight: 44)
+            .background(Theme.surface)
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.cardRadius)
+                    .strokeBorder(Theme.line.opacity(0.75), lineWidth: 0.8)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
+        #endif
     }
 
     private func settingToggle(_ title: String, isOn: Binding<Bool>) -> some View {

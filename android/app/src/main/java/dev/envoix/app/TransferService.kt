@@ -118,14 +118,14 @@ class TransferService : Service() {
             }
             ACTION_PAUSE -> {
                 val id = intent.getLongExtra(EXTRA_ID, -1L)
-                NativeTransfer.cancel(id)
+                UniffiTransferRunner.cancel(id)
                 TransferRepository.update(id) {
                     if (it.status.isTerminal) it else it.copy(status = Status.Paused, speedBps = 0.0)
                 }
             }
             ACTION_CANCEL -> {
                 val id = intent.getLongExtra(EXTRA_ID, -1L)
-                NativeTransfer.cancel(id)
+                UniffiTransferRunner.cancel(id)
                 specs.remove(id)
                 TransferRepository.update(id) {
                     if (it.status.isTerminal) it else it.copy(status = Status.Cancelled)
@@ -153,7 +153,7 @@ class TransferService : Service() {
             var lastNotif = 0L
             var startTs = 0L
             if (spec.useMdns) runCatching { multicastLock.acquire() }
-            NativeTransfer.run(
+            UniffiTransferRunner.run(
                 id,
                 spec.direction,
                 spec.room,

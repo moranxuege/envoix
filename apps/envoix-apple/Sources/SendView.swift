@@ -462,10 +462,10 @@ struct SendView: View {
 
         do {
             let parsed = try parsePairingInvite(input: input)
-            guard parsed.role != .send else {
+            guard parsed.role == .receive else {
                 ToastCenter.shared.show(AppText.value(
-                    "This QR belongs to another sender. Switch to Receive or scan a receiver code.",
-                    "这是另一个发送端的二维码。请切到接收，或扫描接收端的码。",
+                    "Scan a receiver code or share your send code.",
+                    "请扫描接收端的码，或分享你的发送码。",
                     language: uiLanguage
                 ))
                 return
@@ -634,10 +634,10 @@ struct SendView: View {
                     )
                 } else if lowercasedInput.hasPrefix("envoix://pair/") {
                     let parsed = try parsePairingInvite(input: input)
-                    guard parsed.role != .send else {
+                    guard parsed.role == .receive else {
                         throw RuntimeSettingsError(AppText.value(
-                            "This QR belongs to another sender. Switch to Receive or scan a receiver code.",
-                            "这是另一个发送端的二维码。请切到接收，或扫描接收端的码。",
+                            "Scan a receiver code or share your send code.",
+                            "请扫描接收端的码，或分享你的发送码。",
                             language: uiLanguage
                         ))
                     }
@@ -669,10 +669,10 @@ struct SendView: View {
             case .invite:
                 if invite.trimmed.lowercased().hasPrefix("envoix://pair/") {
                     let parsed = try parsePairingInvite(input: invite.trimmed)
-                    guard parsed.role != .send else {
+                    guard parsed.role == .receive else {
                         throw RuntimeSettingsError(AppText.value(
-                            "This QR belongs to another sender. Switch to Receive or scan a receiver code.",
-                            "这是另一个发送端的二维码。请切到接收，或扫描接收端的码。",
+                            "Scan a receiver code or share your send code.",
+                            "请扫描接收端的码，或分享你的发送码。",
                             language: uiLanguage
                         ))
                     }

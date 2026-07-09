@@ -109,6 +109,12 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func cancelActivity(_ activityID: String) {
+        receive.cancelActivityForRemoval(activityID)
+        send.cancelActivityForRemoval(activityID)
+        syncActivitySnapshots()
+    }
+
     func removeActivity(_ activityID: String) {
         removedActivityIDs.insert(activityID)
         if !receive.discardActivityForRemoval(activityID) {

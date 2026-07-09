@@ -38,7 +38,7 @@ sealed interface CliEvent {
  * Runs a transfer through the shared UniFFI core and exposes its callbacks as the
  * legacy Android [CliEvent] stream consumed by [TransferService].
  */
-object NativeTransfer {
+object UniffiTransferRunner {
     private data class ActiveTransfer(val activityId: String, val session: EnvoixSession)
 
     private val active = ConcurrentHashMap<Long, ActiveTransfer>()

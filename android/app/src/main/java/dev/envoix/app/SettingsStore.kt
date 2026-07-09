@@ -93,7 +93,7 @@ object SettingsStore {
 
     /** Push the current verbosity down to the native reloadable filter. */
     fun applyLogLevel() =
-        Native.setLogLevel(if (_settings.value.verboseLog) LOG_VERBOSE else LOG_BASELINE)
+        NativeBootstrap.setLogLevel(if (_settings.value.verboseLog) LOG_VERBOSE else LOG_BASELINE)
 
     /** Where received files go, for display: the picked SAF folder's name, else Downloads/<folder>. */
     fun saveLabel(context: Context): String {

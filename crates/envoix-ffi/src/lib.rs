@@ -163,7 +163,7 @@ mod android_bootstrap {
 
     /// Wire the Android VM + app context into dependencies that use ndk_context.
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_dev_envoix_app_Native_initContext(
+    pub extern "system" fn Java_dev_envoix_app_NativeBootstrap_initContext(
         env: JNIEnv,
         _class: JClass,
         context: JObject,
@@ -185,7 +185,7 @@ mod android_bootstrap {
 
     /// Forward Rust tracing output into the app's LogStore.
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_dev_envoix_app_Native_initLogging(
+    pub extern "system" fn Java_dev_envoix_app_NativeBootstrap_initLogging(
         env: JNIEnv,
         _class: JClass,
         sink: JObject,
@@ -220,7 +220,7 @@ mod android_bootstrap {
 
     /// Change the log filter used by the Android developer verbosity toggle.
     #[unsafe(no_mangle)]
-    pub extern "system" fn Java_dev_envoix_app_Native_setLogLevel(
+    pub extern "system" fn Java_dev_envoix_app_NativeBootstrap_setLogLevel(
         mut env: JNIEnv,
         _class: JClass,
         spec: JString,

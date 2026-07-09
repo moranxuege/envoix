@@ -1,8 +1,11 @@
 package dev.envoix.app.ui
 
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,32 +15,19 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.PathEffect
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.StrokeJoin
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
@@ -45,22 +35,18 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.automirrored.filled.OpenInNew
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.SwipeToDismissBox
-import androidx.compose.material3.SwipeToDismissBoxValue
-import androidx.compose.material3.rememberSwipeToDismissBoxState
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -72,6 +58,18 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -83,8 +81,11 @@ import dev.envoix.app.LogUpload
 import dev.envoix.app.SettingsStore
 import dev.envoix.app.Status
 import dev.envoix.app.Transfer
+import dev.envoix.app.isTerminal
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
+
+private enum class HomeTab { Transfer, Activity, Settings }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -96,27 +97,21 @@ fun HomeScreen(
     onCancel: (Long) -> Unit,
     onRemove: (Long) -> Unit,
     onOpenLogs: () -> Unit,
-    onOpenSettings: () -> Unit,
     onOpen: (Transfer) -> Unit,
 ) {
     val colors = Envoix.colors
-    var sheetOpen by remember { mutableStateOf(false) }
+    var tab by remember { mutableStateOf(HomeTab.Transfer) }
     val expanded = remember { mutableStateListOf<Long>() }
     val active = transfers.count { it.status == Status.Connecting || it.status == Status.Transferring }
 
     Scaffold(
         containerColor = colors.bg,
-        floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = { sheetOpen = true },
-                modifier = Modifier.testTag(EnvoixTestTags.NEW_TRANSFER_BUTTON),
-                containerColor = colors.accent,
-                contentColor = androidx.compose.ui.graphics.Color.White,
-            ) {
-                Icon(Icons.Default.Add, contentDescription = null)
-                Spacer(Modifier.width(8.dp))
-                Text("New transfer", fontWeight = FontWeight.SemiBold)
-            }
+        bottomBar = {
+            BottomTabs(
+                selected = tab,
+                active = active,
+                onSelect = { tab = it },
+            )
         },
     ) { inner ->
         Column(
@@ -126,47 +121,75 @@ fun HomeScreen(
                 .padding(inner)
                 .padding(horizontal = 20.dp),
         ) {
-            Header(active, onOpenLogs, onOpenSettings)
-            Spacer(Modifier.height(12.dp))
-            if (transfers.isEmpty()) {
-                EmptyState()
-            } else {
-                LazyColumn(
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                    contentPadding = PaddingValues(top = 4.dp, bottom = 96.dp),
-                ) {
-                    items(transfers.sortedByDescending { it.id }, key = { it.id }) { t ->
-                        TransferCard(
-                            t = t,
-                            expanded = t.id in expanded,
-                            onToggleDetail = { if (it in expanded) expanded.remove(it) else expanded.add(it) },
-                            onPauseResume = onPauseResume,
-                            onCancel = onCancel,
-                            onRemove = onRemove,
-                            onOpen = onOpen,
-                        )
-                    }
-                }
+            when (tab) {
+                HomeTab.Transfer -> TransferPane(
+                    transfers = transfers,
+                    active = active,
+                    onShowActivity = { tab = HomeTab.Activity },
+                    onReceive = onReceive,
+                    onSend = onSend,
+                )
+                HomeTab.Activity -> ActivityPane(
+                    transfers = transfers,
+                    active = active,
+                    expanded = expanded,
+                    onOpenLogs = onOpenLogs,
+                    onPauseResume = onPauseResume,
+                    onCancel = onCancel,
+                    onRemove = onRemove,
+                    onOpen = onOpen,
+                )
+                HomeTab.Settings -> SettingsScreen(onBack = { tab = HomeTab.Transfer }, showBack = false)
             }
-        }
-    }
-
-    if (sheetOpen) {
-        ModalBottomSheet(
-            onDismissRequest = { sheetOpen = false },
-            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            containerColor = colors.surface,
-        ) {
-            NewTransferSheet(
-                onReceive = { c, b, r, qr -> sheetOpen = false; onReceive(c, b, r, qr) },
-                onSend = { c, b, r, uri, qr, invite -> sheetOpen = false; onSend(c, b, r, uri, qr, invite) },
-            )
         }
     }
 }
 
 @Composable
-private fun Header(active: Int, onOpenLogs: () -> Unit, onOpenSettings: () -> Unit) {
+private fun BottomTabs(selected: HomeTab, active: Int, onSelect: (HomeTab) -> Unit) {
+    val colors = Envoix.colors
+    NavigationBar(containerColor = colors.surface, contentColor = colors.text) {
+        NavigationBarItem(
+            selected = selected == HomeTab.Transfer,
+            onClick = { onSelect(HomeTab.Transfer) },
+            icon = { Icon(Icons.Default.SwapHoriz, contentDescription = null) },
+            label = { Text("Transfer") },
+        )
+        NavigationBarItem(
+            selected = selected == HomeTab.Activity,
+            onClick = { onSelect(HomeTab.Activity) },
+            icon = { Icon(Icons.AutoMirrored.Filled.List, contentDescription = null) },
+            label = { Text(if (active > 0) "Activity ($active)" else "Activity") },
+        )
+        NavigationBarItem(
+            selected = selected == HomeTab.Settings,
+            onClick = { onSelect(HomeTab.Settings) },
+            icon = { Icon(Icons.Default.Settings, contentDescription = null) },
+            label = { Text("Settings") },
+        )
+    }
+}
+
+@Composable
+private fun TransferPane(
+    transfers: List<Transfer>,
+    active: Int,
+    onShowActivity: () -> Unit,
+    onReceive: (code: String, broker: String, relay: String, qrPayload: String?) -> Unit,
+    onSend: (code: String, broker: String, relay: String, file: android.net.Uri, qrPayload: String?, transferInvite: String?) -> Unit,
+) {
+    Column(Modifier.fillMaxSize()) {
+        TransferHeader(active = active, hasHistory = transfers.isNotEmpty(), onShowActivity = onShowActivity)
+        Spacer(Modifier.height(12.dp))
+        NewTransferSheet(
+            onReceive = { c, b, r, qr -> onReceive(c, b, r, qr); onShowActivity() },
+            onSend = { c, b, r, uri, qr, invite -> onSend(c, b, r, uri, qr, invite); onShowActivity() },
+        )
+    }
+}
+
+@Composable
+private fun TransferHeader(active: Int, hasHistory: Boolean, onShowActivity: () -> Unit) {
     val colors = Envoix.colors
     Row(
         Modifier
@@ -175,7 +198,72 @@ private fun Header(active: Int, onOpenLogs: () -> Unit, onOpenSettings: () -> Un
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text("Envoix", color = colors.text, fontSize = 32.sp, fontWeight = FontWeight.ExtraBold)
+        Text("Transfer", color = colors.text, fontSize = 32.sp, fontWeight = FontWeight.ExtraBold)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (active > 0) {
+                Pill(text = "$active active", fg = colors.success, bg = colors.successSoft)
+                Spacer(Modifier.width(8.dp))
+            }
+            if (hasHistory) {
+                Text(
+                    "View activity",
+                    color = colors.accent,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 14.sp,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .clickable(onClick = onShowActivity)
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ActivityPane(
+    transfers: List<Transfer>,
+    active: Int,
+    expanded: MutableList<Long>,
+    onOpenLogs: () -> Unit,
+    onPauseResume: (Long) -> Unit,
+    onCancel: (Long) -> Unit,
+    onRemove: (Long) -> Unit,
+    onOpen: (Transfer) -> Unit,
+) {
+    ActivityHeader(active, onOpenLogs)
+    Spacer(Modifier.height(12.dp))
+    if (transfers.isEmpty()) {
+        EmptyState()
+    } else {
+        LazyColumn(
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            contentPadding = PaddingValues(top = 4.dp, bottom = 20.dp),
+        ) {
+            items(transfers.sortedByDescending { it.id }, key = { it.id }) { t ->
+                TransferCard(
+                    t = t,
+                    expanded = t.id in expanded,
+                    onToggleDetail = { if (it in expanded) expanded.remove(it) else expanded.add(it) },
+                    onPauseResume = onPauseResume,
+                    onCancel = onCancel,
+                    onRemove = onRemove,
+                    onOpen = onOpen,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ActivityHeader(active: Int, onOpenLogs: () -> Unit) {
+    val colors = Envoix.colors
+    Row(
+        Modifier.fillMaxWidth().padding(top = 16.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("Activity", color = colors.text, fontSize = 32.sp, fontWeight = FontWeight.ExtraBold)
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (active > 0) {
                 Pill(text = "$active active", fg = colors.success, bg = colors.successSoft)
@@ -192,17 +280,6 @@ private fun Header(active: Int, onOpenLogs: () -> Unit, onOpenSettings: () -> Un
                     .clickable(onClick = onOpenLogs)
                     .padding(horizontal = 10.dp, vertical = 6.dp),
             )
-            Icon(
-                Icons.Default.Settings,
-                contentDescription = "Settings",
-                tint = colors.accent,
-                modifier = Modifier
-                    .clip(CircleShape)
-                    .testTag(EnvoixTestTags.SETTINGS_BUTTON)
-                    .clickable(onClick = onOpenSettings)
-                    .padding(6.dp)
-                    .size(22.dp),
-            )
         }
     }
 }
@@ -212,7 +289,7 @@ private fun EmptyState() {
     val colors = Envoix.colors
     Box(Modifier.fillMaxWidth().padding(top = 80.dp), contentAlignment = Alignment.Center) {
         Text(
-            "No transfers yet.\nTap “New transfer” to send or receive.",
+            "No transfers yet.\nStart a send or receive from the Transfer tab.",
             color = colors.muted,
             fontSize = 15.sp,
         )
@@ -233,9 +310,15 @@ private fun TransferCard(
     val colors = Envoix.colors
     val failed = t.status == Status.Failed
     val cancelled = t.status == Status.Cancelled
+    val terminal = t.status.isTerminal
     val dismissState = rememberSwipeToDismissBoxState(
         confirmValueChange = {
-            if (it == SwipeToDismissBoxValue.EndToStart) { onRemove(t.id); true } else false
+            if (it == SwipeToDismissBoxValue.EndToStart) {
+                if (terminal) onRemove(t.id) else onCancel(t.id)
+                terminal
+            } else {
+                false
+            }
         },
     )
     SwipeToDismissBox(
@@ -249,9 +332,19 @@ private fun TransferCard(
                 horizontalArrangement = Arrangement.End,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(Icons.Default.Delete, null, tint = Color.White, modifier = Modifier.size(18.dp))
+                Icon(
+                    if (terminal) Icons.Default.Delete else Icons.Default.Close,
+                    null,
+                    tint = Color.White,
+                    modifier = Modifier.size(18.dp),
+                )
                 Spacer(Modifier.width(8.dp))
-                Text("Remove", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                Text(
+                    if (terminal) "Delete" else "Cancel",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 14.sp,
+                )
             }
         },
     ) {

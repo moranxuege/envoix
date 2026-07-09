@@ -86,7 +86,7 @@ class TransferLoopbackInstrumentedTest {
         try {
             val receiverEvents = CliEventRecorder()
             val receiverJob = launch(Dispatchers.IO) {
-                NativeTransfer.run(
+                UniffiTransferRunner.run(
                     id = 91_001,
                     direction = "receive",
                     code = "invite-direct",
@@ -109,7 +109,7 @@ class TransferLoopbackInstrumentedTest {
 
             val senderEvents = CliEventRecorder()
             val senderJob = launch(Dispatchers.IO) {
-                NativeTransfer.run(
+                UniffiTransferRunner.run(
                     id = 91_002,
                     direction = "send",
                     code = "invite-direct",

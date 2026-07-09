@@ -5,8 +5,8 @@ interface LogCallback {
     fun log(line: String)
 }
 
-/** JNI bootstrap for Android context + logs; transfers use the UniFFI binding. */
-object Native {
+/** JNI bootstrap for Android context + logs only; transfers use the UniFFI binding. */
+object NativeBootstrap {
     init {
         System.loadLibrary("envoix_ffi")
     }

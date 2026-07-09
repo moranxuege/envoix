@@ -8,9 +8,9 @@ class EnvoixApp : Application() {
         super.onCreate()
         SettingsStore.init(this)
         LogStore.init(filesDir)
-        Native.initLogging(LogSink) // before initContext, so init logs are captured
+        NativeBootstrap.initLogging(LogSink) // before initContext, so init logs are captured
         SettingsStore.applyLogLevel() // restore the saved (dev) verbosity
-        Native.initContext(this)
+        NativeBootstrap.initContext(this)
 
         // Capture uncaught exceptions into the log (foundation for crash reporting).
         val previous = Thread.getDefaultUncaughtExceptionHandler()

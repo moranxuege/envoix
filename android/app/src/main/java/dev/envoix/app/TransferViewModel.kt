@@ -35,11 +35,10 @@ class TransferViewModel(app: Application) : AndroidViewModel(app) {
 
     fun cancel(id: Long) = TransferService.cancel(getApplication(), id)
 
-    /** Remove a transfer from the list, cancelling it first if it's still active. */
+    /** Delete a finished/cancelled/failed history item. Active transfers must be cancelled explicitly. */
     fun remove(id: Long) {
         val t = TransferRepository.transfers.value.find { it.id == id }
-        if (t != null && !t.status.isTerminal) TransferService.cancel(getApplication(), id)
-        TransferRepository.remove(id)
+        if (t != null && t.status.isTerminal) TransferRepository.remove(id)
     }
 
     /** Pause a running transfer, or resume/retry a paused/failed one. */
