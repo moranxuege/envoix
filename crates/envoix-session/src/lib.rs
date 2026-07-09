@@ -19,7 +19,7 @@ pub use envoix_transfer::{
     TransferSummary, USER_INTERRUPT_MESSAGE,
 };
 pub use envoix_types::TransferDirection;
-use iroh::{Endpoint, EndpointAddr};
+use iroh::Endpoint;
 use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
 use n0_future::StreamExt;
 
@@ -31,11 +31,12 @@ use endpoint::{
     peer_addr_from_descriptor,
 };
 pub use identity::IdentityConfig;
+pub use iroh::EndpointAddr;
 pub use room::{receive_file_via_room, send_file_via_room};
 
 const ALPN: &[u8] = b"envoix/1";
 const MAX_AUTH_FAILURES: u32 = 50;
-const MDNS_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
+const MDNS_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Error type returned by session orchestration.
 pub type SessionError = CoreError;
@@ -183,10 +184,16 @@ pub async fn send_file_to_endpoint_addr(
     )
     .await?;
     let events: Arc<dyn EventSink> = Arc::from(events);
+    events.on_event(TransferEvent::Diagnostic {
+        message: format!("dial start {}", endpoint_addr_shape(&peer_addr)),
+    });
     events.on_event(TransferEvent::Connecting);
     let mut connection = match dial_peer_addr(local_endpoint.clone(), peer_addr).await {
         Ok(connection) => connection,
         Err(error) => {
+            events.on_event(TransferEvent::Diagnostic {
+                message: format!("dial failed: {error}"),
+            });
             local_endpoint.close().await;
             return Err(error);
         }
@@ -313,8 +320,8 @@ pub async fn send_file_enable_mdns(
     }))
 }
 
-/// Receives one file, reporting the concrete bound peer descriptor before
-/// accepting; stops while waiting or transferring if cancelled.
+/// Receives one file, reporting the concrete bound peer descriptor and relay
+/// URLs before accepting; stops while waiting or transferring if cancelled.
 pub async fn receive_file_with_bound_peer<F>(
     listen_addrs: impl Into<BindAddrs>,
     output_dir: PathBuf,
@@ -325,7 +332,7 @@ pub async fn receive_file_with_bound_peer<F>(
     cancel: TransferCancelToken,
 ) -> Result<TransferSummary, SessionError>
 where
-    F: FnOnce(PeerDescriptor) + Send,
+    F: FnOnce(PeerDescriptor, Vec<String>) + Send,
 {
     let bound_endpoint = bind_iroh_endpoint_with_relay(
         listen_addrs,
@@ -335,8 +342,15 @@ where
         &config.candidates,
     )
     .await?;
+    let endpoint_addr = bound_endpoint
+        .ready_endpoint_addr(config.data_relay().is_some())
+        .await;
     let peer = bound_endpoint.peer_descriptor()?;
-    on_bound_peer(peer);
+    let relay_urls = endpoint_addr
+        .relay_urls()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    on_bound_peer(peer, relay_urls);
     receive_one_authenticated(bound_endpoint, output_dir, config, pairing, events, cancel).await
 }
 
@@ -349,14 +363,14 @@ pub async fn receive_one_authenticated(
     events: Box<dyn EventSink>,
     cancel: TransferCancelToken,
 ) -> Result<TransferSummary, SessionError> {
-    let mut connection = match accept_or_cancel(&bound_endpoint, &cancel).await {
+    let events: Arc<dyn EventSink> = Arc::from(events);
+    let mut connection = match accept_or_cancel(&bound_endpoint, &cancel, events.as_ref()).await {
         Ok(connection) => connection,
         Err(error) => {
             bound_endpoint.local_endpoint.close().await;
             return Err(error);
         }
     };
-    let events: Arc<dyn EventSink> = Arc::from(events);
     connection.watch_path(events.clone());
     let engine = TransferEngine::new(config.chunk_size);
 
@@ -383,15 +397,17 @@ pub async fn receive_with_auth_retries(
     events: Box<dyn EventSink>,
     cancel: TransferCancelToken,
 ) -> Result<TransferSummary, SessionError> {
+    let events: Arc<dyn EventSink> = Arc::from(events);
     let mut connection =
-        match accept_authenticated_with_retries(&bound_endpoint, pairing, &cancel).await {
+        match accept_authenticated_with_retries(&bound_endpoint, pairing, &cancel, events.as_ref())
+            .await
+        {
             Ok(connection) => connection,
             Err(error) => {
                 bound_endpoint.local_endpoint.close().await;
                 return Err(error);
             }
         };
-    let events: Arc<dyn EventSink> = Arc::from(events);
     connection.watch_path(events.clone());
     let engine = TransferEngine::new(config.chunk_size);
     let result = engine
@@ -422,10 +438,11 @@ async fn accept_authenticated_with_retries(
     bound_endpoint: &BoundEndpoint,
     pairing: &PairingConfig,
     cancel: &TransferCancelToken,
+    events: &dyn EventSink,
 ) -> Result<IrohFrameConnection, SessionError> {
     let mut failures = 0_u32;
     loop {
-        let mut connection = accept_or_cancel(bound_endpoint, cancel).await?;
+        let mut connection = accept_or_cancel(bound_endpoint, cancel, events).await?;
         match authenticate_receiver(&mut connection, pairing).await {
             Ok(()) => return Ok(connection),
             Err(_) => {
@@ -480,8 +497,19 @@ async fn send_file_to_peer_addr(
     events: Arc<dyn EventSink>,
     cancel: &TransferCancelToken,
 ) -> Result<TransferSummary, SessionError> {
+    events.on_event(TransferEvent::Diagnostic {
+        message: format!("dial start {}", endpoint_addr_shape(&peer_addr)),
+    });
     events.on_event(TransferEvent::Connecting);
-    let mut connection = dial_peer_addr(local_endpoint, peer_addr).await?;
+    let mut connection = match dial_peer_addr(local_endpoint, peer_addr).await {
+        Ok(connection) => connection,
+        Err(error) => {
+            events.on_event(TransferEvent::Diagnostic {
+                message: format!("dial failed: {error}"),
+            });
+            return Err(error);
+        }
+    };
     connection.watch_path(events.clone());
     let engine = TransferEngine::new(config.chunk_size);
     if let Err(error) = authenticate_sender(&mut connection, pairing).await {
@@ -498,11 +526,26 @@ async fn send_file_to_peer_addr(
 async fn accept_or_cancel(
     bound_endpoint: &BoundEndpoint,
     cancel: &TransferCancelToken,
+    events: &dyn EventSink,
 ) -> Result<IrohFrameConnection, SessionError> {
     tokio::select! {
-        result = bound_endpoint.accept() => result,
+        result = bound_endpoint.accept_with_events(events) => result,
         () = cancel.cancelled() => Err(interrupted_error()),
     }
+}
+
+fn endpoint_addr_shape(addr: &EndpointAddr) -> String {
+    format!(
+        "endpoint={} direct={} relay={}",
+        short_endpoint_id(&addr.id.to_string()),
+        addr.ip_addrs().count(),
+        addr.relay_urls().count()
+    )
+}
+
+fn short_endpoint_id(id: &str) -> &str {
+    let end = id.len().min(12);
+    &id[..end]
 }
 
 fn interrupted_error() -> SessionError {

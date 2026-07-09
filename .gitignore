@@ -20,6 +20,7 @@ node_modules/
 # android
 android/local.properties
 android/.gradle/
+android/.gradle-cache/
 android/build/
 android/app/build/
 .idea/

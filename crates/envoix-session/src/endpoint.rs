@@ -11,7 +11,10 @@ use noq_proto::congestion::Bbr3Config;
 use crate::candidates::CandidateFilter;
 use crate::connection::IrohFrameConnection;
 use crate::identity::{IdentityConfig, load_secret_key};
-use crate::{ALPN, SessionError};
+use crate::{ALPN, EventSink, SessionError, TransferEvent};
+
+const RELAY_HOME_WAIT_ATTEMPTS: usize = 100;
+const RELAY_HOME_WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Local socket addresses an accepting iroh endpoint should bind.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -226,19 +229,67 @@ impl BoundEndpoint {
         EndpointAddr::from_parts(self.local_endpoint.id(), ips.chain(relays))
     }
 
-    pub(crate) async fn accept(&self) -> Result<IrohFrameConnection, SessionError> {
+    /// Wait until this endpoint has learned an address worth advertising.
+    ///
+    /// Direct addresses are available immediately from local sockets, while a
+    /// relay home takes a round-trip to register. When `want_relay` is true we
+    /// wait for the relay home so cross-network peers do not receive a
+    /// direct-only address by accident.
+    pub(crate) async fn ready_endpoint_addr(&self, want_relay: bool) -> EndpointAddr {
+        for _ in 0..RELAY_HOME_WAIT_ATTEMPTS {
+            let raw = self.local_endpoint.addr();
+            let ready = if want_relay {
+                raw.relay_urls().next().is_some()
+            } else {
+                !raw.is_empty()
+            };
+            if ready {
+                return self.endpoint_addr();
+            }
+            tokio::time::sleep(RELAY_HOME_WAIT_POLL).await;
+        }
+
+        let addr = self.endpoint_addr();
+        if want_relay && addr.relay_urls().next().is_none() {
+            tracing::warn!(
+                "relay configured but its home did not register in time; advertising a \
+                 direct-only address - a peer that cannot reach us directly may fail to connect"
+            );
+        }
+        addr
+    }
+
+    pub(crate) async fn accept_with_events(
+        &self,
+        events: &dyn EventSink,
+    ) -> Result<IrohFrameConnection, SessionError> {
+        events.on_event(TransferEvent::Diagnostic {
+            message: format!(
+                "accept waiting {}",
+                endpoint_addr_shape(&self.endpoint_addr())
+            ),
+        });
         let incoming = self
             .local_endpoint
             .accept()
             .await
             .ok_or_else(|| CoreError::Transport("iroh endpoint closed".into()))?;
+        events.on_event(TransferEvent::Diagnostic {
+            message: "accept incoming received; awaiting connection".to_string(),
+        });
         let connection = incoming
             .await
             .map_err(|error| CoreError::Transport(error.to_string()))?;
+        events.on_event(TransferEvent::Diagnostic {
+            message: "accept connection established; awaiting stream".to_string(),
+        });
         let (send, recv) = connection
             .accept_bi()
             .await
             .map_err(|error| CoreError::Transport(error.to_string()))?;
+        events.on_event(TransferEvent::Diagnostic {
+            message: "accept stream opened".to_string(),
+        });
         Ok(IrohFrameConnection::new(
             self.local_endpoint.clone(),
             connection,
@@ -246,6 +297,20 @@ impl BoundEndpoint {
             recv,
         ))
     }
+}
+
+fn endpoint_addr_shape(addr: &EndpointAddr) -> String {
+    format!(
+        "endpoint={} direct={} relay={}",
+        short_endpoint_id(&addr.id.to_string()),
+        addr.ip_addrs().count(),
+        addr.relay_urls().count()
+    )
+}
+
+fn short_endpoint_id(id: &str) -> &str {
+    let end = id.len().min(12);
+    &id[..end]
 }
 
 pub(crate) fn peer_addr_from_descriptor(

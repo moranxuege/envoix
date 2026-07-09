@@ -15,10 +15,12 @@ use envoix_types::PairingStep;
 use iroh::{Endpoint, EndpointAddr, SecretKey};
 
 use crate::{
-    BindAddrs, BoundEndpoint, EventSink, PairingConfig, SessionConfig, SessionError,
-    TransferCancelToken, TransferEvent, TransferSummary, bind_iroh_endpoint_with_relay,
-    receive_with_auth_retries, send_file_to_endpoint_addr,
+    BindAddrs, EventSink, PairingConfig, SessionConfig, SessionError, TransferCancelToken,
+    TransferEvent, TransferSummary, bind_iroh_endpoint_with_relay, receive_with_auth_retries,
+    send_file_to_endpoint_addr,
 };
+
+const SEND_ROOM_PAIRING_TIMEOUT: Duration = Duration::from_secs(35);
 
 /// An ephemeral iroh endpoint used only to reach the rendezvous broker, routed
 /// through `relay` (a relay URL) when set so it can reach a NATed broker.
@@ -30,42 +32,6 @@ async fn rendezvous_endpoint(relay: &Option<String>) -> Result<Endpoint, Session
     )
     .await
     .map_err(|error| CoreError::Transport(error.to_string()))
-}
-
-/// Wait until `bound` has learned an address to advertise, then return its full
-/// endpoint addr. When a relay is configured we wait for the relay home to
-/// register (not just any direct addr): direct addrs are learned instantly from
-/// local sockets, but the relay home takes a round-trip, so returning on the
-/// first direct addr would exchange a descriptor with no relay home - leaving a
-/// peer that cannot reach us directly (true CGNAT) unable to dial us at all.
-async fn ready_endpoint_addr(bound: &BoundEndpoint, want_relay: bool) -> EndpointAddr {
-    for _ in 0..100 {
-        // Poll readiness on the raw endpoint address so the candidate filter -
-        // and its per-drop `-v` logging - runs once, on the address we return,
-        // not on every poll iteration.
-        let raw = bound.local_endpoint.addr();
-        let ready = if want_relay {
-            raw.relay_urls().next().is_some()
-        } else {
-            !raw.is_empty()
-        };
-        if ready {
-            return bound.endpoint_addr();
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    // Fell through the wait. If a relay was configured but its home never
-    // registered (relay unreachable), we advertise a direct-only descriptor.
-    // Warn rather than error: the peer may still reach us directly - but if it
-    // needs the relay, the data-plane dial will fail later, so make it visible.
-    let addr = bound.endpoint_addr();
-    if want_relay && addr.relay_urls().next().is_none() {
-        tracing::warn!(
-            "relay configured but its home did not register in time; advertising a \
-             direct-only address - a peer that cannot reach us directly may fail to connect"
-        );
-    }
-    addr
 }
 
 /// Pair in a room, re-joining if the broker matched us with a stale dead peer.
@@ -127,13 +93,24 @@ async fn pair_or_cancel<T>(
     mine: &T,
     cancel: &TransferCancelToken,
     events: &dyn EventSink,
+    timeout: Option<Duration>,
 ) -> Result<RoomPairing<T>, SessionError>
 where
     T: serde::Serialize + serde::de::DeserializeOwned,
 {
-    let result = tokio::select! {
-        result = pair_in_room_retrying(rdz, broker, room_id, password, mine, events) => result,
-        _ = cancel.cancelled() => Err(CoreError::Transfer(crate::USER_INTERRUPT_MESSAGE.into())),
+    let result = if let Some(timeout) = timeout {
+        tokio::select! {
+            result = pair_in_room_retrying(rdz, broker, room_id, password, mine, events) => result,
+            _ = cancel.cancelled() => Err(CoreError::Transfer(crate::USER_INTERRUPT_MESSAGE.into())),
+            _ = tokio::time::sleep(timeout) => {
+                Err(CoreError::Transport("rendezvous pairing timed out".into()))
+            }
+        }
+    } else {
+        tokio::select! {
+            result = pair_in_room_retrying(rdz, broker, room_id, password, mine, events) => result,
+            _ = cancel.cancelled() => Err(CoreError::Transfer(crate::USER_INTERRUPT_MESSAGE.into())),
+        }
     };
     if result.is_err() {
         rdz.close().await;
@@ -164,7 +141,9 @@ pub async fn receive_file_via_room(
     .await?;
     // With direct-only the data endpoint has no relay home, so wait for a direct
     // addr rather than a relay home; otherwise wait for the relay home as usual.
-    let my_addr = ready_endpoint_addr(&bound, config.data_relay().is_some()).await;
+    let my_addr = bound
+        .ready_endpoint_addr(config.data_relay().is_some())
+        .await;
 
     let rdz = rendezvous_endpoint(&config.relay).await?;
     let pairing = match pair_or_cancel(
@@ -175,6 +154,7 @@ pub async fn receive_file_via_room(
         &my_addr,
         &cancel,
         events.as_ref(),
+        None,
     )
     .await
     {
@@ -227,6 +207,7 @@ pub async fn send_file_via_room(
         &placeholder,
         &cancel,
         events.as_ref(),
+        Some(SEND_ROOM_PAIRING_TIMEOUT),
     )
     .await
     {
@@ -255,4 +236,71 @@ pub async fn send_file_via_room(
         cancel,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use envoix_rendezvous::RoomRegistry;
+    use envoix_rendezvous_iroh::{endpoint_addr, serve_endpoint};
+    use iroh::RelayMode;
+
+    use super::*;
+    use crate::NoopEventSink;
+
+    async fn ready_addr(ep: &Endpoint) -> EndpointAddr {
+        for _ in 0..100 {
+            if ep.addr().ip_addrs().next().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        endpoint_addr(ep)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sender_room_pairing_timeout_returns_before_room_expiry() {
+        let server = build_endpoint(
+            "127.0.0.1:0".parse().unwrap(),
+            SecretKey::generate(),
+            RelayMode::Disabled,
+        )
+        .await
+        .unwrap();
+        let broker = ready_addr(&server).await;
+        tokio::spawn(serve_endpoint(
+            server,
+            Arc::new(RoomRegistry::with_ttl(Duration::from_secs(30))),
+            None,
+        ));
+
+        let rdz = rendezvous_endpoint(&None).await.unwrap();
+        let placeholder = rdz.addr();
+        let started = tokio::time::Instant::now();
+        let result = pair_or_cancel(
+            &rdz,
+            &broker,
+            "9999",
+            "lonely-room",
+            &placeholder,
+            &TransferCancelToken::new(),
+            &NoopEventSink,
+            Some(Duration::from_millis(150)),
+        )
+        .await;
+        let error = match result {
+            Ok(_) => panic!("pairing should time out without a peer"),
+            Err(error) => error,
+        };
+
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "timeout should beat the broker room expiry"
+        );
+        assert!(
+            error.to_string().contains("rendezvous pairing timed out"),
+            "expected pairing timeout, got: {error}"
+        );
+    }
 }

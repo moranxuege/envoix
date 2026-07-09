@@ -1,8 +1,11 @@
 package dev.envoix.app
 
 import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.launch
 import dev.envoix.app.ffi.EnvoixRuntimeSettings
 import dev.envoix.app.ffi.EnvoixSession
 import dev.envoix.app.ffi.FfiDataPathKind
@@ -18,7 +21,9 @@ import dev.envoix.app.ffi.FfiTransferMode
 import dev.envoix.app.ffi.FfiTransferRequest
 import dev.envoix.app.ffi.TransferObserver
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /** Parsed events from the Envoix core (see the client event stream schema). */
 sealed interface CliEvent {
@@ -39,7 +44,27 @@ sealed interface CliEvent {
  * legacy Android [CliEvent] stream consumed by [TransferService].
  */
 object UniffiTransferRunner {
-    private data class ActiveTransfer(val activityId: String, val session: EnvoixSession)
+    private const val ROOM_SEND_FALLBACK_TIMEOUT_MS = 38_000L
+
+    private data class SessionEntry(val generation: Int, val session: EnvoixSession)
+
+    private class ActiveTransfer(val activityId: String) {
+        private val sessions = CopyOnWriteArrayList<SessionEntry>()
+
+        fun add(generation: Int, session: EnvoixSession) {
+            sessions.add(SessionEntry(generation, session))
+        }
+
+        fun cancelOlderThan(generation: Int) {
+            sessions.filter { it.generation < generation }.forEach { entry ->
+                entry.session.cancelActivity(activityId)
+            }
+        }
+
+        fun cancelAll() {
+            sessions.forEach { entry -> entry.session.cancelActivity(activityId) }
+        }
+    }
 
     private val active = ConcurrentHashMap<Long, ActiveTransfer>()
 
@@ -58,38 +83,49 @@ object UniffiTransferRunner {
         useMdns: Boolean,
     ): Flow<CliEvent> = callbackFlow {
         val activityId = "android-$id"
-        val session = EnvoixSession.newWithSettings(
-            EnvoixRuntimeSettings(
-                concurrentTransfers = true,
-                language = "en",
-                serverUrl = broker,
-                relayUrl = relay,
-                configPath = configPath,
-                speedLimitMbps = 40uL,
-            )
+        val settings = EnvoixRuntimeSettings(
+            concurrentTransfers = true,
+            language = "en",
+            serverUrl = broker,
+            relayUrl = relay,
+            configPath = configPath,
+            speedLimitMbps = 40uL,
         )
+        val activeTransfer = ActiveTransfer(activityId)
         val terminal = AtomicBoolean(false)
+        val activeGeneration = AtomicInteger(0)
+        var fallbackJob: Job? = null
 
-        fun complete(bytes: ULong) {
+        fun newSession(): EnvoixSession = EnvoixSession.newWithSettings(settings)
+
+        fun isCurrent(generation: Int): Boolean =
+            generation == activeGeneration.get() && !terminal.get()
+
+        fun complete(bytes: ULong, generation: Int) {
+            if (!isCurrent(generation)) return
             if (terminal.compareAndSet(false, true)) {
-                active.remove(id)
+                fallbackJob?.cancel()
+                active.remove(id)?.cancelAll()
                 trySend(CliEvent.Completed(bytes.toLongSaturated()))
                 trySend(CliEvent.Exit(0))
                 close()
             }
         }
 
-        fun fail(message: String) {
+        fun fail(message: String, generation: Int) {
+            if (!isCurrent(generation)) return
             if (terminal.compareAndSet(false, true)) {
-                active.remove(id)
+                fallbackJob?.cancel()
+                active.remove(id)?.cancelAll()
                 trySend(CliEvent.Failed(message.ifBlank { "transfer failed" }))
                 trySend(CliEvent.Exit(1))
                 close()
             }
         }
 
-        val observer = object : TransferObserver {
+        fun observerFor(generation: Int) = object : TransferObserver {
             override fun onInviteReady(invite: String) {
+                if (!isCurrent(generation)) return
                 trySend(CliEvent.InviteReady(invite))
             }
 
@@ -97,55 +133,82 @@ object UniffiTransferRunner {
 
             override fun onProgress(transferred: ULong, total: ULong) = Unit
 
-            override fun onCompleted(bytes: ULong) = complete(bytes)
+            override fun onCompleted(bytes: ULong) = complete(bytes, generation)
 
-            override fun onTransferFailed(failure: FfiTransferFailure) = fail(failure.message())
+            override fun onTransferFailed(failure: FfiTransferFailure) = fail(failure.message(), generation)
 
-            override fun onFailed(reason: String) = fail(reason)
+            override fun onFailed(reason: String) = fail(reason, generation)
 
             override fun onTransferEvent(event: FfiTransferEvent) {
+                if (!isCurrent(generation)) return
+                if (event.mode == FfiTransferMode.MDNS) {
+                    fallbackJob?.cancel()
+                }
                 mapEvent(event)?.let { trySend(it) }
             }
 
             override fun onTransferActivity(record: dev.envoix.app.ffi.FfiTransferActivityRecord) = Unit
 
             override fun onStatus(message: String) {
+                if (!isCurrent(generation)) return
                 if (message.isNotBlank()) {
+                    if (message.contains("mDNS")) {
+                        fallbackJob?.cancel()
+                    }
                     LogStore.append("core: $message")
                     trySend(CliEvent.CoreStatus(message))
                 }
             }
         }
 
-        active[id] = ActiveTransfer(activityId, session)
-        val started = runCatching {
-            session.startTransfer(
-                transferRequest(
-                    activityId = activityId,
-                    direction = direction,
-                    code = code,
-                    broker = broker,
-                    relay = relay,
-                    path = path,
-                    configPath = configPath,
-                    qrPayload = qrPayload,
-                    transferInvite = transferInvite,
-                    internetAvailable = internetAvailable,
-                    useRoom = useRoom,
-                    useMdns = useMdns,
-                ),
-                observer,
-            )
+        fun startAttempt(generation: Int, attemptUseRoom: Boolean, attemptUseMdns: Boolean) {
+            if (terminal.get()) return
+            val session = newSession()
+            activeTransfer.add(generation, session)
+            active[id] = activeTransfer
+            val started = runCatching {
+                session.startTransfer(
+                    transferRequest(
+                        activityId = activityId,
+                        direction = direction,
+                        code = code,
+                        broker = broker,
+                        relay = relay,
+                        path = path,
+                        configPath = configPath,
+                        qrPayload = qrPayload,
+                        transferInvite = transferInvite,
+                        internetAvailable = internetAvailable,
+                        useRoom = attemptUseRoom,
+                        useMdns = attemptUseMdns,
+                    ),
+                    observerFor(generation),
+                )
+            }
+            started.exceptionOrNull()?.let { error ->
+                fail(error.message ?: "native error", generation)
+            }
         }
-        started.exceptionOrNull()?.let { error ->
-            fail(error.message ?: "native error")
+
+        active[id] = activeTransfer
+        startAttempt(generation = 0, attemptUseRoom = useRoom, attemptUseMdns = useMdns)
+
+        if (shouldRestartRoomSenderWithMdns(direction, transferInvite, internetAvailable, useRoom, useMdns)) {
+            fallbackJob = launch {
+                delay(ROOM_SEND_FALLBACK_TIMEOUT_MS)
+                if (!activeGeneration.compareAndSet(0, 1) || terminal.get()) return@launch
+                val message = "room sender did not connect within ${ROOM_SEND_FALLBACK_TIMEOUT_MS / 1000}s; restarting with mDNS"
+                LogStore.append("core: $message")
+                trySend(CliEvent.CoreStatus(message))
+                activeTransfer.cancelOlderThan(1)
+                startAttempt(generation = 1, attemptUseRoom = false, attemptUseMdns = true)
+            }
         }
 
         awaitClose {
+            fallbackJob?.cancel()
             if (terminal.compareAndSet(false, true)) {
-                active.remove(id)?.let { transfer ->
-                    transfer.session.cancelActivity(transfer.activityId)
-                }
+                active.remove(id)?.cancelAll()
             } else {
                 active.remove(id)
             }
@@ -154,8 +217,21 @@ object UniffiTransferRunner {
 
     fun cancel(id: Long) {
         val transfer = active[id] ?: return
-        transfer.session.cancelActivity(transfer.activityId)
+        transfer.cancelAll()
     }
+
+    private fun shouldRestartRoomSenderWithMdns(
+        direction: String,
+        transferInvite: String?,
+        internetAvailable: Boolean,
+        useRoom: Boolean,
+        useMdns: Boolean,
+    ): Boolean =
+        direction == "send" &&
+            transferInvite.isNullOrBlank() &&
+            internetAvailable &&
+            useRoom &&
+            useMdns
 
     private fun transferRequest(
         activityId: String,

@@ -14,6 +14,8 @@ struct ReceiveView: View {
     @AppStorage("envoix.serverURL") private var serverURL = ""
     @AppStorage("envoix.relayURL") private var relayURL = ""
     @AppStorage("envoix.configChunkSize") private var configChunkSize = ""
+    @AppStorage("envoix.candidatesAllow") private var candidatesAllow = ""
+    @AppStorage("envoix.candidatesDeny") private var candidatesDeny = ""
     @AppStorage("envoix.speedLimit") private var speedLimit = 40
     @State private var mode: PairingMode = .room
     @State private var roomCode = newRoomCode()
@@ -103,7 +105,6 @@ struct ReceiveView: View {
     private var scrollContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                outputSection
                 modeSelector
 
                 if mode == .invite {
@@ -114,6 +115,8 @@ struct ReceiveView: View {
                     TokenField(token: $token, disabled: viewModel.isBusy)
                         .card(padding: 14)
                 }
+
+                outputSection
 
                 if !viewModel.peerAddress.isEmpty {
                     addressReveal
@@ -626,6 +629,8 @@ struct ReceiveView: View {
                 serverURL: serverURL,
                 relayURL: relayURL,
                 configChunkSize: configChunkSize,
+                candidatesAllow: candidatesAllow,
+                candidatesDeny: candidatesDeny,
                 speedLimit: speedLimit
             )
             viewModel.startReceivingWithToken(
@@ -649,6 +654,8 @@ struct ReceiveView: View {
                 serverURL: serverURL,
                 relayURL: relayURL,
                 configChunkSize: configChunkSize,
+                candidatesAllow: candidatesAllow,
+                candidatesDeny: candidatesDeny,
                 speedLimit: speedLimit
             )
             viewModel.startReceivingWithRoom(
@@ -671,6 +678,8 @@ struct ReceiveView: View {
                 serverURL: serverURL,
                 relayURL: relayURL,
                 configChunkSize: configChunkSize,
+                candidatesAllow: candidatesAllow,
+                candidatesDeny: candidatesDeny,
                 speedLimit: speedLimit
             )
             viewModel.startReceivingWithInvite(

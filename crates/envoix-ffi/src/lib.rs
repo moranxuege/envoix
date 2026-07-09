@@ -14,15 +14,17 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use envoix_client::{
     BindAddrs, PeerDescriptor, TransferDirection, TransferSummary,
     api::{
         Client, DataPath, FailureCategory, FailureCode, FailureOrigin, FailurePhase, Invite,
-        PairingStep, PathPolicy, PeerSource, RecoveryAction, Role, StampedEvent, Transfer,
+        PairingStep, PathPolicy, PeerSource, Phase, RecoveryAction, Role, StampedEvent, Transfer,
         TransferError, TransferEvent, TransferMode, TransferOptions,
     },
 };
+use envoix_qr::QrInvitePayload;
 use envoix_rendezvous_iroh::generate_code;
 use tokio::runtime::{Handle, Runtime};
 use tokio::sync::oneshot;
@@ -39,6 +41,7 @@ const DEFAULT_RELAY_URL: &str = "https://envoix.chkxwlyh.us:8444";
 static NEXT_ACTIVITY_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_ATTEMPT_ID: AtomicU64 = AtomicU64::new(1);
 const TRANSFER_ACTIVITY_HISTORY_CAP: usize = 50;
+const ROOM_SEND_FALLBACK_TIMEOUT: Duration = Duration::from_secs(35);
 /// Runtime settings supplied by native UIs.
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct EnvoixRuntimeSettings {
@@ -657,6 +660,7 @@ struct QueuedTransfer {
 struct TransferAttemptSource {
     mode: FfiTransferMode,
     source: PeerSource,
+    path_policy_override: Option<FfiPathPolicy>,
 }
 
 struct TransferAttemptOutcome {
@@ -676,6 +680,21 @@ struct ActiveTransfer {
 enum TransferStop {
     Cancel,
     Pause,
+}
+
+impl TransferAttemptSource {
+    fn new(mode: FfiTransferMode, source: PeerSource) -> Self {
+        Self {
+            mode,
+            source,
+            path_policy_override: None,
+        }
+    }
+
+    fn with_path_policy(mut self, path_policy: FfiPathPolicy) -> Self {
+        self.path_policy_override = Some(path_policy);
+        self
+    }
 }
 
 impl TransferQueueState {
@@ -1259,7 +1278,7 @@ fn validate_transfer_request(
         }
     }
     build_client_for_request(settings, request)?;
-    transfer_options_for_request(settings, request)?;
+    transfer_options_for_request(settings, request, None)?;
     peer_sources_for_request(settings, request)?;
     Ok(())
 }
@@ -1299,10 +1318,11 @@ fn build_transfer_for_source(
     settings: &EnvoixRuntimeSettings,
     request: &FfiTransferRequest,
     source: PeerSource,
+    path_policy_override: Option<FfiPathPolicy>,
     handle: &Handle,
 ) -> Result<Transfer, EnvoixError> {
     let client = build_client_for_request(settings, request)?;
-    let options = transfer_options_for_request(settings, request)?;
+    let options = transfer_options_for_request(settings, request, path_policy_override)?;
     let _guard = handle.enter();
     match request.direction {
         FfiTransferDirection::Send => client
@@ -1627,15 +1647,17 @@ fn build_client_for_request(
 fn transfer_options_for_request(
     settings: &EnvoixRuntimeSettings,
     request: &FfiTransferRequest,
+    path_policy_override: Option<FfiPathPolicy>,
 ) -> Result<TransferOptions, EnvoixError> {
     let mut options = TransferOptions::default();
     options.relay = relay_url_for_request(settings, request);
-    if request.path_policy == FfiPathPolicy::RelayOnly && options.relay.is_none() {
+    let effective_path_policy = path_policy_override.unwrap_or(request.path_policy);
+    if effective_path_policy == FfiPathPolicy::RelayOnly && options.relay.is_none() {
         return Err(EnvoixError::Operation {
             reason: "relay-only transfers require a relay URL".to_string(),
         });
     }
-    options.path = path_policy(request.path_policy);
+    options.path = path_policy(effective_path_policy);
     options.resume = request.resume;
     options.listen_addrs = Some(receive_addrs());
     Ok(options)
@@ -1649,7 +1671,7 @@ fn peer_sources_for_request(
     settings: &EnvoixRuntimeSettings,
     request: &FfiTransferRequest,
 ) -> Result<Vec<TransferAttemptSource>, EnvoixError> {
-    let single = |mode, source| Ok(vec![TransferAttemptSource { mode, source }]);
+    let single = |mode, source| Ok(vec![TransferAttemptSource::new(mode, source)]);
     match request.mode {
         FfiTransferMode::Manual => single(
             FfiTransferMode::Manual,
@@ -1658,12 +1680,23 @@ fn peer_sources_for_request(
                 token: required_value(&request.token, "token")?,
             },
         ),
-        FfiTransferMode::Invite => single(
-            FfiTransferMode::Invite,
-            PeerSource::Invite {
-                invite: required_value(&request.invite, "invite")?,
-            },
-        ),
+        FfiTransferMode::Invite => {
+            let invite = required_value(&request.invite, "invite")?;
+            let source = PeerSource::Invite {
+                invite: invite.clone(),
+            };
+            let mut sources = vec![TransferAttemptSource::new(
+                FfiTransferMode::Invite,
+                source.clone(),
+            )];
+            if should_retry_invite_relay_only(settings, request, &invite) {
+                sources.push(
+                    TransferAttemptSource::new(FfiTransferMode::Invite, source)
+                        .with_path_policy(FfiPathPolicy::RelayOnly),
+                );
+            }
+            Ok(sources)
+        }
         FfiTransferMode::ShowManual => single(
             FfiTransferMode::ShowManual,
             PeerSource::ShowManual {
@@ -1692,12 +1725,14 @@ fn peer_sources_for_request(
                         code: code.clone(),
                         broker: rendezvous_broker_for_request(settings, request),
                     },
+                    path_policy_override: None,
                 });
             }
             if request.rendezvous.use_mdns {
                 sources.push(TransferAttemptSource {
                     mode: FfiTransferMode::Mdns,
                     source: PeerSource::Mdns { token: Some(code) },
+                    path_policy_override: None,
                 });
             }
             if sources.is_empty() {
@@ -1720,6 +1755,22 @@ fn peer_sources_for_request(
             reason: "transfer mode must not be unknown".to_string(),
         }),
     }
+}
+
+fn should_retry_invite_relay_only(
+    settings: &EnvoixRuntimeSettings,
+    request: &FfiTransferRequest,
+    invite: &str,
+) -> bool {
+    if request.direction != FfiTransferDirection::Send
+        || request.path_policy != FfiPathPolicy::Auto
+        || relay_url_for_request(settings, request).is_none()
+    {
+        return false;
+    }
+    QrInvitePayload::decode(invite)
+        .map(|payload| !payload.relay_urls.is_empty())
+        .unwrap_or(false)
 }
 
 fn path_policy(policy: FfiPathPolicy) -> PathPolicy {
@@ -1878,19 +1929,32 @@ fn request_debug_summary(
 }
 
 fn attempt_debug_summary(index: usize, count: usize, attempt: &TransferAttemptSource) -> String {
+    let path = attempt
+        .path_policy_override
+        .map(|policy| format!(" path={}", path_policy_label(policy)))
+        .unwrap_or_default();
     format!(
-        "attempt {}/{} via {} {}",
+        "attempt {}/{} via {}{} {}",
         index + 1,
         count,
         transfer_mode_label(attempt.mode),
+        path,
         peer_source_debug(&attempt.source)
     )
+}
+
+fn path_policy_label(policy: FfiPathPolicy) -> &'static str {
+    match policy {
+        FfiPathPolicy::Auto => "auto",
+        FfiPathPolicy::RelayOnly => "relay-only",
+        FfiPathPolicy::DirectOnly => "direct-only",
+    }
 }
 
 fn peer_source_debug(source: &PeerSource) -> String {
     match source {
         PeerSource::Manual { .. } => "source=manual".to_string(),
-        PeerSource::Invite { invite } => format!("source=invite len={}", invite.len()),
+        PeerSource::Invite { invite } => invite_source_debug(invite),
         PeerSource::ShowManual { token } => {
             format!("source=show-manual token={}", token_state(token.as_deref()))
         }
@@ -1910,6 +1974,36 @@ fn peer_source_debug(source: &PeerSource) -> String {
             )
         }
     }
+}
+
+fn invite_source_debug(invite: &str) -> String {
+    let Ok(payload) = QrInvitePayload::decode(invite) else {
+        return format!("source=invite len={} parse=failed", invite.len());
+    };
+    format!(
+        "source=invite len={} endpoint={} direct={} relay={}",
+        invite.len(),
+        short_endpoint_id(&payload.peer.endpoint_id),
+        payload.peer.direct_addrs.len(),
+        payload.relay_urls.len(),
+    )
+}
+
+fn advertised_endpoint_debug(peer: &PeerDescriptor, invite: Option<&str>) -> String {
+    let relay_count = invite
+        .and_then(|value| QrInvitePayload::decode(value).ok())
+        .map(|payload| payload.relay_urls.len())
+        .unwrap_or(0);
+    format!(
+        "advertised endpoint={} direct={} relay={}",
+        short_endpoint_id(&peer.endpoint_id),
+        peer.direct_addrs.len(),
+        relay_count,
+    )
+}
+
+fn short_endpoint_id(endpoint_id: &str) -> String {
+    endpoint_id.chars().take(12).collect()
 }
 
 fn transfer_direction_label(direction: FfiTransferDirection) -> &'static str {
@@ -2062,8 +2156,13 @@ async fn drive_transfer_request(
             observer.on_transfer_activity(activity.clone());
         }
         observer.on_status(attempt_debug_summary(index, attempt_count, &attempt));
-        let transfer = match build_transfer_for_source(&settings, &request, attempt.source, &handle)
-        {
+        let transfer = match build_transfer_for_source(
+            &settings,
+            &request,
+            attempt.source,
+            attempt.path_policy_override,
+            &handle,
+        ) {
             Ok(transfer) => transfer,
             Err(error) => {
                 if let Some(next_mode) = modes.get(index + 1) {
@@ -2082,6 +2181,14 @@ async fn drive_transfer_request(
             }
         };
 
+        let has_fallback = modes.get(index + 1).is_some();
+        let fallback_timeout = fallback_timeout_for_attempt(&request, attempt.mode, has_fallback);
+        if let Some(timeout) = fallback_timeout {
+            observer.on_status(format!(
+                "fallback timeout armed: {}s before connection",
+                timeout.as_secs()
+            ));
+        }
         let outcome = drive_transfer_attempt(
             transfer,
             &mut activity,
@@ -2089,11 +2196,10 @@ async fn drive_transfer_request(
             &mut control,
             &mut stop_requested,
             &queue,
+            fallback_timeout,
         )
         .await;
-        let can_fallback = outcome.stop_requested.is_none()
-            && !outcome.connected
-            && modes.get(index + 1).is_some();
+        let can_fallback = outcome.stop_requested.is_none() && !outcome.connected && has_fallback;
         match outcome.result {
             Ok(summary) => {
                 report_terminal(
@@ -2155,11 +2261,21 @@ async fn drive_transfer_attempt(
     control: &mut oneshot::Receiver<TransferStop>,
     stop_requested: &mut Option<TransferStop>,
     queue: &Arc<Mutex<TransferQueueState>>,
+    fallback_timeout: Option<Duration>,
 ) -> TransferAttemptOutcome {
     let mut direction = None;
     let mut connected = false;
+    let mut fallback_elapsed = false;
+    let fallback_signal = fallback_watchdog(fallback_timeout);
+    tokio::pin!(fallback_signal);
     loop {
         tokio::select! {
+            _ = &mut fallback_signal, if fallback_timeout.is_some() && !connected && stop_requested.is_none() => {
+                observer.on_status("room send timed out before connection; trying fallback".to_string());
+                transfer.cancel();
+                fallback_elapsed = true;
+                break;
+            }
             event = transfer.next_event() => {
                 let Some(event) = event else { break };
                 if direction.is_none() {
@@ -2182,16 +2298,53 @@ async fn drive_transfer_attempt(
             }
         }
     }
+    let result = if fallback_elapsed {
+        Err(TransferError::transport(
+            Phase::Pairing,
+            "rendezvous pairing timed out",
+        ))
+    } else {
+        transfer.wait().await
+    };
     TransferAttemptOutcome {
-        result: transfer.wait().await,
+        result,
         direction,
         connected,
         stop_requested: *stop_requested,
     }
 }
 
+async fn fallback_watchdog(timeout: Option<Duration>) {
+    let Some(timeout) = timeout else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    let (sender, receiver) = oneshot::channel();
+    std::thread::spawn(move || {
+        std::thread::sleep(timeout);
+        let _ = sender.send(());
+    });
+    let _ = receiver.await;
+}
+
+fn fallback_timeout_for_attempt(
+    request: &FfiTransferRequest,
+    mode: FfiTransferMode,
+    has_fallback: bool,
+) -> Option<Duration> {
+    if has_fallback
+        && request.direction == FfiTransferDirection::Send
+        && mode == FfiTransferMode::Room
+    {
+        Some(ROOM_SEND_FALLBACK_TIMEOUT)
+    } else {
+        None
+    }
+}
+
 fn event_direction(event: &TransferEvent) -> Option<TransferDirection> {
     match event {
+        TransferEvent::Diagnostic { .. } => None,
         TransferEvent::Binding { direction, .. }
         | TransferEvent::Started { direction, .. }
         | TransferEvent::Verifying { direction, .. }
@@ -2212,10 +2365,14 @@ fn observe_transfer_event(
     observer.on_transfer_activity(activity.clone());
     let event = event.event;
     match event {
+        TransferEvent::Diagnostic { message } => {
+            observer.on_status(message);
+        }
         TransferEvent::Binding { direction, mode } => {
             observer.on_status(format!("binding {direction:?} via {mode:?}"));
         }
-        TransferEvent::Advertised { invite, .. } => {
+        TransferEvent::Advertised { peer, invite, .. } => {
+            observer.on_status(advertised_endpoint_debug(&peer, invite.as_deref()));
             if let Some(invite) = invite {
                 observer.on_invite_ready(invite);
                 observer.on_status("invite ready; waiting for sender".to_string());
@@ -2253,6 +2410,10 @@ fn observe_transfer_event(
 fn to_ffi_event(event: &StampedEvent, activity_id: &str) -> FfiTransferEvent {
     let mut ffi = FfiTransferEvent::empty(activity_id, event.ts_ms);
     match &event.event {
+        TransferEvent::Diagnostic { message } => {
+            ffi.kind = FfiTransferEventKind::Unknown;
+            ffi.diagnostic_message = message.clone();
+        }
         TransferEvent::Binding { direction, mode } => {
             ffi.kind = FfiTransferEventKind::Binding;
             ffi.direction = ffi_direction(Some(*direction));
@@ -2940,6 +3101,33 @@ mod tests {
     }
 
     #[test]
+    fn room_fallback_timeout_only_applies_to_senders() {
+        let mut send_request =
+            FfiTransferRequest::send("/tmp/envoix-room.txt".to_string(), FfiTransferMode::Room);
+        send_request.code = "135790-amber-comet".to_string();
+        let mut receive_request =
+            FfiTransferRequest::receive("/tmp/envoix".to_string(), FfiTransferMode::Room);
+        receive_request.code = "135790-amber-comet".to_string();
+
+        assert_eq!(
+            fallback_timeout_for_attempt(&send_request, FfiTransferMode::Room, true),
+            Some(ROOM_SEND_FALLBACK_TIMEOUT),
+        );
+        assert_eq!(
+            fallback_timeout_for_attempt(&receive_request, FfiTransferMode::Room, true),
+            None,
+        );
+        assert_eq!(
+            fallback_timeout_for_attempt(&send_request, FfiTransferMode::Room, false),
+            None,
+        );
+        assert_eq!(
+            fallback_timeout_for_attempt(&send_request, FfiTransferMode::Mdns, true),
+            None,
+        );
+    }
+
+    #[test]
     fn room_rendezvous_plan_skips_room_without_internet() {
         let mut request =
             FfiTransferRequest::receive("/tmp/envoix".to_string(), FfiTransferMode::Room);
@@ -2993,6 +3181,62 @@ mod tests {
         assert!(attempt.contains("room=123456"));
         assert!(!summary.contains("amber-comet"));
         assert!(!attempt.contains("amber-comet"));
+    }
+
+    #[test]
+    fn invite_debug_summary_reports_endpoint_shape_without_token() {
+        let peer = PeerDescriptor::new(
+            SecretKey::generate().public().to_string(),
+            vec!["127.0.0.1:9000".parse().unwrap()],
+        )
+        .unwrap();
+        let invite = QrInvitePayload::new_with_relay_urls(
+            "135790-amber-comet".to_string(),
+            peer.clone(),
+            vec!["https://relay.example:8444".to_string()],
+            999,
+        )
+        .encode();
+
+        let source = invite_source_debug(&invite);
+        let advertised = advertised_endpoint_debug(&peer, Some(&invite));
+
+        assert!(source.contains("source=invite"));
+        assert!(source.contains("direct=1"));
+        assert!(source.contains("relay=1"));
+        assert!(!source.contains("amber-comet"));
+        assert!(advertised.contains("direct=1"));
+        assert!(advertised.contains("relay=1"));
+    }
+
+    #[test]
+    fn invite_send_auto_adds_relay_only_retry_when_invite_has_relay() {
+        let peer = PeerDescriptor::new(
+            SecretKey::generate().public().to_string(),
+            vec!["127.0.0.1:9000".parse().unwrap()],
+        )
+        .unwrap();
+        let invite = QrInvitePayload::new_with_relay_urls(
+            "135790-amber-comet".to_string(),
+            peer,
+            vec!["https://relay.example:8444".to_string()],
+            999,
+        )
+        .encode();
+        let mut request =
+            FfiTransferRequest::send("/tmp/report.pdf".to_string(), FfiTransferMode::Invite);
+        request.invite = invite;
+
+        let attempts = peer_sources_for_request(&EnvoixRuntimeSettings::default(), &request)
+            .expect("invite request should build attempts");
+
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].path_policy_override, None);
+        assert_eq!(
+            attempts[1].path_policy_override,
+            Some(FfiPathPolicy::RelayOnly)
+        );
+        assert!(attempt_debug_summary(1, 2, &attempts[1]).contains("path=relay-only"));
     }
 
     #[test]

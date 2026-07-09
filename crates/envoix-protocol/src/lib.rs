@@ -686,6 +686,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn file_header_preserves_sizes_above_i32_max() {
+        let (mut writer, mut reader) = tokio::io::duplex(1024);
+        let frame = Frame::FileHeader(FileHeader {
+            transfer_id: TransferId::new("transfer-large"),
+            file_name: "mathematica.zip".into(),
+            file_size: i32::MAX as u64 + 1,
+            chunk_size: 64 * 1024,
+            resume_requested: true,
+        });
+
+        write_frame(&mut writer, &frame).await.unwrap();
+
+        assert_eq!(read_frame(&mut reader).await.unwrap(), frame);
+    }
+
+    #[tokio::test]
     async fn resumable_v1_frames_round_trip() {
         let frames = vec![
             Frame::Auth(AuthFrame::Spake2Start(Spake2Start {

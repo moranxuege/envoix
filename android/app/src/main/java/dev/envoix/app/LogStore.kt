@@ -1,5 +1,6 @@
 package dev.envoix.app
 
+import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -69,10 +70,22 @@ object LogSink : LogCallback {
 
     override fun log(line: String) {
         LogStore.append(line)
-        val room = ROOM.find(line)?.groupValues?.get(1) ?: return
         val m = LEVEL.find(line) ?: return
         val (level, tail) = m.destructured
+        writeLogcat(level, line)
+        val room = ROOM.find(line)?.groupValues?.get(1) ?: return
         val stamp = clock.format(java.time.Instant.now())
         TransferRepository.appendCoreLog(room, "$stamp  $level  ${tail.replaceFirst(TRANSFER_SPAN, "")}")
+    }
+
+    private fun writeLogcat(level: String, line: String) {
+        when (level) {
+            "TRACE" -> Log.v("Envoix", line)
+            "DEBUG" -> Log.d("Envoix", line)
+            "INFO" -> Log.i("Envoix", line)
+            "WARN" -> Log.w("Envoix", line)
+            "ERROR" -> Log.e("Envoix", line)
+            else -> Log.d("Envoix", line)
+        }
     }
 }

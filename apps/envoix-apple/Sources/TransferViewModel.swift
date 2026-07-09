@@ -480,7 +480,11 @@ final class TransferViewModel: ObservableObject {
     private func rendezvousPlan(for mode: FfiTransferMode) -> FfiRendezvousPlan {
         switch mode {
         case .room:
-            return FfiRendezvousPlan(useRoom: true, useMdns: true, internetAvailable: true)
+            return FfiRendezvousPlan(
+                useRoom: UserDefaults.standard.object(forKey: "envoix.useRoom") as? Bool ?? true,
+                useMdns: UserDefaults.standard.object(forKey: "envoix.useMdns") as? Bool ?? true,
+                internetAvailable: true
+            )
         case .mdns:
             return FfiRendezvousPlan(useRoom: false, useMdns: true, internetAvailable: true)
         default:

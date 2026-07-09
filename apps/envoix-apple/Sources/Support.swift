@@ -50,13 +50,19 @@ enum RuntimeSettingsProvider {
         serverURL: String,
         relayURL: String,
         configChunkSize: String,
+        candidatesAllow: String = "",
+        candidatesDeny: String = "",
         speedLimit: Int
     ) throws -> EnvoixRuntimeSettings {
         guard speedLimit >= 0 else {
             throw RuntimeSettingsError("Speed limit cannot be negative.")
         }
 
-        let configPath = try resolveConfigPath(chunkSize: configChunkSize)
+        let configPath = try resolveConfigPath(
+            chunkSize: configChunkSize,
+            candidatesAllow: candidatesAllow,
+            candidatesDeny: candidatesDeny
+        )
 
         return EnvoixRuntimeSettings(
             concurrentTransfers: concurrentTransfers,
@@ -420,9 +426,15 @@ func byteString(_ bytes: UInt64) -> String {
 /// or returns an empty string when no config overrides are configured.
 private let runtimeConfigFileName = "envoix-runtime-config.toml"
 
-func resolveConfigPath(chunkSize: String) throws -> String {
+func resolveConfigPath(
+    chunkSize: String,
+    candidatesAllow: String = "",
+    candidatesDeny: String = ""
+) throws -> String {
     let chunkSize = chunkSize.trimmed
-    if chunkSize.isEmpty {
+    let allow = configListLines(candidatesAllow)
+    let deny = configListLines(candidatesDeny)
+    if chunkSize.isEmpty && allow.isEmpty && deny.isEmpty {
         return ""
     }
 
@@ -436,10 +448,38 @@ func resolveConfigPath(chunkSize: String) throws -> String {
     let configDir = supportDir.appendingPathComponent("envoix", isDirectory: true)
     try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
     let configFile = configDir.appendingPathComponent(runtimeConfigFileName)
-    let escapedChunkSize = chunkSize.replacingOccurrences(of: "\"", with: "\\\"")
-    let contents = "chunk_size = \"\(escapedChunkSize)\"\n"
+    var lines: [String] = []
+    if !chunkSize.isEmpty {
+        lines.append("chunk_size = \"\(tomlEscaped(chunkSize))\"")
+    }
+    if !allow.isEmpty || !deny.isEmpty {
+        lines.append("[candidates]")
+        if !allow.isEmpty {
+            lines.append("allow = \(tomlArray(allow))")
+        }
+        if !deny.isEmpty {
+            lines.append("deny = \(tomlArray(deny))")
+        }
+    }
+    let contents = lines.joined(separator: "\n") + "\n"
     try contents.write(to: configFile, atomically: true, encoding: .utf8)
     return configFile.path
+}
+
+func configListLines(_ text: String) -> [String] {
+    text
+        .split(whereSeparator: \.isNewline)
+        .map { String($0).trimmed }
+        .filter { !$0.isEmpty }
+}
+
+private func tomlArray(_ values: [String]) -> String {
+    "[" + values.map { "\"\(tomlEscaped($0))\"" }.joined(separator: ", ") + "]"
+}
+
+private func tomlEscaped(_ value: String) -> String {
+    value.replacingOccurrences(of: "\\", with: "\\\\")
+        .replacingOccurrences(of: "\"", with: "\\\"")
 }
 
 /// Formats a transfer rate, picking the most fitting unit (e.g. "12.3 MB/s").

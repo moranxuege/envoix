@@ -130,15 +130,28 @@ fun NewTransferSheet(
 
     Column(
         Modifier.fillMaxWidth().testTag(EnvoixTestTags.NEW_TRANSFER_SHEET).verticalScroll(rememberScrollState())
-            .padding(horizontal = 20.dp).padding(bottom = 28.dp),
+            .padding(horizontal = EnvoixDimens.ScreenPadding).padding(bottom = 28.dp),
     ) {
         Text("New transfer", color = colors.text, fontSize = 21.sp, fontWeight = FontWeight.ExtraBold)
         Spacer(Modifier.height(14.dp))
 
-        // ---- top pane: show my QR vs scan one ----
+        Text("I WANT TO", color = colors.muted, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+        Spacer(Modifier.height(6.dp))
         Row(
-            Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-                .background(colors.bg).border(1.dp, colors.line, RoundedCornerShape(12.dp)).padding(3.dp),
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(EnvoixDimens.ControlRadius))
+                .background(colors.bg).border(1.dp, colors.line, RoundedCornerShape(EnvoixDimens.ControlRadius)).padding(3.dp),
+        ) {
+            SegTab("Send", role == "send", Modifier.weight(1f).testTag(EnvoixTestTags.ROLE_SEND)) { role = "send" }
+            SegTab("Receive", role == "receive", Modifier.weight(1f).testTag(EnvoixTestTags.ROLE_RECEIVE)) { role = "receive" }
+        }
+
+        // ---- top pane: show my QR vs scan one ----
+        Spacer(Modifier.height(16.dp))
+        Text("PAIRING", color = colors.muted, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+        Spacer(Modifier.height(6.dp))
+        Row(
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(EnvoixDimens.ControlRadius))
+                .background(colors.bg).border(1.dp, colors.line, RoundedCornerShape(EnvoixDimens.ControlRadius)).padding(3.dp),
         ) {
             SegTab("Show QR", topMode == "show", Modifier.weight(1f).testTag(EnvoixTestTags.SHOW_QR_TAB)) { topMode = "show" }
             SegTab("Scan QR", topMode == "scan", Modifier.weight(1f).testTag(EnvoixTestTags.SCAN_QR_TAB)) { topMode = "scan" }
@@ -214,18 +227,6 @@ fun NewTransferSheet(
             modifier = Modifier.fillMaxWidth().testTag(EnvoixTestTags.JOIN_CODE_FIELD),
         )
 
-        // ---- role picker ----
-        Spacer(Modifier.height(16.dp))
-        Text("I WANT TO", color = colors.muted, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
-        Spacer(Modifier.height(6.dp))
-        Row(
-            Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-                .background(colors.bg).border(1.dp, colors.line, RoundedCornerShape(12.dp)).padding(3.dp),
-        ) {
-            SegTab("Send", role == "send", Modifier.weight(1f).testTag(EnvoixTestTags.ROLE_SEND)) { role = "send" }
-            SegTab("Receive", role == "receive", Modifier.weight(1f).testTag(EnvoixTestTags.ROLE_RECEIVE)) { role = "receive" }
-        }
-
         // ---- path: file to send (required) or where received files land ----
         Spacer(Modifier.height(14.dp))
         if (role == "send") {
@@ -241,7 +242,7 @@ fun NewTransferSheet(
         // ---- start ----
         Spacer(Modifier.height(16.dp))
         Box(
-            Modifier.fillMaxWidth().testTag(EnvoixTestTags.START_TRANSFER_BUTTON).height(52.dp).clip(RoundedCornerShape(14.dp))
+            Modifier.fillMaxWidth().testTag(EnvoixTestTags.START_TRANSFER_BUTTON).height(EnvoixDimens.PrimaryButtonHeight).clip(RoundedCornerShape(EnvoixDimens.ControlRadius))
                 .background(colors.accent.copy(alpha = if (ready) 1f else 0.4f))
                 .clickable(enabled = ready) {
                     val c = code ?: return@clickable
@@ -266,7 +267,7 @@ fun NewTransferSheet(
 private fun SegTab(text: String, selected: Boolean, modifier: Modifier, onClick: () -> Unit) {
     val colors = Envoix.colors
     Box(
-        modifier.clip(RoundedCornerShape(9.dp))
+        modifier.clip(RoundedCornerShape(EnvoixDimens.ControlRadius))
             .background(if (selected) colors.accent else Color.Transparent)
             .clickable(onClick = onClick).padding(vertical = 9.dp),
         contentAlignment = Alignment.Center,
@@ -287,9 +288,9 @@ private fun PathRow(label: String, value: String, placeholder: Boolean, testTag:
     Text(label, color = colors.muted, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
     Spacer(Modifier.height(6.dp))
     Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(EnvoixDimens.ControlRadius))
             .testTag(testTag)
-            .border(1.dp, colors.line, RoundedCornerShape(12.dp))
+            .border(1.dp, colors.line, RoundedCornerShape(EnvoixDimens.ControlRadius))
             .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
             .padding(horizontal = 14.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,

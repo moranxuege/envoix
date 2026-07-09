@@ -16,6 +16,8 @@ struct SendView: View {
     @AppStorage("envoix.serverURL") private var serverURL = ""
     @AppStorage("envoix.relayURL") private var relayURL = ""
     @AppStorage("envoix.configChunkSize") private var configChunkSize = ""
+    @AppStorage("envoix.candidatesAllow") private var candidatesAllow = ""
+    @AppStorage("envoix.candidatesDeny") private var candidatesDeny = ""
     @AppStorage("envoix.speedLimit") private var speedLimit = 40
     @State private var invite: String = ""
     @State private var roomCode = ""
@@ -535,6 +537,8 @@ struct SendView: View {
             serverURL: parsed.broker.trimmed.isEmpty ? serverURL : parsed.broker,
             relayURL: parsed.relay.trimmed.isEmpty ? relayURL : parsed.relay,
             configChunkSize: configChunkSize,
+            candidatesAllow: candidatesAllow,
+            candidatesDeny: candidatesDeny,
             speedLimit: speedLimit
         )
     }
@@ -619,6 +623,8 @@ struct SendView: View {
                 serverURL: serverURL,
                 relayURL: relayURL,
                 configChunkSize: configChunkSize,
+                candidatesAllow: candidatesAllow,
+                candidatesDeny: candidatesDeny,
                 speedLimit: speedLimit
             )
             switch mode {

@@ -30,6 +30,10 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
         XCTAssertTrue(app.tabBars.buttons["Settings"].exists)
 
         XCTAssertTrue(app.buttons["transfer_role_send"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["transfer_role_receive"].exists)
+
+        app.buttons["transfer_role_send"].tap()
+
         XCTAssertTrue(app.buttons["send_file_picker"].exists)
         XCTAssertTrue(app.buttons["send_start_button"].exists)
         XCTAssertFalse(app.buttons["send_start_button"].isEnabled)
@@ -83,17 +87,31 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
         try fileManager.createDirectory(at: receiveDirectory, withIntermediateDirectories: true)
         defer { try? fileManager.removeItem(at: root) }
 
-        let session = EnvoixSession()
+        let session = Self.crossDeviceSession()
         let observer = RecordingObserver()
-        try session.receiveRoom(outputDir: receiveDirectory.path, code: Self.androidToIosCode, observer: observer)
+        try session.startTransfer(
+            request: Self.crossDeviceRequest(
+                direction: .receive,
+                mode: .room,
+                code: Self.androidToIosCode,
+                filePath: "",
+                outputDir: receiveDirectory.path,
+                invite: ""
+            ),
+            observer: observer
+        )
         print("[cross-device] iOS receive completed call returned")
 
-        let bytes = try observer.waitForCompletion(timeout: Self.crossDeviceTimeout)
+        let expectedBytes = Self.androidToIosExpectedBytes
+        let bytes = try observer.waitForCompletion(timeout: Self.crossDeviceTimeout(for: expectedBytes))
         print("[cross-device] iOS receive completion bytes=\(bytes)")
-        XCTAssertGreaterThanOrEqual(bytes, UInt64(Self.androidToIosPayload.count))
+        XCTAssertGreaterThanOrEqual(bytes, expectedBytes)
 
-        let receivedPayload = try Data(contentsOf: receiveDirectory.appendingPathComponent(Self.androidToIosFileName))
-        XCTAssertEqual(receivedPayload, Self.androidToIosPayload)
+        try Self.assertReceivedFile(
+            receiveDirectory.appendingPathComponent(Self.androidToIosFileName),
+            payload: Self.androidToIosPayload,
+            expectedBytes: expectedBytes
+        )
 #endif
     }
 
@@ -107,27 +125,240 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
         defer { try? fileManager.removeItem(at: root) }
 
         let sendFile = root.appendingPathComponent(Self.iosToAndroidFileName)
-        try Self.iosToAndroidPayload.write(to: sendFile)
+        let expectedBytes = Self.iosToAndroidExpectedBytes
+        try Self.writeCrossDevicePayload(Self.iosToAndroidPayload, expectedBytes: expectedBytes, to: sendFile)
 
-        let session = EnvoixSession()
+        let session = Self.crossDeviceSession()
         let observer = RecordingObserver()
-        try session.sendRoom(filePath: sendFile.path, code: Self.iosToAndroidCode, observer: observer)
+        try session.startTransfer(
+            request: Self.crossDeviceRequest(
+                direction: .send,
+                mode: .room,
+                code: Self.iosToAndroidCode,
+                filePath: sendFile.path,
+                outputDir: "",
+                invite: ""
+            ),
+            observer: observer
+        )
         print("[cross-device] iOS send completed call returned")
 
-        let bytes = try observer.waitForCompletion(timeout: Self.crossDeviceTimeout)
+        let bytes = try observer.waitForCompletion(timeout: Self.crossDeviceTimeout(for: expectedBytes))
         print("[cross-device] iOS send completion bytes=\(bytes)")
-        XCTAssertGreaterThanOrEqual(bytes, UInt64(Self.iosToAndroidPayload.count))
+        XCTAssertGreaterThanOrEqual(bytes, expectedBytes)
+#endif
+    }
+
+    func testCrossDeviceReceiveAndroidToIosInvite() throws {
+#if ENVOIX_CROSS_DEVICE_TESTING
+        print("[cross-device] iOS invite receive start")
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("envoix-ios-cross-device-invite-receive-\(UUID().uuidString)", isDirectory: true)
+        let receiveDirectory = root.appendingPathComponent("received", isDirectory: true)
+        try fileManager.createDirectory(at: receiveDirectory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: root) }
+
+        let session = Self.crossDeviceSession()
+        let observer = RecordingObserver()
+        try session.startTransfer(
+            request: Self.crossDeviceRequest(
+                direction: .receive,
+                mode: .showInvite,
+                code: "",
+                filePath: "",
+                outputDir: receiveDirectory.path,
+                invite: ""
+            ),
+            observer: observer
+        )
+
+        let invite = try observer.waitForInvite(timeout: 10)
+        print("[cross-device] iOS invite \(invite)")
+
+        let expectedBytes = Self.androidToIosExpectedBytes
+        let bytes = try observer.waitForCompletion(timeout: Self.crossDeviceTimeout(for: expectedBytes))
+        print("[cross-device] iOS invite receive completion bytes=\(bytes)")
+        XCTAssertGreaterThanOrEqual(bytes, expectedBytes)
+
+        try Self.assertReceivedFile(
+            receiveDirectory.appendingPathComponent(Self.androidToIosFileName),
+            payload: Self.androidToIosPayload,
+            expectedBytes: expectedBytes
+        )
+#endif
+    }
+
+    func testCrossDeviceSendIosToAndroidInvite() throws {
+#if ENVOIX_CROSS_DEVICE_TESTING
+        print("[cross-device] iOS invite send start")
+        guard let invite = ProcessInfo.processInfo.environment["ENVOIX_TRANSFER_INVITE"], !invite.isEmpty else {
+            throw LoopbackTestError.missingValue("ENVOIX_TRANSFER_INVITE")
+        }
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("envoix-ios-cross-device-invite-send-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: root) }
+
+        let sendFile = root.appendingPathComponent(Self.iosToAndroidFileName)
+        let expectedBytes = Self.iosToAndroidExpectedBytes
+        try Self.writeCrossDevicePayload(Self.iosToAndroidPayload, expectedBytes: expectedBytes, to: sendFile)
+
+        let session = Self.crossDeviceSession()
+        let observer = RecordingObserver()
+        try session.startTransfer(
+            request: Self.crossDeviceRequest(
+                direction: .send,
+                mode: .invite,
+                code: "",
+                filePath: sendFile.path,
+                outputDir: "",
+                invite: invite
+            ),
+            observer: observer
+        )
+
+        let bytes = try observer.waitForCompletion(timeout: Self.crossDeviceTimeout(for: expectedBytes))
+        print("[cross-device] iOS invite send completion bytes=\(bytes)")
+        XCTAssertGreaterThanOrEqual(bytes, expectedBytes)
 #endif
     }
 
 #if ENVOIX_CROSS_DEVICE_TESTING
-    private static let androidToIosCode = "741203-amber-comet"
-    private static let iosToAndroidCode = "741204-azure-river"
+    private static let defaultAndroidToIosCode = "741203-amber-comet"
+    private static let defaultIosToAndroidCode = "741204-azure-river"
+    private static let androidToIosCode = envString("ENVOIX_ANDROID_TO_IOS_CODE") ?? defaultAndroidToIosCode
+    private static let iosToAndroidCode = envString("ENVOIX_IOS_TO_ANDROID_CODE") ?? defaultIosToAndroidCode
     private static let androidToIosFileName = "envoix-cross-android-to-ios.txt"
     private static let iosToAndroidFileName = "envoix-cross-ios-to-android.txt"
     private static let androidToIosPayload = Data("envoix cross-device android to ios\n".utf8)
     private static let iosToAndroidPayload = Data("envoix cross-device ios to android\n".utf8)
+    private static let androidToIosExpectedBytes =
+        envUInt64("ENVOIX_ANDROID_TO_IOS_BYTES") ?? UInt64(androidToIosPayload.count)
+    private static let iosToAndroidExpectedBytes =
+        envUInt64("ENVOIX_IOS_TO_ANDROID_BYTES") ?? UInt64(iosToAndroidPayload.count)
     private static let crossDeviceTimeout: TimeInterval = 180
+    private static let timeoutBytesPerSecond: UInt64 = 2 * 1024 * 1024
+    private static let rendezvousBroker = "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445"
+    private static let relayURL = "https://envoix.chkxwlyh.us:8444"
+
+    private static func crossDeviceTimeout(for expectedBytes: UInt64) -> TimeInterval {
+        if let override = envDouble("ENVOIX_CROSS_DEVICE_TIMEOUT_SECONDS") {
+            return override
+        }
+        let scaled = crossDeviceTimeout + TimeInterval(expectedBytes / timeoutBytesPerSecond)
+        return max(crossDeviceTimeout, scaled)
+    }
+
+    private static func writeCrossDevicePayload(_ payload: Data, expectedBytes: UInt64, to url: URL) throws {
+        if expectedBytes == UInt64(payload.count) {
+            try payload.write(to: url)
+            return
+        }
+        _ = FileManager.default.createFile(atPath: url.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try handle.truncate(atOffset: expectedBytes)
+        guard expectedBytes > 0 else { return }
+
+        let prefixCount = expectedBytes < UInt64(payload.count) ? Int(expectedBytes) : payload.count
+        try handle.seek(toOffset: 0)
+        try handle.write(contentsOf: payload.prefix(prefixCount))
+        if expectedBytes > UInt64(payload.count) {
+            try handle.seek(toOffset: expectedBytes - 1)
+            let lastByte = payload[Int((expectedBytes - 1) % UInt64(payload.count))]
+            try handle.write(contentsOf: Data([lastByte]))
+        }
+    }
+
+    private static func assertReceivedFile(_ url: URL, payload: Data, expectedBytes: UInt64) throws {
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        let actualBytes = try XCTUnwrap(attributes[.size] as? NSNumber).uint64Value
+        XCTAssertEqual(actualBytes, expectedBytes)
+        if expectedBytes == UInt64(payload.count) {
+            let receivedPayload = try Data(contentsOf: url)
+            XCTAssertEqual(receivedPayload, payload)
+        }
+    }
+
+    private static func envUInt64(_ name: String) -> UInt64? {
+        guard let raw = ProcessInfo.processInfo.environment[name], !raw.isEmpty else {
+            return nil
+        }
+        return UInt64(raw)
+    }
+
+    private static func envDouble(_ name: String) -> Double? {
+        guard let raw = ProcessInfo.processInfo.environment[name], !raw.isEmpty else {
+            return nil
+        }
+        return Double(raw)
+    }
+
+    private static func envString(_ name: String) -> String? {
+        guard let raw = ProcessInfo.processInfo.environment[name], !raw.isEmpty else {
+            return nil
+        }
+        return raw
+    }
+
+    private static func crossDeviceSession() -> EnvoixSession {
+        EnvoixSession.newWithSettings(
+            settings: EnvoixRuntimeSettings(
+                concurrentTransfers: true,
+                language: "en",
+                serverUrl: rendezvousBroker,
+                relayUrl: relayURL,
+                configPath: "",
+                speedLimitMbps: 40
+            )
+        )
+    }
+
+    private static func crossDeviceRequest(
+        direction: FfiTransferDirection,
+        mode: FfiTransferMode,
+        code: String,
+        filePath: String,
+        outputDir: String,
+        invite: String
+    ) -> FfiTransferRequest {
+        FfiTransferRequest(
+            activityId: "ios-\(UUID().uuidString)",
+            direction: direction,
+            mode: mode,
+            filePath: filePath,
+            outputDir: outputDir,
+            peerDescriptor: "",
+            invite: invite,
+            code: code,
+            token: code,
+            broker: rendezvousBroker,
+            relay: relayURL,
+            configPath: "",
+            pathPolicy: .auto,
+            resume: true,
+            limits: FfiTransferLimits(
+                maxParallelTransfers: 1,
+                maxParallelFiles: 1,
+                maxParallelChunksPerFile: 1,
+                speedLimitBps: 0
+            ),
+            rendezvous: rendezvousPlan(for: mode)
+        )
+    }
+
+    private static func rendezvousPlan(for mode: FfiTransferMode) -> FfiRendezvousPlan {
+        switch mode {
+        case .room:
+            return FfiRendezvousPlan(useRoom: true, useMdns: true, internetAvailable: true)
+        case .mdns:
+            return FfiRendezvousPlan(useRoom: false, useMdns: true, internetAvailable: true)
+        default:
+            return FfiRendezvousPlan(useRoom: false, useMdns: false, internetAvailable: true)
+        }
+    }
 #endif
 }
 

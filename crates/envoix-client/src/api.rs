@@ -34,10 +34,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use envoix_qr::{QrInvitePayload, generate_token};
 use envoix_session::{
-    BindAddrs, DEFAULT_CHUNK_SIZE, SessionConfig, TransferCancelToken, TransferDirection,
-    TransferSummary, bind_iroh_endpoint_enable_mdns, parse_broker_addr, receive_file_via_room,
-    receive_file_with_bound_peer, receive_with_auth_retries, send_file_enable_mdns,
-    send_file_manual, send_file_via_room,
+    BindAddrs, DEFAULT_CHUNK_SIZE, EndpointAddr, SessionConfig, TransferCancelToken,
+    TransferDirection, TransferSummary, bind_iroh_endpoint_enable_mdns, parse_broker_addr,
+    receive_file_via_room, receive_file_with_bound_peer, receive_with_auth_retries,
+    send_file_enable_mdns, send_file_manual, send_file_to_endpoint_addr, send_file_via_room,
 };
 use tracing::Instrument;
 
@@ -206,7 +206,7 @@ impl Client {
                 })
             }
             PeerSource::Invite { invite } => {
-                let (peer, token) = resolve_invite(&invite)?;
+                let (peer_addr, token) = resolve_invite(&invite)?;
                 let pairing = shared_token(&token)?;
                 let config = self.session_config(&options);
                 let cancel = cancel.clone();
@@ -215,7 +215,10 @@ impl Client {
                         direction: TransferDirection::Send,
                         mode,
                     });
-                    send_file_manual(peer, file, resume, config, &pairing, sink, cancel).await
+                    send_file_to_endpoint_addr(
+                        peer_addr, file, resume, config, &pairing, sink, cancel,
+                    )
+                    .await
                 })
             }
             PeerSource::Mdns { token: Some(token) } => {
@@ -299,7 +302,7 @@ impl Client {
                 let cancel = cancel.clone();
                 let on_bound = {
                     let events = events.clone();
-                    move |peer: PeerDescriptor| {
+                    move |peer: PeerDescriptor, _relay_urls: Vec<String>| {
                         events.emit(TransferEvent::Advertised {
                             peer,
                             token: Some(token),
@@ -433,10 +436,15 @@ fn advertise_with_invite(
     events: EventSender,
     token: String,
     ttl_secs: u64,
-) -> impl FnOnce(PeerDescriptor) + Send {
-    move |peer: PeerDescriptor| {
-        let invite =
-            QrInvitePayload::new(token.clone(), peer.clone(), unix_now() + ttl_secs).encode();
+) -> impl FnOnce(PeerDescriptor, Vec<String>) + Send {
+    move |peer: PeerDescriptor, relay_urls: Vec<String>| {
+        let invite = QrInvitePayload::new_with_relay_urls(
+            token.clone(),
+            peer.clone(),
+            relay_urls,
+            unix_now() + ttl_secs,
+        )
+        .encode();
         events.emit(TransferEvent::Advertised {
             peer,
             token: Some(token),
@@ -454,13 +462,14 @@ fn validate_path_policy(options: &TransferOptions) -> Result<(), TransferError> 
     Ok(())
 }
 
-/// Decodes and validates an invite, returning the peer to dial and the token.
-fn resolve_invite(invite: &str) -> Result<(PeerDescriptor, String), TransferError> {
+/// Decodes and validates an invite, returning the endpoint address to dial and
+/// the token.
+fn resolve_invite(invite: &str) -> Result<(EndpointAddr, String), TransferError> {
     let to_err = |e| TransferError::input(format!("invalid invite: {e}"));
     let payload = QrInvitePayload::decode(invite).map_err(to_err)?;
     payload.validate(unix_now()).map_err(to_err)?;
-    let peer = payload.peer_descriptor().map_err(to_err)?;
-    Ok((peer, payload.token))
+    let peer_addr = payload.endpoint_addr().map_err(to_err)?;
+    Ok((peer_addr, payload.token))
 }
 
 /// Current Unix time in whole seconds.

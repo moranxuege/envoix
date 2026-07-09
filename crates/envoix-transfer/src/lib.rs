@@ -93,6 +93,11 @@ impl TransferCancelToken {
 /// User-visible transfer lifecycle event.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TransferEvent {
+    /// Diagnostic-only status that must not change the transfer state.
+    Diagnostic {
+        /// Human-readable diagnostic message for logs and tests.
+        message: String,
+    },
     /// A send or receive operation has started.
     Started {
         /// Transfer identifier for correlating events.
@@ -431,7 +436,14 @@ impl TransferEngine {
             return receive_existing_final(connection, header, final_path, events).await;
         }
 
-        let prepared = prepare_receive_state(&output_dir, &header, events, self.chunk_size).await?;
+        let prepared =
+            match prepare_receive_state(&output_dir, &header, events, self.chunk_size).await {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    notify_error(connection, &error).await;
+                    return Err(error);
+                }
+            };
         let temp_path = prepared.temp_path;
         let mut file = prepared.file;
         let mut hasher = prepared.hasher;
@@ -481,48 +493,72 @@ impl TransferEngine {
 
             match frame {
                 Frame::Chunk(chunk) => {
-                    if expected_offset > 0 && chunk.index == 0 && chunk.offset == 0 {
-                        file.set_len(0).await?;
-                        file.flush().await?;
-                        expected_index = 0;
-                        expected_offset = 0;
-                        last_resume_state_bytes = 0;
-                        hasher = blake3::Hasher::new();
-                        write_resume_state_for_offset(&output_dir, &header, 0, 0, None).await?;
-                    }
-                    validate_chunk(&chunk, &header.transfer_id, expected_index, expected_offset)?;
-                    if chunk.bytes.len() as u64 + expected_offset > header.file_size {
-                        return Err(CoreError::Transfer(format!(
-                            "chunk data exceeds expected file size: chunk offset {} + data length {} > expected file size {}",
-                            chunk.offset,
-                            chunk.bytes.len(),
-                            header.file_size
-                        )));
-                    }
-                    file.write_all(&chunk.bytes).await?;
-                    hasher.update(&chunk.bytes);
+                    let result: Result<(), TransferError> = async {
+                        if expected_offset > 0 && chunk.index == 0 && chunk.offset == 0 {
+                            file.set_len(0).await?;
+                            file.flush().await?;
+                            expected_index = 0;
+                            expected_offset = 0;
+                            last_resume_state_bytes = 0;
+                            hasher = blake3::Hasher::new();
+                            write_resume_state_for_offset(&output_dir, &header, 0, 0, None)
+                                .await?;
+                        }
+                        validate_chunk(
+                            &chunk,
+                            &header.transfer_id,
+                            expected_index,
+                            expected_offset,
+                        )?;
+                        if chunk.bytes.len() as u64 + expected_offset > header.file_size {
+                            return Err(CoreError::Transfer(format!(
+                                "chunk data exceeds expected file size: chunk offset {} + data length {} > expected file size {}",
+                                chunk.offset,
+                                chunk.bytes.len(),
+                                header.file_size
+                            )));
+                        }
+                        file.write_all(&chunk.bytes).await?;
+                        hasher.update(&chunk.bytes);
 
-                    expected_index += 1;
-                    expected_offset += chunk.bytes.len() as u64;
-                    if expected_offset.saturating_sub(last_resume_state_bytes)
-                        >= RESUME_STATE_WRITE_INTERVAL
-                    {
-                        file.flush().await?;
-                        write_resume_state_for_offset(
+                        expected_index += 1;
+                        expected_offset += chunk.bytes.len() as u64;
+                        if expected_offset.saturating_sub(last_resume_state_bytes)
+                            >= RESUME_STATE_WRITE_INTERVAL
+                        {
+                            file.flush().await?;
+                            write_resume_state_for_offset(
+                                &output_dir,
+                                &header,
+                                expected_offset,
+                                expected_index,
+                                Some(hasher.finalize().to_hex().to_string()),
+                            )
+                            .await?;
+                            last_resume_state_bytes = expected_offset;
+                        }
+                        events.on_event(TransferEvent::Progress {
+                            transfer_id: header.transfer_id.clone(),
+                            bytes_transferred: expected_offset,
+                            total_bytes: header.file_size,
+                        });
+                        Ok(())
+                    }
+                    .await;
+                    if let Err(error) = result {
+                        report_receive_failure(
+                            connection,
                             &output_dir,
                             &header,
+                            &mut file,
                             expected_offset,
                             expected_index,
-                            Some(hasher.finalize().to_hex().to_string()),
+                            &hasher,
+                            &error,
                         )
-                        .await?;
-                        last_resume_state_bytes = expected_offset;
+                        .await;
+                        return Err(error);
                     }
-                    events.on_event(TransferEvent::Progress {
-                        transfer_id: header.transfer_id.clone(),
-                        bytes_transferred: expected_offset,
-                        total_bytes: header.file_size,
-                    });
                 }
                 Frame::Complete(complete) if complete.transfer_id == header.transfer_id => {
                     // Verify + atomically finalize. On ANY failure the transfer did
@@ -731,6 +767,48 @@ async fn notify_error(connection: &mut dyn FrameConnection, error: &TransferErro
             message: error.to_string(),
         }))
         .await;
+}
+
+async fn report_receive_failure(
+    connection: &mut dyn FrameConnection,
+    output_dir: &Path,
+    header: &FileHeader,
+    file: &mut fs::File,
+    bytes_received: u64,
+    next_chunk_index: u64,
+    hasher: &blake3::Hasher,
+    error: &TransferError,
+) {
+    if let Err(flush_error) = file.flush().await {
+        tracing::warn!(
+            transfer_id = %header.transfer_id,
+            error = %flush_error,
+            "failed to flush partial receive before reporting transfer error"
+        );
+    }
+    if let Err(state_error) = write_resume_state_for_offset(
+        output_dir,
+        header,
+        bytes_received,
+        next_chunk_index,
+        Some(hasher.finalize().to_hex().to_string()),
+    )
+    .await
+    {
+        tracing::warn!(
+            transfer_id = %header.transfer_id,
+            error = %state_error,
+            "failed to persist receive resume state before reporting transfer error"
+        );
+    }
+    tracing::warn!(
+        transfer_id = %header.transfer_id,
+        file_name = %header.file_name,
+        bytes_received,
+        error = %error,
+        "receiver aborting transfer during chunk phase"
+    );
+    notify_error(connection, error).await;
 }
 
 async fn notify_interrupted(connection: &mut dyn FrameConnection) {
@@ -1663,6 +1741,70 @@ mod tests {
         assert!(matches!(
             error,
             CoreError::Transfer(message) if message == "connection closed by peer"
+        ));
+    }
+
+    #[tokio::test]
+    async fn receiver_reports_chunk_phase_error_to_sender() {
+        let root = unique_test_dir();
+        let output_dir = root.join("output");
+        tokio::fs::create_dir_all(&output_dir).await.unwrap();
+
+        let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
+        let receiver = tokio::spawn({
+            let output_dir = output_dir.clone();
+            async move {
+                TransferEngine::new(4)
+                    .receive_file(&mut receiver_connection, output_dir, &NoopEventSink)
+                    .await
+            }
+        });
+
+        let transfer_id = TransferId::new("bad-chunk-transfer");
+        sender_connection
+            .send_frame(Frame::Hello(Hello {
+                protocol_version: PROTOCOL_VERSION,
+                role: PeerRole::Sender,
+            }))
+            .await
+            .unwrap();
+        expect_ready(sender_connection.recv_frame().await.unwrap()).unwrap();
+        sender_connection
+            .send_frame(Frame::FileHeader(FileHeader {
+                transfer_id: transfer_id.clone(),
+                file_name: "bad-chunk.txt".into(),
+                file_size: 8,
+                chunk_size: 4,
+                resume_requested: false,
+            }))
+            .await
+            .unwrap();
+        expect_resume_status(
+            sender_connection.recv_frame().await.unwrap(),
+            &transfer_id,
+            4,
+        )
+        .unwrap();
+
+        sender_connection
+            .send_frame(Frame::Chunk(Chunk {
+                transfer_id: transfer_id.clone(),
+                index: 0,
+                offset: 4,
+                bytes: b"oops".to_vec(),
+            }))
+            .await
+            .unwrap();
+
+        let frame = sender_connection.recv_frame().await.unwrap();
+        assert!(matches!(
+            frame,
+            Frame::Error(ErrorFrame { message }) if message.contains("chunk offset")
+        ));
+        let receive_error = receiver.await.unwrap().unwrap_err();
+        assert!(matches!(
+            receive_error,
+            CoreError::Transfer(message) if message.contains("chunk offset")
         ));
     }
 

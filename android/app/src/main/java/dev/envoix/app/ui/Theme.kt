@@ -9,6 +9,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
 
 /** The demo's design tokens (see envoix-demo CSS: --accent, --bg, --muted, ...). */
 @Immutable
@@ -66,6 +67,16 @@ val LocalEnvoixColors = staticCompositionLocalOf { LightColors }
 object Envoix {
     val colors: EnvoixColors
         @Composable get() = LocalEnvoixColors.current
+}
+
+object EnvoixDimens {
+    val CardRadius = 8.dp
+    val ControlRadius = 8.dp
+    val PillRadius = 999.dp
+    val ScreenPadding = 16.dp
+    val CardPadding = 14.dp
+    val ControlHeight = 44.dp
+    val PrimaryButtonHeight = 52.dp
 }
 
 @Composable

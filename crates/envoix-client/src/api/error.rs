@@ -203,6 +203,15 @@ impl TransferError {
         }
     }
 
+    /// A transport failure observed at `phase`.
+    pub fn transport(phase: Phase, message: impl Into<String>) -> Self {
+        Self {
+            phase,
+            kind: ErrorKind::Transport,
+            message: message.into(),
+        }
+    }
+
     /// Classifies an internal error, attaching the phase the transfer had
     /// reached when it surfaced.
     pub(crate) fn from_core(error: CoreError, phase: Phase) -> Self {

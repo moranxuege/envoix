@@ -60,6 +60,7 @@ impl StatsHandle {
     fn observe(&self, ts_ms: u64, event: &TransferEvent) {
         let mut s = self.0.lock().expect("stats mutex");
         match event {
+            TransferEvent::Diagnostic { .. } => {}
             // The connect window opens once pairing is done and we begin
             // connecting; the pairing steps and the Connecting event both mark
             // it, the latest wins - so a room receiver's peer-wait is excluded.
@@ -150,6 +151,7 @@ impl PhaseCell {
 /// The phase a transfer is in once `event` has been observed.
 fn phase_of(event: &TransferEvent) -> Phase {
     match event {
+        TransferEvent::Diagnostic { .. } => Phase::Setup,
         TransferEvent::Binding { .. } => Phase::Setup,
         TransferEvent::Advertised { .. } => Phase::Waiting,
         TransferEvent::Pairing { .. } => Phase::Pairing,
@@ -314,6 +316,7 @@ impl envoix_session::EventSink for SessionEventAdapter {
 impl From<SessionEvent> for TransferEvent {
     fn from(event: SessionEvent) -> Self {
         match event {
+            SessionEvent::Diagnostic { message } => TransferEvent::Diagnostic { message },
             SessionEvent::Started {
                 transfer_id,
                 direction,

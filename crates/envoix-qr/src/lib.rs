@@ -15,6 +15,7 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use envoix_protocol::PeerDescriptor;
+use iroh::{EndpointAddr, EndpointId, RelayUrl, TransportAddr};
 use qrcode::QrCode;
 use qrcode::types::Color;
 use serde::{Deserialize, Serialize};
@@ -39,6 +40,11 @@ pub struct QrInvitePayload {
     pub token: String,
     /// Direct iroh endpoint descriptor the sender should dial.
     pub peer: PeerDescriptor,
+    /// Optional relay home URLs for the endpoint. Older clients ignore this
+    /// field and keep dialing direct addresses; newer clients combine it with
+    /// `peer` into a full iroh endpoint address for relay fallback.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relay_urls: Vec<String>,
     /// Expiry as a Unix timestamp in seconds.  Senders reject payloads where
     /// `expires_at <= now`.
     pub expires_at: u64,
@@ -66,6 +72,9 @@ pub enum QrError {
 
     #[error("malformed endpoint id: {0}")]
     MalformedEndpointId(String),
+
+    #[error("malformed relay url: {0}")]
+    MalformedRelayUrl(String),
 
     #[error("decode error: {0}")]
     DecodeError(String),
@@ -140,8 +149,14 @@ impl QrInvitePayload {
             return Err(QrError::WeakToken);
         }
 
-        if let Err(error) = self.peer.endpoint_id.parse::<iroh::EndpointId>() {
+        if let Err(error) = self.peer.endpoint_id.parse::<EndpointId>() {
             return Err(QrError::MalformedEndpointId(error.to_string()));
+        }
+
+        for relay_url in &self.relay_urls {
+            relay_url
+                .parse::<RelayUrl>()
+                .map_err(|error| QrError::MalformedRelayUrl(error.to_string()))?;
         }
 
         if self.flags != 0 {
@@ -159,14 +174,46 @@ impl QrInvitePayload {
         Ok(self.peer.clone())
     }
 
+    /// Returns the full iroh endpoint address described by the invite,
+    /// including relay URLs when present.
+    pub fn endpoint_addr(&self) -> Result<EndpointAddr, QrError> {
+        let peer = self.peer_descriptor()?;
+        let id = peer
+            .endpoint_id
+            .parse::<EndpointId>()
+            .map_err(|error| QrError::MalformedEndpointId(error.to_string()))?;
+        let direct = peer.direct_addrs.iter().copied().map(TransportAddr::Ip);
+        let relays = self
+            .relay_urls
+            .iter()
+            .map(|url| {
+                url.parse::<RelayUrl>()
+                    .map(TransportAddr::Relay)
+                    .map_err(|error| QrError::MalformedRelayUrl(error.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(EndpointAddr::from_parts(id, direct.chain(relays)))
+    }
+
     /// Constructs a new payload with the current protocol version and schema
     /// version pre-filled.
     pub fn new(token: String, peer: PeerDescriptor, expires_at: u64) -> Self {
+        Self::new_with_relay_urls(token, peer, Vec::new(), expires_at)
+    }
+
+    /// Constructs a new payload with optional relay home URLs.
+    pub fn new_with_relay_urls(
+        token: String,
+        peer: PeerDescriptor,
+        relay_urls: Vec<String>,
+        expires_at: u64,
+    ) -> Self {
         Self {
             version: PAYLOAD_VERSION,
             protocol_version: PROTOCOL_VERSION,
             token,
             peer,
+            relay_urls,
             expires_at,
             flags: 0,
         }
@@ -404,6 +451,70 @@ mod tests {
             payload.peer_descriptor().unwrap_err(),
             QrError::NoDirectAddresses
         );
+    }
+
+    // --- endpoint_addr / relay URLs ---
+
+    #[test]
+    fn missing_relay_urls_decodes_as_legacy_direct_only_payload() {
+        let payload = valid_payload(0);
+        let mut value = serde_json::to_value(&payload).unwrap();
+        value.as_object_mut().unwrap().remove("relay_urls");
+        let json = serde_json::to_vec(&value).unwrap();
+        let decoded =
+            QrInvitePayload::decode(&format!("envoix:{}", URL_SAFE_NO_PAD.encode(json))).unwrap();
+
+        decoded.validate(0).unwrap();
+        assert!(decoded.relay_urls.is_empty());
+    }
+
+    #[test]
+    fn endpoint_addr_includes_relay_urls_when_present() {
+        let payload = QrInvitePayload::new_with_relay_urls(
+            TOKEN.into(),
+            valid_peer(),
+            vec!["https://relay.example:8444".into()],
+            300,
+        );
+
+        payload.validate(0).unwrap();
+        let endpoint_addr = payload.endpoint_addr().unwrap();
+
+        assert_eq!(
+            endpoint_addr.ip_addrs().copied().collect::<Vec<_>>(),
+            payload.peer.direct_addrs
+        );
+        assert_eq!(endpoint_addr.relay_urls().count(), 1);
+    }
+
+    #[test]
+    fn relay_urls_round_trip_through_invite_encoding() {
+        let payload = QrInvitePayload::new_with_relay_urls(
+            TOKEN.into(),
+            valid_peer(),
+            vec!["https://relay.example:8444".into()],
+            300,
+        );
+
+        let decoded = QrInvitePayload::decode(&payload.encode()).unwrap();
+
+        assert_eq!(decoded.relay_urls, payload.relay_urls);
+        assert_eq!(decoded.endpoint_addr().unwrap().relay_urls().count(), 1);
+    }
+
+    #[test]
+    fn malformed_relay_url_is_rejected() {
+        let mut payload = valid_payload(0);
+        payload.relay_urls = vec!["not-a-url".into()];
+
+        assert!(matches!(
+            payload.validate(0).unwrap_err(),
+            QrError::MalformedRelayUrl(_)
+        ));
+        assert!(matches!(
+            payload.endpoint_addr().unwrap_err(),
+            QrError::MalformedRelayUrl(_)
+        ));
     }
 
     // --- generate_token ---

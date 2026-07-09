@@ -1,5 +1,8 @@
 import SwiftUI
 import EnvoixCore
+#if os(iOS)
+import UniformTypeIdentifiers
+#endif
 
 private enum AppStage: String, CaseIterable {
     case transfer, activity, settings
@@ -85,7 +88,7 @@ struct ContentView: View {
                     stageContent(for: item)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                         .padding(.horizontal, 16)
-                        .background(Theme.surface)
+                        .background(Theme.bg)
                         .navigationTitle(item.title(language: language))
                         .navigationBarTitleDisplayMode(.inline)
                 }
@@ -322,12 +325,22 @@ struct ContentView: View {
 
 private struct TransferSetupStageView: View {
     @Environment(\.appLanguage) private var language
-    @State private var role: TransferRole = .send
+    @AppStorage("envoix.defaultRole") private var defaultRole = "receive"
+    @State private var role: TransferRole = .receive
+    @State private var didApplyDefaultRole = false
     @ObservedObject var send: TransferViewModel
     @ObservedObject var receive: TransferViewModel
     let onShowActivity: () -> Void
 
     var body: some View {
+        #if os(iOS)
+        mobileBody
+        #else
+        desktopBody
+        #endif
+    }
+
+    private var desktopBody: some View {
         VStack(alignment: .leading, spacing: 14) {
             if showsActivityShortcut {
                 Button(action: onShowActivity) {
@@ -351,7 +364,49 @@ private struct TransferSetupStageView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
+        .onAppear(perform: applyDefaultRoleOnce)
     }
+
+    #if os(iOS)
+    private var mobileBody: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center) {
+                Text(AppText.value("New transfer", "新传输", language: language))
+                    .font(.title3.weight(.bold))
+                    .foregroundStyle(Theme.text)
+                Spacer(minLength: 8)
+                if showsActivityShortcut {
+                    Button(action: onShowActivity) {
+                        Label(AppText.value("Activity", "活动", language: language), systemImage: "list.bullet.rectangle")
+                            .labelStyle(.titleAndIcon)
+                            .font(.callout.weight(.semibold))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .accessibilityIdentifier("transfer_view_activity_button")
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(AppText.value("I WANT TO", "我要", language: language))
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(Theme.muted)
+                rolePicker
+            }
+
+            Group {
+                switch role {
+                case .send:
+                    SendView(viewModel: send)
+                case .receive:
+                    ReceiveView(viewModel: receive)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .onAppear(perform: applyDefaultRoleOnce)
+    }
+    #endif
 
     private var rolePicker: some View {
         HStack(spacing: 4) {
@@ -381,6 +436,12 @@ private struct TransferSetupStageView: View {
         .background(Theme.line.opacity(0.35), in: RoundedRectangle(cornerRadius: Theme.cardRadius))
     }
 
+    private func applyDefaultRoleOnce() {
+        guard !didApplyDefaultRole else { return }
+        didApplyDefaultRole = true
+        role = TransferRole(rawValue: defaultRole) ?? .receive
+    }
+
     private var showsActivityShortcut: Bool {
         !isIdle(send) || !isIdle(receive)
     }
@@ -405,7 +466,6 @@ private struct TransferStageView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 12) {
-                overviewCard
                 if records.isEmpty {
                     emptyActivityView
                 } else {
@@ -435,35 +495,14 @@ private struct TransferStageView: View {
         }
     }
 
-    private var overviewCard: some View {
-        HStack(spacing: 14) {
-            Image(systemName: overviewIcon)
-                .font(.system(size: 34, weight: .semibold))
-                .foregroundStyle(overviewTint)
-                .frame(width: 44)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(overviewTitle)
-                    .font(.title2.weight(.semibold))
-                    .foregroundStyle(Theme.text)
-                Text(activitySummary)
-                    .font(.title3)
-                    .foregroundStyle(Theme.muted)
-            }
-
-            Spacer(minLength: 8)
-        }
-        .card(raised: true, padding: 16)
-    }
-
     private var emptyActivityView: some View {
         HStack(spacing: 12) {
             Image(systemName: "tray")
-                .font(.title3.weight(.semibold))
+                .font(.body.weight(.semibold))
                 .foregroundStyle(Theme.muted)
                 .frame(width: 30)
             Text(AppText.value("Transfers will appear here once started.", "开始传输后会显示在这里。", language: language))
-                .font(.title3)
+                .font(.subheadline)
                 .foregroundStyle(Theme.muted)
             Spacer(minLength: 8)
         }
@@ -480,12 +519,12 @@ private struct TransferStageView: View {
                     .frame(width: 22)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(activityTitle(for: record))
-                        .font(.title2.weight(.semibold))
+                        .font(.headline.weight(.semibold))
                         .foregroundStyle(Theme.text)
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Text(activitySubtitle(for: record))
-                        .font(.title3)
+                        .font(.subheadline)
                         .foregroundStyle(Theme.muted)
                         .lineLimit(2)
                 }
@@ -601,7 +640,7 @@ private struct TransferStageView: View {
                     .help(AppText.value("Copy diagnostics", "复制诊断", language: language))
                 }
             }
-            .font(.body.monospacedDigit())
+            .font(.caption.monospacedDigit())
             .foregroundStyle(Theme.muted)
 
             if expanded {
@@ -612,71 +651,6 @@ private struct TransferStageView: View {
         .onLongPressGesture {
             toggleActivityDetail(record.activityId)
         }
-    }
-
-    private var pendingCount: Int {
-        records.filter { isPending($0) }.count
-    }
-
-    private var failedCount: Int {
-        records.filter { $0.state == .failed }.count
-    }
-
-    private var receivePendingCount: Int {
-        records.filter { isPending($0) && $0.direction == .receive }.count
-    }
-
-    private var sendPendingCount: Int {
-        records.filter { isPending($0) && $0.direction == .send }.count
-    }
-
-    private var overviewIcon: String {
-        if pendingCount > 0 { return "clock.badge.exclamationmark" }
-        if failedCount > 0 { return "exclamationmark.triangle" }
-        return "checkmark.circle"
-    }
-
-    private var overviewTint: Color {
-        if pendingCount > 0 { return Theme.warning }
-        if failedCount > 0 { return Theme.danger }
-        return Theme.success
-    }
-
-    private var overviewTitle: String {
-        if pendingCount > 0 {
-            return AppText.value(
-                "\(pendingCount) pending task\(pendingCount == 1 ? "" : "s")",
-                "\(pendingCount) 个待处理任务",
-                language: language
-            )
-        }
-        if failedCount > 0 {
-            return AppText.value(
-                "\(failedCount) item\(failedCount == 1 ? "" : "s") need attention",
-                "\(failedCount) 个项目需要处理",
-                language: language
-            )
-        }
-        return AppText.value("No pending transfers", "没有待处理传输", language: language)
-    }
-
-    private var activitySummary: String {
-        if pendingCount == 0 {
-            if failedCount > 0 {
-                return AppText.value("Review failed transfers below, or start a new operation when ready.", "请查看下方失败的传输，或在准备好后开始新操作。", language: language)
-            }
-            return AppText.value("Completed transfers stay visible below until the next operation.", "已完成的传输会保留在下方，直到下一次操作。", language: language)
-        }
-        if receivePendingCount > 0 && sendPendingCount > 0 {
-            return AppText.value("Receiving and sending are both in progress.", "接收和发送都在进行中。", language: language)
-        }
-        if receivePendingCount > 0 {
-            return AppText.value("A receive task is currently waiting or transferring.", "当前有一个接收任务正在等待或传输。", language: language)
-        }
-        if sendPendingCount > 0 {
-            return AppText.value("A send task is currently transferring.", "当前有一个发送任务正在传输。", language: language)
-        }
-        return AppText.value("Review failed tasks below before starting another transfer.", "开始新的传输前，请先查看下方失败任务。", language: language)
     }
 
     private func isPending(_ record: FfiTransferActivityRecord) -> Bool {
@@ -1025,10 +999,17 @@ private struct SpeedSparkline: View {
 private struct SettingsStageView: View {
     @AppStorage("envoix.appearance") private var appearance: Appearance = .system
     @AppStorage("envoix.language") private var language = "en"
+    @AppStorage("envoix.defaultRole") private var defaultRole = "receive"
     @AppStorage("envoix.serverURL") private var serverURL = ""
     @AppStorage("envoix.relayURL") private var relayURL = ""
     @AppStorage("envoix.configChunkSize") private var configChunkSize = ""
+    @AppStorage("envoix.candidatesAllow") private var candidatesAllow = ""
+    @AppStorage("envoix.candidatesDeny") private var candidatesDeny = ""
+    @AppStorage("envoix.useRoom") private var useRoom = true
+    @AppStorage("envoix.useMdns") private var useMdns = true
     @AppStorage("envoix.developerMode") private var developerMode = false
+    @AppStorage("envoix.verboseLog") private var verboseLog = false
+    @State private var showAdvanced = false
 
     var body: some View {
         ScrollView {
@@ -1049,25 +1030,45 @@ private struct SettingsStageView: View {
                 .card(padding: 14)
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(AppText.value("Developer mode", "开发者模式", language: language))
+                    Text(AppText.value("Default role for a new code", "新建短码的默认角色", language: language))
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(Theme.muted)
+                    Picker("Default role", selection: $defaultRole) {
+                        Text(AppText.value("Send", "发送", language: language)).tag("send")
+                        Text(AppText.value("Receive", "接收", language: language)).tag("receive")
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                }
+                .card(padding: 14)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(AppText.value("Pairing", "配对", language: language))
                         .font(.title3.weight(.semibold))
                         .foregroundStyle(Theme.muted)
                     settingToggle(
-                        AppText.value("Enable developer mode", "开启开发者模式", language: language),
-                        isOn: $developerMode
+                        AppText.value("Avoid Tailscale addresses", "避开 Tailscale 地址", language: language),
+                        subtitle: AppText.value("Prefer the real WAN or relay path instead of 100.x candidates.", "不广播 100.x 候选地址，优先使用真实网络或中继。", language: language),
+                        isOn: avoidTailscaleBinding
+                    )
+                    Divider().overlay(Theme.line.opacity(0.5))
+                    settingToggle(
+                        AppText.value("Internet pairing", "互联网配对", language: language),
+                        subtitle: AppText.value("Use the rendezvous broker for Room pairing.", "通过配对服务器建立 Room。", language: language),
+                        isOn: $useRoom
+                    )
+                    Divider().overlay(Theme.line.opacity(0.5))
+                    settingToggle(
+                        AppText.value("Local Wi-Fi pairing", "本地 Wi‑Fi 配对", language: language),
+                        subtitle: AppText.value("Also try mDNS on the same network.", "同时尝试同一网络内的 mDNS。", language: language),
+                        isOn: $useMdns
                     )
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Theme.surface)
-                .overlay(
-                    RoundedRectangle(cornerRadius: Theme.cardRadius)
-                        .strokeBorder(Theme.line.opacity(0.75), lineWidth: 0.8)
-                )
-                .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
+                .card(padding: 14)
 
-                if developerMode {
+                advancedHeader
+
+                if showAdvanced {
                     settingField(
                         AppText.value("Rendezvous broker", "配对服务器", language: language),
                         text: $serverURL,
@@ -1093,6 +1094,35 @@ private struct SettingsStageView: View {
                             language: language
                         )
                     )
+                    settingMultilineField(
+                        AppText.value("Candidate allow", "候选地址 allow", language: language),
+                        text: $candidatesAllow,
+                        helper: AppText.value("One CIDR per line. Empty means allow all.", "每行一个 CIDR；留空表示全部允许。", language: language)
+                    )
+                    settingMultilineField(
+                        AppText.value("Candidate deny", "候选地址 deny", language: language),
+                        text: $candidatesDeny,
+                        helper: AppText.value("One CIDR per line. Avoid Tailscale edits this list.", "每行一个 CIDR；避开 Tailscale 会修改此列表。", language: language)
+                    )
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(AppText.value("Developer mode", "开发者模式", language: language))
+                            .font(.title3.weight(.semibold))
+                            .foregroundStyle(Theme.muted)
+                        settingToggle(
+                            AppText.value("Enable developer mode", "开启开发者模式", language: language),
+                            isOn: $developerMode
+                        )
+                        if developerMode {
+                            Divider().overlay(Theme.line.opacity(0.5))
+                            settingToggle(
+                                AppText.value("Verbose logging", "详细日志", language: language),
+                                subtitle: AppText.value("Show more transfer diagnostics in Activity.", "在活动页显示更多传输诊断信息。", language: language),
+                                isOn: $verboseLog
+                            )
+                        }
+                    }
+                    .card(padding: 14)
                 }
 
                 Text(appDebugBuildLabel)
@@ -1146,6 +1176,44 @@ private struct SettingsStageView: View {
         }
     }
 
+    private var advancedHeader: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.16)) {
+                showAdvanced.toggle()
+            }
+        } label: {
+            HStack {
+                Text(AppText.value("Advanced", "高级", language: language))
+                    .font(.headline.weight(.semibold))
+                    .foregroundStyle(Theme.text)
+                Spacer()
+                Image(systemName: showAdvanced ? "chevron.up" : "chevron.down")
+                    .foregroundStyle(Theme.muted)
+            }
+            .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var avoidTailscaleBinding: Binding<Bool> {
+        Binding(
+            get: {
+                let deny = Set(configListLines(candidatesDeny))
+                return Self.tailscaleCIDRs.allSatisfy { deny.contains($0) }
+            },
+            set: { enabled in
+                var deny = configListLines(candidatesDeny)
+                if enabled {
+                    deny = Array(Set(deny).union(Self.tailscaleCIDRs)).sorted()
+                } else {
+                    deny.removeAll { Self.tailscaleCIDRs.contains($0) }
+                }
+                candidatesDeny = deny.joined(separator: "\n")
+            }
+        )
+    }
+
     private func settingField(
         _ title: String,
         text: Binding<String>,
@@ -1164,6 +1232,36 @@ private struct SettingsStageView: View {
                     .foregroundStyle(Theme.muted)
                     .fixedSize(horizontal: false, vertical: true)
             }
+        }
+        .card(padding: 14)
+    }
+
+    private func settingMultilineField(
+        _ title: String,
+        text: Binding<String>,
+        helper: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(Theme.muted)
+            TextEditor(text: text)
+                .font(.body.monospaced())
+                .foregroundStyle(Theme.text)
+                .frame(minHeight: 88)
+                .scrollContentBackground(.hidden)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .background(Theme.surface)
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.cardRadius)
+                        .strokeBorder(Theme.line.opacity(0.75), lineWidth: 0.8)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
+            Text(helper)
+                .font(.body)
+                .foregroundStyle(Theme.muted)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .card(padding: 14)
     }
@@ -1211,15 +1309,31 @@ private struct SettingsStageView: View {
     }
 
     private func settingToggle(_ title: String, isOn: Binding<Bool>) -> some View {
+        settingToggle(title, subtitle: nil, isOn: isOn)
+    }
+
+    private func settingToggle(
+        _ title: String,
+        subtitle: String?,
+        isOn: Binding<Bool>
+    ) -> some View {
         Button {
             withAnimation(.easeInOut(duration: 0.15)) {
                 isOn.wrappedValue.toggle()
             }
         } label: {
             HStack(spacing: 12) {
-                Text(title)
-                    .font(.title3)
-                    .foregroundStyle(Theme.text)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .font(.title3)
+                        .foregroundStyle(Theme.text)
+                    if let subtitle {
+                        Text(subtitle)
+                            .font(.body)
+                            .foregroundStyle(Theme.muted)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
                 Spacer(minLength: 12)
                 SettingSwitchIndicator(isOn: isOn.wrappedValue)
             }
@@ -1231,6 +1345,8 @@ private struct SettingsStageView: View {
         .accessibilityLabel(title)
         .accessibilityValue(isOn.wrappedValue ? "On" : "Off")
     }
+
+    private static let tailscaleCIDRs = ["100.64.0.0/10", "fd7a:115c:a1e0::/48"]
 }
 
 private struct SettingSwitchIndicator: View {

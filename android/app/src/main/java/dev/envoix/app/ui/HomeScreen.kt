@@ -119,7 +119,7 @@ fun HomeScreen(
                 .fillMaxSize()
                 .testTag(EnvoixTestTags.HOME_ROOT)
                 .padding(inner)
-                .padding(horizontal = 20.dp),
+                .padding(horizontal = EnvoixDimens.ScreenPadding),
         ) {
             when (tab) {
                 HomeTab.Transfer -> TransferPane(
@@ -327,7 +327,7 @@ private fun TransferCard(
         enableDismissFromEndToStart = true,
         backgroundContent = {
             Row(
-                Modifier.fillMaxSize().clip(RoundedCornerShape(16.dp)).background(colors.danger)
+                Modifier.fillMaxSize().clip(RoundedCornerShape(EnvoixDimens.CardRadius)).background(colors.danger)
                     .padding(horizontal = 22.dp),
                 horizontalArrangement = Arrangement.End,
                 verticalAlignment = Alignment.CenterVertically,
@@ -351,9 +351,9 @@ private fun TransferCard(
         Column(
             Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(16.dp))
+                .clip(RoundedCornerShape(EnvoixDimens.CardRadius))
                 .background(if (cancelled) colors.line else colors.surface)
-                .border(1.dp, colors.line, RoundedCornerShape(16.dp))
+                .border(1.dp, colors.line, RoundedCornerShape(EnvoixDimens.CardRadius))
                 .combinedClickable(
                     onClick = {
                         if (t.status == Status.Completed && t.savedUri != null) {
@@ -412,14 +412,23 @@ private fun TransferCard(
                         Text(t.error, color = colors.danger, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     }
                 }
-                Spacer(Modifier.width(10.dp))
-                CardControls(t, onPauseResume, onCancel, onOpen)
+                if (hasCardControls(t)) {
+                    Spacer(Modifier.width(10.dp))
+                    CardControls(t, onPauseResume, onCancel, onOpen)
+                }
             }
             }
             if (expanded) DetailDrawer(t)
         }
     }
 }
+
+private fun hasCardControls(t: Transfer): Boolean =
+    when (t.status) {
+        Status.Connecting, Status.Transferring, Status.Paused, Status.Failed -> true
+        Status.Completed -> t.savedUri != null
+        Status.Cancelled -> false
+    }
 
 @Composable
 private fun CardControls(

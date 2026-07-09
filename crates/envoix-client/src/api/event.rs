@@ -32,6 +32,12 @@ pub struct StampedEvent {
 #[non_exhaustive]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum TransferEvent {
+    /// Diagnostic-only status. It is meant for logs/tests and does not change
+    /// the activity state.
+    Diagnostic {
+        /// Human-readable diagnostic message.
+        message: String,
+    },
     /// The local endpoint is being set up.
     Binding {
         /// Direction of this local operation.

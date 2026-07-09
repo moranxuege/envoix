@@ -54,18 +54,18 @@ extension Color {
 // MARK: - Design tokens (from the reference demo)
 
 enum Theme {
-    static let bg = Color(light: 0xffffff, dark: 0x1b2027)
+    static let bg = Color(light: 0xf6f7f9, dark: 0x121519)
     static let surface = Color(light: 0xffffff, dark: 0x1b2027)
-    static let surfaceRaised = Color(light: 0xffffff, dark: 0x1b2027)
+    static let surfaceRaised = Color(light: 0xfdfeff, dark: 0x232a33)
     static let text = Color(light: 0x17202a, dark: 0xedf2f7)
     static let muted = Color(light: 0x647181, dark: 0xaab5c2)
-    static let line = Color(light: 0xe5ebf1, dark: 0x303946)
+    static let line = Color(light: 0xd9e0e7, dark: 0x343d49)
     static let accent = Color(light: 0x0f6bff, dark: 0x6bb6ff)
     static let accentStrong = Color(light: 0x084fbd, dark: 0x9ed0ff)
-    static let accentSoft = Color(light: 0xf0f6ff, dark: 0x182b40)
+    static let accentSoft = Color(light: 0xe7f0ff, dark: 0x19334f)
     static let success = Color(light: 0x147a4b, dark: 0x61d69a)
     static let warning = Color(light: 0xa05a00, dark: 0xffc166)
-    static let danger = Color(light: 0xb42318, dark: 0xff8a80)
+    static let danger = Color(light: 0xe74c3c, dark: 0xf07167)
     static let dangerSoft = Color(light: 0xfff4f2, dark: 0x3a2020)
 
     static let cardRadius: CGFloat = 8
