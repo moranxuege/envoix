@@ -12,15 +12,15 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.io.File
-import java.util.Base64
 
-/** Params needed to (re)launch a transfer, kept so a paused/failed one can resume. */
+/** Params needed to (re)create a transfer session (also carries UI extras). */
 private data class Spec(
     val direction: String,
     val room: String,
@@ -35,24 +35,45 @@ private data class Spec(
     /** Rendezvous modes to attempt, in order Room → mDNS. */
     val useRoom: Boolean,
     val useMdns: Boolean,
-    /** Honor receiver-side resume state and completion receipts. False for a
-     *  user-initiated NEW transfer (a fresh copy is wanted even if this file
-     *  was received before); flipped true when relaunched via Resume/re-verify. */
-    val resume: Boolean = false,
 ) {
     fun dir(): Direction = if (direction == "send") Direction.Send else Direction.Receive
+
+    /** The session params JSON for [Native.createSession]. `resume` false for a
+     *  user-initiated NEW transfer (fresh semantics); true when re-creating a
+     *  session that should honor partials/receipts. */
+    fun paramsJson(resume: Boolean): String = JSONObject().apply {
+        put("direction", direction)
+        put("code", room)
+        put("broker", broker)
+        put("relay", relay)
+        put("path", path)
+        put("chunk_size", chunkSize)
+        put("candidates_allow", candidatesAllow)
+        put("candidates_deny", candidatesDeny)
+        put("use_room", useRoom)
+        put("use_mdns", useMdns)
+        put("resume", resume)
+    }.toString()
 }
 
 /**
- * Foreground service that owns running transfers (decoupled from the Activity so
- * they survive backgrounding), updates [TransferRepository], publishes received
- * files to Downloads, and shows an ongoing progress notification.
+ * Foreground service that owns transfer sessions. Since the state machine
+ * moved into the Rust core (envoix-client machine + driver), this service no
+ * longer interprets events: it forwards user intents to the session, renders
+ * the snapshot stream into [TransferRepository], acts as the mailbox courier
+ * (dumb HTTP GET/POST — the driver seals, verifies, and decides), and keeps
+ * the Android-only side effects: notifications, MediaStore publish, multicast.
  */
 class TransferService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val active = java.util.concurrent.atomic.AtomicInteger(0)
 
-    /** Held while an mDNS-enabled transfer runs; Android gates multicast behind it. */
+    /** Collector jobs per transfer id (live Rust session ⇔ live job). */
+    private val jobs = java.util.concurrent.ConcurrentHashMap<Long, Job>()
+
+    /** Last applied snapshot seq per id: out-of-order snapshots are dropped. */
+    private val lastSeq = java.util.concurrent.ConcurrentHashMap<Long, Long>()
+
+    /** Held while an mDNS-enabled session runs; Android gates multicast behind it. */
     private val multicastLock by lazy {
         (getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager)
             .createMulticastLock("envoix-mdns").apply { setReferenceCounted(true) }
@@ -85,7 +106,7 @@ class TransferService : Service() {
                 val direction = intent.getStringExtra(EXTRA_DIRECTION)
                 val room = intent.getStringExtra(EXTRA_ROOM)
                 val path = intent.getStringExtra(EXTRA_PATH)
-                if (direction == null || room == null || path == null) return stopIfIdle()
+                if (direction == null || room == null || path == null) return START_NOT_STICKY
                 val spec = Spec(
                     direction, room, path,
                     intent.getStringExtra(EXTRA_BROKER) ?: Endpoints.BROKER,
@@ -108,41 +129,43 @@ class TransferService : Service() {
                 }
                 specs[id] = spec
                 OpLog.add("start $direction room=${room.substringBefore('-')} id=$id")
-                runLoop(id, spec)
+                startSession(id, spec, resume = false)
             }
             ACTION_RESUME -> {
                 val id = intent.getLongExtra(EXTRA_ID, -1L)
-                val spec = specs[id] ?: return stopIfIdle()
                 enterForeground()
-                TransferRepository.update(id) { it.copy(status = Status.Connecting, error = null) }
                 OpLog.add("resume transfer id=$id")
-                runLoop(id, spec.copy(resume = true))
+                if (jobs.containsKey(id)) {
+                    // Live session: the machine handles the attempt bump.
+                    Native.sessionIntent(id, "resume")
+                } else {
+                    // Session died with the service; re-create it with resume
+                    // semantics (partials/receipts honored).
+                    val spec = specs[id] ?: return START_NOT_STICKY
+                    startSession(id, spec, resume = true)
+                }
             }
             ACTION_PAUSE -> {
                 val id = intent.getLongExtra(EXTRA_ID, -1L)
                 OpLog.add("pause transfer id=$id")
-                // Mark Paused *before* stopping: the stop triggers a Failed event,
-                // and the event loop keeps a status that is already Paused - so a
-                // pause never flips to Failed. Native.pause also tells the core
-                // (and, best-effort, the peer) this stop is a pause, not a cancel.
-                TransferRepository.update(id) {
-                    if (it.status.isTerminal) it else it.copy(status = Status.Paused, speedBps = 0.0)
-                }
-                Native.pause(id)
+                Native.sessionIntent(id, "pause")
             }
             ACTION_CANCEL -> {
                 val id = intent.getLongExtra(EXTRA_ID, -1L)
                 OpLog.add("cancel transfer id=$id")
-                // Mark Cancelled *before* cancelling, like ACTION_PAUSE: during
-                // pairing the abort's Failed event is near-instant and would beat
-                // this update, turning the card terminal-Failed (which this then skips).
-                TransferRepository.update(id) {
-                    if (it.status.isTerminal) it else it.copy(status = Status.Cancelled)
-                }
-                // Keep the spec: a cancel leaves the room + partial, so it stays
-                // resumable - the same as pause or a network drop. Removing the card
-                // (swipe) is the only true abandon.
-                Native.cancel(id)
+                Native.sessionIntent(id, "cancel")
+            }
+            ACTION_REMOVE -> {
+                val id = intent.getLongExtra(EXTRA_ID, -1L)
+                OpLog.add("remove transfer id=$id")
+                // D2, the one true abandon: discard partial + resume state +
+                // receipt, then tear the session and card down.
+                Native.destroySession(id, true)
+                jobs.remove(id)?.cancel()
+                specs.remove(id)
+                lastSeq.remove(id)
+                TransferRepository.remove(id)
+                stopIfIdle()
             }
         }
         return START_NOT_STICKY
@@ -157,212 +180,133 @@ class TransferService : Service() {
     private fun addLog(cur: List<String>, line: String): List<String> =
         (cur + "${logTime.format(java.util.Date())}  $line").takeLast(TransferRepository.LOG_CAP)
 
-    private fun runLoop(id: Long, spec: Spec) {
-        active.incrementAndGet()
-        updateNotification()
-        scope.launch {
-            var lastTs = 0L
-            var lastBytes = 0L
-            var lastNotif = 0L
-            var startTs = 0L
+    /** Create the Rust session and render its notice stream. */
+    private fun startSession(id: Long, spec: Spec, resume: Boolean) {
+        lastSeq[id] = 0L
+        val job = scope.launch {
             if (spec.useMdns) runCatching { multicastLock.acquire() }
-            NativeTransfer.run(id, spec.direction, spec.room, spec.broker, spec.relay, spec.path, spec.chunkSize, spec.candidatesAllow, spec.candidatesDeny, spec.useRoom, spec.useMdns, spec.resume)
-                .collect { ev ->
-                    TransferRepository.update(id) { t ->
-                        // Once a card is terminal or user-paused, ignore every late
-                        // in-flight event. During pairing the core keeps emitting
-                        // Connecting, which would otherwise revive a just-Cancelled card
-                        // (Connecting is set unconditionally below) and let the abort's
-                        // Failed relabel it. The user's Cancel/Pause and the final
-                        // outcome are the last word.
-                        if (t.status.isTerminal || t.status == Status.Paused) t
-                        else when (ev) {
-                            CliEvent.Binding, CliEvent.Connecting ->
-                                t.copy(
-                                    status = Status.Connecting,
-                                    log = if (t.log.isEmpty())
-                                        addLog(t.log, "pairing in room ${spec.room.substringBefore('-')}…")
-                                    else t.log,
-                                )
-                            is CliEvent.Connected ->
-                                t.copy(
-                                    pathType = ev.pathType, pathAddr = ev.addr,
-                                    log = addLog(
-                                        t.log,
-                                        "connected · ${ev.pathType}" + if (ev.addr.isNotBlank()) " (${ev.addr})" else "",
-                                    ),
-                                )
-                            is CliEvent.Started ->
-                                t.copy(
-                                    fileName = ev.fileName, total = ev.totalBytes, status = Status.Transferring,
-                                    transferId = ev.transferId,
-                                    log = addLog(t.log, "started · ${ev.fileName}"),
-                                )
-                            is CliEvent.Progress -> if (t.status.isTerminal || t.status == Status.Paused) t else {
-                                val now = System.nanoTime()
-                                if (startTs == 0L) {
-                                    startTs = now; lastTs = now; lastBytes = ev.bytesTransferred
-                                }
-                                // True average = total bytes / elapsed (matches the CLI's avg_bps),
-                                // not the mean of per-event samples (which over-weights fast bursts).
-                                val avg = if (now > startTs)
-                                    ev.bytesTransferred * 1e9 / (now - startTs) else 0.0
-                                val dt = now - lastTs
-                                // Sample the instantaneous rate over >=250ms windows, so the chart
-                                // and peak reflect real bursts, not sub-ms measurement noise.
-                                if (dt >= 250_000_000L) {
-                                    val bps = (ev.bytesTransferred - lastBytes) * 1e9 / dt
-                                    lastTs = now; lastBytes = ev.bytesTransferred
-                                    t.copy(
-                                        bytes = ev.bytesTransferred, total = ev.totalBytes,
-                                        speedBps = bps, avgBps = avg, status = Status.Transferring,
-                                        speedHistory = (t.speedHistory + bps).takeLast(90),
-                                    )
-                                } else {
-                                    t.copy(
-                                        bytes = ev.bytesTransferred, total = ev.totalBytes,
-                                        avgBps = avg, status = Status.Transferring,
-                                    )
-                                }
-                            }
-                            is CliEvent.Completed -> {
-                                val now = System.nanoTime()
-                                val avg = if (startTs > 0 && now > startTs)
-                                    ev.bytesTransferred * 1e9 / (now - startTs) else t.avgBps
-                                t.copy(
-                                    bytes = ev.bytesTransferred, speedBps = 0.0, avgBps = avg,
-                                    status = Status.Completed, log = addLog(t.log, "complete"),
-                                )
-                            }
-                            is CliEvent.Failed ->
-                                // A local pause/cancel surfaces as a Failed event; keep the
-                                // status the action already set. Otherwise classify by the
-                                // core's typed reason_code - peer delivery of the code is
-                                // BEST-EFFORT (a degraded path drops it), so the legacy
-                                // prose heuristics remain as the fallback, and durable
-                                // facts (bytes on disk) decide resumability.
-                                if (t.status == Status.Cancelled || t.status == Status.Paused) t
-                                else {
-                                    val lost = ev.reasonCode == "connection_lost" ||
-                                        (ev.reasonCode.isEmpty() && ev.error.contains("connection lost"))
-                                    // reasonCode when present; prose fallback for events
-                                    // that predate it (e.g. the JNI's synthetic terminal).
-                                    val peerPaused = ev.reasonCode == "peer_paused" ||
-                                        (ev.reasonCode.isEmpty() && ev.error.contains("paused by peer"))
-                                    val peerStop = peerPaused ||
-                                        ev.reasonCode == "peer_cancelled" ||
-                                        (ev.reasonCode.isEmpty() && ev.error.contains("interrupted by peer"))
-                                    when {
-                                        // All bytes sent but the ack was lost (Two-Generals):
-                                        // the file almost certainly arrived - not a failure.
-                                        // Requires an actively Transferring run: a failed
-                                        // RE-join still carries the finished run's stale
-                                        // bytes/total and must not fake an Unconfirmed.
-                                        t.status == Status.Transferring &&
-                                            t.direction == Direction.Send && t.total > 0 &&
-                                            t.bytes >= t.total && lost ->
-                                            t.copy(
-                                                status = Status.Unconfirmed, error = ev.error,
-                                                log = addLog(t.log, "sent · unconfirmed — all bytes sent, no CompleteAck"),
-                                            )
-                                        // The peer said it paused: mirror it as Paused.
-                                        peerPaused ->
-                                            t.copy(
-                                                status = Status.Paused, error = null, speedBps = 0.0,
-                                                log = addLog(t.log, "paused by peer (resumable)"),
-                                            )
-                                        // Peer cancel or a dropped link with a partial on
-                                        // disk: resumable - show Paused, not a dead Failed.
-                                        (peerStop || lost) && t.bytes > 0 ->
-                                            t.copy(
-                                                status = Status.Paused, error = ev.error,
-                                                log = addLog(t.log, "paused · interrupted, ${t.bytes} B kept (resumable)"),
-                                            )
-                                        else -> t.copy(status = Status.Failed, error = ev.error, log = addLog(t.log, "failed · ${ev.error}"))
-                                    }
-                                }
-                            is CliEvent.Exit ->
-                                if (t.status.isTerminal || t.status == Status.Paused) t
-                                else t.copy(status = if (ev.code == 0) Status.Completed else Status.Failed)
-                        }
-                    }
-                    // Keep the foreground notification's progress bar live while
-                    // backgrounded; throttle the frequent Progress events.
-                    when (ev) {
-                        is CliEvent.Progress -> {
-                            val now = System.currentTimeMillis()
-                            if (now - lastNotif > 700) { lastNotif = now; updateNotification() }
-                        }
-                        is CliEvent.Started, is CliEvent.Connected -> updateNotification()
-                        else -> {}
+            try {
+                NativeSession.start(id, spec.paramsJson(resume)).collect { notice ->
+                    when (notice.optString("notice")) {
+                        "snapshot" -> onSnapshot(id, spec, notice)
+                        "fetch_receipt" -> onFetchReceipt(id, notice.optString("key"))
+                        "post_receipt" -> onPostReceipt(id, notice)
                     }
                 }
-            if (spec.useMdns) runCatching { multicastLock.release() }
-            if (spec.dir() == Direction.Receive) publishReceived(id, spec.path)
-            handleReceiptMailbox(id, spec)
-            active.decrementAndGet()
-            // Refresh only while transfers remain; when idle, let stopIfIdle's
-            // stopForeground(REMOVE) clear the notification — reposting here would
-            // detach it and leave a stale status-bar icon.
-            if (active.get() > 0) updateNotification()
-            stopIfIdle()
+            } finally {
+                if (spec.useMdns) runCatching { multicastLock.release() }
+            }
+        }
+        jobs[id] = job
+        updateNotification()
+    }
+
+    /** Map one machine snapshot onto the card. The machine is authoritative:
+     *  no interpretation, no guards — just rendering. */
+    private fun onSnapshot(id: Long, spec: Spec, s: JSONObject) {
+        val seq = s.optLong("seq")
+        val prev = lastSeq[id] ?: 0L
+        if (seq <= prev) return
+        lastSeq[id] = seq
+
+        val state = s.optString("state")
+        val status = when (state) {
+            "waiting", "connecting", "verifying" -> Status.Connecting
+            "transferring", "confirming" -> Status.Transferring
+            "paused" -> Status.Paused
+            "unconfirmed" -> Status.Unconfirmed
+            "completed" -> Status.Completed
+            "failed" -> Status.Failed
+            "cancelled" -> Status.Cancelled
+            else -> return
+        }
+        val reason = s.optString("reason").ifEmpty { null }
+        val bytes = s.optLong("bytes")
+        val total = s.optLong("total")
+        val speed = s.optDouble("speed_bps", 0.0)
+        val avg = s.optDouble("avg_bps", 0.0)
+        val path = s.optString("path").ifEmpty { null }
+        var entered: String? = null
+
+        TransferRepository.update(id) { t ->
+            entered = if (t.status != status) stateLogLine(state, s, bytes) else null
+            t.copy(
+                status = status,
+                transferId = s.optString("transfer_id").ifEmpty { t.transferId },
+                fileName = s.optString("file_name").ifEmpty { t.fileName },
+                bytes = bytes,
+                total = if (total > 0) total else t.total,
+                speedBps = if (status == Status.Transferring) speed else 0.0,
+                avgBps = avg,
+                speedHistory = if (status == Status.Transferring && speed > 0)
+                    (t.speedHistory + speed).takeLast(90) else t.speedHistory,
+                pathType = path?.substringBefore(' ') ?: t.pathType,
+                pathAddr = path?.substringAfter('(', "")?.removeSuffix(")")?.ifEmpty { null }
+                    ?: t.pathAddr,
+                error = if (status == Status.Failed || status == Status.Unconfirmed) reason else null,
+                log = entered?.let { addLog(t.log, it) } ?: t.log,
+            )
+        }
+
+        when {
+            entered != null -> updateNotification()
+            else -> throttledNotification()
+        }
+        if (state == "completed" && spec.dir() == Direction.Receive) {
+            publishReceived(id, spec.path)
+        }
+        if (!jobsActive()) stopForegroundKeepCards()
+    }
+
+    /** Human line for a state transition, for the card's log drawer. */
+    private fun stateLogLine(state: String, s: JSONObject, bytes: Long): String = when (state) {
+        "waiting" -> "waiting for peer…"
+        "connecting" -> "pairing in room…"
+        "verifying" -> "verifying…"
+        "transferring" -> "started · ${s.optString("file_name")}"
+        "confirming" -> "confirming delivery…"
+        "paused" -> when (s.optString("origin")) {
+            "peer" -> "paused by peer (resumable)"
+            "lost" -> "paused · interrupted, $bytes B kept (resumable)"
+            else -> "paused"
+        }
+        "unconfirmed" -> "sent · unconfirmed — awaiting proof (mailbox)"
+        "completed" -> "complete"
+        "failed" -> "failed · ${s.optString("reason")}"
+        "cancelled" -> "cancelled"
+        else -> state
+    }
+
+    /** Courier: GET the mailbox slot and hand the blob back to the driver. */
+    private fun onFetchReceipt(id: Long, key: String) {
+        if (key.isEmpty()) return
+        val server = SettingsStore.settings.value.logServer.trimEnd('/')
+        if (server.isEmpty()) return
+        scope.launch {
+            val blob = LogUpload.getBytes("$server/receipts/$key")
+            val b64 = blob?.let { java.util.Base64.getEncoder().encodeToString(it) } ?: ""
+            Native.receiptResponse(id, b64)
         }
     }
 
-    /**
-     * The rdz receipt mailbox (async re-confirmation, no peer presence needed):
-     * after a receive completes, post the sealed completion receipt so an
-     * unconfirmed sender can re-confirm from the mailbox alone; after a send
-     * ends "Sent · unconfirmed", poll the mailbox and flip to Done once the
-     * receipt proves the peer finalized exactly our bytes. Blobs are sealed
-     * under transfer id + code — the rdz stores bytes it cannot read.
-     */
-    private suspend fun handleReceiptMailbox(id: Long, spec: Spec) {
-        val t = TransferRepository.transfers.value.find { it.id == id } ?: return
-        val tid = t.transferId ?: return
+    /** Courier: POST the sealed receipt blob (with backoff — the whole point
+     *  of the mailbox is that this can retry long after the ack could not). */
+    private fun onPostReceipt(id: Long, notice: JSONObject) {
+        val key = notice.optString("key")
+        val b64 = notice.optString("blob")
+        if (key.isEmpty() || b64.isEmpty()) return
         val server = SettingsStore.settings.value.logServer.trimEnd('/')
         if (server.isEmpty()) return
-        if (spec.dir() == Direction.Receive && t.status == Status.Completed) {
-            val name = t.fileName ?: return
-            val json = runCatching { File(spec.path, ".envoix-receipt.$name.json").readText() }
-                .getOrNull() ?: return
-            val sealed = runCatching { JSONObject(Native.sealReceipt(tid, spec.room, json)) }
-                .getOrNull() ?: return
-            val key = sealed.optString("key")
-            val blob = sealed.optString("blob")
-            if (key.isEmpty() || blob.isEmpty()) return
-            val bytes = Base64.getDecoder().decode(blob)
+        val bytes = runCatching { java.util.Base64.getDecoder().decode(b64) }.getOrNull() ?: return
+        scope.launch {
             for (backoff in listOf(0L, 5_000L, 30_000L)) {
                 if (backoff > 0) delay(backoff)
                 if (LogUpload.postBytes("$server/receipts/$key", bytes)) {
                     OpLog.add("receipt posted id=$id")
-                    return
+                    return@launch
                 }
             }
             OpLog.add("receipt post failed id=$id")
-        } else if (spec.dir() == Direction.Send && t.status == Status.Unconfirmed) {
-            val key = Native.receiptMailboxKey(tid)
-            for (backoff in listOf(2_000L, 10_000L, 30_000L)) {
-                delay(backoff)
-                val blob = LogUpload.getBytes("$server/receipts/$key") ?: continue
-                val b64 = Base64.getEncoder().encodeToString(blob)
-                val verdict = runCatching { JSONObject(Native.verifyReceipt(tid, spec.room, b64, spec.path)) }
-                    .getOrNull()
-                if (verdict?.optBoolean("ok") == true) {
-                    TransferRepository.update(id) {
-                        if (it.status == Status.Unconfirmed)
-                            it.copy(
-                                status = Status.Completed, error = null,
-                                log = addLog(it.log, "confirmed via receipt — peer finalized the file"),
-                            )
-                        else it
-                    }
-                    OpLog.add("receipt confirmed id=$id")
-                } else {
-                    OpLog.add("receipt verify failed id=$id")
-                }
-                return // found a blob: verified or authenticated mismatch — done either way
-            }
         }
     }
 
@@ -426,12 +370,35 @@ class TransferService : Service() {
         else -> "%.2f GB".format(n / 1073741824.0)
     }
 
+    private var lastNotif = 0L
+
+    private fun throttledNotification() {
+        val now = System.currentTimeMillis()
+        if (now - lastNotif > 700) {
+            lastNotif = now
+            updateNotification()
+        }
+    }
+
     private fun updateNotification() {
         getSystemService(NotificationManager::class.java).notify(NOTIF_ID, notification())
     }
 
+    /** Whether any card still has a live attempt or a pending proof. */
+    private fun jobsActive(): Boolean = TransferRepository.transfers.value.any {
+        it.status == Status.Connecting || it.status == Status.Transferring ||
+            it.status == Status.Unconfirmed
+    }
+
+    /** All cards at rest: drop the foreground state (notification dismissible)
+     *  but keep the service — sessions idle cheaply and stay resumable. */
+    private fun stopForegroundKeepCards() {
+        stopForeground(STOP_FOREGROUND_DETACH)
+        updateNotification()
+    }
+
     private fun stopIfIdle(): Int {
-        if (active.get() <= 0) {
+        if (TransferRepository.transfers.value.isEmpty()) {
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
         }
@@ -439,7 +406,7 @@ class TransferService : Service() {
     }
 
     override fun onDestroy() {
-        scope.cancel()
+        scope.cancel() // collectors' awaitClose destroys the Rust sessions
         super.onDestroy()
     }
 
@@ -450,8 +417,10 @@ class TransferService : Service() {
         private const val ACTION_CANCEL = "dev.envoix.app.CANCEL"
         private const val ACTION_PAUSE = "dev.envoix.app.PAUSE"
         private const val ACTION_RESUME = "dev.envoix.app.RESUME"
+        private const val ACTION_REMOVE = "dev.envoix.app.REMOVE"
 
-        /** Launch specs by id, so a paused/failed transfer can be resumed. */
+        /** Launch specs by id, so a session can be re-created after the service
+         *  (or process) restarted. */
         private val specs = java.util.concurrent.ConcurrentHashMap<Long, Spec>()
         private const val EXTRA_DIRECTION = "direction"
         private const val EXTRA_ROOM = "room"
@@ -515,11 +484,22 @@ class TransferService : Service() {
             )
         }
 
-        /** Relaunch a paused/failed transfer from its stored spec (resumes the partial). */
+        /** Resume/retry: a live session bumps its attempt; a dead one is
+         *  re-created from its spec with resume semantics. */
         fun resume(context: Context, id: Long) {
             context.startForegroundService(
                 Intent(context, TransferService::class.java).apply {
                     action = ACTION_RESUME
+                    putExtra(EXTRA_ID, id)
+                }
+            )
+        }
+
+        /** Remove the card AND its on-disk leftovers (D2: the one true abandon). */
+        fun remove(context: Context, id: Long) {
+            context.startService(
+                Intent(context, TransferService::class.java).apply {
+                    action = ACTION_REMOVE
                     putExtra(EXTRA_ID, id)
                 }
             )

@@ -741,3 +741,28 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod serde_tests {
+    use super::*;
+    use envoix_session::TransferDirection::Send;
+
+    /// The snapshot JSON shape is the FFI contract: state/origin flatten to
+    /// top-level keys the frontend reads with optString.
+    #[test]
+    fn session_serializes_flat_state_and_origin() {
+        let mut s = Session::new(Send);
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["state"], "connecting");
+        assert!(v["origin"].is_null() || v.get("origin").is_none());
+
+        s.state = State::Paused(PauseOrigin::Peer);
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["state"], "paused");
+        assert_eq!(v["origin"], "peer");
+        // Matches the existing public event stream shape (no rename_all on the
+        // wire-adjacent TransferDirection); the app reads direction from its own
+        // Spec, not the snapshot.
+        assert_eq!(v["direction"], "Send");
+    }
+}

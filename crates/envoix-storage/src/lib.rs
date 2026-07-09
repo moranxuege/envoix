@@ -304,6 +304,21 @@ impl LocalFileStorage {
         Ok(())
     }
 
+    /// Deletes the completion receipt for `file_name`, if present (Remove is
+    /// the one true abandon: a later re-offer of this file re-transfers).
+    pub async fn delete_receipt(output_dir: &Path, file_name: &str) -> Result<(), StorageError> {
+        if !is_plain_file_name(file_name) {
+            return Err(CoreError::Storage(format!(
+                "invalid output file name: {file_name}"
+            )));
+        }
+        let path = receipt_path(output_dir, file_name);
+        if fs::try_exists(&path).await? {
+            fs::remove_file(path).await?;
+        }
+        Ok(())
+    }
+
     /// Reads the completion receipt for `file_name`, if present. A receipt that
     /// fails to parse reads as `None` (self-healing: the next completion
     /// overwrites it) — a corrupt optimization sidecar must never block a

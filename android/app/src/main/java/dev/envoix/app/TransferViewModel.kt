@@ -33,10 +33,9 @@ class TransferViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Remove a transfer from the list, cancelling it first if it's still active. */
     fun remove(id: Long) {
-        OpLog.add("remove transfer id=$id")
-        val t = TransferRepository.transfers.value.find { it.id == id }
-        if (t != null && !t.status.isTerminal) TransferService.cancel(getApplication(), id)
-        TransferRepository.remove(id)
+        // D2, the one true abandon: the service tears the session down and
+        // discards the partial + resume state + receipt.
+        TransferService.remove(getApplication(), id)
     }
 
     /** Pause a running transfer, or resume/retry a paused/failed one. */

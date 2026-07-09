@@ -78,6 +78,8 @@ enum Cmd {
     Cancel,
     Resume,
     ReceiptResponse(Option<Vec<u8>>),
+    /// D2 (Remove): delete the partial, resume state, and receipt sidecars.
+    Discard,
 }
 
 /// Handle to a running transfer session (one card).
@@ -128,6 +130,12 @@ impl TransferSession {
     /// mailbox blob, or `None` when the slot was empty (404).
     pub fn receipt_response(&self, blob: Option<Vec<u8>>) {
         let _ = self.cmds.send(Cmd::ReceiptResponse(blob));
+    }
+
+    /// D2 (Remove, the one true abandon): delete this transfer's partial,
+    /// resume state, and receipt sidecars. Call before dropping the handle.
+    pub fn discard(&self) {
+        let _ = self.cmds.send(Cmd::Discard);
     }
 }
 
@@ -255,6 +263,15 @@ impl Actor {
                 }
             }
             Cmd::ReceiptResponse(None) => {} // empty slot; later polls may hit
+            Cmd::Discard => {
+                self.discard_partial().await;
+                if let Some(name) = &self.session.file_name
+                    && let Err(error) =
+                        LocalFileStorage::delete_receipt(&self.params.path, name).await
+                {
+                    tracing::debug!(%error, "discard: receipt");
+                }
+            }
         }
     }
 

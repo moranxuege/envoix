@@ -56,6 +56,20 @@ object Native {
      *  peer — as a pause, so both sides can show a resumable state. */
     external fun pause(id: Long)
 
+    /** Create + start a transfer session (the Rust state-machine driver).
+     *  Notices (snapshots + mailbox courier requests) arrive on [callback] as
+     *  JSON; returns immediately. */
+    external fun createSession(id: Long, paramsJson: String, callback: EventCallback)
+
+    /** Route a user intent ("pause" / "resume" / "cancel") to a live session. */
+    external fun sessionIntent(id: Long, intent: String)
+
+    /** Answer a fetch_receipt notice: the blob (base64), or "" for an empty slot. */
+    external fun receiptResponse(id: Long, blobB64: String)
+
+    /** Tear a session down; with [discard], delete partial/resume/receipt (D2). */
+    external fun destroySession(id: Long, discard: Boolean)
+
     /** The rdz mailbox key this transfer's completion receipt is stored under. */
     external fun receiptMailboxKey(transferId: String): String
 

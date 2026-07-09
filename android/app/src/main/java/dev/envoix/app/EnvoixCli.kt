@@ -10,6 +10,23 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
+/**
+ * A transfer session's notice stream (state-machine snapshots + mailbox courier
+ * requests) as a [Flow] of parsed JSON. The Rust driver owns the machine; this
+ * is a rendering feed, not an event stream to interpret.
+ */
+object NativeSession {
+    fun start(id: Long, paramsJson: String): Flow<JSONObject> = callbackFlow {
+        val callback = object : EventCallback {
+            override fun onEvent(json: String) {
+                runCatching { JSONObject(json) }.getOrNull()?.let { trySend(it) }
+            }
+        }
+        Native.createSession(id, paramsJson, callback)
+        awaitClose { Native.destroySession(id, false) }
+    }.buffer(capacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+}
+
 /** Parsed events from the Envoix core (see the client event stream schema). */
 sealed interface CliEvent {
     data object Binding : CliEvent

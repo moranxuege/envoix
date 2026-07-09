@@ -31,6 +31,14 @@ fn cancels() -> &'static Mutex<CancelMap> {
     CANCELS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Live transfer sessions (the state-machine driver), keyed by the Kotlin id.
+type SessionMap = HashMap<i64, envoix_client::api::driver::TransferSession>;
+static SESSIONS: OnceLock<Mutex<SessionMap>> = OnceLock::new();
+
+fn sessions() -> &'static Mutex<SessionMap> {
+    SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// VM + Kotlin log sink for [`Java_dev_envoix_app_Native_initLogging`]. The
 /// `tracing` subscriber below forwards every formatted line to `sink.log(String)`.
 static LOG_VM: OnceLock<JavaVM> = OnceLock::new();
@@ -549,4 +557,181 @@ fn json_str(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+// ---------------------------------------------------------------------------
+// Session API (the state-machine driver; replaces runTransfer in step C).
+// ---------------------------------------------------------------------------
+
+/// One notice as JSON for the Kotlin side.
+fn notice_json(notice: envoix_client::api::driver::SessionNotice) -> String {
+    use base64::Engine;
+    use envoix_client::api::driver::SessionNotice as N;
+    match notice {
+        N::Snapshot(snapshot) => {
+            let path = snapshot.session.path.as_ref().map(|p| p.to_string());
+            let mut value = serde_json::to_value(&snapshot).unwrap_or_default();
+            if let Some(map) = value.as_object_mut() {
+                map.insert("notice".into(), "snapshot".into());
+                // The frontend wants a display string, not the enum encoding.
+                map.insert(
+                    "path".into(),
+                    path.map(Into::into).unwrap_or(serde_json::Value::Null),
+                );
+            }
+            value.to_string()
+        }
+        N::FetchReceipt { key } => {
+            format!(r#"{{"notice":"fetch_receipt","key":{}}}"#, json_str(&key))
+        }
+        N::PostReceipt { key, blob } => format!(
+            r#"{{"notice":"post_receipt","key":{},"blob":{}}}"#,
+            json_str(&key),
+            json_str(&base64::engine::general_purpose::STANDARD.encode(blob)),
+        ),
+    }
+}
+
+/// Create and start a transfer session. `params_json` carries the same fields
+/// as `runTransfer` (direction/code/broker/relay/path/chunk_size/candidates/
+/// use_room/use_mdns/resume). Notices (snapshots + mailbox courier requests)
+/// are delivered to `callback.onEvent` as JSON; returns immediately.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_createSession(
+    mut env: JNIEnv,
+    _class: JClass,
+    id: jlong,
+    params_json: JString,
+    callback: JObject,
+) {
+    use envoix_client::api::driver::{SessionParams, TransferSession};
+    let json = jstr(&mut env, &params_json);
+    let vm = env.get_java_vm().expect("java vm");
+    let cb = env.new_global_ref(&callback).expect("callback ref");
+
+    let fail = |vm: &JavaVM, cb: &GlobalRef, err: String| {
+        emit(
+            vm,
+            cb,
+            &format!(
+                r#"{{"notice":"snapshot","seq":1,"state":"failed","reason":{}}}"#,
+                json_str(&err)
+            ),
+        );
+    };
+
+    let v: serde_json::Value = match serde_json::from_str(&json) {
+        Ok(v) => v,
+        Err(e) => return fail(&vm, &cb, e.to_string()),
+    };
+    let get = |k: &str| v[k].as_str().unwrap_or("").to_string();
+    let allow = split_csv(&get("candidates_allow"));
+    let deny = split_csv(&get("candidates_deny"));
+    let chunk = get("chunk_size");
+    let chunk = (!chunk.is_empty()).then_some(chunk);
+    let client = match Client::from_config_fields(chunk.as_deref(), &allow, &deny) {
+        Ok(c) => c,
+        Err(e) => return fail(&vm, &cb, e.to_string()),
+    };
+
+    let code = get("code");
+    let mut sources: Vec<PeerSource> = Vec::new();
+    if v["use_room"].as_bool().unwrap_or(false) {
+        sources.push(PeerSource::Room {
+            code: code.clone(),
+            broker: get("broker"),
+        });
+    }
+    if v["use_mdns"].as_bool().unwrap_or(false) {
+        sources.push(PeerSource::Mdns { token: Some(code) });
+    }
+    let mut options = TransferOptions::default();
+    options.relay = Some(get("relay"));
+    options.resume = v["resume"].as_bool().unwrap_or(false);
+    let direction = match get("direction").as_str() {
+        "send" => TransferDirection::Send,
+        _ => TransferDirection::Receive,
+    };
+    let params = SessionParams {
+        direction,
+        path: std::path::PathBuf::from(get("path")),
+        sources,
+        options,
+    };
+
+    let _guard = runtime().enter();
+    let (session, mut notices) = TransferSession::start(client, params);
+    if let Ok(mut map) = sessions().lock() {
+        map.insert(id, session);
+    }
+    runtime().spawn(async move {
+        while let Some(notice) = notices.recv().await {
+            emit(&vm, &cb, &notice_json(notice));
+        }
+    });
+}
+
+/// Route a user intent ("pause" / "resume" / "cancel") to a live session.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_sessionIntent(
+    mut env: JNIEnv,
+    _class: JClass,
+    id: jlong,
+    intent: JString,
+) {
+    let intent = jstr(&mut env, &intent);
+    if let Ok(map) = sessions().lock()
+        && let Some(session) = map.get(&id)
+    {
+        match intent.as_str() {
+            "pause" => session.pause(),
+            "resume" => session.resume(),
+            "cancel" => session.cancel(),
+            _ => {}
+        }
+    }
+}
+
+/// The courier's answer to a fetch_receipt notice: the blob (base64), or ""
+/// when the mailbox slot was empty.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_receiptResponse(
+    mut env: JNIEnv,
+    _class: JClass,
+    id: jlong,
+    blob_b64: JString,
+) {
+    use base64::Engine;
+    let blob_b64 = jstr(&mut env, &blob_b64);
+    let blob = if blob_b64.trim().is_empty() {
+        None
+    } else {
+        base64::engine::general_purpose::STANDARD
+            .decode(blob_b64.trim())
+            .ok()
+    };
+    if let Ok(map) = sessions().lock()
+        && let Some(session) = map.get(&id)
+    {
+        session.receipt_response(blob);
+    }
+}
+
+/// Tear a session down. With `discard` (D2, Remove): delete the partial,
+/// resume state, and receipt sidecars first. Idempotent.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_destroySession(
+    _env: JNIEnv,
+    _class: JClass,
+    id: jlong,
+    discard: jboolean,
+) {
+    let session = sessions().lock().ok().and_then(|mut m| m.remove(&id));
+    if let Some(session) = session {
+        if discard != 0 {
+            session.discard();
+        }
+        // Dropping the handle closes the command channel; the actor drains the
+        // queued discard first, cancels any live attempt, and exits.
+    }
 }
