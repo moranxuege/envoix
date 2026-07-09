@@ -233,6 +233,15 @@ destroySession(sessionId)   (Remove; deletes partials per D1/D2 semantics)
   the RECEIVER DISCARDS the partial + resume state; Cancelled cards restart
   fresh. Pause remains the resumable stop. → makes Pause/Cancel genuinely
   different. **Recommended: yes.**
+  **Ruling (design review): the discard fires ONLY on an explicit typed
+  `peer_cancelled`.** If the cancel message is lost (best-effort), the receiver
+  sees a bare `connection_lost` and lands in `Paused(Lost)` — ambiguity always
+  resolves to the side whose wrong guess is recoverable: discarding a partial
+  that was really a pause destroys progress irreversibly; keeping a partial
+  that was really a cancel costs disk + a stale card, cleaned by Remove (D2).
+  Optional v2 extension (not now): a sealed cancel TOMBSTONE in the rdz
+  mailbox under the same transfer-id key, letting a Paused(Lost) receiver
+  discover the cancel out-of-band — same infra as receipts.
 - **D2 — Remove semantics**: swipe-Remove deletes the local partial + resume
   state + (receiver) receipt. Today it only drops the card. **Recommended:
   yes** (completes "the one true abandon").
