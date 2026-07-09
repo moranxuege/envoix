@@ -237,7 +237,11 @@ class TransferService : Service() {
                                 else {
                                     val lost = ev.reasonCode == "connection_lost" ||
                                         (ev.reasonCode.isEmpty() && ev.error.contains("connection lost"))
-                                    val peerStop = ev.reasonCode == "peer_paused" ||
+                                    // reasonCode when present; prose fallback for events
+                                    // that predate it (e.g. the JNI's synthetic terminal).
+                                    val peerPaused = ev.reasonCode == "peer_paused" ||
+                                        (ev.reasonCode.isEmpty() && ev.error.contains("paused by peer"))
+                                    val peerStop = peerPaused ||
                                         ev.reasonCode == "peer_cancelled" ||
                                         (ev.reasonCode.isEmpty() && ev.error.contains("interrupted by peer"))
                                     when {
@@ -250,7 +254,7 @@ class TransferService : Service() {
                                                 log = addLog(t.log, "sent · unconfirmed — all bytes sent, no CompleteAck"),
                                             )
                                         // The peer said it paused: mirror it as Paused.
-                                        ev.reasonCode == "peer_paused" ->
+                                        peerPaused ->
                                             t.copy(
                                                 status = Status.Paused, error = null, speedBps = 0.0,
                                                 log = addLog(t.log, "paused by peer (resumable)"),

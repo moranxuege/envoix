@@ -508,6 +508,18 @@ impl Client {
                     }
                 }
             }
+            // The event stream must tell the whole story on its own: emit the
+            // terminal Failed (with its typed reason_code) here, because the
+            // lower layers only return the error - the one session-level Failed
+            // event is the mDNS multi-peer loop's per-attempt report.
+            if let Err(error) = &last {
+                let reason = error.to_string();
+                events.emit(TransferEvent::Failed {
+                    direction,
+                    reason_code: event::FailureCode::classify(&reason),
+                    reason,
+                });
+            }
             last
         });
         Ok(Transfer::new(
@@ -811,5 +823,29 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.kind, ErrorKind::Input);
+    }
+
+    #[tokio::test]
+    async fn run_emits_a_terminal_failed_event_with_reason_code() {
+        // The event stream must tell the whole story on its own: a failed run
+        // ends with a Failed event carrying the typed reason_code (frontends
+        // branch on it; the operation's Result is a separate channel).
+        let mut transfer = client()
+            .run(TransferRequest {
+                direction: TransferDirection::Send,
+                path: "f.txt".into(),
+                sources: vec![PeerSource::Invite {
+                    invite: "not-an-invite".into(),
+                }],
+                options: TransferOptions::default(),
+            })
+            .expect("run spawns the transfer");
+        let mut terminal = None;
+        while let Some(stamped) = transfer.next_event().await {
+            if let TransferEvent::Failed { reason_code, .. } = stamped.event {
+                terminal = Some(reason_code);
+            }
+        }
+        assert_eq!(terminal, Some(FailureCode::Other));
     }
 }
