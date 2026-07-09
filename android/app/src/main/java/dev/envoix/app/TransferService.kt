@@ -75,6 +75,9 @@ class TransferService : Service() {
     /** Last applied snapshot seq per id: out-of-order snapshots are dropped. */
     private val lastSeq = java.util.concurrent.ConcurrentHashMap<Long, Long>()
 
+    /** Latch for the active→resting tray transition. */
+    private var wasActive = false
+
     /** Held while an mDNS-enabled session runs; Android gates multicast behind it. */
     private val multicastLock by lazy {
         (getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager)
@@ -393,7 +396,14 @@ class TransferService : Service() {
         if (state == "completed" && spec.dir() == Direction.Receive) {
             sweepStaging(spec.path, attributeTo = id)
         }
-        if (!jobsActive()) stopForegroundKeepCards()
+        // Active→resting transition: post the one final summary frame, then
+        // detach so a stale ongoing notification can never linger.
+        val nowActive = TransferRepository.transfers.value.any { isActive(it.status) }
+        if (wasActive && !nowActive) {
+            updateNotification()
+            stopForeground(STOP_FOREGROUND_DETACH)
+        }
+        wasActive = nowActive
     }
 
     /** Human line for a state transition, for the card's log drawer. */
@@ -479,36 +489,86 @@ class TransferService : Service() {
         }
     }
 
+    /** Active machine states pin the tray; everything else rests. */
+    private fun isActive(st: Status) =
+        st == Status.Waiting || st == Status.Connecting || st == Status.Verifying ||
+            st == Status.Transferring || st == Status.Confirming
+
+    private fun arrow(t: Transfer) = if (t.direction == Direction.Send) "↑" else "↓"
+
+    private fun trayWord(t: Transfer): String = when (t.status) {
+        Status.Waiting -> "Waiting for peer"
+        Status.Connecting -> "Pairing…"
+        Status.Verifying -> "Verifying"
+        Status.Confirming -> "Confirming"
+        Status.Transferring ->
+            if (t.total > 0) "${((t.bytes * 100) / t.total).toInt().coerceIn(0, 100)}%" else "…"
+        Status.Paused -> "Paused"
+        Status.Unconfirmed -> "Unconfirmed"
+        Status.Completed -> "Done"
+        Status.Failed -> "Failed"
+        Status.Cancelled -> "Cancelled"
+    }
+
+    /**
+     * The tray is a THIRD renderer of the repository cards (after the list and
+     * the log): everything derived, zero tray-side state — so it can never
+     * disagree with the cards (the old tray said "transferring" forever).
+     */
     private fun notification(): Notification {
         val open = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val active = TransferRepository.transfers.value.filter { !it.status.isTerminal && it.status != Status.Paused && it.status != Status.Unconfirmed }
+        val cards = TransferRepository.transfers.value
+        val active = cards.filter { isActive(it.status) }
         val b = NotificationCompat.Builder(this, CHANNEL)
             .setSmallIcon(android.R.drawable.stat_sys_upload)
             .setOngoing(active.isNotEmpty())
             .setOnlyAlertOnce(true)
             .setContentIntent(open)
-        val t = active.singleOrNull()
         when {
-            active.isEmpty() -> b.setContentTitle("Envoix").setContentText("Done")
-            t == null -> b.setContentTitle("Envoix").setContentText("${active.size} transfers in progress")
-            else -> {
+            active.isEmpty() -> {
+                // Final summary: outcomes, never a stale "transferring".
+                val done = cards.count { it.status == Status.Completed }
+                val paused = cards.count { it.status == Status.Paused || it.status == Status.Unconfirmed }
+                val failed = cards.count { it.status == Status.Failed }
+                val parts = buildList {
+                    if (done > 0) add("$done done")
+                    if (paused > 0) add("$paused paused")
+                    if (failed > 0) add("$failed failed")
+                }
+                b.setContentTitle("Envoix").setContentText(
+                    if (parts.isEmpty()) "No transfers"
+                    else "All transfers finished · ${parts.joinToString(", ")}"
+                )
+            }
+            active.size == 1 -> {
+                val t = active.single()
                 b.setSmallIcon(
                     if (t.direction == Direction.Send) android.R.drawable.stat_sys_upload
                     else android.R.drawable.stat_sys_download,
                 )
-                val verb = if (t.direction == Direction.Send) "Sending" else "Receiving"
-                b.setContentTitle("$verb ${t.fileName ?: "…"}")
+                val speed = if (t.status == Status.Transferring && t.speedBps > 0)
+                    " · ${humanBytes(t.speedBps.toLong())}/s" else ""
+                b.setContentTitle("${arrow(t)} ${t.fileName ?: "…"}")
+                b.setContentText(trayWord(t) + speed)
                 if (t.status == Status.Transferring && t.total > 0) {
-                    val pct = ((t.bytes * 100) / t.total).toInt().coerceIn(0, 100)
-                    b.setContentText("$pct%  ·  ${humanBytes(t.bytes)} / ${humanBytes(t.total)}")
-                    b.setProgress(100, pct, false)
+                    b.setProgress(100, ((t.bytes * 100) / t.total).toInt().coerceIn(0, 100), false)
                 } else {
-                    b.setContentText("Connecting…")
                     b.setProgress(0, 0, true)
                 }
+            }
+            else -> {
+                val up = active.count { it.direction == Direction.Send }
+                b.setContentTitle("${active.size} transfers · ${up}↑ ${active.size - up}↓")
+                val style = NotificationCompat.InboxStyle()
+                for (t in active.take(5)) {
+                    val speed = if (t.status == Status.Transferring && t.speedBps > 0)
+                        " · ${humanBytes(t.speedBps.toLong())}/s" else ""
+                    style.addLine("${arrow(t)} ${t.fileName ?: "…"} · ${trayWord(t)}$speed")
+                }
+                b.setStyle(style)
             }
         }
         return b.build()
@@ -526,11 +586,6 @@ class TransferService : Service() {
 
     private fun updateNotification() {
         getSystemService(NotificationManager::class.java).notify(NOTIF_ID, notification())
-    }
-
-    /** Whether any card still has a live attempt or a pending proof. */
-    private fun jobsActive(): Boolean = TransferRepository.transfers.value.any {
-        !it.status.isTerminal && it.status != Status.Paused
     }
 
     /** All cards at rest: drop the foreground state (notification dismissible)
