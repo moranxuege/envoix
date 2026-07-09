@@ -1,7 +1,6 @@
 //! Durable transfer records (roadmap #5): one JSON file per transfer session,
-//! written by the driver on every state change. A record is exactly
-//! `(SessionParams, Session)` — the machine state was designed serializable
-//! for this. What it buys:
+//! written by the driver on every state change. A record is exactly the
+//! immutable launch context plus the serializable machine state. What it buys:
 //! - resume across app restarts (the relaunch parameters survive the process),
 //! - receipt confirmation across restarts (a restored Unconfirmed session
 //!   resumes its mailbox poll),
@@ -12,20 +11,55 @@
 
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 
-use super::driver::SessionParams;
+use super::driver::{SessionContext, SessionParams};
 use super::machine::Session;
 
 /// One persisted transfer session.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct TransferRecord {
     /// The frontend's card id — stable across restarts.
     pub id: u64,
     /// Last-write time, ms since the Unix epoch (display/GC only).
     pub updated_ms: u64,
-    pub params: SessionParams,
+    /// Complete immutable context needed to recreate the same Rust session.
+    pub context: SessionContext,
     pub session: Session,
+}
+
+impl<'de> Deserialize<'de> for TransferRecord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            id: u64,
+            updated_ms: u64,
+            context: Option<SessionContext>,
+            params: Option<SessionParams>,
+            session: Session,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let context = match (wire.context, wire.params) {
+            (Some(context), _) => context,
+            (None, Some(params)) => SessionContext {
+                client: Default::default(),
+                params,
+            },
+            (None, None) => {
+                return Err(de::Error::missing_field("context"));
+            }
+        };
+        Ok(Self {
+            id: wire.id,
+            updated_ms: wire.updated_ms,
+            context,
+            session: wire.session,
+        })
+    }
 }
 
 /// Filesystem store: `<dir>/record-<id>.json`, atomic writes.
@@ -103,14 +137,17 @@ mod tests {
         TransferRecord {
             id,
             updated_ms: 1,
-            params: SessionParams {
-                direction: TransferDirection::Receive,
-                path: "/tmp/x".into(),
-                sources: vec![super::super::PeerSource::Room {
-                    code: "123456-kelp-coral".into(),
-                    broker: "id@1.2.3.4:5".into(),
-                }],
-                options: super::super::TransferOptions::default(),
+            context: SessionContext {
+                client: Default::default(),
+                params: SessionParams {
+                    direction: TransferDirection::Receive,
+                    path: "/tmp/x".into(),
+                    sources: vec![super::super::PeerSource::Room {
+                        code: "123456-kelp-coral".into(),
+                        broker: "id@1.2.3.4:5".into(),
+                    }],
+                    options: super::super::TransferOptions::default(),
+                },
             },
             session: Session::new(TransferDirection::Receive),
         }
@@ -134,9 +171,9 @@ mod tests {
         assert_eq!(loaded[1].session.state, State::Unconfirmed);
         assert_eq!(loaded[1].session.transfer_id.as_deref(), Some("transfer-x"),);
         assert_eq!(
-            loaded[1].params.sources,
-            record(7).params.sources,
-            "relaunch params survive"
+            loaded[1].context.params.sources,
+            record(7).context.params.sources,
+            "relaunch context survives"
         );
 
         store.delete(3).await;
@@ -147,5 +184,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(store.load_all().await.len(), 1);
+    }
+
+    #[test]
+    fn deserialize_legacy_params_record_as_default_context() {
+        let mut value = serde_json::to_value(record(9)).unwrap();
+        let object = value.as_object_mut().unwrap();
+        let context = object.remove("context").unwrap();
+        object.insert("params".into(), context["params"].clone());
+
+        let loaded: TransferRecord = serde_json::from_value(value).unwrap();
+
+        assert_eq!(loaded.id, 9);
+        assert_eq!(loaded.context.client.chunk_size, None);
+        assert_eq!(loaded.context.params.path, PathBuf::from("/tmp/x"));
     }
 }

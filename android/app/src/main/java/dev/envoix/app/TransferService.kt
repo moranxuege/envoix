@@ -229,7 +229,9 @@ class TransferService : Service() {
             val rec = records.optJSONObject(i) ?: continue
             val id = rec.optLong("id", -1L)
             if (id < 0 || jobs.containsKey(id)) continue
-            val params = rec.optJSONObject("params") ?: continue
+            val context = rec.optJSONObject("context") ?: rec
+            val params = context.optJSONObject("params") ?: rec.optJSONObject("params") ?: continue
+            val client = context.optJSONObject("client")
             val direction = if (params.optString("direction") == "Send") "send" else "receive"
             val sources = params.optJSONArray("sources")
             var code = ""
@@ -261,9 +263,9 @@ class TransferService : Service() {
                         ?.optString("relay")
                         .orEmpty()
                         .ifEmpty { Endpoints.RELAY },
-                    "",
-                    "",
-                    "",
+                    client?.optString("chunk_size").orEmpty(),
+                    jsonStringArrayCsv(client?.optJSONArray("candidates_allow")),
+                    jsonStringArrayCsv(client?.optJSONArray("candidates_deny")),
                     null,
                     useRoom,
                     useMdns,
@@ -284,6 +286,11 @@ class TransferService : Service() {
             OpLog.add("restored transfer id=$id")
         }
     }
+
+    private fun jsonStringArrayCsv(array: org.json.JSONArray?): String =
+        (0 until (array?.length() ?: 0))
+            .mapNotNull { array?.optString(it)?.takeIf(String::isNotEmpty) }
+            .joinToString(",")
 
     /**
      * Stage a picked content:// into a real path the core can (re)open across
