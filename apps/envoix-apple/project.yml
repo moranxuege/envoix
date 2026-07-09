@@ -91,6 +91,7 @@ targets:
       - Tests/EnvoixIOSUITests
     dependencies:
       - target: Envoix-iOS
+      - package: EnvoixCore
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app.ios.uitests
@@ -99,6 +100,13 @@ targets:
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: 6638TTB2SF
         TEST_TARGET_NAME: Envoix-iOS
+        OTHER_LDFLAGS:
+          - "-framework"
+          - "SystemConfiguration"
+          - "-framework"
+          - "Network"
+          - "-framework"
+          - "Security"
 
 schemes:
   Envoix-iOS:
