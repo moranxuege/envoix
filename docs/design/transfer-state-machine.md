@@ -221,6 +221,23 @@ destroySession(sessionId)   (Remove; deletes partials per D1/D2 semantics)
 - **Loopback integration**: pause/resume/cancel/unconfirmed flows over
   `memory_connection_pair`, asserting snapshot sequences.
 
+## Concurrency audit (step B review; user asked for care with parallelism)
+
+The safety argument is structural: **every machine input flows through one
+actor task** — user commands, attempt events, the confirm timer, poll ticks,
+and courier responses are serialized by one `select!`; the `Session` needs no
+locks. Audited hazards, all safe by construction or pinned by tests:
+ack-vs-receipt race (first wins, second has no edge); stale timers
+(attempt-tagged); poll ticks after state exit (schedule cleared in the same
+loop iteration); old-attempt events after Resume (channel dropped wholesale +
+replaced handle's Drop cancels); `next_event` cancel-safety (mpsc recv);
+JNI maps (std Mutex, never across an await; destroy idempotent); Kotlin
+per-card ordering (one sequential collector per session + the seq guard).
+Soft spot fixed: the session notice flow buffers UNBOUNDED (source-throttled)
+— a dropped courier notice would silently lose a receipt post, and snapshots
+are low-volume by design. Accepted: the actor briefly blocks on attempt-join
+and receipt file I/O (bounded, milliseconds).
+
 ## Migration (three PR-sized steps)
 
 - **A.** `machine` + `TransferSession` in `envoix-client`, fully tested. CLI

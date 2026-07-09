@@ -24,7 +24,10 @@ object NativeSession {
         }
         Native.createSession(id, paramsJson, callback)
         awaitClose { Native.destroySession(id, false) }
-    }.buffer(capacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+        // No drops here, unlike the legacy event flow: the driver already
+        // throttles snapshots at the source (100ms), and a dropped courier
+        // notice would silently lose a receipt post. Low volume, unbounded.
+    }.buffer(capacity = kotlinx.coroutines.channels.Channel.UNLIMITED)
 }
 
 /** Parsed events from the Envoix core (see the client event stream schema). */
