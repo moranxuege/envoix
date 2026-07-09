@@ -3,7 +3,7 @@
 use envoix_session::BindAddrs;
 
 /// Constraint on which data paths a transfer may use.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum PathPolicy {
     /// Try direct (hole-punched) first, fall back to the relay when set.
     #[default]
@@ -24,7 +24,7 @@ pub enum PathPolicy {
 
 /// Options for one transfer. Construct with [`TransferOptions::default`] and
 /// set the fields you need; new capabilities become new defaulted fields.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[non_exhaustive]
 pub struct TransferOptions {
     /// Relay URL for WAN/NAT reachability, e.g. `https://relay.example.com:8444`.

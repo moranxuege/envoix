@@ -16,13 +16,13 @@
 
 use envoix_session::TransferDirection;
 use envoix_types::DataPath;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::event::FailureCode;
 
 /// Where a pause came from — a label detail, not a distinct state: the
 /// affordance (Resume) is identical.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PauseOrigin {
     /// The local user paused.
@@ -34,7 +34,7 @@ pub enum PauseOrigin {
 }
 
 /// The session state (one card).
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "state", content = "origin")]
 pub enum State {
     /// Advertising an invite / parked in the room; no peer yet.
@@ -148,7 +148,7 @@ pub enum Effect {
 /// One transfer session (one card): the machine state plus the observable
 /// data a frontend renders. Serializable — this is the snapshot payload, and
 /// the future durable TransferRecord.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Session {
     pub direction: TransferDirection,
     #[serde(flatten)]

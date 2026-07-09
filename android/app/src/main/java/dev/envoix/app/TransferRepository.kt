@@ -26,6 +26,16 @@ object TransferRepository {
         return id
     }
 
+    /** Seed a card with a FIXED id (restoring a persisted record); keeps new
+     *  ids from colliding with restored ones. No-op if the id already exists. */
+    @Synchronized
+    fun restoreCard(id: Long, direction: Direction, room: String): Boolean {
+        if (_transfers.value.any { it.id == id }) return false
+        nextId = maxOf(nextId, id + 1)
+        _transfers.value = _transfers.value + Transfer(id = id, direction = direction, room = room)
+        return true
+    }
+
     @Synchronized
     fun update(id: Long, transform: (Transfer) -> Transfer) {
         _transfers.value = _transfers.value.map { if (it.id == id) transform(it) else it }

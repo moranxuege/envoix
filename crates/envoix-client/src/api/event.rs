@@ -7,7 +7,7 @@
 use envoix_protocol::PeerDescriptor;
 use envoix_session::TransferDirection;
 use envoix_types::{DataPath, PairingStep, TransferId};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::TransferMode;
 
@@ -144,7 +144,7 @@ pub enum TransferEvent {
 /// Frontends should treat these as a hint and keep durable facts (a partial on
 /// disk) as the fallback signal for resumability.
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailureCode {
     /// The local user cancelled the transfer.

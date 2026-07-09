@@ -23,6 +23,7 @@ use tokio::time::Instant;
 use super::event::FailureCode;
 use super::machine::{AttemptEvent, Effect, Input, Session};
 use super::receipt;
+use super::record::{RecordStore, TransferRecord, unix_now_ms};
 use super::{Client, PeerSource, TransferEvent, TransferOptions, TransferRequest};
 use super::error::TransferError;
 
@@ -41,7 +42,7 @@ const POLL_SCHEDULE: [Duration; 4] = [
 const PROGRESS_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Everything needed to (re)launch attempts of one transfer.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct SessionParams {
     pub direction: TransferDirection,
     /// The file to send, or the directory to receive into.
@@ -92,16 +93,55 @@ pub struct TransferSession {
 
 impl TransferSession {
     /// Start a session: launches attempt 1 immediately. Returns the handle and
-    /// the notice stream (snapshots + courier requests).
+    /// the notice stream (snapshots + courier requests). With `record`, every
+    /// state change is persisted for restore-across-restart.
     pub fn start(
         client: Client,
         params: SessionParams,
+        record: Option<(RecordStore, u64)>,
+    ) -> (Self, mpsc::UnboundedReceiver<SessionNotice>) {
+        let direction = params.direction;
+        Self::spawn(client, params, Session::new(direction), record, true)
+    }
+
+    /// Rehydrate a persisted session WITHOUT launching an attempt. A record
+    /// that died mid-flight (process killed while active) restores as
+    /// Paused(Lost) — the attempt died with the process. Standing effects are
+    /// re-derived from the state: a restored Unconfirmed session resumes its
+    /// mailbox poll, so receipt confirmation survives restarts.
+    pub fn restore(
+        client: Client,
+        params: SessionParams,
+        mut session: Session,
+        record: Option<(RecordStore, u64)>,
+    ) -> (Self, mpsc::UnboundedReceiver<SessionNotice>) {
+        use super::machine::{PauseOrigin, State};
+        if matches!(
+            session.state,
+            State::Waiting
+                | State::Connecting
+                | State::Verifying
+                | State::Transferring
+                | State::Confirming
+        ) {
+            session.state = State::Paused(PauseOrigin::Lost);
+            session.reason = Some("interrupted by an app restart".into());
+        }
+        Self::spawn(client, params, session, record, false)
+    }
+
+    fn spawn(
+        client: Client,
+        params: SessionParams,
+        session: Session,
+        record: Option<(RecordStore, u64)>,
+        launch: bool,
     ) -> (Self, mpsc::UnboundedReceiver<SessionNotice>) {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (notice_tx, notice_rx) = mpsc::unbounded_channel();
         let actor = Actor {
             client,
-            session: Session::new(params.direction),
+            session,
             params,
             cmds: cmd_rx,
             notices: notice_tx,
@@ -112,6 +152,8 @@ impl TransferSession {
             poll_key: None,
             rate: RateTracker::default(),
             last_progress_snapshot: None,
+            record,
+            launch,
         };
         tokio::spawn(actor.run());
         (Self { cmds: cmd_tx }, notice_rx)
@@ -200,14 +242,23 @@ struct Actor {
     poll_key: Option<String>,
     rate: RateTracker,
     last_progress_snapshot: Option<Instant>,
+    record: Option<(RecordStore, u64)>,
+    /// False when restoring: no attempt is launched; standing effects are
+    /// re-derived from the restored state instead.
+    launch: bool,
 }
 
 impl Actor {
     async fn run(mut self) {
-        // Attempt 1: a user-initiated new transfer, resume per the params.
-        let resume = self.params.options.resume;
-        self.launch_attempt(resume);
+        if self.launch {
+            // Attempt 1: a user-initiated new transfer, resume per the params.
+            let resume = self.params.options.resume;
+            self.launch_attempt(resume);
+        } else if self.session.state == super::machine::State::Unconfirmed {
+            self.run_effect(Effect::StartMailboxPoll).await;
+        }
         self.emit_snapshot(false);
+        self.persist().await;
 
         loop {
             let confirm_at = self.confirm_deadline.map(|(_, at)| at);
@@ -273,6 +324,10 @@ impl Actor {
                         LocalFileStorage::delete_receipt(&self.params.path, name).await
                 {
                     tracing::debug!(%error, "discard: receipt");
+                }
+                // Remove is the one true abandon: the record goes too.
+                if let Some((store, id)) = &self.record {
+                    store.delete(*id).await;
                 }
             }
         }
@@ -359,6 +414,26 @@ impl Actor {
         }
         if self.session != before {
             self.emit_snapshot(progress_only);
+            // Persist state changes (not progress ticks: on a crash the
+            // receiver's on-disk resume state is the real resume anyway).
+            if !progress_only {
+                self.persist().await;
+            }
+        }
+    }
+
+    /// Write the durable record, when recording is on.
+    async fn persist(&self) {
+        if let Some((store, id)) = &self.record {
+            let record = TransferRecord {
+                id: *id,
+                updated_ms: unix_now_ms(),
+                params: self.params.clone(),
+                session: self.session.clone(),
+            };
+            if let Err(error) = store.save(&record).await {
+                tracing::warn!(%error, "persisting transfer record failed");
+            }
         }
     }
 
@@ -556,7 +631,7 @@ mod tests {
     #[tokio::test]
     async fn failing_attempt_reaches_failed_via_run_ended() {
         let (_session, mut notices) =
-            TransferSession::start(Client::new(), failing_params(TransferDirection::Send));
+            TransferSession::start(Client::new(), failing_params(TransferDirection::Send), None);
         let snapshot = wait_for_state(&mut notices, State::Failed).await;
         assert_eq!(snapshot.session.attempt, 1);
         assert!(snapshot.session.reason.is_some());
@@ -565,7 +640,7 @@ mod tests {
     #[tokio::test]
     async fn resume_launches_attempt_two() {
         let (session, mut notices) =
-            TransferSession::start(Client::new(), failing_params(TransferDirection::Send));
+            TransferSession::start(Client::new(), failing_params(TransferDirection::Send), None);
         wait_for_state(&mut notices, State::Failed).await;
         session.resume();
         let snapshot = wait_for_state(&mut notices, State::Connecting).await;
@@ -576,9 +651,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restore_coerces_active_to_paused_lost() {
+        let mut session = Session::new(TransferDirection::Receive);
+        session.bytes = 40;
+        assert_eq!(session.state, State::Connecting); // "active" when persisted
+        let (_handle, mut notices) = TransferSession::restore(
+            Client::new(),
+            failing_params(TransferDirection::Receive),
+            session,
+            None,
+        );
+        let snapshot = wait_for_state(
+            &mut notices,
+            State::Paused(super::super::machine::PauseOrigin::Lost),
+        )
+        .await;
+        assert_eq!(snapshot.session.bytes, 40, "progress display survives");
+        assert_eq!(snapshot.session.attempt, 1, "no attempt was launched");
+    }
+
+    #[tokio::test]
+    async fn restore_unconfirmed_resumes_the_mailbox_poll() {
+        let mut session = Session::new(TransferDirection::Send);
+        session.state = State::Unconfirmed;
+        session.transfer_id = Some("transfer-restored".into());
+        let (_handle, mut notices) = TransferSession::restore(
+            Client::new(),
+            failing_params(TransferDirection::Send),
+            session,
+            None,
+        );
+        // Receipt confirmation must survive restarts: the restored session
+        // re-derives its standing effect and asks the courier to fetch.
+        loop {
+            let notice = tokio::time::timeout(Duration::from_secs(8), notices.recv())
+                .await
+                .expect("courier request within the poll schedule")
+                .expect("stream open");
+            if let SessionNotice::FetchReceipt { key } = notice {
+                assert_eq!(key.len(), 64);
+                break;
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn cancel_wins_over_the_attempt() {
         let (session, mut notices) =
-            TransferSession::start(Client::new(), failing_params(TransferDirection::Receive));
+            TransferSession::start(Client::new(), failing_params(TransferDirection::Receive), None);
         session.cancel();
         let snapshot = wait_for_state(&mut notices, State::Cancelled).await;
         // Whatever the racing attempt reported, the user's cancel is final.

@@ -35,6 +35,7 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             requestNotif.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
+        TransferService.restoreAll(this)
         setContent {
             EnvoixTheme {
                 var screen by remember { mutableStateOf(Screen.Home) }

@@ -148,6 +148,11 @@ Design (two layers that compose; user-proposed mailbox evaluated and adopted):
    app session; cross-restart needs TransferRecord (#5).
 4. Transfer state machine in `envoix-client` (design doc first, then implement).
 5. Durable `TransferRecord` (cancel keeps, remove deletes; receipts are its first slice).
+   ✅ DONE 2026-07-09: RecordStore (one JSON per session, atomic) written by the driver
+   on state changes; TransferSession::restore rehydrates without launching (mid-flight
+   records coerce to Paused(Lost); restored Unconfirmed resumes its mailbox poll — receipt
+   confirmation survives restarts); app restores cards at launch via their durable ids;
+   Remove deletes the record (D2). Completed records persist = transfer history in-list.
 6. Logging/diagnostics formalization. Requirement learned 2026-07-08: at TRACE the
    4×8 MB core-log ring churns in minutes (a needed room's story rotated away mid-
    debug) — retention must be per-room/per-transfer, not a byte ring. Also surface

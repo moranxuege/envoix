@@ -163,6 +163,7 @@ class TransferService : Service() {
                 OpLog.add("cancel transfer id=$id")
                 Native.sessionIntent(id, "cancel")
             }
+            ACTION_RESTORE_ALL -> restoreAllRecords()
             ACTION_REMOVE -> {
                 val id = intent.getLongExtra(EXTRA_ID, -1L)
                 OpLog.add("remove transfer id=$id")
@@ -194,6 +195,51 @@ class TransferService : Service() {
     /** Append a timestamped line to a transfer's log, keeping the last 60. */
     private fun addLog(cur: List<String>, line: String): List<String> =
         (cur + "${logTime.format(java.util.Date())}  $line").takeLast(TransferRepository.LOG_CAP)
+
+    /**
+     * Restore persisted transfer records (roadmap #5): recreate each card with
+     * its durable id and rehydrate its Rust session — the session's initial
+     * snapshot repopulates the card through the normal rendering path. Resting
+     * cards idle; a restored Unconfirmed resumes its mailbox poll in Rust.
+     */
+    private fun restoreAllRecords() {
+        val records = runCatching { org.json.JSONArray(Native.listRecords()) }.getOrNull() ?: return
+        for (i in 0 until records.length()) {
+            val rec = records.optJSONObject(i) ?: continue
+            val id = rec.optLong("id", -1L)
+            if (id < 0 || jobs.containsKey(id)) continue
+            val params = rec.optJSONObject("params") ?: continue
+            val direction = if (params.optString("direction") == "Send") "send" else "receive"
+            val sources = params.optJSONArray("sources")
+            var code = ""; var broker = ""; var useRoom = false; var useMdns = false
+            for (j in 0 until (sources?.length() ?: 0)) {
+                val src = sources!!.optJSONObject(j) ?: continue
+                src.optJSONObject("Room")?.let { useRoom = true; code = it.optString("code"); broker = it.optString("broker") }
+                src.optJSONObject("Mdns")?.let { useMdns = true; if (code.isEmpty()) code = it.optString("token") }
+            }
+            if (code.isEmpty()) continue
+            if (!TransferRepository.restoreCard(id, if (direction == "send") Direction.Send else Direction.Receive, code)) continue
+            val spec = Spec(
+                direction, code, params.optString("path"),
+                broker.ifEmpty { Endpoints.BROKER },
+                params.optJSONObject("options")?.optString("relay").orEmpty().ifEmpty { Endpoints.RELAY },
+                "", "", "", null, useRoom, useMdns,
+            )
+            specs[id] = spec
+            lastSeq[id] = 0L
+            val job = scope.launch {
+                NativeSession.restore(id).collect { notice ->
+                    when (notice.optString("notice")) {
+                        "snapshot" -> onSnapshot(id, spec, notice)
+                        "fetch_receipt" -> onFetchReceipt(id, notice.optString("key"))
+                        "post_receipt" -> onPostReceipt(id, notice)
+                    }
+                }
+            }
+            jobs[id] = job
+            OpLog.add("restored transfer id=$id")
+        }
+    }
 
     /**
      * Stage a picked content:// into a real path the core can (re)open across
@@ -515,6 +561,7 @@ class TransferService : Service() {
         private const val ACTION_PAUSE = "dev.envoix.app.PAUSE"
         private const val ACTION_RESUME = "dev.envoix.app.RESUME"
         private const val ACTION_REMOVE = "dev.envoix.app.REMOVE"
+        private const val ACTION_RESTORE_ALL = "dev.envoix.app.RESTORE_ALL"
 
         /** Launch specs by id, so a session can be re-created after the service
          *  (or process) restarted. */
@@ -592,6 +639,13 @@ class TransferService : Service() {
                     action = ACTION_RESUME
                     putExtra(EXTRA_ID, id)
                 }
+            )
+        }
+
+        /** Restore persisted transfer records into cards + idle sessions. */
+        fun restoreAll(context: Context) {
+            context.startService(
+                Intent(context, TransferService::class.java).apply { action = ACTION_RESTORE_ALL }
             )
         }
 

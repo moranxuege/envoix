@@ -26,6 +26,16 @@ object Native {
     /** Wire the Android VM + app context into the Rust network stack. Call once. */
     external fun initContext(context: android.content.Context)
 
+    /** Set the durable transfer-record directory (once, at app start). */
+    external fun initRecords(dir: String)
+
+    /** All persisted transfer records, as a JSON array. */
+    external fun listRecords(): String
+
+    /** Rehydrate a persisted session (no attempt launched); notices flow to
+     *  [callback] like [createSession]. */
+    external fun restoreSession(id: Long, callback: EventCallback)
+
     /** Create + start a transfer session (the Rust state-machine driver).
      *  Notices (snapshots + mailbox courier requests) arrive on [callback] as
      *  JSON; returns immediately. */

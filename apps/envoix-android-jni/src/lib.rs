@@ -13,6 +13,7 @@ use std::io::Write;
 use std::sync::{Mutex, OnceLock};
 
 use envoix_client::TransferDirection;
+use envoix_client::api::driver::{SessionParams, TransferSession};
 use envoix_client::api::{Client, Invite, PeerSource, Role, TransferOptions};
 use jni::JNIEnv;
 use jni::JavaVM;
@@ -20,6 +21,13 @@ use jni::objects::{GlobalRef, JClass, JObject, JString, JValue};
 use jni::sys::{jboolean, jlong};
 
 static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+
+/// The durable record store (roadmap #5), set once by `initRecords`.
+static RECORDS: OnceLock<envoix_client::api::record::RecordStore> = OnceLock::new();
+
+fn record_for(id: i64) -> Option<(envoix_client::api::record::RecordStore, u64)> {
+    RECORDS.get().map(|s| (s.clone(), id as u64))
+}
 
 /// Live transfer sessions (the state-machine driver), keyed by the Kotlin id.
 type SessionMap = HashMap<i64, envoix_client::api::driver::TransferSession>;
@@ -360,7 +368,6 @@ pub extern "system" fn Java_dev_envoix_app_Native_createSession(
     params_json: JString,
     callback: JObject,
 ) {
-    use envoix_client::api::driver::{SessionParams, TransferSession};
     let json = jstr(&mut env, &params_json);
     let vm = env.get_java_vm().expect("java vm");
     let cb = env.new_global_ref(&callback).expect("callback ref");
@@ -416,15 +423,82 @@ pub extern "system" fn Java_dev_envoix_app_Native_createSession(
     };
 
     let _guard = runtime().enter();
-    let (session, mut notices) = TransferSession::start(client, params);
+    let (session, notices) = TransferSession::start(client, params, record_for(id));
     if let Ok(mut map) = sessions().lock() {
         map.insert(id, session);
     }
+    spawn_pump(vm, cb, notices);
+}
+
+fn spawn_pump(
+    vm: JavaVM,
+    cb: GlobalRef,
+    mut notices: tokio::sync::mpsc::UnboundedReceiver<envoix_client::api::driver::SessionNotice>,
+) {
     runtime().spawn(async move {
         while let Some(notice) = notices.recv().await {
             emit(&vm, &cb, &notice_json(notice));
         }
     });
+}
+
+/// Set the durable record directory. Call once at app start, before sessions.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_initRecords(
+    mut env: JNIEnv,
+    _class: JClass,
+    dir: JString,
+) {
+    let dir = jstr(&mut env, &dir);
+    let _ = RECORDS.set(envoix_client::api::record::RecordStore::new(dir));
+}
+
+/// All persisted transfer records as a JSON array (for restoring cards).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_listRecords<'a>(
+    env: JNIEnv<'a>,
+    _class: JClass,
+) -> jni::sys::jstring {
+    let json = match RECORDS.get() {
+        Some(store) => {
+            let records = runtime().block_on(store.load_all());
+            serde_json::to_string(&records).unwrap_or_else(|_| "[]".into())
+        }
+        None => "[]".into(),
+    };
+    env.new_string(json).expect("jstring").into_raw()
+}
+
+/// Rehydrate a persisted session (no attempt launched; a mid-flight record
+/// restores as Paused(Lost); a restored Unconfirmed resumes its mailbox poll).
+/// Notices flow to `callback` like `createSession`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_restoreSession(
+    env: JNIEnv,
+    _class: JClass,
+    id: jlong,
+    callback: JObject,
+) {
+    let vm = env.get_java_vm().expect("java vm");
+    let cb = env.new_global_ref(&callback).expect("callback ref");
+    let Some(store) = RECORDS.get() else { return };
+    let record = runtime()
+        .block_on(store.load_all())
+        .into_iter()
+        .find(|r| r.id == id as u64);
+    let Some(record) = record else { return };
+    let client = Client::from_config_fields(None, &[], &[]).unwrap_or_default();
+    let _guard = runtime().enter();
+    let (session, notices) = TransferSession::restore(
+        client,
+        record.params,
+        record.session,
+        record_for(id),
+    );
+    if let Ok(mut map) = sessions().lock() {
+        map.insert(id, session);
+    }
+    spawn_pump(vm, cb, notices);
 }
 
 /// Route a user intent ("pause" / "resume" / "cancel") to a live session.

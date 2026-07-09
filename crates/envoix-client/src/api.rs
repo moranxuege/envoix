@@ -15,6 +15,7 @@ pub mod driver;
 mod options;
 pub mod machine;
 pub mod receipt;
+pub mod record;
 mod source;
 mod transfer;
 
