@@ -68,8 +68,12 @@ pub extern "system" fn Java_dev_envoix_app_Native_initContext(
     _class: JClass,
     context: JObject,
 ) {
-    let Ok(vm) = env.get_java_vm() else { return };
+    let Ok(vm) = env.get_java_vm() else {
+        tracing::warn!("initContext: failed to get JavaVM");
+        return;
+    };
     let Ok(ctx) = env.new_global_ref(&context) else {
+        tracing::warn!("initContext: failed to create global context ref");
         return;
     };
     unsafe {
@@ -149,7 +153,20 @@ pub extern "system" fn Java_dev_envoix_app_Native_parseInvite(
 fn to_jstring(env: &mut JNIEnv, s: &str) -> jni::sys::jstring {
     env.new_string(s)
         .map(|s| s.into_raw())
-        .unwrap_or(std::ptr::null_mut())
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "failed to allocate Java string");
+            std::ptr::null_mut()
+        })
+}
+
+fn error_jstring(
+    env: &mut JNIEnv,
+    context: &str,
+    error: impl std::fmt::Display,
+) -> jni::sys::jstring {
+    let message = format!("{context}: {error}");
+    tracing::warn!(%message);
+    to_jstring(env, &format!(r#"{{"error":{}}}"#, json_str(&message)))
 }
 
 fn opt_json(s: Option<&str>) -> String {
@@ -169,12 +186,16 @@ fn split_csv(value: &str) -> Vec<String> {
 }
 
 fn jstr(env: &mut JNIEnv, s: &JString) -> String {
-    env.get_string(s).map(|s| s.into()).unwrap_or_default()
+    env.get_string(s).map(|s| s.into()).unwrap_or_else(|error| {
+        tracing::warn!(%error, "failed to read Java string");
+        String::new()
+    })
 }
 
 /// Call `callback.onEvent(json)`, attaching this thread to the JVM as needed.
 fn emit(vm: &JavaVM, cb: &GlobalRef, json: &str) {
     let Ok(mut env) = vm.attach_current_thread() else {
+        tracing::warn!("failed to attach thread to JVM for callback");
         return;
     };
     if let Ok(js) = env.new_string(json) {
@@ -184,6 +205,8 @@ fn emit(vm: &JavaVM, cb: &GlobalRef, json: &str) {
             "(Ljava/lang/String;)V",
             &[JValue::Object(&js)],
         );
+    } else {
+        tracing::warn!("failed to allocate callback JSON string");
     }
 }
 
@@ -198,8 +221,12 @@ pub extern "system" fn Java_dev_envoix_app_Native_initLogging(
     _class: JClass,
     sink: JObject,
 ) {
-    let Ok(vm) = env.get_java_vm() else { return };
+    let Ok(vm) = env.get_java_vm() else {
+        tracing::warn!("initLogging: failed to get JavaVM");
+        return;
+    };
     let Ok(sink) = env.new_global_ref(&sink) else {
+        tracing::warn!("initLogging: failed to create global log sink ref");
         return;
     };
     let _ = LOG_VM.set(vm);
@@ -246,6 +273,7 @@ pub extern "system" fn Java_dev_envoix_app_Native_setLogLevel(
     spec: JString,
 ) {
     let Ok(spec) = env.get_string(&spec) else {
+        tracing::warn!("setLogLevel: failed to read log filter string");
         return;
     };
     let spec: String = spec.into();
@@ -408,6 +436,39 @@ fn json_str(s: &str) -> String {
     out
 }
 
+fn failed_snapshot(reason: &str) -> String {
+    format!(
+        r#"{{"notice":"snapshot","seq":1,"state":"failed","reason":{}}}"#,
+        json_str(reason)
+    )
+}
+
+fn emit_failed_snapshot(vm: &JavaVM, cb: &GlobalRef, context: &str, error: impl std::fmt::Display) {
+    let reason = format!("{context}: {error}");
+    tracing::warn!(%reason);
+    emit(vm, cb, &failed_snapshot(&reason));
+}
+
+fn java_vm_or_log(env: &JNIEnv, context: &str) -> Option<JavaVM> {
+    match env.get_java_vm() {
+        Ok(vm) => Some(vm),
+        Err(error) => {
+            tracing::warn!(%error, "{context}: failed to get JavaVM");
+            None
+        }
+    }
+}
+
+fn callback_or_log(env: &JNIEnv, callback: &JObject, context: &str) -> Option<GlobalRef> {
+    match env.new_global_ref(callback) {
+        Ok(callback) => Some(callback),
+        Err(error) => {
+            tracing::warn!(%error, "{context}: failed to create callback global ref");
+            None
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Session API (the state-machine driver; replaces runTransfer in step C).
 // ---------------------------------------------------------------------------
@@ -454,23 +515,16 @@ pub extern "system" fn Java_dev_envoix_app_Native_createSession(
     callback: JObject,
 ) {
     let json = jstr(&mut env, &params_json);
-    let vm = env.get_java_vm().expect("java vm");
-    let cb = env.new_global_ref(&callback).expect("callback ref");
-
-    let fail = |vm: &JavaVM, cb: &GlobalRef, err: String| {
-        emit(
-            vm,
-            cb,
-            &format!(
-                r#"{{"notice":"snapshot","seq":1,"state":"failed","reason":{}}}"#,
-                json_str(&err)
-            ),
-        );
+    let Some(vm) = java_vm_or_log(&env, "createSession") else {
+        return;
+    };
+    let Some(cb) = callback_or_log(&env, &callback, "createSession") else {
+        return;
     };
 
     let v: serde_json::Value = match serde_json::from_str(&json) {
         Ok(v) => v,
-        Err(e) => return fail(&vm, &cb, e.to_string()),
+        Err(e) => return emit_failed_snapshot(&vm, &cb, "invalid session params JSON", e),
     };
     let get = |k: &str| v[k].as_str().unwrap_or("").to_string();
     let allow = split_csv(&get("candidates_allow"));
@@ -479,7 +533,7 @@ pub extern "system" fn Java_dev_envoix_app_Native_createSession(
     let chunk = (!chunk.is_empty()).then_some(chunk);
     let client = match Client::from_config_fields(chunk.as_deref(), &allow, &deny) {
         Ok(c) => c,
-        Err(e) => return fail(&vm, &cb, e.to_string()),
+        Err(e) => return emit_failed_snapshot(&vm, &cb, "invalid client config", e),
     };
 
     let code = get("code");
@@ -510,8 +564,13 @@ pub extern "system" fn Java_dev_envoix_app_Native_createSession(
 
     let _guard = runtime().enter();
     let (session, notices) = TransferSession::start(client, params, record_for(id));
-    if let Ok(mut map) = sessions().lock() {
-        map.insert(id, session);
+    match sessions().lock() {
+        Ok(mut map) => {
+            map.insert(id, session);
+        }
+        Err(error) => {
+            return emit_failed_snapshot(&vm, &cb, "session registry unavailable", error);
+        }
     }
     spawn_pump(vm, cb, notices);
 }
@@ -536,23 +595,33 @@ pub extern "system" fn Java_dev_envoix_app_Native_initRecords(
     dir: JString,
 ) {
     let dir = jstr(&mut env, &dir);
-    let _ = RECORDS.set(envoix_client::api::record::RecordStore::new(dir));
+    if RECORDS
+        .set(envoix_client::api::record::RecordStore::new(dir))
+        .is_err()
+    {
+        tracing::warn!("initRecords: record store already initialized");
+    }
 }
 
 /// All persisted transfer records as a JSON array (for restoring cards).
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_envoix_app_Native_listRecords<'a>(
-    env: JNIEnv<'a>,
+    mut env: JNIEnv<'a>,
     _class: JClass,
 ) -> jni::sys::jstring {
     let json = match RECORDS.get() {
         Some(store) => {
             let records = runtime().block_on(store.load_all());
-            serde_json::to_string(&records).unwrap_or_else(|_| "[]".into())
+            match serde_json::to_string(&records) {
+                Ok(json) => json,
+                Err(error) => {
+                    return error_jstring(&mut env, "failed to serialize transfer records", error);
+                }
+            }
         }
         None => "[]".into(),
     };
-    env.new_string(json).expect("jstring").into_raw()
+    to_jstring(&mut env, &json)
 }
 
 /// Rehydrate a persisted session (no attempt launched; a mid-flight record
@@ -565,20 +634,38 @@ pub extern "system" fn Java_dev_envoix_app_Native_restoreSession(
     id: jlong,
     callback: JObject,
 ) {
-    let vm = env.get_java_vm().expect("java vm");
-    let cb = env.new_global_ref(&callback).expect("callback ref");
-    let Some(store) = RECORDS.get() else { return };
+    let Some(vm) = java_vm_or_log(&env, "restoreSession") else {
+        return;
+    };
+    let Some(cb) = callback_or_log(&env, &callback, "restoreSession") else {
+        return;
+    };
+    let Some(store) = RECORDS.get() else {
+        return emit_failed_snapshot(&vm, &cb, "transfer record store is not initialized", "");
+    };
     let record = runtime()
         .block_on(store.load_all())
         .into_iter()
         .find(|r| r.id == id as u64);
-    let Some(record) = record else { return };
-    let client = Client::from_config_fields(None, &[], &[]).unwrap_or_default();
+    let Some(record) = record else {
+        return emit_failed_snapshot(&vm, &cb, "transfer record not found", id);
+    };
+    let client = match Client::from_config_fields(None, &[], &[]) {
+        Ok(client) => client,
+        Err(error) => {
+            return emit_failed_snapshot(&vm, &cb, "invalid restored client config", error);
+        }
+    };
     let _guard = runtime().enter();
     let (session, notices) =
         TransferSession::restore(client, record.params, record.session, record_for(id));
-    if let Ok(mut map) = sessions().lock() {
-        map.insert(id, session);
+    match sessions().lock() {
+        Ok(mut map) => {
+            map.insert(id, session);
+        }
+        Err(error) => {
+            return emit_failed_snapshot(&vm, &cb, "session registry unavailable", error);
+        }
     }
     spawn_pump(vm, cb, notices);
 }
@@ -592,17 +679,21 @@ pub extern "system" fn Java_dev_envoix_app_Native_sessionIntent(
     intent: JString,
 ) {
     let intent = jstr(&mut env, &intent);
-    if let Ok(map) = sessions().lock()
-        && let Some(session) = map.get(&id)
-    {
-        match intent.as_str() {
-            "pause" => session.pause(),
-            "resume" => session.resume(),
-            "cancel" => session.cancel(),
-            "reverify" => session.serve_reverify(),
-            "receipt_posted" => session.receipt_posted(),
-            _ => {}
-        }
+    let Ok(map) = sessions().lock() else {
+        tracing::warn!(id, intent, "sessionIntent: session registry unavailable");
+        return;
+    };
+    let Some(session) = map.get(&id) else {
+        tracing::warn!(id, intent, "sessionIntent: session not found");
+        return;
+    };
+    match intent.as_str() {
+        "pause" => session.pause(),
+        "resume" => session.resume(),
+        "cancel" => session.cancel(),
+        "reverify" => session.serve_reverify(),
+        "receipt_posted" => session.receipt_posted(),
+        _ => tracing::warn!(id, intent, "sessionIntent: unknown intent"),
     }
 }
 
@@ -620,15 +711,23 @@ pub extern "system" fn Java_dev_envoix_app_Native_receiptResponse(
     let blob = if blob_b64.trim().is_empty() {
         None
     } else {
-        base64::engine::general_purpose::STANDARD
-            .decode(blob_b64.trim())
-            .ok()
+        match base64::engine::general_purpose::STANDARD.decode(blob_b64.trim()) {
+            Ok(blob) => Some(blob),
+            Err(error) => {
+                tracing::warn!(id, %error, "receiptResponse: invalid base64 blob");
+                return;
+            }
+        }
     };
-    if let Ok(map) = sessions().lock()
-        && let Some(session) = map.get(&id)
-    {
-        session.receipt_response(blob);
-    }
+    let Ok(map) = sessions().lock() else {
+        tracing::warn!(id, "receiptResponse: session registry unavailable");
+        return;
+    };
+    let Some(session) = map.get(&id) else {
+        tracing::warn!(id, "receiptResponse: session not found");
+        return;
+    };
+    session.receipt_response(blob);
 }
 
 /// Tear a session down. With `discard` (D2, Remove): delete the partial,
@@ -641,6 +740,10 @@ pub extern "system" fn Java_dev_envoix_app_Native_destroySession(
     discard: jboolean,
 ) {
     let Some(session) = sessions().lock().ok().and_then(|mut m| m.remove(&id)) else {
+        tracing::warn!(
+            id,
+            "destroySession: session not found or registry unavailable"
+        );
         return;
     };
     if discard != 0 {
