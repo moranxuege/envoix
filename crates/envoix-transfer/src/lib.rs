@@ -6,6 +6,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::Duration;
 
 use envoix_error::CoreError;
 use envoix_protocol::{
@@ -72,6 +73,10 @@ pub const USER_PAUSE_MESSAGE: &str = "transfer paused by user";
 pub const PEER_INTERRUPT_MESSAGE: &str = "transfer interrupted by peer";
 /// Local error text when the peer reported a pause.
 pub const PEER_PAUSE_MESSAGE: &str = "transfer paused by peer";
+#[cfg(not(test))]
+const COMPLETE_ACK_TIMEOUT: Duration = Duration::from_secs(60);
+#[cfg(test)]
+const COMPLETE_ACK_TIMEOUT: Duration = Duration::from_millis(250);
 const RESUME_STATE_WRITE_INTERVAL: u64 = 8 * 1024 * 1024;
 
 /// Error type returned by the transfer state machine.
@@ -801,6 +806,23 @@ async fn recv_frame_or_cancel(
     }
 }
 
+async fn recv_frame_or_cancel_with_timeout(
+    connection: &mut dyn FrameConnection,
+    cancel: &TransferCancelToken,
+    timeout: Duration,
+) -> Result<Frame, TransferError> {
+    tokio::select! {
+        frame = connection.recv_frame() => frame,
+        () = cancel.cancelled() => {
+            notify_interrupted(connection, cancel).await;
+            Err(interrupted_error(cancel))
+        }
+        () = tokio::time::sleep(timeout) => Err(CoreError::Transfer(format!(
+            "receiver did not confirm completion within {} seconds; retry may resume the transfer",
+            timeout.as_secs()
+        ))),
+    }
+}
 async fn check_cancelled(
     connection: &mut dyn FrameConnection,
     cancel: &TransferCancelToken,
