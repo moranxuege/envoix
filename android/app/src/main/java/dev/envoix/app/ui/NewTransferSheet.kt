@@ -189,11 +189,25 @@ fun NewTransferSheet(
         OutlinedTextField(
             value = typed,
             onValueChange = {
-                typed = it.trim()
-                transferInvite = if (InviteCodec.isTransferInvite(typed)) typed else null
-                if (transferInvite != null) role = "send"
+                val trimmed = it.trim()
+                typed = trimmed
+                transferInvite = null
                 scannedBroker = null
                 scannedRelay = null
+                when {
+                    InviteCodec.isTransferInvite(trimmed) -> {
+                        transferInvite = trimmed
+                        role = "send"
+                    }
+                    trimmed.lowercase().startsWith("envoix://pair/") -> {
+                        InviteCodec.parse(trimmed)?.let { invite ->
+                            typed = invite.code
+                            scannedBroker = invite.broker
+                            scannedRelay = invite.relay
+                            InviteCodec.oppositeRole(invite.role)?.let { role = it }
+                        }
+                    }
+                }
             },
             placeholder = { Text("or enter a code to join…") },
             singleLine = true,

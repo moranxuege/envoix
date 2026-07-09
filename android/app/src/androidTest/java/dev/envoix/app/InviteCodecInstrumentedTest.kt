@@ -24,6 +24,8 @@ class InviteCodecInstrumentedTest {
         val parsedPayload = InviteCodec.parse(payload)
         assertNotNull("UniFFI invite payload parsing returned null", parsedPayload)
         assertEquals(code, parsedPayload!!.code)
+        assertEquals(Endpoints.BROKER, parsedPayload.broker)
+        assertEquals(Endpoints.RELAY, parsedPayload.relay)
         assertEquals("receive", parsedPayload.role)
 
         val parsedCode = InviteCodec.parse(code)

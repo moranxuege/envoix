@@ -1849,6 +1849,156 @@ fn completed_file_path_for_request(
         .into_owned()
 }
 
+fn request_debug_summary(
+    settings: &EnvoixRuntimeSettings,
+    request: &FfiTransferRequest,
+    attempts: &[TransferAttemptSource],
+) -> String {
+    let direction = transfer_direction_label(request.direction);
+    let mode = transfer_mode_label(request.mode);
+    let routes = attempts
+        .iter()
+        .map(|attempt| transfer_mode_label(attempt.mode))
+        .collect::<Vec<_>>()
+        .join(" -> ");
+    let path = match request.direction {
+        FfiTransferDirection::Send => file_label(&request.file_path),
+        FfiTransferDirection::Receive => dir_label(&request.output_dir),
+        FfiTransferDirection::Unknown => "path=<unknown>".to_string(),
+    };
+    let room = optional_code_room(&request.code)
+        .map(|room| format!(" room={room}"))
+        .unwrap_or_default();
+    let broker = effective_broker_label(settings, request);
+    let relay = effective_relay_label(settings, request);
+    format!(
+        "request direction={direction} mode={mode}{room} routes=[{routes}] {path} broker={broker} relay={relay} internet={}",
+        request.rendezvous.internet_available,
+    )
+}
+
+fn attempt_debug_summary(index: usize, count: usize, attempt: &TransferAttemptSource) -> String {
+    format!(
+        "attempt {}/{} via {} {}",
+        index + 1,
+        count,
+        transfer_mode_label(attempt.mode),
+        peer_source_debug(&attempt.source)
+    )
+}
+
+fn peer_source_debug(source: &PeerSource) -> String {
+    match source {
+        PeerSource::Manual { .. } => "source=manual".to_string(),
+        PeerSource::Invite { invite } => format!("source=invite len={}", invite.len()),
+        PeerSource::ShowManual { token } => {
+            format!("source=show-manual token={}", token_state(token.as_deref()))
+        }
+        PeerSource::ShowInvite { ttl_secs } => format!("source=show-invite ttl={ttl_secs}s"),
+        PeerSource::Mdns { token } => format!(
+            "source=mdns token={}",
+            token
+                .as_deref()
+                .and_then(optional_code_room)
+                .unwrap_or_else(|| token_state(token.as_deref()))
+        ),
+        PeerSource::Room { code, broker } => {
+            format!(
+                "source=room room={} broker={}",
+                code_room(code),
+                broker_label(broker)
+            )
+        }
+    }
+}
+
+fn transfer_direction_label(direction: FfiTransferDirection) -> &'static str {
+    match direction {
+        FfiTransferDirection::Send => "send",
+        FfiTransferDirection::Receive => "receive",
+        FfiTransferDirection::Unknown => "unknown",
+    }
+}
+
+fn file_label(path: &str) -> String {
+    let name = Path::new(path.trim())
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "<none>".to_string());
+    format!("file={name}")
+}
+
+fn dir_label(path: &str) -> String {
+    let name = Path::new(path.trim())
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "<none>".to_string());
+    format!("output_dir={name}")
+}
+
+fn effective_broker_label(
+    settings: &EnvoixRuntimeSettings,
+    request: &FfiTransferRequest,
+) -> String {
+    let broker = request.broker.trim();
+    let broker = if broker.is_empty() {
+        settings.server_url.trim()
+    } else {
+        broker
+    };
+    if broker.is_empty() {
+        "default".to_string()
+    } else {
+        broker_label(broker)
+    }
+}
+
+fn effective_relay_label(settings: &EnvoixRuntimeSettings, request: &FfiTransferRequest) -> String {
+    let relay = request.relay.trim();
+    let relay = if relay.is_empty() {
+        settings.relay_url.trim()
+    } else {
+        relay
+    };
+    if relay.is_empty() {
+        if request.broker.trim().is_empty() && settings.server_url.trim().is_empty() {
+            "default".to_string()
+        } else {
+            "none".to_string()
+        }
+    } else {
+        relay.to_string()
+    }
+}
+
+fn broker_label(broker: &str) -> String {
+    broker
+        .split_once('@')
+        .map(|(_, addr)| addr.to_string())
+        .unwrap_or_else(|| broker.to_string())
+}
+
+fn optional_code_room(code: &str) -> Option<&str> {
+    let code = code.trim();
+    if code.is_empty() {
+        None
+    } else {
+        Some(code_room(code))
+    }
+}
+
+fn code_room(code: &str) -> &str {
+    code.split('-').next().unwrap_or(code)
+}
+
+fn token_state(token: Option<&str>) -> &'static str {
+    if token.is_some_and(|token| !token.trim().is_empty()) {
+        "set"
+    } else {
+        "generated"
+    }
+}
+
 /// Reports the single terminal outcome from the awaited operation result.
 fn report_terminal(
     observer: &dyn TransferObserver,
@@ -1901,7 +2051,9 @@ async fn drive_transfer_request(
         .iter()
         .map(|attempt| attempt.mode)
         .collect::<Vec<_>>();
+    observer.on_status(request_debug_summary(&settings, &request, &attempts));
     let mut stop_requested = None;
+    let attempt_count = modes.len();
     for (index, attempt) in attempts.into_iter().enumerate() {
         if index > 0 {
             activity.attempt_id = next_attempt_id();
@@ -1909,14 +2061,16 @@ async fn drive_transfer_request(
             store_active_activity(&queue, &activity);
             observer.on_transfer_activity(activity.clone());
         }
+        observer.on_status(attempt_debug_summary(index, attempt_count, &attempt));
         let transfer = match build_transfer_for_source(&settings, &request, attempt.source, &handle)
         {
             Ok(transfer) => transfer,
             Err(error) => {
                 if let Some(next_mode) = modes.get(index + 1) {
                     observer.on_status(format!(
-                        "{} setup failed; trying {}",
+                        "{} setup failed ({}); trying {}",
                         transfer_mode_label(attempt.mode),
+                        error,
                         transfer_mode_label(*next_mode)
                     ));
                     continue;
@@ -2822,6 +2976,23 @@ mod tests {
             .expect_err("room without internet and without mDNS must be rejected");
 
         assert!(error.to_string().contains("internet is unavailable"));
+    }
+
+    #[test]
+    fn debug_summary_redacts_room_password() {
+        let mut request =
+            FfiTransferRequest::send("/tmp/report.pdf".to_string(), FfiTransferMode::Room);
+        request.code = "123456-amber-comet".to_string();
+        let attempts = peer_sources_for_request(&EnvoixRuntimeSettings::default(), &request)
+            .expect("room request should build rendezvous sources");
+
+        let summary = request_debug_summary(&EnvoixRuntimeSettings::default(), &request, &attempts);
+        let attempt = attempt_debug_summary(0, attempts.len(), &attempts[0]);
+
+        assert!(summary.contains("room=123456"));
+        assert!(attempt.contains("room=123456"));
+        assert!(!summary.contains("amber-comet"));
+        assert!(!attempt.contains("amber-comet"));
     }
 
     #[test]

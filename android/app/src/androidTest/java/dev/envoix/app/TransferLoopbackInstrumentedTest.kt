@@ -96,6 +96,7 @@ class TransferLoopbackInstrumentedTest {
                     configPath = "",
                     qrPayload = "pending-invite",
                     transferInvite = null,
+                    internetAvailable = true,
                     useRoom = false,
                     useMdns = false,
                 ).collect { receiverEvents.record(it) }
@@ -118,6 +119,7 @@ class TransferLoopbackInstrumentedTest {
                     configPath = "",
                     qrPayload = null,
                     transferInvite = invite,
+                    internetAvailable = true,
                     useRoom = false,
                     useMdns = false,
                 ).collect { senderEvents.record(it) }

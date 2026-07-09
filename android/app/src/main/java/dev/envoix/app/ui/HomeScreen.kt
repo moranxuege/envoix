@@ -34,6 +34,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.material.icons.filled.Add
@@ -376,7 +377,7 @@ private fun CircleBtn(icon: ImageVector, filled: Boolean, onClick: () -> Unit) {
 @Composable
 private fun WaitingBody(t: Transfer, onCancel: (Long) -> Unit) {
     val colors = Envoix.colors
-    val settings by SettingsStore.settings.collectAsState()
+    val context = LocalContext.current
     val directInvite = InviteCodec.isTransferInvite(t.qrPayload.orEmpty())
     val copiedText = if (directInvite) t.qrPayload.orEmpty() else t.room
     Column(Modifier.fillMaxWidth().padding(16.dp)) {
@@ -388,7 +389,7 @@ private fun WaitingBody(t: Transfer, onCancel: (Long) -> Unit) {
                 )
                 Text(
                     if (t.direction == Direction.Send) "Sending ${t.fileName ?: "a file"}"
-                    else "Saving to Downloads/${settings.saveFolder}",
+                    else "Saving to ${SettingsStore.saveLabel(context)}",
                     color = colors.muted, fontSize = 13.sp,
                     maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )

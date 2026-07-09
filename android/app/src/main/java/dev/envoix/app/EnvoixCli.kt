@@ -30,6 +30,7 @@ sealed interface CliEvent {
     data class Progress(val bytesTransferred: Long, val totalBytes: Long) : CliEvent
     data class Completed(val bytesTransferred: Long) : CliEvent
     data class Failed(val error: String) : CliEvent
+    data class CoreStatus(val message: String) : CliEvent
     data class Exit(val code: Int) : CliEvent
 }
 
@@ -109,7 +110,10 @@ object NativeTransfer {
             override fun onTransferActivity(record: dev.envoix.app.ffi.FfiTransferActivityRecord) = Unit
 
             override fun onStatus(message: String) {
-                if (message.isNotBlank()) LogStore.append("core: $message")
+                if (message.isNotBlank()) {
+                    LogStore.append("core: $message")
+                    trySend(CliEvent.CoreStatus(message))
+                }
             }
         }
 

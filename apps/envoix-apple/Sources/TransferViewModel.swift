@@ -522,7 +522,8 @@ final class TransferViewModel: ObservableObject {
 
     func handleCompleted(_ bytes: UInt64) {
         appendLog("completed · \(byteString(bytes))")
-        transferred = total
+        transferred = bytes
+        total = max(total, bytes)
         bytesPerSec = 0
         if completedFileURL == nil, let dir = destinationDir, !fileName.isEmpty {
             completedFileURL = URL(fileURLWithPath: dir).appendingPathComponent(fileName)

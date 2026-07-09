@@ -33,6 +33,63 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
         let receivedPayload = try Data(contentsOf: receiveDirectory.appendingPathComponent(sendFile.lastPathComponent))
         XCTAssertEqual(receivedPayload, payload)
     }
+
+    func testCrossDeviceReceiveAndroidToIosRoom() throws {
+#if ENVOIX_CROSS_DEVICE_TESTING
+        print("[cross-device] iOS receive start code=\(Self.androidToIosCode)")
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("envoix-ios-cross-device-receive-\(UUID().uuidString)", isDirectory: true)
+        let receiveDirectory = root.appendingPathComponent("received", isDirectory: true)
+        try fileManager.createDirectory(at: receiveDirectory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: root) }
+
+        let session = EnvoixSession()
+        let observer = RecordingObserver()
+        try session.receiveRoom(outputDir: receiveDirectory.path, code: Self.androidToIosCode, observer: observer)
+        print("[cross-device] iOS receive completed call returned")
+
+        let bytes = try observer.waitForCompletion(timeout: Self.crossDeviceTimeout)
+        print("[cross-device] iOS receive completion bytes=\(bytes)")
+        XCTAssertGreaterThanOrEqual(bytes, UInt64(Self.androidToIosPayload.count))
+
+        let receivedPayload = try Data(contentsOf: receiveDirectory.appendingPathComponent(Self.androidToIosFileName))
+        XCTAssertEqual(receivedPayload, Self.androidToIosPayload)
+#endif
+    }
+
+    func testCrossDeviceSendIosToAndroidRoom() throws {
+#if ENVOIX_CROSS_DEVICE_TESTING
+        print("[cross-device] iOS send start code=\(Self.iosToAndroidCode)")
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("envoix-ios-cross-device-send-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: root) }
+
+        let sendFile = root.appendingPathComponent(Self.iosToAndroidFileName)
+        try Self.iosToAndroidPayload.write(to: sendFile)
+
+        let session = EnvoixSession()
+        let observer = RecordingObserver()
+        try session.sendRoom(filePath: sendFile.path, code: Self.iosToAndroidCode, observer: observer)
+        print("[cross-device] iOS send completed call returned")
+
+        let bytes = try observer.waitForCompletion(timeout: Self.crossDeviceTimeout)
+        print("[cross-device] iOS send completion bytes=\(bytes)")
+        XCTAssertGreaterThanOrEqual(bytes, UInt64(Self.iosToAndroidPayload.count))
+#endif
+    }
+
+#if ENVOIX_CROSS_DEVICE_TESTING
+    private static let androidToIosCode = "741203-amber-comet"
+    private static let iosToAndroidCode = "741204-azure-river"
+    private static let androidToIosFileName = "envoix-cross-android-to-ios.txt"
+    private static let iosToAndroidFileName = "envoix-cross-ios-to-android.txt"
+    private static let androidToIosPayload = Data("envoix cross-device android to ios\n".utf8)
+    private static let iosToAndroidPayload = Data("envoix cross-device ios to android\n".utf8)
+    private static let crossDeviceTimeout: TimeInterval = 180
+#endif
 }
 
 private final class RecordingObserver: TransferObserver, @unchecked Sendable {
@@ -55,9 +112,17 @@ private final class RecordingObserver: TransferObserver, @unchecked Sendable {
         }
     }
 
-    func onStarted(fileName: String, totalBytes: UInt64) {}
+    func onStarted(fileName: String, totalBytes: UInt64) {
+        if !fileName.isEmpty {
+            print("[cross-device] onStarted fileName=\(fileName) totalBytes=\(totalBytes)")
+        } else {
+            print("[cross-device] onStarted fileName=<unknown> totalBytes=\(totalBytes)")
+        }
+    }
 
-    func onProgress(transferred: UInt64, total: UInt64) {}
+    func onProgress(transferred: UInt64, total: UInt64) {
+        print("[cross-device] onProgress transferred=\(transferred) total=\(total)")
+    }
 
     func onCompleted(bytes: UInt64) {
         complete(bytes: bytes, failure: nil)
@@ -72,11 +137,24 @@ private final class RecordingObserver: TransferObserver, @unchecked Sendable {
         complete(bytes: nil, failure: reason)
     }
 
-    func onTransferEvent(event: FfiTransferEvent) {}
+    func onTransferEvent(event: FfiTransferEvent) {
+        print(
+            "[cross-device] onTransferEvent kind=\(event.kind) mode=\(event.mode) direction=\(event.direction) " +
+            "pairing=\(event.pairingStep) path=\(event.dataPathKind):\(event.dataPathDetail) " +
+            "bytes=\(event.bytesTransferred)/\(event.totalBytes) token=\(Self.tokenLabel(event.token)) " +
+            "peerLen=\(event.peerDescriptor.count)"
+        )
+    }
 
-    func onTransferActivity(record: FfiTransferActivityRecord) {}
+    func onTransferActivity(record: FfiTransferActivityRecord) {
+        print("[cross-device] onTransferActivity \(record)")
+    }
 
-    func onStatus(message: String) {}
+    func onStatus(message: String) {
+        if !message.isEmpty {
+            print("[cross-device] status \(message)")
+        }
+    }
 
     func waitForInvite(timeout: TimeInterval) throws -> String {
         guard inviteSemaphore.wait(timeout: .now() + timeout) == .success else {
@@ -121,6 +199,13 @@ private final class RecordingObserver: TransferObserver, @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return try body()
+    }
+
+    private static func tokenLabel(_ token: String) -> String {
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "<none>" }
+        let room = trimmed.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? ""
+        return room != trimmed && !room.isEmpty ? room : "set(len=\(trimmed.count))"
     }
 }
 

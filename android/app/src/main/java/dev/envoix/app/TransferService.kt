@@ -29,6 +29,9 @@ private data class Spec(
     val qrPayload: String?,
     /** Direct transfer invite scanned from a receiver, used by senders only. */
     val transferInvite: String?,
+    /** Whether the device currently reports network connectivity that can reach
+     *  rendezvous peers; forwarded to Rust to preserve fallback behavior. */
+    val internetAvailable: Boolean,
     /** Rendezvous modes to attempt, in order Room → mDNS. */
     val useRoom: Boolean,
     val useMdns: Boolean,
@@ -51,15 +54,16 @@ class TransferService : Service() {
             .createMulticastLock("envoix-mdns").apply { setReferenceCounted(true) }
     }
 
-    /** True when the active network actually reaches the internet (not just a
-     *  captive portal). Room pairing needs the broker, so skip it when this is
-     *  false — otherwise Room just retries an unreachable broker forever, and the
-     *  mDNS fallback never gets a turn. */
+    /** True when the active network can reach the host network layer.
+     *
+     * We keep room enabled as long as the transport provides raw internet
+     * capability. The broker connection itself may still fail and then we can
+     * fall back to mDNS, which mirrors previous app behavior.
+     */
     private fun hasInternet(): Boolean {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
         val caps = cm.activeNetwork?.let { cm.getNetworkCapabilities(it) } ?: return false
-        return caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
-            caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+        return caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -79,6 +83,7 @@ class TransferService : Service() {
                 val room = intent.getStringExtra(EXTRA_ROOM)
                 val path = intent.getStringExtra(EXTRA_PATH)
                 if (direction == null || room == null || path == null) return stopIfIdle()
+                val internetAvailable = hasInternet()
                 val spec = Spec(
                     direction, room, path,
                     intent.getStringExtra(EXTRA_BROKER) ?: Endpoints.BROKER,
@@ -86,7 +91,8 @@ class TransferService : Service() {
                     intent.getStringExtra(EXTRA_CONFIG) ?: "",
                     intent.getStringExtra(EXTRA_QR),
                     intent.getStringExtra(EXTRA_TRANSFER_INVITE),
-                    SettingsStore.settings.value.useRoom && hasInternet(),
+                    internetAvailable,
+                    SettingsStore.settings.value.useRoom && internetAvailable,
                     SettingsStore.settings.value.useMdns,
                 )
                 enterForeground()
@@ -157,6 +163,7 @@ class TransferService : Service() {
                 spec.config,
                 spec.qrPayload,
                 spec.transferInvite,
+                spec.internetAvailable,
                 spec.useRoom,
                 spec.useMdns,
             )
@@ -220,7 +227,10 @@ class TransferService : Service() {
                                 val avg = if (startTs > 0 && now > startTs)
                                     ev.bytesTransferred * 1e9 / (now - startTs) else t.avgBps
                                 t.copy(
-                                    bytes = ev.bytesTransferred, speedBps = 0.0, avgBps = avg,
+                                    bytes = ev.bytesTransferred,
+                                    total = maxOf(t.total, ev.bytesTransferred),
+                                    speedBps = 0.0,
+                                    avgBps = avg,
                                     status = Status.Completed, log = addLog(t.log, "complete"),
                                 )
                             }
@@ -229,6 +239,8 @@ class TransferService : Service() {
                                 // Paused/Cancelled status the action already set.
                                 if (t.status == Status.Cancelled || t.status == Status.Paused) t
                                 else t.copy(status = Status.Failed, error = ev.error, log = addLog(t.log, "failed · ${ev.error}"))
+                            is CliEvent.CoreStatus ->
+                                t.copy(log = addLog(t.log, "core · ${ev.message}"))
                             is CliEvent.Exit ->
                                 if (t.status.isTerminal || t.status == Status.Paused) t
                                 else t.copy(status = if (ev.code == 0) Status.Completed else Status.Failed)
@@ -247,12 +259,29 @@ class TransferService : Service() {
                 }
             if (spec.useMdns) runCatching { multicastLock.release() }
             if (spec.dir() == Direction.Receive) publishReceived(id, spec.path)
+            else cleanupFinishedSend(id, spec.path)
             active.decrementAndGet()
             // Refresh only while transfers remain; when idle, let stopIfIdle's
             // stopForeground(REMOVE) clear the notification — reposting here would
             // detach it and leave a stale status-bar icon.
             if (active.get() > 0) updateNotification()
             stopIfIdle()
+        }
+    }
+
+    /** Delete the app-owned cache copy for a send after it can no longer resume. */
+    private fun cleanupFinishedSend(id: Long, sourcePath: String) {
+        val status = TransferRepository.transfers.value.find { it.id == id }?.status ?: return
+        if (status != Status.Completed && status != Status.Cancelled) return
+        specs.remove(id)
+
+        val source = File(sourcePath)
+        val sendCache = File(cacheDir, "send")
+        val isAppCacheCopy = runCatching {
+            source.canonicalFile.toPath().startsWith(sendCache.canonicalFile.toPath())
+        }.getOrDefault(false)
+        if (isAppCacheCopy && source.isFile && source.delete()) {
+            LogStore.append("app: deleted cached send copy ${source.name}")
         }
     }
 
