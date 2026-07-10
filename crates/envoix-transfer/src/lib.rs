@@ -176,6 +176,10 @@ pub enum TransferEvent {
     Confirming {
         /// Transfer identifier for correlating events.
         transfer_id: TransferId,
+        /// BLAKE3 hash of the bytes actually sent (the `Complete` frame's
+        /// hash) - the committed proof basis for receipt verification, so a
+        /// receipt is never checked against the (mutable) source path later.
+        file_hash: String,
     },
     /// More plaintext bytes have been sent or persisted.
     Progress {
@@ -428,15 +432,17 @@ impl TransferEngine {
             )));
         }
 
+        let file_hash = hasher.finalize().to_hex().to_string();
         connection
             .send_frame(Frame::Complete(Complete {
                 transfer_id: transfer_id.clone(),
-                file_hash: hasher.finalize().to_hex().to_string(),
+                file_hash: file_hash.clone(),
             }))
             .await
             .map_err(peer_closed_error)?;
         events.on_event(TransferEvent::Confirming {
             transfer_id: transfer_id.clone(),
+            file_hash,
         });
         // The whole file plus the Complete frame (which carries the file hash the
         // receiver verifies before finalizing) have been sent. Require the

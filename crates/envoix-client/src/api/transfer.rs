@@ -373,7 +373,13 @@ impl From<SessionEvent> for TransferEvent {
                 file_name,
                 bytes_hashed,
             },
-            SessionEvent::Confirming { transfer_id } => TransferEvent::Confirming { transfer_id },
+            SessionEvent::Confirming {
+                transfer_id,
+                file_hash,
+            } => TransferEvent::Confirming {
+                transfer_id,
+                file_hash,
+            },
             SessionEvent::Completed {
                 transfer_id,
                 file_name,

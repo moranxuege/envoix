@@ -382,15 +382,30 @@ impl Actor {
                 else {
                     return;
                 };
-                // Send side: params.path IS the source file.
-                match receipt::verify_receipt_against_file(
-                    &tid,
-                    &code,
-                    &blob,
-                    &self.context.params.path,
-                )
-                .await
-                {
+                let verified = match &self.session.sent_hash {
+                    // The committed fact (what this attempt actually sent):
+                    // never re-read the source path - it is mutable and may
+                    // have changed or vanished since the send.
+                    Some(sent_hash) => receipt::verify_receipt_against_fact(
+                        &tid,
+                        &code,
+                        &blob,
+                        sent_hash,
+                        self.session.total,
+                    ),
+                    // Sessions persisted before the fact existed: fall back
+                    // to hashing the source file (params.path IS the file).
+                    None => {
+                        receipt::verify_receipt_against_file(
+                            &tid,
+                            &code,
+                            &blob,
+                            &self.context.params.path,
+                        )
+                        .await
+                    }
+                };
+                match verified {
                     Ok(_) => self.apply(Input::ReceiptVerified).await,
                     Err(error) => {
                         tracing::warn!(%error, "mailbox receipt failed verification");
@@ -470,7 +485,9 @@ impl Actor {
             }
             TransferEvent::Verifying { .. } => Some(AttemptEvent::Verifying),
             TransferEvent::Verified { .. } => Some(AttemptEvent::Verified),
-            TransferEvent::Confirming { .. } => Some(AttemptEvent::Confirming),
+            TransferEvent::Confirming { file_hash, .. } => {
+                Some(AttemptEvent::Confirming { file_hash })
+            }
             TransferEvent::Completed {
                 transfer_id,
                 file_name,

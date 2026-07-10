@@ -93,7 +93,9 @@ pub enum AttemptEvent {
     },
     Verifying,
     Verified,
-    Confirming,
+    Confirming {
+        file_hash: String,
+    },
     Completed {
         transfer_id: String,
         file_name: String,
@@ -180,6 +182,11 @@ pub struct Session {
     pub path: Option<DataPath>,
     pub reason: Option<String>,
     pub reason_code: Option<FailureCode>,
+    /// Send: BLAKE3 hash of the bytes the current attempt actually sent
+    /// (set on Confirming). The committed proof basis - mailbox receipts are
+    /// verified against this fact, never against the mutable source path.
+    #[serde(default)]
+    pub sent_hash: Option<String>,
     #[serde(default)]
     pub facts: Facts,
 }
@@ -199,6 +206,7 @@ impl Session {
             path: None,
             reason: None,
             reason_code: None,
+            sent_hash: None,
             facts: Facts::default(),
         }
     }
@@ -342,8 +350,9 @@ impl Session {
                 self.state = S::Connecting;
                 Vec::new()
             }
-            E::Confirming if self.state == S::Transferring => {
+            E::Confirming { file_hash } if self.state == S::Transferring => {
                 self.state = S::Confirming;
+                self.sent_hash = Some(file_hash);
                 // Parallel proofs (design review): the mailbox is polled WHILE
                 // the in-band ack is awaited - whichever proof lands first wins.
                 // On a healthy path the ack beats the first poll and no HTTP
@@ -459,6 +468,12 @@ mod tests {
         }
     }
 
+    fn confirming() -> AttemptEvent {
+        E::Confirming {
+            file_hash: "hash-of-sent-bytes".into(),
+        }
+    }
+
     fn failed(code: FailureCode) -> AttemptEvent {
         E::Failed {
             reason_code: code,
@@ -494,12 +509,14 @@ mod tests {
     fn send_happy_path_confirms_then_completes() {
         let mut s = transferring(Send);
         s.reduce(ev(1, E::Progress { bytes: 100 }));
-        let effects = s.reduce(ev(1, E::Confirming));
+        let effects = s.reduce(ev(1, confirming()));
         assert_eq!(s.state, State::Confirming);
         assert_eq!(
             effects,
             vec![Effect::StartConfirmTimer, Effect::StartMailboxPoll]
         );
+        // The committed proof basis: receipts are verified against this fact.
+        assert_eq!(s.sent_hash.as_deref(), Some("hash-of-sent-bytes"));
         let effects = s.reduce(ev(1, completed(100)));
         assert_eq!(s.state, State::Completed);
         assert_eq!(
@@ -545,7 +562,7 @@ mod tests {
     fn stale_bytes_cannot_fake_unconfirmed() {
         let mut s = transferring(Send);
         s.reduce(ev(1, E::Progress { bytes: 100 }));
-        s.reduce(ev(1, E::Confirming));
+        s.reduce(ev(1, confirming()));
         s.reduce(ev(1, completed(100)));
         assert_eq!(s.state, State::Completed);
         // A send's Resume from Completed is ignored (nothing to re-join)…
@@ -570,7 +587,7 @@ mod tests {
     fn confirming_connection_lost_escalates_to_mailbox() {
         let mut s = transferring(Send);
         s.reduce(ev(1, E::Progress { bytes: 100 }));
-        s.reduce(ev(1, E::Confirming));
+        s.reduce(ev(1, confirming()));
         let effects = s.reduce(ev(1, failed(FailureCode::ConnectionLost)));
         assert_eq!(s.state, State::Unconfirmed);
         assert_eq!(
@@ -591,7 +608,7 @@ mod tests {
     fn confirm_timeout_escalates_proactively_and_stale_timers_are_ignored() {
         let mut s = transferring(Send);
         s.reduce(ev(1, E::Progress { bytes: 100 }));
-        s.reduce(ev(1, E::Confirming));
+        s.reduce(ev(1, confirming()));
         // A stale timer from another attempt does nothing.
         assert!(s.reduce(Input::ConfirmTimeout { attempt: 7 }).is_empty());
         let effects = s.reduce(Input::ConfirmTimeout { attempt: 1 });
@@ -606,7 +623,7 @@ mod tests {
     fn receipt_verified_during_confirming_completes_and_stops_the_wait() {
         let mut s = transferring(Send);
         s.reduce(ev(1, E::Progress { bytes: 100 }));
-        s.reduce(ev(1, E::Confirming));
+        s.reduce(ev(1, confirming()));
         let effects = s.reduce(Input::ReceiptVerified);
         assert_eq!(s.state, State::Completed);
         assert_eq!(
@@ -788,7 +805,7 @@ mod tests {
             E::Progress { bytes: 999 },
             E::Verifying,
             E::Verified,
-            E::Confirming,
+            confirming(),
             completed(999),
             failed(FailureCode::PeerCancelled),
             E::RunEnded { failure: None },
@@ -813,7 +830,7 @@ mod tests {
                 ev(attempt, E::Connecting),
                 ev(attempt, started()),
                 ev(attempt, E::Progress { bytes: 50 }),
-                ev(attempt, E::Confirming),
+                ev(attempt, confirming()),
                 ev(attempt, completed(100)),
                 ev(attempt, failed(FailureCode::ConnectionLost)),
                 ev(attempt, failed(FailureCode::PeerCancelled)),
