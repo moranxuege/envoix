@@ -120,7 +120,12 @@ enum Cmd {
     Pause,
     Cancel,
     Resume,
-    ReceiptResponse(Option<Vec<u8>>),
+    /// The courier's answer, stamped with the mailbox key it answers so a
+    /// late response from a superseded attempt can be dropped.
+    ReceiptResponse {
+        key: String,
+        blob: Option<Vec<u8>>,
+    },
     /// Courier ack-back: the receipt POST got its 2xx.
     ReceiptPosted,
     /// D2 (Remove): delete the partial, resume state, and receipt sidecars.
@@ -231,9 +236,10 @@ impl TransferSession {
     }
 
     /// The courier's answer to a [`SessionNotice::FetchReceipt`] — the raw
-    /// mailbox blob, or `None` when the slot was empty (404).
-    pub fn receipt_response(&self, blob: Option<Vec<u8>>) {
-        let _ = self.cmds.send(Cmd::ReceiptResponse(blob));
+    /// mailbox blob, or `None` when the slot was empty (404). `key` echoes
+    /// the fetched slot, so an answer from a superseded attempt is dropped.
+    pub fn receipt_response(&self, key: String, blob: Option<Vec<u8>>) {
+        let _ = self.cmds.send(Cmd::ReceiptResponse { key, blob });
     }
 
     /// Courier ack-back: the receipt POST was acknowledged - the receiver's
@@ -377,7 +383,13 @@ impl Actor {
             Cmd::Pause => self.apply(Input::Pause).await,
             Cmd::Cancel => self.apply(Input::Cancel).await,
             Cmd::Resume => self.apply(Input::Resume).await,
-            Cmd::ReceiptResponse(Some(blob)) => {
+            Cmd::ReceiptResponse {
+                key,
+                blob: Some(blob),
+            } => {
+                if self.poll_key.as_deref() != Some(&key) {
+                    return; // a late answer for a superseded attempt's slot
+                }
                 let (Some(tid), Some(code)) = (self.session.transfer_id.clone(), self.code())
                 else {
                     return;
@@ -415,7 +427,7 @@ impl Actor {
                 }
             }
             Cmd::ReceiptPosted => self.apply(Input::ReceiptPosted).await,
-            Cmd::ReceiptResponse(None) => {} // empty slot; later polls may hit
+            Cmd::ReceiptResponse { blob: None, .. } => {} // empty slot; later polls may hit
             Cmd::ServeReverify => {
                 let mut options = self.context.params.options.clone();
                 options.resume = true;
@@ -912,6 +924,40 @@ mod tests {
             notice => panic!("expected receipt post, got {notice:?}"),
         }
         let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn stale_receipt_responses_are_dropped_by_key() {
+        let mut context = failing_context(TransferDirection::Send);
+        context.params.sources = vec![PeerSource::Room {
+            code: "123456-kelp-coral".into(),
+            broker: "id@1.2.3.4:5".into(),
+        }];
+        let (mut actor, _notices) = actor_for_context(context);
+        actor.session.state = State::Unconfirmed;
+        actor.session.transfer_id = Some("transfer-current".into());
+        actor.session.sent_hash = Some("sent".into());
+        let current_key = receipt::receipt_mailbox_key("transfer-current");
+        actor.poll_key = Some(current_key.clone());
+        actor.polls = vec![Instant::now() + Duration::from_secs(60)];
+
+        // A late answer for a superseded attempt's slot changes nothing.
+        actor
+            .on_cmd(Cmd::ReceiptResponse {
+                key: receipt::receipt_mailbox_key("transfer-previous"),
+                blob: Some(vec![1, 2, 3]),
+            })
+            .await;
+        assert_eq!(actor.polls.len(), 1, "stale response must not clear polls");
+
+        // The current slot with a garbage blob is a real mismatch: polls stop.
+        actor
+            .on_cmd(Cmd::ReceiptResponse {
+                key: current_key,
+                blob: Some(vec![1, 2, 3]),
+            })
+            .await;
+        assert!(actor.polls.is_empty(), "authenticated mismatch stops polls");
     }
 
     #[tokio::test]

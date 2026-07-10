@@ -57,9 +57,12 @@ object Native {
         intent: String,
     )
 
-    /** Answer a fetch_receipt notice: the blob (base64), or "" for an empty slot. */
+    /** Answer a fetch_receipt notice: the blob (base64), or "" for an empty
+     *  slot. [key] echoes the notice's mailbox key, so the driver can drop
+     *  answers from a superseded attempt. */
     external fun receiptResponse(
         id: Long,
+        key: String,
         blobB64: String,
     )
 

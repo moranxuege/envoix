@@ -530,7 +530,7 @@ class TransferService : Service() {
                         .getEncoder()
                         .encodeToString(it)
                 } ?: ""
-            Native.receiptResponse(id, b64)
+            Native.receiptResponse(id, key, b64)
         }
     }
 
