@@ -332,3 +332,64 @@ Field bugs Q2/Q3 traced to two root causes, fixed structurally:
   longer feeds `reduce()` inline (it dropped effects and skipped persist —
   the Failed state vanished on restart); it queues the input and the apply
   loop drains it through the one reduce→effects→persist→snapshot path.
+
+## Addendum (2026-07-11, designed with the user): `Preparing` — durable pre-attempt staging
+
+Problem: a send from a `content://` source stages into `cacheDir/send/<id>/`
+BEFORE the Rust record exists, so process death mid-copy loses the transfer
+intent entirely (the orphan bytes are GC'd, the card is gone). The record can
+only protect what it precedes — write-ahead applies to the first byte of side
+effect, not just to attempts.
+
+Rejected shapes:
+- **Kotlin-side pending store** — a second durable authority; the dual-store
+  disease this document exists to prevent.
+- **Record in `Waiting` with no attempt** — overloads attempt vocabulary.
+  `Waiting` means an endpoint is bound and a peer may arrive, and it restores
+  as `Paused(Lost)`. A staging session has no attempt, no peer, and must
+  restore by RE-STAGING. Different phase, different state.
+
+### The state
+
+`Preparing` — send-only, entered only when the session is created with a
+platform source that needs staging. The CLI and all receives never see it.
+
+Flow (each step commits before the next acts):
+1. Kotlin picks the deterministic staging path `cacheDir/send/<id>/<safe_name>`
+   and takes the persistable READ grant on the source URI.
+2. `createSession` writes the record FIRST: `state = Preparing`, `attempt = 0`,
+   `params.path = <staging path>`, extras carrying `source_uri` and
+   `source_recoverable` (whether the grant succeeded). No side effect precedes
+   the record.
+3. Staging is a SNAPSHOT-DERIVED renderer (the Phase-5 rule, not a one-shot
+   effect): Kotlin observes `state == preparing` and idempotently ensures a
+   staging job runs for that card. Fresh start and crash recovery are the
+   same code path.
+4. Staging progress rides `Progress` events — snapshot-only, never persisted
+   (progress ticks already skip persistence). The machine owns staging
+   STATUS; extras carry only what the core cannot interpret. Machine state
+   never hides in the opaque blob.
+5. `Input::StageComplete` → `Connecting` + `Effect::StartAttempt` (attempt 1).
+   `Input::StageFailed(reason)` → `Failed` with the message, persisted.
+
+### Legality rows
+
+| State | Input | Result |
+| --- | --- | --- |
+| Preparing | StageComplete | Connecting + StartAttempt |
+| Preparing | StageFailed | Failed(reason) |
+| Preparing | Cancel | Cancelled — NO wire effect (no peer exists; the one purely-local cancel) |
+| Preparing | Pause | no-op (nothing pausable; kill+restore re-stages for free) |
+| Preparing | attempt events | none can arrive (attempt = 0) — dropped structurally |
+
+### Restore rule
+
+Restored `Preparing` is NOT coerced to `Paused(Lost)` (that is attempt
+vocabulary): with `source_recoverable` it stays `Preparing` and the renderer
+re-stages; without it, it becomes `Failed("source needs re-picking")`
+IMMEDIATELY at restore — never a silent retry of a URI we provably cannot
+reopen (same principle as the SAF save-tree fix: never persist a capability
+you do not hold).
+
+Remove targets the record id first, as everywhere; the staging job dies with
+the per-card scope and the staging dir is deleted by id.
