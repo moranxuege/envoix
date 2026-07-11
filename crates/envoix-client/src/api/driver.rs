@@ -52,6 +52,13 @@ pub struct ClientContext {
     /// CIDR deny-list for candidate addresses.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub candidates_deny: Vec<String>,
+    /// Receipt-mailbox endpoint (e.g. `https://rdz.example:8460`), frozen at
+    /// session creation. The courier gets it from the driver's notices, so a
+    /// transfer keeps confirming against the mailbox it was created with even
+    /// if the (diagnostics) setting is later cleared or edited. `None` = the
+    /// frontend's current setting (pre-field records).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_server: Option<String>,
 }
 
 impl ClientContext {
@@ -107,11 +114,16 @@ pub enum SessionNotice {
     /// [`TransferSession::receipt_response`] with the body (or None on 404).
     FetchReceipt {
         key: String,
+        /// The durable endpoint from the session's context; `None` means the
+        /// frontend falls back to its current setting (pre-field records).
+        server: Option<String>,
     },
     /// POST the sealed blob to `<server>/receipts/<key>` (retry on failure).
     PostReceipt {
         key: String,
         blob: Vec<u8>,
+        /// See [`Self::FetchReceipt::server`].
+        server: Option<String>,
     },
 }
 
@@ -392,7 +404,10 @@ impl Actor {
                 _ = sleep_until(poll_at), if poll_at.is_some() => {
                     self.polls.remove(0);
                     if let Some(key) = self.poll_key.clone() {
-                        let _ = self.notices.send(SessionNotice::FetchReceipt { key });
+                        let _ = self.notices.send(SessionNotice::FetchReceipt {
+                            key,
+                            server: self.context.client.receipt_server.clone(),
+                        });
                     }
                 }
             }
@@ -695,7 +710,11 @@ impl Actor {
         match receipt::seal_receipt(&tid, &code, &receipt_data) {
             Ok(blob) => {
                 let key = receipt::receipt_mailbox_key(&tid);
-                let _ = self.notices.send(SessionNotice::PostReceipt { key, blob });
+                let _ = self.notices.send(SessionNotice::PostReceipt {
+                    key,
+                    blob,
+                    server: self.context.client.receipt_server.clone(),
+                });
             }
             Err(error) => tracing::warn!(%error, "sealing receipt failed"),
         }
@@ -959,7 +978,7 @@ mod tests {
                 .await
                 .expect("courier request within the poll schedule")
                 .expect("stream open");
-            if let SessionNotice::FetchReceipt { key } = notice {
+            if let SessionNotice::FetchReceipt { key, .. } = notice {
                 assert_eq!(key.len(), 64);
                 break;
             }
@@ -1013,7 +1032,7 @@ mod tests {
             .await;
 
         match notices.recv().await.expect("receipt posted") {
-            SessionNotice::PostReceipt { key, blob } => {
+            SessionNotice::PostReceipt { key, blob, .. } => {
                 assert_eq!(key.len(), 64);
                 assert!(!blob.is_empty());
             }

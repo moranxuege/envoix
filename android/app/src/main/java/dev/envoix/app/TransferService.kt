@@ -37,6 +37,9 @@ private data class Spec(
     /** Rendezvous modes to attempt, in order Room → mDNS. */
     val useRoom: Boolean,
     val useMdns: Boolean,
+    /** Receipt-mailbox endpoint frozen at creation; persisted in the record's
+     *  context so confirmation survives later edits to the setting. */
+    val receiptServer: String = "",
 ) {
     fun dir(): Direction = if (direction == "send") Direction.Send else Direction.Receive
 
@@ -57,6 +60,7 @@ private data class Spec(
                 put("use_room", useRoom)
                 put("use_mdns", useMdns)
                 put("resume", resume)
+                put("receipt_server", receiptServer)
             }.toString()
 }
 
@@ -95,7 +99,41 @@ class TransferService : Service() {
     private val lastSeq = java.util.concurrent.ConcurrentHashMap<Long, Long>()
 
     /** Latch for the active→resting tray transition. */
-    private var wasActive = false
+    /** Foreground is platform STATE, reconciled against the snapshot stream -
+     *  not a history edge. (The old active->resting latch never fired for a
+     *  card born terminal, e.g. a sync launch failure: the service stayed
+     *  foreground with a stale ongoing notification.) */
+    private var isForeground = false
+
+    /** Cards currently holding a multicast ref (the lock is ref-counted). */
+    private val multicastHolders = HashSet<Long>()
+
+    /** The multicast lock derives from the OBSERVED state, not the launch
+     *  path: held exactly while an mDNS-capable card is active (it disables
+     *  radio multicast filtering - battery). Restore reconciles automatically:
+     *  the first restored snapshot flows through here like any other. */
+    @Synchronized
+    private fun renderMulticast(
+        id: Long,
+        spec: Spec,
+        status: Status,
+    ) {
+        val want = spec.useMdns && isActive(status)
+        val holds = id in multicastHolders
+        if (want && !holds) {
+            runCatching { multicastLock.acquire() }
+            multicastHolders.add(id)
+        } else if (!want && holds) {
+            multicastHolders.remove(id)
+            runCatching { multicastLock.release() }
+        }
+    }
+
+    /** Safety release when a collector dies without a resting snapshot. */
+    @Synchronized
+    private fun releaseMulticast(id: Long) {
+        if (multicastHolders.remove(id)) runCatching { multicastLock.release() }
+    }
 
     /** Held while an mDNS-enabled session runs; Android gates multicast behind it. */
     private val multicastLock by lazy {
@@ -200,6 +238,7 @@ class TransferService : Service() {
                         intent.getStringExtra(EXTRA_QR),
                         SettingsStore.settings.value.useRoom && hasInternet(),
                         SettingsStore.settings.value.useMdns,
+                        SettingsStore.settings.value.logServer,
                     )
                 enterForeground()
                 val id = TransferRepository.create(spec0.dir(), room)
@@ -288,7 +327,10 @@ class TransferService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun enterForeground() = startForeground(NOTIF_ID, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+    private fun enterForeground() {
+        startForeground(NOTIF_ID, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        isForeground = true
+    }
 
     private val logTime = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
 
@@ -355,20 +397,17 @@ class TransferService : Service() {
             lastSeq[id] = 0L
             val job =
                 transferScope(id).launch {
-                    // Restored sessions need the same platform resources as
-                    // fresh ones: a resumed mDNS attempt without the multicast
-                    // lock cannot see discovery traffic.
-                    if (spec.useMdns) runCatching { multicastLock.acquire() }
                     try {
                         NativeSession.restore(id).collect { notice ->
                             when (notice.optString("notice")) {
                                 "snapshot" -> onSnapshot(id, spec, notice)
-                                "fetch_receipt" -> onFetchReceipt(id, notice.optString("key"))
+                                "fetch_receipt" ->
+                                onFetchReceipt(id, notice.optString("key"), notice.optString("server"))
                                 "post_receipt" -> onPostReceipt(id, notice)
                             }
                         }
                     } finally {
-                        if (spec.useMdns) runCatching { multicastLock.release() }
+                        releaseMulticast(id)
                     }
                 }
             jobs[id] = job
@@ -475,17 +514,17 @@ class TransferService : Service() {
         lastSeq[id] = 0L
         val job =
             transferScope(id).launch {
-                if (spec.useMdns) runCatching { multicastLock.acquire() }
                 try {
                     NativeSession.start(id, spec.paramsJson(resume)).collect { notice ->
                         when (notice.optString("notice")) {
                             "snapshot" -> onSnapshot(id, spec, notice)
-                            "fetch_receipt" -> onFetchReceipt(id, notice.optString("key"))
+                            "fetch_receipt" ->
+                                onFetchReceipt(id, notice.optString("key"), notice.optString("server"))
                             "post_receipt" -> onPostReceipt(id, notice)
                         }
                     }
                 } finally {
-                    if (spec.useMdns) runCatching { multicastLock.release() }
+                    releaseMulticast(id)
                 }
             }
         jobs[id] = job
@@ -556,6 +595,10 @@ class TransferService : Service() {
             )
         }
 
+        // Platform effects derive from the observed snapshot (design rule):
+        // the same code path serves fresh starts, restores, and cards born
+        // terminal - there is no launch-path special case to fall out of sync.
+        renderMulticast(id, spec, status)
         when {
             entered != null -> updateNotification()
             else -> throttledNotification()
@@ -563,14 +606,15 @@ class TransferService : Service() {
         if (state == "completed" && spec.dir() == Direction.Receive) {
             sweepStaging(spec.path, attributeTo = id)
         }
-        // Active→resting transition: post the one final summary frame, then
-        // detach so a stale ongoing notification can never linger.
+        // Foreground reconciles against the whole card set: when nothing is
+        // active, post the one final summary frame and detach - including for
+        // a card whose FIRST snapshot is already terminal.
         val nowActive = TransferRepository.transfers.value.any { isActive(it.status) }
-        if (wasActive && !nowActive) {
+        if (isForeground && !nowActive) {
             updateNotification()
             stopForeground(STOP_FOREGROUND_DETACH)
+            isForeground = false
         }
-        wasActive = nowActive
     }
 
     /** Human line for a state transition, for the card's log drawer. */
@@ -602,10 +646,14 @@ class TransferService : Service() {
     private fun onFetchReceipt(
         id: Long,
         key: String,
+        durableServer: String,
     ) {
         if (key.isEmpty()) return
+        // The driver's notice carries the endpoint the transfer was created
+        // with; the mutable setting is only the fallback for pre-field records.
         val server =
-            SettingsStore.settings.value.logServer
+            durableServer
+                .ifEmpty { SettingsStore.settings.value.logServer }
                 .trimEnd('/')
         if (server.isEmpty()) return
         transferScope(id).launch {
@@ -630,7 +678,9 @@ class TransferService : Service() {
         val b64 = notice.optString("blob")
         if (key.isEmpty() || b64.isEmpty()) return
         val server =
-            SettingsStore.settings.value.logServer
+            notice
+                .optString("server")
+                .ifEmpty { SettingsStore.settings.value.logServer }
                 .trimEnd('/')
         if (server.isEmpty()) return
         val bytes =
@@ -813,6 +863,7 @@ class TransferService : Service() {
      *  but keep the service — sessions idle cheaply and stay resumable. */
     private fun stopForegroundKeepCards() {
         stopForeground(STOP_FOREGROUND_DETACH)
+        isForeground = false
         updateNotification()
     }
 

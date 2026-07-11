@@ -544,13 +544,16 @@ fn notice_json(notice: envoix_client::api::driver::SessionNotice) -> String {
             }
             value.to_string()
         }
-        N::FetchReceipt { key } => {
-            format!(r#"{{"notice":"fetch_receipt","key":{}}}"#, json_str(&key))
-        }
-        N::PostReceipt { key, blob } => format!(
-            r#"{{"notice":"post_receipt","key":{},"blob":{}}}"#,
+        N::FetchReceipt { key, server } => format!(
+            r#"{{"notice":"fetch_receipt","key":{},"server":{}}}"#,
+            json_str(&key),
+            json_str(&server.unwrap_or_default()),
+        ),
+        N::PostReceipt { key, blob, server } => format!(
+            r#"{{"notice":"post_receipt","key":{},"blob":{},"server":{}}}"#,
             json_str(&key),
             json_str(&base64::engine::general_purpose::STANDARD.encode(blob)),
+            json_str(&server.unwrap_or_default()),
         ),
     }
 }
@@ -584,10 +587,12 @@ pub extern "system" fn Java_dev_envoix_app_Native_createSession(
     let deny = split_csv(&get("candidates_deny"));
     let chunk = get("chunk_size");
     let chunk = (!chunk.is_empty()).then_some(chunk);
+    let receipt_server = get("receipt_server");
     let client_context = ClientContext {
         chunk_size: chunk,
         candidates_allow: allow,
         candidates_deny: deny,
+        receipt_server: (!receipt_server.is_empty()).then_some(receipt_server),
     };
 
     let code = get("code");
