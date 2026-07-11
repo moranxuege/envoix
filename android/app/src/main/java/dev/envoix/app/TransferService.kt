@@ -19,6 +19,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
 
@@ -380,15 +381,17 @@ class TransferService : Service() {
         resume: Boolean,
     ) {
         lastSeq[id] = 0L
-        // Drain any residue BEFORE the transfer: a finalized file left in
-        // staging (e.g. by a failed publish) makes the core's existing-final
-        // path answer a fresh send of that file instantly - and invisibly,
-        // since the user only sees Downloads. Field bug: room 104519.
-        if (spec.dir() == Direction.Receive) {
-            scope.launch(Dispatchers.IO) { sweepStaging(spec.path, attributeTo = null) }
-        }
         val job =
             scope.launch {
+                // Drain any residue BEFORE the transfer: a finalized file left
+                // in staging (e.g. by a failed publish) makes the core's
+                // existing-final path answer a resume-enabled send of that
+                // file instantly - and invisibly, since the user only sees
+                // Downloads. Field bug: room 104519. Must complete before the
+                // session starts: a fire-and-forget sweep can lose the race.
+                if (spec.dir() == Direction.Receive) {
+                    withContext(Dispatchers.IO) { sweepStaging(spec.path, attributeTo = null) }
+                }
                 if (spec.useMdns) runCatching { multicastLock.acquire() }
                 try {
                     NativeSession.start(id, spec.paramsJson(resume)).collect { notice ->
