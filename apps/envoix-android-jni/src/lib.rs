@@ -703,15 +703,18 @@ pub extern "system" fn Java_dev_envoix_app_Native_sessionIntent(
 }
 
 /// The courier's answer to a fetch_receipt notice: the blob (base64), or ""
-/// when the mailbox slot was empty.
+/// when the mailbox slot was empty. `key` echoes the notice's mailbox key,
+/// so the driver can drop answers from a superseded attempt.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_envoix_app_Native_receiptResponse(
     mut env: JNIEnv,
     _class: JClass,
     id: jlong,
+    key: JString,
     blob_b64: JString,
 ) {
     use base64::Engine;
+    let key = jstr(&mut env, &key);
     let blob_b64 = jstr(&mut env, &blob_b64);
     let blob = if blob_b64.trim().is_empty() {
         None
@@ -732,7 +735,7 @@ pub extern "system" fn Java_dev_envoix_app_Native_receiptResponse(
         tracing::warn!(id, "receiptResponse: session not found");
         return;
     };
-    session.receipt_response(blob);
+    session.receipt_response(key, blob);
 }
 
 /// Tear a session down. With `discard` (D2, Remove): delete the partial,

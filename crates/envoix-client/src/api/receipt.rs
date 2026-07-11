@@ -95,9 +95,37 @@ pub fn open_receipt(
     .map_err(|e| crypto_error(format!("opening receipt: {e}")))
 }
 
+/// Open a mailbox blob and verify it against the committed send facts: the
+/// receipt's size and BLAKE3 hash must match what this attempt actually sent
+/// (the `Complete` frame's hash, recorded on Confirming). No file I/O — the
+/// source path may have changed or vanished since the send, and must not be
+/// the proof basis.
+pub fn verify_receipt_against_fact(
+    transfer_id: &str,
+    code: &str,
+    blob: &[u8],
+    sent_hash: &str,
+    sent_size: u64,
+) -> Result<TransferReceipt, TransferError> {
+    let receipt = open_receipt(transfer_id, code, blob)?;
+    if receipt.file_size != sent_size {
+        return Err(crypto_error(format!(
+            "receipt is for {} bytes but {sent_size} were sent",
+            receipt.file_size
+        )));
+    }
+    if receipt.file_hash != sent_hash {
+        return Err(crypto_error(
+            "receipt hash does not match the sent bytes".to_string(),
+        ));
+    }
+    Ok(receipt)
+}
+
 /// Open a mailbox blob and verify it against the local source file: the
 /// receipt's size and BLAKE3 hash must match the file we sent. Returns the
-/// verified receipt — proof the peer finalized exactly our bytes.
+/// verified receipt — proof the peer finalized exactly our bytes. Fallback
+/// for sessions persisted before the committed `sent_hash` fact existed.
 pub async fn verify_receipt_against_file(
     transfer_id: &str,
     code: &str,
@@ -174,6 +202,17 @@ mod tests {
         assert_eq!(key.len(), 64);
         assert_eq!(key, receipt_mailbox_key("transfer-aa11"));
         assert_ne!(key, receipt_mailbox_key("transfer-bb22"));
+    }
+
+    #[test]
+    fn verify_against_fact_checks_size_and_hash() {
+        let blob = seal_receipt("t-1", "1-a-b", &receipt()).unwrap();
+        assert!(verify_receipt_against_fact("t-1", "1-a-b", &blob, "abc123", 42).is_ok());
+        // Wrong committed hash or size: an authenticated mismatch.
+        assert!(verify_receipt_against_fact("t-1", "1-a-b", &blob, "abc124", 42).is_err());
+        assert!(verify_receipt_against_fact("t-1", "1-a-b", &blob, "abc123", 43).is_err());
+        // Wrong seal (stale key from another attempt) fails to open at all.
+        assert!(verify_receipt_against_fact("t-2", "1-a-b", &blob, "abc123", 42).is_err());
     }
 
     #[tokio::test]

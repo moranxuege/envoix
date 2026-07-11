@@ -35,8 +35,9 @@ object MediaStoreSaver {
         treeUri: Uri,
     ): Uri? {
         val tree = DocumentFile.fromTreeUri(context, treeUri)?.takeIf { it.canWrite() } ?: return null
-        tree.findFile(displayName)?.delete() // overwrite a same-named file
-        val doc = tree.createFile("application/octet-stream", displayName) ?: return null
+        // Never delete a same-named file (it may be the user's, or an earlier
+        // receive): uniquify like the Downloads/MediaStore path does.
+        val doc = tree.createFile("application/octet-stream", uniqueName(tree, displayName)) ?: return null
         return runCatching {
             context.contentResolver.openOutputStream(doc.uri)!!.use { out ->
                 source.inputStream().use { it.copyTo(out) }
@@ -46,6 +47,21 @@ object MediaStoreSaver {
             doc.delete()
             null
         }
+    }
+
+    /** [name] if free in [tree], else "name (1)", "name (2)", … before the extension. */
+    private fun uniqueName(
+        tree: DocumentFile,
+        name: String,
+    ): String {
+        if (tree.findFile(name) == null) return name
+        val dot = name.lastIndexOf('.')
+        val (base, ext) = if (dot > 0) name.substring(0, dot) to name.substring(dot) else name to ""
+        for (i in 1..99) {
+            val candidate = "$base ($i)$ext"
+            if (tree.findFile(candidate) == null) return candidate
+        }
+        return "$base (${System.currentTimeMillis()})$ext"
     }
 
     fun saveToDownloads(

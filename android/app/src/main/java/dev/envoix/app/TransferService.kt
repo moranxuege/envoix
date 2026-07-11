@@ -187,14 +187,10 @@ class TransferService : Service() {
                 val id = intent.getLongExtra(EXTRA_ID, -1L)
                 OpLog.add("remove transfer id=$id", id)
                 // D2, the one true abandon: discard partial + resume state +
-                // receipt, then tear the session and card down. A send's staged
-                // cache copy goes too (they are as big as the file itself).
-                specs[id]?.let { sp ->
-                    val staged = File(cacheDir, "send").absolutePath
-                    if (sp.dir() == Direction.Send && sp.path.startsWith(staged)) {
-                        File(sp.path).delete()
-                    }
-                }
+                // receipt, then tear the session and card down. The send
+                // staging dir is keyed by card id, so it goes too without
+                // consulting the (possibly already gone) spec.
+                File(File(cacheDir, "send"), id.toString()).deleteRecursively()
                 Native.destroySession(id, true)
                 TransferLogs.delete(id)
                 jobs.remove(id)?.cancel()
@@ -305,12 +301,21 @@ class TransferService : Service() {
         uri: Uri,
     ) {
         scope.launch(Dispatchers.IO) {
-            val name = displayName(uri) ?: "upload.bin"
+            // The provider's DISPLAY_NAME is untrusted input (it can contain
+            // path separators): keep only the leaf, never a dot name.
+            val name =
+                (displayName(uri) ?: "upload.bin")
+                    .let { File(it).name }
+                    .takeUnless { it.isEmpty() || it == "." || it == ".." }
+                    ?: "upload.bin"
             val size = querySize(uri)
             TransferRepository.update(id) {
                 it.copy(fileName = name, total = size, log = addLog(it.log, "preparing · staging $name…"))
             }
-            val out = File(File(cacheDir, "send").apply { mkdirs() }, name)
+            // Staging is keyed by card id: two same-named sends must never
+            // share a source path (the sender hashes as it reads, so a
+            // mid-send overwrite can pass verification with mixed bytes).
+            val out = File(File(File(cacheDir, "send"), id.toString()).apply { mkdirs() }, name)
             val ok =
                 runCatching {
                     contentResolver.openInputStream(uri)!!.use { input ->
@@ -341,6 +346,13 @@ class TransferService : Service() {
                         log = addLog(it.log, "failed · staging the picked file"),
                     )
                 }
+                return@launch
+            }
+            // Remove may have raced the staging copy: never start a session
+            // for a card that no longer exists (it would run invisibly and
+            // re-create the record Remove just deleted).
+            if (TransferRepository.transfers.value.none { it.id == id }) {
+                out.parentFile?.deleteRecursively()
                 return@launch
             }
             // Reset the bar for the real transfer; the machine owns it from here.
@@ -518,7 +530,7 @@ class TransferService : Service() {
                         .getEncoder()
                         .encodeToString(it)
                 } ?: ""
-            Native.receiptResponse(id, b64)
+            Native.receiptResponse(id, key, b64)
         }
     }
 
