@@ -37,6 +37,59 @@ fn sessions() -> &'static Mutex<SessionMap> {
     SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Intents addressed to a record id whose session is not registered yet (the
+/// restore-then-intent race: Kotlin fires "resume" right after asking for a
+/// restore, and the registration may not have happened). Queued here, drained
+/// in order on registration, cleared on destroy. Lock order is always
+/// sessions() before pending_intents().
+static PENDING_INTENTS: OnceLock<Mutex<HashMap<i64, Vec<String>>>> = OnceLock::new();
+/// Per-id bound; an id nobody registers must not accumulate garbage.
+const MAX_PENDING_INTENTS: usize = 8;
+
+fn pending_intents() -> &'static Mutex<HashMap<i64, Vec<String>>> {
+    PENDING_INTENTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Dispatch one intent string to a live session (shared by the direct path
+/// and the pending-queue drain).
+fn route_intent(id: i64, session: &envoix_client::api::driver::TransferSession, intent: &str) {
+    match intent {
+        "pause" => session.pause(),
+        "resume" => session.resume(),
+        "cancel" => session.cancel(),
+        "reverify" => session.serve_reverify(),
+        "receipt_posted" => session.receipt_posted(),
+        _ => tracing::warn!(id, intent, "sessionIntent: unknown intent"),
+    }
+}
+
+/// Register a freshly created/restored session, then drain any intents that
+/// arrived before it existed. Refuses to replace a live session: silently
+/// swapping the map entry would orphan a running driver (the caller's new
+/// session is dropped, which detaches without touching the wire).
+fn register_session(id: i64, session: envoix_client::api::driver::TransferSession) -> bool {
+    let Ok(mut map) = sessions().lock() else {
+        return false;
+    };
+    if map.contains_key(&id) {
+        tracing::warn!(id, "session already live; duplicate start/restore ignored");
+        return false;
+    }
+    map.insert(id, session);
+    let queued = pending_intents()
+        .lock()
+        .ok()
+        .and_then(|mut p| p.remove(&id))
+        .unwrap_or_default();
+    if let Some(session) = map.get(&id) {
+        for intent in queued {
+            tracing::info!(id, intent, "applying queued intent");
+            route_intent(id, session, &intent);
+        }
+    }
+    true
+}
+
 /// VM + Kotlin log sink for [`Java_dev_envoix_app_Native_initLogging`]. The
 /// `tracing` subscriber below forwards every formatted line to `sink.log(String)`.
 static LOG_VM: OnceLock<JavaVM> = OnceLock::new();
@@ -571,13 +624,8 @@ pub extern "system" fn Java_dev_envoix_app_Native_createSession(
         Ok(session) => session,
         Err(error) => return emit_failed_snapshot(&vm, &cb, "invalid session context", error),
     };
-    match sessions().lock() {
-        Ok(mut map) => {
-            map.insert(id, session);
-        }
-        Err(error) => {
-            return emit_failed_snapshot(&vm, &cb, "session registry unavailable", error);
-        }
+    if !register_session(id, session) {
+        return emit_failed_snapshot(&vm, &cb, "session already live or registry unavailable", id);
     }
     spawn_pump(vm, cb, notices);
 }
@@ -664,13 +712,8 @@ pub extern "system" fn Java_dev_envoix_app_Native_restoreSession(
             return emit_failed_snapshot(&vm, &cb, "invalid restored session context", error);
         }
     };
-    match sessions().lock() {
-        Ok(mut map) => {
-            map.insert(id, session);
-        }
-        Err(error) => {
-            return emit_failed_snapshot(&vm, &cb, "session registry unavailable", error);
-        }
+    if !register_session(id, session) {
+        return emit_failed_snapshot(&vm, &cb, "session already live or registry unavailable", id);
     }
     spawn_pump(vm, cb, notices);
 }
@@ -689,17 +732,20 @@ pub extern "system" fn Java_dev_envoix_app_Native_sessionIntent(
         return;
     };
     let Some(session) = map.get(&id) else {
-        tracing::warn!(id, intent, "sessionIntent: session not found");
+        // Not registered (yet): queue by record id - registration drains the
+        // queue in order, so an intent can never race a restore and be lost.
+        if let Ok(mut pending) = pending_intents().lock() {
+            let queue = pending.entry(id).or_default();
+            if queue.len() < MAX_PENDING_INTENTS {
+                tracing::info!(id, intent, "session not registered; intent queued");
+                queue.push(intent);
+            } else {
+                tracing::warn!(id, intent, "pending intent queue full; dropped");
+            }
+        }
         return;
     };
-    match intent.as_str() {
-        "pause" => session.pause(),
-        "resume" => session.resume(),
-        "cancel" => session.cancel(),
-        "reverify" => session.serve_reverify(),
-        "receipt_posted" => session.receipt_posted(),
-        _ => tracing::warn!(id, intent, "sessionIntent: unknown intent"),
-    }
+    route_intent(id, session, &intent);
 }
 
 /// The courier's answer to a fetch_receipt notice: the blob (base64), or ""
@@ -747,11 +793,19 @@ pub extern "system" fn Java_dev_envoix_app_Native_destroySession(
     id: jlong,
     discard: jboolean,
 ) {
-    let Some(session) = sessions().lock().ok().and_then(|mut m| m.remove(&id)) else {
-        tracing::warn!(
-            id,
-            "destroySession: session not found or registry unavailable"
-        );
+    let session = sessions().lock().ok().and_then(|mut m| m.remove(&id));
+    if let Ok(mut pending) = pending_intents().lock() {
+        pending.remove(&id);
+    }
+    let Some(session) = session else {
+        // No live handle - the record is still the authority for existence:
+        // Remove must clean the durable artifacts anyway, or the record
+        // resurrects the card on the next restore.
+        if discard != 0
+            && let Some((store, id)) = record_for(id)
+        {
+            runtime().block_on(envoix_client::api::record::discard_record(&store, id));
+        }
         return;
     };
     if discard != 0 {
