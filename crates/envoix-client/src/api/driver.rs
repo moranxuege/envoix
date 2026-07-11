@@ -15,7 +15,6 @@ use std::time::Duration;
 
 use envoix_session::TransferDirection;
 use envoix_storage::LocalFileStorage;
-use envoix_types::TransferId;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -462,13 +461,12 @@ impl Actor {
                 if let Some(t) = self.current.take() {
                     t.cancel_and_join().await;
                 }
-                self.discard_partial().await;
-                if let Some(name) = &self.session.file_name
-                    && let Err(error) =
-                        LocalFileStorage::delete_receipt(&self.context.params.path, name).await
-                {
-                    tracing::debug!(%error, "discard: receipt");
-                }
+                super::record::discard_artifacts(
+                    &self.context.params.path,
+                    self.session.file_name.as_deref(),
+                    self.session.transfer_id.as_deref(),
+                )
+                .await;
                 // Remove is the one true abandon: the record goes too.
                 if let Some((store, id)) = &self.record {
                     store.delete(*id).await;
@@ -673,17 +671,12 @@ impl Actor {
 
     /// D1: the peer explicitly cancelled — drop the partial + resume state.
     async fn discard_partial(&self) {
-        let (Some(name), Some(tid)) = (&self.session.file_name, &self.session.transfer_id) else {
-            return;
-        };
-        let tid = TransferId::new(tid.clone());
-        let dir = &self.context.params.path;
-        if let Err(error) = LocalFileStorage::delete_resume_temp(dir, name, &tid).await {
-            tracing::debug!(%error, "discard: temp");
-        }
-        if let Err(error) = LocalFileStorage::delete_resume_state(dir, name, &tid).await {
-            tracing::debug!(%error, "discard: state");
-        }
+        super::record::discard_partial_files(
+            &self.context.params.path,
+            self.session.file_name.as_deref(),
+            self.session.transfer_id.as_deref(),
+        )
+        .await;
     }
 
     /// The pairing code, for sealing/verifying mailbox blobs.
