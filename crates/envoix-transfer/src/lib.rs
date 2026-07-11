@@ -1225,6 +1225,28 @@ async fn receive_existing_final(
         }
     }
 
+    let file_name = final_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_owned)
+        .unwrap_or(header.file_name.clone());
+    // Crash repair BEFORE the ack: finalize commits the file before it writes
+    // the receipt, so a death in between leaves possession without proof -
+    // and PostReceipt seals from the on-disk receipt, so a missing one makes
+    // the confirmation duty undischargeable forever. Recovery must repair,
+    // not just read; the write is an idempotent overwrite when all is well.
+    if let Some(output_dir) = final_path.parent() {
+        LocalFileStorage::write_receipt(
+            output_dir,
+            &TransferReceipt {
+                file_name: file_name.clone(),
+                file_size: header.file_size,
+                file_hash: final_hash.clone(),
+            },
+        )
+        .await?;
+    }
+
     // Possession is already durable; the ack is best-effort (see the
     // receive loop: suppressing Completed here would suppress the mailbox
     // receipt post the lost-ack design depends on).
@@ -1232,11 +1254,6 @@ async fn receive_existing_final(
         tracing::warn!(%error, "complete ack undeliverable; sender will learn via mailbox");
     }
 
-    let file_name = final_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(str::to_owned)
-        .unwrap_or(header.file_name);
     events.on_event(TransferEvent::Completed {
         transfer_id: header.transfer_id.clone(),
         file_name: file_name.clone(),
@@ -2680,6 +2697,63 @@ mod tests {
         assert_eq!(
             tokio::fs::read(output_dir.join("data.bin")).await.unwrap(),
             source_bytes
+        );
+    }
+
+    /// Crash-repair: finalize commits the file before the receipt, so a death
+    /// in between leaves possession without proof. The existing-final recovery
+    /// path must recreate the receipt - PostReceipt seals from it, and without
+    /// it the confirmation duty is undischargeable forever.
+    #[tokio::test]
+    async fn existing_final_recovery_repairs_a_missing_receipt() {
+        let root = unique_test_dir();
+        let output_dir = root.join("output");
+        tokio::fs::create_dir_all(&output_dir).await.unwrap();
+        let source_bytes = b"abcdefghij";
+        // The crash left the final file but no receipt sidecar.
+        tokio::fs::write(output_dir.join("data.bin"), source_bytes)
+            .await
+            .unwrap();
+        assert!(
+            LocalFileStorage::read_receipt(&output_dir, "data.bin")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
+        let receiver = tokio::spawn({
+            let output_dir = output_dir.clone();
+            async move {
+                TransferEngine::new(5)
+                    .receive_file(&mut receiver_connection, output_dir, &NoopEventSink)
+                    .await
+                    .unwrap()
+            }
+        });
+
+        manual_send(
+            &mut sender_connection,
+            ManualSend {
+                file_name: "data.bin",
+                source_bytes,
+                chunk_size: 5,
+                resume_requested: true,
+                bytes_to_send: source_bytes,
+                complete_hash: blake3::hash(source_bytes).to_hex().to_string(),
+                expected_resume_bytes: source_bytes.len() as u64,
+            },
+        )
+        .await;
+        receiver.await.unwrap();
+
+        let receipt = LocalFileStorage::read_receipt(&output_dir, "data.bin")
+            .await
+            .unwrap()
+            .expect("recovery repaired the receipt");
+        assert_eq!(
+            receipt.file_hash,
+            blake3::hash(source_bytes).to_hex().to_string()
         );
     }
 
