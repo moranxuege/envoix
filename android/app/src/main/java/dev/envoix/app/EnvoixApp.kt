@@ -12,6 +12,18 @@ class EnvoixApp : Application() {
         TransferLogs.init(filesDir)
         Diagnostics.init(filesDir)
         Native.initRecords(java.io.File(filesDir, "records").absolutePath)
+        // Ids must clear the persisted records BEFORE any card is created;
+        // relying on restore to bump the counter loses the race when the user
+        // starts a transfer before the service restores (id collision =
+        // silent record overwrite).
+        runCatching {
+            val records = org.json.JSONArray(Native.listRecords())
+            var maxId = 0L
+            for (i in 0 until records.length()) {
+                maxId = maxOf(maxId, records.optJSONObject(i)?.optLong("id", 0L) ?: 0L)
+            }
+            TransferRepository.seedNextId(maxId + 1)
+        }
         LogStore.append("envoix-android v${BuildConfig.VERSION_NAME} (${BuildConfig.GIT_COMMIT})")
         Native.initLogging(LogSink) // before initContext, so init logs are captured
         SettingsStore.applyLogLevel() // restore the saved (dev) verbosity

@@ -18,6 +18,15 @@ object TransferRepository {
 
     private var nextId = 1L
 
+    /** Raise the id floor to clear every persisted record. Called at app start
+     *  (before any card can be created): a new card allocated before the
+     *  service restores old records must not reuse a persisted id - the new
+     *  session would silently overwrite that record on its first persist. */
+    @Synchronized
+    fun seedNextId(min: Long) {
+        nextId = maxOf(nextId, min)
+    }
+
     /** Allocate an id + seed a Connecting card; returns the id. */
     @Synchronized
     fun create(
