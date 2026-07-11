@@ -672,16 +672,25 @@ impl TransferEngine {
                         notify_error(connection, &error).await;
                         return Err(error);
                     }
-                    send_complete_ack(connection, &header.transfer_id).await?;
+                    // The file is finalized - a durable fact. The ack is
+                    // best-effort from here: if the path died, suppressing
+                    // Completed would also suppress the mailbox receipt post,
+                    // which exists precisely for the lost-ack case.
+                    if let Err(error) = send_complete_ack(connection, &header.transfer_id).await {
+                        tracing::warn!(
+                            %error,
+                            "complete ack undeliverable; sender will learn via mailbox"
+                        );
+                    }
                     events.on_event(TransferEvent::Completed {
                         transfer_id: header.transfer_id.clone(),
-                        file_name: header.file_name.clone(),
+                        file_name: target_name.clone(),
                         bytes_transferred: expected_offset,
                     });
 
                     return Ok(TransferSummary {
                         transfer_id: header.transfer_id,
-                        file_name: header.file_name,
+                        file_name: target_name,
                         bytes_transferred: expected_offset,
                     });
                 }
@@ -1216,17 +1225,27 @@ async fn receive_existing_final(
         }
     }
 
-    send_complete_ack(connection, &header.transfer_id).await?;
+    // Possession is already durable; the ack is best-effort (see the
+    // receive loop: suppressing Completed here would suppress the mailbox
+    // receipt post the lost-ack design depends on).
+    if let Err(error) = send_complete_ack(connection, &header.transfer_id).await {
+        tracing::warn!(%error, "complete ack undeliverable; sender will learn via mailbox");
+    }
 
+    let file_name = final_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_owned)
+        .unwrap_or(header.file_name);
     events.on_event(TransferEvent::Completed {
         transfer_id: header.transfer_id.clone(),
-        file_name: header.file_name.clone(),
+        file_name: file_name.clone(),
         bytes_transferred: header.file_size,
     });
 
     Ok(TransferSummary {
         transfer_id: header.transfer_id,
-        file_name: header.file_name,
+        file_name,
         bytes_transferred: header.file_size,
     })
 }
@@ -1278,17 +1297,19 @@ async fn receive_from_receipt(
         }
     }
 
-    send_complete_ack(connection, &header.transfer_id).await?;
+    if let Err(error) = send_complete_ack(connection, &header.transfer_id).await {
+        tracing::warn!(%error, "complete ack undeliverable; sender will learn via mailbox");
+    }
 
     events.on_event(TransferEvent::Completed {
         transfer_id: header.transfer_id.clone(),
-        file_name: header.file_name.clone(),
+        file_name: receipt.file_name.clone(),
         bytes_transferred: header.file_size,
     });
 
     Ok(TransferSummary {
         transfer_id: header.transfer_id,
-        file_name: header.file_name,
+        file_name: receipt.file_name,
         bytes_transferred: header.file_size,
     })
 }
@@ -2582,6 +2603,84 @@ mod tests {
 
         assert_eq!(send_summary.bytes_transferred, 12);
         assert_eq!(receive_summary.bytes_transferred, 12);
+    }
+
+    /// Lost-ack window: the sender vanishes right after Complete, before the
+    /// ack can be delivered. The file is finalized (a durable fact), so the
+    /// receive must still complete - suppressing Completed here would also
+    /// suppress the mailbox receipt post that exists for exactly this case.
+    #[tokio::test]
+    async fn receiver_completes_when_the_ack_cannot_be_delivered() {
+        let root = unique_test_dir();
+        let output_dir = root.join("output");
+        tokio::fs::create_dir_all(&output_dir).await.unwrap();
+        let source_bytes = b"abcdefghij";
+
+        let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
+        let receiver = tokio::spawn({
+            let output_dir = output_dir.clone();
+            async move {
+                TransferEngine::new(5)
+                    .receive_file(&mut receiver_connection, output_dir, &NoopEventSink)
+                    .await
+            }
+        });
+
+        let transfer_id = TransferId::new("manual-transfer");
+        sender_connection
+            .send_frame(Frame::Hello(Hello {
+                protocol_version: PROTOCOL_VERSION,
+                role: PeerRole::Sender,
+            }))
+            .await
+            .unwrap();
+        expect_ready(sender_connection.recv_frame().await.unwrap()).unwrap();
+        sender_connection
+            .send_frame(Frame::FileHeader(FileHeader {
+                transfer_id: transfer_id.clone(),
+                file_name: "data.bin".into(),
+                file_size: source_bytes.len() as u64,
+                chunk_size: 5,
+                resume_requested: false,
+            }))
+            .await
+            .unwrap();
+        expect_resume_status(
+            sender_connection.recv_frame().await.unwrap(),
+            &transfer_id,
+            5,
+        )
+        .unwrap();
+        for (index, chunk) in source_bytes.chunks(5).enumerate() {
+            sender_connection
+                .send_frame(Frame::Chunk(Chunk {
+                    transfer_id: transfer_id.clone(),
+                    index: index as u64,
+                    offset: index as u64 * 5,
+                    bytes: chunk.to_vec(),
+                }))
+                .await
+                .unwrap();
+        }
+        sender_connection
+            .send_frame(Frame::Complete(Complete {
+                transfer_id: transfer_id.clone(),
+                file_hash: blake3::hash(source_bytes).to_hex().to_string(),
+            }))
+            .await
+            .unwrap();
+        // The sender dies without reading the ack.
+        drop(sender_connection);
+
+        let summary = receiver
+            .await
+            .unwrap()
+            .expect("finalized receive must complete");
+        assert_eq!(summary.bytes_transferred, source_bytes.len() as u64);
+        assert_eq!(
+            tokio::fs::read(output_dir.join("data.bin")).await.unwrap(),
+            source_bytes
+        );
     }
 
     /// Field bug (rooms 223606/135499): a fresh send of an already-present
