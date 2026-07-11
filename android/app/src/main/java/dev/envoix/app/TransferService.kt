@@ -71,6 +71,23 @@ private data class Spec(
 class TransferService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
+    /** One scope per card: staging copy, session collector, and courier calls
+     *  all run inside it, so Remove fences a card's ENTIRE async surface with
+     *  a single cancel (no hidden session can start after, no receipt retry
+     *  survives). Parented to the service scope - teardown cancels all. */
+    private val transferScopes = HashMap<Long, CoroutineScope>()
+
+    @Synchronized
+    private fun transferScope(id: Long): CoroutineScope =
+        transferScopes.getOrPut(id) {
+            CoroutineScope(scope.coroutineContext + SupervisorJob(scope.coroutineContext[Job]))
+        }
+
+    @Synchronized
+    private fun cancelTransferScope(id: Long) {
+        transferScopes.remove(id)?.cancel()
+    }
+
     /** Collector jobs per transfer id (live Rust session ⇔ live job). */
     private val jobs = java.util.concurrent.ConcurrentHashMap<Long, Job>()
 
@@ -247,6 +264,12 @@ class TransferService : Service() {
             ACTION_REMOVE -> {
                 val id = intent.getLongExtra(EXTRA_ID, -1L)
                 OpLog.add("remove transfer id=$id", id)
+                // Fence the card's async surface FIRST: staging copy, session
+                // collector, courier retries all die here, so nothing can
+                // start a hidden session or re-create files during cleanup.
+                // (A blocking copy may outlive the signal briefly; its dir is
+                // orphaned then and the startup GC reaps it.)
+                cancelTransferScope(id)
                 // D2, the one true abandon: discard partial + resume state +
                 // receipt, then tear the session and card down. Both staging
                 // dirs are keyed by card id, so they go too without consulting
@@ -255,7 +278,7 @@ class TransferService : Service() {
                 receiveStagingDir(id).deleteRecursively()
                 Native.destroySession(id, true)
                 TransferLogs.delete(id)
-                jobs.remove(id)?.cancel()
+                jobs.remove(id)
                 specs.remove(id)
                 lastSeq.remove(id)
                 TransferRepository.remove(id)
@@ -331,7 +354,7 @@ class TransferService : Service() {
             specs[id] = spec
             lastSeq[id] = 0L
             val job =
-                scope.launch {
+                transferScope(id).launch {
                     // Restored sessions need the same platform resources as
                     // fresh ones: a resumed mDNS attempt without the multicast
                     // lock cannot see discovery traffic.
@@ -370,7 +393,7 @@ class TransferService : Service() {
         spec0: Spec,
         uri: Uri,
     ) {
-        scope.launch(Dispatchers.IO) {
+        transferScope(id).launch(Dispatchers.IO) {
             // The provider's DISPLAY_NAME is untrusted input (it can contain
             // path separators): keep only the leaf, never a dot name.
             val name =
@@ -451,7 +474,7 @@ class TransferService : Service() {
     ) {
         lastSeq[id] = 0L
         val job =
-            scope.launch {
+            transferScope(id).launch {
                 if (spec.useMdns) runCatching { multicastLock.acquire() }
                 try {
                     NativeSession.start(id, spec.paramsJson(resume)).collect { notice ->
@@ -585,7 +608,7 @@ class TransferService : Service() {
             SettingsStore.settings.value.logServer
                 .trimEnd('/')
         if (server.isEmpty()) return
-        scope.launch {
+        transferScope(id).launch {
             val blob = LogUpload.getBytes("$server/receipts/$key")
             val b64 =
                 blob?.let {
@@ -616,7 +639,7 @@ class TransferService : Service() {
                     .getDecoder()
                     .decode(b64)
             }.getOrNull() ?: return
-        scope.launch {
+        transferScope(id).launch {
             for (backoff in listOf(0L, 5_000L, 30_000L)) {
                 if (backoff > 0) delay(backoff)
                 if (LogUpload.postBytes("$server/receipts/$key", bytes)) {
