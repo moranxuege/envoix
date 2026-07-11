@@ -393,3 +393,51 @@ you do not hold).
 
 Remove targets the record id first, as everywhere; the staging job dies with
 the per-card scope and the staging dir is deleted by id.
+
+## Addendum (2026-07-11, three-way review): publish journal — reserve, copy, commit
+
+Publish (staging → MediaStore/SAF) is the last un-journaled store seam. It is
+a PLATFORM fact, not machine state — the reducer does not care where the
+bytes become user-visible, and `Completed` is already true — so the journal
+lives in `platform_extras` (contrast `Preparing`: staging gates the attempt
+launch, so staging is machine state; the line is "does the reducer care").
+
+Crash windows without a journal: SAF mid-copy leaves a truncated VISIBLE file
+in the user's folder; commit-to-delete gap re-publishes a duplicate; delete-
+to-extras gap loses savedUri.
+
+Design (reserve-then-commit; names are NOT identity — the journal records the
+reserved target's URI, never just a name, because a same-named file created
+by the user or another app must never be adopted):
+
+```
+platform_extras.publish_intent = { kind: mediastore|saf, name, target_uri }
+platform_extras.published_uri  = "content://..."
+```
+
+1. **Reserve**: choose a unique name; MediaStore: insert the IS_PENDING=1 row;
+   SAF: create the document. Persist `publish_intent` with the reserved URI
+   BEFORE the first copied byte.
+2. **Copy** into the reserved target.
+3. **Commit**: MediaStore clears IS_PENDING (SAF: copy completion is the
+   commit). Persist `published_uri`.
+4. **Delete staging last** (`staging_deleted` is not journaled — the
+   filesystem answers that itself; never journal what a store can report).
+
+Recovery (an idempotent renderer on the completed snapshot, fresh and
+restored alike):
+- `published_uri` present → verify it RESOLVES, adopt it, delete leftover
+  staging. Unresolvable (user deleted the file) → treat as no result and
+  fall through — never delete staging against a dangling URI (staging may be
+  the last copy of the received bytes).
+- `publish_intent` only → delete/inspect the reserved candidate BY ITS URI
+  (the truncated half-copy), then retry from Reserve. If the candidate
+  cannot be deleted, log and reserve under a NEW unique name — never
+  blind-recreate over it (recovery must not loop or duplicate).
+- Neither → fresh publish from Reserve.
+
+Implementation note: `MediaStoreSaver` splits into reserve/commit so the
+journal writes land between the steps. Rejected: a full outbox (overweight
+for one side-effect kind); name-only intent journal (adopt-by-name can adopt
+a foreign same-named file and then delete staging — data loss, not just
+duplication).
