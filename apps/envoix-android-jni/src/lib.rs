@@ -10,6 +10,7 @@
 
 use std::collections::HashMap;
 use std::io::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use envoix_client::TransferDirection;
@@ -36,6 +37,13 @@ static SESSIONS: OnceLock<Mutex<SessionMap>> = OnceLock::new();
 fn sessions() -> &'static Mutex<SessionMap> {
     SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
+
+/// Monotone pump generation: every createSession/restoreSession claims one
+/// and stamps it into all of that session's notices. Kotlin gates per card,
+/// so a stale pump (a torn-down session for the same id) can never mutate
+/// the current card - the fence is explicit, not an artifact of flow
+/// mechanics.
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 /// Intents addressed to a record id whose session is not registered yet (the
 /// restore-then-intent race: Kotlin fires "resume" right after asking for a
@@ -527,7 +535,7 @@ fn callback_or_log(env: &JNIEnv, callback: &JObject, context: &str) -> Option<Gl
 // ---------------------------------------------------------------------------
 
 /// One notice as JSON for the Kotlin side.
-fn notice_json(notice: envoix_client::api::driver::SessionNotice) -> String {
+fn notice_json(notice: envoix_client::api::driver::SessionNotice, generation: u64) -> String {
     use base64::Engine;
     use envoix_client::api::driver::SessionNotice as N;
     match notice {
@@ -536,6 +544,7 @@ fn notice_json(notice: envoix_client::api::driver::SessionNotice) -> String {
             let mut value = serde_json::to_value(&snapshot).unwrap_or_default();
             if let Some(map) = value.as_object_mut() {
                 map.insert("notice".into(), "snapshot".into());
+                map.insert("gen".into(), generation.into());
                 // The frontend wants a display string, not the enum encoding.
                 map.insert(
                     "path".into(),
@@ -545,12 +554,12 @@ fn notice_json(notice: envoix_client::api::driver::SessionNotice) -> String {
             value.to_string()
         }
         N::FetchReceipt { key, server } => format!(
-            r#"{{"notice":"fetch_receipt","key":{},"server":{}}}"#,
+            r#"{{"notice":"fetch_receipt","gen":{generation},"key":{},"server":{}}}"#,
             json_str(&key),
             json_str(&server.unwrap_or_default()),
         ),
         N::PostReceipt { key, blob, server } => format!(
-            r#"{{"notice":"post_receipt","key":{},"blob":{},"server":{}}}"#,
+            r#"{{"notice":"post_receipt","gen":{generation},"key":{},"blob":{},"server":{}}}"#,
             json_str(&key),
             json_str(&base64::engine::general_purpose::STANDARD.encode(blob)),
             json_str(&server.unwrap_or_default()),
@@ -641,9 +650,10 @@ fn spawn_pump(
     cb: GlobalRef,
     mut notices: tokio::sync::mpsc::UnboundedReceiver<envoix_client::api::driver::SessionNotice>,
 ) {
+    let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
     runtime().spawn(async move {
         while let Some(notice) = notices.recv().await {
-            emit(&vm, &cb, &notice_json(notice));
+            emit(&vm, &cb, &notice_json(notice, generation));
         }
     });
 }

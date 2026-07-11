@@ -99,6 +99,29 @@ class TransferService : Service() {
     /** Last applied snapshot seq per id: out-of-order snapshots are dropped. */
     private val lastSeq = java.util.concurrent.ConcurrentHashMap<Long, Long>()
 
+    /** Pump generation currently owning each card (stamped into every JNI
+     *  notice). The active collector claims it on its first notice; anything
+     *  else is a stale pump from a torn-down session for the same id and is
+     *  dropped - the fence is explicit, not an artifact of flow mechanics. */
+    private val generations = HashMap<Long, Long>()
+
+    /** True when [notice] belongs to the card's current pump (claiming it if
+     *  the card is unclaimed). */
+    @Synchronized
+    private fun ownsCard(
+        id: Long,
+        notice: JSONObject,
+    ): Boolean {
+        val gen = notice.optLong("gen", 0L)
+        if (gen <= 0L) return true // pre-generation core: let it through
+        val current = generations[id]
+        if (current == null) {
+            generations[id] = gen
+            return true
+        }
+        return gen == current
+    }
+
     /** Latch for the active→resting tray transition. */
     /** Foreground is platform STATE, reconciled against the snapshot stream -
      *  not a history edge. (The old active->resting latch never fired for a
@@ -321,6 +344,7 @@ class TransferService : Service() {
                 jobs.remove(id)
                 specs.remove(id)
                 lastSeq.remove(id)
+                generations.remove(id)
                 TransferRepository.remove(id)
                 stopIfIdle()
             }
@@ -406,10 +430,12 @@ class TransferService : Service() {
                 )
             specs[id] = spec
             lastSeq[id] = 0L
+            generations.remove(id)
             val job =
                 transferScope(id).launch {
                     try {
                         NativeSession.restore(id).collect { notice ->
+                            if (!ownsCard(id, notice)) return@collect
                             when (notice.optString("notice")) {
                                 "snapshot" -> onSnapshot(id, spec, notice)
                                 "fetch_receipt" ->
@@ -523,10 +549,12 @@ class TransferService : Service() {
         resume: Boolean,
     ) {
         lastSeq[id] = 0L
+        generations.remove(id)
         val job =
             transferScope(id).launch {
                 try {
                     NativeSession.start(id, spec.paramsJson(resume)).collect { notice ->
+                        if (!ownsCard(id, notice)) return@collect
                         when (notice.optString("notice")) {
                             "snapshot" -> onSnapshot(id, spec, notice)
                             "fetch_receipt" ->
