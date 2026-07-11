@@ -579,6 +579,10 @@ class TransferService : Service() {
      * [attributeTo] names the card that gets fileName/savedUri (completion
      * sweeps only; a start-of-session sweep publishes without attribution -
      * the residue belongs to some older card).
+     *
+     * DELETE WITH PHASE 4: this sweep only compensates SHARED receive staging.
+     * Per-transfer incoming/<id>/ staging is empty by construction - nothing
+     * to sweep, and the existing-final path cannot fire on residue.
      */
     private fun sweepStaging(
         outputDir: String,
