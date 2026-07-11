@@ -350,10 +350,15 @@ impl Actor {
             tokio::select! {
                 cmd = self.cmds.recv() => match cmd {
                     Some(cmd) => self.on_cmd(cmd).await,
-                    // All handles dropped: stop the attempt and end the actor.
+                    // All handles dropped: an infrastructure fact, not a user
+                    // intent. Say nothing on the wire - the peer's connection-
+                    // lost handling (partial kept, durable facts) is the
+                    // designed story for silence, and a graceful teardown must
+                    // be indistinguishable from a crash. A cancel here used to
+                    // make the peer discard its partial (lifecycle-issue #4).
                     None => {
                         if let Some(t) = self.current.take() {
-                            t.cancel();
+                            t.detach();
                         }
                         return;
                     }

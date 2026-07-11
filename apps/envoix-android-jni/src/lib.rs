@@ -758,5 +758,6 @@ pub extern "system" fn Java_dev_envoix_app_Native_destroySession(
         session.discard();
     }
     // Dropping the handle closes the command channel; the actor drains the
-    // queued discard first, cancels any live attempt, and exits.
+    // queued discard first, then detaches any live attempt - a silent
+    // teardown (the peer sees connection loss, never a cancel) - and exits.
 }
