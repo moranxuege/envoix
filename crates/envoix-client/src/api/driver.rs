@@ -455,6 +455,13 @@ impl Actor {
                 }
             }
             Cmd::Discard => {
+                // Stop the attempt BEFORE deleting anything: the engine
+                // checkpoints resume state even on its cancel path, so a live
+                // attempt would resurrect the files removed below. Remove is
+                // an explicit user intent - the peer hears a cancel.
+                if let Some(t) = self.current.take() {
+                    t.cancel_and_join().await;
+                }
                 self.discard_partial().await;
                 if let Some(name) = &self.session.file_name
                     && let Err(error) =
