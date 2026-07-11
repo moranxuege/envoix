@@ -16,9 +16,16 @@ use serde::{Deserialize, Deserializer, Serialize, de};
 use super::driver::{SessionContext, SessionParams};
 use super::machine::Session;
 
+/// Current record schema version, written on every save. Old records
+/// deserialize as 0 (fields were only ever added with serde defaults).
+pub const RECORD_VERSION: u32 = 1;
+
 /// One persisted transfer session.
 #[derive(Clone, Debug, Serialize)]
 pub struct TransferRecord {
+    /// Schema version stamp (see [`RECORD_VERSION`]).
+    #[serde(default)]
+    pub version: u32,
     /// The frontend's card id — stable across restarts.
     pub id: u64,
     /// Last-write time, ms since the Unix epoch (display/GC only).
@@ -26,6 +33,12 @@ pub struct TransferRecord {
     /// Complete immutable context needed to recreate the same Rust session.
     pub context: SessionContext,
     pub session: Session,
+    /// Opaque frontend-owned card context (e.g. Android's QR payload and
+    /// saved URI). Persisted verbatim, returned on restore, never read by the
+    /// core: the record is the ONE durable home for a card, but lifecycle
+    /// authority stays with `session`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_extras: Option<serde_json::Value>,
 }
 
 impl<'de> Deserialize<'de> for TransferRecord {
@@ -35,11 +48,15 @@ impl<'de> Deserialize<'de> for TransferRecord {
     {
         #[derive(Deserialize)]
         struct Wire {
+            #[serde(default)]
+            version: u32,
             id: u64,
             updated_ms: u64,
             context: Option<SessionContext>,
             params: Option<SessionParams>,
             session: Session,
+            #[serde(default)]
+            platform_extras: Option<serde_json::Value>,
         }
 
         let wire = Wire::deserialize(deserializer)?;
@@ -54,10 +71,12 @@ impl<'de> Deserialize<'de> for TransferRecord {
             }
         };
         Ok(Self {
+            version: wire.version,
             id: wire.id,
             updated_ms: wire.updated_ms,
             context,
             session: wire.session,
+            platform_extras: wire.platform_extras,
         })
     }
 }
@@ -199,8 +218,10 @@ mod tests {
 
     fn record(id: u64) -> TransferRecord {
         TransferRecord {
+            version: RECORD_VERSION,
             id,
             updated_ms: 1,
+            platform_extras: None,
             context: SessionContext {
                 client: Default::default(),
                 params: SessionParams {
@@ -315,6 +336,26 @@ mod tests {
                 .unwrap()
                 .is_none(),
             "state deleted"
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn platform_extras_survive_the_round_trip() {
+        let dir = std::env::temp_dir().join(format!("envoix-extras-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let store = RecordStore::new(&dir);
+        let mut r = record(11);
+        r.platform_extras =
+            Some(serde_json::json!({"qr": "envoix:abc", "saved_uri": "content://x"}));
+        store.save(&r).await.unwrap();
+
+        let loaded = store.load(11).await.unwrap();
+        assert_eq!(loaded.version, RECORD_VERSION);
+        assert_eq!(
+            loaded.platform_extras.unwrap()["qr"],
+            serde_json::json!("envoix:abc"),
+            "the core persists the frontend's context verbatim"
         );
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

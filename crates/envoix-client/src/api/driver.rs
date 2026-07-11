@@ -144,6 +144,8 @@ enum Cmd {
     /// Serve the peer's re-verify (courier tier: one-shot, bounded, never
     /// touches the machine, the record, or the card).
     ServeReverify,
+    /// Replace the frontend-owned card context persisted with the record.
+    SetExtras(serde_json::Value),
 }
 
 /// Handle to a running transfer session (one card).
@@ -158,6 +160,7 @@ impl TransferSession {
     pub fn start(
         context: SessionContext,
         record: Option<(RecordStore, u64)>,
+        extras: Option<serde_json::Value>,
     ) -> Result<(Self, mpsc::UnboundedReceiver<SessionNotice>), TransferError> {
         let client = context.client.client()?;
         let direction = context.params.direction;
@@ -166,6 +169,7 @@ impl TransferSession {
             context,
             Session::new(direction),
             record,
+            extras,
             true,
         ))
     }
@@ -202,7 +206,14 @@ impl TransferSession {
                 session.reason = Some("interrupted by an app restart".into());
             }
         }
-        Ok(Self::spawn(client, record.context, session, store, false))
+        Ok(Self::spawn(
+            client,
+            record.context,
+            session,
+            store,
+            record.platform_extras,
+            false,
+        ))
     }
 
     fn spawn(
@@ -210,6 +221,7 @@ impl TransferSession {
         context: SessionContext,
         mut session: Session,
         record: Option<(RecordStore, u64)>,
+        platform_extras: Option<serde_json::Value>,
         launch: bool,
     ) -> (Self, mpsc::UnboundedReceiver<SessionNotice>) {
         // A sender always knows its file: seed the name from the source path
@@ -238,6 +250,7 @@ impl TransferSession {
             rate: RateTracker::default(),
             last_progress_snapshot: None,
             record,
+            platform_extras,
             launch,
         };
         tokio::spawn(actor.run());
@@ -280,6 +293,12 @@ impl TransferSession {
     /// machine are untouched.
     pub fn serve_reverify(&self) {
         let _ = self.cmds.send(Cmd::ServeReverify);
+    }
+
+    /// Replace the frontend-owned card context (QR payload, saved URI, ...)
+    /// persisted with the record. Opaque to the core; survives restarts.
+    pub fn set_extras(&self, extras: serde_json::Value) {
+        let _ = self.cmds.send(Cmd::SetExtras(extras));
     }
 }
 
@@ -333,6 +352,8 @@ struct Actor {
     cmds: mpsc::UnboundedReceiver<Cmd>,
     notices: mpsc::UnboundedSender<SessionNotice>,
     current: Option<super::Transfer>,
+    /// Frontend-owned card context, persisted verbatim with the record.
+    platform_extras: Option<serde_json::Value>,
     /// Input produced while running effects (a sync launch failure inside
     /// [`Effect::StartAttempt`]); drained by the [`Self::apply`] loop so it
     /// takes the same reduce->effects->persist path as every other input.
@@ -487,6 +508,10 @@ impl Actor {
                     });
                 }
             }
+            Cmd::SetExtras(extras) => {
+                self.platform_extras = Some(extras);
+                self.persist().await;
+            }
             Cmd::Discard => {
                 // Stop the attempt BEFORE deleting anything: the engine
                 // checkpoints resume state even on its cancel path, so a live
@@ -620,10 +645,12 @@ impl Actor {
     async fn persist(&self) {
         if let Some((store, id)) = &self.record {
             let record = TransferRecord {
+                version: super::record::RECORD_VERSION,
                 id: *id,
                 updated_ms: unix_now_ms(),
                 context: self.context.clone(),
                 session: self.session.clone(),
+                platform_extras: self.platform_extras.clone(),
             };
             if let Err(error) = store.save(&record).await {
                 tracing::warn!(%error, "persisting transfer record failed");
@@ -812,10 +839,12 @@ mod tests {
 
     fn record(direction: TransferDirection, session: Session) -> TransferRecord {
         TransferRecord {
+            version: super::super::record::RECORD_VERSION,
             id: 7,
             updated_ms: 1,
             context: failing_context(direction),
             session,
+            platform_extras: None,
         }
     }
 
@@ -841,6 +870,7 @@ mod tests {
                 rate: RateTracker::default(),
                 last_progress_snapshot: None,
                 record: None,
+                platform_extras: None,
                 launch: false,
             },
             notice_rx,
@@ -871,7 +901,7 @@ mod tests {
     #[tokio::test]
     async fn failing_attempt_reaches_failed_via_run_ended() {
         let (_session, mut notices) =
-            TransferSession::start(failing_context(TransferDirection::Send), None).unwrap();
+            TransferSession::start(failing_context(TransferDirection::Send), None, None).unwrap();
         let snapshot = wait_for_state(&mut notices, State::Failed).await;
         assert_eq!(snapshot.session.attempt, 1);
         assert!(snapshot.session.reason.is_some());
@@ -880,7 +910,7 @@ mod tests {
     #[tokio::test]
     async fn resume_launches_attempt_two() {
         let (session, mut notices) =
-            TransferSession::start(failing_context(TransferDirection::Send), None).unwrap();
+            TransferSession::start(failing_context(TransferDirection::Send), None, None).unwrap();
         wait_for_state(&mut notices, State::Failed).await;
         session.resume();
         let snapshot = wait_for_state(&mut notices, State::Connecting).await;
@@ -943,7 +973,7 @@ mod tests {
         let mut context = failing_context(TransferDirection::Send);
         context.params.sources = Vec::new();
         let (_handle, mut notices) =
-            TransferSession::start(context, Some((store.clone(), 3))).unwrap();
+            TransferSession::start(context, Some((store.clone(), 3)), None).unwrap();
         wait_for_state(&mut notices, State::Failed).await;
 
         // Snapshots emit before the fs write completes: poll briefly.
@@ -1084,7 +1114,8 @@ mod tests {
     #[tokio::test]
     async fn cancel_wins_over_the_attempt() {
         let (session, mut notices) =
-            TransferSession::start(failing_context(TransferDirection::Receive), None).unwrap();
+            TransferSession::start(failing_context(TransferDirection::Receive), None, None)
+                .unwrap();
         session.cancel();
         let snapshot = wait_for_state(&mut notices, State::Cancelled).await;
         // Whatever the racing attempt reported, the user's cancel is final.

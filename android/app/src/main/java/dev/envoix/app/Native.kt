@@ -67,6 +67,13 @@ object Native {
     )
 
     /** Tear a session down; with [discard], delete partial/resume/receipt (D2). */
+    /** Replace the card context (QR payload, saved URI) persisted with the
+     *  transfer's record; opaque to the core, returned by listRecords. */
+    external fun setSessionExtras(
+        id: Long,
+        extrasJson: String,
+    )
+
     external fun destroySession(
         id: Long,
         discard: Boolean,

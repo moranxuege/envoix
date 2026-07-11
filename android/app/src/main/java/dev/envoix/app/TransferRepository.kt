@@ -45,10 +45,19 @@ object TransferRepository {
         id: Long,
         direction: Direction,
         room: String,
+        qrPayload: String? = null,
+        savedUri: String? = null,
     ): Boolean {
         if (_transfers.value.any { it.id == id }) return false
         nextId = maxOf(nextId, id + 1)
-        _transfers.value = _transfers.value + Transfer(id = id, direction = direction, room = room)
+        _transfers.value = _transfers.value +
+            Transfer(
+                id = id,
+                direction = direction,
+                room = room,
+                qrPayload = qrPayload,
+                savedUri = savedUri,
+            )
         return true
     }
 

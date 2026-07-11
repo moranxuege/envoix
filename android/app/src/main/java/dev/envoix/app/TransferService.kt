@@ -61,6 +61,7 @@ private data class Spec(
                 put("use_mdns", useMdns)
                 put("resume", resume)
                 put("receipt_server", receiptServer)
+                qrPayload?.let { put("platform_extras", org.json.JSONObject().put("qr", it)) }
             }.toString()
 }
 
@@ -374,7 +375,17 @@ class TransferService : Service() {
                 }
             }
             if (code.isEmpty()) continue
-            if (!TransferRepository.restoreCard(id, if (direction == "send") Direction.Send else Direction.Receive, code)) continue
+            val extras = rec.optJSONObject("platform_extras")
+            if (!TransferRepository.restoreCard(
+                    id,
+                    if (direction == "send") Direction.Send else Direction.Receive,
+                    code,
+                    qrPayload = extras?.optString("qr")?.ifEmpty { null },
+                    savedUri = extras?.optString("saved_uri")?.ifEmpty { null },
+                )
+            ) {
+                continue
+            }
             val spec =
                 Spec(
                     direction,
@@ -731,9 +742,20 @@ class TransferService : Service() {
                         it
                     }
                 }
+                syncExtras(attributeTo)
             }
             LogStore.append("app: saved ${src.name} to Downloads")
         }
+    }
+
+    /** Push the card's platform context (QR payload, saved URI) into the
+     *  transfer's durable record, so it survives restarts. */
+    private fun syncExtras(id: Long) {
+        val t = TransferRepository.transfers.value.firstOrNull { it.id == id } ?: return
+        val extras = org.json.JSONObject()
+        t.qrPayload?.let { extras.put("qr", it) }
+        t.savedUri?.let { extras.put("saved_uri", it) }
+        Native.setSessionExtras(id, extras.toString())
     }
 
     /** Active machine states pin the tray; everything else rests. */

@@ -624,8 +624,9 @@ pub extern "system" fn Java_dev_envoix_app_Native_createSession(
         },
     };
 
+    let extras = v.get("platform_extras").filter(|e| e.is_object()).cloned();
     let _guard = runtime().enter();
-    let (session, notices) = match TransferSession::start(context, record_for(id)) {
+    let (session, notices) = match TransferSession::start(context, record_for(id), extras) {
         Ok(session) => session,
         Err(error) => return emit_failed_snapshot(&vm, &cb, "invalid session context", error),
     };
@@ -787,6 +788,30 @@ pub extern "system" fn Java_dev_envoix_app_Native_receiptResponse(
         return;
     };
     session.receipt_response(key, blob);
+}
+
+/// Replace the frontend-owned card context (QR payload, saved URI, ...)
+/// persisted with the transfer's record. Opaque to the core.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_setSessionExtras(
+    mut env: JNIEnv,
+    _class: JClass,
+    id: jlong,
+    extras_json: JString,
+) {
+    let raw = jstr(&mut env, &extras_json);
+    let Ok(extras) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        tracing::warn!(id, "setSessionExtras: invalid JSON");
+        return;
+    };
+    let Ok(map) = sessions().lock() else {
+        return;
+    };
+    let Some(session) = map.get(&id) else {
+        tracing::debug!(id, "setSessionExtras: session not live");
+        return;
+    };
+    session.set_extras(extras);
 }
 
 /// Tear a session down. With `discard` (D2, Remove): delete the partial,
