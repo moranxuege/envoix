@@ -19,7 +19,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
 
@@ -107,6 +106,57 @@ class TransferService : Service() {
         mgr.createNotificationChannel(
             NotificationChannel(CHANNEL, "Transfers", NotificationManager.IMPORTANCE_LOW),
         )
+        gcStaging()
+    }
+
+    /** The per-card receive staging dir (Phase 4): `filesDir/incoming/<id>/`. */
+    private fun receiveStagingDir(id: Long) = File(File(filesDir, "incoming"), id.toString())
+
+    /**
+     * Reconcile staging with the record store at service start, before any
+     * action can run (onCreate precedes onStartCommand, so no session exists
+     * yet and nothing races the deletes):
+     * - per-id staging dirs with no record are crash residue - delete;
+     * - files directly in the incoming root are pre-Phase-4 shared-staging
+     *   leftovers: publish finals (the old pre-receive sweep's recovery
+     *   duty, one last time), drop sidecars. Runs async - new transfers
+     *   never touch the root anymore.
+     */
+    private fun gcStaging() {
+        var recordIds = emptySet<Long>()
+        var legacyRootInUse = false
+        val incoming = File(filesDir, "incoming")
+        runCatching {
+            val records = org.json.JSONArray(Native.listRecords())
+            recordIds =
+                (0 until records.length())
+                    .mapNotNull { records.optJSONObject(it)?.optLong("id", -1L)?.takeIf { id -> id >= 0 } }
+                    .toSet()
+            // Pre-Phase-4 records point straight at the shared root; their
+            // artifacts live there and are NOT garbage while the record does.
+            legacyRootInUse =
+                (0 until records.length()).any {
+                    val rec = records.optJSONObject(it) ?: return@any false
+                    val params = rec.optJSONObject("context")?.optJSONObject("params") ?: rec.optJSONObject("params")
+                    params?.optString("path") == incoming.absolutePath
+                }
+        }
+        incoming.listFiles { f -> f.isDirectory }?.forEach { dir ->
+            if (dir.name.toLongOrNull() !in recordIds) {
+                dir.deleteRecursively()
+                OpLog.add("gc: dropped orphan staging ${dir.name}")
+            }
+        }
+        val send = File(cacheDir, "send")
+        send.listFiles { f -> f.isDirectory }?.forEach { dir ->
+            if (dir.name.toLongOrNull() !in recordIds) dir.deleteRecursively()
+        }
+        if (!legacyRootInUse) {
+            scope.launch(Dispatchers.IO) {
+                sweepStaging(incoming.absolutePath, attributeTo = null)
+                incoming.listFiles { f -> f.isFile }?.forEach { it.delete() }
+            }
+        }
     }
 
     override fun onStartCommand(
@@ -120,7 +170,7 @@ class TransferService : Service() {
                 val room = intent.getStringExtra(EXTRA_ROOM)
                 val path = intent.getStringExtra(EXTRA_PATH)
                 if (direction == null || room == null || path == null) return START_NOT_STICKY
-                val spec =
+                val spec0 =
                     Spec(
                         direction,
                         room,
@@ -135,7 +185,17 @@ class TransferService : Service() {
                         SettingsStore.settings.value.useMdns,
                     )
                 enterForeground()
-                val id = TransferRepository.create(spec.dir(), room)
+                val id = TransferRepository.create(spec0.dir(), room)
+                // Receive staging is keyed by card id (Phase 4): a fresh dir
+                // is empty by construction, so the core's existing-final path
+                // cannot fire on another card's residue, and resume/receipt
+                // artifacts flow only through the card that owns them.
+                val spec =
+                    if (spec0.dir() == Direction.Receive) {
+                        spec0.copy(path = receiveStagingDir(id).absolutePath)
+                    } else {
+                        spec0
+                    }
                 TransferRepository.update(id) {
                     it.copy(
                         qrPayload = spec.qrPayload,
@@ -188,10 +248,11 @@ class TransferService : Service() {
                 val id = intent.getLongExtra(EXTRA_ID, -1L)
                 OpLog.add("remove transfer id=$id", id)
                 // D2, the one true abandon: discard partial + resume state +
-                // receipt, then tear the session and card down. The send
-                // staging dir is keyed by card id, so it goes too without
-                // consulting the (possibly already gone) spec.
+                // receipt, then tear the session and card down. Both staging
+                // dirs are keyed by card id, so they go too without consulting
+                // the (possibly already gone) spec.
                 File(File(cacheDir, "send"), id.toString()).deleteRecursively()
+                receiveStagingDir(id).deleteRecursively()
                 Native.destroySession(id, true)
                 TransferLogs.delete(id)
                 jobs.remove(id)?.cancel()
@@ -271,12 +332,20 @@ class TransferService : Service() {
             lastSeq[id] = 0L
             val job =
                 scope.launch {
-                    NativeSession.restore(id).collect { notice ->
-                        when (notice.optString("notice")) {
-                            "snapshot" -> onSnapshot(id, spec, notice)
-                            "fetch_receipt" -> onFetchReceipt(id, notice.optString("key"))
-                            "post_receipt" -> onPostReceipt(id, notice)
+                    // Restored sessions need the same platform resources as
+                    // fresh ones: a resumed mDNS attempt without the multicast
+                    // lock cannot see discovery traffic.
+                    if (spec.useMdns) runCatching { multicastLock.acquire() }
+                    try {
+                        NativeSession.restore(id).collect { notice ->
+                            when (notice.optString("notice")) {
+                                "snapshot" -> onSnapshot(id, spec, notice)
+                                "fetch_receipt" -> onFetchReceipt(id, notice.optString("key"))
+                                "post_receipt" -> onPostReceipt(id, notice)
+                            }
                         }
+                    } finally {
+                        if (spec.useMdns) runCatching { multicastLock.release() }
                     }
                 }
             jobs[id] = job
@@ -383,15 +452,6 @@ class TransferService : Service() {
         lastSeq[id] = 0L
         val job =
             scope.launch {
-                // Drain any residue BEFORE the transfer: a finalized file left
-                // in staging (e.g. by a failed publish) makes the core's
-                // existing-final path answer a resume-enabled send of that
-                // file instantly - and invisibly, since the user only sees
-                // Downloads. Field bug: room 104519. Must complete before the
-                // session starts: a fire-and-forget sweep can lose the race.
-                if (spec.dir() == Direction.Receive) {
-                    withContext(Dispatchers.IO) { sweepStaging(spec.path, attributeTo = null) }
-                }
                 if (spec.useMdns) runCatching { multicastLock.acquire() }
                 try {
                     NativeSession.start(id, spec.paramsJson(resume)).collect { notice ->
@@ -570,19 +630,12 @@ class TransferService : Service() {
     }
 
     /**
-     * Publish EVERY finalized file in the staging dir to Downloads (the card's
-     * own file plus any residue from an earlier failed publish), deleting the
-     * staging copy on success. The staging dir must never retain finals: the
-     * core treats an existing final as "already have it" and answers future
-     * sends of that file instantly - correct for the CLI (a real output dir),
-     * wrong for the app (staging is invisible; the user only sees Downloads).
-     * [attributeTo] names the card that gets fileName/savedUri (completion
-     * sweeps only; a start-of-session sweep publishes without attribution -
-     * the residue belongs to some older card).
-     *
-     * DELETE WITH PHASE 4: this sweep only compensates SHARED receive staging.
-     * Per-transfer incoming/<id>/ staging is empty by construction - nothing
-     * to sweep, and the existing-final path cannot fire on residue.
+     * Publish every finalized file in one staging dir to Downloads, deleting
+     * the staging copy on success (receipt sidecars stay - they re-confirm a
+     * lost CompleteAck after the file is published away). With per-card
+     * staging (Phase 4) the dir holds only [attributeTo]'s own artifacts; the
+     * unattributed call in [gcStaging] is the one legacy exception, draining
+     * pre-Phase-4 shared-staging residue.
      */
     private fun sweepStaging(
         outputDir: String,
