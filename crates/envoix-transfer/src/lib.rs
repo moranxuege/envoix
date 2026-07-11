@@ -487,10 +487,35 @@ impl TransferEngine {
 
         let header = expect_file_header(recv_frame_or_cancel(connection, cancel).await?)?;
         validate_header(&header, self.chunk_size)?;
-        let final_path = output_dir.join(&header.file_name);
-        if fs::try_exists(&final_path).await? {
-            return receive_existing_final(connection, header, final_path, events).await;
+        // One scan serves the whole ladder below: the in-flight partial (and
+        // the landing name it recorded), the existing-final answer, and the
+        // receipt short-circuit.
+        let resume_state = LocalFileStorage::find_resume_state(
+            &output_dir,
+            &header.file_name,
+            header.file_size,
+            header.chunk_size,
+        )
+        .await?;
+        // A prior fresh attempt recorded where it is landing; honor that name
+        // so resuming it continues beside the original file instead of being
+        // instantly answered by it (field bug: fresh re-send of an already-
+        // present file "completed" in 308ms off the existing final, with the
+        // fresh request silently ignored).
+        let mut target_name = resume_state
+            .as_ref()
+            .and_then(|state| state.target_file_name.clone())
+            .unwrap_or_else(|| header.file_name.clone());
+        if fs::try_exists(output_dir.join(&target_name)).await? {
+            if header.resume_requested {
+                let final_path = output_dir.join(&target_name);
+                return receive_existing_final(connection, header, final_path, events).await;
+            }
+            // A fresh send must move real bytes: never answer it from an
+            // existing same-name final - land beside it under a free name.
+            target_name = unique_final_name(&output_dir, &header.file_name).await?;
         }
+        let final_path = output_dir.join(&target_name);
         // The file itself may have been moved/published away after completion;
         // its receipt then re-confirms a re-offer without any bytes re-sent.
         // Gated on resume_requested so a --fresh send forces a real re-receive,
@@ -500,14 +525,7 @@ impl TransferEngine {
         // previously-completed file "completed" instantly off the old receipt,
         // orphaning the partial and delivering nothing).
         if header.resume_requested
-            && LocalFileStorage::find_resume_state(
-                &output_dir,
-                &header.file_name,
-                header.file_size,
-                header.chunk_size,
-            )
-            .await?
-            .is_none()
+            && resume_state.is_none()
             && let Some(receipt) =
                 LocalFileStorage::read_receipt(&output_dir, &header.file_name).await?
             && receipt.file_size == header.file_size
@@ -515,7 +533,15 @@ impl TransferEngine {
             return receive_from_receipt(connection, header, receipt, events).await;
         }
 
-        let prepared = prepare_receive_state(&output_dir, &header, events, self.chunk_size).await?;
+        let prepared = prepare_receive_state(
+            &output_dir,
+            &header,
+            resume_state,
+            &target_name,
+            events,
+            self.chunk_size,
+        )
+        .await?;
         let temp_path = prepared.temp_path;
         let mut file = prepared.file;
         let mut hasher = prepared.hasher;
@@ -554,6 +580,7 @@ impl TransferEngine {
                     write_resume_state_for_offset(
                         &output_dir,
                         &header,
+                        &target_name,
                         expected_offset,
                         expected_index,
                         Some(hasher.finalize().to_hex().to_string()),
@@ -572,7 +599,15 @@ impl TransferEngine {
                         expected_offset = 0;
                         last_resume_state_bytes = 0;
                         hasher = blake3::Hasher::new();
-                        write_resume_state_for_offset(&output_dir, &header, 0, 0, None).await?;
+                        write_resume_state_for_offset(
+                            &output_dir,
+                            &header,
+                            &target_name,
+                            0,
+                            0,
+                            None,
+                        )
+                        .await?;
                     }
                     validate_chunk(&chunk, &header.transfer_id, expected_index, expected_offset)?;
                     if chunk.bytes.len() as u64 + expected_offset > header.file_size {
@@ -595,6 +630,7 @@ impl TransferEngine {
                         write_resume_state_for_offset(
                             &output_dir,
                             &header,
+                            &target_name,
                             expected_offset,
                             expected_index,
                             Some(hasher.finalize().to_hex().to_string()),
@@ -785,10 +821,17 @@ async fn finalize_received_file(
         )));
     }
     file.flush().await?;
+    // The landing name: differs from header.file_name for a fresh re-receive
+    // beside an existing same-name final.
+    let target_name = final_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(&header.file_name);
     let actual_hash = hasher.finalize().to_hex().to_string();
     write_resume_state_for_offset(
         output_dir,
         header,
+        target_name,
         expected_offset,
         expected_index,
         Some(actual_hash.clone()),
@@ -810,7 +853,7 @@ async fn finalize_received_file(
     LocalFileStorage::write_receipt(
         output_dir,
         &TransferReceipt {
-            file_name: header.file_name.clone(),
+            file_name: target_name.to_owned(),
             file_size: header.file_size,
             file_hash: actual_hash,
         },
@@ -901,6 +944,7 @@ fn validate_chunk(
 async fn write_resume_state_for_offset(
     output_dir: &Path,
     header: &FileHeader,
+    target_name: &str,
     bytes_received: u64,
     next_chunk_index: u64,
     hash_checkpoint: Option<String>,
@@ -916,6 +960,7 @@ async fn write_resume_state_for_offset(
             next_chunk_index,
             hash_bytes: bytes_received,
             hash_checkpoint,
+            target_file_name: (target_name != header.file_name).then(|| target_name.to_owned()),
         },
     )
     .await
@@ -932,6 +977,8 @@ struct PreparedReceive {
 async fn prepare_receive_state(
     output_dir: &Path,
     header: &FileHeader,
+    resume_state: Option<TransferResumeState>,
+    target_name: &str,
     events: &dyn EventSink,
     buffer_size: usize,
 ) -> Result<PreparedReceive, TransferError> {
@@ -940,14 +987,7 @@ async fn prepare_receive_state(
     }
 
     let state = if header.resume_requested {
-        match LocalFileStorage::find_resume_state(
-            output_dir,
-            &header.file_name,
-            header.file_size,
-            header.chunk_size,
-        )
-        .await?
-        {
+        match resume_state {
             Some(state) => match prepare_existing_resume_state(output_dir, header, state).await? {
                 Some(state) => state,
                 None => fresh_resume_state(output_dir, header).await?,
@@ -976,6 +1016,7 @@ async fn prepare_receive_state(
     write_resume_state_for_offset(
         output_dir,
         header,
+        target_name,
         state.bytes_received,
         state.next_chunk_index,
         Some(prefix_hash.clone()),
@@ -1074,6 +1115,27 @@ async fn delete_resume_candidate(
     LocalFileStorage::delete_resume_state(output_dir, &state.file_name, &state.transfer_id).await
 }
 
+/// First `name (n).ext` (n = 1, 2, ...) that does not exist in `output_dir`;
+/// used when a fresh receive must land beside an existing same-name final.
+async fn unique_final_name(output_dir: &Path, file_name: &str) -> Result<String, TransferError> {
+    let (stem, extension) = match file_name.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() => (stem, Some(extension)),
+        _ => (file_name, None),
+    };
+    for n in 1..=9999u32 {
+        let candidate = match extension {
+            Some(extension) => format!("{stem} ({n}).{extension}"),
+            None => format!("{stem} ({n})"),
+        };
+        if !fs::try_exists(output_dir.join(&candidate)).await? {
+            return Ok(candidate);
+        }
+    }
+    Err(CoreError::Storage(format!(
+        "no free landing name for {file_name}"
+    )))
+}
+
 async fn fresh_resume_state(
     output_dir: &Path,
     header: &FileHeader,
@@ -1087,6 +1149,7 @@ async fn fresh_resume_state(
         next_chunk_index: 0,
         hash_bytes: 0,
         hash_checkpoint: None,
+        target_file_name: None,
     };
     LocalFileStorage::delete_resume_temp(output_dir, &state.file_name, &state.transfer_id).await?;
     LocalFileStorage::write_resume_state(output_dir, &state).await?;
@@ -1585,6 +1648,7 @@ mod tests {
             next_chunk_index: 2,
             hash_bytes: 0,
             hash_checkpoint: None,
+            target_file_name: None,
         };
         LocalFileStorage::write_resume_state(&output_dir, &state)
             .await
@@ -2166,6 +2230,7 @@ mod tests {
             next_chunk_index: 1,
             hash_bytes: 5,
             hash_checkpoint: Some(blake3::hash(b"abcde").to_hex().to_string()),
+            target_file_name: None,
         };
         LocalFileStorage::write_resume_state(&output_dir, &state)
             .await
@@ -2224,6 +2289,7 @@ mod tests {
             next_chunk_index: 0,
             hash_bytes: 0,
             hash_checkpoint: None,
+            target_file_name: None,
         };
         LocalFileStorage::write_resume_state(&output_dir, &state)
             .await
@@ -2276,6 +2342,7 @@ mod tests {
             next_chunk_index: 1,
             hash_bytes: 5,
             hash_checkpoint: Some(blake3::hash(b"abcde").to_hex().to_string()),
+            target_file_name: None,
         };
         LocalFileStorage::write_resume_state(&output_dir, &state)
             .await
@@ -2334,6 +2401,7 @@ mod tests {
             next_chunk_index: 1,
             hash_bytes: 5,
             hash_checkpoint: Some(blake3::hash(b"abcde").to_hex().to_string()),
+            target_file_name: None,
         };
         LocalFileStorage::write_resume_state(&output_dir, &state)
             .await
@@ -2401,6 +2469,7 @@ mod tests {
             next_chunk_index: 7,
             hash_bytes: 5,
             hash_checkpoint: Some(blake3::hash(b"abcde").to_hex().to_string()),
+            target_file_name: None,
         };
         LocalFileStorage::write_resume_state(&output_dir, &state)
             .await
@@ -2507,6 +2576,171 @@ mod tests {
 
         assert_eq!(send_summary.bytes_transferred, 12);
         assert_eq!(receive_summary.bytes_transferred, 12);
+    }
+
+    /// Field bug (rooms 223606/135499): a fresh send of an already-present
+    /// file "completed" in 308ms off the existing final - the fresh request
+    /// was silently ignored. A fresh offer must move real bytes and land
+    /// beside the original under a free name.
+    #[tokio::test]
+    async fn fresh_offer_beside_existing_final_lands_real_copy_under_new_name() {
+        let root = unique_test_dir();
+        let output_dir = root.join("output");
+        tokio::fs::create_dir_all(&output_dir).await.unwrap();
+        let source_bytes = b"abcdefghij";
+        tokio::fs::write(output_dir.join("data.bin"), source_bytes)
+            .await
+            .unwrap();
+
+        let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
+        let receiver = tokio::spawn({
+            let output_dir = output_dir.clone();
+            async move {
+                TransferEngine::new(5)
+                    .receive_file(&mut receiver_connection, output_dir, &NoopEventSink)
+                    .await
+                    .unwrap()
+            }
+        });
+
+        manual_send(
+            &mut sender_connection,
+            ManualSend {
+                file_name: "data.bin",
+                source_bytes,
+                chunk_size: 5,
+                resume_requested: false,
+                bytes_to_send: source_bytes,
+                complete_hash: blake3::hash(source_bytes).to_hex().to_string(),
+                expected_resume_bytes: 0,
+            },
+        )
+        .await;
+        let receive_summary = receiver.await.unwrap();
+
+        assert_eq!(
+            receive_summary.bytes_transferred,
+            source_bytes.len() as u64,
+            "fresh offer must transfer real bytes, not answer from the final"
+        );
+        assert_eq!(
+            tokio::fs::read(output_dir.join("data (1).bin"))
+                .await
+                .unwrap(),
+            source_bytes,
+            "fresh copy lands beside the original under a uniquified name"
+        );
+        assert_eq!(
+            tokio::fs::read(output_dir.join("data.bin")).await.unwrap(),
+            source_bytes,
+            "the original file is untouched"
+        );
+        let receipt = LocalFileStorage::read_receipt(&output_dir, "data (1).bin")
+            .await
+            .unwrap()
+            .expect("receipt is keyed by the file that actually exists");
+        assert_eq!(receipt.file_size, source_bytes.len() as u64);
+    }
+
+    /// The pause+resume half of the same bug: an interrupted fresh re-receive
+    /// records its landing name, and the resumed attempt (resume_requested is
+    /// true on attempt 2+) must continue into that name - not be instantly
+    /// answered by the same-name final that made it uniquify in the first place.
+    #[tokio::test]
+    async fn interrupted_fresh_offer_resumes_into_recorded_target() {
+        let root = unique_test_dir();
+        let output_dir = root.join("output");
+        tokio::fs::create_dir_all(&output_dir).await.unwrap();
+        let source_bytes = b"abcdefghij";
+        tokio::fs::write(output_dir.join("data.bin"), source_bytes)
+            .await
+            .unwrap();
+        // The state an interrupted fresh attempt leaves behind: 5 of 10 bytes
+        // in the temp, landing name recorded.
+        let old_transfer_id = TransferId::new("old-transfer");
+        let state = TransferResumeState {
+            transfer_id: old_transfer_id.clone(),
+            file_name: "data.bin".into(),
+            file_size: source_bytes.len() as u64,
+            chunk_size: 5,
+            bytes_received: 5,
+            next_chunk_index: 1,
+            hash_bytes: 5,
+            hash_checkpoint: Some(blake3::hash(b"abcde").to_hex().to_string()),
+            target_file_name: Some("data (1).bin".into()),
+        };
+        LocalFileStorage::write_resume_state(&output_dir, &state)
+            .await
+            .unwrap();
+        let temp_path =
+            LocalFileStorage::resumable_temp_path(&output_dir, "data.bin", &old_transfer_id)
+                .unwrap();
+        tokio::fs::write(&temp_path, b"abcde").await.unwrap();
+
+        let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
+        let receiver = tokio::spawn({
+            let output_dir = output_dir.clone();
+            async move {
+                TransferEngine::new(5)
+                    .receive_file(&mut receiver_connection, output_dir, &NoopEventSink)
+                    .await
+                    .unwrap()
+            }
+        });
+
+        manual_send(
+            &mut sender_connection,
+            ManualSend {
+                file_name: "data.bin",
+                source_bytes,
+                chunk_size: 5,
+                resume_requested: true,
+                bytes_to_send: source_bytes,
+                complete_hash: blake3::hash(source_bytes).to_hex().to_string(),
+                expected_resume_bytes: 5,
+            },
+        )
+        .await;
+        let receive_summary = receiver.await.unwrap();
+
+        assert_eq!(receive_summary.bytes_transferred, source_bytes.len() as u64);
+        assert_eq!(
+            tokio::fs::read(output_dir.join("data (1).bin"))
+                .await
+                .unwrap(),
+            source_bytes,
+            "resume continues into the recorded landing name"
+        );
+        assert_eq!(
+            tokio::fs::read(output_dir.join("data.bin")).await.unwrap(),
+            source_bytes,
+            "the original file is untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn unique_final_name_skips_taken_names() {
+        let root = unique_test_dir();
+        let output_dir = root.join("output");
+        tokio::fs::create_dir_all(&output_dir).await.unwrap();
+        tokio::fs::write(output_dir.join("a.txt"), b"x")
+            .await
+            .unwrap();
+        tokio::fs::write(output_dir.join("a (1).txt"), b"x")
+            .await
+            .unwrap();
+        assert_eq!(
+            unique_final_name(&output_dir, "a.txt").await.unwrap(),
+            "a (2).txt"
+        );
+        assert_eq!(
+            unique_final_name(&output_dir, "noext").await.unwrap(),
+            "noext (1)"
+        );
+        assert_eq!(
+            unique_final_name(&output_dir, ".dotfile").await.unwrap(),
+            ".dotfile (1)"
+        );
     }
 
     struct MemoryFrameConnection {
