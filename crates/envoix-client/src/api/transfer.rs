@@ -120,6 +120,13 @@ impl StatsHandle {
             paths: s.paths.clone(),
         }
     }
+
+    /// Whether a `Connected` event has been observed - i.e. the transfer
+    /// reached a live peer connection. The fallback loop reads this to tell a
+    /// pre-connection failure (retry the next source) from a mid-transfer one.
+    pub(crate) fn connected(&self) -> bool {
+        self.0.lock().expect("stats mutex").connected_ms.is_some()
+    }
 }
 
 /// Lock-free cell holding the phase the transfer has reached, updated as
@@ -160,6 +167,7 @@ fn phase_of(event: &TransferEvent) -> Phase {
         | TransferEvent::Progress { .. }
         | TransferEvent::Verifying { .. }
         | TransferEvent::Verified { .. }
+        | TransferEvent::Confirming { .. }
         | TransferEvent::Completed { .. }
         | TransferEvent::Failed { .. } => Phase::Transfer,
     }
@@ -217,6 +225,13 @@ impl Transfer {
     /// Requests a graceful stop; the transfer ends with a cancellation error.
     pub fn cancel(&self) {
         self.cancel.cancel();
+    }
+
+    /// Requests a pause: the same graceful stop as [`cancel`](Self::cancel),
+    /// but reported — locally and (best-effort) to the peer — as a pause, so
+    /// both sides can present a resumable state instead of a failure.
+    pub fn pause(&self) {
+        self.cancel.pause();
     }
 
     /// A clonable handle that cancels this transfer, for callers that drive the
@@ -358,15 +373,23 @@ impl From<SessionEvent> for TransferEvent {
                 file_name,
                 bytes_hashed,
             },
+            SessionEvent::Confirming { transfer_id } => TransferEvent::Confirming { transfer_id },
             SessionEvent::Completed {
                 transfer_id,
+                file_name,
                 bytes_transferred,
             } => TransferEvent::Completed {
                 transfer_id,
+                file_name,
                 bytes_transferred,
             },
             SessionEvent::Failed { direction, reason } => {
-                TransferEvent::Failed { direction, reason }
+                let reason_code = super::event::FailureCode::classify(&reason);
+                TransferEvent::Failed {
+                    direction,
+                    reason,
+                    reason_code,
+                }
             }
             SessionEvent::Pairing { step } => TransferEvent::Pairing { step },
             SessionEvent::Connecting => TransferEvent::Connecting,
@@ -395,6 +418,7 @@ mod tests {
         });
         adapter.on_event(SessionEvent::Completed {
             transfer_id: TransferId::new("t1"),
+            file_name: "a.bin".into(),
             bytes_transferred: 42,
         });
 
@@ -413,6 +437,7 @@ mod tests {
             receiver.recv().await.unwrap().event,
             TransferEvent::Completed {
                 transfer_id: TransferId::new("t1"),
+                file_name: "a.bin".into(),
                 bytes_transferred: 42,
             }
         );
@@ -481,6 +506,7 @@ mod tests {
             1800,
             &TransferEvent::Completed {
                 transfer_id: TransferId::new("t"),
+                file_name: "f".into(),
                 bytes_transferred: 1000,
             },
         );

@@ -140,7 +140,7 @@ impl QrInvitePayload {
             return Err(QrError::WeakToken);
         }
 
-        if let Err(error) = self.peer.endpoint_id.parse::<iroh::EndpointId>() {
+        if let Err(error) = validate_endpoint_id_hex(&self.peer.endpoint_id) {
             return Err(QrError::MalformedEndpointId(error.to_string()));
         }
 
@@ -236,6 +236,17 @@ pub fn render_terminal_qr(data: &str) -> Option<String> {
     }
 
     Some(output)
+}
+
+/// Lightweight endpoint-id shape check (64 hex chars = a 32-byte key), so this
+/// encoding crate does not pull the whole iroh stack for one parse; a truly
+/// invalid key still fails fast when the session dials it.
+fn validate_endpoint_id_hex(s: &str) -> Result<(), String> {
+    if s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Ok(())
+    } else {
+        Err("endpoint id must be 64 hex characters".into())
+    }
 }
 
 #[cfg(test)]

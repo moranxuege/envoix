@@ -14,7 +14,7 @@ use crate::identity::{IdentityConfig, load_secret_key};
 use crate::{ALPN, SessionError};
 
 /// Local socket addresses an accepting iroh endpoint should bind.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct BindAddrs {
     addrs: Vec<BindAddr>,
 }
@@ -123,7 +123,7 @@ fn is_link_local(ip: &IpAddr) -> bool {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 struct BindAddr {
     addr: SocketAddr,
     required: bool,

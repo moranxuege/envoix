@@ -77,15 +77,17 @@ fun NewTransferSheet(
     var fileName by remember { mutableStateOf<String?>(null) }
     var topMode by remember { mutableStateOf("show") } // "show" | "scan"
 
-    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) {
-            fileUri = uri
-            fileName = displayName(context, uri)
+    val filePicker =
+        rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            if (uri != null) {
+                fileUri = uri
+                fileName = displayName(context, uri)
+            }
         }
-    }
-    val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        if (uri != null) SettingsStore.setSaveTree(context, uri)
-    }
+    val folderPicker =
+        rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            if (uri != null) SettingsStore.setSaveTree(context, uri)
+        }
     val joining = typed.isNotBlank()
 
     // (Re)generate our own code whenever the role changes and we're not joining.
@@ -108,16 +110,23 @@ fun NewTransferSheet(
     val ready = !code.isNullOrBlank() && code.contains("-") && (role == "receive" || fileUri != null)
 
     Column(
-        Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
-            .padding(horizontal = 20.dp).padding(bottom = 28.dp),
+        Modifier
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp)
+            .padding(bottom = 28.dp),
     ) {
         Text("New transfer", color = colors.text, fontSize = 21.sp, fontWeight = FontWeight.ExtraBold)
         Spacer(Modifier.height(14.dp))
 
         // ---- top pane: show my QR vs scan one ----
         Row(
-            Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-                .background(colors.bg).border(1.dp, colors.line, RoundedCornerShape(12.dp)).padding(3.dp),
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(colors.bg)
+                .border(1.dp, colors.line, RoundedCornerShape(12.dp))
+                .padding(3.dp),
         ) {
             SegTab("Show QR", topMode == "show", Modifier.weight(1f)) { topMode = "show" }
             SegTab("Scan QR", topMode == "scan", Modifier.weight(1f)) { topMode = "scan" }
@@ -143,16 +152,22 @@ fun NewTransferSheet(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
                             generated!!.first,
-                            color = colors.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+                            color = colors.text,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold,
                             fontFamily = FontFamily.Monospace,
                         )
                         Spacer(Modifier.width(8.dp))
                         Icon(
-                            Icons.Default.ContentCopy, "Copy code",
+                            Icons.Default.ContentCopy,
+                            "Copy code",
                             tint = colors.muted,
-                            modifier = Modifier.clip(CircleShape)
-                                .clickable { clip.setText(AnnotatedString(generated!!.first)) }
-                                .padding(6.dp).size(18.dp),
+                            modifier =
+                                Modifier
+                                    .clip(CircleShape)
+                                    .clickable { clip.setText(AnnotatedString(generated!!.first)) }
+                                    .padding(6.dp)
+                                    .size(18.dp),
                         )
                     }
                 }
@@ -163,7 +178,11 @@ fun NewTransferSheet(
         Spacer(Modifier.height(16.dp))
         OutlinedTextField(
             value = typed,
-            onValueChange = { typed = it.trim(); scannedBroker = null; scannedRelay = null },
+            onValueChange = {
+                typed = it.trim()
+                scannedBroker = null
+                scannedRelay = null
+            },
             placeholder = { Text("or enter a code to join…") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
@@ -174,8 +193,12 @@ fun NewTransferSheet(
         Text("I WANT TO", color = colors.muted, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
         Spacer(Modifier.height(6.dp))
         Row(
-            Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-                .background(colors.bg).border(1.dp, colors.line, RoundedCornerShape(12.dp)).padding(3.dp),
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(colors.bg)
+                .border(1.dp, colors.line, RoundedCornerShape(12.dp))
+                .padding(3.dp),
         ) {
             SegTab("Send", role == "send", Modifier.weight(1f)) { role = "send" }
             SegTab("Receive", role == "receive", Modifier.weight(1f)) { role = "receive" }
@@ -196,7 +219,10 @@ fun NewTransferSheet(
         // ---- start ----
         Spacer(Modifier.height(16.dp))
         Box(
-            Modifier.fillMaxWidth().height(52.dp).clip(RoundedCornerShape(14.dp))
+            Modifier
+                .fillMaxWidth()
+                .height(52.dp)
+                .clip(RoundedCornerShape(14.dp))
                 .background(colors.accent.copy(alpha = if (ready) 1f else 0.4f))
                 .clickable(enabled = ready) {
                     val c = code ?: return@clickable
@@ -207,25 +233,35 @@ fun NewTransferSheet(
         ) {
             Text(
                 if (role == "send") "Send" else "Receive",
-                color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp,
+                color = Color.White,
+                fontWeight = FontWeight.Bold,
+                fontSize = 16.sp,
             )
         }
     }
 }
 
 @Composable
-private fun SegTab(text: String, selected: Boolean, modifier: Modifier, onClick: () -> Unit) {
+private fun SegTab(
+    text: String,
+    selected: Boolean,
+    modifier: Modifier,
+    onClick: () -> Unit,
+) {
     val colors = Envoix.colors
     Box(
-        modifier.clip(RoundedCornerShape(9.dp))
+        modifier
+            .clip(RoundedCornerShape(9.dp))
             .background(if (selected) colors.accent else Color.Transparent)
-            .clickable(onClick = onClick).padding(vertical = 9.dp),
+            .clickable(onClick = onClick)
+            .padding(vertical = 9.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(
             text,
             color = if (selected) Color.White else colors.muted,
-            fontWeight = FontWeight.Bold, fontSize = 14.sp,
+            fontWeight = FontWeight.Bold,
+            fontSize = 14.sp,
         )
     }
 }
@@ -233,12 +269,19 @@ private fun SegTab(text: String, selected: Boolean, modifier: Modifier, onClick:
 /** A labelled path row: a tappable file/folder picker (onClick != null) or a
  *  read-only value. */
 @Composable
-private fun PathRow(label: String, value: String, placeholder: Boolean, onClick: (() -> Unit)?) {
+private fun PathRow(
+    label: String,
+    value: String,
+    placeholder: Boolean,
+    onClick: (() -> Unit)?,
+) {
     val colors = Envoix.colors
     Text(label, color = colors.muted, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
     Spacer(Modifier.height(6.dp))
     Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
             .border(1.dp, colors.line, RoundedCornerShape(12.dp))
             .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
             .padding(horizontal = 14.dp, vertical = 14.dp),
@@ -248,8 +291,10 @@ private fun PathRow(label: String, value: String, placeholder: Boolean, onClick:
         Text(
             value,
             color = if (placeholder) colors.muted else colors.text,
-            fontSize = 14.sp, fontFamily = FontFamily.Monospace,
-            maxLines = 1, overflow = TextOverflow.Ellipsis,
+            fontSize = 14.sp,
+            fontFamily = FontFamily.Monospace,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f, fill = false),
         )
         if (onClick != null) {
@@ -258,6 +303,10 @@ private fun PathRow(label: String, value: String, placeholder: Boolean, onClick:
     }
 }
 
-private fun displayName(context: Context, uri: Uri): String =
-    context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+private fun displayName(
+    context: Context,
+    uri: Uri,
+): String =
+    context.contentResolver
+        .query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
         ?.use { c -> if (c.moveToFirst()) c.getString(0) else null } ?: "file"

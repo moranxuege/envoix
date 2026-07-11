@@ -10,10 +10,11 @@
 
 use std::collections::HashMap;
 use std::io::Write;
-use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
-use envoix_client::api::{Client, Invite, PeerSource, Role, TransferEvent, TransferOptions};
+use envoix_client::TransferDirection;
+use envoix_client::api::driver::{ClientContext, SessionContext, SessionParams, TransferSession};
+use envoix_client::api::{Invite, PeerSource, Role, TransferOptions};
 use jni::JNIEnv;
 use jni::JavaVM;
 use jni::objects::{GlobalRef, JClass, JObject, JString, JValue};
@@ -21,12 +22,19 @@ use jni::sys::{jboolean, jlong};
 
 static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
-/// Cancel closures for in-flight transfers, keyed by the Kotlin-side transfer id.
-type CancelMap = HashMap<i64, Box<dyn Fn() + Send + Sync>>;
-static CANCELS: OnceLock<Mutex<CancelMap>> = OnceLock::new();
+/// The durable record store (roadmap #5), set once by `initRecords`.
+static RECORDS: OnceLock<envoix_client::api::record::RecordStore> = OnceLock::new();
 
-fn cancels() -> &'static Mutex<CancelMap> {
-    CANCELS.get_or_init(|| Mutex::new(HashMap::new()))
+fn record_for(id: i64) -> Option<(envoix_client::api::record::RecordStore, u64)> {
+    RECORDS.get().map(|s| (s.clone(), id as u64))
+}
+
+/// Live transfer sessions (the state-machine driver), keyed by the Kotlin id.
+type SessionMap = HashMap<i64, envoix_client::api::driver::TransferSession>;
+static SESSIONS: OnceLock<Mutex<SessionMap>> = OnceLock::new();
+
+fn sessions() -> &'static Mutex<SessionMap> {
+    SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// VM + Kotlin log sink for [`Java_dev_envoix_app_Native_initLogging`]. The
@@ -60,8 +68,12 @@ pub extern "system" fn Java_dev_envoix_app_Native_initContext(
     _class: JClass,
     context: JObject,
 ) {
-    let Ok(vm) = env.get_java_vm() else { return };
+    let Ok(vm) = env.get_java_vm() else {
+        tracing::warn!("initContext: failed to get JavaVM");
+        return;
+    };
     let Ok(ctx) = env.new_global_ref(&context) else {
+        tracing::warn!("initContext: failed to create global context ref");
         return;
     };
     unsafe {
@@ -73,69 +85,6 @@ pub extern "system" fn Java_dev_envoix_app_Native_initContext(
     // Keep the global ref alive for the whole process, since ndk_context holds a
     // raw pointer to it.
     std::mem::forget(ctx);
-}
-
-/// Run one transfer to completion, forwarding each event's JSON to
-/// `callback.onEvent(String)`. Blocks the calling thread, so invoke it from a
-/// background thread on the Kotlin side.
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_envoix_app_Native_runTransfer(
-    mut env: JNIEnv,
-    _class: JClass,
-    id: jlong,
-    direction: JString,
-    code: JString,
-    broker: JString,
-    relay: JString,
-    path: JString,
-    config_path: JString,
-    use_room: jboolean,
-    use_mdns: jboolean,
-    callback: JObject,
-) {
-    let direction = jstr(&mut env, &direction);
-    let code = jstr(&mut env, &code);
-    let broker = jstr(&mut env, &broker);
-    let relay = jstr(&mut env, &relay);
-    let path = jstr(&mut env, &path);
-    let config_path = jstr(&mut env, &config_path);
-
-    let vm = env.get_java_vm().expect("java vm");
-    let cb = env.new_global_ref(&callback).expect("callback ref");
-
-    let req = DriveRequest {
-        id,
-        direction,
-        code,
-        broker,
-        relay,
-        path,
-        config_path,
-        use_room: use_room != 0,
-        use_mdns: use_mdns != 0,
-    };
-    runtime().block_on(async move {
-        if let Err(err) = drive(req, &vm, &cb).await {
-            emit(
-                &vm,
-                &cb,
-                &format!(r#"{{"event":"failed","error":{}}}"#, json_str(&err)),
-            );
-        }
-    });
-    if let Ok(mut map) = cancels().lock() {
-        map.remove(&id);
-    }
-}
-
-/// Cancel the in-flight transfer with the given id (no-op if it already ended).
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_envoix_app_Native_cancel(_env: JNIEnv, _class: JClass, id: jlong) {
-    if let Ok(map) = cancels().lock()
-        && let Some(cancel) = map.get(&id)
-    {
-        cancel();
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -204,7 +153,20 @@ pub extern "system" fn Java_dev_envoix_app_Native_parseInvite(
 fn to_jstring(env: &mut JNIEnv, s: &str) -> jni::sys::jstring {
     env.new_string(s)
         .map(|s| s.into_raw())
-        .unwrap_or(std::ptr::null_mut())
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "failed to allocate Java string");
+            std::ptr::null_mut()
+        })
+}
+
+fn error_jstring(
+    env: &mut JNIEnv,
+    context: &str,
+    error: impl std::fmt::Display,
+) -> jni::sys::jstring {
+    let message = format!("{context}: {error}");
+    tracing::warn!(%message);
+    to_jstring(env, &format!(r#"{{"error":{}}}"#, json_str(&message)))
 }
 
 fn opt_json(s: Option<&str>) -> String {
@@ -212,91 +174,28 @@ fn opt_json(s: Option<&str>) -> String {
 }
 
 /// Everything one native transfer needs, bundled so the JNI entry point and
-/// [`drive`] stay readable (and clippy-clean).
-struct DriveRequest {
-    id: i64,
-    direction: String,
-    code: String,
-    broker: String,
-    relay: String,
-    path: String,
-    config_path: String,
-    use_room: bool,
-    use_mdns: bool,
+/// Split a comma-joined FFI config field into trimmed, non-empty entries.
+/// Commas never appear in CIDR prefixes, so this round-trips the Kotlin lists.
+fn split_csv(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect()
 }
 
-async fn drive(req: DriveRequest, vm: &JavaVM, cb: &GlobalRef) -> Result<(), String> {
-    let config = (!req.config_path.is_empty()).then(|| PathBuf::from(&req.config_path));
-    let client = Client::from_runtime_sources(config.as_deref()).map_err(|e| e.to_string())?;
-    let into = PathBuf::from(&req.path);
-
-    // Try each enabled rendezvous in order (Room, then mDNS via the code as its
-    // token). Fall back to the next only on a *pre-connection* failure, so a
-    // transfer that already started is never re-sent.
-    let mut sources: Vec<PeerSource> = Vec::new();
-    if req.use_room {
-        sources.push(PeerSource::Room {
-            code: req.code.clone(),
-            broker: req.broker,
-        });
-    }
-    if req.use_mdns {
-        sources.push(PeerSource::Mdns {
-            token: Some(req.code),
-        });
-    }
-    if sources.is_empty() {
-        return Err("no rendezvous mode enabled".to_string());
-    }
-
-    let count = sources.len();
-    let mut last_err = "transfer failed".to_string();
-    for (i, source) in sources.into_iter().enumerate() {
-        let mut options = TransferOptions::default();
-        options.relay = Some(req.relay.clone());
-        let mut transfer = match req.direction.as_str() {
-            "send" => client.send(into.clone(), source, options),
-            _ => client.receive(into.clone(), source, options),
-        }
-        .map_err(|e| e.to_string())?;
-
-        // Register a cancel handle so `cancel(id)` can stop this transfer.
-        let handle = transfer.cancel_handle();
-        if let Ok(mut map) = cancels().lock() {
-            map.insert(req.id, Box::new(move || handle.cancel()));
-        }
-
-        let mut connected = false;
-        while let Some(event) = transfer.next_event().await {
-            if matches!(event.event, TransferEvent::Connected { .. }) {
-                connected = true;
-            }
-            if let Ok(json) = serde_json::to_string(&event) {
-                emit(vm, cb, &json);
-            }
-        }
-        match transfer.wait().await {
-            Ok(_) => return Ok(()),
-            Err(err) => {
-                last_err = err.to_string();
-                // Fall back only if we never reached a live connection.
-                if connected || i + 1 == count {
-                    return Err(last_err);
-                }
-            }
-        }
-    }
-    Err(last_err)
-}
-
-/// Read a Java string into a Rust `String` (empty on any error).
 fn jstr(env: &mut JNIEnv, s: &JString) -> String {
-    env.get_string(s).map(|s| s.into()).unwrap_or_default()
+    env.get_string(s).map(|s| s.into()).unwrap_or_else(|error| {
+        tracing::warn!(%error, "failed to read Java string");
+        String::new()
+    })
 }
 
 /// Call `callback.onEvent(json)`, attaching this thread to the JVM as needed.
 fn emit(vm: &JavaVM, cb: &GlobalRef, json: &str) {
     let Ok(mut env) = vm.attach_current_thread() else {
+        tracing::warn!("failed to attach thread to JVM for callback");
         return;
     };
     if let Ok(js) = env.new_string(json) {
@@ -306,6 +205,8 @@ fn emit(vm: &JavaVM, cb: &GlobalRef, json: &str) {
             "(Ljava/lang/String;)V",
             &[JValue::Object(&js)],
         );
+    } else {
+        tracing::warn!("failed to allocate callback JSON string");
     }
 }
 
@@ -320,8 +221,12 @@ pub extern "system" fn Java_dev_envoix_app_Native_initLogging(
     _class: JClass,
     sink: JObject,
 ) {
-    let Ok(vm) = env.get_java_vm() else { return };
+    let Ok(vm) = env.get_java_vm() else {
+        tracing::warn!("initLogging: failed to get JavaVM");
+        return;
+    };
     let Ok(sink) = env.new_global_ref(&sink) else {
+        tracing::warn!("initLogging: failed to create global log sink ref");
         return;
     };
     let _ = LOG_VM.set(vm);
@@ -335,6 +240,7 @@ pub extern "system" fn Java_dev_envoix_app_Native_initLogging(
     use tracing_subscriber::util::SubscriberInitExt;
     let installed = tracing_subscriber::registry()
         .with(filter)
+        .with(RoomTag) // must precede fmt: it hands the room to the writer
         .with(
             tracing_subscriber::fmt::layer()
                 .with_writer(JniLogWriter)
@@ -345,6 +251,15 @@ pub extern "system" fn Java_dev_envoix_app_Native_initLogging(
         .is_ok();
     if installed {
         let _ = LOG_RELOAD.set(handle);
+        // Route Rust panics into the tracing sink so the message reaches the app
+        // log (and its on-disk copy) — a native abort otherwise leaves the panic
+        // text only in logcat / the tombstone's "Abort message". Chain the default
+        // hook so the native tombstone is still produced.
+        let default = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            tracing::error!(target: "envoix", "core panic: {info}");
+            default(info);
+        }));
     }
 }
 
@@ -358,6 +273,7 @@ pub extern "system" fn Java_dev_envoix_app_Native_setLogLevel(
     spec: JString,
 ) {
     let Ok(spec) = env.get_string(&spec) else {
+        tracing::warn!("setLogLevel: failed to read log filter string");
         return;
     };
     let spec: String = spec.into();
@@ -377,8 +293,92 @@ fn log_line(line: &str) {
     let Ok(mut env) = vm.attach_current_thread() else {
         return;
     };
+    // The room captured by RoomTag for THIS event (same thread, synchronous).
+    let room = CURRENT_ROOM.with(|r| r.borrow_mut().take());
+    let room_obj = match room.as_deref().map(|r| env.new_string(r)) {
+        Some(Ok(js)) => js,
+        _ => jni::objects::JString::default(),
+    };
     if let Ok(js) = env.new_string(line) {
-        let _ = env.call_method(sink, "log", "(Ljava/lang/String;)V", &[JValue::Object(&js)]);
+        let _ = env.call_method(
+            sink,
+            "log",
+            "(Ljava/lang/String;Ljava/lang/String;)V",
+            &[JValue::Object(&room_obj), JValue::Object(&js)],
+        );
+    }
+}
+
+thread_local! {
+    /// Handoff from [`RoomTag`] to [`log_line`]: the `room` span field of the
+    /// event currently being formatted (fmt writes synchronously after us).
+    static CURRENT_ROOM: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The `room` value recorded on a span (see docs/observability.md: room and
+/// transfer_id are span fields on every line — this extracts them
+/// STRUCTURALLY, replacing the Kotlin-side regex on formatted text).
+struct RoomField(String);
+
+/// Captures `room` at span creation AND on later `Span::record` calls (the
+/// transfer span records it once known), then tags each event with the
+/// nearest enclosing room.
+struct RoomTag;
+
+struct RoomVisitor(Option<String>);
+
+impl tracing::field::Visit for RoomVisitor {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "room" {
+            self.0 = Some(value.trim_matches('"').to_string());
+        }
+    }
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "room" {
+            self.0 = Some(format!("{value:?}").trim_matches('"').to_string());
+        }
+    }
+}
+
+impl<S> tracing_subscriber::layer::Layer<S> for RoomTag
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let mut visitor = RoomVisitor(None);
+        attrs.record(&mut visitor);
+        if let (Some(room), Some(span)) = (visitor.0, ctx.span(id)) {
+            span.extensions_mut().replace(RoomField(room));
+        }
+    }
+
+    fn on_record(
+        &self,
+        id: &tracing::span::Id,
+        values: &tracing::span::Record<'_>,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let mut visitor = RoomVisitor(None);
+        values.record(&mut visitor);
+        if let (Some(room), Some(span)) = (visitor.0, ctx.span(id)) {
+            span.extensions_mut().replace(RoomField(room));
+        }
+    }
+
+    fn on_event(&self, event: &tracing::Event<'_>, ctx: tracing_subscriber::layer::Context<'_, S>) {
+        let room = ctx.event_scope(event).and_then(|scope| {
+            // innermost-first iteration: the first hit is the nearest room
+            scope
+                .filter_map(|span| span.extensions().get::<RoomField>().map(|r| r.0.clone()))
+                .next()
+        });
+        CURRENT_ROOM.with(|r| *r.borrow_mut() = room);
     }
 }
 
@@ -434,4 +434,326 @@ fn json_str(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+fn failed_snapshot(reason: &str) -> String {
+    format!(
+        r#"{{"notice":"snapshot","seq":1,"state":"failed","reason":{}}}"#,
+        json_str(reason)
+    )
+}
+
+fn emit_failed_snapshot(vm: &JavaVM, cb: &GlobalRef, context: &str, error: impl std::fmt::Display) {
+    let reason = format!("{context}: {error}");
+    tracing::warn!(%reason);
+    emit(vm, cb, &failed_snapshot(&reason));
+}
+
+fn java_vm_or_log(env: &JNIEnv, context: &str) -> Option<JavaVM> {
+    match env.get_java_vm() {
+        Ok(vm) => Some(vm),
+        Err(error) => {
+            tracing::warn!(%error, "{context}: failed to get JavaVM");
+            None
+        }
+    }
+}
+
+fn callback_or_log(env: &JNIEnv, callback: &JObject, context: &str) -> Option<GlobalRef> {
+    match env.new_global_ref(callback) {
+        Ok(callback) => Some(callback),
+        Err(error) => {
+            tracing::warn!(%error, "{context}: failed to create callback global ref");
+            None
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Session API (the state-machine driver; replaces runTransfer in step C).
+// ---------------------------------------------------------------------------
+
+/// One notice as JSON for the Kotlin side.
+fn notice_json(notice: envoix_client::api::driver::SessionNotice) -> String {
+    use base64::Engine;
+    use envoix_client::api::driver::SessionNotice as N;
+    match notice {
+        N::Snapshot(snapshot) => {
+            let path = snapshot.session.path.as_ref().map(|p| p.to_string());
+            let mut value = serde_json::to_value(&snapshot).unwrap_or_default();
+            if let Some(map) = value.as_object_mut() {
+                map.insert("notice".into(), "snapshot".into());
+                // The frontend wants a display string, not the enum encoding.
+                map.insert(
+                    "path".into(),
+                    path.map(Into::into).unwrap_or(serde_json::Value::Null),
+                );
+            }
+            value.to_string()
+        }
+        N::FetchReceipt { key } => {
+            format!(r#"{{"notice":"fetch_receipt","key":{}}}"#, json_str(&key))
+        }
+        N::PostReceipt { key, blob } => format!(
+            r#"{{"notice":"post_receipt","key":{},"blob":{}}}"#,
+            json_str(&key),
+            json_str(&base64::engine::general_purpose::STANDARD.encode(blob)),
+        ),
+    }
+}
+
+/// Create and start a transfer session. `params_json` carries the same fields
+/// as `runTransfer` (direction/code/broker/relay/path/chunk_size/candidates/
+/// use_room/use_mdns/resume). Notices (snapshots + mailbox courier requests)
+/// are delivered to `callback.onEvent` as JSON; returns immediately.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_createSession(
+    mut env: JNIEnv,
+    _class: JClass,
+    id: jlong,
+    params_json: JString,
+    callback: JObject,
+) {
+    let json = jstr(&mut env, &params_json);
+    let Some(vm) = java_vm_or_log(&env, "createSession") else {
+        return;
+    };
+    let Some(cb) = callback_or_log(&env, &callback, "createSession") else {
+        return;
+    };
+
+    let v: serde_json::Value = match serde_json::from_str(&json) {
+        Ok(v) => v,
+        Err(e) => return emit_failed_snapshot(&vm, &cb, "invalid session params JSON", e),
+    };
+    let get = |k: &str| v[k].as_str().unwrap_or("").to_string();
+    let allow = split_csv(&get("candidates_allow"));
+    let deny = split_csv(&get("candidates_deny"));
+    let chunk = get("chunk_size");
+    let chunk = (!chunk.is_empty()).then_some(chunk);
+    let client_context = ClientContext {
+        chunk_size: chunk,
+        candidates_allow: allow,
+        candidates_deny: deny,
+    };
+
+    let code = get("code");
+    let mut sources: Vec<PeerSource> = Vec::new();
+    if v["use_room"].as_bool().unwrap_or(false) {
+        sources.push(PeerSource::Room {
+            code: code.clone(),
+            broker: get("broker"),
+        });
+    }
+    if v["use_mdns"].as_bool().unwrap_or(false) {
+        sources.push(PeerSource::Mdns { token: Some(code) });
+    }
+    let mut options = TransferOptions::default();
+    let relay = get("relay");
+    options.relay = (!relay.is_empty()).then_some(relay); // empty = default, like the CLI
+    options.resume = v["resume"].as_bool().unwrap_or(false);
+    let direction = match get("direction").as_str() {
+        "send" => TransferDirection::Send,
+        _ => TransferDirection::Receive,
+    };
+    let context = SessionContext {
+        client: client_context,
+        params: SessionParams {
+            direction,
+            path: std::path::PathBuf::from(get("path")),
+            sources,
+            options,
+        },
+    };
+
+    let _guard = runtime().enter();
+    let (session, notices) = match TransferSession::start(context, record_for(id)) {
+        Ok(session) => session,
+        Err(error) => return emit_failed_snapshot(&vm, &cb, "invalid session context", error),
+    };
+    match sessions().lock() {
+        Ok(mut map) => {
+            map.insert(id, session);
+        }
+        Err(error) => {
+            return emit_failed_snapshot(&vm, &cb, "session registry unavailable", error);
+        }
+    }
+    spawn_pump(vm, cb, notices);
+}
+
+fn spawn_pump(
+    vm: JavaVM,
+    cb: GlobalRef,
+    mut notices: tokio::sync::mpsc::UnboundedReceiver<envoix_client::api::driver::SessionNotice>,
+) {
+    runtime().spawn(async move {
+        while let Some(notice) = notices.recv().await {
+            emit(&vm, &cb, &notice_json(notice));
+        }
+    });
+}
+
+/// Set the durable record directory. Call once at app start, before sessions.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_initRecords(
+    mut env: JNIEnv,
+    _class: JClass,
+    dir: JString,
+) {
+    let dir = jstr(&mut env, &dir);
+    if RECORDS
+        .set(envoix_client::api::record::RecordStore::new(dir))
+        .is_err()
+    {
+        tracing::warn!("initRecords: record store already initialized");
+    }
+}
+
+/// All persisted transfer records as a JSON array (for restoring cards).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_listRecords<'a>(
+    mut env: JNIEnv<'a>,
+    _class: JClass,
+) -> jni::sys::jstring {
+    let json = match RECORDS.get() {
+        Some(store) => {
+            let records = runtime().block_on(store.load_all());
+            match serde_json::to_string(&records) {
+                Ok(json) => json,
+                Err(error) => {
+                    return error_jstring(&mut env, "failed to serialize transfer records", error);
+                }
+            }
+        }
+        None => "[]".into(),
+    };
+    to_jstring(&mut env, &json)
+}
+
+/// Rehydrate a persisted session (no attempt launched; a mid-flight record
+/// restores as Paused(Lost); a restored Unconfirmed resumes its mailbox poll).
+/// Notices flow to `callback` like `createSession`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_restoreSession(
+    env: JNIEnv,
+    _class: JClass,
+    id: jlong,
+    callback: JObject,
+) {
+    let Some(vm) = java_vm_or_log(&env, "restoreSession") else {
+        return;
+    };
+    let Some(cb) = callback_or_log(&env, &callback, "restoreSession") else {
+        return;
+    };
+    let Some(store) = RECORDS.get() else {
+        return emit_failed_snapshot(&vm, &cb, "transfer record store is not initialized", "");
+    };
+    let record = runtime()
+        .block_on(store.load_all())
+        .into_iter()
+        .find(|r| r.id == id as u64);
+    let Some(record) = record else {
+        return emit_failed_snapshot(&vm, &cb, "transfer record not found", id);
+    };
+    let _guard = runtime().enter();
+    let (session, notices) = match TransferSession::restore(record, record_for(id)) {
+        Ok(session) => session,
+        Err(error) => {
+            return emit_failed_snapshot(&vm, &cb, "invalid restored session context", error);
+        }
+    };
+    match sessions().lock() {
+        Ok(mut map) => {
+            map.insert(id, session);
+        }
+        Err(error) => {
+            return emit_failed_snapshot(&vm, &cb, "session registry unavailable", error);
+        }
+    }
+    spawn_pump(vm, cb, notices);
+}
+
+/// Route a user intent ("pause" / "resume" / "cancel") to a live session.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_sessionIntent(
+    mut env: JNIEnv,
+    _class: JClass,
+    id: jlong,
+    intent: JString,
+) {
+    let intent = jstr(&mut env, &intent);
+    let Ok(map) = sessions().lock() else {
+        tracing::warn!(id, intent, "sessionIntent: session registry unavailable");
+        return;
+    };
+    let Some(session) = map.get(&id) else {
+        tracing::warn!(id, intent, "sessionIntent: session not found");
+        return;
+    };
+    match intent.as_str() {
+        "pause" => session.pause(),
+        "resume" => session.resume(),
+        "cancel" => session.cancel(),
+        "reverify" => session.serve_reverify(),
+        "receipt_posted" => session.receipt_posted(),
+        _ => tracing::warn!(id, intent, "sessionIntent: unknown intent"),
+    }
+}
+
+/// The courier's answer to a fetch_receipt notice: the blob (base64), or ""
+/// when the mailbox slot was empty.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_receiptResponse(
+    mut env: JNIEnv,
+    _class: JClass,
+    id: jlong,
+    blob_b64: JString,
+) {
+    use base64::Engine;
+    let blob_b64 = jstr(&mut env, &blob_b64);
+    let blob = if blob_b64.trim().is_empty() {
+        None
+    } else {
+        match base64::engine::general_purpose::STANDARD.decode(blob_b64.trim()) {
+            Ok(blob) => Some(blob),
+            Err(error) => {
+                tracing::warn!(id, %error, "receiptResponse: invalid base64 blob");
+                return;
+            }
+        }
+    };
+    let Ok(map) = sessions().lock() else {
+        tracing::warn!(id, "receiptResponse: session registry unavailable");
+        return;
+    };
+    let Some(session) = map.get(&id) else {
+        tracing::warn!(id, "receiptResponse: session not found");
+        return;
+    };
+    session.receipt_response(blob);
+}
+
+/// Tear a session down. With `discard` (D2, Remove): delete the partial,
+/// resume state, and receipt sidecars first. Idempotent.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_destroySession(
+    _env: JNIEnv,
+    _class: JClass,
+    id: jlong,
+    discard: jboolean,
+) {
+    let Some(session) = sessions().lock().ok().and_then(|mut m| m.remove(&id)) else {
+        tracing::warn!(
+            id,
+            "destroySession: session not found or registry unavailable"
+        );
+        return;
+    };
+    if discard != 0 {
+        session.discard();
+    }
+    // Dropping the handle closes the command channel; the actor drains the
+    // queued discard first, cancels any live attempt, and exits.
 }

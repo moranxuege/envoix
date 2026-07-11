@@ -2,7 +2,25 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("org.jlleitschuh.gradle.ktlint")
 }
+
+// Short git SHA embedded into BuildConfig, so any uploaded log identifies exactly
+// which build produced it. Falls back to "unknown" outside a git checkout.
+val gitCommit: String =
+    try {
+        ProcessBuilder("git", "rev-parse", "--short", "HEAD")
+            .directory(rootDir)
+            .redirectErrorStream(true)
+            .start()
+            .inputStream
+            .bufferedReader()
+            .readText()
+            .trim()
+            .ifEmpty { "unknown" }
+    } catch (e: Exception) {
+        "unknown"
+    }
 
 android {
     namespace = "dev.envoix.app"
@@ -14,6 +32,7 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "0.1.0"
+        buildConfigField("String", "GIT_COMMIT", "\"$gitCommit\"")
         ndk {
             // Ship the envoix binary only for the ABIs we cross-compile.
             abiFilters += listOf("x86_64", "arm64-v8a")
@@ -38,7 +57,10 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
 
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+        buildConfig = true // for BuildConfig.GIT_COMMIT / VERSION_NAME
+    }
 
     // The envoix CLI ships as libenvoix.so in jniLibs; legacy packaging extracts
     // it to the app's native-lib dir, the one place Android lets us exec a file.
@@ -47,6 +69,10 @@ android {
             useLegacyPackaging = true
         }
     }
+}
+
+ktlint {
+    android = true
 }
 
 dependencies {
@@ -63,7 +89,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.6")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.6")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
-    implementation("com.google.zxing:core:3.5.3")               // QR encode + decode
+    implementation("com.google.zxing:core:3.5.3") // QR encode + decode
     // CameraX for the custom QR scanner (preview + frame analysis)
     implementation("androidx.camera:camera-core:1.3.4")
     implementation("androidx.camera:camera-camera2:1.3.4")

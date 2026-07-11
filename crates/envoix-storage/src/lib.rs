@@ -15,6 +15,22 @@ pub type StorageError = CoreError;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LocalFileStorage;
 
+/// Durable proof that a transfer completed: written beside the final file on
+/// finalize and kept after the file itself is moved or published away (e.g.
+/// Android publishes to MediaStore and deletes the output copy). A later
+/// re-offer of the same file matches against it, so the receiver can re-confirm
+/// completion — re-deliver a lost CompleteAck — without the file on hand and
+/// without any bytes being re-sent.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TransferReceipt {
+    /// Plain destination file name, without path components.
+    pub file_name: String,
+    /// Final file length in bytes.
+    pub file_size: u64,
+    /// BLAKE3 hash of the completed file (as verified at finalize).
+    pub file_hash: String,
+}
+
 /// Durable receiver-side state used to resume an interrupted transfer.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TransferResumeState {
@@ -260,6 +276,69 @@ impl LocalFileStorage {
         validate_resume_path_parts(file_name, transfer_id)?;
         Ok(resumable_temp_path(output_dir, file_name, transfer_id))
     }
+
+    /// Writes the completion receipt for a finalized transfer (atomic sidecar;
+    /// one per file name — a re-completion overwrites it).
+    pub async fn write_receipt(
+        output_dir: &Path,
+        receipt: &TransferReceipt,
+    ) -> Result<(), StorageError> {
+        if !is_plain_file_name(&receipt.file_name) {
+            return Err(CoreError::Storage(format!(
+                "invalid output file name: {}",
+                receipt.file_name
+            )));
+        }
+        fs::create_dir_all(output_dir).await?;
+
+        let path = receipt_path(output_dir, &receipt.file_name);
+        let temp_path = output_dir.join(format!(".envoix-receipt.{}.json.tmp", receipt.file_name));
+        let bytes = serde_json::to_vec_pretty(receipt)
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let mut file = File::create(&temp_path).await?;
+        file.write_all(&bytes).await?;
+        file.flush().await?;
+        file.sync_all().await?;
+        drop(file);
+        fs::rename(temp_path, path).await?;
+        Ok(())
+    }
+
+    /// Deletes the completion receipt for `file_name`, if present (Remove is
+    /// the one true abandon: a later re-offer of this file re-transfers).
+    pub async fn delete_receipt(output_dir: &Path, file_name: &str) -> Result<(), StorageError> {
+        if !is_plain_file_name(file_name) {
+            return Err(CoreError::Storage(format!(
+                "invalid output file name: {file_name}"
+            )));
+        }
+        let path = receipt_path(output_dir, file_name);
+        if fs::try_exists(&path).await? {
+            fs::remove_file(path).await?;
+        }
+        Ok(())
+    }
+
+    /// Reads the completion receipt for `file_name`, if present. A receipt that
+    /// fails to parse reads as `None` (self-healing: the next completion
+    /// overwrites it) — a corrupt optimization sidecar must never block a
+    /// receive.
+    pub async fn read_receipt(
+        output_dir: &Path,
+        file_name: &str,
+    ) -> Result<Option<TransferReceipt>, StorageError> {
+        if !is_plain_file_name(file_name) {
+            return Err(CoreError::Storage(format!(
+                "invalid output file name: {file_name}"
+            )));
+        }
+        let path = receipt_path(output_dir, file_name);
+        if !fs::try_exists(&path).await? {
+            return Ok(None);
+        }
+        let bytes = fs::read(&path).await?;
+        Ok(serde_json::from_slice(&bytes).ok())
+    }
 }
 
 fn is_plain_file_name(file_name: &str) -> bool {
@@ -307,6 +386,13 @@ fn resumable_temp_state_path(
 fn is_resume_state_sidecar_for_file(candidate_name: &str, file_name: &str) -> bool {
     let prefix = format!(".envoix.{file_name}.");
     candidate_name.starts_with(&prefix) && candidate_name.ends_with(".json")
+}
+
+/// Receipt sidecar path. The `.envoix-receipt.` prefix is deliberately outside
+/// the `.envoix.{file}.` namespace [`is_resume_state_sidecar_for_file`] scans,
+/// so a receipt can never be mistaken for resume state.
+fn receipt_path(output_dir: &Path, file_name: &str) -> PathBuf {
+    output_dir.join(format!(".envoix-receipt.{file_name}.json"))
 }
 
 #[cfg(test)]

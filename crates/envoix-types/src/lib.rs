@@ -104,6 +104,12 @@ pub enum ConnectionMode {
     ServerFallback,
 }
 
+/// Which end of a transfer a peer is - the data-plane transfer direction,
+/// wire-encoded in the protocol. Mirrored at the invite layer by
+/// `envoix_client::api::Role` (`Send`/`Receive`); orthogonal to the broker's
+/// SPAKE2 handshake role (`envoix_rendezvous::Role`, `Initiator`/`Responder`),
+/// which is decided by join order, not by who sends the file. The three look
+/// alike but are deliberately separate - do not merge them.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Hash, Serialize)]
 pub enum PeerRole {
     Sender,

@@ -7,7 +7,7 @@
 //! are additive later - unknown payload params are ignored so newer invites stay
 //! parseable. See `docs/design/invite.md`.
 
-use envoix_rendezvous_iroh::generate_code;
+use envoix_session::generate_code;
 
 use super::{PeerSource, TransferError};
 
@@ -20,6 +20,10 @@ const CODE_WORDS: usize = 2;
 /// take the [`opposite`](Role::opposite). A hint only - the transfer still runs
 /// whichever command each side chooses; this just lets a scanner avoid the
 /// two-senders / two-receivers mistake.
+///
+/// The invite-layer mirror of `envoix_types::PeerRole` (`Send` == `Sender`),
+/// kept separate so the public invite API and its QR wiring (`send`/`receive`)
+/// can evolve without disturbing the data-plane wire enum.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Role {
     Send,

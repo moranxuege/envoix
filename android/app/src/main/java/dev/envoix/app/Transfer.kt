@@ -2,7 +2,7 @@ package dev.envoix.app
 
 enum class Direction { Send, Receive }
 
-enum class Status { Connecting, Transferring, Paused, Completed, Failed, Cancelled }
+enum class Status { Waiting, Connecting, Verifying, Transferring, Confirming, Paused, Completed, Unconfirmed, Failed, Cancelled }
 
 /** One transfer's observable state, shown as a card. */
 data class Transfer(
@@ -10,6 +10,12 @@ data class Transfer(
     val direction: Direction,
     val room: String,
     val fileName: String? = null,
+    /** Machine attempt number (resume bumps it). */
+    val attempt: Int = 1,
+    /** Receiver: the confirmation duty is discharged (receipt on the rdz). */
+    val proofDelivered: Boolean = false,
+    /** Core transfer id (from Started) — keys the rdz receipt mailbox. */
+    val transferId: String? = null,
     val pathType: String? = null,
     val pathAddr: String? = null,
     val bytes: Long = 0,
@@ -32,4 +38,24 @@ data class Transfer(
 )
 
 val Status.isTerminal: Boolean
-    get() = this == Status.Completed || this == Status.Failed || this == Status.Cancelled
+    get() =
+        this == Status.Completed ||
+            this == Status.Unconfirmed ||
+            this == Status.Failed ||
+            this == Status.Cancelled
+
+/** Human-readable byte count (the ONE implementation - was duplicated). */
+fun humanBytes(n: Long): String =
+    when {
+        n < 1024 -> "$n B"
+        n < 1024 * 1024 -> "%.0f KB".format(n / 1024.0)
+        n < 1024L * 1024 * 1024 -> "%.1f MB".format(n / 1048576.0)
+        else -> "%.2f GB".format(n / 1073741824.0)
+    }
+
+/** Trailing-window average of the 250 ms-sampled rate (~3 s): the headline
+ *  speed/ETA smoothing policy, kept beside the model (not in a composable). */
+fun smoothedBps(t: Transfer): Double {
+    val window = t.speedHistory.takeLast(12)
+    return if (window.isEmpty()) t.avgBps else window.average()
+}

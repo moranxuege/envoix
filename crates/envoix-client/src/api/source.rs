@@ -39,7 +39,7 @@ pub enum TransferMode {
 /// consumer variants work for `send`, producer variants for `receive`, and
 /// `Mdns`/`Room` for both. Unsupported combinations fail fast with
 /// `InvalidInput` before any network activity.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum PeerSource {
     /// Dial a peer descriptor obtained out of band, authenticating with a
     /// shared token (>= 12 ASCII bytes).
