@@ -64,7 +64,12 @@ object SettingsStore {
                 devMode = prefs.getBoolean("devMode", false),
                 verboseLog = prefs.getBoolean("verboseLog", false),
                 traceIroh = prefs.getBoolean("traceIroh", false),
-                logServer = prefs.getString("logServer", Endpoints.LOG_SERVER)!!,
+                logServer =
+                    prefs.getString("logServer", Endpoints.LOG_SERVER)!!.let {
+                        // Installs from before the TLS cutover have the old
+                        // plaintext default frozen in prefs; carry them over.
+                        if (it == Endpoints.LOG_SERVER_LEGACY) Endpoints.LOG_SERVER else it
+                    },
             )
     }
 

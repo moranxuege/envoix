@@ -86,6 +86,9 @@ object Endpoints {
         "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445"
     const val RELAY = "https://envoix.chkxwlyh.us:8444"
 
-    /** Per-room log-collection endpoint on the rdz box (dev-mode upload target). */
-    const val LOG_SERVER = "http://67.230.187.238:8460"
+    /** Per-room log-collection + receipt-mailbox endpoint on the rdz box (TLS). */
+    const val LOG_SERVER = "https://rdz.chkxwlyh.us:8460"
+
+    /** Pre-TLS default; migrated to [LOG_SERVER] on settings load. */
+    const val LOG_SERVER_LEGACY = "http://67.230.187.238:8460"
 }
