@@ -13,8 +13,8 @@ use std::io::Write;
 use std::sync::{Mutex, OnceLock};
 
 use envoix_client::TransferDirection;
-use envoix_client::api::driver::{SessionParams, TransferSession};
-use envoix_client::api::{Client, Invite, PeerSource, Role, TransferOptions};
+use envoix_client::api::driver::{ClientContext, SessionContext, SessionParams, TransferSession};
+use envoix_client::api::{Invite, PeerSource, Role, TransferOptions};
 use jni::JNIEnv;
 use jni::JavaVM;
 use jni::objects::{GlobalRef, JClass, JObject, JString, JValue};
@@ -539,9 +539,10 @@ pub extern "system" fn Java_dev_envoix_app_Native_createSession(
     let deny = split_csv(&get("candidates_deny"));
     let chunk = get("chunk_size");
     let chunk = (!chunk.is_empty()).then_some(chunk);
-    let client = match Client::from_config_fields(chunk.as_deref(), &allow, &deny) {
-        Ok(c) => c,
-        Err(e) => return emit_failed_snapshot(&vm, &cb, "invalid client config", e),
+    let client_context = ClientContext {
+        chunk_size: chunk,
+        candidates_allow: allow,
+        candidates_deny: deny,
     };
 
     let code = get("code");
@@ -563,15 +564,21 @@ pub extern "system" fn Java_dev_envoix_app_Native_createSession(
         "send" => TransferDirection::Send,
         _ => TransferDirection::Receive,
     };
-    let params = SessionParams {
-        direction,
-        path: std::path::PathBuf::from(get("path")),
-        sources,
-        options,
+    let context = SessionContext {
+        client: client_context,
+        params: SessionParams {
+            direction,
+            path: std::path::PathBuf::from(get("path")),
+            sources,
+            options,
+        },
     };
 
     let _guard = runtime().enter();
-    let (session, notices) = TransferSession::start(client, params, record_for(id));
+    let (session, notices) = match TransferSession::start(context, record_for(id)) {
+        Ok(session) => session,
+        Err(error) => return emit_failed_snapshot(&vm, &cb, "invalid session context", error),
+    };
     match sessions().lock() {
         Ok(mut map) => {
             map.insert(id, session);
@@ -658,15 +665,13 @@ pub extern "system" fn Java_dev_envoix_app_Native_restoreSession(
     let Some(record) = record else {
         return emit_failed_snapshot(&vm, &cb, "transfer record not found", id);
     };
-    let client = match Client::from_config_fields(None, &[], &[]) {
-        Ok(client) => client,
+    let _guard = runtime().enter();
+    let (session, notices) = match TransferSession::restore(record, record_for(id)) {
+        Ok(session) => session,
         Err(error) => {
-            return emit_failed_snapshot(&vm, &cb, "invalid restored client config", error);
+            return emit_failed_snapshot(&vm, &cb, "invalid restored session context", error);
         }
     };
-    let _guard = runtime().enter();
-    let (session, notices) =
-        TransferSession::restore(client, record.params, record.session, record_for(id));
     match sessions().lock() {
         Ok(mut map) => {
             map.insert(id, session);

@@ -379,9 +379,11 @@ impl From<SessionEvent> for TransferEvent {
             SessionEvent::Confirming { transfer_id } => TransferEvent::Confirming { transfer_id },
             SessionEvent::Completed {
                 transfer_id,
+                file_name,
                 bytes_transferred,
             } => TransferEvent::Completed {
                 transfer_id,
+                file_name,
                 bytes_transferred,
             },
             SessionEvent::Failed { direction, reason } => {
@@ -419,6 +421,7 @@ mod tests {
         });
         adapter.on_event(SessionEvent::Completed {
             transfer_id: TransferId::new("t1"),
+            file_name: "a.bin".into(),
             bytes_transferred: 42,
         });
 
@@ -437,6 +440,7 @@ mod tests {
             receiver.recv().await.unwrap().event,
             TransferEvent::Completed {
                 transfer_id: TransferId::new("t1"),
+                file_name: "a.bin".into(),
                 bytes_transferred: 42,
             }
         );
@@ -505,6 +509,7 @@ mod tests {
             1800,
             &TransferEvent::Completed {
                 transfer_id: TransferId::new("t"),
+                file_name: "f".into(),
                 bytes_transferred: 1000,
             },
         );

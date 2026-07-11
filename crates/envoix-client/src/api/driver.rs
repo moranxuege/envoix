@@ -16,7 +16,7 @@ use std::time::Duration;
 use envoix_session::TransferDirection;
 use envoix_storage::LocalFileStorage;
 use envoix_types::TransferId;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
@@ -41,8 +41,42 @@ const POLL_SCHEDULE: [Duration; 4] = [
 /// Minimum interval between progress-only snapshots.
 const PROGRESS_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(100);
 
-/// Everything needed to (re)launch attempts of one transfer.
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+/// Client-side runtime policy needed to recreate a transfer after process death.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ClientContext {
+    /// Human-readable chunk size as supplied by the frontend. `None` means default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_size: Option<String>,
+    /// CIDR allow-list for candidate addresses.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates_allow: Vec<String>,
+    /// CIDR deny-list for candidate addresses.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates_deny: Vec<String>,
+}
+
+impl ClientContext {
+    pub fn client(&self) -> Result<Client, TransferError> {
+        Client::from_config_fields(
+            self.chunk_size.as_deref(),
+            &self.candidates_allow,
+            &self.candidates_deny,
+        )
+    }
+}
+
+/// Everything needed to relaunch attempts of one transfer.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SessionContext {
+    /// Runtime client policy that affects transfer wire behavior and addressing.
+    #[serde(default)]
+    pub client: ClientContext,
+    /// Direction, path, rendezvous sources, and per-transfer options.
+    pub params: SessionParams,
+}
+
+/// Direction, paths, rendezvous sources, and attempt options for one transfer.
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SessionParams {
     pub direction: TransferDirection,
     /// The file to send, or the directory to receive into.
@@ -106,12 +140,18 @@ impl TransferSession {
     /// the notice stream (snapshots + courier requests). With `record`, every
     /// state change is persisted for restore-across-restart.
     pub fn start(
-        client: Client,
-        params: SessionParams,
+        context: SessionContext,
         record: Option<(RecordStore, u64)>,
-    ) -> (Self, mpsc::UnboundedReceiver<SessionNotice>) {
-        let direction = params.direction;
-        Self::spawn(client, params, Session::new(direction), record, true)
+    ) -> Result<(Self, mpsc::UnboundedReceiver<SessionNotice>), TransferError> {
+        let client = context.client.client()?;
+        let direction = context.params.direction;
+        Ok(Self::spawn(
+            client,
+            context,
+            Session::new(direction),
+            record,
+            true,
+        ))
     }
 
     /// Rehydrate a persisted session WITHOUT launching an attempt. A record
@@ -120,11 +160,11 @@ impl TransferSession {
     /// re-derived from the state: a restored Unconfirmed session resumes its
     /// mailbox poll, so receipt confirmation survives restarts.
     pub fn restore(
-        client: Client,
-        params: SessionParams,
-        mut session: Session,
-        record: Option<(RecordStore, u64)>,
-    ) -> (Self, mpsc::UnboundedReceiver<SessionNotice>) {
+        record: TransferRecord,
+        store: Option<(RecordStore, u64)>,
+    ) -> Result<(Self, mpsc::UnboundedReceiver<SessionNotice>), TransferError> {
+        let client = record.context.client.client()?;
+        let mut session = record.session;
         use super::machine::{PauseOrigin, State};
         if matches!(
             session.state,
@@ -137,12 +177,12 @@ impl TransferSession {
             session.state = State::Paused(PauseOrigin::Lost);
             session.reason = Some("interrupted by an app restart".into());
         }
-        Self::spawn(client, params, session, record, false)
+        Ok(Self::spawn(client, record.context, session, store, false))
     }
 
     fn spawn(
         client: Client,
-        params: SessionParams,
+        context: SessionContext,
         mut session: Session,
         record: Option<(RecordStore, u64)>,
         launch: bool,
@@ -150,7 +190,8 @@ impl TransferSession {
         // A sender always knows its file: seed the name from the source path
         // instead of waiting for Started (pairing-stage cards showed "file").
         if session.file_name.is_none() && session.direction == TransferDirection::Send {
-            session.file_name = params
+            session.file_name = context
+                .params
                 .path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned());
@@ -160,7 +201,7 @@ impl TransferSession {
         let actor = Actor {
             client,
             session,
-            params,
+            context,
             cmds: cmd_rx,
             notices: notice_tx,
             current: None,
@@ -261,7 +302,7 @@ impl RateTracker {
 struct Actor {
     client: Client,
     session: Session,
-    params: SessionParams,
+    context: SessionContext,
     cmds: mpsc::UnboundedReceiver<Cmd>,
     notices: mpsc::UnboundedSender<SessionNotice>,
     current: Option<super::Transfer>,
@@ -283,7 +324,7 @@ impl Actor {
     async fn run(mut self) {
         if self.launch {
             // Attempt 1: a user-initiated new transfer, resume per the params.
-            let resume = self.params.options.resume;
+            let resume = self.context.params.options.resume;
             self.launch_attempt(resume);
         } else if self.session.state == super::machine::State::Unconfirmed {
             self.run_effect(Effect::StartMailboxPoll).await;
@@ -342,8 +383,13 @@ impl Actor {
                     return;
                 };
                 // Send side: params.path IS the source file.
-                match receipt::verify_receipt_against_file(&tid, &code, &blob, &self.params.path)
-                    .await
+                match receipt::verify_receipt_against_file(
+                    &tid,
+                    &code,
+                    &blob,
+                    &self.context.params.path,
+                )
+                .await
                 {
                     Ok(_) => self.apply(Input::ReceiptVerified).await,
                     Err(error) => {
@@ -356,12 +402,12 @@ impl Actor {
             Cmd::ReceiptPosted => self.apply(Input::ReceiptPosted).await,
             Cmd::ReceiptResponse(None) => {} // empty slot; later polls may hit
             Cmd::ServeReverify => {
-                let mut options = self.params.options.clone();
+                let mut options = self.context.params.options.clone();
                 options.resume = true;
                 let request = TransferRequest {
-                    direction: self.params.direction,
-                    path: self.params.path.clone(),
-                    sources: self.params.sources.clone(),
+                    direction: self.context.params.direction,
+                    path: self.context.params.path.clone(),
+                    sources: self.context.params.sources.clone(),
                     options,
                 };
                 if let Ok(transfer) = self.client.run(request) {
@@ -380,7 +426,7 @@ impl Actor {
                 self.discard_partial().await;
                 if let Some(name) = &self.session.file_name
                     && let Err(error) =
-                        LocalFileStorage::delete_receipt(&self.params.path, name).await
+                        LocalFileStorage::delete_receipt(&self.context.params.path, name).await
                 {
                     tracing::debug!(%error, "discard: receipt");
                 }
@@ -426,8 +472,12 @@ impl Actor {
             TransferEvent::Verified { .. } => Some(AttemptEvent::Verified),
             TransferEvent::Confirming { .. } => Some(AttemptEvent::Confirming),
             TransferEvent::Completed {
-                bytes_transferred, ..
+                transfer_id,
+                file_name,
+                bytes_transferred,
             } => Some(AttemptEvent::Completed {
+                transfer_id: transfer_id.to_string(),
+                file_name,
                 bytes: bytes_transferred,
             }),
             // D4: mid-run Failed events are retry reports, not attempt
@@ -487,7 +537,7 @@ impl Actor {
             let record = TransferRecord {
                 id: *id,
                 updated_ms: unix_now_ms(),
-                params: self.params.clone(),
+                context: self.context.clone(),
                 session: self.session.clone(),
             };
             if let Err(error) = store.save(&record).await {
@@ -531,12 +581,12 @@ impl Actor {
     }
 
     fn launch_attempt(&mut self, resume: bool) {
-        let mut options = self.params.options.clone();
+        let mut options = self.context.params.options.clone();
         options.resume = resume;
         let request = TransferRequest {
-            direction: self.params.direction,
-            path: self.params.path.clone(),
-            sources: self.params.sources.clone(),
+            direction: self.context.params.direction,
+            path: self.context.params.path.clone(),
+            sources: self.context.params.sources.clone(),
             options,
         };
         self.rate.reset();
@@ -566,10 +616,11 @@ impl Actor {
         ) else {
             return;
         };
-        let receipt_data = match LocalFileStorage::read_receipt(&self.params.path, &name).await {
-            Ok(Some(r)) => r,
-            _ => return,
-        };
+        let receipt_data =
+            match LocalFileStorage::read_receipt(&self.context.params.path, &name).await {
+                Ok(Some(r)) => r,
+                _ => return,
+            };
         match receipt::seal_receipt(&tid, &code, &receipt_data) {
             Ok(blob) => {
                 let key = receipt::receipt_mailbox_key(&tid);
@@ -585,7 +636,7 @@ impl Actor {
             return;
         };
         let tid = TransferId::new(tid.clone());
-        let dir = &self.params.path;
+        let dir = &self.context.params.path;
         if let Err(error) = LocalFileStorage::delete_resume_temp(dir, name, &tid).await {
             tracing::debug!(%error, "discard: temp");
         }
@@ -596,7 +647,7 @@ impl Actor {
 
     /// The pairing code, for sealing/verifying mailbox blobs.
     fn code(&self) -> Option<String> {
-        self.params.sources.iter().find_map(|s| match s {
+        self.context.params.sources.iter().find_map(|s| match s {
             PeerSource::Room { code, .. } => Some(code.clone()),
             PeerSource::Mdns { token: Some(t) } => Some(t.clone()),
             _ => None,
@@ -652,8 +703,9 @@ async fn sleep_until(at: Option<Instant>) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::machine::State;
+    use super::super::machine::{AttemptEvent, Input, State};
     use super::*;
+    use envoix_storage::{LocalFileStorage, TransferReceipt};
 
     fn failing_params(direction: TransferDirection) -> SessionParams {
         SessionParams {
@@ -664,6 +716,49 @@ mod tests {
             }],
             options: TransferOptions::default(),
         }
+    }
+
+    fn failing_context(direction: TransferDirection) -> SessionContext {
+        SessionContext {
+            client: ClientContext::default(),
+            params: failing_params(direction),
+        }
+    }
+
+    fn record(direction: TransferDirection, session: Session) -> TransferRecord {
+        TransferRecord {
+            id: 7,
+            updated_ms: 1,
+            context: failing_context(direction),
+            session,
+        }
+    }
+
+    fn actor_for_context(
+        context: SessionContext,
+    ) -> (Actor, mpsc::UnboundedReceiver<SessionNotice>) {
+        let (cmds, cmd_rx) = mpsc::unbounded_channel();
+        drop(cmds);
+        let (notice_tx, notice_rx) = mpsc::unbounded_channel();
+        (
+            Actor {
+                client: Client::new(),
+                session: Session::new(context.params.direction),
+                context,
+                cmds: cmd_rx,
+                notices: notice_tx,
+                current: None,
+                seq: 0,
+                confirm_deadline: None,
+                polls: Vec::new(),
+                poll_key: None,
+                rate: RateTracker::default(),
+                last_progress_snapshot: None,
+                record: None,
+                launch: false,
+            },
+            notice_rx,
+        )
     }
 
     /// Drain notices until a snapshot in the wanted state arrives.
@@ -690,7 +785,7 @@ mod tests {
     #[tokio::test]
     async fn failing_attempt_reaches_failed_via_run_ended() {
         let (_session, mut notices) =
-            TransferSession::start(Client::new(), failing_params(TransferDirection::Send), None);
+            TransferSession::start(failing_context(TransferDirection::Send), None).unwrap();
         let snapshot = wait_for_state(&mut notices, State::Failed).await;
         assert_eq!(snapshot.session.attempt, 1);
         assert!(snapshot.session.reason.is_some());
@@ -699,7 +794,7 @@ mod tests {
     #[tokio::test]
     async fn resume_launches_attempt_two() {
         let (session, mut notices) =
-            TransferSession::start(Client::new(), failing_params(TransferDirection::Send), None);
+            TransferSession::start(failing_context(TransferDirection::Send), None).unwrap();
         wait_for_state(&mut notices, State::Failed).await;
         session.resume();
         let snapshot = wait_for_state(&mut notices, State::Connecting).await;
@@ -714,12 +809,8 @@ mod tests {
         let mut session = Session::new(TransferDirection::Receive);
         session.bytes = 40;
         assert_eq!(session.state, State::Connecting); // "active" when persisted
-        let (_handle, mut notices) = TransferSession::restore(
-            Client::new(),
-            failing_params(TransferDirection::Receive),
-            session,
-            None,
-        );
+        let (_handle, mut notices) =
+            TransferSession::restore(record(TransferDirection::Receive, session), None).unwrap();
         let snapshot = wait_for_state(
             &mut notices,
             State::Paused(super::super::machine::PauseOrigin::Lost),
@@ -734,12 +825,8 @@ mod tests {
         let mut session = Session::new(TransferDirection::Send);
         session.state = State::Unconfirmed;
         session.transfer_id = Some("transfer-restored".into());
-        let (_handle, mut notices) = TransferSession::restore(
-            Client::new(),
-            failing_params(TransferDirection::Send),
-            session,
-            None,
-        );
+        let (_handle, mut notices) =
+            TransferSession::restore(record(TransferDirection::Send, session), None).unwrap();
         // Receipt confirmation must survive restarts: the restored session
         // re-derives its standing effect and asks the courier to fetch.
         loop {
@@ -754,13 +841,66 @@ mod tests {
         }
     }
 
+    #[test]
+    fn restore_validates_persisted_client_context() {
+        let mut record = record(
+            TransferDirection::Receive,
+            Session::new(TransferDirection::Receive),
+        );
+        record.context.client.chunk_size = Some("not-a-size".into());
+
+        assert!(TransferSession::restore(record, None).is_err());
+    }
+
+    #[tokio::test]
+    async fn completed_without_started_still_posts_receipt() {
+        let dir =
+            std::env::temp_dir().join(format!("envoix-driver-receipt-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        LocalFileStorage::write_receipt(
+            &dir,
+            &TransferReceipt {
+                file_name: "done.bin".into(),
+                file_size: 77,
+                file_hash: "hash".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let mut context = failing_context(TransferDirection::Receive);
+        context.params.path = dir.clone();
+        context.params.sources = vec![PeerSource::Room {
+            code: "123456-kelp-coral".into(),
+            broker: "id@1.2.3.4:5".into(),
+        }];
+        let (mut actor, mut notices) = actor_for_context(context);
+
+        actor
+            .apply(Input::Event {
+                attempt: 1,
+                event: AttemptEvent::Completed {
+                    transfer_id: "transfer-fast".into(),
+                    file_name: "done.bin".into(),
+                    bytes: 77,
+                },
+            })
+            .await;
+
+        match notices.recv().await.expect("receipt posted") {
+            SessionNotice::PostReceipt { key, blob } => {
+                assert_eq!(key.len(), 64);
+                assert!(!blob.is_empty());
+            }
+            notice => panic!("expected receipt post, got {notice:?}"),
+        }
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
     #[tokio::test]
     async fn cancel_wins_over_the_attempt() {
-        let (session, mut notices) = TransferSession::start(
-            Client::new(),
-            failing_params(TransferDirection::Receive),
-            None,
-        );
+        let (session, mut notices) =
+            TransferSession::start(failing_context(TransferDirection::Receive), None).unwrap();
         session.cancel();
         let snapshot = wait_for_state(&mut notices, State::Cancelled).await;
         // Whatever the racing attempt reported, the user's cancel is final.
