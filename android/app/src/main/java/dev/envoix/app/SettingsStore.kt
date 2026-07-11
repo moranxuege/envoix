@@ -157,14 +157,22 @@ object SettingsStore {
             update { it.copy(saveTreeUri = "") }
             return
         }
-        runCatching {
-            context.contentResolver.takePersistableUriPermission(
-                uri,
-                android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
-                    android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
-            )
+        val granted =
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+                )
+            }.isSuccess
+        // Never persist a tree we cannot durably write: a URI without the
+        // grant would fail every future publish while the setting claims it
+        // works. On failure the previous (working) choice stays.
+        if (granted) {
+            update { it.copy(saveTreeUri = uri.toString()) }
+        } else {
+            LogStore.append("app: SAF permission grant failed for $uri; keeping previous folder")
         }
-        update { it.copy(saveTreeUri = uri.toString()) }
     }
 
     /** The "Avoid Tailscale" toggle is a *view* over `deny`: on iff the ranges are present. */
