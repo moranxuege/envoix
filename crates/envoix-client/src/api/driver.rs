@@ -390,8 +390,8 @@ impl Actor {
             // Restored with the confirmation duty undischarged: re-post.
             self.run_effect(Effect::PostReceipt).await;
         }
-        self.emit_snapshot(false);
         self.persist().await;
+        self.emit_snapshot(false);
 
         loop {
             let confirm_at = self.confirm_deadline.map(|(_, at)| at);
@@ -632,12 +632,16 @@ impl Actor {
             next = self.pending.take();
         }
         if self.session != before {
-            self.emit_snapshot(progress_only);
-            // Persist state changes (not progress ticks: on a crash the
-            // receiver's on-disk resume state is the real resume anyway).
+            // The record commits BEFORE the snapshot goes out: frontends act
+            // on snapshots (publish, delete staging), and a side effect must
+            // never run for a state the durable authority has not committed -
+            // a crash in between would restore a world that never knew.
+            // (Progress ticks skip persistence: the receiver's on-disk resume
+            // state is the real resume anyway.)
             if !progress_only {
                 self.persist().await;
             }
+            self.emit_snapshot(progress_only);
         }
     }
 
@@ -976,20 +980,13 @@ mod tests {
             TransferSession::start(context, Some((store.clone(), 3)), None).unwrap();
         wait_for_state(&mut notices, State::Failed).await;
 
-        // Snapshots emit before the fs write completes: poll briefly.
-        let mut persisted = None;
-        for _ in 0..100 {
-            if let Some(r) = store.load(3).await
-                && r.session.state == State::Failed
-            {
-                persisted = Some(r);
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        assert!(
-            persisted.is_some(),
-            "the sync launch failure survives a restart"
+        // Persist happens-before emit: by the time any snapshot is observed,
+        // the record already holds that state. No polling.
+        let persisted = store.load(3).await.expect("record exists");
+        assert_eq!(
+            persisted.session.state,
+            State::Failed,
+            "the record commits before the snapshot goes out"
         );
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
