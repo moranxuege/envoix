@@ -122,7 +122,6 @@ class TransferService : Service() {
         return gen == current
     }
 
-    /** Latch for the active→resting tray transition. */
     /** Foreground is platform STATE, reconciled against the snapshot stream -
      *  not a history edge. (The old active->resting latch never fired for a
      *  card born terminal, e.g. a sync launch failure: the service stayed
@@ -439,7 +438,7 @@ class TransferService : Service() {
                             when (notice.optString("notice")) {
                                 "snapshot" -> onSnapshot(id, spec, notice)
                                 "fetch_receipt" ->
-                                onFetchReceipt(id, notice.optString("key"), notice.optString("server"))
+                                    onFetchReceipt(id, notice.optString("key"), notice.optString("server"))
                                 "post_receipt" -> onPostReceipt(id, notice)
                             }
                         }
