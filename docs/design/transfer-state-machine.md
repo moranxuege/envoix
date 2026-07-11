@@ -305,3 +305,30 @@ Field bugs Q2/Q3 traced to two root causes, fixed structurally:
   ruling). A `Facts` struct enters `Session` only when a real edge needs it —
   with terminal Completed, the coercion case that motivated it is
   unrepresentable.
+
+## Addendum (2026-07-11, Phase 1): the fact pipeline formalized
+
+- **`Facts` is real now**: `proof_delivered` (receiver's confirmation duty,
+  gates the restore re-post) and `receipt_mismatch` (see below). Monotone,
+  serde-defaulted — old records parse.
+- **`sent_hash` is the `complete_sent` fact**: recorded exactly at
+  `Confirming` (it is the `Complete` frame's hash), so its presence proves
+  every byte + the Complete frame went out. Consequences:
+  - Mailbox receipts verify against this committed fact, never by re-reading
+    the mutable source path (fallback for pre-fact records only).
+  - **Restore rule**: a record persisted in `Confirming` with `sent_hash`
+    restores as `Unconfirmed` (mailbox poll resumes) — only the ack died with
+    the process. Without the fact: `Paused(Lost)` as before.
+- **`Input::ReceiptMismatch`**: an authenticated mailbox receipt naming
+  different content than the committed facts. It is *stale news, not a
+  verdict* — the receiver overwrites the slot when it re-completes a resumed
+  offer, so the reducer records `facts.receipt_mismatch` and does NOT
+  transition or stop the bounded polls (a later poll can still verify).
+  Meaningful in `Confirming`/`Unconfirmed`; ignored elsewhere.
+- **`Verifying` carries identity** (`transfer_id`, `file_name`): the
+  short-circuit receive paths (existing final, receipt re-confirm) never emit
+  `Started`; without capture the record has no name for Remove to clean.
+- **Every mutation goes through `apply()`**: the sync launch-failure arm no
+  longer feeds `reduce()` inline (it dropped effects and skipped persist —
+  the Failed state vanished on restart); it queues the input and the apply
+  loop drains it through the one reduce→effects→persist→snapshot path.

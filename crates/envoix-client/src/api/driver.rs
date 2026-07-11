@@ -178,8 +178,17 @@ impl TransferSession {
                 | State::Transferring
                 | State::Confirming
         ) {
-            session.state = State::Paused(PauseOrigin::Lost);
-            session.reason = Some("interrupted by an app restart".into());
+            // `sent_hash` is recorded exactly at Confirming: every byte and
+            // the Complete frame were sent. That durable fact makes the
+            // honest restored state Unconfirmed (mailbox poll resumes below),
+            // not Paused(Lost) - only the ACK died with the process.
+            if session.state == State::Confirming && session.sent_hash.is_some() {
+                session.state = State::Unconfirmed;
+                session.reason = Some("app restarted while awaiting confirmation".into());
+            } else {
+                session.state = State::Paused(PauseOrigin::Lost);
+                session.reason = Some("interrupted by an app restart".into());
+            }
         }
         Ok(Self::spawn(client, record.context, session, store, false))
     }
@@ -209,6 +218,7 @@ impl TransferSession {
             cmds: cmd_rx,
             notices: notice_tx,
             current: None,
+            pending: None,
             seq: 0,
             confirm_deadline: None,
             polls: Vec::new(),
@@ -311,6 +321,10 @@ struct Actor {
     cmds: mpsc::UnboundedReceiver<Cmd>,
     notices: mpsc::UnboundedSender<SessionNotice>,
     current: Option<super::Transfer>,
+    /// Input produced while running effects (a sync launch failure inside
+    /// [`Effect::StartAttempt`]); drained by the [`Self::apply`] loop so it
+    /// takes the same reduce->effects->persist path as every other input.
+    pending: Option<Input>,
     seq: u64,
     /// (attempt, deadline) of the armed confirm timer.
     confirm_deadline: Option<(u32, Instant)>,
@@ -331,6 +345,9 @@ impl Actor {
             // Attempt 1: a user-initiated new transfer, resume per the params.
             let resume = self.context.params.options.resume;
             self.launch_attempt(resume);
+            if let Some(input) = self.pending.take() {
+                self.apply(input).await;
+            }
         } else if self.session.state == super::machine::State::Unconfirmed {
             self.run_effect(Effect::StartMailboxPoll).await;
         } else if self.session.state == super::machine::State::Completed
@@ -425,8 +442,10 @@ impl Actor {
                     Ok(_) => self.apply(Input::ReceiptVerified).await,
                     Err(error) => {
                         tracing::warn!(%error, "mailbox receipt failed verification");
-                        // An authenticated mismatch will not fix itself: stop.
-                        self.polls.clear();
+                        // A machine fact, not a driver decision: recorded and
+                        // persisted; polling continues (the receiver
+                        // overwrites the slot if it re-completes our offer).
+                        self.apply(Input::ReceiptMismatch).await;
                     }
                 }
             }
@@ -505,7 +524,14 @@ impl Actor {
                     bytes: bytes_transferred,
                 })
             }
-            TransferEvent::Verifying { .. } => Some(AttemptEvent::Verifying),
+            TransferEvent::Verifying {
+                transfer_id,
+                file_name,
+                ..
+            } => Some(AttemptEvent::Verifying {
+                transfer_id: transfer_id.to_string(),
+                file_name,
+            }),
             TransferEvent::Verified { .. } => Some(AttemptEvent::Verified),
             TransferEvent::Confirming { file_hash, .. } => {
                 Some(AttemptEvent::Confirming { file_hash })
@@ -548,17 +574,22 @@ impl Actor {
 
     /// Feed one input to the machine, execute its effects, emit a snapshot.
     async fn apply(&mut self, input: Input) {
-        let progress_only = matches!(
-            input,
-            Input::Event {
-                event: AttemptEvent::Progress { .. },
-                ..
-            }
-        );
+        let mut progress_only = true;
         let before = self.session.clone();
-        let effects = self.session.reduce(input);
-        for effect in effects {
-            self.run_effect(effect).await;
+        let mut next = Some(input);
+        while let Some(input) = next.take() {
+            progress_only &= matches!(
+                input,
+                Input::Event {
+                    event: AttemptEvent::Progress { .. },
+                    ..
+                }
+            );
+            let effects = self.session.reduce(input);
+            for effect in effects {
+                self.run_effect(effect).await;
+            }
+            next = self.pending.take();
         }
         if self.session != before {
             self.emit_snapshot(progress_only);
@@ -633,15 +664,16 @@ impl Actor {
             Ok(transfer) => self.current = Some(transfer),
             Err(error) => {
                 // Synchronous validation failure: the attempt never launched.
+                // Queued (never fed to reduce() inline): the apply loop gives
+                // it the same effects+persist+snapshot path as every input -
+                // the old inline shortcut dropped effects and skipped persist,
+                // so the failure vanished on restore.
                 let attempt = self.session.attempt;
                 let failure = Some((failure_code_of(&error), error.message));
-                // Feed inline (no await points needed for pure classify).
-                let effects = self.session.reduce(Input::Event {
+                self.pending = Some(Input::Event {
                     attempt,
                     event: AttemptEvent::RunEnded { failure },
                 });
-                debug_assert!(effects.is_empty(), "classification only");
-                self.emit_snapshot(false);
             }
         }
     }
@@ -782,6 +814,7 @@ mod tests {
                 cmds: cmd_rx,
                 notices: notice_tx,
                 current: None,
+                pending: None,
                 seq: 0,
                 confirm_deadline: None,
                 polls: Vec::new(),
@@ -852,6 +885,64 @@ mod tests {
         .await;
         assert_eq!(snapshot.session.bytes, 40, "progress display survives");
         assert_eq!(snapshot.session.attempt, 1, "no attempt was launched");
+    }
+
+    #[tokio::test]
+    async fn restored_confirming_with_sent_hash_is_unconfirmed() {
+        // sent_hash is recorded exactly at Confirming: every byte + the
+        // Complete frame went out, only the ack died with the process. The
+        // honest restored state is Unconfirmed (poll resumes), not Paused.
+        let mut session = Session::new(TransferDirection::Send);
+        session.state = State::Confirming;
+        session.transfer_id = Some("transfer-confirming".into());
+        session.sent_hash = Some("committed-hash".into());
+        let (_handle, mut notices) =
+            TransferSession::restore(record(TransferDirection::Send, session), None).unwrap();
+        let snapshot = wait_for_state(&mut notices, State::Unconfirmed).await;
+        assert_eq!(snapshot.session.state, State::Unconfirmed);
+
+        // Without the committed fact (a pre-fact record), Paused(Lost) stands.
+        let mut session = Session::new(TransferDirection::Send);
+        session.state = State::Confirming;
+        let (_handle, mut notices) =
+            TransferSession::restore(record(TransferDirection::Send, session), None).unwrap();
+        wait_for_state(
+            &mut notices,
+            State::Paused(super::super::machine::PauseOrigin::Lost),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn sync_launch_failure_is_persisted() {
+        // Client::run fails synchronously on empty sources; the failure must
+        // take the same apply path as any input - the old inline shortcut
+        // skipped persist(), so the Failed state vanished on restore.
+        let dir = std::env::temp_dir().join(format!("envoix-launchfail-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let store = RecordStore::new(&dir);
+        let mut context = failing_context(TransferDirection::Send);
+        context.params.sources = Vec::new();
+        let (_handle, mut notices) =
+            TransferSession::start(context, Some((store.clone(), 3))).unwrap();
+        wait_for_state(&mut notices, State::Failed).await;
+
+        // Snapshots emit before the fs write completes: poll briefly.
+        let mut persisted = None;
+        for _ in 0..100 {
+            if let Some(r) = store.load(3).await
+                && r.session.state == State::Failed
+            {
+                persisted = Some(r);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            persisted.is_some(),
+            "the sync launch failure survives a restart"
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]
@@ -955,14 +1046,20 @@ mod tests {
             .await;
         assert_eq!(actor.polls.len(), 1, "stale response must not clear polls");
 
-        // The current slot with a garbage blob is a real mismatch: polls stop.
+        // The current slot with a mismatching blob records the fact and keeps
+        // the bounded polls alive: the receiver overwrites the slot if it
+        // re-completes our offer, so a later poll can still verify.
         actor
             .on_cmd(Cmd::ReceiptResponse {
                 key: current_key,
                 blob: Some(vec![1, 2, 3]),
             })
             .await;
-        assert!(actor.polls.is_empty(), "authenticated mismatch stops polls");
+        assert!(
+            actor.session.facts.receipt_mismatch,
+            "the mismatch is a recorded machine fact"
+        );
+        assert_eq!(actor.polls.len(), 1, "polling continues after a mismatch");
     }
 
     #[tokio::test]

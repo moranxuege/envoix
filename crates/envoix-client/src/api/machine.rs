@@ -91,7 +91,10 @@ pub enum AttemptEvent {
     Progress {
         bytes: u64,
     },
-    Verifying,
+    Verifying {
+        transfer_id: String,
+        file_name: String,
+    },
     Verified,
     Confirming {
         file_hash: String,
@@ -128,6 +131,9 @@ pub enum Input {
     ConfirmTimeout { attempt: u32 },
     /// The mailbox receipt was fetched and VERIFIED against the local file.
     ReceiptVerified,
+    /// The mailbox slot opened with this transfer's key but named different
+    /// content than the committed sent facts (see [`Facts::receipt_mismatch`]).
+    ReceiptMismatch,
     /// Receiver: the sealed receipt POST was acknowledged by the rdz - the
     /// confirmation duty is discharged (monotone fact, any state).
     ReceiptPosted,
@@ -162,6 +168,13 @@ pub struct Facts {
     /// POST was acknowledged by the rdz (or, future: a clean close showed the
     /// ack arrived). Gates the "still on duty" UI and restore re-posting.
     pub proof_delivered: bool,
+    /// Send: the mailbox slot held an authenticated receipt for DIFFERENT
+    /// content (opened with this transfer's key; hash/size didn't match the
+    /// committed sent facts). Stale news, not a verdict - the receiver
+    /// overwrites the slot when it re-completes a resumed offer, so polling
+    /// continues; recorded for diagnostics and the UI.
+    #[serde(default)]
+    pub receipt_mismatch: bool,
 }
 
 /// One transfer session (one card): the machine state plus the observable
@@ -235,6 +248,15 @@ impl Session {
             }
             Input::ReceiptPosted => {
                 self.facts.proof_delivered = true;
+                Vec::new()
+            }
+            Input::ReceiptMismatch => {
+                if matches!(self.state, State::Confirming | State::Unconfirmed) {
+                    self.facts.receipt_mismatch = true;
+                }
+                // No transition, no effects: the bounded polls keep running -
+                // a receiver that re-completes the resumed offer overwrites
+                // the slot, and a later poll then verifies.
                 Vec::new()
             }
             Input::ReceiptVerified => {
@@ -340,8 +362,17 @@ impl Session {
                 self.bytes = bytes;
                 Vec::new()
             }
-            E::Verifying if matches!(self.state, S::Waiting | S::Connecting) => {
+            E::Verifying {
+                transfer_id,
+                file_name,
+            } if matches!(self.state, S::Waiting | S::Connecting) => {
                 self.state = S::Verifying;
+                // Identity facts arrive HERE on the short-circuit paths
+                // (existing final / receipt re-confirm), which never emit
+                // Started - without capture, the record has no name for
+                // Remove to clean and the card shows null.
+                self.transfer_id = Some(transfer_id);
+                self.file_name = Some(file_name);
                 Vec::new()
             }
             E::Verified if self.state == S::Verifying => {
@@ -468,6 +499,13 @@ mod tests {
         }
     }
 
+    fn verifying() -> AttemptEvent {
+        E::Verifying {
+            transfer_id: "transfer-v".into(),
+            file_name: "v.bin".into(),
+        }
+    }
+
     fn confirming() -> AttemptEvent {
         E::Confirming {
             file_hash: "hash-of-sent-bytes".into(),
@@ -503,6 +541,47 @@ mod tests {
         let effects = s.reduce(ev(1, completed(100)));
         assert_eq!(s.state, State::Completed);
         assert_eq!(effects, vec![Effect::PostReceipt]);
+    }
+
+    #[test]
+    fn verifying_captures_identity_without_started() {
+        // The short-circuit receive paths (existing final / receipt) jump to
+        // Verifying without ever emitting Started; the identity facts must
+        // not be lost or Remove has no name to clean and the card shows null.
+        let mut s = Session::new(Receive);
+        s.reduce(ev(1, verifying()));
+        assert_eq!(s.state, State::Verifying);
+        assert_eq!(s.transfer_id.as_deref(), Some("transfer-v"));
+        assert_eq!(s.file_name.as_deref(), Some("v.bin"));
+    }
+
+    #[test]
+    fn receipt_mismatch_is_a_fact_not_a_verdict() {
+        let mut s = transferring(Send);
+        s.reduce(ev(1, E::Progress { bytes: 100 }));
+        s.reduce(ev(1, confirming()));
+        s.reduce(ev(1, failed(FailureCode::ConnectionLost)));
+        assert_eq!(s.state, State::Unconfirmed);
+
+        let effects = s.reduce(Input::ReceiptMismatch);
+        assert_eq!(
+            s.state,
+            State::Unconfirmed,
+            "no transition: stale news, not a verdict"
+        );
+        assert!(
+            effects.is_empty(),
+            "polls keep running (the slot can be overwritten)"
+        );
+        assert!(s.facts.receipt_mismatch, "but the fact is recorded");
+
+        // Terminal states ignore it entirely.
+        let mut done = transferring(Send);
+        done.reduce(ev(1, E::Progress { bytes: 100 }));
+        done.reduce(ev(1, confirming()));
+        done.reduce(ev(1, completed(100)));
+        done.reduce(Input::ReceiptMismatch);
+        assert!(!done.facts.receipt_mismatch);
     }
 
     #[test]
@@ -726,13 +805,13 @@ mod tests {
     #[test]
     fn verifying_returns_to_connecting() {
         let mut s = Session::new(Receive);
-        s.reduce(ev(1, E::Verifying));
+        s.reduce(ev(1, verifying()));
         assert_eq!(s.state, State::Verifying);
         s.reduce(ev(1, E::Verified));
         assert_eq!(s.state, State::Connecting);
         // Completed straight from Verifying is also legal (existing-final path).
         let mut s = Session::new(Receive);
-        s.reduce(ev(1, E::Verifying));
+        s.reduce(ev(1, verifying()));
         s.reduce(ev(1, completed(10)));
         assert_eq!(s.state, State::Completed);
     }
@@ -803,7 +882,7 @@ mod tests {
                 bytes_resumed: 0,
             },
             E::Progress { bytes: 999 },
-            E::Verifying,
+            verifying(),
             E::Verified,
             confirming(),
             completed(999),
