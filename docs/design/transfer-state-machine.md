@@ -357,20 +357,29 @@ platform source that needs staging. The CLI and all receives never see it.
 Flow (each step commits before the next acts):
 1. Kotlin picks the deterministic staging path `cacheDir/send/<id>/<safe_name>`
    and takes the persistable READ grant on the source URI.
-2. `createSession` writes the record FIRST: `state = Preparing`, `attempt = 0`,
-   `params.path = <staging path>`, extras carrying `source_uri` and
-   `source_recoverable` (whether the grant succeeded). No side effect precedes
-   the record.
-3. Staging is a SNAPSHOT-DERIVED renderer (the Phase-5 rule, not a one-shot
-   effect): Kotlin observes `state == preparing` and idempotently ensures a
-   staging job runs for that card. Fresh start and crash recovery are the
-   same code path.
-4. Staging progress rides `Progress` events — snapshot-only, never persisted
-   (progress ticks already skip persistence). The machine owns staging
-   STATUS; extras carry only what the core cannot interpret. Machine state
-   never hides in the opaque blob.
-5. `Input::StageComplete` → `Connecting` + `Effect::StartAttempt` (attempt 1).
-   `Input::StageFailed(reason)` → `Failed` with the message, persisted.
+2. `createStagingSession` writes the record FIRST via `start_staging`
+   (`state = Preparing`, `attempt = 1`, `params.path = <staging path>`, extras
+   carrying `source_uri` and `source_recoverable` — whether the grant
+   succeeded). No side effect precedes the record.
+3. The copy is SNAPSHOT-TRIGGERED, not launched inline: Kotlin waits for the
+   first `preparing` snapshot — which is proof the record committed — then runs
+   the copy once (`launchStaging`, guarded by a per-id set). Implementation
+   note (deviates from an earlier "snapshot-derived renderer" phrasing): the
+   source URI rides the `Spec` (not a separate id→URI map), so fresh start and
+   restore share the trigger without extra hidden state. Launching the copy
+   inline after `createStagingSession` was rejected — the record commits
+   asynchronously in the driver's run loop, so an inline copy could begin in
+   the ~ms before the commit, reopening the very "intent lost mid-copy" hole
+   Preparing closes.
+4. Staging progress is Kotlin-owned: `launchStaging` updates the card's bytes
+   as it copies, and `onSnapshot` preserves the card's bytes while `Preparing`
+   (the machine has no transfer bytes yet). The machine owns staging STATE
+   only; extras carry only what the core cannot interpret.
+5. `Input::StageComplete` → `Connecting` + `Effect::StartAttempt { resume:
+   false }` (the deferred attempt 1). `Input::StageFailed(reason)` → `Failed`
+   with the message, persisted. On restore, a recoverable source re-stages
+   through the same path; a non-recoverable one fails with "source needs
+   re-picking".
 
 ### Legality rows
 
