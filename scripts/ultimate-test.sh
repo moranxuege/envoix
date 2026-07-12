@@ -9,7 +9,6 @@ readonly SERVICE="$PACKAGE/.TransferService"
 readonly ACTION_START="$PACKAGE.START"
 readonly DEVICE_INPUT="/data/user/0/$PACKAGE/cache/ultimate-test-input"
 readonly DEVICE_OUTPUT_DIR="/sdcard/Download/Envoix"
-readonly WIFI_FORWARD_PORT="9999"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/Android/Sdk}}"
@@ -113,6 +112,33 @@ reconnect_wifi() {
     connect_wifi "$serial"
 }
 
+wait_for_validation() {
+    local serial="$1"
+    local expected="$2"
+    local deadline=$((SECONDS + 45))
+    local validated
+
+    while true; do
+        if "$adb" -s "$serial" shell cmd wifi status 2>/dev/null |
+            grep 'NetworkCapabilities:' | grep -q 'VALIDATED'; then
+            validated=yes
+        else
+            validated=no
+        fi
+        [ "$validated" = "$expected" ] && return
+        [ "$SECONDS" -lt "$deadline" ] ||
+            die "$serial Wi-Fi validation remained '$validated' (expected '$expected')"
+        sleep 2
+    done
+}
+
+configure_peer_routes() {
+    local serial="$1"
+
+    "$adb" -s "$serial" shell \
+        'ip rule del pref 9000 2>/dev/null || true; ip rule del pref 9001 2>/dev/null || true; ip -6 rule del pref 9000 2>/dev/null || true; ip -6 rule del pref 9001 2>/dev/null || true; ip rule add pref 9000 to 10.0.2.16/28 lookup wlan0; ip rule add pref 9001 to 224.0.0.0/4 lookup wlan0; ip -6 rule add pref 9000 to fec0::/64 lookup wlan0; ip -6 rule add pref 9001 to ff00::/8 lookup wlan0'
+}
+
 wifi_address() {
     "$adb" -s "$1" shell ip -4 -o address show dev wlan0 scope global |
         awk '{print $4}' | head -n 1 | cut -d/ -f1 | tr -d '\r'
@@ -188,6 +214,13 @@ run_test() {
     printf '\n[%s] Preparing devices...\n' "$environment"
     disable_firewall "$SERIAL_A"
     disable_firewall "$SERIAL_B"
+    if [ "$environment" = "lan-only" ]; then
+        "$adb" -s "$SERIAL_A" shell cmd connectivity airplane-mode enable >/dev/null
+        "$adb" -s "$SERIAL_B" shell cmd connectivity airplane-mode enable >/dev/null
+    else
+        "$adb" -s "$SERIAL_A" shell cmd connectivity airplane-mode disable >/dev/null
+        "$adb" -s "$SERIAL_B" shell cmd connectivity airplane-mode disable >/dev/null
+    fi
     reset_app "$SERIAL_A"
     reset_app "$SERIAL_B"
     "$adb" -s "$SERIAL_A" logcat -c
@@ -202,12 +235,23 @@ run_test() {
     if [ "$environment" = "lan-only" ]; then
         enable_firewall "$SERIAL_A"
         enable_firewall "$SERIAL_B"
-        # Reassociation makes Android revalidate Wi-Fi against the restricted
-        # network. TransferService then observes the normal system capability
-        # state; no application setting or debug flag is changed.
-        reconnect_wifi "$SERIAL_A"
-        reconnect_wifi "$SERIAL_B"
-        sleep 15
+    fi
+    # Reassociate Wi-Fi in the selected environment, then override Android's
+    # overlapping eth0/wlan0 policy only for shared-Wi-Fi peers and multicast.
+    reconnect_wifi "$SERIAL_A"
+    reconnect_wifi "$SERIAL_B"
+    configure_peer_routes "$SERIAL_A"
+    configure_peer_routes "$SERIAL_B"
+    if [ "$environment" = "lan-only" ]; then
+        wait_for_validation "$SERIAL_A" no
+        wait_for_validation "$SERIAL_B" no
+    else
+        "$adb" -s "$SERIAL_A" shell \
+            'nc -w 10 67.230.187.238 8445 </dev/null' ||
+            die "$SERIAL_A cannot reach the internet"
+        "$adb" -s "$SERIAL_B" shell \
+            'nc -w 10 67.230.187.238 8445 </dev/null' ||
+            die "$SERIAL_B cannot reach the internet"
     fi
 
     start_transfer "$SERIAL_B" receive "$room" "unused"
@@ -297,12 +341,9 @@ log_dir="$repo_root/android/build/ultimate-test"
 mkdir -p "$log_dir"
 trap cleanup EXIT INT TERM
 
-"$emulator" "@$avd_a" -port 5554 -feature WiFiPacketStream -wifi-server-port "$WIFI_FORWARD_PORT" \
-    -no-snapshot -netdelay none -netspeed full \
+"$emulator" "@$avd_a" -port 5554 -no-snapshot -netdelay none -netspeed full \
     >"$log_dir/emulator-5554.log" 2>&1 &
-sleep 1
-"$emulator" "@$avd_b" -port 5556 -feature WiFiPacketStream -wifi-client-port "$WIFI_FORWARD_PORT" \
-    -no-snapshot -netdelay none -netspeed full \
+"$emulator" "@$avd_b" -port 5556 -no-snapshot -netdelay none -netspeed full \
     >"$log_dir/emulator-5556.log" 2>&1 &
 started=1
 
