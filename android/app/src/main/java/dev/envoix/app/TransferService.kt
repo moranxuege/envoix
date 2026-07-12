@@ -493,12 +493,14 @@ class TransferService : Service() {
             val uri = spec.sourceUri?.let { Uri.parse(it) }
             if (uri == null) {
                 // A restored Preparing whose source cannot be reopened.
+                TransferTimeline.event(id, "platform.stage", "failed", outcome = "no_source")
                 Native.stageFailed(id, "source needs re-picking")
                 return@launch
             }
             val out = File(spec.path)
             out.parentFile?.mkdirs()
-            val ok =
+            TransferTimeline.event(id, "platform.stage", "start", fields = mapOf("name" to out.name))
+            val result =
                 runCatching {
                     contentResolver.openInputStream(uri)!!.use { input ->
                         out.outputStream().use { o ->
@@ -518,11 +520,19 @@ class TransferService : Service() {
                             }
                         }
                     }
-                }.isSuccess
-            if (ok) {
+                }
+            if (result.isSuccess) {
+                TransferTimeline.event(id, "platform.stage", "complete")
                 Native.stageComplete(id)
             } else {
                 out.delete()
+                TransferTimeline.event(
+                    id,
+                    "platform.stage",
+                    "failed",
+                    outcome = "copy",
+                    fields = mapOf("cause" to (result.exceptionOrNull()?.message ?: "read failed")),
+                )
                 Native.stageFailed(id, "couldn't read the picked file")
             }
         }
@@ -749,6 +759,10 @@ class TransferService : Service() {
                     return@launch
                 }
             }
+            // Every backoff exhausted — the mailbox rescue could not be armed.
+            // (Success is the core's platform.courier.posted; this is the gap
+            // the driver can't see — the HTTP POST itself failing.)
+            TransferTimeline.event(id, "platform.courier", "post_failed")
             OpLog.add("receipt post failed id=$id")
         }
     }
@@ -787,6 +801,16 @@ class TransferService : Service() {
         src: File,
         attributeTo: Long?,
     ) {
+        // Per-transfer timeline events, only when this file is attributed to a
+        // card (the unattributed gcStaging drain has no session to route to).
+        fun tl(
+            event: String,
+            outcome: String = "",
+            fields: Map<String, String> = emptyMap(),
+        ) = attributeTo?.let {
+            TransferTimeline.event(it, "platform.publish", event, outcome = outcome, fields = fields)
+        }
+
         val journal = publishJournal(src)
         // --- recovery: a journal survived a crash mid-publish ---
         runCatching { org.json.JSONObject(journal.readText()) }.getOrNull()?.let { prior ->
@@ -796,6 +820,7 @@ class TransferService : Service() {
                 adopt(attributeTo, src.name, committed)
                 src.delete()
                 journal.delete()
+                tl("adopt", fields = mapOf("uri" to TransferTimeline.redactUri(committed)))
                 LogStore.append("app: adopted already-published ${src.name}")
                 return
             }
@@ -808,21 +833,34 @@ class TransferService : Service() {
 
         // --- fresh publish ---
         val s = SettingsStore.settings.value
-        val target = MediaStoreSaver.reserve(this, src.name, s.saveTreeUri, s.saveFolder) ?: return
+        val target = MediaStoreSaver.reserve(this, src.name, s.saveTreeUri, s.saveFolder)
+        if (target == null) {
+            tl("failed", outcome = "reserve", fields = mapOf("name" to src.name))
+            return
+        }
+        tl("reserve", fields = mapOf("uri" to TransferTimeline.redactUri(target.uri.toString())))
         // Record the reservation BEFORE any byte is copied.
         writePublishJournal(journal, target.uri.toString(), target.mediaStorePending, committed = null)
-        if (!MediaStoreSaver.copyInto(this, src, target)) {
+        val copy = MediaStoreSaver.copyInto(this, src, target)
+        if (copy.isFailure) {
             MediaStoreSaver.delete(this, target.uri)
             journal.delete()
+            tl(
+                "failed",
+                outcome = "copy",
+                fields = mapOf("cause" to (copy.exceptionOrNull()?.message ?: "copy failed")),
+            )
             return
         }
         MediaStoreSaver.commit(this, target)
         // Record the commit BEFORE clearing staging, so a crash here recovers
         // by adopting (never re-publishing = duplicate).
         writePublishJournal(journal, target.uri.toString(), target.mediaStorePending, committed = target.uri.toString())
+        tl("commit", fields = mapOf("uri" to TransferTimeline.redactUri(target.uri.toString())))
         adopt(attributeTo, src.name, target.uri.toString())
         src.delete()
         journal.delete()
+        tl("staging_deleted")
         LogStore.append("app: saved ${src.name} to Downloads")
     }
 

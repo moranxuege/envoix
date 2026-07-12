@@ -44,17 +44,19 @@ object MediaStoreSaver {
             ?.let { reserveInTree(context, displayName, Uri.parse(it)) }
             ?: reserveInDownloads(context, displayName, folder)
 
-    /** Copy [source] into a reserved target. */
+    /** Copy [source] into a reserved target. Returns the failure cause (a
+     *  typed result, not a bare Boolean) so `platform.publish.failed` can carry
+     *  a real reason instead of a swallowed exception. */
     fun copyInto(
         context: Context,
         source: File,
         target: Reserved,
-    ): Boolean =
+    ): Result<Unit> =
         runCatching {
             context.contentResolver.openOutputStream(target.uri)!!.use { out ->
                 source.inputStream().use { it.copyTo(out) }
             }
-        }.isSuccess
+        }.map { }
 
     /** Make a reserved target visible after a successful copy (MediaStore only). */
     fun commit(
@@ -100,7 +102,7 @@ object MediaStoreSaver {
         folder: String,
     ): Uri? {
         val target = reserve(context, displayName, treeUri, folder) ?: return null
-        return if (copyInto(context, source, target)) {
+        return if (copyInto(context, source, target).isSuccess) {
             commit(context, target)
             target.uri
         } else {
