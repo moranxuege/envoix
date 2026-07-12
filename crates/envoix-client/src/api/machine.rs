@@ -134,6 +134,10 @@ pub enum Input {
     /// The mailbox slot opened with this transfer's key but named different
     /// content than the committed sent facts (see [`Facts::receipt_mismatch`]).
     ReceiptMismatch,
+    /// The driver could not commit the record after bounded retries: the
+    /// durable authority is unwritable, so the session ends visibly instead
+    /// of running ahead of a store that cannot follow.
+    StorageFailed,
     /// Receiver: the sealed receipt POST was acknowledged by the rdz - the
     /// confirmation duty is discharged (monotone fact, any state).
     ReceiptPosted,
@@ -250,6 +254,20 @@ impl Session {
                 self.facts.proof_delivered = true;
                 Vec::new()
             }
+            Input::StorageFailed
+                if !matches!(
+                    self.state,
+                    State::Completed | State::Failed | State::Cancelled
+                ) =>
+            {
+                let mut effects = self.exit_effects();
+                effects.push(Effect::CancelToken);
+                self.state = State::Failed;
+                self.reason = Some("transfer record store is unwritable".into());
+                self.reason_code = Some(FailureCode::Other);
+                effects
+            }
+            Input::StorageFailed => Vec::new(), // terminal states: nothing to end
             Input::ReceiptMismatch => {
                 if matches!(self.state, State::Confirming | State::Unconfirmed) {
                     self.facts.receipt_mismatch = true;
@@ -541,6 +559,29 @@ mod tests {
         let effects = s.reduce(ev(1, completed(100)));
         assert_eq!(s.state, State::Completed);
         assert_eq!(effects, vec![Effect::PostReceipt]);
+    }
+
+    #[test]
+    fn storage_failed_ends_active_states_and_spares_terminal_ones() {
+        let mut s = transferring(Send);
+        let effects = s.reduce(Input::StorageFailed);
+        assert_eq!(s.state, State::Failed);
+        assert!(s.reason.as_deref().unwrap_or("").contains("record store"));
+        assert!(
+            effects.contains(&Effect::CancelToken),
+            "the live attempt stops"
+        );
+
+        let mut done = transferring(Send);
+        done.reduce(ev(1, E::Progress { bytes: 100 }));
+        done.reduce(ev(1, confirming()));
+        done.reduce(ev(1, completed(100)));
+        assert!(done.reduce(Input::StorageFailed).is_empty());
+        assert_eq!(
+            done.state,
+            State::Completed,
+            "terminal states are not rewritten"
+        );
     }
 
     #[test]

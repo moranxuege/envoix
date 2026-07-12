@@ -332,3 +332,41 @@ Field bugs Q2/Q3 traced to two root causes, fixed structurally:
   longer feeds `reduce()` inline (it dropped effects and skipped persist —
   the Failed state vanished on restart); it queues the input and the apply
   loop drains it through the one reduce→effects→persist→snapshot path.
+
+## Addendum (2026-07-12, three-way review): Phase 0 — the durable commit boundary
+
+One invariant, surfacing at four boundaries (none of which gets a generic
+transaction framework — the stores are different animals; the RULE is what
+is shared): **durable ownership before irreversible effects.**
+
+| Boundary | Instance |
+| --- | --- |
+| Rust record | state transitions commit before snapshots/effects |
+| Android source | staging copies only after a durable `Preparing` record |
+| Android publish | MediaStore/SAF target journaled before copy/delete |
+| Filesystem final name | destination atomically claimed before finalize |
+
+Rules (driver):
+- `reduce()` only produces intended state + effects; the COMMIT gates their
+  release. Ordering alone is not a barrier — the write's SUCCESS is
+  (a swallowed persist failure makes the barrier fake).
+- Effects split in two classes: in-memory bookkeeping (timers, polls) and
+  token signals run immediately — stopping an attempt is idempotent and must
+  never wait on a disk. World-facing effects (`StartAttempt`, `PostReceipt`,
+  `DiscardPartial`) and the snapshot wait behind the commit.
+- On persist failure: withhold (default-safe — no consumer can act on
+  uncommitted state, and nothing needs to remember to check a flag), retry on
+  a bounded backoff, then escalate to `Input::StorageFailed` → a VISIBLE
+  `Failed("record store unwritable")` — never a silent stall. The escalation
+  snapshot is the one last-resort exemption: the store is gone; a truthful UI
+  is what remains. Staged effects for never-committed states are dropped —
+  conservative loses nothing (a kept partial, an unposted receipt).
+- Progress ticks stay UI-only and unpersisted, but are withheld while a
+  commit is pending (the full-session snapshot would leak uncommitted state).
+
+Rule (namespaces): selection is not ownership. Only `create_new`, a
+no-replace link/rename, a reserved URI, or a record write is a claim.
+`finalize_temp_file` claims via `hard_link` (atomic no-replace) and the
+receive loop re-uniquifies on a refused claim — the pick is a hint, the
+claim is the truth. Same shape as the publish journal's target reservation,
+one layer down.
