@@ -292,6 +292,10 @@ impl TransferSession {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (notice_tx, notice_rx) = mpsc::unbounded_channel();
         let context_sources = context.params.sources.clone();
+        // The durable card id — the timeline's routing key (docs/design/
+        // diagnostics.md v2, P4). Copied out before `record` moves into Actor.
+        let session_id = record.as_ref().map(|(_, id)| *id);
+        let direction = session.direction;
         let actor = Actor {
             client,
             session,
@@ -318,10 +322,24 @@ impl TransferSession {
         // room and never reached the per-transfer log. A session span carries
         // the room for the actor's whole life so the machine is diagnosable.
         use tracing::Instrument as _;
-        let span = match session_room(&context_sources) {
-            Some(room) => tracing::info_span!("session", room = %room),
-            None => tracing::info_span!("session"),
+        // `session_id` on the span is the timeline routing key; `room` still
+        // rides for raw-trace correlation (docs/design/diagnostics.md v2).
+        let span = match (session_room(&context_sources), session_id) {
+            (Some(room), Some(sid)) => {
+                tracing::info_span!("session", room = %room, session_id = sid)
+            }
+            (Some(room), None) => tracing::info_span!("session", room = %room),
+            (None, Some(sid)) => tracing::info_span!("session", session_id = sid),
+            (None, None) => tracing::info_span!("session"),
         };
+        span.in_scope(|| {
+            tracing::info!(
+                target: "envoix::timeline",
+                layer = "session",
+                event = "created",
+                direction = ?direction,
+            );
+        });
         tokio::spawn(actor.run().instrument(span));
         (Self { cmds: cmd_tx }, notice_rx)
     }

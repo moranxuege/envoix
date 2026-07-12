@@ -11,6 +11,16 @@ interface LogCallback {
         room: String?,
         line: String,
     )
+
+    /**
+     * A structured authority-event line for the transfer timeline (v2),
+     * pre-built by the core and routed by durable [sessionId] (the card id) —
+     * NOT by room. The writer stamps `source_seq`; the core does not.
+     */
+    fun timeline(
+        sessionId: Long,
+        line: String,
+    )
 }
 
 /** JNI bridge to the in-process Envoix core (libenvoix_jni.so). */

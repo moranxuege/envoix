@@ -106,10 +106,21 @@ static LOG_SINK: OnceLock<GlobalRef> = OnceLock::new();
 /// The always-on baseline: envoix internals + iroh's connection story.
 const DEFAULT_LOG: &str = "envoix=debug,iroh=info,warn";
 
+/// The tracing target that classifies structured authority events (the
+/// transfer timeline, docs/design/diagnostics.md v2). A dedicated always-on
+/// layer serializes these into the delimited envelope and routes them by
+/// `session_id`, independent of the reloadable raw-trace filter (P7). Kept in
+/// sync with `envoix_client`'s emitter const by value.
+const TIMELINE_TARGET: &str = "envoix::timeline";
+/// Envelope schema version — leads the line so a parser version-dispatches.
+const TIMELINE_SCHEMA: u32 = 1;
+
 /// Handle to the reloadable log filter, so the app can raise/lower verbosity at
 /// runtime (the `-vv` dev toggle) without restarting.
-type LogReload =
-    tracing_subscriber::reload::Handle<tracing_subscriber::EnvFilter, tracing_subscriber::Registry>;
+type LogReload = tracing_subscriber::reload::Handle<
+    tracing_subscriber::EnvFilter,
+    tracing_subscriber::layer::Layered<RoomTag, tracing_subscriber::Registry>,
+>;
 static LOG_RELOAD: OnceLock<LogReload> = OnceLock::new();
 
 fn runtime() -> &'static tokio::runtime::Runtime {
@@ -296,18 +307,27 @@ pub extern "system" fn Java_dev_envoix_app_Native_initLogging(
     let spec = std::env::var("ENVOIX_LOG").unwrap_or_else(|_| DEFAULT_LOG.to_string());
     let filter = tracing_subscriber::EnvFilter::try_new(&spec)
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(DEFAULT_LOG));
-    let (filter, handle) = tracing_subscriber::reload::Layer::new(filter);
+    let (raw_filter, handle) = tracing_subscriber::reload::Layer::new(filter);
+    use tracing_subscriber::Layer as _;
+    use tracing_subscriber::filter::filter_fn;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
+    // Two tiers. The RAW trace passes the reloadable EnvFilter (the -vv knob)
+    // and the fmt writer, EXCLUDING the timeline target. The TIMELINE tier has
+    // its OWN always-on filter (P7), so lowering raw verbosity at runtime never
+    // drops authority events. RoomTag stays unfiltered so it stashes room +
+    // session_id into span extensions for BOTH tiers, before fmt writes.
+    let raw = tracing_subscriber::fmt::layer()
+        .with_writer(JniLogWriter)
+        .with_ansi(false)
+        .with_target(false)
+        .with_filter(raw_filter)
+        .with_filter(filter_fn(|m| m.target() != TIMELINE_TARGET));
+    let timeline = TimelineLayer.with_filter(filter_fn(|m| m.target() == TIMELINE_TARGET));
     let installed = tracing_subscriber::registry()
-        .with(filter)
-        .with(RoomTag) // must precede fmt: it hands the room to the writer
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_writer(JniLogWriter)
-                .with_ansi(false)
-                .with_target(false),
-        )
+        .with(RoomTag)
+        .with(raw)
+        .with(timeline)
         .try_init()
         .is_ok();
     if installed {
@@ -387,17 +407,26 @@ struct RoomField(String);
 /// nearest enclosing room.
 struct RoomTag;
 
-struct RoomVisitor(Option<String>);
+#[derive(Default)]
+struct RoomVisitor {
+    room: Option<String>,
+    session_id: Option<u64>,
+}
 
 impl tracing::field::Visit for RoomVisitor {
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
         if field.name() == "room" {
-            self.0 = Some(value.trim_matches('"').to_string());
+            self.room = Some(value.trim_matches('"').to_string());
+        }
+    }
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        if field.name() == "session_id" {
+            self.session_id = Some(value);
         }
     }
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
         if field.name() == "room" {
-            self.0 = Some(format!("{value:?}").trim_matches('"').to_string());
+            self.room = Some(format!("{value:?}").trim_matches('"').to_string());
         }
     }
 }
@@ -412,10 +441,15 @@ where
         id: &tracing::span::Id,
         ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
-        let mut visitor = RoomVisitor(None);
+        let mut visitor = RoomVisitor::default();
         attrs.record(&mut visitor);
-        if let (Some(room), Some(span)) = (visitor.0, ctx.span(id)) {
-            span.extensions_mut().replace(RoomField(room));
+        if let Some(span) = ctx.span(id) {
+            if let Some(room) = visitor.room {
+                span.extensions_mut().replace(RoomField(room));
+            }
+            if let Some(sid) = visitor.session_id {
+                span.extensions_mut().replace(SessionField(sid));
+            }
         }
     }
 
@@ -425,10 +459,15 @@ where
         values: &tracing::span::Record<'_>,
         ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
-        let mut visitor = RoomVisitor(None);
+        let mut visitor = RoomVisitor::default();
         values.record(&mut visitor);
-        if let (Some(room), Some(span)) = (visitor.0, ctx.span(id)) {
-            span.extensions_mut().replace(RoomField(room));
+        if let Some(span) = ctx.span(id) {
+            if let Some(room) = visitor.room {
+                span.extensions_mut().replace(RoomField(room));
+            }
+            if let Some(sid) = visitor.session_id {
+                span.extensions_mut().replace(SessionField(sid));
+            }
         }
     }
 
@@ -440,6 +479,196 @@ where
                 .next()
         });
         CURRENT_ROOM.with(|r| *r.borrow_mut() = room);
+    }
+}
+
+// ─────────────────────── transfer timeline (v2) ───────────────────────
+//
+// A second, always-on tier: structured authority events at `TIMELINE_TARGET`.
+// Routed by `session_id` (the durable card id, carried on the session span) —
+// NOT by room, so two live cards sharing a room stay in distinct files. The
+// Kotlin writer stamps `source_seq`; Rust never assigns it.
+
+/// The durable card id (`session_id`) recorded on the session span, stashed in
+/// span extensions so a timeline event can find the nearest one.
+struct SessionField(u64);
+
+/// Percent-encode ONLY the three octets that would break the TAB-delimited
+/// grammar: `%`, TAB, LF. URIs, spaces, `=`, `:` pass through literally — the
+/// line stays greppable (docs/design/diagnostics.md, "Escaping grammar").
+fn tl_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '%' => out.push_str("%25"),
+            '\t' => out.push_str("%09"),
+            '\n' => out.push_str("%0A"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Collects a timeline event's fields: the fixed columns are pulled out by name,
+/// everything else becomes the ordered `k=v` tail.
+#[derive(Default)]
+struct TimelineVisitor {
+    attempt: String,
+    side: String,
+    layer: String,
+    event: String,
+    outcome: String,
+    tail: Vec<(String, String)>,
+}
+
+impl TimelineVisitor {
+    fn put(&mut self, name: &str, value: String) {
+        match name {
+            "attempt" => self.attempt = value,
+            "side" => self.side = value,
+            "layer" => self.layer = value,
+            "event" => self.event = value,
+            "outcome" => self.outcome = value,
+            // room / session_id ride on the span, not the event
+            "room" | "session_id" => {}
+            other => self.tail.push((other.to_string(), value)),
+        }
+    }
+}
+
+impl tracing::field::Visit for TimelineVisitor {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.put(field.name(), value.to_string());
+    }
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        self.put(field.name(), value.to_string());
+    }
+    fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+        self.put(field.name(), value.to_string());
+    }
+    fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+        self.put(field.name(), value.to_string());
+    }
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.put(field.name(), format!("{value:?}").trim_matches('"').to_string());
+    }
+}
+
+/// Build the delimited envelope MINUS `source_seq` (the Kotlin writer prepends
+/// that). Fixed leading columns are safe by construction (digits / controlled
+/// enums); tail values are escaped.
+fn build_timeline_line(
+    schema: u32,
+    epoch_ms: u64,
+    run_id: u32,
+    session_id: Option<u64>,
+    v: &TimelineVisitor,
+) -> String {
+    let sid = session_id.map(|s| s.to_string()).unwrap_or_default();
+    let mut line = format!(
+        "{schema}\t{epoch_ms}\t{run_id}\t{sid}\t{}\t{}\t{}\t{}\t{}",
+        v.attempt, v.side, v.layer, v.event, v.outcome,
+    );
+    for (k, val) in &v.tail {
+        line.push('\t');
+        line.push_str(k);
+        line.push('=');
+        line.push_str(&tl_escape(val));
+    }
+    line
+}
+
+/// The always-on timeline layer: on each `TIMELINE_TARGET` event, find the
+/// nearest `session_id`, build the envelope, and hand `(session_id, line)` to
+/// the Kotlin sink. Only `on_event` is filtered — the span that carries
+/// `session_id` has a normal target, so `SessionField` is stashed by the
+/// unfiltered [`RoomTag`] layer and read here from the span scope.
+struct TimelineLayer;
+
+impl<S> tracing_subscriber::layer::Layer<S> for TimelineLayer
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    fn on_event(&self, event: &tracing::Event<'_>, ctx: tracing_subscriber::layer::Context<'_, S>) {
+        let session_id = ctx.event_scope(event).and_then(|scope| {
+            scope
+                .filter_map(|span| span.extensions().get::<SessionField>().map(|s| s.0))
+                .next()
+        });
+        let mut v = TimelineVisitor::default();
+        event.record(&mut v);
+        let line = build_timeline_line(TIMELINE_SCHEMA, epoch_ms(), std::process::id(), session_id, &v);
+        timeline_line(session_id.unwrap_or(0), &line);
+    }
+}
+
+/// Forward one built timeline line to `sink.timeline(sessionId, line)`.
+fn timeline_line(session_id: u64, line: &str) {
+    let (Some(vm), Some(sink)) = (LOG_VM.get(), LOG_SINK.get()) else {
+        return;
+    };
+    let Ok(mut env) = vm.attach_current_thread() else {
+        return;
+    };
+    if let Ok(js) = env.new_string(line) {
+        let _ = env.call_method(
+            sink,
+            "timeline",
+            "(JLjava/lang/String;)V",
+            &[JValue::Long(session_id as i64), JValue::Object(&js)],
+        );
+    }
+}
+
+#[cfg(test)]
+mod timeline_tests {
+    use super::*;
+
+    #[test]
+    fn escape_touches_only_delimiter_octets() {
+        // URIs, spaces, and `=` survive; only %, TAB, LF are encoded.
+        assert_eq!(
+            tl_escape("content://media/Download/x.bin?take=1"),
+            "content://media/Download/x.bin?take=1"
+        );
+        assert_eq!(tl_escape("a\tb\nc%d"), "a%09b%0Ac%25d");
+        // decode is unambiguous: %25 must come from a literal % only
+        assert_eq!(tl_escape("100%"), "100%25");
+    }
+
+    #[test]
+    fn envelope_columns_are_positional_then_tail() {
+        let mut v = TimelineVisitor::default();
+        v.put("layer", "session".into());
+        v.put("event", "created".into());
+        v.put("attempt", "0".into());
+        v.put("cause", "disk full = bad".into()); // tail value with = and space
+        let line = build_timeline_line(1, 1_720_000_000_000, 42, Some(7), &v);
+        let cols: Vec<&str> = line.split('\t').collect();
+        assert_eq!(cols[0], "1"); // schema
+        assert_eq!(cols[1], "1720000000000"); // epoch_ms
+        assert_eq!(cols[2], "42"); // run_id
+        assert_eq!(cols[3], "7"); // session_id
+        assert_eq!(cols[4], "0"); // attempt
+        assert_eq!(cols[5], ""); // side (absent)
+        assert_eq!(cols[6], "session"); // layer
+        assert_eq!(cols[7], "created"); // event
+        assert_eq!(cols[8], ""); // outcome (absent)
+        assert_eq!(cols[9], "cause=disk full = bad"); // tail, first = splits k/v
+    }
+
+    #[test]
+    fn absent_session_id_is_empty_not_zero() {
+        let v = TimelineVisitor::default();
+        let line = build_timeline_line(1, 0, 1, None, &v);
+        assert_eq!(line.split('\t').nth(3), Some("")); // session_id column blank
     }
 }
 

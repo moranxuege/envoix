@@ -17,6 +17,12 @@ object TransferLogs {
     private lateinit var dir: File
     private val counts = java.util.concurrent.ConcurrentHashMap<Long, Int>()
 
+    // source_seq authority (docs/design/diagnostics.md v2, P5): one monotonic
+    // counter per transfer file. This single writer covers BOTH producers — the
+    // Rust core (via the JNI timeline callback) and app-side TransferTimeline —
+    // so the two never collide, and seq order is the true write order.
+    private val seq = java.util.concurrent.ConcurrentHashMap<Long, Long>()
+
     fun init(filesDir: File) {
         dir = File(File(filesDir, "logs"), "transfers").apply { mkdirs() }
         gc()
@@ -43,12 +49,27 @@ object TransferLogs {
         }
     }
 
+    /**
+     * Append a structured timeline line, stamping `source_seq` as the leading
+     * TAB column. Synchronized with [append] (same monitor) so seq assignment
+     * and the write are atomic together — seq order equals file order.
+     */
+    @Synchronized
+    fun appendTimeline(
+        id: Long,
+        line: String,
+    ) {
+        val s = seq.merge(id, 0L) { prev, _ -> prev + 1 } ?: 0L
+        append(id, "$s\t$line")
+    }
+
     /** The complete durable log for a card, or "" when none. */
     fun read(id: Long): String = if (::dir.isInitialized) runCatching { file(id).readText() }.getOrDefault("") else ""
 
     /** D2: Remove deletes the card's log with the card. */
     fun delete(id: Long) {
         if (::dir.isInitialized) file(id).delete()
+        seq.remove(id)
     }
 
     /** Keep only the newest [KEEP] files. */

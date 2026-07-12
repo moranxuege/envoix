@@ -381,19 +381,24 @@ A small `redact()` helper at each boundary, not a PII-classification framework.
 Commit (a) is split into three unit commits (it was too large for our
 unit-commit standard); a1 is the spine, a2/a3 are independent after it.
 
-1. **a1 — envelope + routing** (the spine): `session_id` on the session +
-   `transfer` spans; the custom always-on timeline layer building the delimited
-   envelope (with the escaping grammar); `(session_id, line)` JNI callback;
-   Kotlin routes `TransferLogs` by `session_id` (room→card lookup deleted) and
-   stamps `source_seq`. Test: two cards sharing one room route to distinct files.
+1. **a1 — envelope + routing** (the spine): `session_id` on the **session**
+   span; the custom always-on timeline layer building the delimited envelope
+   (with the escaping grammar); `(session_id, line)` JNI callback; Kotlin routes
+   `TransferLogs.appendTimeline` by `session_id` and stamps `source_seq`;
+   `session.created` proves the path. (The `transfer` span gains `session_id` in
+   a3, where the protocol events that need it live. The legacy room→card lookup
+   for RAW core lines stays until commit b's `Diagnostics` cutover — a1 is purely
+   additive, no regression.) Test: escaping/envelope unit tests; on-device, two
+   cards sharing one room land in distinct files.
 2. **a2 — machine instrumentation**: per-`reduce` `machine.input` (non-progress,
    incl. ignored) / `machine.transition` (decided) / `machine.fact_changed` /
    `effect.*`, and the `record.committed{batch}` / `commit_failed` outcome pair.
    Rust tests: multi-input `apply`, ignored/stale input, synchronous StartAttempt
    failure.
-3. **a3 — protocol + courier**: `protocol.complete_ack` in `envoix-transfer`;
-   `platform.courier.*` (poll/post/verify, `post_failed` as a platform obs, not a
-   machine input); re-verify spawn `.instrument(Span::current())` fix.
+3. **a3 — protocol + courier**: `session_id` on the `transfer` span, then
+   `protocol.complete_ack` in `envoix-transfer` (routes by card-id like the
+   rest); `platform.courier.*` (poll/post/verify, `post_failed` as a platform
+   obs, not a machine input); re-verify spawn `.instrument(Span::current())` fix.
 4. **b — app authority + typed results**: `TransferTimeline`, typed boundary
    results (+ `redact()`), staging/publish instrumentation, drawer-as-view, and
    `Diagnostics.build` onto the timeline (raw trace = head+tail appendix).
