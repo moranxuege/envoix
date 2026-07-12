@@ -591,6 +591,23 @@ pub extern "system" fn Java_dev_envoix_app_Native_createSession(
         Ok(v) => v,
         Err(e) => return emit_failed_snapshot(&vm, &cb, "invalid session params JSON", e),
     };
+    let (context, extras) = session_context_from_params(&v);
+    let _guard = runtime().enter();
+    let (session, notices) = match TransferSession::start(context, record_for(id), extras) {
+        Ok(session) => session,
+        Err(error) => return emit_failed_snapshot(&vm, &cb, "invalid session context", error),
+    };
+    if !register_session(id, session) {
+        return emit_failed_snapshot(&vm, &cb, "session already live or registry unavailable", id);
+    }
+    spawn_pump(vm, cb, notices);
+}
+
+/// Build a [`SessionContext`] (and any `platform_extras`) from the frontend's
+/// params JSON. Shared by the normal and staging create paths.
+fn session_context_from_params(
+    v: &serde_json::Value,
+) -> (SessionContext, Option<serde_json::Value>) {
     let get = |k: &str| v[k].as_str().unwrap_or("").to_string();
     let allow = split_csv(&get("candidates_allow"));
     let deny = split_csv(&get("candidates_deny"));
@@ -632,10 +649,35 @@ pub extern "system" fn Java_dev_envoix_app_Native_createSession(
             options,
         },
     };
-
     let extras = v.get("platform_extras").filter(|e| e.is_object()).cloned();
+    (context, extras)
+}
+
+/// Create a SEND session that stages its `content://` source first: the
+/// session starts in Preparing and the record is committed before Kotlin
+/// copies a byte. Notices flow like `createSession`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_createStagingSession(
+    mut env: JNIEnv,
+    _class: JClass,
+    id: jlong,
+    params_json: JString,
+    callback: JObject,
+) {
+    let json = jstr(&mut env, &params_json);
+    let Some(vm) = java_vm_or_log(&env, "createStagingSession") else {
+        return;
+    };
+    let Some(cb) = callback_or_log(&env, &callback, "createStagingSession") else {
+        return;
+    };
+    let v: serde_json::Value = match serde_json::from_str(&json) {
+        Ok(v) => v,
+        Err(e) => return emit_failed_snapshot(&vm, &cb, "invalid session params JSON", e),
+    };
+    let (context, extras) = session_context_from_params(&v);
     let _guard = runtime().enter();
-    let (session, notices) = match TransferSession::start(context, record_for(id), extras) {
+    let (session, notices) = match TransferSession::start_staging(context, record_for(id), extras) {
         Ok(session) => session,
         Err(error) => return emit_failed_snapshot(&vm, &cb, "invalid session context", error),
     };
@@ -819,6 +861,40 @@ pub extern "system" fn Java_dev_envoix_app_Native_receiptResponse(
         return;
     };
     session.receipt_response(key, blob);
+}
+
+/// A Preparing send: staging finished, launch the first attempt.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_stageComplete(
+    _env: JNIEnv,
+    _class: JClass,
+    id: jlong,
+) {
+    let Ok(map) = sessions().lock() else {
+        return;
+    };
+    match map.get(&id) {
+        Some(session) => session.stage_complete(),
+        None => tracing::debug!(id, "stageComplete: session not live"),
+    }
+}
+
+/// A Preparing send: staging failed, fail the transfer with `reason`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_stageFailed(
+    mut env: JNIEnv,
+    _class: JClass,
+    id: jlong,
+    reason: JString,
+) {
+    let reason = jstr(&mut env, &reason);
+    let Ok(map) = sessions().lock() else {
+        return;
+    };
+    match map.get(&id) {
+        Some(session) => session.stage_failed(reason),
+        None => tracing::debug!(id, "stageFailed: session not live"),
+    }
 }
 
 /// Replace the frontend-owned card context (QR payload, saved URI, ...)

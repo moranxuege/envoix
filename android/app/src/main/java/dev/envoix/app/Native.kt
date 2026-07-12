@@ -70,6 +70,24 @@ object Native {
 
     /** Replace the card context (QR payload, saved URI) persisted with the
      *  transfer's record; opaque to the core, surfaced via listRestoreContexts. */
+    /** Create a SEND session that stages its content:// source first: the
+     *  session starts in Preparing and the record is committed before Kotlin
+     *  copies a byte. Notices flow to [callback] like [createSession]. */
+    external fun createStagingSession(
+        id: Long,
+        paramsJson: String,
+        callback: EventCallback,
+    )
+
+    /** A Preparing send: staging finished — launch the first attempt. */
+    external fun stageComplete(id: Long)
+
+    /** A Preparing send: staging failed — fail the transfer with [reason]. */
+    external fun stageFailed(
+        id: Long,
+        reason: String,
+    )
+
     external fun setSessionExtras(
         id: Long,
         extrasJson: String,
