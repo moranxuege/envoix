@@ -828,12 +828,13 @@ class TransferService : Service() {
         val b =
             NotificationCompat
                 .Builder(this, CHANNEL)
-                .setSmallIcon(android.R.drawable.stat_sys_upload)
+                .setSmallIcon(R.drawable.ic_stat_transfer)
                 .setOngoing(active.isNotEmpty())
                 .setOnlyAlertOnce(true)
                 .setContentIntent(open)
         when {
             active.isEmpty() -> {
+                b.setSmallIcon(R.drawable.ic_stat_done)
                 // Final summary: outcomes, never a stale "transferring".
                 val done = cards.count { it.status == Status.Completed }
                 val paused = cards.count { it.status == Status.Paused || it.status == Status.Unconfirmed }
@@ -854,13 +855,6 @@ class TransferService : Service() {
             }
             active.size == 1 -> {
                 val t = active.single()
-                b.setSmallIcon(
-                    if (t.direction == Direction.Send) {
-                        android.R.drawable.stat_sys_upload
-                    } else {
-                        android.R.drawable.stat_sys_download
-                    },
-                )
                 val speed =
                     if (t.status == Status.Transferring && t.speedBps > 0) {
                         " · ${humanBytes(t.speedBps.toLong())}/s"
