@@ -1,0 +1,17 @@
+<!-- Status-bar transfer icon: up + down arrows side by side (direction-neutral;
+     a transfer is happening). White + alpha; the system tints it. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFFFF">
+    <!-- up arrow (left) -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M7,3 L11,8 H8.5 V21 H5.5 V8 H3 Z" />
+    <!-- down arrow (right) -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M17,21 L21,16 H18.5 V3 H15.5 V16 H13 Z" />
+</vector>
