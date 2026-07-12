@@ -32,8 +32,10 @@ object Native {
     /** Set the durable transfer-record directory (once, at app start). */
     external fun initRecords(dir: String)
 
-    /** All persisted transfer records, as a JSON array. */
-    external fun listRecords(): String
+    /** The narrow restore summary of every persisted record (typed by the
+     *  core): a flat JSON array of {id, direction, code, path, use_room,
+     *  use_mdns, qr?, saved_uri?}. The frontend never parses raw record JSON. */
+    external fun listRestoreContexts(): String
 
     /** Rehydrate a persisted session (no attempt launched); notices flow to
      *  [callback] like [createSession]. */
@@ -67,7 +69,7 @@ object Native {
     )
 
     /** Replace the card context (QR payload, saved URI) persisted with the
-     *  transfer's record; opaque to the core, returned by listRecords. */
+     *  transfer's record; opaque to the core, surfaced via listRestoreContexts. */
     external fun setSessionExtras(
         id: Long,
         extrasJson: String,

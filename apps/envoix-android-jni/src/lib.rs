@@ -676,17 +676,38 @@ pub extern "system" fn Java_dev_envoix_app_Native_initRecords(
 
 /// All persisted transfer records as a JSON array (for restoring cards).
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_envoix_app_Native_listRecords<'a>(
+pub extern "system" fn Java_dev_envoix_app_Native_listRestoreContexts<'a>(
     mut env: JNIEnv<'a>,
     _class: JClass,
 ) -> jni::sys::jstring {
     let json = match RECORDS.get() {
         Some(store) => {
             let records = runtime().block_on(store.load_all());
-            match serde_json::to_string(&records) {
+            let dtos: Vec<serde_json::Value> = records
+                .iter()
+                .map(|record| {
+                    let mut value = serde_json::to_value(record.restore_context())
+                        .unwrap_or(serde_json::Value::Null);
+                    // Android-specific card context lives in the opaque
+                    // platform_extras (the core does not interpret it); the
+                    // JNI glue, which knows the Android keys, flattens the two
+                    // the frontend needs onto the DTO.
+                    if let (Some(object), Some(extras)) =
+                        (value.as_object_mut(), record.platform_extras.as_ref())
+                    {
+                        for key in ["qr", "saved_uri"] {
+                            if let Some(text) = extras.get(key).and_then(|v| v.as_str()) {
+                                object.insert(key.into(), text.into());
+                            }
+                        }
+                    }
+                    value
+                })
+                .collect();
+            match serde_json::to_string(&dtos) {
                 Ok(json) => json,
                 Err(error) => {
-                    return error_jstring(&mut env, "failed to serialize transfer records", error);
+                    return error_jstring(&mut env, "failed to serialize restore contexts", error);
                 }
             }
         }

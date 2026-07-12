@@ -205,18 +205,16 @@ class TransferService : Service() {
         var legacyRootInUse = false
         val incoming = File(filesDir, "incoming")
         runCatching {
-            val records = org.json.JSONArray(Native.listRecords())
+            val ctxs = org.json.JSONArray(Native.listRestoreContexts())
             recordIds =
-                (0 until records.length())
-                    .mapNotNull { records.optJSONObject(it)?.optLong("id", -1L)?.takeIf { id -> id >= 0 } }
+                (0 until ctxs.length())
+                    .mapNotNull { ctxs.optJSONObject(it)?.optLong("id", -1L)?.takeIf { id -> id >= 0 } }
                     .toSet()
             // Pre-Phase-4 records point straight at the shared root; their
             // artifacts live there and are NOT garbage while the record does.
             legacyRootInUse =
-                (0 until records.length()).any {
-                    val rec = records.optJSONObject(it) ?: return@any false
-                    val params = rec.optJSONObject("context")?.optJSONObject("params") ?: rec.optJSONObject("params")
-                    params?.optString("path") == incoming.absolutePath
+                (0 until ctxs.length()).any {
+                    ctxs.optJSONObject(it)?.optString("path") == incoming.absolutePath
                 }
         }
         incoming.listFiles { f -> f.isDirectory }?.forEach { dir ->
@@ -371,61 +369,41 @@ class TransferService : Service() {
      * cards idle; a restored Unconfirmed resumes its mailbox poll in Rust.
      */
     private fun restoreAllRecords() {
-        val records = runCatching { org.json.JSONArray(Native.listRecords()) }.getOrNull() ?: return
-        for (i in 0 until records.length()) {
-            val rec = records.optJSONObject(i) ?: continue
-            val id = rec.optLong("id", -1L)
+        val ctxs = runCatching { org.json.JSONArray(Native.listRestoreContexts()) }.getOrNull() ?: return
+        for (i in 0 until ctxs.length()) {
+            val c = ctxs.optJSONObject(i) ?: continue
+            val id = c.optLong("id", -1L)
             if (id < 0 || jobs.containsKey(id)) continue
-            val context = rec.optJSONObject("context") ?: rec
-            val params = context.optJSONObject("params") ?: rec.optJSONObject("params") ?: continue
-            val client = context.optJSONObject("client")
-            val direction = if (params.optString("direction") == "Send") "send" else "receive"
-            val sources = params.optJSONArray("sources")
-            var code = ""
-            var broker = ""
-            var useRoom = false
-            var useMdns = false
-            for (j in 0 until (sources?.length() ?: 0)) {
-                val src = sources!!.optJSONObject(j) ?: continue
-                src.optJSONObject("Room")?.let {
-                    useRoom = true
-                    code = it.optString("code")
-                    broker = it.optString("broker")
-                }
-                src.optJSONObject("Mdns")?.let {
-                    useMdns = true
-                    if (code.isEmpty()) code = it.optString("token")
-                }
-            }
+            val direction = c.optString("direction")
+            val code = c.optString("code")
             if (code.isEmpty()) continue
-            val extras = rec.optJSONObject("platform_extras")
             if (!TransferRepository.restoreCard(
                     id,
                     if (direction == "send") Direction.Send else Direction.Receive,
                     code,
-                    qrPayload = extras?.optString("qr")?.ifEmpty { null },
-                    savedUri = extras?.optString("saved_uri")?.ifEmpty { null },
+                    qrPayload = c.optString("qr").ifEmpty { null },
+                    savedUri = c.optString("saved_uri").ifEmpty { null },
                 )
             ) {
                 continue
             }
+            // Transport config (broker/relay/chunk/candidates) is unused for a
+            // restored session - the core relaunches from the durable record's
+            // own context - so the display Spec carries only what the card and
+            // platform effects need.
             val spec =
                 Spec(
                     direction,
                     code,
-                    params.optString("path"),
-                    broker.ifEmpty { Endpoints.BROKER },
-                    params
-                        .optJSONObject("options")
-                        ?.optString("relay")
-                        .orEmpty()
-                        .ifEmpty { Endpoints.RELAY },
-                    client?.optString("chunk_size").orEmpty(),
-                    jsonStringArrayCsv(client?.optJSONArray("candidates_allow")),
-                    jsonStringArrayCsv(client?.optJSONArray("candidates_deny")),
+                    c.optString("path"),
+                    Endpoints.BROKER,
+                    Endpoints.RELAY,
+                    "",
+                    "",
+                    "",
                     null,
-                    useRoom,
-                    useMdns,
+                    c.optBoolean("use_room"),
+                    c.optBoolean("use_mdns"),
                 )
             specs[id] = spec
             lastSeq[id] = 0L
@@ -450,11 +428,6 @@ class TransferService : Service() {
             OpLog.add("restored transfer id=$id")
         }
     }
-
-    private fun jsonStringArrayCsv(array: org.json.JSONArray?): String =
-        (0 until (array?.length() ?: 0))
-            .mapNotNull { array?.optString(it)?.takeIf(String::isNotEmpty) }
-            .joinToString(",")
 
     /**
      * Stage a picked content:// into a real path the core can (re)open across
