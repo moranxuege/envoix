@@ -59,6 +59,7 @@ fn transfer_span(direction: TransferDirection, mode: TransferMode) -> tracing::S
         ?mode,
         room = tracing::field::Empty,
         transfer_id = tracing::field::Empty,
+        session_id = tracing::field::Empty,
     )
 }
 
@@ -247,6 +248,9 @@ impl Client {
         let resume = options.resume;
         let mode = to.mode();
         let span = transfer_span(TransferDirection::Send, mode);
+        if let Some(sid) = options.session_id {
+            span.record("session_id", sid);
+        }
 
         let fut: TransferFuture = match to {
             PeerSource::Manual { peer, token } => {
@@ -365,6 +369,9 @@ impl Client {
             .unwrap_or_else(|| BindAddrs::dual_stack(0));
         let mode = from.mode();
         let span = transfer_span(TransferDirection::Receive, mode);
+        if let Some(sid) = options.session_id {
+            span.record("session_id", sid);
+        }
 
         let fut: TransferFuture = match from {
             PeerSource::ShowManual { token } => {

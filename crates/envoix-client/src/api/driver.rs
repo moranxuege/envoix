@@ -1047,6 +1047,9 @@ impl Actor {
     fn launch_attempt(&mut self, resume: bool) {
         let mut options = self.context.params.options.clone();
         options.resume = resume;
+        // Carry the card id onto the transfer span so engine timeline events
+        // (protocol.complete_ack) route by session_id (diagnostics v2, P4).
+        options.session_id = self.record.as_ref().map(|(_, id)| *id);
         let request = TransferRequest {
             direction: self.context.params.direction,
             path: self.context.params.path.clone(),

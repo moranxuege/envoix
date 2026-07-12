@@ -36,6 +36,12 @@ pub struct TransferOptions {
     /// Local socket addresses to bind when listening; `None` binds
     /// dual-stack IPv4 + IPv6 with OS-assigned ports (receive side).
     pub listen_addrs: Option<BindAddrs>,
+    /// Diagnostic only: the durable card id, recorded on the transfer span so
+    /// engine timeline events (e.g. `protocol.complete_ack`) route by card id
+    /// (docs/design/diagnostics.md v2, P4). Transient — the driver sets it fresh
+    /// per attempt; never persisted (`serde(skip)`).
+    #[serde(skip)]
+    pub session_id: Option<u64>,
 }
 
 impl Default for TransferOptions {
@@ -45,6 +51,7 @@ impl Default for TransferOptions {
             path: PathPolicy::Auto,
             resume: true,
             listen_addrs: None,
+            session_id: None,
         }
     }
 }

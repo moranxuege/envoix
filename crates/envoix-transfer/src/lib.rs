@@ -681,11 +681,26 @@ impl TransferEngine {
                     // best-effort from here: if the path died, suppressing
                     // Completed would also suppress the mailbox receipt post,
                     // which exists precisely for the lost-ack case.
-                    if let Err(error) = send_complete_ack(connection, &header.transfer_id).await {
-                        tracing::warn!(
-                            %error,
-                            "complete ack undeliverable; sender will learn via mailbox"
-                        );
+                    match send_complete_ack(connection, &header.transfer_id).await {
+                        Ok(()) => tracing::info!(
+                            target: "envoix::timeline",
+                            layer = "protocol",
+                            event = "complete_ack",
+                            outcome = "sent",
+                        ),
+                        Err(error) => {
+                            tracing::info!(
+                                target: "envoix::timeline",
+                                layer = "protocol",
+                                event = "complete_ack",
+                                outcome = "failed",
+                                cause = %error,
+                            );
+                            tracing::warn!(
+                                %error,
+                                "complete ack undeliverable; sender will learn via mailbox"
+                            );
+                        }
                     }
                     events.on_event(TransferEvent::Completed {
                         transfer_id: header.transfer_id.clone(),
@@ -1262,8 +1277,23 @@ async fn receive_existing_final(
     // Possession is already durable; the ack is best-effort (see the
     // receive loop: suppressing Completed here would suppress the mailbox
     // receipt post the lost-ack design depends on).
-    if let Err(error) = send_complete_ack(connection, &header.transfer_id).await {
-        tracing::warn!(%error, "complete ack undeliverable; sender will learn via mailbox");
+    match send_complete_ack(connection, &header.transfer_id).await {
+        Ok(()) => tracing::info!(
+            target: "envoix::timeline",
+            layer = "protocol",
+            event = "complete_ack",
+            outcome = "sent",
+        ),
+        Err(error) => {
+            tracing::info!(
+                target: "envoix::timeline",
+                layer = "protocol",
+                event = "complete_ack",
+                outcome = "failed",
+                cause = %error,
+            );
+            tracing::warn!(%error, "complete ack undeliverable; sender will learn via mailbox");
+        }
     }
 
     events.on_event(TransferEvent::Completed {
@@ -1326,8 +1356,23 @@ async fn receive_from_receipt(
         }
     }
 
-    if let Err(error) = send_complete_ack(connection, &header.transfer_id).await {
-        tracing::warn!(%error, "complete ack undeliverable; sender will learn via mailbox");
+    match send_complete_ack(connection, &header.transfer_id).await {
+        Ok(()) => tracing::info!(
+            target: "envoix::timeline",
+            layer = "protocol",
+            event = "complete_ack",
+            outcome = "sent",
+        ),
+        Err(error) => {
+            tracing::info!(
+                target: "envoix::timeline",
+                layer = "protocol",
+                event = "complete_ack",
+                outcome = "failed",
+                cause = %error,
+            );
+            tracing::warn!(%error, "complete ack undeliverable; sender will learn via mailbox");
+        }
     }
 
     events.on_event(TransferEvent::Completed {
