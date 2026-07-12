@@ -103,8 +103,13 @@ fn register_session(id: i64, session: envoix_client::api::driver::TransferSessio
 static LOG_VM: OnceLock<JavaVM> = OnceLock::new();
 static LOG_SINK: OnceLock<GlobalRef> = OnceLock::new();
 
-/// The always-on baseline: envoix internals + iroh's connection story.
-const DEFAULT_LOG: &str = "envoix=debug,iroh=info,warn";
+/// The always-on baseline: envoix internals + iroh's connection story. The
+/// `envoix::timeline=off` directive keeps the structured timeline tier OUT of
+/// the raw fmt trace (it has its own unfiltered layer) — no duplication.
+const DEFAULT_LOG: &str = "envoix=debug,envoix::timeline=off,iroh=info,warn";
+/// Appended to every runtime -vv spec so a reload can't re-admit timeline
+/// events into the raw tier.
+const TIMELINE_OFF: &str = ",envoix::timeline=off";
 
 /// The tracing target that classifies structured authority events (the
 /// transfer timeline, docs/design/diagnostics.md v2). A dedicated always-on
@@ -309,25 +314,24 @@ pub extern "system" fn Java_dev_envoix_app_Native_initLogging(
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(DEFAULT_LOG));
     let (raw_filter, handle) = tracing_subscriber::reload::Layer::new(filter);
     use tracing_subscriber::Layer as _;
-    use tracing_subscriber::filter::filter_fn;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
-    // Two tiers. The RAW trace passes the reloadable EnvFilter (the -vv knob)
-    // and the fmt writer, EXCLUDING the timeline target. The TIMELINE tier has
-    // its OWN always-on filter (P7), so lowering raw verbosity at runtime never
-    // drops authority events. RoomTag stays unfiltered so it stashes room +
-    // session_id into span extensions for BOTH tiers, before fmt writes.
+    // Two tiers. The RAW trace passes the reloadable EnvFilter (the -vv knob);
+    // the `envoix::timeline=off` directive in the spec keeps timeline events out
+    // of it (so they aren't duplicated in the appendix). The TIMELINE tier is
+    // UNFILTERED — it must see every span to read `session_id`, and it is
+    // always-on regardless of the -vv knob (P7); an in-code target guard in
+    // `TimelineLayer::on_event` restricts it to authority events. RoomTag stays
+    // unfiltered so it stashes room + session_id into span extensions.
     let raw = tracing_subscriber::fmt::layer()
         .with_writer(JniLogWriter)
         .with_ansi(false)
         .with_target(false)
-        .with_filter(raw_filter)
-        .with_filter(filter_fn(|m| m.target() != TIMELINE_TARGET));
-    let timeline = TimelineLayer.with_filter(filter_fn(|m| m.target() == TIMELINE_TARGET));
+        .with_filter(raw_filter);
     let installed = tracing_subscriber::registry()
         .with(RoomTag)
         .with(raw)
-        .with(timeline)
+        .with(TimelineLayer)
         .try_init()
         .is_ok();
     if installed {
@@ -357,7 +361,7 @@ pub extern "system" fn Java_dev_envoix_app_Native_setLogLevel(
         tracing::warn!("setLogLevel: failed to read log filter string");
         return;
     };
-    let spec: String = spec.into();
+    let spec = format!("{}{}", String::from(spec), TIMELINE_OFF);
     if let (Some(handle), Ok(filter)) = (
         LOG_RELOAD.get(),
         tracing_subscriber::EnvFilter::try_new(&spec),
@@ -597,6 +601,15 @@ where
     S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
 {
     fn on_event(&self, event: &tracing::Event<'_>, ctx: tracing_subscriber::layer::Context<'_, S>) {
+        // In-code target guard, NOT a per-layer `.with_filter()`: a per-layer
+        // filter would restrict this layer's SPAN visibility too, hiding the
+        // `session` span (whose target is the driver module) so `SessionField`
+        // could never be read (session_id came out empty on-device — see the
+        // `perlayer_filter_hides_session_span` test). Unfiltered + guarded, the
+        // layer sees every span but only ACTS on timeline events.
+        if event.metadata().target() != TIMELINE_TARGET {
+            return;
+        }
         let session_id = ctx.event_scope(event).and_then(|scope| {
             scope
                 .filter_map(|span| span.extensions().get::<SessionField>().map(|s| s.0))
@@ -669,6 +682,89 @@ mod timeline_tests {
         let v = TimelineVisitor::default();
         let line = build_timeline_line(1, 0, 1, None, &v);
         assert_eq!(line.split('\t').nth(3), Some("")); // session_id column blank
+    }
+
+    use std::sync::{Arc, Mutex};
+
+    // A capturing stand-in for TimelineLayer: same session_id lookup + target
+    // guard, but records to a Vec instead of the JNI sink.
+    struct Cap {
+        guard: bool,
+        out: Arc<Mutex<Vec<(Option<u64>, String)>>>,
+    }
+    impl<S> tracing_subscriber::layer::Layer<S> for Cap
+    where
+        S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if self.guard && event.metadata().target() != TIMELINE_TARGET {
+                return;
+            }
+            let sid = ctx.event_scope(event).and_then(|scope| {
+                scope
+                    .filter_map(|s| s.extensions().get::<SessionField>().map(|f| f.0))
+                    .next()
+            });
+            self.out
+                .lock()
+                .unwrap()
+                .push((sid, event.metadata().target().to_string()));
+        }
+    }
+
+    fn run_capture(guard: bool, filtered: bool) -> Vec<(Option<u64>, String)> {
+        use tracing_subscriber::Layer as _;
+        use tracing_subscriber::layer::SubscriberExt;
+        let out = Arc::new(Mutex::new(Vec::new()));
+        let cap = Cap {
+            guard,
+            out: out.clone(),
+        };
+        let sub = if filtered {
+            tracing_subscriber::registry().with(RoomTag).with(
+                cap.with_filter(tracing_subscriber::filter::filter_fn(|m| {
+                    m.target() == TIMELINE_TARGET
+                }))
+                .boxed(),
+            )
+        } else {
+            tracing_subscriber::registry()
+                .with(RoomTag)
+                .with(cap.boxed())
+        };
+        tracing::subscriber::with_default(sub, || {
+            let span = tracing::info_span!("session", room = "r", session_id = 7u64);
+            span.in_scope(|| {
+                tracing::info!(target: "envoix::timeline", layer = "session", event = "created");
+                tracing::info!(target: "iroh_relay", "noise that must NOT reach the timeline");
+            });
+        });
+        let v = out.lock().unwrap().clone();
+        v
+    }
+
+    // WHY TimelineLayer must NOT use a per-layer filter (the a1 bug): a
+    // per-layer `target` filter restricts the layer's SPAN visibility, so the
+    // session span (targeted at the driver module, not the timeline target) is
+    // hidden and `session_id` can never be read.
+    #[test]
+    fn perlayer_filter_hides_session_span() {
+        let got = run_capture(false, true);
+        assert_eq!(got[0].0, None, "the per-layer filter hides the session span → session_id lost");
+    }
+
+    // The FIX: no per-layer filter (so the session span is visible → session_id
+    // resolves), an explicit target guard (so non-timeline events are dropped).
+    #[test]
+    fn guard_without_filter_resolves_session_id_and_drops_noise() {
+        let got = run_capture(true, false);
+        assert_eq!(got.len(), 1, "only the timeline event survives the guard");
+        assert_eq!(got[0].0, Some(7), "session_id resolves from the visible span");
+        assert_eq!(got[0].1, TIMELINE_TARGET);
     }
 }
 
