@@ -482,13 +482,6 @@ class TransferService : Service() {
         }
     }
 
-    /**
-     * Stage a picked content:// into a real path the core can (re)open across
-     * attempts, VISIBLY: the card exists from the moment of the tap, and the
-     * copy shows as "preparing" with a live bar (for a large file this phase
-     * is seconds - hiding it made Send look dead). Runs in the service scope,
-     * so a rotation mid-copy no longer kills the send.
-     */
     /** Copy a Preparing send's content:// source into its staging path, then
      *  report to the core (stage_complete / stage_failed). Launched from the
      *  Preparing snapshot, so the record is already durable. */

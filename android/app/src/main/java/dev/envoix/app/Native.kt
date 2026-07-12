@@ -68,8 +68,6 @@ object Native {
         blobB64: String,
     )
 
-    /** Replace the card context (QR payload, saved URI) persisted with the
-     *  transfer's record; opaque to the core, surfaced via listRestoreContexts. */
     /** Create a SEND session that stages its content:// source first: the
      *  session starts in Preparing and the record is committed before Kotlin
      *  copies a byte. Notices flow to [callback] like [createSession]. */
@@ -94,6 +92,8 @@ object Native {
         reason: String,
     )
 
+    /** Replace the card context (QR payload, saved URI) persisted with the
+     *  transfer's record; opaque to the core, surfaced via listRestoreContexts. */
     external fun setSessionExtras(
         id: Long,
         extrasJson: String,

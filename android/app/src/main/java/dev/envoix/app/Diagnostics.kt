@@ -52,6 +52,7 @@ object Diagnostics {
         budget: Int = if (BuildConfig.DEBUG) Int.MAX_VALUE else UPLOAD_MAX,
     ): String {
         val full = BuildConfig.DEBUG && budget == Int.MAX_VALUE
+
         fun cap(release: Int) = if (full) Int.MAX_VALUE else release
         val sections =
             buildList {
