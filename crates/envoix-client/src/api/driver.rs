@@ -170,6 +170,18 @@ pub struct TransferSession {
     cmds: mpsc::UnboundedSender<Cmd>,
 }
 
+/// The rendezvous room id a session correlates by (the broker's view): the
+/// room code's numeric prefix, or the mDNS token. `None` for invite-only.
+fn session_room(sources: &[super::PeerSource]) -> Option<String> {
+    sources.iter().find_map(|source| match source {
+        super::PeerSource::Room { code, .. } => {
+            Some(envoix_session::split_code(code).0.to_string())
+        }
+        super::PeerSource::Mdns { token: Some(token) } => Some(token.clone()),
+        _ => None,
+    })
+}
+
 impl TransferSession {
     /// Start a session: launches attempt 1 immediately. Returns the handle and
     /// the notice stream (snapshots + courier requests). With `record`, every
@@ -252,6 +264,7 @@ impl TransferSession {
         }
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (notice_tx, notice_rx) = mpsc::unbounded_channel();
+        let context_sources = context.params.sources.clone();
         let actor = Actor {
             client,
             session,
@@ -273,7 +286,16 @@ impl TransferSession {
             commit_retry_at: None,
             launch,
         };
-        tokio::spawn(actor.run());
+        // The actor runs OUTSIDE the per-attempt transfer span, so its own
+        // events (state transitions, receipt outcomes, commit barrier) had no
+        // room and never reached the per-transfer log. A session span carries
+        // the room for the actor's whole life so the machine is diagnosable.
+        use tracing::Instrument as _;
+        let span = match session_room(&context_sources) {
+            Some(room) => tracing::info_span!("session", room = %room),
+            None => tracing::info_span!("session"),
+        };
+        tokio::spawn(actor.run().instrument(span));
         (Self { cmds: cmd_tx }, notice_rx)
     }
 
@@ -512,7 +534,10 @@ impl Actor {
                     }
                 };
                 match verified {
-                    Ok(_) => self.apply(Input::ReceiptVerified).await,
+                    Ok(_) => {
+                        tracing::info!("mailbox receipt verified");
+                        self.apply(Input::ReceiptVerified).await
+                    }
                     Err(error) => {
                         tracing::warn!(%error, "mailbox receipt failed verification");
                         // A machine fact, not a driver decision: recorded and
@@ -671,6 +696,18 @@ impl Actor {
                     }
                 }
                 next = self.pending.take();
+            }
+            if before.state != self.session.state {
+                // The single most load-bearing diagnostic line: the machine's
+                // own transition, routed to the per-transfer log by the
+                // session span. Its absence is why field cases were opaque.
+                tracing::info!(
+                    transfer_id = self.session.transfer_id.as_deref().unwrap_or(""),
+                    attempt = self.session.attempt,
+                    from = ?before.state,
+                    to = ?self.session.state,
+                    "transition"
+                );
             }
             if self.session == before && self.staged.is_empty() {
                 return; // no legal edge, nothing to commit

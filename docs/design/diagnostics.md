@@ -112,3 +112,52 @@ Dismiss = ack without upload. No modal, no nagging: one banner, one tap.
 - **D-C: keep the rdz upload as the only report transport?** Share-as-file
   (FileProvider) was floated earlier for full untruncated logs — proposed:
   add it later if the 480 KB budget proves too small in practice.
+
+## Redesign (2026-07-12): the diagnostic contract
+
+Field lesson: the logging system was formalized around the transport + frame
+layer (iroh endpoints, `envoix_transfer` events). When the state machine
+became the authority (`envoix-client` machine/driver), its transitions were
+never wired into logging — so the single most important view, the machine's
+own state path, appeared in NO upload. A completed-via-mailbox transfer's log
+ended at the engine attempt's failure with no trace of the recovery. D-C's
+"480 KB is probably enough" was also wrong: the core trace was trimmed
+tail-first to ~256 KB, discarding the beginning where the transfer starts.
+
+### The contract
+
+Every **authority-level event** emits a structured `tracing` event inside a
+room-tagged span, so it routes through `RoomTag` into the per-transfer log and
+thus every upload. The per-transfer log is the authoritative timeline. Feature
+work does not invent its own logging — it emits contract events:
+
+| Source | Event |
+| --- | --- |
+| driver `apply()` | `transition` (from → to, attempt, transfer_id) — DONE |
+| driver receipt path | `mailbox receipt verified` / `… failed verification` — DONE |
+| driver commit barrier | persist failure / retry / `record store unwritable` — DONE (routed) |
+| driver effects | `StartAttempt` / `PostReceipt` / `DiscardPartial` execution — TODO |
+| Preparing (planned) | staging reserve / copy progress / stage-complete / stage-failed |
+| publish journal (planned) | reserve target / commit / staging-deleted |
+
+Mechanism: the actor runs under `info_span!("session", room = …)`
+(`session_room()` derives the room id from the sources). Before this, the
+actor ran outside any room span and its events were dropped from the
+per-transfer log.
+
+### Truncation policy
+
+- **Debug**: NO trimming. `Diagnostics.build` uploads the full report;
+  `MAX_BODY` on the server is 64 MB. Server space is not a concern pre-release,
+  and a clipped diagnostic is unusable.
+- **Release (TODO)**: a real retention/rotation policy — prioritize the
+  timeline and frame events over the raw iroh core trace (the core trace is the
+  LEAST diagnostic-dense and currently eats the budget), and consider
+  share-as-file (FileProvider) for full logs on demand.
+
+### Builds
+
+Debug and release APKs are produced every update. The emulator and full-log
+field testing use the DEBUG variant (`android:debuggable`, so `adb run-as`
+can read the sandboxed per-transfer logs, and `BuildConfig.DEBUG` enables full
+uploads). Release stays minified for real-device installs.

@@ -20,8 +20,10 @@ use tracing::{Event, Subscriber};
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
 
-/// Cap on a single uploaded log body.
-const MAX_BODY: usize = 512 * 1024;
+/// Cap on a single uploaded log body. Generous for the debug era (full,
+/// untrimmed uploads — server space is not a concern pre-release); revisit
+/// with a retention/rotation policy before release.
+const MAX_BODY: usize = 64 * 1024 * 1024;
 /// Cap on the rdz's own captured lines per room.
 const MAX_RDZ_LINES: usize = 2000;
 /// Reject absurd room keys.
