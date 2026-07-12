@@ -2,7 +2,7 @@ package dev.envoix.app
 
 enum class Direction { Send, Receive }
 
-enum class Status { Waiting, Connecting, Verifying, Transferring, Confirming, Paused, Completed, Unconfirmed, Failed, Cancelled }
+enum class Status { Preparing, Waiting, Connecting, Verifying, Transferring, Confirming, Paused, Completed, Unconfirmed, Failed, Cancelled }
 
 /** One transfer's observable state, shown as a card. */
 data class Transfer(

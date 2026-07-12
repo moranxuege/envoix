@@ -557,6 +557,7 @@ class TransferService : Service() {
         val state = s.optString("state")
         val status =
             when (state) {
+                "preparing" -> Status.Preparing
                 "waiting" -> Status.Waiting
                 "connecting" -> Status.Connecting
                 "verifying" -> Status.Verifying
@@ -635,6 +636,7 @@ class TransferService : Service() {
         bytes: Long,
     ): String =
         when (state) {
+            "preparing" -> "preparing · staging the source…"
             "waiting" -> "waiting for peer…"
             "connecting" -> "pairing in room…"
             "verifying" -> "verifying…"
@@ -760,7 +762,8 @@ class TransferService : Service() {
 
     /** Active machine states pin the tray; everything else rests. */
     private fun isActive(st: Status) =
-        st == Status.Waiting ||
+        st == Status.Preparing ||
+            st == Status.Waiting ||
             st == Status.Connecting ||
             st == Status.Verifying ||
             st == Status.Transferring ||
@@ -770,6 +773,7 @@ class TransferService : Service() {
 
     private fun trayWord(t: Transfer): String =
         when (t.status) {
+            Status.Preparing -> "Preparing…"
             Status.Waiting -> "Waiting for peer"
             Status.Connecting -> "Pairing…"
             Status.Verifying -> "Verifying"

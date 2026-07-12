@@ -111,7 +111,12 @@ fun HomeScreen(
     LaunchedEffect(newestId) {
         if (newestId >= 0) listState.animateScrollToItem(0)
     }
-    val active = transfers.count { it.status == Status.Connecting || it.status == Status.Transferring }
+    val active =
+        transfers.count {
+            it.status == Status.Preparing ||
+                it.status == Status.Connecting ||
+                it.status == Status.Transferring
+        }
 
     Scaffold(
         containerColor = colors.bg,
@@ -377,6 +382,8 @@ private fun CardControls(
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         when (t.status) {
+            Status.Preparing ->
+                CircleBtn(Icons.Default.Close, filled = false) { onCancel(t.id) }
             Status.Waiting, Status.Connecting, Status.Verifying,
             Status.Transferring, Status.Confirming,
             -> {
@@ -713,6 +720,7 @@ private fun PathBadge(t: Transfer) {
             t.status == Status.Failed -> Triple("Failed", colors.danger, colors.danger.copy(alpha = 0.12f))
             t.status == Status.Cancelled -> Triple("Cancelled", colors.muted, colors.line.copy(alpha = 0.5f))
             t.status == Status.Paused -> Triple("Paused", colors.warning, colors.warning.copy(alpha = 0.14f))
+            t.status == Status.Preparing -> Triple("Preparing", colors.accent, colors.accentSoft)
             t.status == Status.Waiting -> Triple("Waiting", colors.accent, colors.accentSoft)
             t.status == Status.Verifying -> Triple("Verifying", colors.accent, colors.accentSoft)
             t.status == Status.Confirming -> Triple("Confirming", colors.accent, colors.accentSoft)
@@ -772,6 +780,7 @@ private fun fraction(t: Transfer): Float {
 private fun speedText(t: Transfer): String {
     if (t.status != Status.Transferring || t.speedBps <= 0) {
         return when (t.status) {
+            Status.Preparing -> "preparing"
             Status.Waiting -> "waiting for peer"
             Status.Connecting -> "connecting"
             Status.Verifying -> "verifying"
