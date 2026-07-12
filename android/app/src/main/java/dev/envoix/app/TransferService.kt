@@ -116,6 +116,10 @@ class TransferService : Service() {
      *  dropped - the fence is explicit, not an artifact of flow mechanics. */
     private val generations = HashMap<Long, Long>()
 
+    /** Ids whose staging copy has been launched, so the Preparing snapshot
+     *  triggers it exactly once. */
+    private val stagingStarted = HashSet<Long>()
+
     /** True when [notice] belongs to the card's current pump (claiming it if
      *  the card is unclaimed). */
     @Synchronized
@@ -300,7 +304,39 @@ class TransferService : Service() {
                 OpLog.add("start $direction room=${room.substringBefore('-')} id=$id")
                 val sourceUri = intent.getStringExtra(EXTRA_SOURCE_URI)
                 if (spec.dir() == Direction.Send && !sourceUri.isNullOrEmpty()) {
-                    stageAndStart(id, spec, Uri.parse(sourceUri))
+                    val uri = Uri.parse(sourceUri)
+                    // The provider's DISPLAY_NAME is untrusted (can contain path
+                    // separators): keep only the leaf, never a dot name.
+                    val name =
+                        (displayName(uri) ?: "upload.bin")
+                            .let { File(it).name }
+                            .takeUnless { it.isEmpty() || it == "." || it == ".." }
+                            ?: "upload.bin"
+                    // A durable read grant lets a restart re-stage the source.
+                    val recoverable =
+                        runCatching {
+                            contentResolver.takePersistableUriPermission(
+                                uri,
+                                Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                            )
+                        }.isSuccess
+                    // Staging is keyed by card id so two same-named sends never
+                    // share a source path (the sender hashes as it reads).
+                    val stagingPath =
+                        File(File(File(cacheDir, "send"), id.toString()), name).absolutePath
+                    TransferRepository.update(id) {
+                        it.copy(
+                            fileName = name,
+                            total = querySize(uri),
+                            log = addLog(it.log, "preparing · staging $name…"),
+                        )
+                    }
+                    val stagingSpec =
+                        spec.copy(path = stagingPath, sourceUri = sourceUri, sourceRecoverable = recoverable)
+                    specs[id] = stagingSpec
+                    // Record commits in Preparing FIRST; the copy launches from
+                    // the Preparing snapshot (durable intent before a byte moves).
+                    startSession(id, stagingSpec, resume = false, staging = true)
                 } else {
                     startSession(id, spec, resume = false)
                 }
@@ -353,6 +389,7 @@ class TransferService : Service() {
                 specs.remove(id)
                 lastSeq.remove(id)
                 generations.remove(id)
+                synchronized(stagingStarted) { stagingStarted.remove(id) }
                 TransferRepository.remove(id)
                 stopIfIdle()
             }
@@ -447,27 +484,22 @@ class TransferService : Service() {
      * is seconds - hiding it made Send look dead). Runs in the service scope,
      * so a rotation mid-copy no longer kills the send.
      */
-    private fun stageAndStart(
+    /** Copy a Preparing send's content:// source into its staging path, then
+     *  report to the core (stage_complete / stage_failed). Launched from the
+     *  Preparing snapshot, so the record is already durable. */
+    private fun launchStaging(
         id: Long,
-        spec0: Spec,
-        uri: Uri,
+        spec: Spec,
     ) {
         transferScope(id).launch(Dispatchers.IO) {
-            // The provider's DISPLAY_NAME is untrusted input (it can contain
-            // path separators): keep only the leaf, never a dot name.
-            val name =
-                (displayName(uri) ?: "upload.bin")
-                    .let { File(it).name }
-                    .takeUnless { it.isEmpty() || it == "." || it == ".." }
-                    ?: "upload.bin"
-            val size = querySize(uri)
-            TransferRepository.update(id) {
-                it.copy(fileName = name, total = size, log = addLog(it.log, "preparing · staging $name…"))
+            val uri = spec.sourceUri?.let { Uri.parse(it) }
+            if (uri == null) {
+                // A restored Preparing whose source cannot be reopened.
+                Native.stageFailed(id, "source needs re-picking")
+                return@launch
             }
-            // Staging is keyed by card id: two same-named sends must never
-            // share a source path (the sender hashes as it reads, so a
-            // mid-send overwrite can pass verification with mixed bytes).
-            val out = File(File(File(cacheDir, "send"), id.toString()).apply { mkdirs() }, name)
+            val out = File(spec.path)
+            out.parentFile?.mkdirs()
             val ok =
                 runCatching {
                     contentResolver.openInputStream(uri)!!.use { input ->
@@ -489,29 +521,13 @@ class TransferService : Service() {
                         }
                     }
                 }.isSuccess
-            if (!ok) {
+            if (ok) {
+                TransferRepository.update(id) { it.copy(bytes = 0) } // reset for the transfer
+                Native.stageComplete(id)
+            } else {
                 out.delete()
-                TransferRepository.update(id) {
-                    it.copy(
-                        status = Status.Failed,
-                        error = "couldn't read the picked file",
-                        log = addLog(it.log, "failed · staging the picked file"),
-                    )
-                }
-                return@launch
+                Native.stageFailed(id, "couldn't read the picked file")
             }
-            // Remove may have raced the staging copy: never start a session
-            // for a card that no longer exists (it would run invisibly and
-            // re-create the record Remove just deleted).
-            if (TransferRepository.transfers.value.none { it.id == id }) {
-                out.parentFile?.deleteRecursively()
-                return@launch
-            }
-            // Reset the bar for the real transfer; the machine owns it from here.
-            TransferRepository.update(id) { it.copy(bytes = 0) }
-            val spec = spec0.copy(path = out.absolutePath)
-            specs[id] = spec
-            startSession(id, spec, resume = false)
         }
     }
 
@@ -606,7 +622,9 @@ class TransferService : Service() {
                         ?: t.proofDelivered,
                 transferId = s.optString("transfer_id").ifEmpty { t.transferId },
                 fileName = s.optString("file_name").ifEmpty { t.fileName },
-                bytes = bytes,
+                // While Preparing, the staging copy owns the bar; the machine
+                // has no transfer bytes yet, so keep what the copy set.
+                bytes = if (status == Status.Preparing) t.bytes else bytes,
                 total = if (total > 0) total else t.total,
                 speedBps = if (status == Status.Transferring) speed else 0.0,
                 avgBps = avg,
@@ -629,6 +647,13 @@ class TransferService : Service() {
         // the same code path serves fresh starts, restores, and cards born
         // terminal - there is no launch-path special case to fall out of sync.
         renderMulticast(id, spec, status)
+        // The record is now committed (this snapshot proves it), so the copy
+        // never runs ahead of the durable intent. Guarded to fire once.
+        if (status == Status.Preparing && spec.dir() == Direction.Send) {
+            synchronized(stagingStarted) {
+                if (stagingStarted.add(id)) launchStaging(id, spec)
+            }
+        }
         when {
             entered != null -> updateNotification()
             else -> throttledNotification()
