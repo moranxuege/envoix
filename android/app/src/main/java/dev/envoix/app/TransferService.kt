@@ -825,16 +825,26 @@ class TransferService : Service() {
             )
         val cards = TransferRepository.transfers.value
         val active = cards.filter { isActive(it.status) }
+        // Direction-specific status-bar icon: up-only for sends, down-only for
+        // receives, both arrows only when genuinely sending AND receiving, a
+        // checkmark once everything is done.
+        val icon =
+            when {
+                active.isEmpty() -> R.drawable.ic_stat_done
+                active.any { it.direction == Direction.Send } &&
+                    active.any { it.direction == Direction.Receive } -> R.drawable.ic_stat_transfer
+                active.first().direction == Direction.Send -> R.drawable.ic_stat_upload
+                else -> R.drawable.ic_stat_download
+            }
         val b =
             NotificationCompat
                 .Builder(this, CHANNEL)
-                .setSmallIcon(R.drawable.ic_stat_transfer)
+                .setSmallIcon(icon)
                 .setOngoing(active.isNotEmpty())
                 .setOnlyAlertOnce(true)
                 .setContentIntent(open)
         when {
             active.isEmpty() -> {
-                b.setSmallIcon(R.drawable.ic_stat_done)
                 // Final summary: outcomes, never a stale "transferring".
                 val done = cards.count { it.status == Status.Completed }
                 val paused = cards.count { it.status == Status.Paused || it.status == Status.Unconfirmed }
