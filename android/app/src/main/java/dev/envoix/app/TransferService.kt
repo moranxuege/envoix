@@ -40,6 +40,11 @@ private data class Spec(
     /** Receipt-mailbox endpoint frozen at creation; persisted in the record's
      *  context so confirmation survives later edits to the setting. */
     val receiptServer: String = "",
+    /** Staging send only: the content:// source to copy into [path], and
+     *  whether a durable read grant was taken (so restore knows if it can
+     *  re-stage). Both ride platform_extras, so they survive restarts. */
+    val sourceUri: String? = null,
+    val sourceRecoverable: Boolean = false,
 ) {
     fun dir(): Direction = if (direction == "send") Direction.Send else Direction.Receive
 
@@ -61,7 +66,13 @@ private data class Spec(
                 put("use_mdns", useMdns)
                 put("resume", resume)
                 put("receipt_server", receiptServer)
-                qrPayload?.let { put("platform_extras", org.json.JSONObject().put("qr", it)) }
+                val extras = org.json.JSONObject()
+                qrPayload?.let { extras.put("qr", it) }
+                sourceUri?.let {
+                    extras.put("source_uri", it)
+                    extras.put("source_recoverable", sourceRecoverable)
+                }
+                if (extras.length() > 0) put("platform_extras", extras)
             }.toString()
 }
 
@@ -519,13 +530,20 @@ class TransferService : Service() {
         id: Long,
         spec: Spec,
         resume: Boolean,
+        staging: Boolean = false,
     ) {
         lastSeq[id] = 0L
         generations.remove(id)
+        val notices =
+            if (staging) {
+                NativeSession.startStaging(id, spec.paramsJson(resume = false))
+            } else {
+                NativeSession.start(id, spec.paramsJson(resume))
+            }
         val job =
             transferScope(id).launch {
                 try {
-                    NativeSession.start(id, spec.paramsJson(resume)).collect { notice ->
+                    notices.collect { notice ->
                         if (!ownsCard(id, notice)) return@collect
                         when (notice.optString("notice")) {
                             "snapshot" -> onSnapshot(id, spec, notice)

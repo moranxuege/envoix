@@ -25,6 +25,23 @@ object NativeSession {
             awaitClose { Native.destroySession(id, false) }
         }.buffer(capacity = kotlinx.coroutines.channels.Channel.UNLIMITED)
 
+    /** Create a staging SEND (Preparing): the record is committed before the
+     *  copy. Same notice stream as [start]. */
+    fun startStaging(
+        id: Long,
+        paramsJson: String,
+    ): Flow<JSONObject> =
+        callbackFlow {
+            val callback =
+                object : EventCallback {
+                    override fun onEvent(json: String) {
+                        runCatching { JSONObject(json) }.getOrNull()?.let { trySend(it) }
+                    }
+                }
+            Native.createStagingSession(id, paramsJson, callback)
+            awaitClose { Native.destroySession(id, false) }
+        }.buffer(capacity = kotlinx.coroutines.channels.Channel.UNLIMITED)
+
     fun start(
         id: Long,
         paramsJson: String,
