@@ -79,6 +79,12 @@ object Native {
         callback: EventCallback,
     )
 
+    /** A Preparing send: staging copied [bytes] so far — moves the bar. */
+    external fun stageProgress(
+        id: Long,
+        bytes: Long,
+    )
+
     /** A Preparing send: staging finished — launch the first attempt. */
     external fun stageComplete(id: Long)
 

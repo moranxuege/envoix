@@ -520,14 +520,13 @@ class TransferService : Service() {
                                 val now = System.currentTimeMillis()
                                 if (now - last > 150) {
                                     last = now
-                                    TransferRepository.update(id) { it.copy(bytes = copied) }
+                                    Native.stageProgress(id, copied)
                                 }
                             }
                         }
                     }
                 }.isSuccess
             if (ok) {
-                TransferRepository.update(id) { it.copy(bytes = 0) } // reset for the transfer
                 Native.stageComplete(id)
             } else {
                 out.delete()
@@ -627,9 +626,7 @@ class TransferService : Service() {
                         ?: t.proofDelivered,
                 transferId = s.optString("transfer_id").ifEmpty { t.transferId },
                 fileName = s.optString("file_name").ifEmpty { t.fileName },
-                // While Preparing, the staging copy owns the bar; the machine
-                // has no transfer bytes yet, so keep what the copy set.
-                bytes = if (status == Status.Preparing) t.bytes else bytes,
+                bytes = bytes,
                 total = if (total > 0) total else t.total,
                 speedBps = if (status == Status.Transferring) speed else 0.0,
                 avgBps = avg,

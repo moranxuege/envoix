@@ -867,6 +867,22 @@ pub extern "system" fn Java_dev_envoix_app_Native_receiptResponse(
     session.receipt_response(key, blob);
 }
 
+/// A Preparing send: report staging copy progress (moves the bar only).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_stageProgress(
+    _env: JNIEnv,
+    _class: JClass,
+    id: jlong,
+    bytes: jlong,
+) {
+    let Ok(map) = sessions().lock() else {
+        return;
+    };
+    if let Some(session) = map.get(&id) {
+        session.stage_progress(bytes.max(0) as u64);
+    }
+}
+
 /// A Preparing send: staging finished, launch the first attempt.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_envoix_app_Native_stageComplete(
