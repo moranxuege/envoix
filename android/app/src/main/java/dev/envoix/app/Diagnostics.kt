@@ -43,20 +43,24 @@ object Diagnostics {
         runCatching { ackFile().writeText(crashFile().lastModified().toString()) }
     }
 
-    /** Build one report, within [budget] bytes. */
+    /** Build one report, within [budget] bytes. In debug builds nothing is
+     *  trimmed (server space is not a concern pre-release, and a clipped
+     *  diagnostic is unusable); release keeps the caps. */
     fun build(
         kind: Kind,
         transferId: Long? = null,
-        budget: Int = UPLOAD_MAX,
+        budget: Int = if (BuildConfig.DEBUG) Int.MAX_VALUE else UPLOAD_MAX,
     ): String {
+        val full = BuildConfig.DEBUG && budget == Int.MAX_VALUE
+        fun cap(release: Int) = if (full) Int.MAX_VALUE else release
         val sections =
             buildList {
                 add("── envoix-android v${BuildConfig.VERSION_NAME} (${BuildConfig.GIT_COMMIT}) · $kind ──" to 512)
-                if (kind == Kind.Crash) add(section("crash", runCatching { crashFile().readText() }.getOrDefault("")) to CRASH_MAX)
+                if (kind == Kind.Crash) add(section("crash", runCatching { crashFile().readText() }.getOrDefault("")) to cap(CRASH_MAX))
                 if (kind == Kind.Transfer && transferId != null) {
-                    add(section("transfer $transferId", TransferLogs.read(transferId)) to TRANSFER_MAX)
+                    add(section("transfer $transferId", TransferLogs.read(transferId)) to cap(TRANSFER_MAX))
                 }
-                add(section("operations", OpLog.report()) to OPS_MAX)
+                add(section("operations", OpLog.report()) to cap(OPS_MAX))
                 add(section("core trace (tail)", LogStore.dump()) to Int.MAX_VALUE)
             }
         // Fixed-cap sections first; core gets whatever budget remains.

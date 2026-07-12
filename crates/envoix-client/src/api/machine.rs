@@ -134,6 +134,10 @@ pub enum Input {
     /// The mailbox slot opened with this transfer's key but named different
     /// content than the committed sent facts (see [`Facts::receipt_mismatch`]).
     ReceiptMismatch,
+    /// The driver could not commit the record after bounded retries: the
+    /// durable authority is unwritable, so the session ends visibly instead
+    /// of running ahead of a store that cannot follow.
+    StorageFailed,
     /// Receiver: the sealed receipt POST was acknowledged by the rdz - the
     /// confirmation duty is discharged (monotone fact, any state).
     ReceiptPosted,
@@ -250,6 +254,20 @@ impl Session {
                 self.facts.proof_delivered = true;
                 Vec::new()
             }
+            Input::StorageFailed
+                if !matches!(
+                    self.state,
+                    State::Completed | State::Failed | State::Cancelled
+                ) =>
+            {
+                let mut effects = self.exit_effects();
+                effects.push(Effect::CancelToken);
+                self.state = State::Failed;
+                self.reason = Some("transfer record store is unwritable".into());
+                self.reason_code = Some(FailureCode::Other);
+                effects
+            }
+            Input::StorageFailed => Vec::new(), // terminal states: nothing to end
             Input::ReceiptMismatch => {
                 if matches!(self.state, State::Confirming | State::Unconfirmed) {
                     self.facts.receipt_mismatch = true;
@@ -290,7 +308,7 @@ impl Session {
     }
 
     fn on_cancel(&mut self) -> Vec<Effect> {
-        match self.state {
+        let effects = match self.state {
             s if s.is_active() => {
                 let mut effects = self.exit_effects();
                 self.state = State::Cancelled;
@@ -303,8 +321,15 @@ impl Session {
                 self.state = State::Cancelled;
                 effects
             }
-            _ => Vec::new(),
-        }
+            _ => return Vec::new(),
+        };
+        // A cancelled transfer is not "partway done" - it is abandoned. Clear
+        // the progress at the source so every consumer agrees: the Cancelled
+        // card reads 0, and a resume-from-cancelled (the ONLY fresh restart,
+        // partial discarded) inherits 0 instead of the stale pre-cancel bar.
+        self.bytes = 0;
+        self.bytes_resumed = 0;
+        effects
     }
 
     fn on_resume(&mut self) -> Vec<Effect> {
@@ -541,6 +566,58 @@ mod tests {
         let effects = s.reduce(ev(1, completed(100)));
         assert_eq!(s.state, State::Completed);
         assert_eq!(effects, vec![Effect::PostReceipt]);
+    }
+
+    #[test]
+    fn storage_failed_ends_active_states_and_spares_terminal_ones() {
+        let mut s = transferring(Send);
+        let effects = s.reduce(Input::StorageFailed);
+        assert_eq!(s.state, State::Failed);
+        assert!(s.reason.as_deref().unwrap_or("").contains("record store"));
+        assert!(
+            effects.contains(&Effect::CancelToken),
+            "the live attempt stops"
+        );
+
+        let mut done = transferring(Send);
+        done.reduce(ev(1, E::Progress { bytes: 100 }));
+        done.reduce(ev(1, confirming()));
+        done.reduce(ev(1, completed(100)));
+        assert!(done.reduce(Input::StorageFailed).is_empty());
+        assert_eq!(
+            done.state,
+            State::Completed,
+            "terminal states are not rewritten"
+        );
+    }
+
+    #[test]
+    fn cancel_clears_progress_and_the_fresh_resume_inherits_it() {
+        let mut s = transferring(Send);
+        s.reduce(ev(1, E::Progress { bytes: 50 }));
+        assert_eq!(s.bytes, 50);
+        // Cancel abandons the progress: the Cancelled card reads 0, not 50.
+        s.reduce(Input::Cancel);
+        assert_eq!(s.state, State::Cancelled);
+        assert_eq!(s.bytes, 0, "a cancelled transfer is not partway done");
+        assert_eq!(s.bytes_resumed, 0);
+        // A resume-from-cancelled is a FRESH restart and simply inherits 0 -
+        // no special case in on_resume.
+        let effects = s.reduce(Input::Resume);
+        assert_eq!(s.state, State::Connecting);
+        assert_eq!(s.bytes, 0);
+        assert!(effects.contains(&Effect::StartAttempt { resume: false }));
+    }
+
+    #[test]
+    fn paused_resume_keeps_progress_until_started_corrects_it() {
+        // A resume=true (Paused) restart keeps the last known bytes - the
+        // partial is real and Started will set the exact resumed offset.
+        let mut s = transferring(Send);
+        s.reduce(ev(1, E::Progress { bytes: 50 }));
+        s.reduce(Input::Pause);
+        s.reduce(Input::Resume);
+        assert_eq!(s.bytes, 50, "a genuine resume does not zero the bar");
     }
 
     #[test]

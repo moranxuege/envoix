@@ -825,10 +825,21 @@ class TransferService : Service() {
             )
         val cards = TransferRepository.transfers.value
         val active = cards.filter { isActive(it.status) }
+        // Direction-specific status-bar icon: up-only for sends, down-only for
+        // receives, both arrows only when genuinely sending AND receiving, a
+        // checkmark once everything is done.
+        val icon =
+            when {
+                active.isEmpty() -> R.drawable.ic_stat_done
+                active.any { it.direction == Direction.Send } &&
+                    active.any { it.direction == Direction.Receive } -> R.drawable.ic_stat_transfer
+                active.first().direction == Direction.Send -> R.drawable.ic_stat_upload
+                else -> R.drawable.ic_stat_download
+            }
         val b =
             NotificationCompat
                 .Builder(this, CHANNEL)
-                .setSmallIcon(android.R.drawable.stat_sys_upload)
+                .setSmallIcon(icon)
                 .setOngoing(active.isNotEmpty())
                 .setOnlyAlertOnce(true)
                 .setContentIntent(open)
@@ -854,13 +865,6 @@ class TransferService : Service() {
             }
             active.size == 1 -> {
                 val t = active.single()
-                b.setSmallIcon(
-                    if (t.direction == Direction.Send) {
-                        android.R.drawable.stat_sys_upload
-                    } else {
-                        android.R.drawable.stat_sys_download
-                    },
-                )
                 val speed =
                     if (t.status == Status.Transferring && t.speedBps > 0) {
                         " · ${humanBytes(t.speedBps.toLong())}/s"

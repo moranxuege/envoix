@@ -28,6 +28,23 @@ use super::{Client, PeerSource, TransferEvent, TransferOptions, TransferRequest}
 
 /// How long a send waits in Confirming before escalating to the mailbox.
 const CONFIRM_TIMEOUT: Duration = Duration::from_secs(20);
+/// Commit-barrier retry backoff; after the last entry the session escalates
+/// to [`Input::StorageFailed`] - a visible failure, never a silent stall.
+const COMMIT_RETRY: [Duration; 3] = [
+    Duration::from_secs(1),
+    Duration::from_secs(5),
+    Duration::from_secs(15),
+];
+
+/// World-facing effects wait for the commit barrier; in-memory bookkeeping
+/// (timers, polls) and token signals do not - stopping an attempt is
+/// idempotent and must never wait on a disk.
+fn is_post_commit(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::StartAttempt { .. } | Effect::PostReceipt | Effect::DiscardPartial
+    )
+}
 /// The state-scoped mailbox poll schedule (design: bounded). Runs in PARALLEL
 /// with the Confirming ack wait - whichever proof lands first wins - and is
 /// restarted on entering Unconfirmed.
@@ -153,6 +170,18 @@ pub struct TransferSession {
     cmds: mpsc::UnboundedSender<Cmd>,
 }
 
+/// The rendezvous room id a session correlates by (the broker's view): the
+/// room code's numeric prefix, or the mDNS token. `None` for invite-only.
+fn session_room(sources: &[super::PeerSource]) -> Option<String> {
+    sources.iter().find_map(|source| match source {
+        super::PeerSource::Room { code, .. } => {
+            Some(envoix_session::split_code(code).0.to_string())
+        }
+        super::PeerSource::Mdns { token: Some(token) } => Some(token.clone()),
+        _ => None,
+    })
+}
+
 impl TransferSession {
     /// Start a session: launches attempt 1 immediately. Returns the handle and
     /// the notice stream (snapshots + courier requests). With `record`, every
@@ -235,6 +264,7 @@ impl TransferSession {
         }
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (notice_tx, notice_rx) = mpsc::unbounded_channel();
+        let context_sources = context.params.sources.clone();
         let actor = Actor {
             client,
             session,
@@ -251,9 +281,21 @@ impl TransferSession {
             last_progress_snapshot: None,
             record,
             platform_extras,
+            staged: Vec::new(),
+            commit_failures: 0,
+            commit_retry_at: None,
             launch,
         };
-        tokio::spawn(actor.run());
+        // The actor runs OUTSIDE the per-attempt transfer span, so its own
+        // events (state transitions, receipt outcomes, commit barrier) had no
+        // room and never reached the per-transfer log. A session span carries
+        // the room for the actor's whole life so the machine is diagnosable.
+        use tracing::Instrument as _;
+        let span = match session_room(&context_sources) {
+            Some(room) => tracing::info_span!("session", room = %room),
+            None => tracing::info_span!("session"),
+        };
+        tokio::spawn(actor.run().instrument(span));
         (Self { cmds: cmd_tx }, notice_rx)
     }
 
@@ -354,6 +396,14 @@ struct Actor {
     current: Option<super::Transfer>,
     /// Frontend-owned card context, persisted verbatim with the record.
     platform_extras: Option<serde_json::Value>,
+    /// World-facing effects staged behind the commit barrier: they run only
+    /// after the record write succeeds. In-memory bookkeeping and token
+    /// signals never wait here.
+    staged: Vec<Effect>,
+    /// Consecutive failed commits (drives the retry backoff + escalation).
+    commit_failures: u32,
+    /// When to retry a failed commit.
+    commit_retry_at: Option<Instant>,
     /// Input produced while running effects (a sync launch failure inside
     /// [`Effect::StartAttempt`]); drained by the [`Self::apply`] loop so it
     /// takes the same reduce->effects->persist path as every other input.
@@ -375,12 +425,11 @@ struct Actor {
 impl Actor {
     async fn run(mut self) {
         if self.launch {
-            // Attempt 1: a user-initiated new transfer, resume per the params.
+            // Attempt 1 waits behind the commit barrier like every other
+            // world-facing effect: nothing contacts a peer for a session the
+            // record has not committed.
             let resume = self.context.params.options.resume;
-            self.launch_attempt(resume);
-            if let Some(input) = self.pending.take() {
-                self.apply(input).await;
-            }
+            self.staged.push(Effect::StartAttempt { resume });
         } else if self.session.state == super::machine::State::Unconfirmed {
             self.run_effect(Effect::StartMailboxPoll).await;
         } else if self.session.state == super::machine::State::Completed
@@ -388,14 +437,17 @@ impl Actor {
             && !self.session.facts.proof_delivered
         {
             // Restored with the confirmation duty undischarged: re-post.
-            self.run_effect(Effect::PostReceipt).await;
+            self.staged.push(Effect::PostReceipt);
         }
-        self.persist().await;
-        self.emit_snapshot(false);
+        self.try_commit().await;
+        if let Some(input) = self.pending.take() {
+            self.apply(input).await;
+        }
 
         loop {
             let confirm_at = self.confirm_deadline.map(|(_, at)| at);
             let poll_at = self.polls.first().copied();
+            let commit_at = self.commit_retry_at;
             tokio::select! {
                 cmd = self.cmds.recv() => match cmd {
                     Some(cmd) => self.on_cmd(cmd).await,
@@ -429,6 +481,13 @@ impl Actor {
                             key,
                             server: self.context.client.receipt_server.clone(),
                         });
+                    }
+                }
+                _ = sleep_until(commit_at), if commit_at.is_some() => {
+                    self.commit_retry_at = None;
+                    self.try_commit().await;
+                    if let Some(input) = self.pending.take() {
+                        self.apply(input).await;
                     }
                 }
             }
@@ -475,7 +534,10 @@ impl Actor {
                     }
                 };
                 match verified {
-                    Ok(_) => self.apply(Input::ReceiptVerified).await,
+                    Ok(_) => {
+                        tracing::info!("mailbox receipt verified");
+                        self.apply(Input::ReceiptVerified).await
+                    }
                     Err(error) => {
                         tracing::warn!(%error, "mailbox receipt failed verification");
                         // A machine fact, not a driver decision: recorded and
@@ -510,7 +572,7 @@ impl Actor {
             }
             Cmd::SetExtras(extras) => {
                 self.platform_extras = Some(extras);
-                self.persist().await;
+                self.try_commit().await;
             }
             Cmd::Discard => {
                 // Stop the attempt BEFORE deleting anything: the engine
@@ -614,52 +676,130 @@ impl Actor {
 
     /// Feed one input to the machine, execute its effects, emit a snapshot.
     async fn apply(&mut self, input: Input) {
-        let mut progress_only = true;
         let before = self.session.clone();
+        let mut progress_only = true;
         let mut next = Some(input);
-        while let Some(input) = next.take() {
-            progress_only &= matches!(
-                input,
-                Input::Event {
-                    event: AttemptEvent::Progress { .. },
-                    ..
+        loop {
+            while let Some(input) = next.take() {
+                progress_only &= matches!(
+                    input,
+                    Input::Event {
+                        event: AttemptEvent::Progress { .. },
+                        ..
+                    }
+                );
+                for effect in self.session.reduce(input) {
+                    if is_post_commit(&effect) {
+                        self.staged.push(effect);
+                    } else {
+                        self.run_effect(effect).await;
+                    }
                 }
-            );
-            let effects = self.session.reduce(input);
-            for effect in effects {
-                self.run_effect(effect).await;
+                next = self.pending.take();
             }
-            next = self.pending.take();
-        }
-        if self.session != before {
-            // The record commits BEFORE the snapshot goes out: frontends act
-            // on snapshots (publish, delete staging), and a side effect must
-            // never run for a state the durable authority has not committed -
-            // a crash in between would restore a world that never knew.
-            // (Progress ticks skip persistence: the receiver's on-disk resume
-            // state is the real resume anyway.)
-            if !progress_only {
-                self.persist().await;
+            if before.state != self.session.state {
+                // The single most load-bearing diagnostic line: the machine's
+                // own transition, routed to the per-transfer log by the
+                // session span. Its absence is why field cases were opaque.
+                tracing::info!(
+                    transfer_id = self.session.transfer_id.as_deref().unwrap_or(""),
+                    attempt = self.session.attempt,
+                    from = ?before.state,
+                    to = ?self.session.state,
+                    "transition"
+                );
             }
-            self.emit_snapshot(progress_only);
+            if self.session == before && self.staged.is_empty() {
+                return; // no legal edge, nothing to commit
+            }
+            if progress_only {
+                // Progress is UI-only and never persisted - but while a
+                // commit is pending, the full-session snapshot would leak
+                // uncommitted state, so it is withheld with the rest.
+                if self.commit_retry_at.is_none() {
+                    self.emit_snapshot(true);
+                }
+                return;
+            }
+            // The commit barrier: the record commits BEFORE the snapshot and
+            // BEFORE any world-facing effect - a crash in between would
+            // restore a world that never knew. Ordering alone is not enough:
+            // the write's SUCCESS gates them (a swallowed failure makes the
+            // barrier fake - PR #48 review, P1).
+            self.try_commit().await;
+            match self.pending.take() {
+                // A drained StartAttempt failed synchronously: reduce it
+                // through the same loop.
+                Some(input) => next = Some(input),
+                None => return,
+            }
         }
     }
 
-    /// Write the durable record, when recording is on.
-    async fn persist(&self) {
-        if let Some((store, id)) = &self.record {
-            let record = TransferRecord {
-                version: super::record::RECORD_VERSION,
-                id: *id,
-                updated_ms: unix_now_ms(),
-                context: self.context.clone(),
-                session: self.session.clone(),
-                platform_extras: self.platform_extras.clone(),
-            };
-            if let Err(error) = store.save(&record).await {
-                tracing::warn!(%error, "persisting transfer record failed");
+    /// Run the commit barrier: persist, then release the staged world-facing
+    /// effects and the snapshot. On failure, withhold both and retry on a
+    /// bounded backoff; when the store stays unwritable, escalate to a
+    /// VISIBLE failure - never a silent stall.
+    async fn try_commit(&mut self) {
+        match self.persist().await {
+            Ok(()) => {
+                self.commit_failures = 0;
+                self.commit_retry_at = None;
+                for effect in std::mem::take(&mut self.staged) {
+                    self.run_effect(effect).await;
+                }
+                self.emit_snapshot(false);
+            }
+            Err(error) => {
+                let failures = self.commit_failures as usize;
+                if failures < COMMIT_RETRY.len() {
+                    self.commit_failures += 1;
+                    self.commit_retry_at = Some(Instant::now() + COMMIT_RETRY[failures]);
+                    tracing::warn!(
+                        %error,
+                        attempt = self.commit_failures,
+                        "record commit failed; snapshot and effects withheld"
+                    );
+                } else {
+                    tracing::error!(%error, "record store unwritable; failing the session");
+                    self.storage_failed().await;
+                }
             }
         }
+    }
+
+    /// Terminal escalation: the machine records the storage failure and the
+    /// snapshot goes out even though the record could not - the store is
+    /// gone, and a truthful UI is what remains. Staged effects for the
+    /// never-committed states are dropped: they were never world-visible,
+    /// and conservative loses nothing (a kept partial, an unposted receipt).
+    async fn storage_failed(&mut self) {
+        self.staged.clear();
+        self.commit_retry_at = None;
+        for effect in self.session.reduce(Input::StorageFailed) {
+            if !is_post_commit(&effect) {
+                self.run_effect(effect).await;
+            }
+        }
+        let _ = self.persist().await; // best-effort last attempt
+        self.emit_snapshot(false);
+    }
+
+    /// Write the durable record, when recording is on. `Ok` when no store is
+    /// attached: durability is not required, so the barrier is vacuous.
+    async fn persist(&self) -> Result<(), std::io::Error> {
+        let Some((store, id)) = &self.record else {
+            return Ok(());
+        };
+        let record = TransferRecord {
+            version: super::record::RECORD_VERSION,
+            id: *id,
+            updated_ms: unix_now_ms(),
+            context: self.context.clone(),
+            session: self.session.clone(),
+            platform_extras: self.platform_extras.clone(),
+        };
+        store.save(&record).await
     }
 
     async fn run_effect(&mut self, effect: Effect) {
@@ -875,6 +1015,9 @@ mod tests {
                 last_progress_snapshot: None,
                 record: None,
                 platform_extras: None,
+                staged: Vec::new(),
+                commit_failures: 0,
+                commit_retry_at: None,
                 launch: false,
             },
             notice_rx,
@@ -938,6 +1081,47 @@ mod tests {
         .await;
         assert_eq!(snapshot.session.bytes, 40, "progress display survives");
         assert_eq!(snapshot.session.attempt, 1, "no attempt was launched");
+    }
+
+    /// The commit barrier under a dead store: no snapshot may leak an
+    /// uncommitted state, the attempt never launches, and after the bounded
+    /// retries the session fails VISIBLY (never a silent stall).
+    #[tokio::test(start_paused = true)]
+    async fn unwritable_store_escalates_to_a_visible_failure() {
+        let root = std::env::temp_dir().join(format!("envoix-deadstore-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&root).await;
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        // A FILE where the store wants a directory: every save fails.
+        tokio::fs::write(root.join("blocker"), b"x").await.unwrap();
+        let store = RecordStore::new(root.join("blocker").join("records"));
+
+        let (_handle, mut notices) = TransferSession::start(
+            failing_context(TransferDirection::Send),
+            Some((store, 5)),
+            None,
+        )
+        .unwrap();
+
+        // The paused clock drives the retry backoff instantly; the FIRST
+        // snapshot ever observed must already be the terminal escalation -
+        // anything earlier would be a view of uncommitted state.
+        let snapshot = loop {
+            match notices.recv().await.expect("stream open") {
+                SessionNotice::Snapshot(s) => break s,
+                _ => continue,
+            }
+        };
+        assert_eq!(snapshot.session.state, State::Failed);
+        assert!(
+            snapshot
+                .session
+                .reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("record store"),
+            "the failure names the store, not the transfer"
+        );
+        let _ = tokio::fs::remove_dir_all(&root).await;
     }
 
     #[tokio::test]
