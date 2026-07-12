@@ -543,6 +543,12 @@ impl Actor {
                 _ = sleep_until(poll_at), if poll_at.is_some() => {
                     self.polls.remove(0);
                     if let Some(key) = self.poll_key.clone() {
+                        tracing::info!(
+                            target: "envoix::timeline",
+                            layer = "platform.courier",
+                            event = "poll_start",
+                            attempt = self.session.attempt,
+                        );
                         let _ = self.notices.send(SessionNotice::FetchReceipt {
                             key,
                             server: self.context.client.receipt_server.clone(),
@@ -572,6 +578,12 @@ impl Actor {
                 if self.poll_key.as_deref() != Some(&key) {
                     return; // a late answer for a superseded attempt's slot
                 }
+                tracing::info!(
+                    target: "envoix::timeline",
+                    layer = "platform.courier",
+                    event = "poll_hit",
+                    attempt = self.session.attempt,
+                );
                 let (Some(tid), Some(code)) = (self.session.transfer_id.clone(), self.code())
                 else {
                     return;
@@ -601,10 +613,20 @@ impl Actor {
                 };
                 match verified {
                     Ok(_) => {
+                        tracing::info!(
+                            target: "envoix::timeline",
+                            layer = "platform.courier",
+                            event = "verified",
+                        );
                         tracing::info!("mailbox receipt verified");
                         self.apply(Input::ReceiptVerified).await
                     }
                     Err(error) => {
+                        tracing::info!(
+                            target: "envoix::timeline",
+                            layer = "platform.courier",
+                            event = "mismatch",
+                        );
                         tracing::warn!(%error, "mailbox receipt failed verification");
                         // A machine fact, not a driver decision: recorded and
                         // persisted; polling continues (the receiver
@@ -613,8 +635,23 @@ impl Actor {
                     }
                 }
             }
-            Cmd::ReceiptPosted => self.apply(Input::ReceiptPosted).await,
-            Cmd::ReceiptResponse { blob: None, .. } => {} // empty slot; later polls may hit
+            Cmd::ReceiptPosted => {
+                tracing::info!(
+                    target: "envoix::timeline",
+                    layer = "platform.courier",
+                    event = "posted",
+                );
+                self.apply(Input::ReceiptPosted).await
+            }
+            Cmd::ReceiptResponse { blob: None, .. } => {
+                // empty slot; later polls may hit
+                tracing::info!(
+                    target: "envoix::timeline",
+                    layer = "platform.courier",
+                    event = "poll_empty",
+                    attempt = self.session.attempt,
+                );
+            }
             Cmd::ServeReverify => {
                 let mut options = self.context.params.options.clone();
                 options.resume = true;
@@ -626,14 +663,29 @@ impl Actor {
                 };
                 if let Ok(transfer) = self.client.run(request) {
                     tracing::info!("serving re-verify (courier tier; card untouched)");
-                    tokio::spawn(async move {
-                        // Bounded: one shot; outcome only logged.
-                        match tokio::time::timeout(Duration::from_secs(120), transfer.wait()).await
-                        {
-                            Ok(Ok(_)) => tracing::info!("re-verify served"),
-                            other => tracing::info!(?other, "re-verify ended without serving"),
+                    // Instrument with the session span so the re-verify outcome
+                    // carries session_id and lands in this transfer's timeline
+                    // (the detached spawn otherwise lost the span — v2 P7 note).
+                    use tracing::Instrument as _;
+                    tokio::spawn(
+                        async move {
+                            // Bounded: one shot; outcome only logged.
+                            match tokio::time::timeout(Duration::from_secs(120), transfer.wait())
+                                .await
+                            {
+                                Ok(Ok(_)) => {
+                                    tracing::info!(
+                                        target: "envoix::timeline",
+                                        layer = "platform.courier",
+                                        event = "reverify_served",
+                                    );
+                                    tracing::info!("re-verify served");
+                                }
+                                other => tracing::info!(?other, "re-verify ended without serving"),
+                            }
                         }
-                    });
+                        .instrument(tracing::Span::current()),
+                    );
                 }
             }
             Cmd::SetExtras(extras) => {

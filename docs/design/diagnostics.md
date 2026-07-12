@@ -386,7 +386,7 @@ unit-commit standard); a1 is the spine, a2/a3 are independent after it.
    (with the escaping grammar); `(session_id, line)` JNI callback; Kotlin routes
    `TransferLogs.appendTimeline` by `session_id` and stamps `source_seq`;
    `session.created` proves the path. (The `transfer` span gains `session_id` in
-   a3, where the protocol events that need it live. The legacy room→card lookup
+   a4, where the protocol events that need it live. The legacy room→card lookup
    for RAW core lines stays until commit b's `Diagnostics` cutover — a1 is purely
    additive, no regression.) Test: escaping/envelope unit tests; on-device, two
    cards sharing one room land in distinct files.
@@ -395,15 +395,21 @@ unit-commit standard); a1 is the spine, a2/a3 are independent after it.
    `effect.*`, and the `record.committed{batch}` / `commit_failed` outcome pair.
    Rust tests: multi-input `apply`, ignored/stale input, synchronous StartAttempt
    failure.
-3. **a3 — protocol + courier**: `session_id` on the `transfer` span, then
-   `protocol.complete_ack` in `envoix-transfer` (routes by card-id like the
-   rest); `platform.courier.*` (poll/post/verify, `post_failed` as a platform
-   obs, not a machine input); re-verify spawn `.instrument(Span::current())` fix.
-4. **b — app authority + typed results**: `TransferTimeline`, typed boundary
+3. **a3 — driver courier**: `platform.courier.*` under the session span —
+   poll_start / poll_empty / poll_hit / verified / mismatch / posted (the exact
+   mDNS-Unconfirmed diagnostic: did the receiver post? did the sender poll an
+   empty slot?); re-verify spawn `.instrument(Span::current())` fix + a
+   `reverify_served` event. (`post_failed` is a Kotlin HTTP observation → it
+   lands in commit b with `TransferTimeline`.)
+4. **a4 — protocol**: `session_id` on the `transfer` span, then
+   `protocol.complete_ack` (sent/failed) in `envoix-transfer`, routed by card-id
+   like the rest. (The complete-ack-undeliverable warning already reaches the
+   raw per-transfer log via room-routing; a4 elevates it to the timeline.)
+5. **b — app authority + typed results**: `TransferTimeline`, typed boundary
    results (+ `redact()`), staging/publish instrumentation, drawer-as-view, and
    `Diagnostics.build` onto the timeline (raw trace = head+tail appendix).
-5. **c — rdz lanes + merge**: `source_seq`/`epoch_ms` capture, per-source lane
+6. **c — rdz lanes + merge**: `source_seq`/`epoch_ms` capture, per-source lane
    rendering (canonical) + labelled skew-sensitive time-merge.
-6. **Deferred, separate**: raw-trace batching + overload/dropped-record
+7. **Deferred, separate**: raw-trace batching + overload/dropped-record
    hardening; log-retrieval auth (**must precede broad rollout** of the richer
    reports); removal of legacy `Transfer.log`/`OpLog` duplication after migration.
