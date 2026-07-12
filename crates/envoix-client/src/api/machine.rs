@@ -308,7 +308,7 @@ impl Session {
     }
 
     fn on_cancel(&mut self) -> Vec<Effect> {
-        match self.state {
+        let effects = match self.state {
             s if s.is_active() => {
                 let mut effects = self.exit_effects();
                 self.state = State::Cancelled;
@@ -321,8 +321,15 @@ impl Session {
                 self.state = State::Cancelled;
                 effects
             }
-            _ => Vec::new(),
-        }
+            _ => return Vec::new(),
+        };
+        // A cancelled transfer is not "partway done" - it is abandoned. Clear
+        // the progress at the source so every consumer agrees: the Cancelled
+        // card reads 0, and a resume-from-cancelled (the ONLY fresh restart,
+        // partial discarded) inherits 0 instead of the stale pre-cancel bar.
+        self.bytes = 0;
+        self.bytes_resumed = 0;
+        effects
     }
 
     fn on_resume(&mut self) -> Vec<Effect> {
@@ -582,6 +589,35 @@ mod tests {
             State::Completed,
             "terminal states are not rewritten"
         );
+    }
+
+    #[test]
+    fn cancel_clears_progress_and_the_fresh_resume_inherits_it() {
+        let mut s = transferring(Send);
+        s.reduce(ev(1, E::Progress { bytes: 50 }));
+        assert_eq!(s.bytes, 50);
+        // Cancel abandons the progress: the Cancelled card reads 0, not 50.
+        s.reduce(Input::Cancel);
+        assert_eq!(s.state, State::Cancelled);
+        assert_eq!(s.bytes, 0, "a cancelled transfer is not partway done");
+        assert_eq!(s.bytes_resumed, 0);
+        // A resume-from-cancelled is a FRESH restart and simply inherits 0 -
+        // no special case in on_resume.
+        let effects = s.reduce(Input::Resume);
+        assert_eq!(s.state, State::Connecting);
+        assert_eq!(s.bytes, 0);
+        assert!(effects.contains(&Effect::StartAttempt { resume: false }));
+    }
+
+    #[test]
+    fn paused_resume_keeps_progress_until_started_corrects_it() {
+        // A resume=true (Paused) restart keeps the last known bytes - the
+        // partial is real and Started will set the exact resumed offset.
+        let mut s = transferring(Send);
+        s.reduce(ev(1, E::Progress { bytes: 50 }));
+        s.reduce(Input::Pause);
+        s.reduce(Input::Resume);
+        assert_eq!(s.bytes, 50, "a genuine resume does not zero the bar");
     }
 
     #[test]
