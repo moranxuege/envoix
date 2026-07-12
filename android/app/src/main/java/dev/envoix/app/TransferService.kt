@@ -768,24 +768,94 @@ class TransferService : Service() {
         val finals =
             File(outputDir)
                 .listFiles { f -> f.isFile && !f.name.startsWith(".") } ?: return
-        val s = SettingsStore.settings.value
-        for (src in finals) {
-            val uri =
-                MediaStoreSaver.saveReceived(this, src, src.name, s.saveTreeUri, s.saveFolder)
-                    ?: continue
-            src.delete()
-            if (attributeTo != null) {
-                TransferRepository.update(attributeTo) {
-                    if (it.fileName == null || it.fileName == src.name) {
-                        it.copy(fileName = it.fileName ?: src.name, savedUri = uri.toString())
-                    } else {
-                        it
-                    }
-                }
-                syncExtras(attributeTo)
+        for (src in finals) publishOne(src, attributeTo)
+    }
+
+    /** The publish sidecar journal for one staged file: `.envoix-publish.<name>.json`
+     *  beside it, holding the reserved target URI (written before the copy) and
+     *  the committed URI (written after). Lets a crash mid-publish recover:
+     *  drop a half-written candidate, or adopt an already-committed one. */
+    private fun publishJournal(src: File) = File(src.parentFile, ".envoix-publish.${src.name}.json")
+
+    /**
+     * Publish one finalized staging file, journaled. Recovery first: a surviving
+     * journal means a prior publish was interrupted — adopt its committed target
+     * (if it still resolves) or delete the half-written candidate — then a fresh
+     * reserve → copy → commit → delete-staging, recording each step first.
+     */
+    private fun publishOne(
+        src: File,
+        attributeTo: Long?,
+    ) {
+        val journal = publishJournal(src)
+        // --- recovery: a journal survived a crash mid-publish ---
+        runCatching { org.json.JSONObject(journal.readText()) }.getOrNull()?.let { prior ->
+            val committed = prior.optString("committed_uri").ifEmpty { null }
+            if (committed != null && MediaStoreSaver.resolves(this, Uri.parse(committed))) {
+                // Commit had landed; the crash was before staging was cleared.
+                adopt(attributeTo, src.name, committed)
+                src.delete()
+                journal.delete()
+                LogStore.append("app: adopted already-published ${src.name}")
+                return
             }
-            LogStore.append("app: saved ${src.name} to Downloads")
+            // Reserved but never committed (or the user deleted it): drop the
+            // half-written candidate so we do not leave a truncated file, then
+            // fall through to a fresh publish.
+            prior.optString("target").ifEmpty { null }?.let { MediaStoreSaver.delete(this, Uri.parse(it)) }
+            journal.delete()
         }
+
+        // --- fresh publish ---
+        val s = SettingsStore.settings.value
+        val target = MediaStoreSaver.reserve(this, src.name, s.saveTreeUri, s.saveFolder) ?: return
+        // Record the reservation BEFORE any byte is copied.
+        writePublishJournal(journal, target.uri.toString(), target.mediaStorePending, committed = null)
+        if (!MediaStoreSaver.copyInto(this, src, target)) {
+            MediaStoreSaver.delete(this, target.uri)
+            journal.delete()
+            return
+        }
+        MediaStoreSaver.commit(this, target)
+        // Record the commit BEFORE clearing staging, so a crash here recovers
+        // by adopting (never re-publishing = duplicate).
+        writePublishJournal(journal, target.uri.toString(), target.mediaStorePending, committed = target.uri.toString())
+        adopt(attributeTo, src.name, target.uri.toString())
+        src.delete()
+        journal.delete()
+        LogStore.append("app: saved ${src.name} to Downloads")
+    }
+
+    private fun writePublishJournal(
+        journal: File,
+        target: String,
+        pending: Boolean,
+        committed: String?,
+    ) {
+        val obj =
+            org.json
+                .JSONObject()
+                .put("target", target)
+                .put("pending", pending)
+        committed?.let { obj.put("committed_uri", it) }
+        runCatching { journal.writeText(obj.toString()) }
+    }
+
+    /** Attribute a published URI to its card (savedUri), and durable extras. */
+    private fun adopt(
+        attributeTo: Long?,
+        name: String,
+        uri: String,
+    ) {
+        if (attributeTo == null) return
+        TransferRepository.update(attributeTo) {
+            if (it.fileName == null || it.fileName == name) {
+                it.copy(fileName = it.fileName ?: name, savedUri = uri)
+            } else {
+                it
+            }
+        }
+        syncExtras(attributeTo)
     }
 
     /** Push the card's platform context (QR payload, saved URI) into the
