@@ -33,10 +33,21 @@ const MAX_ROOM_KEY: usize = 64;
 #[derive(Default)]
 struct RoomEntry {
     updated: Option<Instant>,
-    /// The rdz's own events for this room (captured from its tracing).
-    rdz: Vec<String>,
+    /// The rdz's own events for this room (captured from its tracing), each with
+    /// the wall-clock `epoch_ms` it was captured at — the broker's lane in the
+    /// time-merge (docs/design/diagnostics.md v2, P5).
+    rdz: Vec<(u64, String)>,
     /// Each peer's uploaded log, keyed by side ("send"/"receive"/…).
     clients: Vec<(String, String)>,
+}
+
+/// Wall-clock milliseconds since the epoch (the broker's clock — one lane in the
+/// skew-sensitive time-merge).
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Room -> collected logs, evicted after `ttl` of inactivity.
@@ -54,14 +65,14 @@ impl RoomLogs {
     }
 
     /// Append the rdz's own log line for `room` (called from the tracing layer).
-    pub fn push_rdz(&self, room: &str, line: String) {
+    pub fn push_rdz(&self, room: &str, epoch_ms: u64, line: String) {
         if room.len() > MAX_ROOM_KEY {
             return;
         }
         let mut rooms = self.rooms.lock().unwrap();
         evict(&mut rooms, self.ttl);
         let entry = rooms.entry(room.to_string()).or_default();
-        entry.rdz.push(line);
+        entry.rdz.push((epoch_ms, line));
         if entry.rdz.len() > MAX_RDZ_LINES {
             entry.rdz.drain(0..entry.rdz.len() - MAX_RDZ_LINES);
         }
@@ -78,7 +89,8 @@ impl RoomLogs {
         entry.updated = Some(Instant::now());
     }
 
-    /// Render the merged view for `room`, or None if nothing collected.
+    /// The canonical view: one ordered lane per source (rdz, then each peer's
+    /// upload verbatim). Authoritative — no cross-source clock comparison (P5).
     fn view(&self, room: &str) -> Option<String> {
         let mut rooms = self.rooms.lock().unwrap();
         evict(&mut rooms, self.ttl);
@@ -86,7 +98,7 @@ impl RoomLogs {
         let mut out = String::new();
         if !entry.rdz.is_empty() {
             out.push_str(&format!("═════ rdz · room {room} ═════\n"));
-            for line in &entry.rdz {
+            for (_, line) in &entry.rdz {
                 out.push_str(line);
                 out.push('\n');
             }
@@ -101,6 +113,57 @@ impl RoomLogs {
             out.push('\n');
         }
         Some(out)
+    }
+
+    /// The SECONDARY time-merged view (`?merge=time`): every timeline line from
+    /// every source, interleaved by `epoch_ms`, side-tagged. Explicitly labelled
+    /// skew-sensitive — sender/receiver/broker clocks are independent, so this
+    /// can invent a plausible-but-false causal order; the per-source lanes above
+    /// are the truth. Raw/non-timeline lines (no epoch) are omitted here.
+    fn merge_view(&self, room: &str) -> Option<String> {
+        let mut rooms = self.rooms.lock().unwrap();
+        evict(&mut rooms, self.ttl);
+        let entry = rooms.get(room)?;
+        let mut rows: Vec<(u64, &str, &str)> = Vec::new();
+        for (epoch, line) in &entry.rdz {
+            rows.push((*epoch, "rdz", line.as_str()));
+        }
+        for (side, body) in &entry.clients {
+            for line in body.lines() {
+                if let Some(epoch) = timeline_epoch(line) {
+                    rows.push((epoch, side.as_str(), line));
+                }
+            }
+        }
+        // Stable sort: within one clock tick, insertion (per-lane) order holds.
+        rows.sort_by_key(|(epoch, _, _)| *epoch);
+        let mut out = String::new();
+        out.push_str(&format!(
+            "═════ time-merged · room {room} · ⚠ SKEW-SENSITIVE ═════\n\
+             (sender / receiver / broker clocks are independent — this interleave\n\
+              can imply a false causal order. The per-source lanes (default view)\n\
+              are authoritative. Columns: epoch_ms  [side]  line)\n\n"
+        ));
+        for (epoch, side, line) in rows {
+            out.push_str(&format!("{epoch}  [{side:<7}]  {line}\n"));
+        }
+        Some(out)
+    }
+}
+
+/// The `epoch_ms` (column 2) of a timeline-envelope line — `seq⇥schema⇥epoch⇥…`
+/// with the three leading columns all digits and epoch exactly 13 wide — or None
+/// for a raw / header / non-timeline line.
+fn timeline_epoch(line: &str) -> Option<u64> {
+    let mut cols = line.split('\t');
+    let seq = cols.next()?;
+    let schema = cols.next()?;
+    let epoch = cols.next()?;
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if digits(seq) && digits(schema) && epoch.len() == 13 && digits(epoch) {
+        epoch.parse().ok()
+    } else {
+        None
     }
 }
 
@@ -132,9 +195,20 @@ async fn upload(
 
 async fn view(
     Path(room): Path<String>,
+    RawQuery(query): RawQuery,
     State(store): State<Arc<RoomLogs>>,
 ) -> (StatusCode, String) {
-    match store.view(&room) {
+    // Default is the canonical per-source lanes; `?merge=time` is the secondary
+    // skew-sensitive interleave.
+    let merged = query
+        .as_deref()
+        .is_some_and(|q| q.split('&').any(|kv| kv == "merge=time"));
+    let result = if merged {
+        store.merge_view(&room)
+    } else {
+        store.view(&room)
+    };
+    match result {
         Some(text) => (StatusCode::OK, text),
         None => (StatusCode::NOT_FOUND, "no logs for this room\n".to_string()),
     }
@@ -253,6 +327,41 @@ where
         } else {
             format!("{level}  {}  {}", fmt.message, fmt.fields)
         };
-        self.store.push_rdz(&room, line);
+        self.store.push_rdz(&room, now_ms(), line);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timeline_epoch_parses_envelope_and_rejects_raw() {
+        assert_eq!(
+            timeline_epoch("12\t1\t1783875675799\t8045\t3\t\tprotocol\tcomplete_ack\tsent"),
+            Some(1783875675799),
+        );
+        // raw iroh line, header line, and a too-short epoch all yield None.
+        assert_eq!(timeline_epoch("13:00:47  DEBUG  data path: direct"), None);
+        assert_eq!(timeline_epoch("═════ send ═════"), None);
+        assert_eq!(timeline_epoch("1\t1\t123\tx"), None);
+    }
+
+    #[test]
+    fn merge_interleaves_sources_by_epoch() {
+        let store = RoomLogs::new(Duration::from_secs(60));
+        store.push_rdz("r", 100, "INFO  paired".to_string());
+        // 13-digit epochs; receive (200) predates send (300).
+        store.upload("r", "send", "0\t1\t0000000000300\t9\t3\t\tmachine\ttransition\t\n".to_string());
+        store.upload(
+            "r",
+            "receive",
+            "0\t1\t0000000000200\t9\t5\t\tsession\tcreated\t\n".to_string(),
+        );
+        let merged = store.merge_view("r").unwrap();
+        let rdz = merged.find("[rdz").unwrap();
+        let recv = merged.find("[receive").unwrap();
+        let send = merged.find("[send").unwrap();
+        assert!(rdz < recv && recv < send, "interleaved by epoch across sources");
     }
 }

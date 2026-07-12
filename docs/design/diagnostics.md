@@ -417,8 +417,13 @@ unit-commit standard); a1 is the spine, a2/a3 are independent after it.
    raw is what diagnosed the GSO stall; the split separates the tiers in the
    report without losing it); (b) drawer-as-view is DEFERRED (the UI drawer
    works; making it a timeline projection is a separate UX change).
-7. **c — rdz lanes + merge**: `source_seq`/`epoch_ms` capture, per-source lane
-   rendering (canonical) + labelled skew-sensitive time-merge.
+7. **c — rdz lanes + merge** (code-complete; deploy restarts the prod rdz): the
+   rdz's own lines now carry `epoch_ms`; the default `GET /logs/{room}` is the
+   canonical per-source lanes (source_seq = insertion order, authoritative,
+   unchanged); `GET /logs/{room}?merge=time` is the SECONDARY view — every
+   timeline line (peer lines' col-2 epoch + rdz lines' epoch) interleaved,
+   side-tagged, explicitly labelled ⚠ skew-sensitive. Peer raw/header lines
+   (no epoch) are omitted from the merge.
 8. **Deferred, separate**: drawer-as-view (UI projection over the timeline);
    the release truncation policy (timeline-protected head+tail — debug is
    untrimmed today); raw-trace batching + overload/dropped-record hardening;
