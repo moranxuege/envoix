@@ -405,11 +405,22 @@ unit-commit standard); a1 is the spine, a2/a3 are independent after it.
    `protocol.complete_ack` (sent/failed) in `envoix-transfer`, routed by card-id
    like the rest. (The complete-ack-undeliverable warning already reaches the
    raw per-transfer log via room-routing; a4 elevates it to the timeline.)
-5. **b — app authority + typed results**: `TransferTimeline`, typed boundary
-   results (+ `redact()`), staging/publish instrumentation, drawer-as-view, and
-   `Diagnostics.build` onto the timeline (raw trace = head+tail appendix).
-6. **c — rdz lanes + merge**: `source_seq`/`epoch_ms` capture, per-source lane
+5. **b1 — app authority into the timeline**: `TransferTimeline` (same envelope,
+   `redact()` for URIs/paths); `MediaStoreSaver.copyInto` returns a typed
+   `Result` so failures carry a cause; `platform.stage.*` / `platform.publish.*`
+   / `platform.courier.post_failed` instrumented. (`post_failed` is the Kotlin
+   HTTP-POST failure; success stays the core's `platform.courier.posted`.)
+6. **b2 — Diagnostics cutover**: the transfer section splits into a prioritized
+   `timeline` section (uncapped, emitted first) + a `transfer raw trace`
+   appendix, separated by line shape. TWO deliberate deviations from the plan:
+   (a) the per-transfer raw is KEPT (the room→card lookup is NOT deleted — that
+   raw is what diagnosed the GSO stall; the split separates the tiers in the
+   report without losing it); (b) drawer-as-view is DEFERRED (the UI drawer
+   works; making it a timeline projection is a separate UX change).
+7. **c — rdz lanes + merge**: `source_seq`/`epoch_ms` capture, per-source lane
    rendering (canonical) + labelled skew-sensitive time-merge.
-7. **Deferred, separate**: raw-trace batching + overload/dropped-record
-   hardening; log-retrieval auth (**must precede broad rollout** of the richer
-   reports); removal of legacy `Transfer.log`/`OpLog` duplication after migration.
+8. **Deferred, separate**: drawer-as-view (UI projection over the timeline);
+   the release truncation policy (timeline-protected head+tail — debug is
+   untrimmed today); raw-trace batching + overload/dropped-record hardening;
+   log-retrieval auth (**must precede broad rollout** of the richer reports);
+   removal of legacy `Transfer.log`/`OpLog` duplication after migration.

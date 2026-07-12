@@ -59,7 +59,12 @@ object Diagnostics {
                 add("── envoix-android v${BuildConfig.VERSION_NAME} (${BuildConfig.GIT_COMMIT}) · $kind ──" to 512)
                 if (kind == Kind.Crash) add(section("crash", runCatching { crashFile().readText() }.getOrDefault("")) to cap(CRASH_MAX))
                 if (kind == Kind.Transfer && transferId != null) {
-                    add(section("transfer $transferId", TransferLogs.read(transferId)) to cap(TRANSFER_MAX))
+                    // The structured timeline is the authority — emitted first
+                    // and uncapped (it is bounded, tens of events); the verbose
+                    // raw iroh trace is the appendix that yields space (v2 P6).
+                    val (timeline, raw) = splitTransfer(transferId)
+                    add(section("timeline $transferId", timeline) to Int.MAX_VALUE)
+                    add(section("transfer raw trace", raw) to cap(TRANSFER_MAX))
                 }
                 add(section("operations", OpLog.report()) to cap(OPS_MAX))
                 add(section("core trace (tail)", LogStore.dump()) to Int.MAX_VALUE)
@@ -75,6 +80,24 @@ object Diagnostics {
             if (remaining <= 0) break
         }
         return out.toString()
+    }
+
+    // A structured timeline line begins: <source_seq>\t<schema>\t<epoch-ms>\t…
+    private val TIMELINE_LINE = Regex("""^\d+\t\d+\t\d{13}\t""")
+
+    /** Split a transfer's durable log into (structured timeline, raw trace) by
+     *  line shape — the two tiers coexist in one file (v2), separated here. */
+    private fun splitTransfer(id: Long): Pair<String, String> {
+        val timeline = StringBuilder()
+        val raw = StringBuilder()
+        for (line in TransferLogs.read(id).lineSequence()) {
+            when {
+                line.isEmpty() -> {}
+                TIMELINE_LINE.containsMatchIn(line) -> timeline.append(line).append('\n')
+                else -> raw.append(line).append('\n')
+            }
+        }
+        return timeline.toString() to raw.toString()
     }
 
     private fun section(
