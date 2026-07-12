@@ -656,7 +656,9 @@ impl TransferEngine {
                     // frame before returning: otherwise the sender's close-race
                     // tolerance would take a real failure (size/hash mismatch,
                     // finalize/rename error) for the benign ack-lost-on-close race.
-                    if let Err(error) = finalize_received_file(
+                    // The claim may land under a later name than the one
+                    // selected at start (see finalize_received_file).
+                    let target_name = match finalize_received_file(
                         &header,
                         &output_dir,
                         &temp_path,
@@ -669,9 +671,12 @@ impl TransferEngine {
                     )
                     .await
                     {
-                        notify_error(connection, &error).await;
-                        return Err(error);
-                    }
+                        Ok(landed) => landed,
+                        Err(error) => {
+                            notify_error(connection, &error).await;
+                            return Err(error);
+                        }
+                    };
                     // The file is finalized - a durable fact. The ack is
                     // best-effort from here: if the path died, suppressing
                     // Completed would also suppress the mailbox receipt post,
@@ -828,7 +833,7 @@ async fn finalize_received_file(
     complete: &Complete,
     expected_offset: u64,
     expected_index: u64,
-) -> Result<(), TransferError> {
+) -> Result<String, TransferError> {
     if expected_offset != header.file_size {
         return Err(CoreError::Transfer(format!(
             "transfer complete but expected offset {expected_offset} does not match file size {}",
@@ -838,15 +843,16 @@ async fn finalize_received_file(
     file.flush().await?;
     // The landing name: differs from header.file_name for a fresh re-receive
     // beside an existing same-name final.
-    let target_name = final_path
+    let mut target_name = final_path
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or(&header.file_name);
+        .unwrap_or(&header.file_name)
+        .to_owned();
     let actual_hash = hasher.finalize().to_hex().to_string();
     write_resume_state_for_offset(
         output_dir,
         header,
-        target_name,
+        &target_name,
         expected_offset,
         expected_index,
         Some(actual_hash.clone()),
@@ -859,7 +865,13 @@ async fn finalize_received_file(
             complete.file_hash
         )));
     }
-    LocalFileStorage::finalize_temp_file(temp_path, final_path).await?;
+    // Claim the destination atomically; the name selected at receive start is
+    // an observation, not ownership, and the namespace may have moved on
+    // (another finalizer, the user, another app). A refused claim takes the
+    // next free name instead of failing a completed transfer.
+    while !LocalFileStorage::finalize_temp_file(temp_path, &output_dir.join(&target_name)).await? {
+        target_name = unique_final_name(output_dir, &header.file_name).await?;
+    }
     LocalFileStorage::delete_resume_state(output_dir, &header.file_name, &header.transfer_id)
         .await?;
     // Durable completion receipt: survives the final file being moved/published
@@ -868,13 +880,13 @@ async fn finalize_received_file(
     LocalFileStorage::write_receipt(
         output_dir,
         &TransferReceipt {
-            file_name: target_name.to_owned(),
+            file_name: target_name.clone(),
             file_size: header.file_size,
             file_hash: actual_hash,
         },
     )
     .await?;
-    Ok(())
+    Ok(target_name)
 }
 
 /// Best-effort notify the peer of a terminal error, so the sender can tell a real
@@ -2410,6 +2422,7 @@ mod tests {
         manual_send(
             &mut sender_connection,
             ManualSend {
+                transfer_id: "manual-transfer",
                 file_name: "fresh.txt",
                 source_bytes,
                 chunk_size: 5,
@@ -2469,6 +2482,7 @@ mod tests {
         manual_send(
             &mut sender_connection,
             ManualSend {
+                transfer_id: "manual-transfer",
                 file_name: "short-temp.txt",
                 source_bytes,
                 chunk_size: 5,
@@ -2566,6 +2580,7 @@ mod tests {
         manual_send(
             &mut sender_connection,
             ManualSend {
+                transfer_id: "manual-transfer",
                 file_name: "bad-hash.txt",
                 source_bytes,
                 chunk_size: 5,
@@ -2700,6 +2715,86 @@ mod tests {
         );
     }
 
+    /// PR #48 review P1: two concurrent receives of the same name into one
+    /// directory both selected it, both passed the finalize existence check,
+    /// and the second rename silently REPLACED the first completed file. The
+    /// atomic claim refuses the taken name and the loser lands beside it.
+    #[tokio::test]
+    async fn concurrent_same_name_receives_never_destroy_each_other() {
+        let root = unique_test_dir();
+        let output_dir = root.join("output");
+        tokio::fs::create_dir_all(&output_dir).await.unwrap();
+        let bytes_a = b"aaaaaaaaaa";
+        let bytes_b = b"bbbbbbbbbb";
+
+        let (mut sender_a, mut receiver_conn_a) = memory_connection_pair();
+        let (mut sender_b, mut receiver_conn_b) = memory_connection_pair();
+        let recv_a = tokio::spawn({
+            let dir = output_dir.clone();
+            async move {
+                TransferEngine::new(5)
+                    .receive_file(&mut receiver_conn_a, dir, &NoopEventSink)
+                    .await
+                    .unwrap()
+            }
+        });
+        let recv_b = tokio::spawn({
+            let dir = output_dir.clone();
+            async move {
+                TransferEngine::new(5)
+                    .receive_file(&mut receiver_conn_b, dir, &NoopEventSink)
+                    .await
+                    .unwrap()
+            }
+        });
+
+        // Both offers use the SAME name; neither sees a collision at start
+        // (the dir is empty), so both try to claim "c.bin" at finalize.
+        tokio::join!(
+            manual_send(
+                &mut sender_a,
+                ManualSend {
+                    transfer_id: "transfer-a",
+                    file_name: "c.bin",
+                    source_bytes: bytes_a,
+                    chunk_size: 5,
+                    resume_requested: false,
+                    bytes_to_send: bytes_a,
+                    complete_hash: blake3::hash(bytes_a).to_hex().to_string(),
+                    expected_resume_bytes: 0,
+                },
+            ),
+            manual_send(
+                &mut sender_b,
+                ManualSend {
+                    transfer_id: "transfer-b",
+                    file_name: "c.bin",
+                    source_bytes: bytes_b,
+                    chunk_size: 5,
+                    resume_requested: false,
+                    bytes_to_send: bytes_b,
+                    complete_hash: blake3::hash(bytes_b).to_hex().to_string(),
+                    expected_resume_bytes: 0,
+                },
+            ),
+        );
+        let summary_a = recv_a.await.unwrap();
+        let summary_b = recv_b.await.unwrap();
+
+        let landed_a = tokio::fs::read(output_dir.join(&summary_a.file_name))
+            .await
+            .unwrap();
+        let landed_b = tokio::fs::read(output_dir.join(&summary_b.file_name))
+            .await
+            .unwrap();
+        assert_ne!(
+            summary_a.file_name, summary_b.file_name,
+            "distinct landed names"
+        );
+        assert_eq!(landed_a, bytes_a, "receive A intact under its landed name");
+        assert_eq!(landed_b, bytes_b, "receive B intact under its landed name");
+    }
+
     /// Crash-repair: finalize commits the file before the receipt, so a death
     /// in between leaves possession without proof. The existing-final recovery
     /// path must recreate the receipt - PostReceipt seals from it, and without
@@ -2735,6 +2830,7 @@ mod tests {
         manual_send(
             &mut sender_connection,
             ManualSend {
+                transfer_id: "manual-transfer",
                 file_name: "data.bin",
                 source_bytes,
                 chunk_size: 5,
@@ -2785,6 +2881,7 @@ mod tests {
         manual_send(
             &mut sender_connection,
             ManualSend {
+                transfer_id: "manual-transfer",
                 file_name: "data.bin",
                 source_bytes,
                 chunk_size: 5,
@@ -2870,6 +2967,7 @@ mod tests {
         manual_send(
             &mut sender_connection,
             ManualSend {
+                transfer_id: "manual-transfer",
                 file_name: "data.bin",
                 source_bytes,
                 chunk_size: 5,
@@ -2944,6 +3042,7 @@ mod tests {
     }
 
     struct ManualSend<'a> {
+        transfer_id: &'a str,
         file_name: &'a str,
         source_bytes: &'a [u8],
         chunk_size: u64,
@@ -2954,7 +3053,7 @@ mod tests {
     }
 
     async fn manual_send(connection: &mut MemoryFrameConnection, request: ManualSend<'_>) {
-        let transfer_id = TransferId::new("manual-transfer");
+        let transfer_id = TransferId::new(request.transfer_id);
         connection
             .send_frame(Frame::Hello(Hello {
                 protocol_version: PROTOCOL_VERSION,

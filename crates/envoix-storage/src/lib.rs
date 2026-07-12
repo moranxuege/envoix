@@ -105,20 +105,33 @@ impl LocalFileStorage {
         Ok((temp_path, file))
     }
 
-    /// Renames a verified temp file to its final destination.
+    /// Atomically claims `final_path` with the verified temp file's content.
+    /// Returns `false` when the name is already taken - the caller picks
+    /// another name. A name observed free is not a name owned: the old
+    /// check-then-rename raced, and a concurrent finalizer's rename silently
+    /// REPLACED a completed file (PR #48 review, P1). `hard_link` refuses an
+    /// existing destination atomically.
     pub async fn finalize_temp_file(
         temp_path: &Path,
         final_path: &Path,
-    ) -> Result<(), StorageError> {
-        if fs::try_exists(final_path).await? {
-            return Err(CoreError::Storage(format!(
-                "destination already exists: {}",
-                final_path.display()
-            )));
+    ) -> Result<bool, StorageError> {
+        match fs::hard_link(temp_path, final_path).await {
+            Ok(()) => {
+                fs::remove_file(temp_path).await?;
+                Ok(true)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(_) => {
+                // Filesystem without hard links (e.g. FAT): degrade to the
+                // checked rename. Racy, but better than failing receives;
+                // real errors (permissions, IO) surface from the rename.
+                if fs::try_exists(final_path).await? {
+                    return Ok(false);
+                }
+                fs::rename(temp_path, final_path).await?;
+                Ok(true)
+            }
         }
-
-        fs::rename(temp_path, final_path).await?;
-        Ok(())
     }
 
     /// Reads the JSON sidecar state for a resumable transfer, if present.
