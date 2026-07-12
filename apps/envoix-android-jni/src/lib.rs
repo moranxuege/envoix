@@ -737,10 +737,14 @@ pub extern "system" fn Java_dev_envoix_app_Native_listRestoreContexts<'a>(
                     if let (Some(object), Some(extras)) =
                         (value.as_object_mut(), record.platform_extras.as_ref())
                     {
-                        for key in ["qr", "saved_uri"] {
+                        for key in ["qr", "saved_uri", "source_uri"] {
                             if let Some(text) = extras.get(key).and_then(|v| v.as_str()) {
                                 object.insert(key.into(), text.into());
                             }
+                        }
+                        if let Some(ok) = extras.get("source_recoverable").and_then(|v| v.as_bool())
+                        {
+                            object.insert("source_recoverable".into(), ok.into());
                         }
                     }
                     value

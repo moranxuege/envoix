@@ -439,6 +439,9 @@ class TransferService : Service() {
             // restored session - the core relaunches from the durable record's
             // own context - so the display Spec carries only what the card and
             // platform effects need.
+            // A restored Preparing send re-stages only if its source grant was
+            // durable; otherwise the copy path fails it with "needs re-picking".
+            val recoverable = c.optBoolean("source_recoverable", false)
             val spec =
                 Spec(
                     direction,
@@ -452,6 +455,8 @@ class TransferService : Service() {
                     null,
                     c.optBoolean("use_room"),
                     c.optBoolean("use_mdns"),
+                    sourceUri = if (recoverable) c.optString("source_uri").ifEmpty { null } else null,
+                    sourceRecoverable = recoverable,
                 )
             specs[id] = spec
             lastSeq[id] = 0L
