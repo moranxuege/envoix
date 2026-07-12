@@ -163,6 +163,8 @@ enum Cmd {
     ServeReverify,
     /// Replace the frontend-owned card context persisted with the record.
     SetExtras(serde_json::Value),
+    /// A Preparing send: staging copied more bytes (snapshot-only).
+    StageProgress(u64),
     /// A Preparing send: staging finished, launch the first attempt.
     StageComplete,
     /// A Preparing send: staging failed, fail the transfer with this reason.
@@ -366,6 +368,12 @@ impl TransferSession {
     /// persisted with the record. Opaque to the core; survives restarts.
     pub fn set_extras(&self, extras: serde_json::Value) {
         let _ = self.cmds.send(Cmd::SetExtras(extras));
+    }
+
+    /// A Preparing send: report staging copy progress (moves the bar only,
+    /// never persisted).
+    pub fn stage_progress(&self, bytes: u64) {
+        let _ = self.cmds.send(Cmd::StageProgress(bytes));
     }
 
     /// A Preparing send: the source is staged at the transfer's path; launch
@@ -610,6 +618,7 @@ impl Actor {
                 self.platform_extras = Some(extras);
                 self.try_commit().await;
             }
+            Cmd::StageProgress(bytes) => self.apply(Input::StageProgress { bytes }).await,
             Cmd::StageComplete => self.apply(Input::StageComplete).await,
             Cmd::StageFailed(reason) => self.apply(Input::StageFailed { reason }).await,
             Cmd::Discard => {
@@ -724,7 +733,7 @@ impl Actor {
                     Input::Event {
                         event: AttemptEvent::Progress { .. },
                         ..
-                    }
+                    } | Input::StageProgress { .. }
                 );
                 for effect in self.session.reduce(input) {
                     if is_post_commit(&effect) {
@@ -1181,6 +1190,37 @@ mod tests {
         // And the record committed as Preparing BEFORE the copy would start.
         let persisted = store.load(8).await.expect("record persisted");
         assert_eq!(persisted.session.state, State::Preparing);
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn stage_progress_moves_the_bar_but_is_not_persisted() {
+        let dir = std::env::temp_dir().join(format!("envoix-stageprog-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let store = RecordStore::new(&dir);
+        let (session, mut notices) = TransferSession::start_staging(
+            failing_context(TransferDirection::Send),
+            Some((store.clone(), 12)),
+            None,
+        )
+        .unwrap();
+        wait_for_state(&mut notices, State::Preparing).await;
+
+        session.stage_progress(200);
+        // The snapshot shows the staging bar move...
+        let snapshot = loop {
+            match notices.recv().await.expect("stream open") {
+                SessionNotice::Snapshot(s) if s.session.bytes == 200 => break s,
+                _ => continue,
+            }
+        };
+        assert_eq!(snapshot.session.bytes, 200);
+        // ...but the record is NOT rewritten for progress (would be churn).
+        let persisted = store.load(12).await.expect("record exists");
+        assert_eq!(
+            persisted.session.bytes, 0,
+            "staging progress is snapshot-only"
+        );
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 

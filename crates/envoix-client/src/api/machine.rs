@@ -131,13 +131,25 @@ pub enum Input {
     /// User intent: resume/retry — launches a new attempt.
     Resume,
     /// Staging finished: the source is at the transfer's path, launch attempt 1.
+    /// Staging copied more bytes into the durable path (snapshot-only, never
+    /// persisted). Keeps the machine the single source of bytes.
+    StageProgress {
+        bytes: u64,
+    },
     StageComplete,
     /// Staging failed (e.g. the source could not be read); the reason is kept.
-    StageFailed { reason: String },
+    StageFailed {
+        reason: String,
+    },
     /// A core event from attempt `attempt`.
-    Event { attempt: u32, event: AttemptEvent },
+    Event {
+        attempt: u32,
+        event: AttemptEvent,
+    },
     /// The driver's confirm timer for attempt `attempt` expired.
-    ConfirmTimeout { attempt: u32 },
+    ConfirmTimeout {
+        attempt: u32,
+    },
     /// The mailbox receipt was fetched and VERIFIED against the local file.
     ReceiptVerified,
     /// The mailbox slot opened with this transfer's key but named different
@@ -263,12 +275,20 @@ impl Session {
                 self.facts.proof_delivered = true;
                 Vec::new()
             }
+            Input::StageProgress { bytes } if self.state == State::Preparing => {
+                self.bytes = bytes;
+                Vec::new()
+            }
+            Input::StageProgress { .. } => Vec::new(),
             Input::StageComplete if self.state == State::Preparing => {
                 // Staging produced the source; launch the first attempt. attempt
                 // stays 1 - this IS the first attempt, deferred past staging -
                 // and it is fresh: a staged send is always a user-initiated new
-                // transfer.
+                // transfer. The staging bytes are cleared: the transfer owns the
+                // bar from here.
                 self.state = State::Connecting;
+                self.bytes = 0;
+                self.bytes_resumed = 0;
                 vec![Effect::StartAttempt { resume: false }]
             }
             Input::StageComplete => Vec::new(), // not Preparing: no legal edge
@@ -626,13 +646,31 @@ mod tests {
     #[test]
     fn stage_complete_launches_the_first_attempt_fresh() {
         let mut s = preparing(Send);
+        // Staging progress is owned by the machine (single source of truth).
+        s.reduce(Input::StageProgress { bytes: 200 });
+        assert_eq!(s.bytes, 200);
         let effects = s.reduce(Input::StageComplete);
         assert_eq!(s.state, State::Connecting);
         assert_eq!(
             s.attempt, 1,
             "still the first attempt, deferred past staging"
         );
+        assert_eq!(
+            s.bytes, 0,
+            "staging bytes cleared; the transfer owns the bar"
+        );
         assert_eq!(effects, vec![Effect::StartAttempt { resume: false }]);
+    }
+
+    #[test]
+    fn stage_progress_only_moves_the_bar_in_preparing() {
+        let mut s = preparing(Send);
+        s.reduce(Input::StageProgress { bytes: 100 });
+        assert_eq!(s.bytes, 100);
+        let mut t = transferring(Send);
+        t.reduce(ev(1, E::Progress { bytes: 50 }));
+        t.reduce(Input::StageProgress { bytes: 999 });
+        assert_eq!(t.bytes, 50, "stage progress is ignored outside Preparing");
     }
 
     #[test]
