@@ -163,6 +163,10 @@ enum Cmd {
     ServeReverify,
     /// Replace the frontend-owned card context persisted with the record.
     SetExtras(serde_json::Value),
+    /// A Preparing send: staging finished, launch the first attempt.
+    StageComplete,
+    /// A Preparing send: staging failed, fail the transfer with this reason.
+    StageFailed(String),
 }
 
 /// Handle to a running transfer session (one card).
@@ -203,6 +207,22 @@ impl TransferSession {
         ))
     }
 
+    /// Start a SEND that must stage a platform source first (e.g. an Android
+    /// `content://`). The session is created in Preparing and the record is
+    /// committed BEFORE the frontend copies a byte, so the staging survives
+    /// process death; no attempt launches until [`Self::stage_complete`].
+    pub fn start_staging(
+        context: SessionContext,
+        record: Option<(RecordStore, u64)>,
+        extras: Option<serde_json::Value>,
+    ) -> Result<(Self, mpsc::UnboundedReceiver<SessionNotice>), TransferError> {
+        let client = context.client.client()?;
+        let direction = context.params.direction;
+        let mut session = Session::new(direction);
+        session.state = super::machine::State::Preparing;
+        Ok(Self::spawn(client, context, session, record, extras, false))
+    }
+
     /// Rehydrate a persisted session WITHOUT launching an attempt. A record
     /// that died mid-flight (process killed while active) restores as
     /// Paused(Lost) — the attempt died with the process. Standing effects are
@@ -235,6 +255,11 @@ impl TransferSession {
                 session.reason = Some("interrupted by an app restart".into());
             }
         }
+        // Preparing is deliberately NOT coerced: whether its source can be
+        // re-staged is a platform fact (the persistable grant), which the core
+        // must not read from the opaque extras. A restored Preparing session
+        // waits, and the frontend re-stages it (stage_complete) or fails it
+        // (stage_failed) per that grant.
         Ok(Self::spawn(
             client,
             record.context,
@@ -341,6 +366,17 @@ impl TransferSession {
     /// persisted with the record. Opaque to the core; survives restarts.
     pub fn set_extras(&self, extras: serde_json::Value) {
         let _ = self.cmds.send(Cmd::SetExtras(extras));
+    }
+
+    /// A Preparing send: the source is staged at the transfer's path; launch
+    /// the first attempt (Preparing -> Connecting).
+    pub fn stage_complete(&self) {
+        let _ = self.cmds.send(Cmd::StageComplete);
+    }
+
+    /// A Preparing send: staging failed; fail the transfer with `reason`.
+    pub fn stage_failed(&self, reason: String) {
+        let _ = self.cmds.send(Cmd::StageFailed(reason));
     }
 }
 
@@ -574,6 +610,8 @@ impl Actor {
                 self.platform_extras = Some(extras);
                 self.try_commit().await;
             }
+            Cmd::StageComplete => self.apply(Input::StageComplete).await,
+            Cmd::StageFailed(reason) => self.apply(Input::StageFailed { reason }).await,
             Cmd::Discard => {
                 // Stop the attempt BEFORE deleting anything: the engine
                 // checkpoints resume state even on its cancel path, so a live
@@ -1122,6 +1160,65 @@ mod tests {
             "the failure names the store, not the transfer"
         );
         let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn start_staging_waits_in_preparing_and_persists_before_any_attempt() {
+        let dir = std::env::temp_dir().join(format!("envoix-staging-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let store = RecordStore::new(&dir);
+        let (_session, mut notices) = TransferSession::start_staging(
+            failing_context(TransferDirection::Send),
+            Some((store.clone(), 8)),
+            None,
+        )
+        .unwrap();
+
+        // The FIRST snapshot is Preparing - no attempt was launched (the
+        // failing context would otherwise drive it straight to Failed).
+        let snapshot = wait_for_state(&mut notices, State::Preparing).await;
+        assert_eq!(snapshot.session.state, State::Preparing);
+        // And the record committed as Preparing BEFORE the copy would start.
+        let persisted = store.load(8).await.expect("record persisted");
+        assert_eq!(persisted.session.state, State::Preparing);
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn stage_complete_leaves_preparing_and_launches() {
+        let (session, mut notices) =
+            TransferSession::start_staging(failing_context(TransferDirection::Send), None, None)
+                .unwrap();
+        wait_for_state(&mut notices, State::Preparing).await;
+        session.stage_complete();
+        // The attempt launches (and fails, via the failing context) - the
+        // point is it LEFT Preparing rather than staying stuck.
+        wait_for_state(&mut notices, State::Failed).await;
+    }
+
+    #[tokio::test]
+    async fn stage_failed_fails_the_preparing_transfer() {
+        let (session, mut notices) =
+            TransferSession::start_staging(failing_context(TransferDirection::Send), None, None)
+                .unwrap();
+        wait_for_state(&mut notices, State::Preparing).await;
+        session.stage_failed("source could not be read".into());
+        let snapshot = wait_for_state(&mut notices, State::Failed).await;
+        assert_eq!(
+            snapshot.session.reason.as_deref(),
+            Some("source could not be read")
+        );
+    }
+
+    #[tokio::test]
+    async fn restored_preparing_stays_preparing_for_the_platform() {
+        let mut session = Session::new(TransferDirection::Send);
+        session.state = State::Preparing;
+        let (_handle, mut notices) =
+            TransferSession::restore(record(TransferDirection::Send, session), None).unwrap();
+        // Not coerced to Paused(Lost): the platform decides re-stage vs fail.
+        let snapshot = wait_for_state(&mut notices, State::Preparing).await;
+        assert_eq!(snapshot.session.state, State::Preparing);
     }
 
     #[tokio::test]
