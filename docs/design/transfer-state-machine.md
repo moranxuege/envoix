@@ -450,6 +450,16 @@ journal writes land between the steps. Rejected: a full outbox (overweight
 for one side-effect kind); name-only intent journal (adopt-by-name can adopt
 a foreign same-named file and then delete staging — data loss, not just
 duplication).
+
+Implementation deviation (2026-07-12, flagged): the journal is a SIDECAR file
+`.envoix-publish.<name>.json` beside the staged file, not `platform_extras`.
+Both are platform facts the reducer never sees, but the journal governs
+staging FILES, so it lives with them — like the existing `.envoix-receipt`
+sidecar (consistency), and self-contained: recovery re-sweeps the staging dir
+and finds the journal there, with no DTO exposure / card field / restore-order
+plumbing. `platform_extras` remains the right home for card identity facts
+(QR, saved URI, Preparing's `source_uri`); a filesystem-operation journal is
+not one.
 ## Addendum (2026-07-12, three-way review): Phase 0 — the durable commit boundary
 
 One invariant, surfacing at four boundaries (none of which gets a generic
