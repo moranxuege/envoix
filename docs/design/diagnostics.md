@@ -424,8 +424,49 @@ unit-commit standard); a1 is the spine, a2/a3 are independent after it.
    timeline line (peer lines' col-2 epoch + rdz lines' epoch) interleaved,
    side-tagged, explicitly labelled ⚠ skew-sensitive. Peer raw/header lines
    (no epoch) are omitted from the merge.
-8. **Deferred, separate**: drawer-as-view (UI projection over the timeline);
-   the release truncation policy (timeline-protected head+tail — debug is
-   untrimmed today); raw-trace batching + overload/dropped-record hardening;
-   log-retrieval auth (**must precede broad rollout** of the richer reports);
-   removal of legacy `Transfer.log`/`OpLog` duplication after migration.
+8. **Release truncation policy** (DONE): the `timeline` section is emitted FIRST
+   and uncapped, so under the release budget it survives whole and the raw trace
+   yields space; the `transfer raw trace` appendix now keeps HEAD **and** TAIL
+   (`Diagnostics.headAndTail`) — the connection setup and the failure — not
+   tail-only. Debug stays fully untrimmed. (No Kotlin unit-test harness exists,
+   so this is a minimal, compile-verified change, not a rewrite.)
+9. **Still deferred** (need a UX/security decision or on-device verification —
+   designed below for review, not yet built): drawer-as-view; log-retrieval
+   auth (**must precede broad public rollout**); raw-trace batching; removal of
+   legacy `Transfer.log`/`OpLog` duplication.
+
+### Deferred designs (for review before building)
+
+**drawer-as-view.** Today the per-card UI drawer renders `Transfer.log` (an
+in-memory list fed by `addLog`: app `stateLogLine` transitions + routed core
+lines) — a *separate* sink from the durable timeline. Make it a projection:
+a `renderTimeline(id)` reads `TransferLogs`, and for each structured line
+(`seq⇥schema⇥epoch⇥…`) formats `HH:mm:ss  layer.event  outcome  k=v…` (raw lines
+pass through as-is); the drawer's `LogBox` shows that instead of `Transfer.log`.
+Then `stateLogLine`/`addLog`/`Transfer.log` can be deleted (one source of truth).
+RISK: purely visual — needs the user's eyes on the rendered drawer, so it's a
+review-then-build item, not a blind change. Open choice: keep a compact
+human render, or show the raw envelope with a monospace toggle.
+
+**log-retrieval auth.** `GET /logs/{room}` is unauthenticated over a low-entropy
+room id; the richer timeline leaks more (filenames are redacted, but the shape
+of a transfer is visible). Proposal: a bearer token (a secret CLI arg
+`--log-read-token` / env on the rdz) required on **GET only**; **POST stays
+open** (peers can't hold the operator secret and must still upload). 401 without
+it. Keep it OFF by default so private-group testing is unaffected; turn it on
+for broad rollout. Deploy = another rdz restart. NOT built — it would add a
+token to every `curl …/logs/{room}` the user runs during testing, so it should
+land deliberately, not now.
+
+**raw-trace batching (observer effect).** The raw tier crosses JNI synchronously
+one line at a time and does Kotlin file I/O on the logging path, which can
+perturb transfer timing under load. Proposal: a bounded MPSC queue drained by a
+single background writer thread; on overflow, drop and emit one
+`raw dropped N lines` marker (never silent). The low-volume timeline lane stays
+synchronous/reliable. NOT built — a perf change best validated on-device under a
+real high-throughput transfer, which needs the user present.
+
+**legacy sink removal.** Blocked on drawer-as-view: `Transfer.log`/`addLog` can
+only go once the drawer reads the timeline. `OpLog` breadcrumbs partly duplicate
+timeline events; fold the still-unique ones (launch marker, crash) into a
+clearly-scoped global sink and drop the rest. Do LAST, after the above land.

@@ -54,27 +54,30 @@ object Diagnostics {
         val full = BuildConfig.DEBUG && budget == Int.MAX_VALUE
 
         fun cap(release: Int) = if (full) Int.MAX_VALUE else release
+        // Each section: (text, byte cap, keepHeadAndTail). The timeline is the
+        // authority — emitted FIRST and uncapped (it is bounded, tens of events),
+        // so under a tight release budget it survives intact and the verbose raw
+        // trace is what yields space. The raw trace keeps its HEAD and TAIL (the
+        // connection setup AND the failure), not tail-only (v2 P6).
         val sections =
             buildList {
-                add("── envoix-android v${BuildConfig.VERSION_NAME} (${BuildConfig.GIT_COMMIT}) · $kind ──" to 512)
-                if (kind == Kind.Crash) add(section("crash", runCatching { crashFile().readText() }.getOrDefault("")) to cap(CRASH_MAX))
-                if (kind == Kind.Transfer && transferId != null) {
-                    // The structured timeline is the authority — emitted first
-                    // and uncapped (it is bounded, tens of events); the verbose
-                    // raw iroh trace is the appendix that yields space (v2 P6).
-                    val (timeline, raw) = splitTransfer(transferId)
-                    add(section("timeline $transferId", timeline) to Int.MAX_VALUE)
-                    add(section("transfer raw trace", raw) to cap(TRANSFER_MAX))
+                add(Triple("── envoix-android v${BuildConfig.VERSION_NAME} (${BuildConfig.GIT_COMMIT}) · $kind ──", 512, false))
+                if (kind == Kind.Crash) {
+                    add(Triple(section("crash", runCatching { crashFile().readText() }.getOrDefault("")), cap(CRASH_MAX), false))
                 }
-                add(section("operations", OpLog.report()) to cap(OPS_MAX))
-                add(section("core trace (tail)", LogStore.dump()) to Int.MAX_VALUE)
+                if (kind == Kind.Transfer && transferId != null) {
+                    val (timeline, raw) = splitTransfer(transferId)
+                    add(Triple(section("timeline $transferId", timeline), Int.MAX_VALUE, false))
+                    add(Triple(section("transfer raw trace", raw), cap(TRANSFER_MAX), true))
+                }
+                add(Triple(section("operations", OpLog.report()), cap(OPS_MAX), false))
+                add(Triple(section("core trace (tail)", LogStore.dump()), Int.MAX_VALUE, false))
             }
-        // Fixed-cap sections first; core gets whatever budget remains.
         var remaining = budget
         val out = StringBuilder()
-        for ((text, cap) in sections) {
+        for ((text, cap, headAndTail) in sections) {
             val allowed = minOf(cap, remaining)
-            val piece = tail(text, allowed)
+            val piece = if (headAndTail) headAndTail(text, allowed) else tail(text, allowed)
             out.append(piece).append('\n')
             remaining -= piece.toByteArray().size + 1
             if (remaining <= 0) break
@@ -114,5 +117,18 @@ object Diagnostics {
         if (bytes.size <= maxBytes) return text
         val note = "[… trimmed — last ${maxBytes / 1024} KB of ${bytes.size / 1024} KB]\n"
         return note + String(bytes, bytes.size - maxBytes, maxBytes, Charsets.UTF_8)
+    }
+
+    /** First AND last [maxBytes]/2 bytes, marked when clipped — for the raw trace,
+     *  where the connection setup (head) matters as much as the failure (tail). */
+    fun headAndTail(
+        text: String,
+        maxBytes: Int,
+    ): String {
+        val bytes = text.toByteArray(Charsets.UTF_8)
+        if (bytes.size <= maxBytes) return text
+        val half = maxBytes / 2
+        val note = "\n[… trimmed — kept first & last ${half / 1024} KB of ${bytes.size / 1024} KB …]\n"
+        return String(bytes, 0, half, Charsets.UTF_8) + note + String(bytes, bytes.size - half, half, Charsets.UTF_8)
     }
 }
