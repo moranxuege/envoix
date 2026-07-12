@@ -21,7 +21,7 @@ use tokio::time::Instant;
 
 use super::error::TransferError;
 use super::event::FailureCode;
-use super::machine::{AttemptEvent, Effect, Input, Session};
+use super::machine::{AttemptEvent, Effect, Facts, Input, Session, State};
 use super::receipt;
 use super::record::{RecordStore, TransferRecord, unix_now_ms};
 use super::{Client, PeerSource, TransferEvent, TransferOptions, TransferRequest};
@@ -305,6 +305,7 @@ impl TransferSession {
             current: None,
             pending: None,
             seq: 0,
+            apply_seq: 0,
             confirm_deadline: None,
             polls: Vec::new(),
             poll_key: None,
@@ -471,6 +472,9 @@ struct Actor {
     /// takes the same reduce->effects->persist path as every other input.
     pending: Option<Input>,
     seq: u64,
+    /// Monotonic per-`apply` id: groups a batch of `decided` edges to the one
+    /// `record.committed` that persists their final state (diagnostics v2, P8).
+    apply_seq: u64,
     /// (attempt, deadline) of the armed confirm timer.
     confirm_deadline: Option<(u32, Instant)>,
     /// Pending mailbox poll instants (drained front to back).
@@ -741,19 +745,30 @@ impl Actor {
 
     /// Feed one input to the machine, execute its effects, emit a snapshot.
     async fn apply(&mut self, input: Input) {
+        self.apply_seq += 1;
         let before = self.session.clone();
         let mut progress_only = true;
         let mut next = Some(input);
         loop {
             while let Some(input) = next.take() {
-                progress_only &= matches!(
+                let is_progress = matches!(
                     input,
                     Input::Event {
                         event: AttemptEvent::Progress { .. },
                         ..
                     } | Input::StageProgress { .. }
                 );
-                for effect in self.session.reduce(input) {
+                progress_only &= is_progress;
+                // Observe THIS reduction (cheap Copy snapshot of state+facts).
+                // Progress is excluded: it would flood the timeline (v2 P6).
+                let pre_state = self.session.state;
+                let pre_facts = self.session.facts;
+                let kind = input.kind();
+                let effects = self.session.reduce(input);
+                if !is_progress {
+                    self.observe_reduce(kind, pre_state, pre_facts, &effects);
+                }
+                for effect in effects {
                     if is_post_commit(&effect) {
                         self.staged.push(effect);
                     } else {
@@ -761,18 +776,6 @@ impl Actor {
                     }
                 }
                 next = self.pending.take();
-            }
-            if before.state != self.session.state {
-                // The single most load-bearing diagnostic line: the machine's
-                // own transition, routed to the per-transfer log by the
-                // session span. Its absence is why field cases were opaque.
-                tracing::info!(
-                    transfer_id = self.session.transfer_id.as_deref().unwrap_or(""),
-                    attempt = self.session.attempt,
-                    from = ?before.state,
-                    to = ?self.session.state,
-                    "transition"
-                );
             }
             if self.session == before && self.staged.is_empty() {
                 return; // no legal edge, nothing to commit
@@ -801,6 +804,70 @@ impl Actor {
         }
     }
 
+    /// Emit the per-reduction timeline events (diagnostics v2): the input
+    /// (accepted/ignored), any state transition (as `decided` — the commit
+    /// outcome follows in [`Self::try_commit`], never marked committed here),
+    /// fact deltas, and the effects this edge produced. Non-progress only.
+    fn observe_reduce(
+        &self,
+        kind: &'static str,
+        pre_state: State,
+        pre_facts: Facts,
+        effects: &[Effect],
+    ) {
+        let changed_state = pre_state != self.session.state;
+        let changed_facts = pre_facts != self.session.facts;
+        let accepted = changed_state || changed_facts || !effects.is_empty();
+        tracing::info!(
+            target: "envoix::timeline",
+            layer = "machine",
+            event = "input",
+            kind = kind,
+            attempt = self.session.attempt,
+            outcome = if accepted { "accepted" } else { "ignored" },
+        );
+        if changed_state {
+            tracing::info!(
+                target: "envoix::timeline",
+                layer = "machine",
+                event = "transition",
+                attempt = self.session.attempt,
+                from = ?pre_state,
+                to = ?self.session.state,
+                outcome = "decided",
+                batch = self.apply_seq,
+            );
+        }
+        if pre_facts.proof_delivered != self.session.facts.proof_delivered {
+            tracing::info!(
+                target: "envoix::timeline",
+                layer = "machine",
+                event = "fact_changed",
+                fact = "proof_delivered",
+                old = pre_facts.proof_delivered,
+                new = self.session.facts.proof_delivered,
+            );
+        }
+        if pre_facts.receipt_mismatch != self.session.facts.receipt_mismatch {
+            tracing::info!(
+                target: "envoix::timeline",
+                layer = "machine",
+                event = "fact_changed",
+                fact = "receipt_mismatch",
+                old = pre_facts.receipt_mismatch,
+                new = self.session.facts.receipt_mismatch,
+            );
+        }
+        for effect in effects {
+            tracing::info!(
+                target: "envoix::timeline",
+                layer = "effect",
+                event = "dispatched",
+                name = effect.kind(),
+            );
+        }
+    }
+
     /// Run the commit barrier: persist, then release the staged world-facing
     /// effects and the snapshot. On failure, withhold both and retry on a
     /// bounded backoff; when the store stays unwritable, escalate to a
@@ -810,6 +877,17 @@ impl Actor {
             Ok(()) => {
                 self.commit_failures = 0;
                 self.commit_retry_at = None;
+                // The batch's decided edges are now durable — the one committed
+                // marker for their final state (v2 P8). Emitted before the
+                // staged world-facing effects run.
+                tracing::info!(
+                    target: "envoix::timeline",
+                    layer = "record",
+                    event = "committed",
+                    attempt = self.session.attempt,
+                    batch = self.apply_seq,
+                    state = ?self.session.state,
+                );
                 for effect in std::mem::take(&mut self.staged) {
                     self.run_effect(effect).await;
                 }
@@ -825,8 +903,21 @@ impl Actor {
                         attempt = self.commit_failures,
                         "record commit failed; snapshot and effects withheld"
                     );
+                    tracing::info!(
+                        target: "envoix::timeline",
+                        layer = "record",
+                        event = "commit_retry",
+                        attempt = self.commit_failures,
+                        batch = self.apply_seq,
+                    );
                 } else {
                     tracing::error!(%error, "record store unwritable; failing the session");
+                    tracing::info!(
+                        target: "envoix::timeline",
+                        layer = "record",
+                        event = "commit_failed",
+                        batch = self.apply_seq,
+                    );
                     self.storage_failed().await;
                 }
             }
@@ -1073,6 +1164,7 @@ mod tests {
                 current: None,
                 pending: None,
                 seq: 0,
+                apply_seq: 0,
                 confirm_deadline: None,
                 polls: Vec::new(),
                 poll_key: None,

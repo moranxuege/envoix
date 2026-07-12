@@ -229,6 +229,65 @@ pub struct Session {
     pub facts: Facts,
 }
 
+impl AttemptEvent {
+    /// The variant name, for the diagnostic timeline (docs/design/diagnostics.md).
+    pub fn kind(&self) -> &'static str {
+        match self {
+            AttemptEvent::Advertised => "Advertised",
+            AttemptEvent::Pairing => "Pairing",
+            AttemptEvent::Connecting => "Connecting",
+            AttemptEvent::Connected(_) => "Connected",
+            AttemptEvent::PathChanged(_) => "PathChanged",
+            AttemptEvent::Started { .. } => "Started",
+            AttemptEvent::Progress { .. } => "Progress",
+            AttemptEvent::Verifying { .. } => "Verifying",
+            AttemptEvent::Verified => "Verified",
+            AttemptEvent::Confirming { .. } => "Confirming",
+            AttemptEvent::Completed { .. } => "Completed",
+            AttemptEvent::Failed { .. } => "Failed",
+            AttemptEvent::RunEnded { .. } => "RunEnded",
+        }
+    }
+}
+
+impl Input {
+    /// A short label for the timeline's `machine.input` event. Core events fold
+    /// to their [`AttemptEvent`] name so the input reads as the fact it carries.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Input::Pause => "Pause",
+            Input::Cancel => "Cancel",
+            Input::Resume => "Resume",
+            Input::StageProgress { .. } => "StageProgress",
+            Input::StageComplete => "StageComplete",
+            Input::StageFailed { .. } => "StageFailed",
+            Input::Event { event, .. } => event.kind(),
+            Input::ConfirmTimeout { .. } => "ConfirmTimeout",
+            Input::ReceiptVerified => "ReceiptVerified",
+            Input::ReceiptMismatch => "ReceiptMismatch",
+            Input::StorageFailed => "StorageFailed",
+            Input::ReceiptPosted => "ReceiptPosted",
+        }
+    }
+}
+
+impl Effect {
+    /// The variant name, for the timeline's `effect.dispatched` event.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Effect::StartAttempt { .. } => "StartAttempt",
+            Effect::PauseToken => "PauseToken",
+            Effect::CancelToken => "CancelToken",
+            Effect::StartConfirmTimer => "StartConfirmTimer",
+            Effect::StopConfirmTimer => "StopConfirmTimer",
+            Effect::StartMailboxPoll => "StartMailboxPoll",
+            Effect::StopMailboxPoll => "StopMailboxPoll",
+            Effect::PostReceipt => "PostReceipt",
+            Effect::DiscardPartial => "DiscardPartial",
+        }
+    }
+}
+
 impl Session {
     /// A new session; the driver launches attempt 1 at construction.
     pub fn new(direction: TransferDirection) -> Self {
@@ -1148,5 +1207,26 @@ mod serde_tests {
         // wire-adjacent TransferDirection); the app reads direction from its own
         // Spec, not the snapshot.
         assert_eq!(v["direction"], "Send");
+    }
+
+    #[test]
+    fn kind_labels_name_variants_and_fold_events() {
+        assert_eq!(Input::Cancel.kind(), "Cancel");
+        assert_eq!(Input::StageComplete.kind(), "StageComplete");
+        assert_eq!(Input::ReceiptPosted.kind(), "ReceiptPosted");
+        // a core event folds to its AttemptEvent name — the input reads as the
+        // fact it carries, not the generic "Event".
+        let verified = Input::Event {
+            attempt: 1,
+            event: AttemptEvent::Verified,
+        };
+        assert_eq!(verified.kind(), "Verified");
+        let progress = Input::Event {
+            attempt: 1,
+            event: AttemptEvent::Progress { bytes: 0 },
+        };
+        assert_eq!(progress.kind(), "Progress");
+        assert_eq!(Effect::PostReceipt.kind(), "PostReceipt");
+        assert_eq!(Effect::StartAttempt { resume: true }.kind(), "StartAttempt");
     }
 }
