@@ -37,6 +37,11 @@ pub enum PauseOrigin {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "state", content = "origin")]
 pub enum State {
+    /// SEND only: staging a platform source (e.g. an Android `content://`)
+    /// into the transfer's path before any attempt. No peer is contacted; the
+    /// record exists so the staging survives process death (see the
+    /// `Preparing` design addendum).
+    Preparing,
     /// Advertising an invite / parked in the room; no peer yet.
     Waiting,
     /// Pairing and connecting.
@@ -125,6 +130,10 @@ pub enum Input {
     Cancel,
     /// User intent: resume/retry — launches a new attempt.
     Resume,
+    /// Staging finished: the source is at the transfer's path, launch attempt 1.
+    StageComplete,
+    /// Staging failed (e.g. the source could not be read); the reason is kept.
+    StageFailed { reason: String },
     /// A core event from attempt `attempt`.
     Event { attempt: u32, event: AttemptEvent },
     /// The driver's confirm timer for attempt `attempt` expired.
@@ -254,6 +263,22 @@ impl Session {
                 self.facts.proof_delivered = true;
                 Vec::new()
             }
+            Input::StageComplete if self.state == State::Preparing => {
+                // Staging produced the source; launch the first attempt. attempt
+                // stays 1 - this IS the first attempt, deferred past staging -
+                // and it is fresh: a staged send is always a user-initiated new
+                // transfer.
+                self.state = State::Connecting;
+                vec![Effect::StartAttempt { resume: false }]
+            }
+            Input::StageComplete => Vec::new(), // not Preparing: no legal edge
+            Input::StageFailed { reason } if self.state == State::Preparing => {
+                self.state = State::Failed;
+                self.reason = Some(reason);
+                self.reason_code = Some(FailureCode::Other);
+                Vec::new()
+            }
+            Input::StageFailed { .. } => Vec::new(),
             Input::StorageFailed
                 if !matches!(
                     self.state,
@@ -315,8 +340,9 @@ impl Session {
                 effects.push(Effect::CancelToken);
                 effects
             }
-            // A resting-but-unfinished card can still be abandoned.
-            State::Paused(_) | State::Unconfirmed => {
+            // A resting-but-unfinished card can still be abandoned. Preparing
+            // has no attempt/peer, so no CancelToken - just abandon.
+            State::Preparing | State::Paused(_) | State::Unconfirmed => {
                 let effects = self.exit_effects();
                 self.state = State::Cancelled;
                 effects
@@ -589,6 +615,60 @@ mod tests {
             State::Completed,
             "terminal states are not rewritten"
         );
+    }
+
+    fn preparing(direction: TransferDirection) -> Session {
+        let mut s = Session::new(direction);
+        s.state = State::Preparing;
+        s
+    }
+
+    #[test]
+    fn stage_complete_launches_the_first_attempt_fresh() {
+        let mut s = preparing(Send);
+        let effects = s.reduce(Input::StageComplete);
+        assert_eq!(s.state, State::Connecting);
+        assert_eq!(
+            s.attempt, 1,
+            "still the first attempt, deferred past staging"
+        );
+        assert_eq!(effects, vec![Effect::StartAttempt { resume: false }]);
+    }
+
+    #[test]
+    fn stage_failed_fails_the_transfer_with_its_reason() {
+        let mut s = preparing(Send);
+        let effects = s.reduce(Input::StageFailed {
+            reason: "source vanished".into(),
+        });
+        assert_eq!(s.state, State::Failed);
+        assert_eq!(s.reason.as_deref(), Some("source vanished"));
+        assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn cancel_during_preparing_abandons_without_a_wire_effect() {
+        let mut s = preparing(Send);
+        let effects = s.reduce(Input::Cancel);
+        assert_eq!(s.state, State::Cancelled);
+        assert!(
+            !effects.contains(&Effect::CancelToken),
+            "no attempt/peer exists, so nothing to signal"
+        );
+    }
+
+    #[test]
+    fn pause_during_preparing_is_a_noop() {
+        let mut s = preparing(Send);
+        assert!(s.reduce(Input::Pause).is_empty());
+        assert_eq!(s.state, State::Preparing, "nothing to pause");
+    }
+
+    #[test]
+    fn stage_inputs_off_preparing_are_dropped() {
+        let mut s = transferring(Send);
+        assert!(s.reduce(Input::StageComplete).is_empty());
+        assert_eq!(s.state, State::Transferring, "no legal edge");
     }
 
     #[test]
