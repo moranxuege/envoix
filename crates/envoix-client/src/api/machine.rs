@@ -1218,6 +1218,31 @@ mod serde_tests {
         assert_eq!(v["direction"], "Send");
     }
 
+    /// Pins every `State` to the exact wire string the Android `Status` enum
+    /// maps (`Status.fromWire`, `Transfer.kt`). A rename here breaks this test
+    /// instead of silently freezing a card on the unmapped string. Keep in sync
+    /// with the Kotlin `every_wire_string_maps_to_a_status` test.
+    #[test]
+    fn every_state_serializes_to_its_wire_string() {
+        let cases: &[(State, &str)] = &[
+            (State::Preparing, "preparing"),
+            (State::Waiting, "waiting"),
+            (State::Connecting, "connecting"),
+            (State::Verifying, "verifying"),
+            (State::Transferring, "transferring"),
+            (State::Confirming, "confirming"),
+            (State::Paused(PauseOrigin::Local), "paused"),
+            (State::Unconfirmed, "unconfirmed"),
+            (State::Completed, "completed"),
+            (State::Failed, "failed"),
+            (State::Cancelled, "cancelled"),
+        ];
+        for (state, expected) in cases {
+            let v = serde_json::to_value(state).unwrap();
+            assert_eq!(v["state"].as_str(), Some(*expected), "{state:?}");
+        }
+    }
+
     #[test]
     fn kind_labels_name_variants_and_fold_events() {
         assert_eq!(Input::Cancel.kind(), "Cancel");

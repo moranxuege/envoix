@@ -604,19 +604,13 @@ class TransferService : Service() {
 
         val state = s.optString("state")
         val status =
-            when (state) {
-                "preparing" -> Status.Preparing
-                "waiting" -> Status.Waiting
-                "connecting" -> Status.Connecting
-                "verifying" -> Status.Verifying
-                "transferring" -> Status.Transferring
-                "confirming" -> Status.Confirming
-                "paused" -> Status.Paused
-                "unconfirmed" -> Status.Unconfirmed
-                "completed" -> Status.Completed
-                "failed" -> Status.Failed
-                "cancelled" -> Status.Cancelled
-                else -> return
+            Status.fromWire(state) ?: run {
+                // Never silent: an unmapped core State would otherwise drop the
+                // whole snapshot and freeze the card with no trace. Surface it
+                // (the Kotlin Status enum is out of sync with the Rust State).
+                LogStore.append("app: unmapped session state '$state' (id=$id) — Status enum out of sync with core; snapshot dropped")
+                OpLog.add("unmapped state '$state' id=$id")
+                return
             }
         val reason = s.optString("reason").ifEmpty { null }
         val bytes = s.optLong("bytes")

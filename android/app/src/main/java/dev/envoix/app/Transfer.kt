@@ -2,7 +2,35 @@ package dev.envoix.app
 
 enum class Direction { Send, Receive }
 
-enum class Status { Preparing, Waiting, Connecting, Verifying, Transferring, Confirming, Paused, Completed, Unconfirmed, Failed, Cancelled }
+/**
+ * Card status. Each variant carries the exact `wire` string the Rust `State`
+ * enum serializes to (serde snake_case, `envoix-client/src/api/machine.rs`) —
+ * the wire string is the single source, so [fromWire] can't silently drift from
+ * the enum. A Rust rename breaks the Rust serialization test; an unmapped state
+ * is surfaced by [fromWire] returning null (never a silent card freeze).
+ */
+enum class Status(
+    val wire: String,
+) {
+    Preparing("preparing"),
+    Waiting("waiting"),
+    Connecting("connecting"),
+    Verifying("verifying"),
+    Transferring("transferring"),
+    Confirming("confirming"),
+    Paused("paused"),
+    Completed("completed"),
+    Unconfirmed("unconfirmed"),
+    Failed("failed"),
+    Cancelled("cancelled"),
+    ;
+
+    companion object {
+        /** The core `State` wire string → Status, or null if this build has no
+         *  mapping for it (the Rust enum gained a state we don't know). */
+        fun fromWire(wire: String): Status? = entries.firstOrNull { it.wire == wire }
+    }
+}
 
 /** One transfer's observable state, shown as a card. */
 data class Transfer(
