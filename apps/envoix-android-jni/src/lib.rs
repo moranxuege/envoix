@@ -715,11 +715,15 @@ mod timeline_tests {
 
     use std::sync::{Arc, Mutex};
 
+    // Captured (session_id, target) pairs — a named type keeps the Arc<Mutex<…>>
+    // below out of clippy::type_complexity.
+    type Captured = Vec<(Option<u64>, String)>;
+
     // A capturing stand-in for TimelineLayer: same session_id lookup + target
     // guard, but records to a Vec instead of the JNI sink.
     struct Cap {
         guard: bool,
-        out: Arc<Mutex<Vec<(Option<u64>, String)>>>,
+        out: Arc<Mutex<Captured>>,
     }
     impl<S> tracing_subscriber::layer::Layer<S> for Cap
     where
@@ -745,7 +749,7 @@ mod timeline_tests {
         }
     }
 
-    fn run_capture(guard: bool, filtered: bool) -> Vec<(Option<u64>, String)> {
+    fn run_capture(guard: bool, filtered: bool) -> Captured {
         use tracing_subscriber::Layer as _;
         use tracing_subscriber::layer::SubscriberExt;
         let out = Arc::new(Mutex::new(Vec::new()));
@@ -772,8 +776,7 @@ mod timeline_tests {
                 tracing::info!(target: "iroh_relay", "noise that must NOT reach the timeline");
             });
         });
-        let v = out.lock().unwrap().clone();
-        v
+        out.lock().unwrap().clone()
     }
 
     // WHY TimelineLayer must NOT use a per-layer filter (the a1 bug): a
