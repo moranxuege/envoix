@@ -28,6 +28,19 @@ pub const MIN_CHUNK_SIZE: usize = 16 * 1024;
 /// Maximum accepted transfer chunk size.
 pub const MAX_CHUNK_SIZE: usize = 16 * 1024 * 1024;
 
+// A max-size Chunk frame is MAX_CHUNK_SIZE of payload plus the frame header and
+// the chunk's index/offset metadata; the codec rejects any frame longer than
+// `envoix_protocol::MAX_FRAME_SIZE` (protocol/src/lib.rs). That crate sits below
+// this one and hardcodes the literal, so the invariant is unenforced there —
+// pin it here (where both consts are visible) so raising MAX_CHUNK_SIZE without
+// raising MAX_FRAME_SIZE is a COMPILE error instead of silently rejecting valid
+// max-size chunks at runtime. 1 KiB comfortably covers the per-frame overhead.
+const _: () = assert!(
+    envoix_protocol::MAX_FRAME_SIZE >= MAX_CHUNK_SIZE + 1024,
+    "MAX_FRAME_SIZE must exceed MAX_CHUNK_SIZE by the chunk-frame overhead; \
+     raising MAX_CHUNK_SIZE requires raising envoix_protocol::MAX_FRAME_SIZE too",
+);
+
 /// Validate a chunk size against the transfer engine's constraints: it must fall
 /// within [`MIN_CHUNK_SIZE`]..=[`MAX_CHUNK_SIZE`] and be a power of two.
 pub fn validate_chunk_size(chunk_size: usize) -> Result<(), CoreError> {
