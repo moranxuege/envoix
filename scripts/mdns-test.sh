@@ -70,8 +70,11 @@ check_avd() {
     config="$(avd_config "$1")"
 
     [ -f "$config" ] || die "missing config.ini for AVD '$1'"
-    grep -Fqx 'abi.type=x86_64' "$config" || die "AVD '$1' is not x86_64"
-    ! grep -Fqx 'PlayStore.enabled=true' "$config" ||
+    # Tolerate both `key=value` and `key = value` config.ini spacing (Android
+    # Studio / avdmanager differ), so a compatible AVD isn't falsely rejected.
+    grep -Eq '^abi\.type[[:space:]]*=[[:space:]]*x86_64[[:space:]]*$' "$config" ||
+        die "AVD '$1' is not x86_64"
+    ! grep -Eq '^PlayStore\.enabled[[:space:]]*=[[:space:]]*true[[:space:]]*$' "$config" ||
         die "AVD '$1' uses a Google Play image; use a rootable Google APIs AVD"
 }
 
