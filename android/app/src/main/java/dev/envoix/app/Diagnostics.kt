@@ -108,27 +108,31 @@ object Diagnostics {
         body: String,
     ) = "\n══════ $name ══════\n" + body.ifBlank { "(empty)" }
 
-    /** Last [maxBytes] UTF-8 bytes, marked when clipped — failures live at the tail. */
+    /** Last bytes, marked when clipped — failures live at the tail. The marker's
+     *  own bytes are RESERVED, so the result never exceeds [maxBytes]. */
     fun tail(
         text: String,
         maxBytes: Int,
     ): String {
         val bytes = text.toByteArray(Charsets.UTF_8)
         if (bytes.size <= maxBytes) return text
-        val note = "[… trimmed — last ${maxBytes / 1024} KB of ${bytes.size / 1024} KB]\n"
-        return note + String(bytes, bytes.size - maxBytes, maxBytes, Charsets.UTF_8)
+        val note = "[… trimmed — tail of ${bytes.size / 1024} KB]\n"
+        val room = (maxBytes - note.toByteArray(Charsets.UTF_8).size).coerceAtLeast(0)
+        return note + String(bytes, bytes.size - room, room, Charsets.UTF_8)
     }
 
-    /** First AND last [maxBytes]/2 bytes, marked when clipped — for the raw trace,
-     *  where the connection setup (head) matters as much as the failure (tail). */
+    /** First AND last bytes, marked when clipped — for the raw trace, where the
+     *  connection setup (head) matters as much as the failure (tail). The marker
+     *  is reserved, so the result never exceeds [maxBytes]. */
     fun headAndTail(
         text: String,
         maxBytes: Int,
     ): String {
         val bytes = text.toByteArray(Charsets.UTF_8)
         if (bytes.size <= maxBytes) return text
-        val half = maxBytes / 2
-        val note = "\n[… trimmed — kept first & last ${half / 1024} KB of ${bytes.size / 1024} KB …]\n"
+        val note = "\n[… middle trimmed — head & tail of ${bytes.size / 1024} KB …]\n"
+        val room = (maxBytes - note.toByteArray(Charsets.UTF_8).size).coerceAtLeast(0)
+        val half = room / 2
         return String(bytes, 0, half, Charsets.UTF_8) + note + String(bytes, bytes.size - half, half, Charsets.UTF_8)
     }
 }

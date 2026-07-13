@@ -41,10 +41,14 @@ object TransferLogs {
         runCatching { f.appendText(line + "\n") }
         val n = counts.merge(id, 1, Int::plus) ?: 1
         if (n % CHECK_EVERY == 0 && f.length() > FILE_CAP) {
-            // keep the newest half; the tail is where failures live
+            // Keep the HEAD (the early timeline — session.created, the first
+            // transitions) AND the TAIL (recent events / the failure), dropping
+            // the middle. "Newest half" alone let high-volume raw trace evict the
+            // low-volume timeline's beginning on disk (v2 P6 — preserve the head).
             runCatching {
                 val text = f.readText()
-                f.writeText("[… truncated — newest half kept]\n" + text.takeLast((FILE_CAP / 2).toInt()))
+                val keep = (FILE_CAP / 4).toInt()
+                f.writeText(text.take(keep) + "\n[… middle trimmed — head & tail kept]\n" + text.takeLast(keep))
             }
         }
     }
