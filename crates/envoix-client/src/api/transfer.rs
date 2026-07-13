@@ -241,6 +241,36 @@ impl Transfer {
         self.cancel.clone()
     }
 
+    /// Cancels the attempt as an explicit user intent (the peer hears the
+    /// interrupt, best-effort) and waits for the task to end, so callers can
+    /// safely delete files the engine writes on its way out (it checkpoints
+    /// resume state even on the cancel path). A task wedged past the grace
+    /// period is aborted - never left running headless.
+    pub(crate) async fn cancel_and_join(mut self) {
+        self.cancel.cancel();
+        let Some(mut task) = self.task.take() else {
+            return;
+        };
+        if tokio::time::timeout(std::time::Duration::from_secs(5), &mut task)
+            .await
+            .is_err()
+        {
+            task.abort();
+        }
+    }
+
+    /// Tears the attempt down as an infrastructure fact, not a user intent:
+    /// the task is aborted and nothing is said on the wire - no interrupt, no
+    /// pause. The peer sees the connection drop and lands in its
+    /// connection-lost handling (partial kept, durable facts), exactly as if
+    /// this process had crashed. Detach must never masquerade as a cancel: a
+    /// peer that hears "interrupted by user" discards its partial.
+    pub(crate) fn detach(mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+
     /// Waits for the transfer to finish and returns its outcome. Events not
     /// yet consumed are discarded.
     pub async fn wait(mut self) -> Result<TransferSummary, TransferError> {
@@ -257,7 +287,11 @@ impl Transfer {
 
 impl Drop for Transfer {
     fn drop(&mut self) {
-        self.cancel.cancel();
+        // Only a still-owned attempt is interrupted; `wait` (finished) and
+        // `detach` (deliberately silent) take the task out first.
+        if self.task.is_some() {
+            self.cancel.cancel();
+        }
     }
 }
 
@@ -373,7 +407,13 @@ impl From<SessionEvent> for TransferEvent {
                 file_name,
                 bytes_hashed,
             },
-            SessionEvent::Confirming { transfer_id } => TransferEvent::Confirming { transfer_id },
+            SessionEvent::Confirming {
+                transfer_id,
+                file_hash,
+            } => TransferEvent::Confirming {
+                transfer_id,
+                file_hash,
+            },
             SessionEvent::Completed {
                 transfer_id,
                 file_name,
@@ -404,6 +444,100 @@ mod tests {
     use super::*;
     use envoix_session::{EventSink as _, TransferDirection};
     use envoix_types::TransferId;
+
+    #[tokio::test]
+    async fn detach_aborts_the_task_and_says_nothing() {
+        let (_events_tx, events) = mpsc::unbounded_channel();
+        let cancel = TransferCancelToken::new();
+        // The task holds `alive_tx`; an abort drops it without sending.
+        let (alive_tx, alive_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _keep = alive_tx;
+            std::future::pending::<Result<TransferSummary, PublicError>>().await
+        });
+        let transfer = Transfer::new(
+            events,
+            cancel.clone(),
+            PhaseCell::new(),
+            StatsHandle::new(),
+            task,
+        );
+
+        transfer.detach();
+
+        alive_rx.await.unwrap_err(); // aborted, not completed
+        assert!(
+            !cancel.is_cancelled(),
+            "detach is not a user intent: the interrupt token must stay untouched \
+             (a triggered token sends an interrupt frame the peer reads as cancel)"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_and_join_fires_the_token_and_waits_for_the_task() {
+        let (_events_tx, events) = mpsc::unbounded_channel();
+        let cancel = TransferCancelToken::new();
+        // A cooperative engine: ends as soon as the token fires.
+        let token = cancel.clone();
+        let task = tokio::spawn(async move {
+            token.cancelled().await;
+            Err(PublicError::Transfer("cancelled".into()))
+        });
+        let transfer = Transfer::new(
+            events,
+            cancel.clone(),
+            PhaseCell::new(),
+            StatsHandle::new(),
+            task,
+        );
+
+        transfer.cancel_and_join().await;
+
+        assert!(cancel.is_cancelled(), "discard is an explicit user intent");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancel_and_join_aborts_a_wedged_task() {
+        let (_events_tx, events) = mpsc::unbounded_channel();
+        let cancel = TransferCancelToken::new();
+        // A wedged engine: ignores the token (e.g. an unbounded await).
+        let (alive_tx, alive_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _keep = alive_tx;
+            std::future::pending::<Result<TransferSummary, PublicError>>().await
+        });
+        let transfer = Transfer::new(
+            events,
+            cancel.clone(),
+            PhaseCell::new(),
+            StatsHandle::new(),
+            task,
+        );
+
+        transfer.cancel_and_join().await; // paused clock: grace elapses instantly
+
+        alive_rx.await.unwrap_err(); // the wedged task was aborted, not leaked
+    }
+
+    #[tokio::test]
+    async fn plain_drop_still_cancels_a_live_attempt() {
+        let (_events_tx, events) = mpsc::unbounded_channel();
+        let cancel = TransferCancelToken::new();
+        let task = tokio::spawn(async {
+            std::future::pending::<Result<TransferSummary, PublicError>>().await
+        });
+        let transfer = Transfer::new(
+            events,
+            cancel.clone(),
+            PhaseCell::new(),
+            StatsHandle::new(),
+            task,
+        );
+
+        drop(transfer);
+
+        assert!(cancel.is_cancelled());
+    }
 
     #[tokio::test]
     async fn session_adapter_maps_legacy_events() {

@@ -15,7 +15,6 @@ use std::time::Duration;
 
 use envoix_session::TransferDirection;
 use envoix_storage::LocalFileStorage;
-use envoix_types::TransferId;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -29,6 +28,23 @@ use super::{Client, PeerSource, TransferEvent, TransferOptions, TransferRequest}
 
 /// How long a send waits in Confirming before escalating to the mailbox.
 const CONFIRM_TIMEOUT: Duration = Duration::from_secs(20);
+/// Commit-barrier retry backoff; after the last entry the session escalates
+/// to [`Input::StorageFailed`] - a visible failure, never a silent stall.
+const COMMIT_RETRY: [Duration; 3] = [
+    Duration::from_secs(1),
+    Duration::from_secs(5),
+    Duration::from_secs(15),
+];
+
+/// World-facing effects wait for the commit barrier; in-memory bookkeeping
+/// (timers, polls) and token signals do not - stopping an attempt is
+/// idempotent and must never wait on a disk.
+fn is_post_commit(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::StartAttempt { .. } | Effect::PostReceipt | Effect::DiscardPartial
+    )
+}
 /// The state-scoped mailbox poll schedule (design: bounded). Runs in PARALLEL
 /// with the Confirming ack wait - whichever proof lands first wins - and is
 /// restarted on entering Unconfirmed.
@@ -53,6 +69,13 @@ pub struct ClientContext {
     /// CIDR deny-list for candidate addresses.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub candidates_deny: Vec<String>,
+    /// Receipt-mailbox endpoint (e.g. `https://rdz.example:8460`), frozen at
+    /// session creation. The courier gets it from the driver's notices, so a
+    /// transfer keeps confirming against the mailbox it was created with even
+    /// if the (diagnostics) setting is later cleared or edited. `None` = the
+    /// frontend's current setting (pre-field records).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_server: Option<String>,
 }
 
 impl ClientContext {
@@ -108,11 +131,16 @@ pub enum SessionNotice {
     /// [`TransferSession::receipt_response`] with the body (or None on 404).
     FetchReceipt {
         key: String,
+        /// The durable endpoint from the session's context; `None` means the
+        /// frontend falls back to its current setting (pre-field records).
+        server: Option<String>,
     },
     /// POST the sealed blob to `<server>/receipts/<key>` (retry on failure).
     PostReceipt {
         key: String,
         blob: Vec<u8>,
+        /// See [`Self::FetchReceipt::server`].
+        server: Option<String>,
     },
 }
 
@@ -120,7 +148,12 @@ enum Cmd {
     Pause,
     Cancel,
     Resume,
-    ReceiptResponse(Option<Vec<u8>>),
+    /// The courier's answer, stamped with the mailbox key it answers so a
+    /// late response from a superseded attempt can be dropped.
+    ReceiptResponse {
+        key: String,
+        blob: Option<Vec<u8>>,
+    },
     /// Courier ack-back: the receipt POST got its 2xx.
     ReceiptPosted,
     /// D2 (Remove): delete the partial, resume state, and receipt sidecars.
@@ -128,6 +161,8 @@ enum Cmd {
     /// Serve the peer's re-verify (courier tier: one-shot, bounded, never
     /// touches the machine, the record, or the card).
     ServeReverify,
+    /// Replace the frontend-owned card context persisted with the record.
+    SetExtras(serde_json::Value),
 }
 
 /// Handle to a running transfer session (one card).
@@ -142,6 +177,7 @@ impl TransferSession {
     pub fn start(
         context: SessionContext,
         record: Option<(RecordStore, u64)>,
+        extras: Option<serde_json::Value>,
     ) -> Result<(Self, mpsc::UnboundedReceiver<SessionNotice>), TransferError> {
         let client = context.client.client()?;
         let direction = context.params.direction;
@@ -150,6 +186,7 @@ impl TransferSession {
             context,
             Session::new(direction),
             record,
+            extras,
             true,
         ))
     }
@@ -174,10 +211,26 @@ impl TransferSession {
                 | State::Transferring
                 | State::Confirming
         ) {
-            session.state = State::Paused(PauseOrigin::Lost);
-            session.reason = Some("interrupted by an app restart".into());
+            // `sent_hash` is recorded exactly at Confirming: every byte and
+            // the Complete frame were sent. That durable fact makes the
+            // honest restored state Unconfirmed (mailbox poll resumes below),
+            // not Paused(Lost) - only the ACK died with the process.
+            if session.state == State::Confirming && session.sent_hash.is_some() {
+                session.state = State::Unconfirmed;
+                session.reason = Some("app restarted while awaiting confirmation".into());
+            } else {
+                session.state = State::Paused(PauseOrigin::Lost);
+                session.reason = Some("interrupted by an app restart".into());
+            }
         }
-        Ok(Self::spawn(client, record.context, session, store, false))
+        Ok(Self::spawn(
+            client,
+            record.context,
+            session,
+            store,
+            record.platform_extras,
+            false,
+        ))
     }
 
     fn spawn(
@@ -185,6 +238,7 @@ impl TransferSession {
         context: SessionContext,
         mut session: Session,
         record: Option<(RecordStore, u64)>,
+        platform_extras: Option<serde_json::Value>,
         launch: bool,
     ) -> (Self, mpsc::UnboundedReceiver<SessionNotice>) {
         // A sender always knows its file: seed the name from the source path
@@ -205,6 +259,7 @@ impl TransferSession {
             cmds: cmd_rx,
             notices: notice_tx,
             current: None,
+            pending: None,
             seq: 0,
             confirm_deadline: None,
             polls: Vec::new(),
@@ -212,6 +267,10 @@ impl TransferSession {
             rate: RateTracker::default(),
             last_progress_snapshot: None,
             record,
+            platform_extras,
+            staged: Vec::new(),
+            commit_failures: 0,
+            commit_retry_at: None,
             launch,
         };
         tokio::spawn(actor.run());
@@ -231,9 +290,10 @@ impl TransferSession {
     }
 
     /// The courier's answer to a [`SessionNotice::FetchReceipt`] — the raw
-    /// mailbox blob, or `None` when the slot was empty (404).
-    pub fn receipt_response(&self, blob: Option<Vec<u8>>) {
-        let _ = self.cmds.send(Cmd::ReceiptResponse(blob));
+    /// mailbox blob, or `None` when the slot was empty (404). `key` echoes
+    /// the fetched slot, so an answer from a superseded attempt is dropped.
+    pub fn receipt_response(&self, key: String, blob: Option<Vec<u8>>) {
+        let _ = self.cmds.send(Cmd::ReceiptResponse { key, blob });
     }
 
     /// Courier ack-back: the receipt POST was acknowledged - the receiver's
@@ -253,6 +313,12 @@ impl TransferSession {
     /// machine are untouched.
     pub fn serve_reverify(&self) {
         let _ = self.cmds.send(Cmd::ServeReverify);
+    }
+
+    /// Replace the frontend-owned card context (QR payload, saved URI, ...)
+    /// persisted with the record. Opaque to the core; survives restarts.
+    pub fn set_extras(&self, extras: serde_json::Value) {
+        let _ = self.cmds.send(Cmd::SetExtras(extras));
     }
 }
 
@@ -306,6 +372,20 @@ struct Actor {
     cmds: mpsc::UnboundedReceiver<Cmd>,
     notices: mpsc::UnboundedSender<SessionNotice>,
     current: Option<super::Transfer>,
+    /// Frontend-owned card context, persisted verbatim with the record.
+    platform_extras: Option<serde_json::Value>,
+    /// World-facing effects staged behind the commit barrier: they run only
+    /// after the record write succeeds. In-memory bookkeeping and token
+    /// signals never wait here.
+    staged: Vec<Effect>,
+    /// Consecutive failed commits (drives the retry backoff + escalation).
+    commit_failures: u32,
+    /// When to retry a failed commit.
+    commit_retry_at: Option<Instant>,
+    /// Input produced while running effects (a sync launch failure inside
+    /// [`Effect::StartAttempt`]); drained by the [`Self::apply`] loop so it
+    /// takes the same reduce->effects->persist path as every other input.
+    pending: Option<Input>,
     seq: u64,
     /// (attempt, deadline) of the armed confirm timer.
     confirm_deadline: Option<(u32, Instant)>,
@@ -323,9 +403,11 @@ struct Actor {
 impl Actor {
     async fn run(mut self) {
         if self.launch {
-            // Attempt 1: a user-initiated new transfer, resume per the params.
+            // Attempt 1 waits behind the commit barrier like every other
+            // world-facing effect: nothing contacts a peer for a session the
+            // record has not committed.
             let resume = self.context.params.options.resume;
-            self.launch_attempt(resume);
+            self.staged.push(Effect::StartAttempt { resume });
         } else if self.session.state == super::machine::State::Unconfirmed {
             self.run_effect(Effect::StartMailboxPoll).await;
         } else if self.session.state == super::machine::State::Completed
@@ -333,21 +415,29 @@ impl Actor {
             && !self.session.facts.proof_delivered
         {
             // Restored with the confirmation duty undischarged: re-post.
-            self.run_effect(Effect::PostReceipt).await;
+            self.staged.push(Effect::PostReceipt);
         }
-        self.emit_snapshot(false);
-        self.persist().await;
+        self.try_commit().await;
+        if let Some(input) = self.pending.take() {
+            self.apply(input).await;
+        }
 
         loop {
             let confirm_at = self.confirm_deadline.map(|(_, at)| at);
             let poll_at = self.polls.first().copied();
+            let commit_at = self.commit_retry_at;
             tokio::select! {
                 cmd = self.cmds.recv() => match cmd {
                     Some(cmd) => self.on_cmd(cmd).await,
-                    // All handles dropped: stop the attempt and end the actor.
+                    // All handles dropped: an infrastructure fact, not a user
+                    // intent. Say nothing on the wire - the peer's connection-
+                    // lost handling (partial kept, durable facts) is the
+                    // designed story for silence, and a graceful teardown must
+                    // be indistinguishable from a crash. A cancel here used to
+                    // make the peer discard its partial (lifecycle-issue #4).
                     None => {
                         if let Some(t) = self.current.take() {
-                            t.cancel();
+                            t.detach();
                         }
                         return;
                     }
@@ -365,7 +455,17 @@ impl Actor {
                 _ = sleep_until(poll_at), if poll_at.is_some() => {
                     self.polls.remove(0);
                     if let Some(key) = self.poll_key.clone() {
-                        let _ = self.notices.send(SessionNotice::FetchReceipt { key });
+                        let _ = self.notices.send(SessionNotice::FetchReceipt {
+                            key,
+                            server: self.context.client.receipt_server.clone(),
+                        });
+                    }
+                }
+                _ = sleep_until(commit_at), if commit_at.is_some() => {
+                    self.commit_retry_at = None;
+                    self.try_commit().await;
+                    if let Some(input) = self.pending.take() {
+                        self.apply(input).await;
                     }
                 }
             }
@@ -377,30 +477,53 @@ impl Actor {
             Cmd::Pause => self.apply(Input::Pause).await,
             Cmd::Cancel => self.apply(Input::Cancel).await,
             Cmd::Resume => self.apply(Input::Resume).await,
-            Cmd::ReceiptResponse(Some(blob)) => {
+            Cmd::ReceiptResponse {
+                key,
+                blob: Some(blob),
+            } => {
+                if self.poll_key.as_deref() != Some(&key) {
+                    return; // a late answer for a superseded attempt's slot
+                }
                 let (Some(tid), Some(code)) = (self.session.transfer_id.clone(), self.code())
                 else {
                     return;
                 };
-                // Send side: params.path IS the source file.
-                match receipt::verify_receipt_against_file(
-                    &tid,
-                    &code,
-                    &blob,
-                    &self.context.params.path,
-                )
-                .await
-                {
+                let verified = match &self.session.sent_hash {
+                    // The committed fact (what this attempt actually sent):
+                    // never re-read the source path - it is mutable and may
+                    // have changed or vanished since the send.
+                    Some(sent_hash) => receipt::verify_receipt_against_fact(
+                        &tid,
+                        &code,
+                        &blob,
+                        sent_hash,
+                        self.session.total,
+                    ),
+                    // Sessions persisted before the fact existed: fall back
+                    // to hashing the source file (params.path IS the file).
+                    None => {
+                        receipt::verify_receipt_against_file(
+                            &tid,
+                            &code,
+                            &blob,
+                            &self.context.params.path,
+                        )
+                        .await
+                    }
+                };
+                match verified {
                     Ok(_) => self.apply(Input::ReceiptVerified).await,
                     Err(error) => {
                         tracing::warn!(%error, "mailbox receipt failed verification");
-                        // An authenticated mismatch will not fix itself: stop.
-                        self.polls.clear();
+                        // A machine fact, not a driver decision: recorded and
+                        // persisted; polling continues (the receiver
+                        // overwrites the slot if it re-completes our offer).
+                        self.apply(Input::ReceiptMismatch).await;
                     }
                 }
             }
             Cmd::ReceiptPosted => self.apply(Input::ReceiptPosted).await,
-            Cmd::ReceiptResponse(None) => {} // empty slot; later polls may hit
+            Cmd::ReceiptResponse { blob: None, .. } => {} // empty slot; later polls may hit
             Cmd::ServeReverify => {
                 let mut options = self.context.params.options.clone();
                 options.resume = true;
@@ -422,14 +545,24 @@ impl Actor {
                     });
                 }
             }
+            Cmd::SetExtras(extras) => {
+                self.platform_extras = Some(extras);
+                self.try_commit().await;
+            }
             Cmd::Discard => {
-                self.discard_partial().await;
-                if let Some(name) = &self.session.file_name
-                    && let Err(error) =
-                        LocalFileStorage::delete_receipt(&self.context.params.path, name).await
-                {
-                    tracing::debug!(%error, "discard: receipt");
+                // Stop the attempt BEFORE deleting anything: the engine
+                // checkpoints resume state even on its cancel path, so a live
+                // attempt would resurrect the files removed below. Remove is
+                // an explicit user intent - the peer hears a cancel.
+                if let Some(t) = self.current.take() {
+                    t.cancel_and_join().await;
                 }
+                super::record::discard_artifacts(
+                    &self.context.params.path,
+                    self.session.file_name.as_deref(),
+                    self.session.transfer_id.as_deref(),
+                )
+                .await;
                 // Remove is the one true abandon: the record goes too.
                 if let Some((store, id)) = &self.record {
                     store.delete(*id).await;
@@ -468,9 +601,18 @@ impl Actor {
                     bytes: bytes_transferred,
                 })
             }
-            TransferEvent::Verifying { .. } => Some(AttemptEvent::Verifying),
+            TransferEvent::Verifying {
+                transfer_id,
+                file_name,
+                ..
+            } => Some(AttemptEvent::Verifying {
+                transfer_id: transfer_id.to_string(),
+                file_name,
+            }),
             TransferEvent::Verified { .. } => Some(AttemptEvent::Verified),
-            TransferEvent::Confirming { .. } => Some(AttemptEvent::Confirming),
+            TransferEvent::Confirming { file_hash, .. } => {
+                Some(AttemptEvent::Confirming { file_hash })
+            }
             TransferEvent::Completed {
                 transfer_id,
                 file_name,
@@ -509,41 +651,118 @@ impl Actor {
 
     /// Feed one input to the machine, execute its effects, emit a snapshot.
     async fn apply(&mut self, input: Input) {
-        let progress_only = matches!(
-            input,
-            Input::Event {
-                event: AttemptEvent::Progress { .. },
-                ..
-            }
-        );
         let before = self.session.clone();
-        let effects = self.session.reduce(input);
-        for effect in effects {
-            self.run_effect(effect).await;
-        }
-        if self.session != before {
-            self.emit_snapshot(progress_only);
-            // Persist state changes (not progress ticks: on a crash the
-            // receiver's on-disk resume state is the real resume anyway).
-            if !progress_only {
-                self.persist().await;
+        let mut progress_only = true;
+        let mut next = Some(input);
+        loop {
+            while let Some(input) = next.take() {
+                progress_only &= matches!(
+                    input,
+                    Input::Event {
+                        event: AttemptEvent::Progress { .. },
+                        ..
+                    }
+                );
+                for effect in self.session.reduce(input) {
+                    if is_post_commit(&effect) {
+                        self.staged.push(effect);
+                    } else {
+                        self.run_effect(effect).await;
+                    }
+                }
+                next = self.pending.take();
+            }
+            if self.session == before && self.staged.is_empty() {
+                return; // no legal edge, nothing to commit
+            }
+            if progress_only {
+                // Progress is UI-only and never persisted - but while a
+                // commit is pending, the full-session snapshot would leak
+                // uncommitted state, so it is withheld with the rest.
+                if self.commit_retry_at.is_none() {
+                    self.emit_snapshot(true);
+                }
+                return;
+            }
+            // The commit barrier: the record commits BEFORE the snapshot and
+            // BEFORE any world-facing effect - a crash in between would
+            // restore a world that never knew. Ordering alone is not enough:
+            // the write's SUCCESS gates them (a swallowed failure makes the
+            // barrier fake - PR #48 review, P1).
+            self.try_commit().await;
+            match self.pending.take() {
+                // A drained StartAttempt failed synchronously: reduce it
+                // through the same loop.
+                Some(input) => next = Some(input),
+                None => return,
             }
         }
     }
 
-    /// Write the durable record, when recording is on.
-    async fn persist(&self) {
-        if let Some((store, id)) = &self.record {
-            let record = TransferRecord {
-                id: *id,
-                updated_ms: unix_now_ms(),
-                context: self.context.clone(),
-                session: self.session.clone(),
-            };
-            if let Err(error) = store.save(&record).await {
-                tracing::warn!(%error, "persisting transfer record failed");
+    /// Run the commit barrier: persist, then release the staged world-facing
+    /// effects and the snapshot. On failure, withhold both and retry on a
+    /// bounded backoff; when the store stays unwritable, escalate to a
+    /// VISIBLE failure - never a silent stall.
+    async fn try_commit(&mut self) {
+        match self.persist().await {
+            Ok(()) => {
+                self.commit_failures = 0;
+                self.commit_retry_at = None;
+                for effect in std::mem::take(&mut self.staged) {
+                    self.run_effect(effect).await;
+                }
+                self.emit_snapshot(false);
+            }
+            Err(error) => {
+                let failures = self.commit_failures as usize;
+                if failures < COMMIT_RETRY.len() {
+                    self.commit_failures += 1;
+                    self.commit_retry_at = Some(Instant::now() + COMMIT_RETRY[failures]);
+                    tracing::warn!(
+                        %error,
+                        attempt = self.commit_failures,
+                        "record commit failed; snapshot and effects withheld"
+                    );
+                } else {
+                    tracing::error!(%error, "record store unwritable; failing the session");
+                    self.storage_failed().await;
+                }
             }
         }
+    }
+
+    /// Terminal escalation: the machine records the storage failure and the
+    /// snapshot goes out even though the record could not - the store is
+    /// gone, and a truthful UI is what remains. Staged effects for the
+    /// never-committed states are dropped: they were never world-visible,
+    /// and conservative loses nothing (a kept partial, an unposted receipt).
+    async fn storage_failed(&mut self) {
+        self.staged.clear();
+        self.commit_retry_at = None;
+        for effect in self.session.reduce(Input::StorageFailed) {
+            if !is_post_commit(&effect) {
+                self.run_effect(effect).await;
+            }
+        }
+        let _ = self.persist().await; // best-effort last attempt
+        self.emit_snapshot(false);
+    }
+
+    /// Write the durable record, when recording is on. `Ok` when no store is
+    /// attached: durability is not required, so the barrier is vacuous.
+    async fn persist(&self) -> Result<(), std::io::Error> {
+        let Some((store, id)) = &self.record else {
+            return Ok(());
+        };
+        let record = TransferRecord {
+            version: super::record::RECORD_VERSION,
+            id: *id,
+            updated_ms: unix_now_ms(),
+            context: self.context.clone(),
+            session: self.session.clone(),
+            platform_extras: self.platform_extras.clone(),
+        };
+        store.save(&record).await
     }
 
     async fn run_effect(&mut self, effect: Effect) {
@@ -594,15 +813,16 @@ impl Actor {
             Ok(transfer) => self.current = Some(transfer),
             Err(error) => {
                 // Synchronous validation failure: the attempt never launched.
+                // Queued (never fed to reduce() inline): the apply loop gives
+                // it the same effects+persist+snapshot path as every input -
+                // the old inline shortcut dropped effects and skipped persist,
+                // so the failure vanished on restore.
                 let attempt = self.session.attempt;
                 let failure = Some((failure_code_of(&error), error.message));
-                // Feed inline (no await points needed for pure classify).
-                let effects = self.session.reduce(Input::Event {
+                self.pending = Some(Input::Event {
                     attempt,
                     event: AttemptEvent::RunEnded { failure },
                 });
-                debug_assert!(effects.is_empty(), "classification only");
-                self.emit_snapshot(false);
             }
         }
     }
@@ -624,7 +844,11 @@ impl Actor {
         match receipt::seal_receipt(&tid, &code, &receipt_data) {
             Ok(blob) => {
                 let key = receipt::receipt_mailbox_key(&tid);
-                let _ = self.notices.send(SessionNotice::PostReceipt { key, blob });
+                let _ = self.notices.send(SessionNotice::PostReceipt {
+                    key,
+                    blob,
+                    server: self.context.client.receipt_server.clone(),
+                });
             }
             Err(error) => tracing::warn!(%error, "sealing receipt failed"),
         }
@@ -632,17 +856,12 @@ impl Actor {
 
     /// D1: the peer explicitly cancelled — drop the partial + resume state.
     async fn discard_partial(&self) {
-        let (Some(name), Some(tid)) = (&self.session.file_name, &self.session.transfer_id) else {
-            return;
-        };
-        let tid = TransferId::new(tid.clone());
-        let dir = &self.context.params.path;
-        if let Err(error) = LocalFileStorage::delete_resume_temp(dir, name, &tid).await {
-            tracing::debug!(%error, "discard: temp");
-        }
-        if let Err(error) = LocalFileStorage::delete_resume_state(dir, name, &tid).await {
-            tracing::debug!(%error, "discard: state");
-        }
+        super::record::discard_partial_files(
+            &self.context.params.path,
+            self.session.file_name.as_deref(),
+            self.session.transfer_id.as_deref(),
+        )
+        .await;
     }
 
     /// The pairing code, for sealing/verifying mailbox blobs.
@@ -727,10 +946,12 @@ mod tests {
 
     fn record(direction: TransferDirection, session: Session) -> TransferRecord {
         TransferRecord {
+            version: super::super::record::RECORD_VERSION,
             id: 7,
             updated_ms: 1,
             context: failing_context(direction),
             session,
+            platform_extras: None,
         }
     }
 
@@ -748,6 +969,7 @@ mod tests {
                 cmds: cmd_rx,
                 notices: notice_tx,
                 current: None,
+                pending: None,
                 seq: 0,
                 confirm_deadline: None,
                 polls: Vec::new(),
@@ -755,6 +977,10 @@ mod tests {
                 rate: RateTracker::default(),
                 last_progress_snapshot: None,
                 record: None,
+                platform_extras: None,
+                staged: Vec::new(),
+                commit_failures: 0,
+                commit_retry_at: None,
                 launch: false,
             },
             notice_rx,
@@ -785,7 +1011,7 @@ mod tests {
     #[tokio::test]
     async fn failing_attempt_reaches_failed_via_run_ended() {
         let (_session, mut notices) =
-            TransferSession::start(failing_context(TransferDirection::Send), None).unwrap();
+            TransferSession::start(failing_context(TransferDirection::Send), None, None).unwrap();
         let snapshot = wait_for_state(&mut notices, State::Failed).await;
         assert_eq!(snapshot.session.attempt, 1);
         assert!(snapshot.session.reason.is_some());
@@ -794,7 +1020,7 @@ mod tests {
     #[tokio::test]
     async fn resume_launches_attempt_two() {
         let (session, mut notices) =
-            TransferSession::start(failing_context(TransferDirection::Send), None).unwrap();
+            TransferSession::start(failing_context(TransferDirection::Send), None, None).unwrap();
         wait_for_state(&mut notices, State::Failed).await;
         session.resume();
         let snapshot = wait_for_state(&mut notices, State::Connecting).await;
@@ -820,6 +1046,98 @@ mod tests {
         assert_eq!(snapshot.session.attempt, 1, "no attempt was launched");
     }
 
+    /// The commit barrier under a dead store: no snapshot may leak an
+    /// uncommitted state, the attempt never launches, and after the bounded
+    /// retries the session fails VISIBLY (never a silent stall).
+    #[tokio::test(start_paused = true)]
+    async fn unwritable_store_escalates_to_a_visible_failure() {
+        let root = std::env::temp_dir().join(format!("envoix-deadstore-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&root).await;
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        // A FILE where the store wants a directory: every save fails.
+        tokio::fs::write(root.join("blocker"), b"x").await.unwrap();
+        let store = RecordStore::new(root.join("blocker").join("records"));
+
+        let (_handle, mut notices) = TransferSession::start(
+            failing_context(TransferDirection::Send),
+            Some((store, 5)),
+            None,
+        )
+        .unwrap();
+
+        // The paused clock drives the retry backoff instantly; the FIRST
+        // snapshot ever observed must already be the terminal escalation -
+        // anything earlier would be a view of uncommitted state.
+        let snapshot = loop {
+            match notices.recv().await.expect("stream open") {
+                SessionNotice::Snapshot(s) => break s,
+                _ => continue,
+            }
+        };
+        assert_eq!(snapshot.session.state, State::Failed);
+        assert!(
+            snapshot
+                .session
+                .reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("record store"),
+            "the failure names the store, not the transfer"
+        );
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn restored_confirming_with_sent_hash_is_unconfirmed() {
+        // sent_hash is recorded exactly at Confirming: every byte + the
+        // Complete frame went out, only the ack died with the process. The
+        // honest restored state is Unconfirmed (poll resumes), not Paused.
+        let mut session = Session::new(TransferDirection::Send);
+        session.state = State::Confirming;
+        session.transfer_id = Some("transfer-confirming".into());
+        session.sent_hash = Some("committed-hash".into());
+        let (_handle, mut notices) =
+            TransferSession::restore(record(TransferDirection::Send, session), None).unwrap();
+        let snapshot = wait_for_state(&mut notices, State::Unconfirmed).await;
+        assert_eq!(snapshot.session.state, State::Unconfirmed);
+
+        // Without the committed fact (a pre-fact record), Paused(Lost) stands.
+        let mut session = Session::new(TransferDirection::Send);
+        session.state = State::Confirming;
+        let (_handle, mut notices) =
+            TransferSession::restore(record(TransferDirection::Send, session), None).unwrap();
+        wait_for_state(
+            &mut notices,
+            State::Paused(super::super::machine::PauseOrigin::Lost),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn sync_launch_failure_is_persisted() {
+        // Client::run fails synchronously on empty sources; the failure must
+        // take the same apply path as any input - the old inline shortcut
+        // skipped persist(), so the Failed state vanished on restore.
+        let dir = std::env::temp_dir().join(format!("envoix-launchfail-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let store = RecordStore::new(&dir);
+        let mut context = failing_context(TransferDirection::Send);
+        context.params.sources = Vec::new();
+        let (_handle, mut notices) =
+            TransferSession::start(context, Some((store.clone(), 3)), None).unwrap();
+        wait_for_state(&mut notices, State::Failed).await;
+
+        // Persist happens-before emit: by the time any snapshot is observed,
+        // the record already holds that state. No polling.
+        let persisted = store.load(3).await.expect("record exists");
+        assert_eq!(
+            persisted.session.state,
+            State::Failed,
+            "the record commits before the snapshot goes out"
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
     #[tokio::test]
     async fn restore_unconfirmed_resumes_the_mailbox_poll() {
         let mut session = Session::new(TransferDirection::Send);
@@ -834,7 +1152,7 @@ mod tests {
                 .await
                 .expect("courier request within the poll schedule")
                 .expect("stream open");
-            if let SessionNotice::FetchReceipt { key } = notice {
+            if let SessionNotice::FetchReceipt { key, .. } = notice {
                 assert_eq!(key.len(), 64);
                 break;
             }
@@ -888,7 +1206,7 @@ mod tests {
             .await;
 
         match notices.recv().await.expect("receipt posted") {
-            SessionNotice::PostReceipt { key, blob } => {
+            SessionNotice::PostReceipt { key, blob, .. } => {
                 assert_eq!(key.len(), 64);
                 assert!(!blob.is_empty());
             }
@@ -898,9 +1216,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_receipt_responses_are_dropped_by_key() {
+        let mut context = failing_context(TransferDirection::Send);
+        context.params.sources = vec![PeerSource::Room {
+            code: "123456-kelp-coral".into(),
+            broker: "id@1.2.3.4:5".into(),
+        }];
+        let (mut actor, _notices) = actor_for_context(context);
+        actor.session.state = State::Unconfirmed;
+        actor.session.transfer_id = Some("transfer-current".into());
+        actor.session.sent_hash = Some("sent".into());
+        let current_key = receipt::receipt_mailbox_key("transfer-current");
+        actor.poll_key = Some(current_key.clone());
+        actor.polls = vec![Instant::now() + Duration::from_secs(60)];
+
+        // A late answer for a superseded attempt's slot changes nothing.
+        actor
+            .on_cmd(Cmd::ReceiptResponse {
+                key: receipt::receipt_mailbox_key("transfer-previous"),
+                blob: Some(vec![1, 2, 3]),
+            })
+            .await;
+        assert_eq!(actor.polls.len(), 1, "stale response must not clear polls");
+
+        // The current slot with a mismatching blob records the fact and keeps
+        // the bounded polls alive: the receiver overwrites the slot if it
+        // re-completes our offer, so a later poll can still verify.
+        actor
+            .on_cmd(Cmd::ReceiptResponse {
+                key: current_key,
+                blob: Some(vec![1, 2, 3]),
+            })
+            .await;
+        assert!(
+            actor.session.facts.receipt_mismatch,
+            "the mismatch is a recorded machine fact"
+        );
+        assert_eq!(actor.polls.len(), 1, "polling continues after a mismatch");
+    }
+
+    #[tokio::test]
     async fn cancel_wins_over_the_attempt() {
         let (session, mut notices) =
-            TransferSession::start(failing_context(TransferDirection::Receive), None).unwrap();
+            TransferSession::start(failing_context(TransferDirection::Receive), None, None)
+                .unwrap();
         session.cancel();
         let snapshot = wait_for_state(&mut notices, State::Cancelled).await;
         // Whatever the racing attempt reported, the user's cancel is final.

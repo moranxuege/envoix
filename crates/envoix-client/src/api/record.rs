@@ -16,9 +16,16 @@ use serde::{Deserialize, Deserializer, Serialize, de};
 use super::driver::{SessionContext, SessionParams};
 use super::machine::Session;
 
+/// Current record schema version, written on every save. Old records
+/// deserialize as 0 (fields were only ever added with serde defaults).
+pub const RECORD_VERSION: u32 = 1;
+
 /// One persisted transfer session.
 #[derive(Clone, Debug, Serialize)]
 pub struct TransferRecord {
+    /// Schema version stamp (see [`RECORD_VERSION`]).
+    #[serde(default)]
+    pub version: u32,
     /// The frontend's card id — stable across restarts.
     pub id: u64,
     /// Last-write time, ms since the Unix epoch (display/GC only).
@@ -26,6 +33,12 @@ pub struct TransferRecord {
     /// Complete immutable context needed to recreate the same Rust session.
     pub context: SessionContext,
     pub session: Session,
+    /// Opaque frontend-owned card context (e.g. Android's QR payload and
+    /// saved URI). Persisted verbatim, returned on restore, never read by the
+    /// core: the record is the ONE durable home for a card, but lifecycle
+    /// authority stays with `session`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_extras: Option<serde_json::Value>,
 }
 
 impl<'de> Deserialize<'de> for TransferRecord {
@@ -35,11 +48,15 @@ impl<'de> Deserialize<'de> for TransferRecord {
     {
         #[derive(Deserialize)]
         struct Wire {
+            #[serde(default)]
+            version: u32,
             id: u64,
             updated_ms: u64,
             context: Option<SessionContext>,
             params: Option<SessionParams>,
             session: Session,
+            #[serde(default)]
+            platform_extras: Option<serde_json::Value>,
         }
 
         let wire = Wire::deserialize(deserializer)?;
@@ -54,10 +71,12 @@ impl<'de> Deserialize<'de> for TransferRecord {
             }
         };
         Ok(Self {
+            version: wire.version,
             id: wire.id,
             updated_ms: wire.updated_ms,
             context,
             session: wire.session,
+            platform_extras: wire.platform_extras,
         })
     }
 }
@@ -113,10 +132,74 @@ impl RecordStore {
         records
     }
 
+    /// Load one record by id, if present and parseable.
+    pub async fn load(&self, id: u64) -> Option<TransferRecord> {
+        let bytes = tokio::fs::read(self.path(id)).await.ok()?;
+        match serde_json::from_slice::<TransferRecord>(&bytes) {
+            Ok(record) => Some(record),
+            Err(error) => {
+                tracing::warn!(%error, id, "unparseable record");
+                None
+            }
+        }
+    }
+
     /// Delete a record (Remove — the one true abandon). Missing is fine.
     pub async fn delete(&self, id: u64) {
         let _ = tokio::fs::remove_file(self.path(id)).await;
     }
+}
+
+/// Delete a transfer's resumable partial and its state sidecar.
+pub(crate) async fn discard_partial_files(
+    dir: &std::path::Path,
+    file_name: Option<&str>,
+    transfer_id: Option<&str>,
+) {
+    use envoix_storage::LocalFileStorage;
+    let (Some(name), Some(tid)) = (file_name, transfer_id) else {
+        return;
+    };
+    let tid = envoix_types::TransferId::new(tid.to_owned());
+    if let Err(error) = LocalFileStorage::delete_resume_temp(dir, name, &tid).await {
+        tracing::debug!(%error, "discard: temp");
+    }
+    if let Err(error) = LocalFileStorage::delete_resume_state(dir, name, &tid).await {
+        tracing::debug!(%error, "discard: state");
+    }
+}
+
+/// Delete every on-disk artifact of a transfer: partial, resume state, and
+/// completion receipt. The one D2 implementation, shared by the live actor
+/// (`Cmd::Discard`) and the dead-session path below.
+pub(crate) async fn discard_artifacts(
+    dir: &std::path::Path,
+    file_name: Option<&str>,
+    transfer_id: Option<&str>,
+) {
+    use envoix_storage::LocalFileStorage;
+    discard_partial_files(dir, file_name, transfer_id).await;
+    if let Some(name) = file_name
+        && let Err(error) = LocalFileStorage::delete_receipt(dir, name).await
+    {
+        tracing::debug!(%error, "discard: receipt");
+    }
+}
+
+/// Record-authoritative Remove (D2) without a live session: the record is the
+/// authority for a transfer's existence — a live driver is an optimization,
+/// and its absence must never make Remove skip cleanup (the record would
+/// resurrect the card on the next restore).
+pub async fn discard_record(store: &RecordStore, id: u64) {
+    if let Some(record) = store.load(id).await {
+        discard_artifacts(
+            &record.context.params.path,
+            record.session.file_name.as_deref(),
+            record.session.transfer_id.as_deref(),
+        )
+        .await;
+    }
+    store.delete(id).await;
 }
 
 /// Current Unix time in whole milliseconds.
@@ -135,8 +218,10 @@ mod tests {
 
     fn record(id: u64) -> TransferRecord {
         TransferRecord {
+            version: RECORD_VERSION,
             id,
             updated_ms: 1,
+            platform_extras: None,
             context: SessionContext {
                 client: Default::default(),
                 params: SessionParams {
@@ -184,6 +269,95 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(store.load_all().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn discard_record_cleans_artifacts_without_a_live_session() {
+        use envoix_storage::{LocalFileStorage, TransferReceipt, TransferResumeState};
+        let dir = std::env::temp_dir().join(format!("envoix-discard-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let store = RecordStore::new(dir.join("records"));
+
+        // A paused receive: record + partial + state + receipt on disk.
+        let mut r = record(4);
+        r.context.params.path = dir.clone();
+        r.session.file_name = Some("f.bin".into());
+        r.session.transfer_id = Some("t-1".into());
+        store.save(&r).await.unwrap();
+        let tid = envoix_types::TransferId::new("t-1");
+        let temp = LocalFileStorage::resumable_temp_path(&dir, "f.bin", &tid).unwrap();
+        tokio::fs::write(&temp, b"partial").await.unwrap();
+        LocalFileStorage::write_resume_state(
+            &dir,
+            &TransferResumeState {
+                transfer_id: tid.clone(),
+                file_name: "f.bin".into(),
+                file_size: 100,
+                chunk_size: 10,
+                bytes_received: 7,
+                next_chunk_index: 1,
+                hash_bytes: 7,
+                hash_checkpoint: None,
+                target_file_name: None,
+            },
+        )
+        .await
+        .unwrap();
+        LocalFileStorage::write_receipt(
+            &dir,
+            &TransferReceipt {
+                file_name: "f.bin".into(),
+                file_size: 100,
+                file_hash: "h".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        // No live session anywhere: Remove still cleans everything.
+        discard_record(&store, 4).await;
+
+        assert!(store.load(4).await.is_none(), "record deleted");
+        assert!(
+            !tokio::fs::try_exists(&temp).await.unwrap(),
+            "partial deleted"
+        );
+        assert!(
+            LocalFileStorage::read_receipt(&dir, "f.bin")
+                .await
+                .unwrap()
+                .is_none(),
+            "receipt deleted"
+        );
+        assert!(
+            LocalFileStorage::find_resume_state(&dir, "f.bin", 100, 10)
+                .await
+                .unwrap()
+                .is_none(),
+            "state deleted"
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn platform_extras_survive_the_round_trip() {
+        let dir = std::env::temp_dir().join(format!("envoix-extras-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let store = RecordStore::new(&dir);
+        let mut r = record(11);
+        r.platform_extras =
+            Some(serde_json::json!({"qr": "envoix:abc", "saved_uri": "content://x"}));
+        store.save(&r).await.unwrap();
+
+        let loaded = store.load(11).await.unwrap();
+        assert_eq!(loaded.version, RECORD_VERSION);
+        assert_eq!(
+            loaded.platform_extras.unwrap()["qr"],
+            serde_json::json!("envoix:abc"),
+            "the core persists the frontend's context verbatim"
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[test]

@@ -305,3 +305,68 @@ Field bugs Q2/Q3 traced to two root causes, fixed structurally:
   ruling). A `Facts` struct enters `Session` only when a real edge needs it —
   with terminal Completed, the coercion case that motivated it is
   unrepresentable.
+
+## Addendum (2026-07-11, Phase 1): the fact pipeline formalized
+
+- **`Facts` is real now**: `proof_delivered` (receiver's confirmation duty,
+  gates the restore re-post) and `receipt_mismatch` (see below). Monotone,
+  serde-defaulted — old records parse.
+- **`sent_hash` is the `complete_sent` fact**: recorded exactly at
+  `Confirming` (it is the `Complete` frame's hash), so its presence proves
+  every byte + the Complete frame went out. Consequences:
+  - Mailbox receipts verify against this committed fact, never by re-reading
+    the mutable source path (fallback for pre-fact records only).
+  - **Restore rule**: a record persisted in `Confirming` with `sent_hash`
+    restores as `Unconfirmed` (mailbox poll resumes) — only the ack died with
+    the process. Without the fact: `Paused(Lost)` as before.
+- **`Input::ReceiptMismatch`**: an authenticated mailbox receipt naming
+  different content than the committed facts. It is *stale news, not a
+  verdict* — the receiver overwrites the slot when it re-completes a resumed
+  offer, so the reducer records `facts.receipt_mismatch` and does NOT
+  transition or stop the bounded polls (a later poll can still verify).
+  Meaningful in `Confirming`/`Unconfirmed`; ignored elsewhere.
+- **`Verifying` carries identity** (`transfer_id`, `file_name`): the
+  short-circuit receive paths (existing final, receipt re-confirm) never emit
+  `Started`; without capture the record has no name for Remove to clean.
+- **Every mutation goes through `apply()`**: the sync launch-failure arm no
+  longer feeds `reduce()` inline (it dropped effects and skipped persist —
+  the Failed state vanished on restart); it queues the input and the apply
+  loop drains it through the one reduce→effects→persist→snapshot path.
+
+## Addendum (2026-07-12, three-way review): Phase 0 — the durable commit boundary
+
+One invariant, surfacing at four boundaries (none of which gets a generic
+transaction framework — the stores are different animals; the RULE is what
+is shared): **durable ownership before irreversible effects.**
+
+| Boundary | Instance |
+| --- | --- |
+| Rust record | state transitions commit before snapshots/effects |
+| Android source | staging copies only after a durable `Preparing` record |
+| Android publish | MediaStore/SAF target journaled before copy/delete |
+| Filesystem final name | destination atomically claimed before finalize |
+
+Rules (driver):
+- `reduce()` only produces intended state + effects; the COMMIT gates their
+  release. Ordering alone is not a barrier — the write's SUCCESS is
+  (a swallowed persist failure makes the barrier fake).
+- Effects split in two classes: in-memory bookkeeping (timers, polls) and
+  token signals run immediately — stopping an attempt is idempotent and must
+  never wait on a disk. World-facing effects (`StartAttempt`, `PostReceipt`,
+  `DiscardPartial`) and the snapshot wait behind the commit.
+- On persist failure: withhold (default-safe — no consumer can act on
+  uncommitted state, and nothing needs to remember to check a flag), retry on
+  a bounded backoff, then escalate to `Input::StorageFailed` → a VISIBLE
+  `Failed("record store unwritable")` — never a silent stall. The escalation
+  snapshot is the one last-resort exemption: the store is gone; a truthful UI
+  is what remains. Staged effects for never-committed states are dropped —
+  conservative loses nothing (a kept partial, an unposted receipt).
+- Progress ticks stay UI-only and unpersisted, but are withheld while a
+  commit is pending (the full-session snapshot would leak uncommitted state).
+
+Rule (namespaces): selection is not ownership. Only `create_new`, a
+no-replace link/rename, a reserved URI, or a record write is a claim.
+`finalize_temp_file` claims via `hard_link` (atomic no-replace) and the
+receive loop re-uniquifies on a refused claim — the pick is a hint, the
+claim is the truth. Same shape as the publish journal's target reservation,
+one layer down.

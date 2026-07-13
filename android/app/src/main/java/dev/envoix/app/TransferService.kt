@@ -37,6 +37,9 @@ private data class Spec(
     /** Rendezvous modes to attempt, in order Room → mDNS. */
     val useRoom: Boolean,
     val useMdns: Boolean,
+    /** Receipt-mailbox endpoint frozen at creation; persisted in the record's
+     *  context so confirmation survives later edits to the setting. */
+    val receiptServer: String = "",
 ) {
     fun dir(): Direction = if (direction == "send") Direction.Send else Direction.Receive
 
@@ -57,6 +60,8 @@ private data class Spec(
                 put("use_room", useRoom)
                 put("use_mdns", useMdns)
                 put("resume", resume)
+                put("receipt_server", receiptServer)
+                qrPayload?.let { put("platform_extras", org.json.JSONObject().put("qr", it)) }
             }.toString()
 }
 
@@ -71,14 +76,87 @@ private data class Spec(
 class TransferService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
+    /** One scope per card: staging copy, session collector, and courier calls
+     *  all run inside it, so Remove fences a card's ENTIRE async surface with
+     *  a single cancel (no hidden session can start after, no receipt retry
+     *  survives). Parented to the service scope - teardown cancels all. */
+    private val transferScopes = HashMap<Long, CoroutineScope>()
+
+    @Synchronized
+    private fun transferScope(id: Long): CoroutineScope =
+        transferScopes.getOrPut(id) {
+            CoroutineScope(scope.coroutineContext + SupervisorJob(scope.coroutineContext[Job]))
+        }
+
+    @Synchronized
+    private fun cancelTransferScope(id: Long) {
+        transferScopes.remove(id)?.cancel()
+    }
+
     /** Collector jobs per transfer id (live Rust session ⇔ live job). */
     private val jobs = java.util.concurrent.ConcurrentHashMap<Long, Job>()
 
     /** Last applied snapshot seq per id: out-of-order snapshots are dropped. */
     private val lastSeq = java.util.concurrent.ConcurrentHashMap<Long, Long>()
 
-    /** Latch for the active→resting tray transition. */
-    private var wasActive = false
+    /** Pump generation currently owning each card (stamped into every JNI
+     *  notice). The active collector claims it on its first notice; anything
+     *  else is a stale pump from a torn-down session for the same id and is
+     *  dropped - the fence is explicit, not an artifact of flow mechanics. */
+    private val generations = HashMap<Long, Long>()
+
+    /** True when [notice] belongs to the card's current pump (claiming it if
+     *  the card is unclaimed). */
+    @Synchronized
+    private fun ownsCard(
+        id: Long,
+        notice: JSONObject,
+    ): Boolean {
+        val gen = notice.optLong("gen", 0L)
+        if (gen <= 0L) return true // pre-generation core: let it through
+        val current = generations[id]
+        if (current == null) {
+            generations[id] = gen
+            return true
+        }
+        return gen == current
+    }
+
+    /** Foreground is platform STATE, reconciled against the snapshot stream -
+     *  not a history edge. (The old active->resting latch never fired for a
+     *  card born terminal, e.g. a sync launch failure: the service stayed
+     *  foreground with a stale ongoing notification.) */
+    private var isForeground = false
+
+    /** Cards currently holding a multicast ref (the lock is ref-counted). */
+    private val multicastHolders = HashSet<Long>()
+
+    /** The multicast lock derives from the OBSERVED state, not the launch
+     *  path: held exactly while an mDNS-capable card is active (it disables
+     *  radio multicast filtering - battery). Restore reconciles automatically:
+     *  the first restored snapshot flows through here like any other. */
+    @Synchronized
+    private fun renderMulticast(
+        id: Long,
+        spec: Spec,
+        status: Status,
+    ) {
+        val want = spec.useMdns && isActive(status)
+        val holds = id in multicastHolders
+        if (want && !holds) {
+            runCatching { multicastLock.acquire() }
+            multicastHolders.add(id)
+        } else if (!want && holds) {
+            multicastHolders.remove(id)
+            runCatching { multicastLock.release() }
+        }
+    }
+
+    /** Safety release when a collector dies without a resting snapshot. */
+    @Synchronized
+    private fun releaseMulticast(id: Long) {
+        if (multicastHolders.remove(id)) runCatching { multicastLock.release() }
+    }
 
     /** Held while an mDNS-enabled session runs; Android gates multicast behind it. */
     private val multicastLock by lazy {
@@ -106,6 +184,57 @@ class TransferService : Service() {
         mgr.createNotificationChannel(
             NotificationChannel(CHANNEL, "Transfers", NotificationManager.IMPORTANCE_LOW),
         )
+        gcStaging()
+    }
+
+    /** The per-card receive staging dir (Phase 4): `filesDir/incoming/<id>/`. */
+    private fun receiveStagingDir(id: Long) = File(File(filesDir, "incoming"), id.toString())
+
+    /**
+     * Reconcile staging with the record store at service start, before any
+     * action can run (onCreate precedes onStartCommand, so no session exists
+     * yet and nothing races the deletes):
+     * - per-id staging dirs with no record are crash residue - delete;
+     * - files directly in the incoming root are pre-Phase-4 shared-staging
+     *   leftovers: publish finals (the old pre-receive sweep's recovery
+     *   duty, one last time), drop sidecars. Runs async - new transfers
+     *   never touch the root anymore.
+     */
+    private fun gcStaging() {
+        var recordIds = emptySet<Long>()
+        var legacyRootInUse = false
+        val incoming = File(filesDir, "incoming")
+        runCatching {
+            val records = org.json.JSONArray(Native.listRecords())
+            recordIds =
+                (0 until records.length())
+                    .mapNotNull { records.optJSONObject(it)?.optLong("id", -1L)?.takeIf { id -> id >= 0 } }
+                    .toSet()
+            // Pre-Phase-4 records point straight at the shared root; their
+            // artifacts live there and are NOT garbage while the record does.
+            legacyRootInUse =
+                (0 until records.length()).any {
+                    val rec = records.optJSONObject(it) ?: return@any false
+                    val params = rec.optJSONObject("context")?.optJSONObject("params") ?: rec.optJSONObject("params")
+                    params?.optString("path") == incoming.absolutePath
+                }
+        }
+        incoming.listFiles { f -> f.isDirectory }?.forEach { dir ->
+            if (dir.name.toLongOrNull() !in recordIds) {
+                dir.deleteRecursively()
+                OpLog.add("gc: dropped orphan staging ${dir.name}")
+            }
+        }
+        val send = File(cacheDir, "send")
+        send.listFiles { f -> f.isDirectory }?.forEach { dir ->
+            if (dir.name.toLongOrNull() !in recordIds) dir.deleteRecursively()
+        }
+        if (!legacyRootInUse) {
+            scope.launch(Dispatchers.IO) {
+                sweepStaging(incoming.absolutePath, attributeTo = null)
+                incoming.listFiles { f -> f.isFile }?.forEach { it.delete() }
+            }
+        }
     }
 
     override fun onStartCommand(
@@ -119,7 +248,7 @@ class TransferService : Service() {
                 val room = intent.getStringExtra(EXTRA_ROOM)
                 val path = intent.getStringExtra(EXTRA_PATH)
                 if (direction == null || room == null || path == null) return START_NOT_STICKY
-                val spec =
+                val spec0 =
                     Spec(
                         direction,
                         room,
@@ -132,9 +261,20 @@ class TransferService : Service() {
                         intent.getStringExtra(EXTRA_QR),
                         SettingsStore.settings.value.useRoom && hasInternet(),
                         SettingsStore.settings.value.useMdns,
+                        SettingsStore.settings.value.logServer,
                     )
                 enterForeground()
-                val id = TransferRepository.create(spec.dir(), room)
+                val id = TransferRepository.create(spec0.dir(), room)
+                // Receive staging is keyed by card id (Phase 4): a fresh dir
+                // is empty by construction, so the core's existing-final path
+                // cannot fire on another card's residue, and resume/receipt
+                // artifacts flow only through the card that owns them.
+                val spec =
+                    if (spec0.dir() == Direction.Receive) {
+                        spec0.copy(path = receiveStagingDir(id).absolutePath)
+                    } else {
+                        spec0
+                    }
                 TransferRepository.update(id) {
                     it.copy(
                         qrPayload = spec.qrPayload,
@@ -186,20 +326,24 @@ class TransferService : Service() {
             ACTION_REMOVE -> {
                 val id = intent.getLongExtra(EXTRA_ID, -1L)
                 OpLog.add("remove transfer id=$id", id)
+                // Fence the card's async surface FIRST: staging copy, session
+                // collector, courier retries all die here, so nothing can
+                // start a hidden session or re-create files during cleanup.
+                // (A blocking copy may outlive the signal briefly; its dir is
+                // orphaned then and the startup GC reaps it.)
+                cancelTransferScope(id)
                 // D2, the one true abandon: discard partial + resume state +
-                // receipt, then tear the session and card down. A send's staged
-                // cache copy goes too (they are as big as the file itself).
-                specs[id]?.let { sp ->
-                    val staged = File(cacheDir, "send").absolutePath
-                    if (sp.dir() == Direction.Send && sp.path.startsWith(staged)) {
-                        File(sp.path).delete()
-                    }
-                }
+                // receipt, then tear the session and card down. Both staging
+                // dirs are keyed by card id, so they go too without consulting
+                // the (possibly already gone) spec.
+                File(File(cacheDir, "send"), id.toString()).deleteRecursively()
+                receiveStagingDir(id).deleteRecursively()
                 Native.destroySession(id, true)
                 TransferLogs.delete(id)
-                jobs.remove(id)?.cancel()
+                jobs.remove(id)
                 specs.remove(id)
                 lastSeq.remove(id)
+                generations.remove(id)
                 TransferRepository.remove(id)
                 stopIfIdle()
             }
@@ -207,7 +351,10 @@ class TransferService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun enterForeground() = startForeground(NOTIF_ID, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+    private fun enterForeground() {
+        startForeground(NOTIF_ID, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        isForeground = true
+    }
 
     private val logTime = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
 
@@ -251,7 +398,17 @@ class TransferService : Service() {
                 }
             }
             if (code.isEmpty()) continue
-            if (!TransferRepository.restoreCard(id, if (direction == "send") Direction.Send else Direction.Receive, code)) continue
+            val extras = rec.optJSONObject("platform_extras")
+            if (!TransferRepository.restoreCard(
+                    id,
+                    if (direction == "send") Direction.Send else Direction.Receive,
+                    code,
+                    qrPayload = extras?.optString("qr")?.ifEmpty { null },
+                    savedUri = extras?.optString("saved_uri")?.ifEmpty { null },
+                )
+            ) {
+                continue
+            }
             val spec =
                 Spec(
                     direction,
@@ -272,14 +429,21 @@ class TransferService : Service() {
                 )
             specs[id] = spec
             lastSeq[id] = 0L
+            generations.remove(id)
             val job =
-                scope.launch {
-                    NativeSession.restore(id).collect { notice ->
-                        when (notice.optString("notice")) {
-                            "snapshot" -> onSnapshot(id, spec, notice)
-                            "fetch_receipt" -> onFetchReceipt(id, notice.optString("key"))
-                            "post_receipt" -> onPostReceipt(id, notice)
+                transferScope(id).launch {
+                    try {
+                        NativeSession.restore(id).collect { notice ->
+                            if (!ownsCard(id, notice)) return@collect
+                            when (notice.optString("notice")) {
+                                "snapshot" -> onSnapshot(id, spec, notice)
+                                "fetch_receipt" ->
+                                    onFetchReceipt(id, notice.optString("key"), notice.optString("server"))
+                                "post_receipt" -> onPostReceipt(id, notice)
+                            }
                         }
+                    } finally {
+                        releaseMulticast(id)
                     }
                 }
             jobs[id] = job
@@ -304,13 +468,22 @@ class TransferService : Service() {
         spec0: Spec,
         uri: Uri,
     ) {
-        scope.launch(Dispatchers.IO) {
-            val name = displayName(uri) ?: "upload.bin"
+        transferScope(id).launch(Dispatchers.IO) {
+            // The provider's DISPLAY_NAME is untrusted input (it can contain
+            // path separators): keep only the leaf, never a dot name.
+            val name =
+                (displayName(uri) ?: "upload.bin")
+                    .let { File(it).name }
+                    .takeUnless { it.isEmpty() || it == "." || it == ".." }
+                    ?: "upload.bin"
             val size = querySize(uri)
             TransferRepository.update(id) {
                 it.copy(fileName = name, total = size, log = addLog(it.log, "preparing · staging $name…"))
             }
-            val out = File(File(cacheDir, "send").apply { mkdirs() }, name)
+            // Staging is keyed by card id: two same-named sends must never
+            // share a source path (the sender hashes as it reads, so a
+            // mid-send overwrite can pass verification with mixed bytes).
+            val out = File(File(File(cacheDir, "send"), id.toString()).apply { mkdirs() }, name)
             val ok =
                 runCatching {
                     contentResolver.openInputStream(uri)!!.use { input ->
@@ -343,6 +516,13 @@ class TransferService : Service() {
                 }
                 return@launch
             }
+            // Remove may have raced the staging copy: never start a session
+            // for a card that no longer exists (it would run invisibly and
+            // re-create the record Remove just deleted).
+            if (TransferRepository.transfers.value.none { it.id == id }) {
+                out.parentFile?.deleteRecursively()
+                return@launch
+            }
             // Reset the bar for the real transfer; the machine owns it from here.
             TransferRepository.update(id) { it.copy(bytes = 0) }
             val spec = spec0.copy(path = out.absolutePath)
@@ -368,26 +548,21 @@ class TransferService : Service() {
         resume: Boolean,
     ) {
         lastSeq[id] = 0L
-        // Drain any residue BEFORE the transfer: a finalized file left in
-        // staging (e.g. by a failed publish) makes the core's existing-final
-        // path answer a fresh send of that file instantly - and invisibly,
-        // since the user only sees Downloads. Field bug: room 104519.
-        if (spec.dir() == Direction.Receive) {
-            scope.launch(Dispatchers.IO) { sweepStaging(spec.path, attributeTo = null) }
-        }
+        generations.remove(id)
         val job =
-            scope.launch {
-                if (spec.useMdns) runCatching { multicastLock.acquire() }
+            transferScope(id).launch {
                 try {
                     NativeSession.start(id, spec.paramsJson(resume)).collect { notice ->
+                        if (!ownsCard(id, notice)) return@collect
                         when (notice.optString("notice")) {
                             "snapshot" -> onSnapshot(id, spec, notice)
-                            "fetch_receipt" -> onFetchReceipt(id, notice.optString("key"))
+                            "fetch_receipt" ->
+                                onFetchReceipt(id, notice.optString("key"), notice.optString("server"))
                             "post_receipt" -> onPostReceipt(id, notice)
                         }
                     }
                 } finally {
-                    if (spec.useMdns) runCatching { multicastLock.release() }
+                    releaseMulticast(id)
                 }
             }
         jobs[id] = job
@@ -458,6 +633,10 @@ class TransferService : Service() {
             )
         }
 
+        // Platform effects derive from the observed snapshot (design rule):
+        // the same code path serves fresh starts, restores, and cards born
+        // terminal - there is no launch-path special case to fall out of sync.
+        renderMulticast(id, spec, status)
         when {
             entered != null -> updateNotification()
             else -> throttledNotification()
@@ -465,14 +644,15 @@ class TransferService : Service() {
         if (state == "completed" && spec.dir() == Direction.Receive) {
             sweepStaging(spec.path, attributeTo = id)
         }
-        // Active→resting transition: post the one final summary frame, then
-        // detach so a stale ongoing notification can never linger.
+        // Foreground reconciles against the whole card set: when nothing is
+        // active, post the one final summary frame and detach - including for
+        // a card whose FIRST snapshot is already terminal.
         val nowActive = TransferRepository.transfers.value.any { isActive(it.status) }
-        if (wasActive && !nowActive) {
+        if (isForeground && !nowActive) {
             updateNotification()
             stopForeground(STOP_FOREGROUND_DETACH)
+            isForeground = false
         }
-        wasActive = nowActive
     }
 
     /** Human line for a state transition, for the card's log drawer. */
@@ -504,13 +684,17 @@ class TransferService : Service() {
     private fun onFetchReceipt(
         id: Long,
         key: String,
+        durableServer: String,
     ) {
         if (key.isEmpty()) return
+        // The driver's notice carries the endpoint the transfer was created
+        // with; the mutable setting is only the fallback for pre-field records.
         val server =
-            SettingsStore.settings.value.logServer
+            durableServer
+                .ifEmpty { SettingsStore.settings.value.logServer }
                 .trimEnd('/')
         if (server.isEmpty()) return
-        scope.launch {
+        transferScope(id).launch {
             val blob = LogUpload.getBytes("$server/receipts/$key")
             val b64 =
                 blob?.let {
@@ -518,7 +702,7 @@ class TransferService : Service() {
                         .getEncoder()
                         .encodeToString(it)
                 } ?: ""
-            Native.receiptResponse(id, b64)
+            Native.receiptResponse(id, key, b64)
         }
     }
 
@@ -532,7 +716,9 @@ class TransferService : Service() {
         val b64 = notice.optString("blob")
         if (key.isEmpty() || b64.isEmpty()) return
         val server =
-            SettingsStore.settings.value.logServer
+            notice
+                .optString("server")
+                .ifEmpty { SettingsStore.settings.value.logServer }
                 .trimEnd('/')
         if (server.isEmpty()) return
         val bytes =
@@ -541,7 +727,7 @@ class TransferService : Service() {
                     .getDecoder()
                     .decode(b64)
             }.getOrNull() ?: return
-        scope.launch {
+        transferScope(id).launch {
             for (backoff in listOf(0L, 5_000L, 30_000L)) {
                 if (backoff > 0) delay(backoff)
                 if (LogUpload.postBytes("$server/receipts/$key", bytes)) {
@@ -555,15 +741,12 @@ class TransferService : Service() {
     }
 
     /**
-     * Publish EVERY finalized file in the staging dir to Downloads (the card's
-     * own file plus any residue from an earlier failed publish), deleting the
-     * staging copy on success. The staging dir must never retain finals: the
-     * core treats an existing final as "already have it" and answers future
-     * sends of that file instantly - correct for the CLI (a real output dir),
-     * wrong for the app (staging is invisible; the user only sees Downloads).
-     * [attributeTo] names the card that gets fileName/savedUri (completion
-     * sweeps only; a start-of-session sweep publishes without attribution -
-     * the residue belongs to some older card).
+     * Publish every finalized file in one staging dir to Downloads, deleting
+     * the staging copy on success (receipt sidecars stay - they re-confirm a
+     * lost CompleteAck after the file is published away). With per-card
+     * staging (Phase 4) the dir holds only [attributeTo]'s own artifacts; the
+     * unattributed call in [gcStaging] is the one legacy exception, draining
+     * pre-Phase-4 shared-staging residue.
      */
     private fun sweepStaging(
         outputDir: String,
@@ -586,9 +769,20 @@ class TransferService : Service() {
                         it
                     }
                 }
+                syncExtras(attributeTo)
             }
             LogStore.append("app: saved ${src.name} to Downloads")
         }
+    }
+
+    /** Push the card's platform context (QR payload, saved URI) into the
+     *  transfer's durable record, so it survives restarts. */
+    private fun syncExtras(id: Long) {
+        val t = TransferRepository.transfers.value.firstOrNull { it.id == id } ?: return
+        val extras = org.json.JSONObject()
+        t.qrPayload?.let { extras.put("qr", it) }
+        t.savedUri?.let { extras.put("saved_uri", it) }
+        Native.setSessionExtras(id, extras.toString())
     }
 
     /** Active machine states pin the tray; everything else rests. */
@@ -631,10 +825,21 @@ class TransferService : Service() {
             )
         val cards = TransferRepository.transfers.value
         val active = cards.filter { isActive(it.status) }
+        // Direction-specific status-bar icon: up-only for sends, down-only for
+        // receives, both arrows only when genuinely sending AND receiving, a
+        // checkmark once everything is done.
+        val icon =
+            when {
+                active.isEmpty() -> R.drawable.ic_stat_done
+                active.any { it.direction == Direction.Send } &&
+                    active.any { it.direction == Direction.Receive } -> R.drawable.ic_stat_transfer
+                active.first().direction == Direction.Send -> R.drawable.ic_stat_upload
+                else -> R.drawable.ic_stat_download
+            }
         val b =
             NotificationCompat
                 .Builder(this, CHANNEL)
-                .setSmallIcon(android.R.drawable.stat_sys_upload)
+                .setSmallIcon(icon)
                 .setOngoing(active.isNotEmpty())
                 .setOnlyAlertOnce(true)
                 .setContentIntent(open)
@@ -660,13 +865,6 @@ class TransferService : Service() {
             }
             active.size == 1 -> {
                 val t = active.single()
-                b.setSmallIcon(
-                    if (t.direction == Direction.Send) {
-                        android.R.drawable.stat_sys_upload
-                    } else {
-                        android.R.drawable.stat_sys_download
-                    },
-                )
                 val speed =
                     if (t.status == Status.Transferring && t.speedBps > 0) {
                         " · ${humanBytes(t.speedBps.toLong())}/s"
@@ -718,6 +916,7 @@ class TransferService : Service() {
      *  but keep the service — sessions idle cheaply and stay resumable. */
     private fun stopForegroundKeepCards() {
         stopForeground(STOP_FOREGROUND_DETACH)
+        isForeground = false
         updateNotification()
     }
 

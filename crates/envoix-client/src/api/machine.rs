@@ -91,9 +91,14 @@ pub enum AttemptEvent {
     Progress {
         bytes: u64,
     },
-    Verifying,
+    Verifying {
+        transfer_id: String,
+        file_name: String,
+    },
     Verified,
-    Confirming,
+    Confirming {
+        file_hash: String,
+    },
     Completed {
         transfer_id: String,
         file_name: String,
@@ -126,6 +131,13 @@ pub enum Input {
     ConfirmTimeout { attempt: u32 },
     /// The mailbox receipt was fetched and VERIFIED against the local file.
     ReceiptVerified,
+    /// The mailbox slot opened with this transfer's key but named different
+    /// content than the committed sent facts (see [`Facts::receipt_mismatch`]).
+    ReceiptMismatch,
+    /// The driver could not commit the record after bounded retries: the
+    /// durable authority is unwritable, so the session ends visibly instead
+    /// of running ahead of a store that cannot follow.
+    StorageFailed,
     /// Receiver: the sealed receipt POST was acknowledged by the rdz - the
     /// confirmation duty is discharged (monotone fact, any state).
     ReceiptPosted,
@@ -160,6 +172,13 @@ pub struct Facts {
     /// POST was acknowledged by the rdz (or, future: a clean close showed the
     /// ack arrived). Gates the "still on duty" UI and restore re-posting.
     pub proof_delivered: bool,
+    /// Send: the mailbox slot held an authenticated receipt for DIFFERENT
+    /// content (opened with this transfer's key; hash/size didn't match the
+    /// committed sent facts). Stale news, not a verdict - the receiver
+    /// overwrites the slot when it re-completes a resumed offer, so polling
+    /// continues; recorded for diagnostics and the UI.
+    #[serde(default)]
+    pub receipt_mismatch: bool,
 }
 
 /// One transfer session (one card): the machine state plus the observable
@@ -180,6 +199,11 @@ pub struct Session {
     pub path: Option<DataPath>,
     pub reason: Option<String>,
     pub reason_code: Option<FailureCode>,
+    /// Send: BLAKE3 hash of the bytes the current attempt actually sent
+    /// (set on Confirming). The committed proof basis - mailbox receipts are
+    /// verified against this fact, never against the mutable source path.
+    #[serde(default)]
+    pub sent_hash: Option<String>,
     #[serde(default)]
     pub facts: Facts,
 }
@@ -199,6 +223,7 @@ impl Session {
             path: None,
             reason: None,
             reason_code: None,
+            sent_hash: None,
             facts: Facts::default(),
         }
     }
@@ -227,6 +252,29 @@ impl Session {
             }
             Input::ReceiptPosted => {
                 self.facts.proof_delivered = true;
+                Vec::new()
+            }
+            Input::StorageFailed
+                if !matches!(
+                    self.state,
+                    State::Completed | State::Failed | State::Cancelled
+                ) =>
+            {
+                let mut effects = self.exit_effects();
+                effects.push(Effect::CancelToken);
+                self.state = State::Failed;
+                self.reason = Some("transfer record store is unwritable".into());
+                self.reason_code = Some(FailureCode::Other);
+                effects
+            }
+            Input::StorageFailed => Vec::new(), // terminal states: nothing to end
+            Input::ReceiptMismatch => {
+                if matches!(self.state, State::Confirming | State::Unconfirmed) {
+                    self.facts.receipt_mismatch = true;
+                }
+                // No transition, no effects: the bounded polls keep running -
+                // a receiver that re-completes the resumed offer overwrites
+                // the slot, and a later poll then verifies.
                 Vec::new()
             }
             Input::ReceiptVerified => {
@@ -260,7 +308,7 @@ impl Session {
     }
 
     fn on_cancel(&mut self) -> Vec<Effect> {
-        match self.state {
+        let effects = match self.state {
             s if s.is_active() => {
                 let mut effects = self.exit_effects();
                 self.state = State::Cancelled;
@@ -273,8 +321,15 @@ impl Session {
                 self.state = State::Cancelled;
                 effects
             }
-            _ => Vec::new(),
-        }
+            _ => return Vec::new(),
+        };
+        // A cancelled transfer is not "partway done" - it is abandoned. Clear
+        // the progress at the source so every consumer agrees: the Cancelled
+        // card reads 0, and a resume-from-cancelled (the ONLY fresh restart,
+        // partial discarded) inherits 0 instead of the stale pre-cancel bar.
+        self.bytes = 0;
+        self.bytes_resumed = 0;
+        effects
     }
 
     fn on_resume(&mut self) -> Vec<Effect> {
@@ -332,8 +387,17 @@ impl Session {
                 self.bytes = bytes;
                 Vec::new()
             }
-            E::Verifying if matches!(self.state, S::Waiting | S::Connecting) => {
+            E::Verifying {
+                transfer_id,
+                file_name,
+            } if matches!(self.state, S::Waiting | S::Connecting) => {
                 self.state = S::Verifying;
+                // Identity facts arrive HERE on the short-circuit paths
+                // (existing final / receipt re-confirm), which never emit
+                // Started - without capture, the record has no name for
+                // Remove to clean and the card shows null.
+                self.transfer_id = Some(transfer_id);
+                self.file_name = Some(file_name);
                 Vec::new()
             }
             E::Verified if self.state == S::Verifying => {
@@ -342,8 +406,9 @@ impl Session {
                 self.state = S::Connecting;
                 Vec::new()
             }
-            E::Confirming if self.state == S::Transferring => {
+            E::Confirming { file_hash } if self.state == S::Transferring => {
                 self.state = S::Confirming;
+                self.sent_hash = Some(file_hash);
                 // Parallel proofs (design review): the mailbox is polled WHILE
                 // the in-band ack is awaited - whichever proof lands first wins.
                 // On a healthy path the ack beats the first poll and no HTTP
@@ -459,6 +524,19 @@ mod tests {
         }
     }
 
+    fn verifying() -> AttemptEvent {
+        E::Verifying {
+            transfer_id: "transfer-v".into(),
+            file_name: "v.bin".into(),
+        }
+    }
+
+    fn confirming() -> AttemptEvent {
+        E::Confirming {
+            file_hash: "hash-of-sent-bytes".into(),
+        }
+    }
+
     fn failed(code: FailureCode) -> AttemptEvent {
         E::Failed {
             reason_code: code,
@@ -491,15 +569,110 @@ mod tests {
     }
 
     #[test]
+    fn storage_failed_ends_active_states_and_spares_terminal_ones() {
+        let mut s = transferring(Send);
+        let effects = s.reduce(Input::StorageFailed);
+        assert_eq!(s.state, State::Failed);
+        assert!(s.reason.as_deref().unwrap_or("").contains("record store"));
+        assert!(
+            effects.contains(&Effect::CancelToken),
+            "the live attempt stops"
+        );
+
+        let mut done = transferring(Send);
+        done.reduce(ev(1, E::Progress { bytes: 100 }));
+        done.reduce(ev(1, confirming()));
+        done.reduce(ev(1, completed(100)));
+        assert!(done.reduce(Input::StorageFailed).is_empty());
+        assert_eq!(
+            done.state,
+            State::Completed,
+            "terminal states are not rewritten"
+        );
+    }
+
+    #[test]
+    fn cancel_clears_progress_and_the_fresh_resume_inherits_it() {
+        let mut s = transferring(Send);
+        s.reduce(ev(1, E::Progress { bytes: 50 }));
+        assert_eq!(s.bytes, 50);
+        // Cancel abandons the progress: the Cancelled card reads 0, not 50.
+        s.reduce(Input::Cancel);
+        assert_eq!(s.state, State::Cancelled);
+        assert_eq!(s.bytes, 0, "a cancelled transfer is not partway done");
+        assert_eq!(s.bytes_resumed, 0);
+        // A resume-from-cancelled is a FRESH restart and simply inherits 0 -
+        // no special case in on_resume.
+        let effects = s.reduce(Input::Resume);
+        assert_eq!(s.state, State::Connecting);
+        assert_eq!(s.bytes, 0);
+        assert!(effects.contains(&Effect::StartAttempt { resume: false }));
+    }
+
+    #[test]
+    fn paused_resume_keeps_progress_until_started_corrects_it() {
+        // A resume=true (Paused) restart keeps the last known bytes - the
+        // partial is real and Started will set the exact resumed offset.
+        let mut s = transferring(Send);
+        s.reduce(ev(1, E::Progress { bytes: 50 }));
+        s.reduce(Input::Pause);
+        s.reduce(Input::Resume);
+        assert_eq!(s.bytes, 50, "a genuine resume does not zero the bar");
+    }
+
+    #[test]
+    fn verifying_captures_identity_without_started() {
+        // The short-circuit receive paths (existing final / receipt) jump to
+        // Verifying without ever emitting Started; the identity facts must
+        // not be lost or Remove has no name to clean and the card shows null.
+        let mut s = Session::new(Receive);
+        s.reduce(ev(1, verifying()));
+        assert_eq!(s.state, State::Verifying);
+        assert_eq!(s.transfer_id.as_deref(), Some("transfer-v"));
+        assert_eq!(s.file_name.as_deref(), Some("v.bin"));
+    }
+
+    #[test]
+    fn receipt_mismatch_is_a_fact_not_a_verdict() {
+        let mut s = transferring(Send);
+        s.reduce(ev(1, E::Progress { bytes: 100 }));
+        s.reduce(ev(1, confirming()));
+        s.reduce(ev(1, failed(FailureCode::ConnectionLost)));
+        assert_eq!(s.state, State::Unconfirmed);
+
+        let effects = s.reduce(Input::ReceiptMismatch);
+        assert_eq!(
+            s.state,
+            State::Unconfirmed,
+            "no transition: stale news, not a verdict"
+        );
+        assert!(
+            effects.is_empty(),
+            "polls keep running (the slot can be overwritten)"
+        );
+        assert!(s.facts.receipt_mismatch, "but the fact is recorded");
+
+        // Terminal states ignore it entirely.
+        let mut done = transferring(Send);
+        done.reduce(ev(1, E::Progress { bytes: 100 }));
+        done.reduce(ev(1, confirming()));
+        done.reduce(ev(1, completed(100)));
+        done.reduce(Input::ReceiptMismatch);
+        assert!(!done.facts.receipt_mismatch);
+    }
+
+    #[test]
     fn send_happy_path_confirms_then_completes() {
         let mut s = transferring(Send);
         s.reduce(ev(1, E::Progress { bytes: 100 }));
-        let effects = s.reduce(ev(1, E::Confirming));
+        let effects = s.reduce(ev(1, confirming()));
         assert_eq!(s.state, State::Confirming);
         assert_eq!(
             effects,
             vec![Effect::StartConfirmTimer, Effect::StartMailboxPoll]
         );
+        // The committed proof basis: receipts are verified against this fact.
+        assert_eq!(s.sent_hash.as_deref(), Some("hash-of-sent-bytes"));
         let effects = s.reduce(ev(1, completed(100)));
         assert_eq!(s.state, State::Completed);
         assert_eq!(
@@ -545,7 +718,7 @@ mod tests {
     fn stale_bytes_cannot_fake_unconfirmed() {
         let mut s = transferring(Send);
         s.reduce(ev(1, E::Progress { bytes: 100 }));
-        s.reduce(ev(1, E::Confirming));
+        s.reduce(ev(1, confirming()));
         s.reduce(ev(1, completed(100)));
         assert_eq!(s.state, State::Completed);
         // A send's Resume from Completed is ignored (nothing to re-join)…
@@ -570,7 +743,7 @@ mod tests {
     fn confirming_connection_lost_escalates_to_mailbox() {
         let mut s = transferring(Send);
         s.reduce(ev(1, E::Progress { bytes: 100 }));
-        s.reduce(ev(1, E::Confirming));
+        s.reduce(ev(1, confirming()));
         let effects = s.reduce(ev(1, failed(FailureCode::ConnectionLost)));
         assert_eq!(s.state, State::Unconfirmed);
         assert_eq!(
@@ -591,7 +764,7 @@ mod tests {
     fn confirm_timeout_escalates_proactively_and_stale_timers_are_ignored() {
         let mut s = transferring(Send);
         s.reduce(ev(1, E::Progress { bytes: 100 }));
-        s.reduce(ev(1, E::Confirming));
+        s.reduce(ev(1, confirming()));
         // A stale timer from another attempt does nothing.
         assert!(s.reduce(Input::ConfirmTimeout { attempt: 7 }).is_empty());
         let effects = s.reduce(Input::ConfirmTimeout { attempt: 1 });
@@ -606,7 +779,7 @@ mod tests {
     fn receipt_verified_during_confirming_completes_and_stops_the_wait() {
         let mut s = transferring(Send);
         s.reduce(ev(1, E::Progress { bytes: 100 }));
-        s.reduce(ev(1, E::Confirming));
+        s.reduce(ev(1, confirming()));
         let effects = s.reduce(Input::ReceiptVerified);
         assert_eq!(s.state, State::Completed);
         assert_eq!(
@@ -709,13 +882,13 @@ mod tests {
     #[test]
     fn verifying_returns_to_connecting() {
         let mut s = Session::new(Receive);
-        s.reduce(ev(1, E::Verifying));
+        s.reduce(ev(1, verifying()));
         assert_eq!(s.state, State::Verifying);
         s.reduce(ev(1, E::Verified));
         assert_eq!(s.state, State::Connecting);
         // Completed straight from Verifying is also legal (existing-final path).
         let mut s = Session::new(Receive);
-        s.reduce(ev(1, E::Verifying));
+        s.reduce(ev(1, verifying()));
         s.reduce(ev(1, completed(10)));
         assert_eq!(s.state, State::Completed);
     }
@@ -786,9 +959,9 @@ mod tests {
                 bytes_resumed: 0,
             },
             E::Progress { bytes: 999 },
-            E::Verifying,
+            verifying(),
             E::Verified,
-            E::Confirming,
+            confirming(),
             completed(999),
             failed(FailureCode::PeerCancelled),
             E::RunEnded { failure: None },
@@ -813,7 +986,7 @@ mod tests {
                 ev(attempt, E::Connecting),
                 ev(attempt, started()),
                 ev(attempt, E::Progress { bytes: 50 }),
-                ev(attempt, E::Confirming),
+                ev(attempt, confirming()),
                 ev(attempt, completed(100)),
                 ev(attempt, failed(FailureCode::ConnectionLost)),
                 ev(attempt, failed(FailureCode::PeerCancelled)),

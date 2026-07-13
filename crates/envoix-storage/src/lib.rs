@@ -50,6 +50,12 @@ pub struct TransferResumeState {
     pub hash_bytes: u64,
     /// Informational BLAKE3 checkpoint for debugging; never trusted for resume.
     pub hash_checkpoint: Option<String>,
+    /// Local file name this transfer is landing under, when it differs from
+    /// `file_name`: a fresh (`resume_requested = false`) re-receive lands
+    /// beside an existing same-name final instead of being answered by it.
+    /// `None` means the transfer lands under `file_name` itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_file_name: Option<String>,
 }
 
 impl LocalFileStorage {
@@ -99,20 +105,33 @@ impl LocalFileStorage {
         Ok((temp_path, file))
     }
 
-    /// Renames a verified temp file to its final destination.
+    /// Atomically claims `final_path` with the verified temp file's content.
+    /// Returns `false` when the name is already taken - the caller picks
+    /// another name. A name observed free is not a name owned: the old
+    /// check-then-rename raced, and a concurrent finalizer's rename silently
+    /// REPLACED a completed file (PR #48 review, P1). `hard_link` refuses an
+    /// existing destination atomically.
     pub async fn finalize_temp_file(
         temp_path: &Path,
         final_path: &Path,
-    ) -> Result<(), StorageError> {
-        if fs::try_exists(final_path).await? {
-            return Err(CoreError::Storage(format!(
-                "destination already exists: {}",
-                final_path.display()
-            )));
+    ) -> Result<bool, StorageError> {
+        match fs::hard_link(temp_path, final_path).await {
+            Ok(()) => {
+                fs::remove_file(temp_path).await?;
+                Ok(true)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(_) => {
+                // Filesystem without hard links (e.g. FAT): degrade to the
+                // checked rename. Racy, but better than failing receives;
+                // real errors (permissions, IO) surface from the rename.
+                if fs::try_exists(final_path).await? {
+                    return Ok(false);
+                }
+                fs::rename(temp_path, final_path).await?;
+                Ok(true)
+            }
         }
-
-        fs::rename(temp_path, final_path).await?;
-        Ok(())
     }
 
     /// Reads the JSON sidecar state for a resumable transfer, if present.
@@ -347,7 +366,15 @@ fn is_plain_file_name(file_name: &str) -> bool {
 }
 
 fn validate_resume_state_name(state: &TransferResumeState) -> Result<(), StorageError> {
-    validate_resume_path_parts(&state.file_name, &state.transfer_id)
+    validate_resume_path_parts(&state.file_name, &state.transfer_id)?;
+    if let Some(target) = &state.target_file_name
+        && !is_plain_file_name(target)
+    {
+        return Err(CoreError::Storage(format!(
+            "invalid target file name: {target}"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_resume_path_parts(
@@ -420,6 +447,43 @@ mod tests {
         assert_eq!(fs::read(&final_path).await.unwrap(), text);
     }
 
+    #[test]
+    fn resume_state_without_target_field_still_parses() {
+        // Sidecars written before target_file_name existed must keep loading.
+        let legacy = r#"{
+            "transfer_id": "transfer-1",
+            "file_name": "hello.txt",
+            "file_size": 11,
+            "chunk_size": 4,
+            "bytes_received": 4,
+            "next_chunk_index": 1,
+            "hash_bytes": 4,
+            "hash_checkpoint": null
+        }"#;
+        let state: TransferResumeState = serde_json::from_str(legacy).unwrap();
+        assert_eq!(state.target_file_name, None);
+
+        // And a same-name target round-trips without serializing the field.
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(!json.contains("target_file_name"));
+    }
+
+    #[test]
+    fn resume_state_with_traversal_target_is_rejected() {
+        let state = TransferResumeState {
+            transfer_id: TransferId::new("transfer-1"),
+            file_name: "hello.txt".into(),
+            file_size: 11,
+            chunk_size: 4,
+            bytes_received: 4,
+            next_chunk_index: 1,
+            hash_bytes: 4,
+            hash_checkpoint: None,
+            target_file_name: Some("../escape.txt".into()),
+        };
+        assert!(validate_resume_state_name(&state).is_err());
+    }
+
     #[tokio::test]
     async fn rejects_nested_destination_file_name() {
         let dir = unique_test_dir();
@@ -443,6 +507,7 @@ mod tests {
             next_chunk_index: 1,
             hash_bytes: 4,
             hash_checkpoint: Some("abc123".into()),
+            target_file_name: None,
         };
 
         LocalFileStorage::write_resume_state(&dir, &state)
@@ -491,6 +556,7 @@ mod tests {
             next_chunk_index: 0,
             hash_bytes: 0,
             hash_checkpoint: None,
+            target_file_name: None,
         };
 
         let (temp_path, mut file) = LocalFileStorage::open_resumable_destination(&dir, &state)
@@ -533,6 +599,7 @@ mod tests {
             next_chunk_index: 1,
             hash_bytes: 4,
             hash_checkpoint: Some("abc123".into()),
+            target_file_name: None,
         };
         LocalFileStorage::write_resume_state(&dir, &state)
             .await
@@ -558,6 +625,7 @@ mod tests {
             next_chunk_index: 0,
             hash_bytes: 0,
             hash_checkpoint: None,
+            target_file_name: None,
         };
         let advanced = TransferResumeState {
             transfer_id: TransferId::new("transfer-advanced"),
@@ -568,6 +636,7 @@ mod tests {
             next_chunk_index: 8,
             hash_bytes: 512,
             hash_checkpoint: Some("abc123".into()),
+            target_file_name: None,
         };
 
         LocalFileStorage::write_resume_state(&dir, &stale)

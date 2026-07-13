@@ -6,6 +6,7 @@ mod endpoint;
 mod identity;
 mod room;
 
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -39,6 +40,11 @@ pub use room::{receive_file_via_room, send_file_via_room};
 
 const ALPN: &[u8] = b"envoix/1";
 const MAX_AUTH_FAILURES: u32 = 50;
+/// Grace period for one auth handshake. An accepted (or dialed) peer that goes
+/// silent must not pin the session: without a bound, cancel only takes effect
+/// on transport failure, and a receiver's failure counter never counts an auth
+/// that refuses to *end*.
+const AUTH_TIMEOUT: Duration = Duration::from_secs(30);
 const MDNS_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 /// Per-candidate connect budget in the mDNS send loop: a stale or unreachable
 /// endpoint fails this fast instead of hanging until the full transport timeout.
@@ -157,7 +163,7 @@ pub async fn send_file_manual(
     connection.watch_path(events.clone());
     let engine = TransferEngine::new(config.chunk_size);
 
-    if let Err(error) = authenticate_sender(&mut connection, pairing).await {
+    if let Err(error) = auth_bounded(authenticate_sender(&mut connection, pairing), &cancel).await {
         let _ = connection.close().await;
         local_endpoint.close().await;
         return Err(error);
@@ -200,7 +206,7 @@ pub async fn send_file_to_endpoint_addr(
     };
     connection.watch_path(events.clone());
     let engine = TransferEngine::new(config.chunk_size);
-    if let Err(error) = authenticate_sender(&mut connection, pairing).await {
+    if let Err(error) = auth_bounded(authenticate_sender(&mut connection, pairing), &cancel).await {
         let _ = connection.close().await;
         local_endpoint.close().await;
         return Err(error);
@@ -387,7 +393,8 @@ pub async fn receive_one_authenticated(
     connection.watch_path(events.clone());
     let engine = TransferEngine::new(config.chunk_size);
 
-    if let Err(error) = authenticate_receiver(&mut connection, pairing).await {
+    if let Err(error) = auth_bounded(authenticate_receiver(&mut connection, pairing), &cancel).await
+    {
         let _ = connection.close().await;
         bound_endpoint.local_endpoint.close().await;
         return Err(error);
@@ -453,7 +460,7 @@ async fn accept_authenticated_with_retries(
     let mut failures = 0_u32;
     loop {
         let mut connection = accept_or_cancel(bound_endpoint, cancel).await?;
-        match authenticate_receiver(&mut connection, pairing).await {
+        match auth_bounded(authenticate_receiver(&mut connection, pairing), cancel).await {
             Ok(()) => return Ok(connection),
             Err(_) => {
                 let _ = connection.close().await;
@@ -527,7 +534,7 @@ async fn send_file_to_peer_addr(
     };
     connection.watch_path(events.clone());
     let engine = TransferEngine::new(config.chunk_size);
-    if let Err(error) = authenticate_sender(&mut connection, pairing).await {
+    if let Err(error) = auth_bounded(authenticate_sender(&mut connection, pairing), cancel).await {
         let _ = connection.close().await;
         return Err(error);
     }
@@ -548,6 +555,21 @@ async fn accept_or_cancel(
     }
 }
 
+/// One auth handshake, bounded by [`AUTH_TIMEOUT`] and the cancel token. Auth
+/// is strictly pre-transfer, so interrupting it is always safe.
+async fn auth_bounded(
+    auth: impl Future<Output = Result<(), SessionError>>,
+    cancel: &TransferCancelToken,
+) -> Result<(), SessionError> {
+    tokio::select! {
+        result = tokio::time::timeout(AUTH_TIMEOUT, auth) => match result {
+            Ok(result) => result,
+            Err(_) => Err(CoreError::Protocol("authentication timed out".into())),
+        },
+        () = cancel.cancelled() => Err(interrupted_error(cancel)),
+    }
+}
+
 fn interrupted_error(cancel: &TransferCancelToken) -> SessionError {
     let message = if cancel.is_pause() {
         USER_PAUSE_MESSAGE
@@ -555,4 +577,30 @@ fn interrupted_error(cancel: &TransferCancelToken) -> SessionError {
         USER_INTERRUPT_MESSAGE
     };
     CoreError::Transfer(message.into())
+}
+
+#[cfg(test)]
+mod auth_bound_tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn wedged_auth_times_out() {
+        let cancel = TransferCancelToken::new();
+        let result = auth_bounded(std::future::pending(), &cancel).await;
+        assert!(matches!(result, Err(CoreError::Protocol(m)) if m.contains("timed out")));
+    }
+
+    #[tokio::test]
+    async fn cancel_interrupts_a_pending_auth() {
+        let cancel = TransferCancelToken::new();
+        cancel.pause();
+        let result = auth_bounded(std::future::pending(), &cancel).await;
+        assert!(matches!(result, Err(CoreError::Transfer(m)) if m == USER_PAUSE_MESSAGE));
+    }
+
+    #[tokio::test]
+    async fn a_finishing_auth_passes_through() {
+        let cancel = TransferCancelToken::new();
+        assert!(auth_bounded(async { Ok(()) }, &cancel).await.is_ok());
+    }
 }
