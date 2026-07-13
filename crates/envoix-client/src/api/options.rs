@@ -36,6 +36,10 @@ pub struct TransferOptions {
     /// Local socket addresses to bind when listening; `None` binds
     /// dual-stack IPv4 + IPv6 with OS-assigned ports (receive side).
     pub listen_addrs: Option<BindAddrs>,
+    /// Internal canonical-session marker: the invite was accepted by an
+    /// earlier attempt, so expiry no longer blocks this transfer's resume.
+    #[serde(skip)]
+    pub(crate) continuation: bool,
 }
 
 impl Default for TransferOptions {
@@ -45,6 +49,7 @@ impl Default for TransferOptions {
             path: PathPolicy::Auto,
             resume: true,
             listen_addrs: None,
+            continuation: false,
         }
     }
 }

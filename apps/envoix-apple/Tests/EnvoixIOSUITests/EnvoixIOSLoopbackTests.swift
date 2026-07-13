@@ -1,51 +1,115 @@
 import EnvoixCore
+import CryptoKit
 import XCTest
+@testable import Envoix_iOS
 
 final class EnvoixIOSLoopbackTests: XCTestCase {
     override func setUpWithError() throws {
         continueAfterFailure = false
     }
 
-    func testTransferScreenShowsStableControls() throws {
-        let app = XCUIApplication()
-        app.launchArguments.append("--ui-testing")
-
-        addUIInterruptionMonitor(withDescription: "System permissions") { alert in
-            if alert.buttons["Allow"].exists {
-                alert.buttons["Allow"].tap()
-                return true
-            }
-            if alert.buttons["OK"].exists {
-                alert.buttons["OK"].tap()
-                return true
-            }
-            return false
+    func testActivityActionPolicyMatchesCanonicalLifecycle() {
+        for state in [
+            FfiTransferActivityState.queued, .binding, .waitingForPeer, .pairing,
+            .connecting, .transferring, .verifying,
+        ] {
+            XCTAssertEqual(
+                activityActionAvailability(for: Self.activity(state: state)),
+                ActivityActionAvailability(canPause: true, canResume: false, canCancel: true, canDelete: false)
+            )
         }
 
-        app.launch()
-        app.tap()
-
-        XCTAssertTrue(app.tabBars.buttons["Transfer"].waitForExistence(timeout: 8))
-        XCTAssertTrue(app.tabBars.buttons["Activity"].exists)
-        XCTAssertTrue(app.tabBars.buttons["Settings"].exists)
-
-        XCTAssertTrue(app.buttons["transfer_role_send"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["transfer_role_receive"].exists)
-
-        app.buttons["transfer_role_send"].tap()
-
-        XCTAssertTrue(app.buttons["send_file_picker"].exists)
-        XCTAssertTrue(app.buttons["send_start_button"].exists)
-        XCTAssertFalse(app.buttons["send_start_button"].isEnabled)
-
-        app.buttons["transfer_role_receive"].tap()
-
-        XCTAssertTrue(app.descendants(matching: .any)["receive_room_code"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["receive_start_button"].exists)
-        XCTAssertTrue(app.buttons["receive_start_button"].isEnabled)
+        XCTAssertEqual(
+            activityActionAvailability(for: Self.activity(state: .verifying, diagnostic: "confirming")),
+            ActivityActionAvailability(canPause: false, canResume: false, canCancel: false, canDelete: false)
+        )
+        XCTAssertEqual(
+            activityActionAvailability(for: Self.activity(state: .paused)),
+            ActivityActionAvailability(canPause: false, canResume: true, canCancel: true, canDelete: false)
+        )
+        XCTAssertEqual(
+            activityActionAvailability(for: Self.activity(state: .failed)),
+            ActivityActionAvailability(canPause: false, canResume: false, canCancel: false, canDelete: true)
+        )
+        XCTAssertEqual(
+            activityActionAvailability(for: Self.activity(state: .failed, retryable: true)),
+            ActivityActionAvailability(canPause: false, canResume: true, canCancel: false, canDelete: true)
+        )
+        XCTAssertEqual(
+            activityActionAvailability(for: Self.activity(state: .publishing, diagnostic: "publish failed: denied")),
+            ActivityActionAvailability(canPause: false, canResume: true, canCancel: true, canDelete: false)
+        )
+        XCTAssertEqual(
+            activityActionAvailability(for: Self.activity(state: .completed)),
+            ActivityActionAvailability(canPause: false, canResume: false, canCancel: false, canDelete: true)
+        )
     }
 
-    func testSendsSmallFileThroughUniffiInviteLoopback() throws {
+    private static func activity(
+        state: FfiTransferActivityState,
+        diagnostic: String = "",
+        retryable: Bool = false
+    ) -> FfiTransferActivityRecord {
+        FfiTransferActivityRecord(
+            activityId: "activity-test",
+            sequence: 1,
+            attemptId: "attempt-1",
+            state: state,
+            direction: .receive,
+            mode: .room,
+            transferId: "transfer-test",
+            fileName: "test.bin",
+            totalBytes: 1024,
+            bytesTransferred: 512,
+            bytesResumed: 0,
+            speedBps: 0,
+            averageSpeedBps: 0,
+            createdAtMs: 1,
+            updatedAtMs: 1,
+            startedAtMs: 1,
+            completedAtMs: 0,
+            completedFilePath: "",
+            dataPathKind: .none,
+            dataPathDetail: "",
+            invite: "",
+            token: "",
+            peerDescriptor: "",
+            diagnosticMessage: diagnostic,
+            failureCode: .unknown,
+            failureCategory: .unknown,
+            failurePhase: .setup,
+            failureOrigin: .unknown,
+            userMessageKey: "",
+            retryable: retryable,
+            recoveryAction: .none,
+            limits: FfiTransferLimits(
+                maxParallelTransfers: 1,
+                maxParallelFiles: 1,
+                maxParallelChunksPerFile: 1,
+                speedLimitBps: 0
+            )
+        )
+    }
+
+    func testCompletedFileAvailabilityRequiresMatchingRegularFile() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("envoix-completion-check-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let file = root.appendingPathComponent("received.bin")
+        try Data([1, 2, 3, 4]).write(to: file)
+
+        XCTAssertEqual(
+            availableCompletedFileURL(path: file.path, expectedBytes: 4),
+            file
+        )
+        XCTAssertNil(availableCompletedFileURL(path: file.path, expectedBytes: 5))
+        XCTAssertNil(availableCompletedFileURL(path: root.path, expectedBytes: 0))
+        XCTAssertNil(availableCompletedFileURL(path: root.appendingPathComponent("missing").path, expectedBytes: 0))
+    }
+
+    func testSendsSmallFileThroughUniffiInviteLoopback() async throws {
         let fileManager = FileManager.default
         let root = fileManager.temporaryDirectory
             .appendingPathComponent("envoix-ios-loopback-\(UUID().uuidString)", isDirectory: true)
@@ -61,15 +125,15 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
         let receiverObserver = RecordingObserver()
         try receiverSession.receive(outputDir: receiveDirectory.path, observer: receiverObserver)
 
-        let invite = try receiverObserver.waitForInvite(timeout: 10)
-        Thread.sleep(forTimeInterval: 0.3)
+        let invite = try await receiverObserver.waitForInvite(timeout: 10)
+        try await Task.sleep(nanoseconds: 300_000_000)
 
         let senderSession = EnvoixSession()
         let senderObserver = RecordingObserver()
         try senderSession.sendInvite(invite: invite, filePath: sendFile.path, observer: senderObserver)
 
-        let senderBytes = try senderObserver.waitForCompletion(timeout: 90)
-        let receiverBytes = try receiverObserver.waitForCompletion(timeout: 90)
+        let senderBytes = try await senderObserver.waitForCompletion(timeout: 90)
+        let receiverBytes = try await receiverObserver.waitForCompletion(timeout: 90)
         XCTAssertGreaterThanOrEqual(senderBytes, UInt64(payload.count))
         XCTAssertGreaterThanOrEqual(receiverBytes, UInt64(payload.count))
 
@@ -77,9 +141,68 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
         XCTAssertEqual(receivedPayload, payload)
     }
 
-    func testCrossDeviceReceiveAndroidToIosRoom() throws {
+    func testPublishingVerifiedFileIsAtomicAndPreservesFailures() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("envoix-publish-\(UUID().uuidString)", isDirectory: true)
+        let staging = root.appendingPathComponent("staging", isDirectory: true)
+        let destination = root.appendingPathComponent("destination", isDirectory: true)
+        try fileManager.createDirectory(at: staging, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: root) }
+
+        let payload = Data("verified envoix payload".utf8)
+        let source = staging.appendingPathComponent("received.bin")
+        try payload.write(to: source)
+
+        let published = try publishReceivedFile(
+            from: source,
+            to: destination,
+            expectedBytes: UInt64(payload.count)
+        )
+        XCTAssertEqual(try Data(contentsOf: published), payload)
+        XCTAssertTrue(fileManager.fileExists(atPath: source.path))
+        XCTAssertTrue(
+            try fileManager.contentsOfDirectory(atPath: destination.path)
+                .allSatisfy { !$0.hasPrefix(".envoix-publish-") }
+        )
+
+        let repeated = try publishReceivedFile(
+            from: source,
+            to: destination,
+            expectedBytes: UInt64(payload.count)
+        )
+        XCTAssertEqual(repeated, published)
+
+        let conflictSource = staging.appendingPathComponent("conflict.bin")
+        let conflictingPayload = Data(repeating: 0x7f, count: payload.count)
+        try conflictingPayload.write(to: conflictSource)
+        let conflictingDestination = destination.appendingPathComponent("conflict.bin")
+        try Data(repeating: 0x21, count: payload.count).write(to: conflictingDestination)
+        XCTAssertThrowsError(
+            try publishReceivedFile(
+                from: conflictSource,
+                to: destination,
+                expectedBytes: UInt64(payload.count)
+            )
+        )
+        XCTAssertEqual(try Data(contentsOf: conflictSource), conflictingPayload)
+        XCTAssertEqual(try Data(contentsOf: published), payload)
+
+        let sizeMismatchSource = staging.appendingPathComponent("size-mismatch.bin")
+        try payload.write(to: sizeMismatchSource)
+        XCTAssertThrowsError(
+            try publishReceivedFile(
+                from: sizeMismatchSource,
+                to: destination,
+                expectedBytes: UInt64(payload.count + 1)
+            )
+        )
+        XCTAssertEqual(try Data(contentsOf: sizeMismatchSource), payload)
+    }
+
+    func testCrossDeviceReceiveAndroidToIosRoom() async throws {
 #if ENVOIX_CROSS_DEVICE_TESTING
-        print("[cross-device] iOS receive start code=\(Self.androidToIosCode)")
+        Self.emitCrossDeviceMarker("iOS receive start code=\(Self.androidToIosCode)")
         let fileManager = FileManager.default
         let root = fileManager.temporaryDirectory
             .appendingPathComponent("envoix-ios-cross-device-receive-\(UUID().uuidString)", isDirectory: true)
@@ -87,35 +210,42 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
         try fileManager.createDirectory(at: receiveDirectory, withIntermediateDirectories: true)
         defer { try? fileManager.removeItem(at: root) }
 
-        let session = Self.crossDeviceSession()
-        let observer = RecordingObserver()
-        try session.startTransfer(
+        let observer = RecordingObserver {
+            Self.emitCrossDeviceMarker("iOS room receiver ready")
+        }
+        let session = try Self.startDurableCrossDeviceTransfer(
             request: Self.crossDeviceRequest(
                 direction: .receive,
                 mode: .room,
                 code: Self.androidToIosCode,
                 filePath: "",
                 outputDir: receiveDirectory.path,
-                invite: ""
+                invite: "",
+                publicationRequired: true
             ),
+            recordsDirectory: root.appendingPathComponent("records", isDirectory: true),
             observer: observer
         )
+        defer { _ = session.remove() }
         print("[cross-device] iOS receive completed call returned")
 
         let expectedBytes = Self.androidToIosExpectedBytes
-        let bytes = try observer.waitForCompletion(timeout: Self.crossDeviceTimeout(for: expectedBytes))
-        print("[cross-device] iOS receive completion bytes=\(bytes)")
-        XCTAssertGreaterThanOrEqual(bytes, expectedBytes)
-
-        try Self.assertReceivedFile(
-            receiveDirectory.appendingPathComponent(Self.androidToIosFileName),
+        let published = try await Self.publishAndCompleteReceive(
+            session: session,
+            observer: observer,
+            expectedFileName: Self.androidToIosFileName,
             payload: Self.androidToIosPayload,
             expectedBytes: expectedBytes
         )
+        defer { try? fileManager.removeItem(at: published.url.deletingLastPathComponent()) }
+        let bytes = published.bytes
+        print("[cross-device] iOS receive completion bytes=\(bytes)")
+        XCTAssertEqual(bytes, expectedBytes)
+        observer.assertPathPolicy(Self.crossDevicePathPolicy)
 #endif
     }
 
-    func testCrossDeviceSendIosToAndroidRoom() throws {
+    func testCrossDeviceSendIosToAndroidRoom() async throws {
 #if ENVOIX_CROSS_DEVICE_TESTING
         print("[cross-device] iOS send start code=\(Self.iosToAndroidCode)")
         let fileManager = FileManager.default
@@ -128,9 +258,8 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
         let expectedBytes = Self.iosToAndroidExpectedBytes
         try Self.writeCrossDevicePayload(Self.iosToAndroidPayload, expectedBytes: expectedBytes, to: sendFile)
 
-        let session = Self.crossDeviceSession()
         let observer = RecordingObserver()
-        try session.startTransfer(
+        let session = try Self.startDurableCrossDeviceTransfer(
             request: Self.crossDeviceRequest(
                 direction: .send,
                 mode: .room,
@@ -139,19 +268,30 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
                 outputDir: "",
                 invite: ""
             ),
+            recordsDirectory: root.appendingPathComponent("records", isDirectory: true),
             observer: observer
         )
+        defer { _ = session.remove() }
         print("[cross-device] iOS send completed call returned")
 
-        let bytes = try observer.waitForCompletion(timeout: Self.crossDeviceTimeout(for: expectedBytes))
+        let pauseTask = Task {
+            try await Self.pauseAndResumeIfRequested(
+                session: session,
+                observer: observer,
+                expectedBytes: expectedBytes
+            )
+        }
+        let bytes = try await observer.waitForCompletion(timeout: Self.crossDeviceTimeout(for: expectedBytes))
+        try await pauseTask.value
         print("[cross-device] iOS send completion bytes=\(bytes)")
-        XCTAssertGreaterThanOrEqual(bytes, expectedBytes)
+        XCTAssertEqual(bytes, expectedBytes)
+        observer.assertPathPolicy(Self.crossDevicePathPolicy)
 #endif
     }
 
-    func testCrossDeviceReceiveAndroidToIosInvite() throws {
+    func testCrossDeviceReceiveAndroidToIosInvite() async throws {
 #if ENVOIX_CROSS_DEVICE_TESTING
-        print("[cross-device] iOS invite receive start")
+        Self.emitCrossDeviceMarker("iOS invite receive start")
         let fileManager = FileManager.default
         let root = fileManager.temporaryDirectory
             .appendingPathComponent("envoix-ios-cross-device-invite-receive-\(UUID().uuidString)", isDirectory: true)
@@ -159,37 +299,41 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
         try fileManager.createDirectory(at: receiveDirectory, withIntermediateDirectories: true)
         defer { try? fileManager.removeItem(at: root) }
 
-        let session = Self.crossDeviceSession()
         let observer = RecordingObserver()
-        try session.startTransfer(
+        let session = try Self.startDurableCrossDeviceTransfer(
             request: Self.crossDeviceRequest(
                 direction: .receive,
                 mode: .showInvite,
                 code: "",
                 filePath: "",
                 outputDir: receiveDirectory.path,
-                invite: ""
+                invite: "",
+                publicationRequired: true
             ),
+            recordsDirectory: root.appendingPathComponent("records", isDirectory: true),
             observer: observer
         )
-
-        let invite = try observer.waitForInvite(timeout: 10)
-        print("[cross-device] iOS invite \(invite)")
+        defer { _ = session.remove() }
 
         let expectedBytes = Self.androidToIosExpectedBytes
-        let bytes = try observer.waitForCompletion(timeout: Self.crossDeviceTimeout(for: expectedBytes))
-        print("[cross-device] iOS invite receive completion bytes=\(bytes)")
-        XCTAssertGreaterThanOrEqual(bytes, expectedBytes)
+        let invite = try await observer.waitForInvite(timeout: Self.crossDeviceTimeout(for: expectedBytes))
+        Self.emitCrossDeviceMarker("iOS invite \(invite)")
 
-        try Self.assertReceivedFile(
-            receiveDirectory.appendingPathComponent(Self.androidToIosFileName),
+        let published = try await Self.publishAndCompleteReceive(
+            session: session,
+            observer: observer,
+            expectedFileName: Self.androidToIosFileName,
             payload: Self.androidToIosPayload,
             expectedBytes: expectedBytes
         )
+        defer { try? fileManager.removeItem(at: published.url.deletingLastPathComponent()) }
+        let bytes = published.bytes
+        print("[cross-device] iOS invite receive completion bytes=\(bytes)")
+        XCTAssertEqual(bytes, expectedBytes)
 #endif
     }
 
-    func testCrossDeviceSendIosToAndroidInvite() throws {
+    func testCrossDeviceSendIosToAndroidInvite() async throws {
 #if ENVOIX_CROSS_DEVICE_TESTING
         print("[cross-device] iOS invite send start")
         guard let invite = ProcessInfo.processInfo.environment["ENVOIX_TRANSFER_INVITE"], !invite.isEmpty else {
@@ -205,9 +349,8 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
         let expectedBytes = Self.iosToAndroidExpectedBytes
         try Self.writeCrossDevicePayload(Self.iosToAndroidPayload, expectedBytes: expectedBytes, to: sendFile)
 
-        let session = Self.crossDeviceSession()
         let observer = RecordingObserver()
-        try session.startTransfer(
+        let session = try Self.startDurableCrossDeviceTransfer(
             request: Self.crossDeviceRequest(
                 direction: .send,
                 mode: .invite,
@@ -216,12 +359,22 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
                 outputDir: "",
                 invite: invite
             ),
+            recordsDirectory: root.appendingPathComponent("records", isDirectory: true),
             observer: observer
         )
+        defer { _ = session.remove() }
 
-        let bytes = try observer.waitForCompletion(timeout: Self.crossDeviceTimeout(for: expectedBytes))
+        let pauseTask = Task {
+            try await Self.pauseAndResumeIfRequested(
+                session: session,
+                observer: observer,
+                expectedBytes: expectedBytes
+            )
+        }
+        let bytes = try await observer.waitForCompletion(timeout: Self.crossDeviceTimeout(for: expectedBytes))
+        try await pauseTask.value
         print("[cross-device] iOS invite send completion bytes=\(bytes)")
-        XCTAssertGreaterThanOrEqual(bytes, expectedBytes)
+        XCTAssertEqual(bytes, expectedBytes)
 #endif
     }
 
@@ -230,18 +383,36 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
     private static let defaultIosToAndroidCode = "741204-azure-river"
     private static let androidToIosCode = envString("ENVOIX_ANDROID_TO_IOS_CODE") ?? defaultAndroidToIosCode
     private static let iosToAndroidCode = envString("ENVOIX_IOS_TO_ANDROID_CODE") ?? defaultIosToAndroidCode
-    private static let androidToIosFileName = "envoix-cross-android-to-ios.txt"
-    private static let iosToAndroidFileName = "envoix-cross-ios-to-android.txt"
+    private static let crossDeviceRunID: String = {
+        let value = envString("ENVOIX_CROSS_DEVICE_RUN_ID") ?? "manual"
+        guard value.count <= 80,
+              value.range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil else {
+            fatalError("ENVOIX_CROSS_DEVICE_RUN_ID must contain only letters, digits, '-' or '_'")
+        }
+        return value
+    }()
+    private static let androidToIosFileName = "envoix-\(crossDeviceRunID)-android-to-ios.bin"
+    private static let iosToAndroidFileName = "envoix-\(crossDeviceRunID)-ios-to-android.bin"
     private static let androidToIosPayload = Data("envoix cross-device android to ios\n".utf8)
     private static let iosToAndroidPayload = Data("envoix cross-device ios to android\n".utf8)
     private static let androidToIosExpectedBytes =
         envUInt64("ENVOIX_ANDROID_TO_IOS_BYTES") ?? UInt64(androidToIosPayload.count)
     private static let iosToAndroidExpectedBytes =
         envUInt64("ENVOIX_IOS_TO_ANDROID_BYTES") ?? UInt64(iosToAndroidPayload.count)
+    private static let pauseAfterBytes = envUInt64("ENVOIX_CROSS_DEVICE_PAUSE_AFTER_BYTES")
+    private static let pauseDurationMilliseconds =
+        envUInt64("ENVOIX_CROSS_DEVICE_PAUSE_DURATION_MS") ?? 2_000
     private static let crossDeviceTimeout: TimeInterval = 180
     private static let timeoutBytesPerSecond: UInt64 = 2 * 1024 * 1024
     private static let rendezvousBroker = "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445"
     private static let relayURL = "https://envoix.chkxwlyh.us:8444"
+    private static let crossDevicePathPolicy: FfiPathPolicy = {
+        switch envString("ENVOIX_CROSS_DEVICE_PATH_POLICY")?.lowercased() {
+        case nil, "", "auto": return .auto
+        case "direct", "direct-only": return .directOnly
+        default: fatalError("ENVOIX_CROSS_DEVICE_PATH_POLICY must be auto or direct-only")
+        }
+    }()
 
     private static func crossDeviceTimeout(for expectedBytes: UInt64) -> TimeInterval {
         if let override = envDouble("ENVOIX_CROSS_DEVICE_TIMEOUT_SECONDS") {
@@ -252,23 +423,18 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
     }
 
     private static func writeCrossDevicePayload(_ payload: Data, expectedBytes: UInt64, to url: URL) throws {
-        if expectedBytes == UInt64(payload.count) {
-            try payload.write(to: url)
-            return
+        guard !payload.isEmpty || expectedBytes == 0 else {
+            throw LoopbackTestError.missingValue("non-empty deterministic payload")
         }
         _ = FileManager.default.createFile(atPath: url.path, contents: nil)
         let handle = try FileHandle(forWritingTo: url)
         defer { try? handle.close() }
-        try handle.truncate(atOffset: expectedBytes)
-        guard expectedBytes > 0 else { return }
-
-        let prefixCount = expectedBytes < UInt64(payload.count) ? Int(expectedBytes) : payload.count
-        try handle.seek(toOffset: 0)
-        try handle.write(contentsOf: payload.prefix(prefixCount))
-        if expectedBytes > UInt64(payload.count) {
-            try handle.seek(toOffset: expectedBytes - 1)
-            let lastByte = payload[Int((expectedBytes - 1) % UInt64(payload.count))]
-            try handle.write(contentsOf: Data([lastByte]))
+        let block = repeatedPayloadBlock(payload)
+        var remaining = expectedBytes
+        while remaining > 0 {
+            let count = Int(min(remaining, UInt64(block.count)))
+            try handle.write(contentsOf: block.prefix(count))
+            remaining -= UInt64(count)
         }
     }
 
@@ -276,10 +442,118 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
         let actualBytes = try XCTUnwrap(attributes[.size] as? NSNumber).uint64Value
         XCTAssertEqual(actualBytes, expectedBytes)
+        XCTAssertEqual(
+            try fileSHA256(url),
+            repeatedPayloadSHA256(payload, expectedBytes: expectedBytes),
+            "received file SHA-256 does not match the deterministic payload"
+        )
         if expectedBytes == UInt64(payload.count) {
             let receivedPayload = try Data(contentsOf: url)
             XCTAssertEqual(receivedPayload, payload)
         }
+    }
+
+    private static func publishAndCompleteReceive(
+        session: DurableEnvoixSession,
+        observer: RecordingObserver,
+        expectedFileName: String,
+        payload: Data,
+        expectedBytes: UInt64
+    ) async throws -> (url: URL, bytes: UInt64) {
+        let timeout = crossDeviceTimeout(for: expectedBytes)
+        let publishing = try await observer.waitForPublishing(timeout: timeout)
+        XCTAssertEqual(publishing.fileName, expectedFileName)
+        XCTAssertEqual(publishing.bytesTransferred, expectedBytes)
+        let staged = URL(fileURLWithPath: publishing.completedFilePath)
+        try assertReceivedFile(staged, payload: payload, expectedBytes: expectedBytes)
+
+        guard let documents = FileManager.default.urls(
+            for: .documentDirectory,
+            in: .userDomainMask
+        ).first else {
+            throw LoopbackTestError.missingValue("iOS Documents directory")
+        }
+        let destination = documents.appendingPathComponent(
+            "EnvoixCrossDeviceTests-\(crossDeviceRunID)",
+            isDirectory: true
+        )
+        try? FileManager.default.removeItem(at: destination)
+        let finalURL = try publishReceivedFile(
+            from: staged,
+            to: destination,
+            expectedBytes: expectedBytes
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: staged.path))
+        XCTAssertTrue(
+            session.publicationSucceeded(path: finalURL.path),
+            "canonical core rejected publication success"
+        )
+
+        let bytes = try await observer.waitForCompletion(timeout: timeout)
+        let completed = session.activity()
+        XCTAssertEqual(completed.state, .completed)
+        XCTAssertEqual(completed.completedFilePath, finalURL.path)
+        try assertReceivedFile(finalURL, payload: payload, expectedBytes: expectedBytes)
+        try FileManager.default.removeItem(at: staged)
+
+        let hash = try fileSHA256(finalURL).map { String(format: "%02x", $0) }.joined()
+        emitCrossDeviceMarker(
+            "evidence path=\(finalURL.path) size=\(expectedBytes) sha256=\(hash)"
+        )
+        return (finalURL, bytes)
+    }
+
+    private static func pauseAndResumeIfRequested(
+        session: DurableEnvoixSession,
+        observer: RecordingObserver,
+        expectedBytes: UInt64
+    ) async throws {
+        guard let pauseAfterBytes else { return }
+        guard pauseAfterBytes > 0, pauseAfterBytes < expectedBytes else {
+            throw LoopbackTestError.missingValue(
+                "ENVOIX_CROSS_DEVICE_PAUSE_AFTER_BYTES must be between 1 and expectedBytes - 1"
+            )
+        }
+        let timeout = crossDeviceTimeout(for: expectedBytes)
+        try await observer.waitForProgress(atLeast: pauseAfterBytes, timeout: timeout)
+        XCTAssertTrue(session.pause(), "canonical pause request was rejected")
+        try await observer.waitForPaused(timeout: timeout)
+        try await Task.sleep(
+            nanoseconds: pauseDurationMilliseconds * 1_000_000
+        )
+        XCTAssertTrue(session.resume(), "canonical resume request was rejected")
+    }
+
+    private static func fileSHA256(_ url: URL) throws -> Data {
+        var hasher = SHA256()
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        while let chunk = try handle.read(upToCount: hashBlockBytes), !chunk.isEmpty {
+            hasher.update(data: chunk)
+        }
+        return Data(hasher.finalize())
+    }
+
+    private static func repeatedPayloadSHA256(_ payload: Data, expectedBytes: UInt64) -> Data {
+        var hasher = SHA256()
+        let block = repeatedPayloadBlock(payload)
+        var remaining = expectedBytes
+        while remaining > 0 {
+            let count = Int(min(remaining, UInt64(block.count)))
+            hasher.update(data: block.prefix(count))
+            remaining -= UInt64(count)
+        }
+        return Data(hasher.finalize())
+    }
+
+    private static func repeatedPayloadBlock(_ payload: Data) -> Data {
+        guard !payload.isEmpty else { return Data() }
+        let repeats = max(1, hashBlockBytes / payload.count)
+        var block = Data(capacity: repeats * payload.count)
+        for _ in 0..<repeats {
+            block.append(payload)
+        }
+        return block
     }
 
     private static func envUInt64(_ name: String) -> UInt64? {
@@ -303,16 +577,34 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
         return raw
     }
 
-    private static func crossDeviceSession() -> EnvoixSession {
-        EnvoixSession.newWithSettings(
-            settings: EnvoixRuntimeSettings(
-                concurrentTransfers: true,
-                language: "en",
-                serverUrl: rendezvousBroker,
-                relayUrl: relayURL,
-                configPath: "",
-                speedLimitMbps: 40
-            )
+    private static func emitCrossDeviceMarker(_ message: String) {
+        FileHandle.standardError.write(Data("[cross-device] \(message)\n".utf8))
+    }
+
+    private static let hashBlockBytes = 1024 * 1024
+
+    private static func crossDeviceSettings() -> EnvoixRuntimeSettings {
+        EnvoixRuntimeSettings(
+            concurrentTransfers: true,
+            language: "en",
+            serverUrl: rendezvousBroker,
+            relayUrl: relayURL,
+            configPath: "",
+            speedLimitMbps: 40
+        )
+    }
+
+    private static func startDurableCrossDeviceTransfer(
+        request: FfiTransferRequest,
+        recordsDirectory: URL,
+        observer: RecordingObserver
+    ) throws -> DurableEnvoixSession {
+        try startDurableTransfer(
+            settings: crossDeviceSettings(),
+            request: request,
+            recordsDir: recordsDirectory.path,
+            observer: observer,
+            mailbox: NoopTestMailboxObserver()
         )
     }
 
@@ -322,7 +614,8 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
         code: String,
         filePath: String,
         outputDir: String,
-        invite: String
+        invite: String,
+        publicationRequired: Bool = false
     ) -> FfiTransferRequest {
         FfiTransferRequest(
             activityId: "ios-\(UUID().uuidString)",
@@ -337,8 +630,9 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
             broker: rendezvousBroker,
             relay: relayURL,
             configPath: "",
-            pathPolicy: .auto,
+            pathPolicy: crossDevicePathPolicy,
             resume: true,
+            publicationRequired: publicationRequired,
             limits: FfiTransferLimits(
                 maxParallelTransfers: 1,
                 maxParallelFiles: 1,
@@ -362,14 +656,32 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
 #endif
 }
 
+private final class NoopTestMailboxObserver: MailboxObserver, @unchecked Sendable {
+    func onFetchReceipt(activityId: String, key: String) {}
+
+    func onPostReceipt(activityId: String, key: String, blob: Data) {}
+}
+
 private final class RecordingObserver: TransferObserver, @unchecked Sendable {
     private let lock = NSLock()
     private let inviteSemaphore = DispatchSemaphore(value: 0)
+    private let publishingSemaphore = DispatchSemaphore(value: 0)
+    private let pausedSemaphore = DispatchSemaphore(value: 0)
     private let terminalSemaphore = DispatchSemaphore(value: 0)
+    private let onRoomReady: () -> Void
 
     private var invite: String?
+    private var publishingRecord: FfiTransferActivityRecord?
+    private var latestProgress: UInt64 = 0
+    private var pausedObserved = false
     private var completedBytes: UInt64?
     private var failure: String?
+    private var roomReady = false
+    private var pathKinds: [FfiDataPathKind] = []
+
+    init(onRoomReady: @escaping () -> Void = {}) {
+        self.onRoomReady = onRoomReady
+    }
 
     func onInviteReady(invite: String) {
         let shouldSignal = locked {
@@ -391,6 +703,9 @@ private final class RecordingObserver: TransferObserver, @unchecked Sendable {
     }
 
     func onProgress(transferred: UInt64, total: UInt64) {
+        locked {
+            latestProgress = max(latestProgress, transferred)
+        }
         print("[cross-device] onProgress transferred=\(transferred) total=\(total)")
     }
 
@@ -408,6 +723,19 @@ private final class RecordingObserver: TransferObserver, @unchecked Sendable {
     }
 
     func onTransferEvent(event: FfiTransferEvent) {
+        if event.dataPathKind != .none {
+            locked { pathKinds.append(event.dataPathKind) }
+        }
+        let shouldReportRoomReady = locked {
+            guard !roomReady, event.kind == .pairing, event.pairingStep == .joining else {
+                return false
+            }
+            roomReady = true
+            return true
+        }
+        if shouldReportRoomReady {
+            onRoomReady()
+        }
         print(
             "[cross-device] onTransferEvent kind=\(event.kind) mode=\(event.mode) direction=\(event.direction) " +
             "pairing=\(event.pairingStep) path=\(event.dataPathKind):\(event.dataPathDetail) " +
@@ -417,6 +745,26 @@ private final class RecordingObserver: TransferObserver, @unchecked Sendable {
     }
 
     func onTransferActivity(record: FfiTransferActivityRecord) {
+        let signals = locked {
+            var publishing = false
+            var paused = false
+            guard record.state == .publishing, publishingRecord == nil else {
+                if record.state == .paused, !pausedObserved {
+                    pausedObserved = true
+                    paused = true
+                }
+                return (publishing, paused)
+            }
+            publishingRecord = record
+            publishing = true
+            return (publishing, paused)
+        }
+        if signals.0 {
+            publishingSemaphore.signal()
+        }
+        if signals.1 {
+            pausedSemaphore.signal()
+        }
         print("[cross-device] onTransferActivity \(record)")
     }
 
@@ -426,31 +774,112 @@ private final class RecordingObserver: TransferObserver, @unchecked Sendable {
         }
     }
 
-    func waitForInvite(timeout: TimeInterval) throws -> String {
-        guard inviteSemaphore.wait(timeout: .now() + timeout) == .success else {
-            throw LoopbackTestError.timeout("invite")
-        }
-        return try locked {
-            guard let invite else {
-                throw LoopbackTestError.missingValue("invite")
+    func waitForInvite(timeout: TimeInterval) async throws -> String {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async { [self] in
+                guard inviteSemaphore.wait(timeout: .now() + timeout) == .success else {
+                    continuation.resume(throwing: LoopbackTestError.timeout("invite"))
+                    return
+                }
+                do {
+                    let value = try locked {
+                        guard let invite else {
+                            throw LoopbackTestError.missingValue("invite")
+                        }
+                        return invite
+                    }
+                    continuation.resume(returning: value)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
             }
-            return invite
         }
     }
 
-    func waitForCompletion(timeout: TimeInterval) throws -> UInt64 {
-        guard terminalSemaphore.wait(timeout: .now() + timeout) == .success else {
-            throw LoopbackTestError.timeout("completion")
+    func waitForCompletion(timeout: TimeInterval) async throws -> UInt64 {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async { [self] in
+                guard terminalSemaphore.wait(timeout: .now() + timeout) == .success else {
+                    continuation.resume(throwing: LoopbackTestError.timeout("completion"))
+                    return
+                }
+                do {
+                    let value = try locked {
+                        if let failure {
+                            throw LoopbackTestError.transferFailed(failure)
+                        }
+                        guard let completedBytes else {
+                            throw LoopbackTestError.missingValue("completed bytes")
+                        }
+                        return completedBytes
+                    }
+                    continuation.resume(returning: value)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
         }
-        return try locked {
-            if let failure {
+    }
+
+    func waitForPublishing(timeout: TimeInterval) async throws -> FfiTransferActivityRecord {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async { [self] in
+                guard publishingSemaphore.wait(timeout: .now() + timeout) == .success else {
+                    continuation.resume(throwing: LoopbackTestError.timeout("publication"))
+                    return
+                }
+                do {
+                    let value = try locked {
+                        guard let publishingRecord else {
+                            throw LoopbackTestError.missingValue("publishing activity")
+                        }
+                        return publishingRecord
+                    }
+                    continuation.resume(returning: value)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    func waitForProgress(atLeast bytes: UInt64, timeout: TimeInterval) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            let snapshot = locked { (latestProgress, failure, completedBytes) }
+            if let failure = snapshot.1 {
                 throw LoopbackTestError.transferFailed(failure)
             }
-            guard let completedBytes else {
-                throw LoopbackTestError.missingValue("completed bytes")
+            if snapshot.0 >= bytes {
+                return
             }
-            return completedBytes
+            if snapshot.2 != nil {
+                throw LoopbackTestError.missingValue(
+                    "transfer completed before pause threshold; progress=\(snapshot.0)"
+                )
+            }
+            try await Task.sleep(nanoseconds: 25_000_000)
         }
+        throw LoopbackTestError.timeout("pause threshold")
+    }
+
+    func waitForPaused(timeout: TimeInterval) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            DispatchQueue.global(qos: .utility).async { [self] in
+                guard pausedSemaphore.wait(timeout: .now() + timeout) == .success else {
+                    continuation.resume(throwing: LoopbackTestError.timeout("Paused snapshot"))
+                    return
+                }
+                continuation.resume()
+            }
+        }
+    }
+
+    func assertPathPolicy(_ policy: FfiPathPolicy) {
+        guard policy == .directOnly else { return }
+        let paths = locked { pathKinds }
+        XCTAssertTrue(paths.contains(.direct), "direct-only transfer did not report a direct path: \(paths)")
+        XCTAssertFalse(paths.contains(.relay), "direct-only transfer reported a relay path: \(paths)")
     }
 
     private func complete(bytes: UInt64?, failure: String?) {

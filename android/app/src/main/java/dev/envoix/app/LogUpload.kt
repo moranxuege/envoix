@@ -16,21 +16,68 @@ object LogUpload {
         body: String,
     ): Boolean =
         withContext(Dispatchers.IO) {
-            runCatching {
-                val url = URL("${server.trimEnd('/')}/logs/$roomId?side=$side")
-                (url.openConnection() as HttpURLConnection).run {
-                    requestMethod = "POST"
-                    doOutput = true
-                    connectTimeout = 8000
-                    readTimeout = 8000
-                    setRequestProperty("Content-Type", "text/plain; charset=utf-8")
-                    outputStream.use { it.write(body.toByteArray()) }
-                    val ok = responseCode in 200..299
-                    disconnect()
-                    ok
+            if (!BuildConfig.DEBUG || !SettingsStore.settings.value.devMode) {
+                return@withContext false
+            }
+            if (!validKey(roomId, 64) || !validKey(side, 32) || body.toByteArray().size > Diagnostics.UPLOAD_MAX) {
+                return@withContext false
+            }
+            for (candidate in uploadServers(server)) {
+                val status = uploadOnce(candidate, roomId, side, body)
+                when {
+                    status != null && status in 200..299 -> return@withContext true
+                    status == null || status >= 500 -> continue
+                    else -> return@withContext false
                 }
-            }.getOrDefault(false)
+            }
+            false
         }
+
+    private fun uploadOnce(
+        server: String,
+        roomId: String,
+        side: String,
+        body: String,
+    ): Int? =
+        runCatching {
+            val url = URL("${server.trimEnd('/')}/logs/$roomId?side=$side")
+            val connection = url.openConnection() as HttpURLConnection
+            try {
+                connection.requestMethod = "POST"
+                connection.doOutput = true
+                connection.connectTimeout = 8000
+                connection.readTimeout = 8000
+                connection.setRequestProperty("Content-Type", "text/plain; charset=utf-8")
+                connection.outputStream.use { it.write(body.toByteArray()) }
+                connection.responseCode
+            } finally {
+                connection.disconnect()
+            }
+        }.getOrNull()
+
+    /** Prefer HTTPS, retaining HTTP only as a connection/5xx fallback. */
+    internal fun uploadServers(server: String): List<String> {
+        val configured = server.trim().trimEnd('/')
+        val preferred =
+            if (configured == Endpoints.DEPRECATED_LOG_SERVER) {
+                Endpoints.LOG_SERVER
+            } else {
+                configured
+            }
+        val parsed = runCatching { URL(preferred) }.getOrNull() ?: return emptyList()
+        if (parsed.protocol != "http" && parsed.protocol != "https") return emptyList()
+        val authority = parsed.authority ?: return emptyList()
+        val path = parsed.path.trimEnd('/')
+        return listOf("https://$authority$path", "http://$authority$path").distinct()
+    }
+
+    private fun validKey(
+        value: String,
+        maxLength: Int,
+    ): Boolean =
+        value.isNotEmpty() &&
+            value.length <= maxLength &&
+            value.all { it.isLetterOrDigit() || it == '-' || it == '_' }
 
     /** POST raw [body] bytes to [url]; true on a 2xx reply. */
     suspend fun postBytes(

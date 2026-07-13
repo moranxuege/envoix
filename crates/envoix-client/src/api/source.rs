@@ -64,6 +64,10 @@ pub enum PeerSource {
     ShowInvite {
         /// Invite lifetime before senders reject it as expired.
         ttl_secs: u64,
+        /// Stable pairing token for resumed listener attempts. Session drivers
+        /// generate and persist it when omitted by a frontend.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token: Option<String>,
     },
     /// Discover (when dialing) or advertise (when listening) over LAN mDNS.
     Mdns {

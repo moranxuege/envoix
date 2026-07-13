@@ -2,11 +2,25 @@ package dev.envoix.app
 
 enum class Direction { Send, Receive }
 
-enum class Status { Waiting, Connecting, Verifying, Transferring, Confirming, Paused, Completed, Unconfirmed, Failed, Cancelled }
+enum class Status {
+    Waiting,
+    Connecting,
+    Verifying,
+    Transferring,
+    Confirming,
+    Publishing,
+    Paused,
+    Completed,
+    Unconfirmed,
+    Failed,
+    Cancelled,
+}
 
 /** One transfer's observable state, shown as a card. */
 data class Transfer(
     val id: Long,
+    /** Monotonic canonical snapshot sequence; older callbacks are discarded. */
+    val sequence: Long = 0,
     val direction: Direction,
     val room: String,
     val fileName: String? = null,
@@ -25,6 +39,8 @@ data class Transfer(
     /** True average throughput (total bytes / elapsed), matching the CLI's avg_bps. */
     val avgBps: Double = 0.0,
     val status: Status = Status.Connecting,
+    /** Canonical core verdict: retry is meaningful for the current failure. */
+    val retryable: Boolean = false,
     val error: String? = null,
     /** Where a received file ended up (a `content://` in Downloads), for opening. */
     val savedUri: String? = null,
@@ -40,9 +56,41 @@ data class Transfer(
 val Status.isTerminal: Boolean
     get() =
         this == Status.Completed ||
-            this == Status.Unconfirmed ||
             this == Status.Failed ||
             this == Status.Cancelled
+
+enum class TransferAction { Pause, Resume, Retry, Cancel, Delete, Open }
+
+/** Canonical action policy consumed by Activity; every rendered button must
+ * correspond to an operation accepted for the current snapshot. */
+fun availableTransferActions(transfer: Transfer): List<TransferAction> =
+    when (transfer.status) {
+        Status.Waiting,
+        Status.Connecting,
+        Status.Verifying,
+        Status.Transferring,
+        -> listOf(TransferAction.Pause, TransferAction.Cancel)
+        Status.Paused -> listOf(TransferAction.Resume, TransferAction.Cancel)
+        Status.Unconfirmed -> listOf(TransferAction.Retry, TransferAction.Cancel)
+        Status.Publishing ->
+            if (transfer.error != null) {
+                listOf(TransferAction.Retry, TransferAction.Cancel)
+            } else {
+                emptyList()
+            }
+        Status.Completed ->
+            buildList {
+                if (transfer.savedUri != null) add(TransferAction.Open)
+                add(TransferAction.Delete)
+            }
+        Status.Failed ->
+            buildList {
+                if (transfer.retryable) add(TransferAction.Retry)
+                add(TransferAction.Delete)
+            }
+        Status.Cancelled -> listOf(TransferAction.Delete)
+        Status.Confirming -> emptyList()
+    }
 
 /** Human-readable byte count (the ONE implementation - was duplicated). */
 fun humanBytes(n: Long): String =

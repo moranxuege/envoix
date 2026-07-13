@@ -5,14 +5,15 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -24,9 +25,13 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.ContentPaste
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -55,16 +60,18 @@ import dev.envoix.app.SettingsStore
 /**
  * New-transfer sheet. The top is a mutually-exclusive **Show QR / Scan QR** pane
  * (your own code vs a live inline scanner); below it a code field to type/paste a
- * code, then the role picker, the file/save path, and the start button. Scanning
+ * code, then the file/save path and the start button. Scanning
  * fills the code and picks the opposite role, so both sides never share a role.
  */
 @Composable
 fun NewTransferSheet(
+    modifier: Modifier = Modifier,
     onReceive: (code: String, broker: String, relay: String, qrPayload: String?) -> Unit,
     onSend: (code: String, broker: String, relay: String, file: Uri, qrPayload: String?, transferInvite: String?) -> Unit,
 ) {
     val colors = Envoix.colors
     val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
     val settings by SettingsStore.settings.collectAsState()
     val broker = settings.broker
     val relay = settings.relay
@@ -79,20 +86,44 @@ fun NewTransferSheet(
     var fileName by remember { mutableStateOf<String?>(null) }
     var topMode by remember { mutableStateOf("show") } // "show" | "scan"
 
-    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) {
-            fileUri = uri
-            fileName = displayName(context, uri)
+    val filePicker =
+        rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            if (uri != null) {
+                fileUri = uri
+                fileName = displayName(context, uri)
+            }
         }
-    }
-    val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        if (uri != null) SettingsStore.setSaveTree(context, uri)
-    }
+    val folderPicker =
+        rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            if (uri != null) SettingsStore.setSaveTree(context, uri)
+        }
     val joining = typed.isNotBlank() || transferInvite != null
 
     // (Re)generate our own code whenever the role changes and we're not joining.
     LaunchedEffect(role, joining) {
         if (!joining) generated = InviteCodec.generate(role, broker, relay)
+    }
+
+    fun applyJoinInput(value: String) {
+        val trimmed = value.trim()
+        typed = trimmed
+        transferInvite = null
+        scannedBroker = null
+        scannedRelay = null
+        when {
+            InviteCodec.isTransferInvite(trimmed) -> {
+                transferInvite = trimmed
+                role = "send"
+            }
+            trimmed.lowercase().startsWith("envoix://pair/") -> {
+                InviteCodec.parse(trimmed)?.let { invite ->
+                    typed = invite.code
+                    scannedBroker = invite.broker
+                    scannedRelay = invite.relay
+                    InviteCodec.oppositeRole(invite.role)?.let { role = it }
+                }
+            }
+        }
     }
 
     fun applyScanned(scanned: String) {
@@ -115,134 +146,155 @@ fun NewTransferSheet(
         topMode = "show" // stop the camera; the code is filled in now
     }
 
-    val code = when {
-        transferInvite != null -> "invite-direct"
-        joining -> typed.trim()
-        else -> generated?.first
-    }
+    val code =
+        when {
+            transferInvite != null -> "invite-direct"
+            joining -> typed.trim()
+            else -> generated?.first
+        }
     val useBroker = scannedBroker ?: broker
     val useRelay = scannedRelay ?: relay
-    val ready = if (transferInvite != null) {
-        role == "send" && fileUri != null
-    } else {
-        !code.isNullOrBlank() && code.contains("-") && (role == "receive" || fileUri != null)
-    }
+    val ready =
+        if (transferInvite != null) {
+            role == "send" && fileUri != null
+        } else {
+            !code.isNullOrBlank() && code.contains("-") && (role == "receive" || fileUri != null)
+        }
 
     Column(
-        Modifier.fillMaxWidth().testTag(EnvoixTestTags.NEW_TRANSFER_SHEET).verticalScroll(rememberScrollState())
-            .padding(horizontal = EnvoixDimens.ScreenPadding).padding(bottom = 28.dp),
+        modifier
+            .fillMaxSize()
+            .testTag(EnvoixTestTags.NEW_TRANSFER_SHEET),
     ) {
-        Text("New transfer", color = colors.text, fontSize = 21.sp, fontWeight = FontWeight.ExtraBold)
-        Spacer(Modifier.height(14.dp))
-
-        Text("I WANT TO", color = colors.muted, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
-        Spacer(Modifier.height(6.dp))
-        Row(
-            Modifier.fillMaxWidth().clip(RoundedCornerShape(EnvoixDimens.ControlRadius))
-                .background(colors.bg).border(1.dp, colors.line, RoundedCornerShape(EnvoixDimens.ControlRadius)).padding(3.dp),
+        Column(
+            Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(bottom = 16.dp),
         ) {
-            SegTab("Send", role == "send", Modifier.weight(1f).testTag(EnvoixTestTags.ROLE_SEND)) { role = "send" }
-            SegTab("Receive", role == "receive", Modifier.weight(1f).testTag(EnvoixTestTags.ROLE_RECEIVE)) { role = "receive" }
-        }
-
-        // ---- top pane: show my QR vs scan one ----
-        Spacer(Modifier.height(16.dp))
-        Text("PAIRING", color = colors.muted, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
-        Spacer(Modifier.height(6.dp))
-        Row(
-            Modifier.fillMaxWidth().clip(RoundedCornerShape(EnvoixDimens.ControlRadius))
-                .background(colors.bg).border(1.dp, colors.line, RoundedCornerShape(EnvoixDimens.ControlRadius)).padding(3.dp),
-        ) {
-            SegTab("Show QR", topMode == "show", Modifier.weight(1f).testTag(EnvoixTestTags.SHOW_QR_TAB)) { topMode = "show" }
-            SegTab("Scan QR", topMode == "scan", Modifier.weight(1f).testTag(EnvoixTestTags.SCAN_QR_TAB)) { topMode = "scan" }
-        }
-
-        Spacer(Modifier.height(14.dp))
-        Box(Modifier.fillMaxWidth().heightIn(min = 250.dp), contentAlignment = Alignment.Center) {
-            if (topMode == "scan") {
-                InlineScanner(onScanned = ::applyScanned, modifier = Modifier.fillMaxWidth())
-            } else if (joining) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("You'll join", color = colors.muted, fontSize = 13.sp)
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        if (transferInvite != null) "Direct invite scanned" else typed,
-                        color = colors.accent, fontSize = 18.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace,
-                    )
-                    Spacer(Modifier.height(6.dp))
-                    Text("clear the code below to show your own", color = colors.muted, fontSize = 11.sp)
-                }
-            } else if (generated != null) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    QrCode(generated!!.second, side = 168.dp)
-                    Spacer(Modifier.height(12.dp))
-                    val clip = LocalClipboardManager.current
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            generated!!.first,
-                            color = colors.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
-                            fontFamily = FontFamily.Monospace,
-                            modifier = Modifier.testTag(EnvoixTestTags.ROOM_CODE),
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Icon(
-                            Icons.Default.ContentCopy, "Copy code",
-                            tint = colors.muted,
-                            modifier = Modifier.clip(CircleShape)
-                                .clickable { clip.setText(AnnotatedString(generated!!.first)) }
-                                .padding(6.dp).size(18.dp),
-                        )
-                    }
-                }
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(EnvoixDimens.ControlRadius + 2.dp))
+                    .background(colors.surface)
+                    .border(1.dp, colors.line, RoundedCornerShape(EnvoixDimens.ControlRadius + 2.dp))
+                    .padding(4.dp),
+            ) {
+                SegTab("Send", role == "send", Modifier.weight(1f).testTag(EnvoixTestTags.ROLE_SEND)) { role = "send" }
+                SegTab("Receive", role == "receive", Modifier.weight(1f).testTag(EnvoixTestTags.ROLE_RECEIVE)) { role = "receive" }
             }
-        }
 
-        // ---- code field (type/paste a code to join) ----
-        Spacer(Modifier.height(16.dp))
-        OutlinedTextField(
-            value = typed,
-            onValueChange = {
-                val trimmed = it.trim()
-                typed = trimmed
-                transferInvite = null
-                scannedBroker = null
-                scannedRelay = null
-                when {
-                    InviteCodec.isTransferInvite(trimmed) -> {
-                        transferInvite = trimmed
-                        role = "send"
+            // QR is the default pairing surface for both roles; scanning is one tap away.
+            Spacer(Modifier.height(12.dp))
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(EnvoixDimens.ControlRadius + 2.dp))
+                    .background(colors.surface)
+                    .border(1.dp, colors.line, RoundedCornerShape(EnvoixDimens.ControlRadius + 2.dp))
+                    .padding(4.dp),
+            ) {
+                SegTab("Show QR", topMode == "show", Modifier.weight(1f).testTag(EnvoixTestTags.SHOW_QR_TAB)) { topMode = "show" }
+                SegTab("Scan QR", topMode == "scan", Modifier.weight(1f).testTag(EnvoixTestTags.SCAN_QR_TAB)) { topMode = "scan" }
+            }
+
+            Spacer(Modifier.height(12.dp))
+            Box(Modifier.fillMaxWidth().heightIn(min = 216.dp), contentAlignment = Alignment.Center) {
+                if (topMode == "scan") {
+                    InlineScanner(onScanned = ::applyScanned, modifier = Modifier.fillMaxWidth())
+                } else if (joining) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("You'll join", color = colors.muted, fontSize = 13.sp)
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            if (transferInvite != null) "Direct invite scanned" else typed,
+                            color = colors.accent,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Text("clear the code below to show your own", color = colors.muted, fontSize = 11.sp)
                     }
-                    trimmed.lowercase().startsWith("envoix://pair/") -> {
-                        InviteCodec.parse(trimmed)?.let { invite ->
-                            typed = invite.code
-                            scannedBroker = invite.broker
-                            scannedRelay = invite.relay
-                            InviteCodec.oppositeRole(invite.role)?.let { role = it }
+                } else if (generated != null) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        QrCode(generated!!.second, side = 156.dp)
+                        Spacer(Modifier.height(12.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                generated!!.first,
+                                color = colors.text,
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                fontFamily = FontFamily.Monospace,
+                                modifier = Modifier.testTag(EnvoixTestTags.ROOM_CODE),
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Icon(
+                                Icons.Default.ContentCopy,
+                                "Copy code",
+                                tint = colors.muted,
+                                modifier =
+                                    Modifier
+                                        .clip(CircleShape)
+                                        .clickable { clipboard.setText(AnnotatedString(generated!!.first)) }
+                                        .padding(6.dp)
+                                        .size(18.dp),
+                            )
                         }
                     }
                 }
-            },
-            placeholder = { Text("or enter a code to join…") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth().testTag(EnvoixTestTags.JOIN_CODE_FIELD),
-        )
-
-        // ---- path: file to send (required) or where received files land ----
-        Spacer(Modifier.height(14.dp))
-        if (role == "send") {
-            PathRow("FILE TO SEND", fileName ?: "Choose a file…", placeholder = fileName == null, testTag = EnvoixTestTags.FILE_PICKER_ROW) {
-                filePicker.launch(arrayOf("*/*"))
             }
-        } else {
-            PathRow("SAVE TO", SettingsStore.saveLabel(context), placeholder = false, testTag = EnvoixTestTags.SAVE_PATH_ROW) {
-                folderPicker.launch(SettingsStore.savePickerInitialUri())
+
+            // A join code is usually pasted, so keep this to one compact row.
+            Spacer(Modifier.height(12.dp))
+            OutlinedTextField(
+                value = typed,
+                onValueChange = ::applyJoinInput,
+                placeholder = { Text("Paste a code to join") },
+                trailingIcon = {
+                    IconButton(onClick = { clipboard.getText()?.text?.let(::applyJoinInput) }) {
+                        Icon(Icons.Default.ContentPaste, contentDescription = "Paste code", tint = colors.accentStrong)
+                    }
+                },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().testTag(EnvoixTestTags.JOIN_CODE_FIELD),
+            )
+
+            // ---- path: file to send (required) or where received files land ----
+            Spacer(Modifier.height(12.dp))
+            if (role == "send") {
+                PathRow(
+                    "FILE TO SEND",
+                    fileName ?: "Choose a file",
+                    placeholder = fileName == null,
+                    icon = Icons.AutoMirrored.Filled.InsertDriveFile,
+                    testTag = EnvoixTestTags.FILE_PICKER_ROW,
+                ) {
+                    filePicker.launch(arrayOf("*/*"))
+                }
+            } else {
+                PathRow(
+                    "SAVE RECEIVED FILES TO",
+                    SettingsStore.saveLabel(context),
+                    placeholder = false,
+                    icon = Icons.Default.Folder,
+                    testTag = EnvoixTestTags.SAVE_PATH_ROW,
+                ) {
+                    folderPicker.launch(SettingsStore.savePickerInitialUri())
+                }
             }
         }
 
-        // ---- start ----
-        Spacer(Modifier.height(16.dp))
+        // Primary action stays reachable instead of disappearing below the scroll area.
         Box(
-            Modifier.fillMaxWidth().testTag(EnvoixTestTags.START_TRANSFER_BUTTON).height(EnvoixDimens.PrimaryButtonHeight).clip(RoundedCornerShape(EnvoixDimens.ControlRadius))
+            Modifier
+                .fillMaxWidth()
+                .testTag(
+                    EnvoixTestTags.START_TRANSFER_BUTTON,
+                ).height(EnvoixDimens.PrimaryButtonHeight)
+                .clip(RoundedCornerShape(EnvoixDimens.ControlRadius))
                 .background(colors.accent.copy(alpha = if (ready) 1f else 0.4f))
                 .clickable(enabled = ready) {
                     val c = code ?: return@clickable
@@ -257,25 +309,41 @@ fun NewTransferSheet(
         ) {
             Text(
                 if (role == "send") "Send" else "Receive",
-                color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp,
+                color = Color.White,
+                fontWeight = FontWeight.Bold,
+                fontSize = 16.sp,
             )
         }
+        Spacer(Modifier.height(8.dp))
     }
 }
 
 @Composable
-private fun SegTab(text: String, selected: Boolean, modifier: Modifier, onClick: () -> Unit) {
+private fun SegTab(
+    text: String,
+    selected: Boolean,
+    modifier: Modifier,
+    onClick: () -> Unit,
+) {
     val colors = Envoix.colors
+    val background by animateColorAsState(
+        if (selected) colors.accent else Color.Transparent,
+        label = "segment-background",
+    )
     Box(
-        modifier.clip(RoundedCornerShape(EnvoixDimens.ControlRadius))
-            .background(if (selected) colors.accent else Color.Transparent)
-            .clickable(onClick = onClick).padding(vertical = 9.dp),
+        modifier
+            .heightIn(min = 50.dp)
+            .clip(RoundedCornerShape(EnvoixDimens.ControlRadius))
+            .background(background)
+            .clickable(onClick = onClick)
+            .padding(vertical = 11.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(
             text,
             color = if (selected) Color.White else colors.muted,
-            fontWeight = FontWeight.Bold, fontSize = 14.sp,
+            fontWeight = FontWeight.Bold,
+            fontSize = 15.sp,
         )
     }
 }
@@ -283,32 +351,57 @@ private fun SegTab(text: String, selected: Boolean, modifier: Modifier, onClick:
 /** A labelled path row: a tappable file/folder picker (onClick != null) or a
  *  read-only value. */
 @Composable
-private fun PathRow(label: String, value: String, placeholder: Boolean, testTag: String, onClick: (() -> Unit)?) {
+private fun PathRow(
+    label: String,
+    value: String,
+    placeholder: Boolean,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    testTag: String,
+    onClick: (() -> Unit)?,
+) {
     val colors = Envoix.colors
-    Text(label, color = colors.muted, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
-    Spacer(Modifier.height(6.dp))
     Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(EnvoixDimens.ControlRadius))
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(EnvoixDimens.ControlRadius))
             .testTag(testTag)
-            .border(1.dp, colors.line, RoundedCornerShape(EnvoixDimens.ControlRadius))
+            .background(colors.surface)
+            .border(1.dp, colors.accent.copy(alpha = 0.28f), RoundedCornerShape(EnvoixDimens.ControlRadius))
             .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
-            .padding(horizontal = 14.dp, vertical = 14.dp),
+            .padding(horizontal = 14.dp, vertical = 12.dp)
+            .heightIn(min = 68.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween,
     ) {
-        Text(
-            value,
-            color = if (placeholder) colors.muted else colors.text,
-            fontSize = 14.sp, fontFamily = FontFamily.Monospace,
-            maxLines = 1, overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f, fill = false),
-        )
+        Box(
+            Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(colors.accentSoft),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(icon, contentDescription = null, tint = colors.accentStrong, modifier = Modifier.size(21.dp))
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(label, color = colors.muted, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp)
+            Spacer(Modifier.height(3.dp))
+            Text(
+                value,
+                color = if (placeholder) colors.muted else colors.text,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
         if (onClick != null) {
+            Spacer(Modifier.width(8.dp))
             Icon(Icons.Default.ChevronRight, null, tint = colors.muted, modifier = Modifier.size(20.dp))
         }
     }
 }
 
-private fun displayName(context: Context, uri: Uri): String =
-    context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+private fun displayName(
+    context: Context,
+    uri: Uri,
+): String =
+    context.contentResolver
+        .query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
         ?.use { c -> if (c.moveToFirst()) c.getString(0) else null } ?: "file"

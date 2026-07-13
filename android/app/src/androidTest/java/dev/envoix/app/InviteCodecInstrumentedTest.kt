@@ -11,11 +11,12 @@ import org.junit.runner.RunWith
 class InviteCodecInstrumentedTest {
     @Test
     fun generatedInviteRoundTripsThroughUniffi() {
-        val invite = InviteCodec.generate(
-            role = "receive",
-            broker = Endpoints.BROKER,
-            relay = Endpoints.RELAY,
-        )
+        val invite =
+            InviteCodec.generate(
+                role = "receive",
+                broker = Endpoints.BROKER,
+                relay = Endpoints.RELAY,
+            )
 
         assertNotNull("UniFFI invite generation returned null", invite)
         val (code, payload) = invite!!

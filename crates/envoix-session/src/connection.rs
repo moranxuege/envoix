@@ -150,6 +150,25 @@ impl FrameConnection for IrohFrameConnection {
         flush_frame_writer(&mut self.send).await
     }
 
+    async fn send_chunk_or_recv_frame(
+        &mut self,
+        transfer_id: &envoix_types::TransferId,
+        index: u64,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<Option<Frame>, ProtocolError> {
+        let send = &mut self.send;
+        let recv = &mut self.recv;
+        tokio::select! {
+            biased;
+            frame = read_frame(recv) => frame.map(Some),
+            result = async {
+                write_chunk_frame(send, transfer_id, index, offset, bytes).await?;
+                flush_frame_writer(send).await
+            } => result.map(|()| None),
+        }
+    }
+
     async fn recv_frame(&mut self) -> Result<Frame, ProtocolError> {
         read_frame(&mut self.recv).await
     }

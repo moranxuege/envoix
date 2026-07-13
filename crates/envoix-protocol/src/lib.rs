@@ -58,6 +58,20 @@ pub trait FrameConnection: Send {
         bytes: &[u8],
     ) -> Result<(), ProtocolError>;
 
+    /// Sends one chunk while allowing a full-duplex transport to surface a
+    /// peer control frame. The default keeps simple transports compatible;
+    /// production full-duplex transports should override this method.
+    async fn send_chunk_or_recv_frame(
+        &mut self,
+        transfer_id: &TransferId,
+        index: u64,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<Option<Frame>, ProtocolError> {
+        self.send_chunk(transfer_id, index, offset, bytes).await?;
+        Ok(None)
+    }
+
     /// Receives one protocol frame.
     async fn recv_frame(&mut self) -> Result<Frame, ProtocolError>;
 

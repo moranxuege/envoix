@@ -15,16 +15,36 @@ const IDENTITY_FILE_VERSION: u32 = 1;
 /// iroh endpoint identity policy.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum IdentityConfig {
-    /// Generate a fresh endpoint identity for this process.
+    /// Generate a fresh endpoint identity for each endpoint bind.
     #[default]
     Ephemeral,
+    /// Reuse one process-memory identity across endpoint rebinds.
+    Memory(MemoryIdentity),
     /// Load an existing identity from this file, creating one if missing.
     Persistent(PathBuf),
+}
+
+/// Secret endpoint identity kept in memory without exposing key bytes through
+/// the public API or `Debug` output.
+#[derive(Clone, Eq, PartialEq)]
+pub struct MemoryIdentity([u8; 32]);
+
+impl MemoryIdentity {
+    pub fn generate() -> Self {
+        Self(SecretKey::generate().to_bytes())
+    }
+}
+
+impl std::fmt::Debug for MemoryIdentity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("MemoryIdentity([REDACTED])")
+    }
 }
 
 pub(crate) async fn load_secret_key(identity: &IdentityConfig) -> Result<SecretKey, SessionError> {
     match identity {
         IdentityConfig::Ephemeral => Ok(SecretKey::generate()),
+        IdentityConfig::Memory(identity) => Ok(SecretKey::from_bytes(&identity.0)),
         IdentityConfig::Persistent(path) => load_or_create_identity(path)
             .await
             .map_err(|error| CoreError::InvalidInput(error.to_string())),
@@ -111,6 +131,16 @@ mod tests {
         let a = load_secret_key(&IdentityConfig::Ephemeral).await.unwrap();
         let b = load_secret_key(&IdentityConfig::Ephemeral).await.unwrap();
         assert_ne!(a.public(), b.public());
+    }
+
+    #[tokio::test]
+    async fn memory_identity_survives_endpoint_rebinds() {
+        let identity = IdentityConfig::Memory(MemoryIdentity::generate());
+        let first = load_secret_key(&identity).await.unwrap();
+        let second = load_secret_key(&identity).await.unwrap();
+
+        assert_eq!(first.public(), second.public());
+        assert!(!format!("{identity:?}").contains(&URL_SAFE_NO_PAD.encode(first.to_bytes())));
     }
 
     #[tokio::test]

@@ -32,6 +32,35 @@ extension View {
     }
 }
 
+// MARK: - Transfer setup
+
+enum PairingPanelMode: Hashable {
+    case show
+    case scan
+}
+
+struct PairingPanelSelector: View {
+    @Environment(\.appLanguage) private var language
+    @Binding var selection: PairingPanelMode
+    var disabled = false
+
+    var body: some View {
+        Picker(AppText.value("Pairing action", "配对操作", language: language), selection: $selection) {
+            Label(AppText.value("Show QR", "显示二维码", language: language), systemImage: "qrcode")
+                .tag(PairingPanelMode.show)
+            Label(AppText.value("Scan QR", "扫描二维码", language: language), systemImage: "qrcode.viewfinder")
+                .tag(PairingPanelMode.scan)
+        }
+        .pickerStyle(.segmented)
+        .controlSize(.large)
+        .font(.body.weight(.semibold))
+        .frame(minHeight: 52)
+        .labelsHidden()
+        .disabled(disabled)
+        .accessibilityIdentifier("pairing_panel_selector")
+    }
+}
+
 // MARK: - Pills
 
 /// Rounded status chip (e.g. "Completed", "Waiting…", an error).
@@ -70,10 +99,10 @@ struct ModePill: View {
 
     var body: some View {
         Text(text)
-            .font(.body.weight(.semibold))
+            .font(.caption.weight(.bold))
             .foregroundStyle(Theme.accentStrong)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 7)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
             .background(Theme.accentSoft.opacity(0.75))
             .clipShape(Capsule())
     }
@@ -101,16 +130,20 @@ struct PairingModeSelector: View {
     }
 
     private var desktopBody: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(AppText.value("Pairing method", "配对方式", language: language))
-                .font(.title3.weight(.semibold))
-                .foregroundStyle(Theme.muted)
+        Group {
+            if developerMode {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(AppText.value("Advanced pairing", "高级配对", language: language))
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(Theme.muted)
 
-            HStack(spacing: 10) {
-                pairingOptions
+                    HStack(spacing: 10) {
+                        pairingOptions
+                    }
+                }
+                .card(padding: 14)
             }
         }
-        .card(padding: 14)
         .disabled(disabled)
         .onAppear(perform: ensureVisibleSelection)
         .onChange(of: developerMode) { _ in ensureVisibleSelection() }
@@ -118,24 +151,26 @@ struct PairingModeSelector: View {
 
     #if os(iOS)
     private var mobileBody: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(AppText.value("Pairing", "配对", language: language))
-                .font(.headline.weight(.semibold))
-                .foregroundStyle(Theme.muted)
+        Group {
+            if developerMode {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(AppText.value("Advanced pairing", "高级配对", language: language))
+                        .font(.headline.weight(.semibold))
+                        .foregroundStyle(Theme.muted)
 
-            HStack(spacing: 8) {
-                mobileOption(.room, title: AppText.value("QR / Code", "扫码 / 短码", language: language), systemImage: "qrcode")
-                if developerMode {
-                    mobileOption(.token, title: AppText.value("Token", "口令", language: language), systemImage: "key")
+                    HStack(spacing: 8) {
+                        mobileOption(.room, title: AppText.value("QR / Code", "扫码 / 短码", language: language), systemImage: "qrcode")
+                        mobileOption(.token, title: AppText.value("Token", "口令", language: language), systemImage: "key")
+                    }
+
+                    Text(selectedHint)
+                        .font(.footnote)
+                        .foregroundStyle(Theme.muted)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
+                .card(padding: 12)
             }
-
-            Text(selectedHint)
-                .font(.footnote)
-                .foregroundStyle(Theme.muted)
-                .fixedSize(horizontal: false, vertical: true)
         }
-        .card(padding: 12)
         .disabled(disabled)
         .onAppear(perform: ensureVisibleSelection)
         .onChange(of: developerMode) { _ in ensureVisibleSelection() }
@@ -305,11 +340,18 @@ extension View {
 struct LinkRow<Trailing: View>: View {
     var text: String
     var textIdentifier: String?
+    var displaysFullText: Bool
     @ViewBuilder var trailing: Trailing
 
-    init(text: String, textIdentifier: String? = nil, @ViewBuilder trailing: () -> Trailing) {
+    init(
+        text: String,
+        textIdentifier: String? = nil,
+        displaysFullText: Bool = false,
+        @ViewBuilder trailing: () -> Trailing
+    ) {
         self.text = text
         self.textIdentifier = textIdentifier
+        self.displaysFullText = displaysFullText
         self.trailing = trailing()
     }
 
@@ -325,9 +367,10 @@ struct LinkRow<Trailing: View>: View {
             }
             .font(.body.monospaced())
             .foregroundStyle(Theme.muted)
-            .lineLimit(1)
+            .lineLimit(displaysFullText ? nil : 1)
             .truncationMode(.middle)
             .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: displaysFullText)
             .frame(maxWidth: .infinity, alignment: .leading)
             trailing
         }

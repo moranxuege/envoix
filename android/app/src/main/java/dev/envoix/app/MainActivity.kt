@@ -29,7 +29,6 @@ import java.io.File
 private enum class Screen { Home, Logs }
 
 class MainActivity : ComponentActivity() {
-
     private val vm: TransferViewModel by viewModels()
 
     private val requestNotif =
@@ -40,7 +39,7 @@ class MainActivity : ComponentActivity() {
         if (
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
-                android.content.pm.PackageManager.PERMISSION_GRANTED
+            android.content.pm.PackageManager.PERMISSION_GRANTED
         ) {
             requestNotif.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
@@ -76,10 +75,11 @@ class MainActivity : ComponentActivity() {
     /** Open a received file (a Downloads content Uri) in whatever app handles it. */
     private fun openReceived(t: Transfer) {
         val uri = t.savedUri?.let { Uri.parse(it) } ?: return
-        val view = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, "*/*")
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
+        val view =
+            Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "*/*")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
         runCatching { startActivity(Intent.createChooser(view, "Open with")) }
     }
 
@@ -97,6 +97,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun displayName(uri: Uri): String? =
-        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+        contentResolver
+            .query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
             ?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
 }

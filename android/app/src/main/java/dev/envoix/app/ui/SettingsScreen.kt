@@ -1,5 +1,7 @@
 package dev.envoix.app.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -38,20 +40,22 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.ui.platform.LocalContext
+import dev.envoix.app.BuildConfig
 import dev.envoix.app.DebugBuild
 import dev.envoix.app.SettingsStore
 
 @Composable
-fun SettingsScreen(onBack: () -> Unit, showBack: Boolean = true) {
+fun SettingsScreen(
+    onBack: () -> Unit,
+    showBack: Boolean = true,
+) {
     val colors = Envoix.colors
     val settings by SettingsStore.settings.collectAsState()
 
@@ -60,9 +64,10 @@ fun SettingsScreen(onBack: () -> Unit, showBack: Boolean = true) {
     var relay by remember { mutableStateOf(settings.relay) }
     var chunkSize by remember { mutableStateOf(settings.chunkSize) }
     val context = LocalContext.current
-    val folderPicker = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocumentTree(),
-    ) { uri -> if (uri != null) SettingsStore.setSaveTree(context, uri) }
+    val folderPicker =
+        rememberLauncherForActivityResult(
+            ActivityResultContracts.OpenDocumentTree(),
+        ) { uri -> if (uri != null) SettingsStore.setSaveTree(context, uri) }
     var allowText by remember { mutableStateOf(settings.candidatesAllow.joinToString("\n")) }
     var denyText by remember { mutableStateOf(settings.candidatesDeny.joinToString("\n")) }
     var logServer by remember { mutableStateOf(settings.logServer) }
@@ -72,12 +77,14 @@ fun SettingsScreen(onBack: () -> Unit, showBack: Boolean = true) {
     // toggle mutating `deny`) back into the raw editors, without clobbering
     // in-progress typing (which already parses to the same list).
     LaunchedEffect(settings.candidatesDeny) {
-        if (cidrLines(denyText) != settings.candidatesDeny)
+        if (cidrLines(denyText) != settings.candidatesDeny) {
             denyText = settings.candidatesDeny.joinToString("\n")
+        }
     }
     LaunchedEffect(settings.candidatesAllow) {
-        if (cidrLines(allowText) != settings.candidatesAllow)
+        if (cidrLines(allowText) != settings.candidatesAllow) {
             allowText = settings.candidatesAllow.joinToString("\n")
+        }
     }
 
     Column(
@@ -140,45 +147,62 @@ fun SettingsScreen(onBack: () -> Unit, showBack: Boolean = true) {
         if (showAdvanced) {
             Spacer(Modifier.height(16.dp))
             SectionLabel("SERVERS")
-            Field("Broker · rendezvous", broker) { broker = it; SettingsStore.update { s -> s.copy(broker = it) } }
-            Spacer(Modifier.height(12.dp))
-            Field("Relay · data path", relay) { relay = it; SettingsStore.update { s -> s.copy(relay = it) } }
-            Spacer(Modifier.height(12.dp))
-            Field("Log server · diagnostics", logServer) {
-                logServer = it; SettingsStore.update { s -> s.copy(logServer = it) }
+            Field("Broker · rendezvous", broker) {
+                broker = it
+                SettingsStore.update { s -> s.copy(broker = it) }
             }
-
+            Spacer(Modifier.height(12.dp))
+            Field("Relay · data path", relay) {
+                relay = it
+                SettingsStore.update { s -> s.copy(relay = it) }
+            }
             Spacer(Modifier.height(22.dp))
             SectionLabel("CONFIG.TOML")
             Field("Chunk size · e.g. 16MB", chunkSize) {
-                chunkSize = it; SettingsStore.update { s -> s.copy(chunkSize = it) }
+                chunkSize = it
+                SettingsStore.update { s -> s.copy(chunkSize = it) }
             }
             Spacer(Modifier.height(12.dp))
             MultilineField("Candidate allow · one CIDR per line", allowText) {
-                allowText = it; SettingsStore.update { s -> s.copy(candidatesAllow = cidrLines(it)) }
+                allowText = it
+                SettingsStore.update { s -> s.copy(candidatesAllow = cidrLines(it)) }
             }
             Spacer(Modifier.height(12.dp))
             MultilineField("Candidate deny · one CIDR per line", denyText) {
-                denyText = it; SettingsStore.update { s -> s.copy(candidatesDeny = cidrLines(it)) }
+                denyText = it
+                SettingsStore.update { s -> s.copy(candidatesDeny = cidrLines(it)) }
             }
+        }
 
-            Spacer(Modifier.height(22.dp))
-            SectionLabel("DEVELOPER")
+        Spacer(Modifier.height(26.dp))
+        SectionLabel("DEVELOPER")
+        ToggleRow(
+            title = "Developer mode",
+            subtitle = "Reveal transfer IDs, path selection, failure details, live logs, and diagnostic reports.",
+            checked = settings.devMode,
+        ) { SettingsStore.update { s -> s.copy(devMode = it) } }
+        if (settings.devMode) {
+            Spacer(Modifier.height(16.dp))
             ToggleRow(
-                title = "Developer mode",
-                subtitle = "Reveal diagnostics — verbose logging (and, later, log upload).",
-                checked = settings.devMode,
-            ) { SettingsStore.update { s -> s.copy(devMode = it) } }
-            if (settings.devMode) {
+                title = "Verbose logging (-vv)",
+                subtitle = "Also capture iroh internals: path selection and hole-punching. High volume.",
+                checked = settings.verboseLog,
+            ) {
+                SettingsStore.update { s -> s.copy(verboseLog = it) }
+                SettingsStore.applyLogLevel()
+            }
+            if (BuildConfig.DEBUG) {
                 Spacer(Modifier.height(16.dp))
-                ToggleRow(
-                    title = "Verbose logging (-vv)",
-                    subtitle = "Also capture iroh internals: path selection, hole-punching. High volume.",
-                    checked = settings.verboseLog,
-                ) {
-                    SettingsStore.update { s -> s.copy(verboseLog = it) }
-                    SettingsStore.applyLogLevel()
+                Field("Remote log server", logServer) {
+                    logServer = it
+                    SettingsStore.update { s -> s.copy(logServer = it) }
                 }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "Redacted reports only. HTTPS is tried before the development HTTP fallback.",
+                    color = colors.muted,
+                    fontSize = 12.sp,
+                )
             }
         }
 
@@ -193,8 +217,7 @@ fun SettingsScreen(onBack: () -> Unit, showBack: Boolean = true) {
     }
 }
 
-private fun cidrLines(t: String): List<String> =
-    t.lines().map { it.trim() }.filter { it.isNotEmpty() }
+private fun cidrLines(t: String): List<String> = t.lines().map { it.trim() }.filter { it.isNotEmpty() }
 
 @Composable
 private fun SectionLabel(text: String) {
@@ -209,23 +232,39 @@ private fun SectionLabel(text: String) {
 }
 
 @Composable
-private fun FolderPickerRow(label: String, custom: Boolean, onPick: () -> Unit, onReset: () -> Unit) {
+private fun FolderPickerRow(
+    label: String,
+    custom: Boolean,
+    onPick: () -> Unit,
+    onReset: () -> Unit,
+) {
     val colors = Envoix.colors
     Text(
         "SAVE RECEIVED FILES TO",
-        color = colors.muted, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp,
+        color = colors.muted,
+        fontSize = 11.sp,
+        fontWeight = FontWeight.Bold,
+        letterSpacing = 1.sp,
     )
     Spacer(Modifier.height(6.dp))
     Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
             .border(1.dp, colors.line, RoundedCornerShape(12.dp))
-            .clickable(onClick = onPick).padding(horizontal = 14.dp, vertical = 14.dp),
+            .clickable(onClick = onPick)
+            .padding(horizontal = 14.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
         Text(
-            label, color = colors.text, fontSize = 14.sp, fontFamily = FontFamily.Monospace,
-            maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false),
+            label,
+            color = colors.text,
+            fontSize = 14.sp,
+            fontFamily = FontFamily.Monospace,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false),
         )
         Spacer(Modifier.width(10.dp))
         Text("Change", color = colors.accent, fontSize = 13.sp, fontWeight = FontWeight.Bold)
@@ -234,15 +273,23 @@ private fun FolderPickerRow(label: String, custom: Boolean, onPick: () -> Unit, 
         Spacer(Modifier.height(6.dp))
         Text(
             "Reset to Downloads",
-            color = colors.accent, fontSize = 12.sp,
-            modifier = Modifier.clip(RoundedCornerShape(6.dp)).clickable(onClick = onReset)
-                .padding(vertical = 3.dp, horizontal = 4.dp),
+            color = colors.accent,
+            fontSize = 12.sp,
+            modifier =
+                Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .clickable(onClick = onReset)
+                    .padding(vertical = 3.dp, horizontal = 4.dp),
         )
     }
 }
 
 @Composable
-private fun Field(label: String, value: String, onChange: (String) -> Unit) {
+private fun Field(
+    label: String,
+    value: String,
+    onChange: (String) -> Unit,
+) {
     OutlinedTextField(
         value = value,
         onValueChange = onChange,
@@ -254,7 +301,11 @@ private fun Field(label: String, value: String, onChange: (String) -> Unit) {
 }
 
 @Composable
-private fun MultilineField(label: String, value: String, onChange: (String) -> Unit) {
+private fun MultilineField(
+    label: String,
+    value: String,
+    onChange: (String) -> Unit,
+) {
     OutlinedTextField(
         value = value,
         onValueChange = onChange,
@@ -265,7 +316,10 @@ private fun MultilineField(label: String, value: String, onChange: (String) -> U
 }
 
 @Composable
-private fun LabeledControl(title: String, control: @Composable () -> Unit) {
+private fun LabeledControl(
+    title: String,
+    control: @Composable () -> Unit,
+) {
     val colors = Envoix.colors
     Row(
         Modifier.fillMaxWidth(),
@@ -274,7 +328,9 @@ private fun LabeledControl(title: String, control: @Composable () -> Unit) {
     ) {
         Text(
             title,
-            color = colors.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
+            color = colors.text,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.SemiBold,
             modifier = Modifier.weight(1f).padding(end = 12.dp),
         )
         control()
@@ -282,11 +338,17 @@ private fun LabeledControl(title: String, control: @Composable () -> Unit) {
 }
 
 @Composable
-private fun RoleToggle(role: String, onChange: (String) -> Unit) {
+private fun RoleToggle(
+    role: String,
+    onChange: (String) -> Unit,
+) {
     val colors = Envoix.colors
     Row(
-        Modifier.clip(RoundedCornerShape(10.dp)).background(colors.bg)
-            .border(1.dp, colors.line, RoundedCornerShape(10.dp)).padding(3.dp),
+        Modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(colors.bg)
+            .border(1.dp, colors.line, RoundedCornerShape(10.dp))
+            .padding(3.dp),
     ) {
         RoleSeg("Send", role == "send") { onChange("send") }
         RoleSeg("Receive", role == "receive") { onChange("receive") }
@@ -294,26 +356,39 @@ private fun RoleToggle(role: String, onChange: (String) -> Unit) {
 }
 
 @Composable
-private fun RoleSeg(text: String, selected: Boolean, onClick: () -> Unit) {
+private fun RoleSeg(
+    text: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
     val colors = Envoix.colors
     Box(
-        Modifier.clip(RoundedCornerShape(8.dp))
+        Modifier
+            .clip(RoundedCornerShape(8.dp))
             .background(if (selected) colors.accent else Color.Transparent)
-            .clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 7.dp),
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 7.dp),
     ) {
         Text(
             text,
             color = if (selected) Color.White else colors.muted,
-            fontSize = 13.sp, fontWeight = FontWeight.Bold,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Bold,
         )
     }
 }
 
 @Composable
-private fun AdvancedHeader(expanded: Boolean, onToggle: () -> Unit) {
+private fun AdvancedHeader(
+    expanded: Boolean,
+    onToggle: () -> Unit,
+) {
     val colors = Envoix.colors
     Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable(onClick = onToggle)
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(onClick = onToggle)
             .padding(vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -328,7 +403,12 @@ private fun AdvancedHeader(expanded: Boolean, onToggle: () -> Unit) {
 }
 
 @Composable
-private fun ToggleRow(title: String, subtitle: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+private fun ToggleRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    onChange: (Boolean) -> Unit,
+) {
     val colors = Envoix.colors
     Row(
         Modifier.fillMaxWidth(),
@@ -342,10 +422,11 @@ private fun ToggleRow(title: String, subtitle: String, checked: Boolean, onChang
         Switch(
             checked = checked,
             onCheckedChange = onChange,
-            colors = SwitchDefaults.colors(
-                checkedThumbColor = Color.White,
-                checkedTrackColor = colors.accent,
-            ),
+            colors =
+                SwitchDefaults.colors(
+                    checkedThumbColor = Color.White,
+                    checkedTrackColor = colors.accent,
+                ),
         )
     }
 }

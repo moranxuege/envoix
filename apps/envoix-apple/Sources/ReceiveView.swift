@@ -25,6 +25,7 @@ struct ReceiveView: View {
     @State private var roomQRCodePayload = ""
     @State private var inviteQRCodeImage: PlatformImage?
     @State private var inviteQRCodePayload = ""
+    @State private var pairingPanel: PairingPanelMode = .show
     @State private var revealAddress = false
     #if os(iOS)
     @State private var isFolderPickerPresented = false
@@ -105,8 +106,6 @@ struct ReceiveView: View {
     private var scrollContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                modeSelector
-
                 if mode == .invite {
                     inviteSection
                 } else if mode == .room {
@@ -117,12 +116,17 @@ struct ReceiveView: View {
                 }
 
                 outputSection
+                modeSelector
 
+                #if os(macOS)
                 if !viewModel.peerAddress.isEmpty {
                     addressReveal
                 }
+                #endif
 
+                #if os(macOS)
                 TransferStatusView(viewModel: viewModel)
+                #endif
             }
             .padding(.vertical, 12)
             #if os(iOS)
@@ -151,28 +155,40 @@ struct ReceiveView: View {
 
     private var primaryButton: some View {
         Button(action: primaryAction) {
-            Label(primaryLabel, systemImage: viewModel.isBusy ? "xmark" : "tray.and.arrow.down")
+            Label(
+                primaryLabel,
+                systemImage: canStartAnotherReceive ? "plus.circle" : "tray.and.arrow.down"
+            )
                 .frame(maxWidth: .infinity, minHeight: 44)
                 .contentShape(Rectangle())
         }
         .keyboardShortcut(.defaultAction)
         .buttonStyle(.borderedProminent)
         .controlSize(.large)
-        .tint(viewModel.isBusy ? Theme.warning : Theme.accent)
-        .disabled((!canStart || concurrencyBlocked) && !viewModel.isBusy)
+        .tint(Theme.accent)
+        .disabled(
+            (viewModel.isBusy && !canStartAnotherReceive)
+                || viewModel.isFinalizing
+                || !canStart
+                || concurrencyBlocked
+        )
         .accessibilityIdentifier("receive_start_button")
     }
 
     #if os(iOS)
     private var bottomActionBar: some View {
-        VStack(spacing: 8) {
-            footerMessage
-            primaryButton
+        Group {
+            if !viewModel.isBusy || canStartAnotherReceive {
+                VStack(spacing: 8) {
+                    footerMessage
+                    primaryButton
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 10)
+                .padding(.bottom, 8)
+                .background(.regularMaterial)
+            }
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 10)
-        .padding(.bottom, 8)
-        .background(.regularMaterial)
     }
     #endif
 
@@ -183,17 +199,37 @@ struct ReceiveView: View {
     private var outputSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(AppText.value("Save to", "保存到", language: uiLanguage))
-                .font(.title3.weight(.semibold))
-                .foregroundStyle(Theme.muted)
+                .font(.headline.weight(.semibold))
+                .foregroundStyle(Theme.text)
             #if os(iOS)
-            LinkRow(text: outputDirDisplayText) {
+            HStack(spacing: 10) {
                 Button {
                     isFolderPickerPresented = true
                 } label: {
-                    Label(outputFolderChooseLabel, systemImage: "folder")
-                        .frame(minHeight: 34)
-                        .contentShape(Rectangle())
+                    HStack(spacing: 12) {
+                        Image(systemName: "folder.fill")
+                            .font(.title3.weight(.semibold))
+                            .foregroundStyle(Theme.accentStrong)
+                            .frame(width: 38, height: 38)
+                            .background(Theme.accentSoft, in: RoundedRectangle(cornerRadius: Theme.cardRadius))
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(outputDirDisplayText)
+                                .font(.body.weight(.semibold))
+                                .foregroundStyle(Theme.text)
+                                .lineLimit(2)
+                            Text(outputFolderChooseLabel)
+                                .font(.footnote)
+                                .foregroundStyle(Theme.muted)
+                        }
+                        Spacer(minLength: 8)
+                        Image(systemName: "chevron.right")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(Theme.muted)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 72, alignment: .leading)
+                    .contentShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
                 }
+                .buttonStyle(.plain)
                 .disabled(viewModel.isBusy)
                 if hasCustomOutputDir {
                     Button {
@@ -204,13 +240,17 @@ struct ReceiveView: View {
                             .frame(width: 30, height: 30)
                             .contentShape(Rectangle())
                     }
+                    .buttonStyle(.bordered)
                     .disabled(viewModel.isBusy)
                 }
             }
-            Text(outputFolderHelperText)
-                .font(.footnote)
-                .foregroundStyle(Theme.muted)
-                .fixedSize(horizontal: false, vertical: true)
+            .padding(12)
+            .background(Theme.surface)
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.cardRadius)
+                    .strokeBorder(Theme.accent.opacity(0.45), lineWidth: 1)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
             #else
             LinkRow(text: outputDir?.path ?? "") {
                 Button {
@@ -268,7 +308,12 @@ struct ReceiveView: View {
     #endif
 
     private var primaryLabel: String {
-        if viewModel.isBusy { return AppText.value("Cancel Transfer", "取消传输", language: uiLanguage) }
+        if canStartAnotherReceive {
+            return AppText.value("Start Another Receive", "再开启一个接收", language: uiLanguage)
+        }
+        if viewModel.isBusy {
+            return AppText.value("Managed in Activity", "请在活动中管理", language: uiLanguage)
+        }
         switch viewModel.phase {
         case .completed, .canceled, .failed:
             return AppText.value("Receive Again", "再次接收", language: uiLanguage)
@@ -324,7 +369,97 @@ struct ReceiveView: View {
         .card(raised: true, padding: 18)
     }
 
-    private var roomSection: some View {
+    @ViewBuilder private var roomSection: some View {
+        #if os(iOS)
+        mobileRoomSection
+        #else
+        desktopRoomSection
+        #endif
+    }
+
+    #if os(iOS)
+    private var mobileRoomSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            PairingPanelSelector(selection: $pairingPanel, disabled: viewModel.isBusy)
+
+            Group {
+                if pairingPanel == .scan {
+                    VStack(spacing: 14) {
+                        Image(systemName: "qrcode.viewfinder")
+                            .font(.system(size: 48, weight: .medium))
+                            .foregroundStyle(Theme.accentStrong)
+                        Text(AppText.value("Scan the sender's QR", "扫描发送端二维码", language: uiLanguage))
+                            .font(.headline.weight(.semibold))
+                            .foregroundStyle(Theme.text)
+                        Button {
+                            isQRScannerPresented = true
+                        } label: {
+                            Label(AppText.value("Open scanner", "打开扫描器", language: uiLanguage), systemImage: "camera")
+                                .frame(maxWidth: .infinity, minHeight: 48)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(Theme.accent)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 230)
+                } else if !joinRoomCode.trimmed.isEmpty {
+                    VStack(spacing: 12) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 42))
+                            .foregroundStyle(Theme.success)
+                        Text(AppText.value("Ready to join", "已准备加入", language: uiLanguage))
+                            .font(.headline.weight(.semibold))
+                            .foregroundStyle(Theme.text)
+                        Text(joinRoomCode)
+                            .font(.body.monospaced().weight(.semibold))
+                            .foregroundStyle(Theme.accentStrong)
+                            .multilineTextAlignment(.center)
+                            .textSelection(.enabled)
+                        Button(AppText.value("Clear and show my QR", "清除并显示我的二维码", language: uiLanguage)) {
+                            joinRoomCode = ""
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 230)
+                } else {
+                    VStack(spacing: 12) {
+                        if let image = roomQRCodeImage {
+                            QRCard(image: image, size: 184)
+                        } else {
+                            qrPlaceholder
+                        }
+                        LinkRow(
+                            text: roomCode.trimmed.isEmpty ? AppText.value("Receive code", "接收码", language: uiLanguage) : roomCode,
+                            textIdentifier: "receive_room_code",
+                            displaysFullText: true
+                        ) {
+                            Button {
+                                copyWithToast(roomCode, AppText.value("Room code copied", "接收码已复制", language: uiLanguage))
+                            } label: {
+                                Label(AppText.value("Copy", "复制", language: uiLanguage), systemImage: "doc.on.doc")
+                                    .frame(minHeight: 40)
+                            }
+                            .disabled(roomCode.trimmed.isEmpty)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 230)
+                }
+            }
+
+            RoomCodeField(
+                code: joinRoomCodeBinding,
+                disabled: viewModel.isBusy,
+                title: AppText.value("Or enter a code", "或输入短码", language: uiLanguage),
+                placeholder: AppText.value("Scan QR or enter code", "扫码或输入短码", language: uiLanguage),
+                showsCopyAction: false,
+                pasteAction: pastePairingInput,
+                helper: ""
+            )
+        }
+        .card(raised: true, padding: 18)
+    }
+    #endif
+
+    private var desktopRoomSection: some View {
         VStack(alignment: .center, spacing: 16) {
             VStack(spacing: 4) {
                 Text(AppText.value("Share this QR or code", "分享二维码或接收码", language: uiLanguage))
@@ -344,7 +479,8 @@ struct ReceiveView: View {
 
             LinkRow(
                 text: roomCode.trimmed.isEmpty ? AppText.value("Receive code", "接收码", language: uiLanguage) : roomCode,
-                textIdentifier: "receive_room_code"
+                textIdentifier: "receive_room_code",
+                displaysFullText: true
             ) {
                 Button {
                     copyWithToast(roomCode, AppText.value("Room code copied", "接收码已复制", language: uiLanguage))
@@ -370,7 +506,7 @@ struct ReceiveView: View {
                 disabled: viewModel.isBusy,
                 title: AppText.value("Join sender instead", "改为加入发送端", language: uiLanguage),
                 placeholder: AppText.value("Scan QR or enter sender code", "扫码或输入发送端短码", language: uiLanguage),
-                helper: AppText.value("Leave this empty to use your receive code above.", "留空则使用上方接收码。", language: uiLanguage)
+                helper: ""
             )
 
             HStack(spacing: 8) {
@@ -378,7 +514,7 @@ struct ReceiveView: View {
                     pastePairingInput()
                 } label: {
                     Label(AppText.value("Paste", "粘贴", language: uiLanguage), systemImage: "doc.on.clipboard")
-                        .frame(minHeight: 34)
+                        .frame(maxWidth: .infinity, minHeight: 44)
                         .contentShape(Rectangle())
                 }
                 .disabled(viewModel.isBusy)
@@ -387,15 +523,15 @@ struct ReceiveView: View {
                 Button {
                     isQRScannerPresented = true
                 } label: {
-                    Label(AppText.value("Scan QR", "扫码", language: uiLanguage), systemImage: "qrcode.viewfinder")
-                        .frame(minHeight: 34)
+                    Label(AppText.value("Scan sender QR", "扫描发送端二维码", language: uiLanguage), systemImage: "qrcode.viewfinder")
+                        .frame(maxWidth: .infinity, minHeight: 44)
                         .contentShape(Rectangle())
                 }
                 .disabled(viewModel.isBusy)
                 #endif
             }
             .buttonStyle(.bordered)
-            .controlSize(.small)
+            .controlSize(.regular)
         }
         .card(raised: true, padding: 18)
     }
@@ -466,6 +602,22 @@ struct ReceiveView: View {
 
     private var concurrencyBlocked: Bool {
         !concurrentTransfers && !viewModel.isBusy && model.send.isBusy
+    }
+
+    private var canStartAnotherReceive: Bool {
+        concurrentTransfers && viewModel.isBusy && mode == .room && activeReceiveCount < 2
+    }
+
+    private var activeReceiveCount: Int {
+        model.activities.filter { record in
+            guard record.direction == .receive else { return false }
+            switch record.state {
+            case .completed, .failed, .canceled: return false
+            case .queued, .binding, .waitingForPeer, .pairing, .connecting,
+                    .transferring, .verifying, .publishing, .unconfirmed, .paused, .unknown:
+                return true
+            }
+        }.count
     }
 
     private func refreshPairingInviteIfNeeded() {
@@ -556,12 +708,14 @@ struct ReceiveView: View {
         let lowercasedInput = input.lowercased()
         guard lowercasedInput.hasPrefix("envoix:") else {
             joinRoomCode = input
+            pairingPanel = .show
             ToastCenter.shared.show(AppText.value("Pairing code pasted", "配对码已粘贴", language: uiLanguage))
             return
         }
         do {
             let code = try roomCodeFromJoinInput(input)
             joinRoomCode = code
+            pairingPanel = .show
             mode = .room
             let message = source == .scan
                 ? AppText.value("QR scanned", "二维码已扫描", language: uiLanguage)
@@ -594,18 +748,15 @@ struct ReceiveView: View {
     }
 
     private func primaryAction() {
-        if viewModel.isBusy {
-            viewModel.cancel()
-        } else {
-            #if os(iOS)
-            guard outputDir != nil else {
-                shouldStartAfterFolderPick = true
-                isFolderPickerPresented = true
-                return
-            }
-            #endif
-            startReceive()
+        guard (!viewModel.isBusy || canStartAnotherReceive), !viewModel.isFinalizing else { return }
+        #if os(iOS)
+        guard outputDir != nil else {
+            shouldStartAfterFolderPick = true
+            isFolderPickerPresented = true
+            return
         }
+        #endif
+        startReceive()
     }
 
     /// Starts (or restarts, for "Regenerate") the receive session.
@@ -637,7 +788,8 @@ struct ReceiveView: View {
                 outputDir: prepared.url.path,
                 token: token.trimmed,
                 settings: settings,
-                destinationAccess: prepared.access
+                destinationAccess: prepared.access,
+                publishDestinationDir: prepared.publishDestinationDir
             )
         } catch {
             viewModel.handleFailed(error.localizedDescription)
@@ -662,11 +814,25 @@ struct ReceiveView: View {
                 outputDir: prepared.url.path,
                 code: code,
                 settings: settings,
-                destinationAccess: prepared.access
+                destinationAccess: prepared.access,
+                publishDestinationDir: prepared.publishDestinationDir
             )
+            prepareNextRoomAfterStart()
         } catch {
             viewModel.handleFailed(error.localizedDescription)
         }
+    }
+
+    private func prepareNextRoomAfterStart() {
+        guard let invite = try? makePairingInvite(
+            role: .receive,
+            broker: serverURL,
+            relay: relayURL
+        ) else { return }
+        pairingInvite = invite
+        roomCode = invite.code
+        joinRoomCode = ""
+        updateRoomQRCode(for: invite.payload)
     }
 
     private func startReceiveWithInvite() {
@@ -685,14 +851,19 @@ struct ReceiveView: View {
             viewModel.startReceivingWithInvite(
                 outputDir: prepared.url.path,
                 settings: settings,
-                destinationAccess: prepared.access
+                destinationAccess: prepared.access,
+                publishDestinationDir: prepared.publishDestinationDir
             )
         } catch {
             viewModel.handleFailed(error.localizedDescription)
         }
     }
 
-    private func prepareOutputDir() throws -> (url: URL, access: AnyObject?) {
+    private func prepareOutputDir() throws -> (
+        url: URL,
+        access: AnyObject?,
+        publishDestinationDir: String?
+    ) {
         guard let url = outputDir else {
             #if os(iOS)
             if hasCustomOutputDir {
@@ -724,7 +895,11 @@ struct ReceiveView: View {
         let access: AnyObject? = nil
         #endif
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        return (url, access)
+        #if os(iOS)
+        return (url, access, hasCustomOutputDir ? url.path : nil)
+        #else
+        return (url, access, nil)
+        #endif
     }
 
     #if os(iOS)

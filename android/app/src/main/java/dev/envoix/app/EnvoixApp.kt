@@ -7,11 +7,14 @@ class EnvoixApp : Application() {
     override fun onCreate() {
         super.onCreate()
         SettingsStore.init(this)
+        Diagnostics.init(filesDir)
         LogStore.init(filesDir)
         TransferLogs.init(filesDir)
         NativeBootstrap.initLogging(LogSink) // before initContext, so init logs are captured
         SettingsStore.applyLogLevel() // restore the saved (dev) verbosity
         NativeBootstrap.initContext(this)
+        UniffiTransferRunner.initialize(this)
+        TransferService.restore(this)
 
         // Capture uncaught exceptions into the log (foundation for crash reporting).
         val previous = Thread.getDefaultUncaughtExceptionHandler()

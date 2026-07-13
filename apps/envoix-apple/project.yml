@@ -65,7 +65,7 @@ targets:
         SWIFT_VERSION: "5.0"
         GENERATE_INFOPLIST_FILE: YES
         SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
-        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: 6638TTB2SF
         INFOPLIST_KEY_UILaunchStoryboardName: LaunchScreen
@@ -82,9 +82,19 @@ targets:
           - "Network"
           - "-framework"
           - "Security"
+      configs:
+        Debug:
+          # The existing diagnostics collector is HTTP-only. Keep this exception
+          # out of Release builds; uploads themselves are additionally gated by
+          # Developer Mode in the app.
+          GENERATE_INFOPLIST_FILE: NO
+          INFOPLIST_FILE: Resources/Info-Debug.plist
 
   Envoix-iOSUITests:
-    type: bundle.ui-testing
+    # The transfer core opens sockets itself. Host these tests in the app so
+    # they inherit the app's networking and local-network permissions instead
+    # of the isolated UI-test runner's network sandbox.
+    type: bundle.unit-test
     platform: iOS
     deploymentTarget: "16.0"
     sources:
@@ -100,6 +110,8 @@ targets:
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: 6638TTB2SF
         TEST_TARGET_NAME: Envoix-iOS
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Envoix-iOS.app/Envoix-iOS"
+        BUNDLE_LOADER: "$(TEST_HOST)"
         OTHER_LDFLAGS:
           - "-framework"
           - "SystemConfiguration"
@@ -108,14 +120,33 @@ targets:
           - "-framework"
           - "Security"
 
+  Envoix-iOSAppUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - Tests/EnvoixIOSAppUITests
+    dependencies:
+      - target: Envoix-iOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app.ios.app-uitests
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: 6638TTB2SF
+        TEST_TARGET_NAME: Envoix-iOS
+
 schemes:
   Envoix-iOS:
     build:
       targets:
         Envoix-iOS: all
         Envoix-iOSUITests: [test]
+        Envoix-iOSAppUITests: [test]
     test:
       config: Debug
       gatherCoverageData: false
       targets:
         - Envoix-iOSUITests
+        - Envoix-iOSAppUITests

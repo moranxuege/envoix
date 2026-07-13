@@ -14,7 +14,8 @@ pub use envoix_auth::SPAKE2_EXPERIMENTAL_WARNING;
 use envoix_error::CoreError;
 pub use envoix_protocol::PeerDescriptor;
 pub use envoix_session::{
-    BindAddrs, IdentityConfig, TransferCancelToken, TransferDirection, TransferSummary,
+    BindAddrs, IdentityConfig, MemoryIdentity, TransferCancelToken, TransferDirection,
+    TransferSummary,
 };
 pub use envoix_storage::TransferReceipt;
 // Chunk-size bounds + validation are a transfer-engine constraint; they live in

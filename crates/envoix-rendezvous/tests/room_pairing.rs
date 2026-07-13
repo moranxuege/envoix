@@ -8,7 +8,9 @@ use std::time::Duration;
 use envoix_pairing::{
     Confirm, PakeResponse, PakeStart, initiator_start, open_json, responder_respond, seal_json,
 };
-use envoix_rendezvous::{Join, PeerConn, Reply, Role, RoomRegistry, read_framed, write_framed};
+use envoix_rendezvous::{
+    Join, JoinIntent, PeerConn, Reply, Role, RoomRegistry, read_framed, write_framed,
+};
 use tokio::io::DuplexStream;
 
 /// Wrap the broker's side of a duplex as a `PeerConn` (the halves own the
@@ -25,12 +27,14 @@ async fn run_initiator(
     room: &str,
     code: &str,
     my_descriptor: &str,
+    intent: Option<JoinIntent>,
 ) -> Result<(Role, String), Box<dyn std::error::Error + Send + Sync>> {
     let (mut reader, mut writer) = tokio::io::split(stream);
     write_framed(
         &mut writer,
         &Join {
             room_id: room.to_string(),
+            intent,
         },
     )
     .await?;
@@ -64,12 +68,14 @@ async fn run_responder(
     room: &str,
     code: &str,
     my_descriptor: &str,
+    intent: Option<JoinIntent>,
 ) -> Result<(Role, String), Box<dyn std::error::Error + Send + Sync>> {
     let (mut reader, mut writer) = tokio::io::split(stream);
     write_framed(
         &mut writer,
         &Join {
             room_id: room.to_string(),
+            intent,
         },
     )
     .await?;
@@ -95,6 +101,23 @@ async fn run_responder(
     Ok((paired.role, other))
 }
 
+async fn join_only(
+    stream: DuplexStream,
+    room: &str,
+    intent: Option<JoinIntent>,
+) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    write_framed(
+        &mut writer,
+        &Join {
+            room_id: room.to_string(),
+            intent,
+        },
+    )
+    .await?;
+    Ok(read_framed(&mut reader).await?)
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_peers_pair_and_exchange_descriptors() {
     let registry = Arc::new(RoomRegistry::with_ttl(Duration::from_secs(5)));
@@ -109,11 +132,25 @@ async fn two_peers_pair_and_exchange_descriptors() {
     // First joiner becomes the initiator. Give A a small head start so the
     // role assignment is deterministic.
     let a = tokio::spawn(async move {
-        run_initiator(client_a, "room-42", "12-orange-tiger", "endpoint-A").await
+        run_initiator(
+            client_a,
+            "room-42",
+            "12-orange-tiger",
+            "endpoint-A",
+            Some(JoinIntent::Send),
+        )
+        .await
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
     let b = tokio::spawn(async move {
-        run_responder(client_b, "room-42", "12-orange-tiger", "endpoint-B").await
+        run_responder(
+            client_b,
+            "room-42",
+            "12-orange-tiger",
+            "endpoint-B",
+            Some(JoinIntent::Receive),
+        )
+        .await
     });
 
     let (role_a, a_got) = a.await.unwrap().expect("initiator pairs");
@@ -142,6 +179,7 @@ async fn lone_peer_expires() {
         &mut writer,
         &Join {
             room_id: "empty".to_string(),
+            intent: Some(JoinIntent::Receive),
         },
     )
     .await
@@ -160,6 +198,39 @@ async fn lone_peer_expires() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn same_direction_peers_do_not_match() {
+    let registry = Arc::new(RoomRegistry::with_ttl(Duration::from_millis(150)));
+    let (sender_a, broker_a) = tokio::io::duplex(4096);
+    let (sender_b, broker_b) = tokio::io::duplex(4096);
+
+    let registry_a = registry.clone();
+    let serve_a = tokio::spawn(async move { registry_a.serve(broker_conn(broker_a)).await });
+    let registry_b = registry.clone();
+    let serve_b = tokio::spawn(async move { registry_b.serve(broker_conn(broker_b)).await });
+
+    let first =
+        tokio::spawn(
+            async move { join_only(sender_a, "senders-only", Some(JoinIntent::Send)).await },
+        );
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let second =
+        tokio::spawn(
+            async move { join_only(sender_b, "senders-only", Some(JoinIntent::Send)).await },
+        );
+
+    assert_eq!(first.await.unwrap().unwrap(), Reply::Expired);
+    assert_eq!(second.await.unwrap().unwrap(), Reply::Expired);
+    assert!(matches!(
+        serve_a.await.unwrap(),
+        Err(envoix_rendezvous::RendezvousError::Expired)
+    ));
+    assert!(matches!(
+        serve_b.await.unwrap(),
+        Err(envoix_rendezvous::RendezvousError::Expired)
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn over_long_room_id_is_rejected() {
     let registry = Arc::new(RoomRegistry::new());
     let (mut client, broker) = tokio::io::duplex(64 * 1024);
@@ -170,6 +241,7 @@ async fn over_long_room_id_is_rejected() {
         &mut writer,
         &Join {
             room_id: "x".repeat(1024),
+            intent: Some(JoinIntent::Send),
         },
     )
     .await
@@ -201,6 +273,7 @@ async fn dead_waiter_is_evicted_and_next_two_peers_pair() {
             &mut writer,
             &Join {
                 room_id: "room-dead".to_string(),
+                intent: Some(JoinIntent::Send),
             },
         )
         .await
@@ -227,11 +300,25 @@ async fn dead_waiter_is_evicted_and_next_two_peers_pair() {
     let sc = tokio::spawn(async move { rc.serve(broker_conn(broker_c)).await });
 
     let b = tokio::spawn(async move {
-        run_initiator(client_b, "room-dead", "12-kelp-coral", "endpoint-B").await
+        run_initiator(
+            client_b,
+            "room-dead",
+            "12-kelp-coral",
+            "endpoint-B",
+            Some(JoinIntent::Send),
+        )
+        .await
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
     let c = tokio::spawn(async move {
-        run_responder(client_c, "room-dead", "12-kelp-coral", "endpoint-C").await
+        run_responder(
+            client_c,
+            "room-dead",
+            "12-kelp-coral",
+            "endpoint-C",
+            Some(JoinIntent::Receive),
+        )
+        .await
     });
 
     let (role_b, b_got) = b.await.unwrap().expect("B pairs despite the corpse");

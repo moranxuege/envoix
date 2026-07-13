@@ -1,7 +1,8 @@
 # Transfer state machine (design)
 
-Roadmap item #4 of `architecture-review-2026-07.md`. Status: DESIGN — reviewed
-with the user before implementation.
+Roadmap item #4 of `architecture-review-2026-07.md`. Status: IMPLEMENTED in the
+shared durable mobile path; repeated Android↔iPhone physical verification is
+still pending.
 
 ## Why (recap)
 
@@ -65,6 +66,11 @@ Confirming     SEND only: all bytes + Complete frame sent, awaiting proof.
                state: on expiry the attempt is cancelled and the card moves to
                Unconfirmed (= BOTH channels have produced nothing yet; polls
                continue their bounded schedule).
+AwaitingPublication
+               RECEIVE only: bytes are verified in app-private staging and a
+               completion receipt exists, but Files/MediaStore publication
+               has not yet succeeded. Native clients expose this as
+               `Publishing`; it is not user-visible completion.
 Paused(origin) resumable stop; origin ∈ {Local, Peer, Lost}
 Unconfirmed    send delivered every byte, ack unknown; mailbox poll active
 Completed      done (receiver may re-enter Connecting to serve a re-verify)
@@ -88,10 +94,13 @@ Notes:
   proof (Unconfirmed + mailbox) are two rungs of one explicit escalation
   ladder. The receiver needs no mirror state: its finalize is milliseconds
   (incremental hash + rename).
-- Terminality is explicit per state: `Failed`/`Cancelled` are terminal for the
-  session (Retry starts a NEW attempt from them); `Completed` is terminal but
-  re-enterable (receiver re-verify); `Unconfirmed` is pseudo-terminal (mailbox
-  can still complete it).
+- Terminality is explicit per state: Retry from `Failed` resumes, Retry from
+  `Cancelled` starts fresh, and `Completed` is terminal. Receiver re-verification
+  is a bounded courier service that does not mutate the card. `Unconfirmed` is
+  pseudo-terminal because a verified mailbox receipt can still complete it.
+- `AwaitingPublication` may be retried natively without retransmitting bytes.
+  Cancel abandons it and deletes only staging artifacts whose receipt carries
+  the same `transfer_id`.
 
 ## Inputs
 
@@ -103,6 +112,7 @@ Attempt n: Advertised · Pairing(step) · Connecting · Connected(path) ·
            Completed(bytes) · Failed{reason_code, reason} · RunEnded(result)
 Driver:    ConfirmTimeout (the confirm timer expired)
 External:  ReceiptVerified(tid) · ReceiptMismatch(tid)
+Native:    Published(path-or-URI)
 ```
 
 `RunEnded` is the attempt future returning — the belt behind the "every failed
@@ -115,18 +125,19 @@ Legend: `—` = input ignored (logged at debug). Attempt-stale inputs are droppe
 before the table applies. `n+1` marks edges that launch a new attempt
 (`Effect::StartAttempt{resume: true|fresh}`).
 
-| State \ Input | Pause | Cancel | Resume | Advertised | Pairing/Connecting | Started | Progress | Verifying/Verified | Completed | Failed(code) | ReceiptVerified |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| **Waiting** | Paused(L) ¹ | Cancelled ¹ | — | — | Connecting | Transferring ² | — | Verifying | — | classify³ | — |
-| **Connecting** | Paused(L) ¹ | Cancelled ¹ | — | Waiting | — | Transferring ² | — | Verifying | Completed⁴ | classify³ | — |
-| **Verifying** | Paused(L) ¹ | Cancelled ¹ | — | — | — | Transferring ² | — | (Verified→ last phase) | Completed | classify³ | — |
-| **Transferring** | Paused(L) ¹ | Cancelled ¹ | — | — | — | — | update bytes | Verifying | Completed | classify³ | — |
-| **Confirming** ⁸ | Paused(L) ¹ | Cancelled ¹ | — | — | — | — | — | — | Completed | classify³ | — |
-| **Paused(any)** | — | Cancelled | Connecting *n+1, resume* | — | — | — | — | — | — | — ⁵ | — |
-| **Unconfirmed** | — | Cancelled | Connecting *n+1, resume* | — | — | — | — | — | — | — ⁵ | **Completed** |
-| **Completed** | — | — | Connecting *n+1, resume* ⁶ | — | — | — | — | — | — | — ⁵ | — |
-| **Failed** | — | — | Connecting *n+1, resume* | — | — | — | — | — | — | — ⁵ | — |
-| **Cancelled** | — | — | Connecting *n+1, FRESH* ⁷ | — | — | — | — | — | — | — ⁵ | — |
+| State \ Input | Pause | Cancel | Resume | Advertised | Pairing/Connecting | Started | Progress | Verifying/Verified | Completed | Failed(code) | ReceiptVerified | Published |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| **Waiting** | Paused(L) ¹ | Cancelled ¹ | — | — | Connecting | Transferring ² | — | Verifying | — | classify³ | — | — |
+| **Connecting** | Paused(L) ¹ | Cancelled ¹ | — | Waiting | — | Transferring ² | — | Verifying | Completed/AwaitingPublication⁴ | classify³ | — | — |
+| **Verifying** | Paused(L) ¹ | Cancelled ¹ | — | — | — | Transferring ² | — | (Verified→ last phase) | Completed/AwaitingPublication⁴ | classify³ | — | — |
+| **Transferring** | Paused(L) ¹ | Cancelled ¹ | — | — | — | — | update bytes | Verifying | Completed/AwaitingPublication⁴ | classify³ | — | — |
+| **Confirming** ⁸ | Paused(L) ¹ | Cancelled ¹ | — | — | — | — | — | — | Completed | classify³ | — | — |
+| **AwaitingPublication** | — | Cancelled ⁹ | — | — | — | — | — | — | — | — | — | **Completed** |
+| **Paused(any)** | — | Cancelled | Connecting *n+1, resume* | — | — | — | — | — | — | — ⁵ | — | — |
+| **Unconfirmed** | — | Cancelled | Connecting *n+1, resume* | — | — | — | — | — | — | — ⁵ | **Completed** | — |
+| **Completed** | — | — | — ⁶ | — | — | — | — | — | — | — ⁵ | — | — |
+| **Failed** | — | — | Connecting *n+1, resume* | — | — | — | — | — | — | — ⁵ | — | — |
+| **Cancelled** | — | — | Connecting *n+1, FRESH* ⁷ | — | — | — | — | — | — | — ⁵ | — | — |
 
 ¹ Effect: `PauseToken` / `CancelToken` on the current attempt. The state
 changes IMMEDIATELY (user intent is authoritative); the attempt's subsequent
@@ -150,23 +161,32 @@ bytes from a previous attempt cannot leak into this one.
 Prose fallbacks for code-less events live HERE (one place), not in frontends.
 
 ⁴ Receiver `receive_existing_final` / `receive_from_receipt` complete without a
-`Started` — hence Completed legal from Connecting.
+`Started`, hence completion is legal from Connecting. When
+`publication_required=true`, every receiver completion enters
+`AwaitingPublication`; otherwise it enters `Completed` directly.
 
 ⁵ A late `Failed` from the CURRENT attempt reaching a resting state can only
 happen after Resume relaunched (attempt moved on) — then it is attempt-stale
 and already dropped. Defensive `—` regardless.
 
-⁶ Receive direction only (serve a peer's re-verify). For Send, Resume from
-Completed is illegal (nothing to re-join — the f010749 lesson).
+⁶ Completed is terminal in both directions. Receiver re-verification is
+`ServeReverify`, a bounded driver service, not a lifecycle transition.
 
 ⁷ Pending decision D1; if Cancel discards partials, restart must be fresh.
 
 ⁸ Entered from Transferring on the new `Confirming` event. Entry effect:
 `StartConfirmTimer`. `ConfirmTimeout` while Confirming ⇒ effect `CancelToken`
-(silently stop waiting on the dying path) and → Unconfirmed +
-`StartMailboxPoll` — escalation is proactive, not a 30s QUIC-idle hang. The
-timer is cancelled on exit. (Receivers that finalized but lost the ack path
-still post their receipt: finalize is local, so the mailbox rung is sound.)
+and → Unconfirmed + `StartMailboxPoll`. This is a proactive escalation, not a
+failure verdict: a late `Completed` from the same attempt is still accepted,
+because the transport ACK budget can outlive the canonical timer while queued
+bytes drain. The timer is cancelled on exit. (Receivers that finalized but lost
+the ack path still post their receipt: finalize is local, so the mailbox rung is
+sound.)
+
+⁹ Effect: `DiscardStagedFile`. The driver first validates that the completion
+receipt's `transfer_id` matches the card, then deletes that staging file and
+receipt. A mismatched or missing receipt preserves the file rather than risking
+cross-transfer data loss.
 
 ## Effects (returned by the reducer, executed by the driver)
 
@@ -176,11 +196,15 @@ PauseToken / CancelToken     on the current attempt's cancel handle
 StartConfirmTimer / StopConfirmTimer
 StartMailboxPoll / StopMailboxPoll
 PostReceipt                  (receive completed; driver seals + posts, retries)
+DiscardPartial               exact partial + resume sidecar on explicit abandon
+DiscardStagedFile            exact verified staging file + receipt on publish abandon
 ```
 
-Platform actions (publish to MediaStore, notifications, multicast lock) are
-NOT effects: the app derives them from snapshot transitions it observes
-(e.g. `* → Completed` on a receive ⇒ publish). The machine stays portable.
+Platform actions (publish to Files/MediaStore, notifications, multicast lock)
+are not reducer effects. A native app reacts to `AwaitingPublication` /
+`Publishing`, performs an idempotent native copy, then sends `Published(path)`.
+Copy failure keeps `Publishing` retryable and retains staging; only canonical
+`Completed` allows staging cleanup. The machine stays portable.
 
 ## Snapshot (the FFI surface)
 
@@ -201,14 +225,21 @@ One JSON object per state change (plus throttled Progress updates):
   every frontend re-deriving them); the UI keeps only presentation smoothing.
 - The snapshot struct is the serialization unit `TransferRecord` (#5) persists.
 
-## JNI surface (replaces the 12-arg runTransfer eventually; additive first)
+## UniFFI durable surface
 
 ```
-createSession(paramsJson) -> sessionId
-sessionIntent(sessionId, "start"|"pause"|"resume"|"cancel")
-   snapshots delivered via the existing callback (JSON, tagged "snapshot")
-destroySession(sessionId)   (Remove; deletes partials per D1/D2 semantics)
+startDurableTransfer(settings, request, recordsDir, observer, mailbox)
+restoreDurableTransfer(activityId, recordsDir, observer, mailbox)
+listDurableTransferRecords(recordsDir)
+
+DurableEnvoixSession:
+  activity() · pause() · resume() · cancel()
+  receiptResponse(blob) · receiptPosted()
+  publicationSucceeded(pathOrUri) · remove()
 ```
+
+The callback emits canonical `FfiTransferActivityRecord` snapshots with a
+monotonic sequence. Raw events remain diagnostics only.
 
 ## Testing
 
@@ -218,8 +249,9 @@ destroySession(sessionId)   (Remove; deletes partials per D1/D2 semantics)
   previous attempt's events changes nothing.
 - **Fuzz**: random interleavings of user intents and event sequences never
   panic, never reach an illegal transition, and always end in a resting state.
-- **Loopback integration**: pause/resume/cancel/unconfirmed flows over
-  `memory_connection_pair`, asserting snapshot sequences.
+- **Loopback integration**: pause/resume/cancel/unconfirmed/publishing flows,
+  asserting snapshot sequences, persisted restore, exact cleanup, and output
+  bytes.
 
 ## Concurrency audit (step B review; user asked for care with parallelism)
 
@@ -238,15 +270,41 @@ Soft spot fixed: the session notice flow buffers UNBOUNDED (source-throttled)
 are low-volume by design. Accepted: the actor briefly blocks on attempt-join
 and receipt file I/O (bounded, milliseconds).
 
-## Migration (three PR-sized steps)
+## Mobile integration status (2026-07-12)
 
-- **A.** `machine` + `TransferSession` in `envoix-client`, fully tested. CLI
-  untouched; nothing wired.
-- **B.** JNI session API; `TransferService` swaps its fold for snapshot
-  rendering behind the SAME `Transfer`/UI model (Status maps 1:1 from
-  snapshot.state). Old event path kept for per-transfer logs only.
-- **C.** Delete the Kotlin fold, the guards, and the classification; remove the
-  Spec map (the driver owns attempts). CLI adoption optional later.
+- Rust `TransferSession` + `RecordStore` is the single mobile lifecycle owner.
+- Android keeps one durable session per Activity and renders only canonical
+  snapshots. `TransferSpecStore` persists Android-only native facts such as
+  SAF/MediaStore destination; it does not reinterpret transfer state.
+- Apple restores all durable records at launch. Its separate publication store
+  retains the selected Files destination/bookmark across process death.
+- Each receive uses a per-activity staging directory. Changing global settings
+  during a transfer cannot redirect an existing publication.
+- A Room sender with another configured source has a 60-second pre-connection
+  deadline; once connected the deadline is disabled. Receivers wait without a
+  deadline because waiting is their normal state.
+- Static QR/manual listeners preserve one endpoint identity, pairing token,
+  and OS-assigned listen port across attempts. Their identity is per activity,
+  not global, so concurrent receivers do not collide at the relay. Dialers and
+  Room peers stay ephemeral. A QR expiry blocks a new pairing, but not a
+  continuation of the transfer that already accepted it.
+- A stopped connection clone is dropped before its iroh endpoint is closed.
+  This prevents the old relay actor from overlapping the resumed endpoint and
+  triggering `Another endpoint connected with the same endpoint id`.
+- Automated Rust, macOS, arm64 iOS Simulator, Android compile/lint/JVM/APK
+  gates pass.
+- Physical Room/Auto pause-resume: 2 repetitions in both directions (4/4),
+  8 MiB each, strict/no retry, final public path or MediaStore URI, exact size,
+  and SHA-256 verified.
+- Physical QR/Invite pause-resume: 2 repetitions in both directions (4/4),
+  8 MiB each, strict/no retry, attempt 2 with non-zero resumed bytes, final
+  public path or MediaStore URI, exact size, and SHA-256 verified. Evidence:
+  `/var/folders/dn/xmztcp9551z4m0kqfbr74m_m0000gn/T/envoix-cross-device-20260712-111843-21655`.
+- Extended 64 MiB pressure runs also pass in both directions for Room/Auto
+  (2/2) and QR/Invite (2/2), with a 3-second mid-transfer pause, non-zero
+  resumed prefix, strict/no retry, and final SHA-256 evidence. Evidence:
+  `envoix-cross-device-20260712-114713-26788` and
+  `envoix-cross-device-20260712-115553-27307` under the same temporary root.
 
 ## Decisions (RESOLVED 2026-07-09, design review with the user)
 

@@ -18,6 +18,7 @@ use envoix_session::TransferDirection;
 use envoix_types::DataPath;
 use serde::{Deserialize, Serialize};
 
+use super::error::TransferFailure;
 use super::event::SessionFailureCode;
 
 /// Where a pause came from — a label detail, not a distinct state: the
@@ -51,6 +52,9 @@ pub enum State {
     Paused(PauseOrigin),
     /// Send delivered every byte; proof pending (mailbox poll active).
     Unconfirmed,
+    /// Receive bytes are verified and committed to staging, but the native
+    /// shell has not published them to the user-selected destination yet.
+    AwaitingPublication,
     /// Done. A receive may re-enter Connecting to serve a peer's re-verify.
     Completed,
     /// Genuine failure (typed reason retained).
@@ -98,6 +102,7 @@ pub enum AttemptEvent {
         transfer_id: String,
         file_name: String,
         bytes: u64,
+        completed_file_path: Option<String>,
     },
     Failed {
         reason_code: SessionFailureCode,
@@ -129,6 +134,9 @@ pub enum Input {
     /// Receiver: the sealed receipt POST was acknowledged by the rdz - the
     /// confirmation duty is discharged (monotone fact, any state).
     ReceiptPosted,
+    /// Native Files/MediaStore publication finished and the supplied path or
+    /// URI is now user-visible.
+    Published { path: String },
 }
 
 /// Side effects for the driver. The machine never performs them.
@@ -150,6 +158,9 @@ pub enum Effect {
     PostReceipt,
     /// D1: the peer explicitly cancelled — discard the partial + resume state.
     DiscardPartial,
+    /// Delete a verified receive from app-private staging after the user
+    /// abandons native publication.
+    DiscardStagedFile,
 }
 
 /// Monotone accomplishments: set-once, never cleared, serialized with the
@@ -180,6 +191,16 @@ pub struct Session {
     pub path: Option<DataPath>,
     pub reason: Option<String>,
     pub reason_code: Option<SessionFailureCode>,
+    /// Full stable failure classification retained across app restarts. Older
+    /// records omit it and fall back to `reason_code` + `reason`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<TransferFailure>,
+    /// Whether a receive must wait for an external platform publication.
+    #[serde(default)]
+    pub publication_required: bool,
+    /// Core committed staging path, then the final published path/URI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_file_path: Option<String>,
     #[serde(default)]
     pub facts: Facts,
 }
@@ -199,6 +220,9 @@ impl Session {
             path: None,
             reason: None,
             reason_code: None,
+            failure: None,
+            publication_required: false,
+            completed_file_path: None,
             facts: Facts::default(),
         }
     }
@@ -220,8 +244,9 @@ impl Session {
                 if attempt != self.attempt || self.state != State::Confirming {
                     return Vec::new(); // stale timer, or already resolved
                 }
-                // Stop waiting on the dying ack; the mailbox polls (already
-                // running in parallel) continue as the remaining proof channel.
+                // Escalate to the mailbox without rejecting a late in-band
+                // completion from this same attempt. The transport's own ACK
+                // budget can outlive this proactive timer on a backed-up link.
                 self.state = State::Unconfirmed;
                 vec![Effect::CancelToken, Effect::StartMailboxPoll]
             }
@@ -239,12 +264,27 @@ impl Session {
                 self.bytes = self.total;
                 self.reason = None;
                 self.reason_code = None;
+                self.failure = None;
                 if was_confirming {
                     // The receipt is sufficient proof; stop the doomed ack wait
                     // instead of letting it hang into the QUIC idle timeout.
                     effects.push(Effect::CancelToken);
                 }
                 effects
+            }
+            Input::Published { path } => {
+                if self.state != State::AwaitingPublication
+                    || self.direction != TransferDirection::Receive
+                    || path.trim().is_empty()
+                {
+                    return Vec::new();
+                }
+                self.state = State::Completed;
+                self.completed_file_path = Some(path);
+                self.reason = None;
+                self.reason_code = None;
+                self.failure = None;
+                Vec::new()
             }
         }
     }
@@ -255,6 +295,7 @@ impl Session {
         }
         let mut effects = self.exit_effects();
         self.state = State::Paused(PauseOrigin::Local);
+        self.failure = None;
         effects.push(Effect::PauseToken);
         effects
     }
@@ -264,13 +305,24 @@ impl Session {
             s if s.is_active() => {
                 let mut effects = self.exit_effects();
                 self.state = State::Cancelled;
+                self.failure = None;
                 effects.push(Effect::CancelToken);
+                effects.push(Effect::DiscardPartial);
                 effects
             }
             // A resting-but-unfinished card can still be abandoned.
             State::Paused(_) | State::Unconfirmed => {
-                let effects = self.exit_effects();
+                let mut effects = self.exit_effects();
                 self.state = State::Cancelled;
+                self.failure = None;
+                effects.push(Effect::DiscardPartial);
+                effects
+            }
+            State::AwaitingPublication if self.direction == TransferDirection::Receive => {
+                let mut effects = self.exit_effects();
+                self.state = State::Cancelled;
+                self.failure = None;
+                effects.push(Effect::DiscardStagedFile);
                 effects
             }
             _ => Vec::new(),
@@ -292,6 +344,7 @@ impl Session {
         self.attempt += 1;
         self.reason = None;
         self.reason_code = None;
+        self.failure = None;
         effects.push(Effect::StartAttempt { resume });
         effects
     }
@@ -355,21 +408,34 @@ impl Session {
                 transfer_id,
                 file_name,
                 bytes,
+                completed_file_path,
             } if matches!(
                 self.state,
-                S::Waiting | S::Connecting | S::Verifying | S::Transferring | S::Confirming
+                S::Waiting
+                    | S::Connecting
+                    | S::Verifying
+                    | S::Transferring
+                    | S::Confirming
+                    | S::Unconfirmed
             ) =>
             {
                 let mut effects = self.exit_effects();
-                self.state = S::Completed;
+                self.state =
+                    if self.direction == TransferDirection::Receive && self.publication_required {
+                        S::AwaitingPublication
+                    } else {
+                        S::Completed
+                    };
                 self.transfer_id = Some(transfer_id);
                 self.file_name = Some(file_name);
+                self.completed_file_path = completed_file_path;
                 self.bytes = bytes;
                 if self.total == 0 {
                     self.total = bytes; // receipt/existing-final paths skip Started
                 }
                 self.reason = None;
                 self.reason_code = None;
+                self.failure = None;
                 if self.direction == TransferDirection::Receive {
                     effects.push(Effect::PostReceipt);
                 }
@@ -418,6 +484,7 @@ impl Session {
         self.state = state;
         self.reason = Some(reason);
         self.reason_code = Some(code);
+        self.failure = None;
         effects.extend(extra);
         effects
     }
@@ -456,6 +523,7 @@ mod tests {
             transfer_id: "transfer-t1".into(),
             file_name: "a.zip".into(),
             bytes,
+            completed_file_path: None,
         }
     }
 
@@ -488,6 +556,55 @@ mod tests {
         let effects = s.reduce(ev(1, completed(100)));
         assert_eq!(s.state, State::Completed);
         assert_eq!(effects, vec![Effect::PostReceipt]);
+    }
+
+    #[test]
+    fn staged_receive_completes_only_after_native_publication() {
+        let mut s = Session::new(Receive);
+        s.publication_required = true;
+        s.reduce(ev(1, started()));
+        s.reduce(ev(1, E::Progress { bytes: 100 }));
+        let mut completed = completed(100);
+        if let E::Completed {
+            completed_file_path,
+            ..
+        } = &mut completed
+        {
+            *completed_file_path = Some("/private/staging/a.zip".into());
+        }
+
+        let effects = s.reduce(ev(1, completed));
+        assert_eq!(s.state, State::AwaitingPublication);
+        assert_eq!(
+            s.completed_file_path.as_deref(),
+            Some("/private/staging/a.zip")
+        );
+        assert_eq!(effects, vec![Effect::PostReceipt]);
+        assert!(s.reduce(Input::Resume).is_empty());
+
+        assert!(
+            s.reduce(Input::Published {
+                path: "file:///Downloads/a.zip".into(),
+            })
+            .is_empty()
+        );
+        assert_eq!(s.state, State::Completed);
+        assert_eq!(
+            s.completed_file_path.as_deref(),
+            Some("file:///Downloads/a.zip")
+        );
+    }
+
+    #[test]
+    fn staged_receive_can_be_abandoned_without_restarting_network_io() {
+        let mut s = transferring(Receive);
+        s.publication_required = true;
+        s.reduce(ev(1, completed(100)));
+
+        let effects = s.reduce(Input::Cancel);
+
+        assert_eq!(s.state, State::Cancelled);
+        assert_eq!(effects, vec![Effect::DiscardStagedFile]);
     }
 
     #[test]
@@ -535,7 +652,7 @@ mod tests {
         let mut s = Session::new(Receive);
         let effects = s.reduce(Input::Cancel);
         assert_eq!(s.state, State::Cancelled);
-        assert_eq!(effects, vec![Effect::CancelToken]);
+        assert_eq!(effects, vec![Effect::CancelToken, Effect::DiscardPartial]);
         assert!(s.reduce(ev(1, E::Connecting)).is_empty());
         assert!(s.reduce(ev(1, E::Pairing)).is_empty());
         assert!(
@@ -605,6 +722,11 @@ mod tests {
         assert_eq!(effects, vec![Effect::CancelToken, Effect::StartMailboxPoll]);
         // A second timeout is a no-op (state already resolved).
         assert!(s.reduce(Input::ConfirmTimeout { attempt: 1 }).is_empty());
+        // The timeout is an escalation, not a verdict: an in-band completion
+        // already queued by the current attempt remains authoritative.
+        let effects = s.reduce(ev(1, completed(100)));
+        assert_eq!(s.state, State::Completed);
+        assert_eq!(effects, vec![Effect::StopMailboxPoll]);
     }
 
     /// Parallel proofs: the receipt can win WHILE the ack is still awaited.
@@ -759,9 +881,14 @@ mod tests {
         s.reduce(Input::Pause);
         let effects = s.reduce(Input::Cancel);
         assert_eq!(s.state, State::Cancelled);
-        assert_eq!(effects, Vec::new());
+        assert_eq!(effects, vec![Effect::DiscardPartial]);
         // …but not from Completed/Failed/Cancelled.
-        for setup in [State::Completed, State::Failed, State::Cancelled] {
+        for setup in [
+            State::AwaitingPublication,
+            State::Completed,
+            State::Failed,
+            State::Cancelled,
+        ] {
             let mut s = transferring(Send);
             s.state = setup;
             assert!(s.reduce(Input::Cancel).is_empty());

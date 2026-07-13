@@ -48,29 +48,46 @@ object SettingsStore {
 
     fun init(context: Context) {
         prefs = context.getSharedPreferences("envoix.settings", Context.MODE_PRIVATE)
-        _settings.value = Settings(
-            broker = prefs.getString("broker", Endpoints.BROKER)!!,
-            relay = prefs.getString("relay", Endpoints.RELAY)!!,
-            chunkSize = prefs.getString("chunkSize", "")!!,
-            candidatesAllow = readList("candidatesAllow"),
-            candidatesDeny = readList("candidatesDeny"),
-            saveFolder = prefs.getString("saveFolder", "Envoix")!!,
-            saveTreeUri = prefs.getString("saveTreeUri", "")!!,
-            defaultRole = prefs.getString("defaultRole", "receive")!!,
-            useRoom = prefs.getBoolean("useRoom", true),
-            useMdns = prefs.getBoolean("useMdns", true),
-            devMode = prefs.getBoolean("devMode", false),
-            verboseLog = prefs.getBoolean("verboseLog", false),
-            logServer = prefs.getString("logServer", Endpoints.LOG_SERVER)!!,
-        )
+        val storedLogServer = prefs.getString("logServer", Endpoints.LOG_SERVER)!!
+        val logServer =
+            if (storedLogServer.trimEnd('/') == Endpoints.DEPRECATED_LOG_SERVER) {
+                Endpoints.LOG_SERVER
+            } else {
+                storedLogServer
+            }
+        if (logServer != storedLogServer) {
+            prefs.edit().putString("logServer", logServer).apply()
+        }
+        _settings.value =
+            Settings(
+                broker = prefs.getString("broker", Endpoints.BROKER)!!,
+                relay = prefs.getString("relay", Endpoints.RELAY)!!,
+                chunkSize = prefs.getString("chunkSize", "")!!,
+                candidatesAllow = readList("candidatesAllow"),
+                candidatesDeny = readList("candidatesDeny"),
+                saveFolder = prefs.getString("saveFolder", "Envoix")!!,
+                saveTreeUri = prefs.getString("saveTreeUri", "")!!,
+                defaultRole = prefs.getString("defaultRole", "receive")!!,
+                useRoom = prefs.getBoolean("useRoom", true),
+                useMdns = prefs.getBoolean("useMdns", true),
+                devMode = prefs.getBoolean("devMode", false),
+                verboseLog = prefs.getBoolean("verboseLog", false),
+                logServer = logServer,
+            )
     }
 
     private fun readList(key: String): List<String> =
-        prefs.getString(key, "").orEmpty().lines().map { it.trim() }.filter { it.isNotEmpty() }
+        prefs
+            .getString(key, "")
+            .orEmpty()
+            .lines()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
 
     fun update(transform: (Settings) -> Settings) {
         val s = transform(_settings.value)
-        prefs.edit()
+        prefs
+            .edit()
             .putString("broker", s.broker)
             .putString("relay", s.relay)
             .putString("chunkSize", s.chunkSize)
@@ -92,17 +109,18 @@ object SettingsStore {
     private const val LOG_VERBOSE = "envoix=trace,iroh=debug,warn"
 
     /** Push the current verbosity down to the native reloadable filter. */
-    fun applyLogLevel() =
-        NativeBootstrap.setLogLevel(if (_settings.value.verboseLog) LOG_VERBOSE else LOG_BASELINE)
+    fun applyLogLevel() = NativeBootstrap.setLogLevel(if (_settings.value.verboseLog) LOG_VERBOSE else LOG_BASELINE)
 
     /** Where received files go, for display: the picked SAF folder's name, else Downloads/<folder>. */
     fun saveLabel(context: Context): String {
         val s = _settings.value
         if (s.saveTreeUri.isNotBlank()) {
-            val name = runCatching {
-                androidx.documentfile.provider.DocumentFile
-                    .fromTreeUri(context, android.net.Uri.parse(s.saveTreeUri))?.name
-            }.getOrNull()
+            val name =
+                runCatching {
+                    androidx.documentfile.provider.DocumentFile
+                        .fromTreeUri(context, android.net.Uri.parse(s.saveTreeUri))
+                        ?.name
+                }.getOrNull()
             if (!name.isNullOrBlank()) return name
         }
         return "Downloads / ${s.saveFolder}"
@@ -117,13 +135,17 @@ object SettingsStore {
             android.net.Uri.parse(tree)
         } else {
             android.provider.DocumentsContract.buildDocumentUri(
-                "com.android.externalstorage.documents", "primary:Download",
+                "com.android.externalstorage.documents",
+                "primary:Download",
             )
         }
     }
 
     /** Persist a SAF folder pick with a durable permission grant; null clears it. */
-    fun setSaveTree(context: Context, uri: android.net.Uri?) {
+    fun setSaveTree(
+        context: Context,
+        uri: android.net.Uri?,
+    ) {
         if (uri == null) {
             update { it.copy(saveTreeUri = "") }
             return
@@ -142,11 +164,16 @@ object SettingsStore {
     fun avoidsTailscale(s: Settings): Boolean = s.candidatesDeny.containsAll(TAILSCALE_CIDRS)
 
     /** Add/remove the Tailscale ranges in `deny` — the same source the Advanced editor edits. */
-    fun setAvoidTailscale(on: Boolean) = update { s ->
-        val deny = if (on) (s.candidatesDeny + TAILSCALE_CIDRS).distinct()
-        else s.candidatesDeny.filterNot { it in TAILSCALE_CIDRS }
-        s.copy(candidatesDeny = deny)
-    }
+    fun setAvoidTailscale(on: Boolean) =
+        update { s ->
+            val deny =
+                if (on) {
+                    (s.candidatesDeny + TAILSCALE_CIDRS).distinct()
+                } else {
+                    s.candidatesDeny.filterNot { it in TAILSCALE_CIDRS }
+                }
+            s.copy(candidatesDeny = deny)
+        }
 
     /**
      * Render a `config.toml` for the core from the config-tier fields, or null
@@ -168,5 +195,6 @@ object SettingsStore {
     }
 
     private fun tomlStr(s: String) = "\"" + s.replace("\"", "") + "\""
+
     private fun tomlArr(items: List<String>) = "[" + items.joinToString(", ") { tomlStr(it) } + "]"
 }

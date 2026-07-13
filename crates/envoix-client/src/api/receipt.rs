@@ -72,6 +72,9 @@ pub fn seal_receipt(
     code: &str,
     receipt: &TransferReceipt,
 ) -> Result<Vec<u8>, TransferError> {
+    if receipt.transfer_id.0 != transfer_id {
+        return Err(crypto_error("receipt transfer id does not match mailbox"));
+    }
     envoix_pairing::seal_json(
         &receipt_seal_key(transfer_id, code),
         &mailbox_aad(KIND_RECEIPT),
@@ -87,12 +90,16 @@ pub fn open_receipt(
     code: &str,
     blob: &[u8],
 ) -> Result<TransferReceipt, TransferError> {
-    envoix_pairing::open_json(
+    let receipt: TransferReceipt = envoix_pairing::open_json(
         &receipt_seal_key(transfer_id, code),
         &mailbox_aad(KIND_RECEIPT),
         blob,
     )
-    .map_err(|e| crypto_error(format!("opening receipt: {e}")))
+    .map_err(|e| crypto_error(format!("opening receipt: {e}")))?;
+    if receipt.transfer_id.0 != transfer_id {
+        return Err(crypto_error("receipt transfer id does not match mailbox"));
+    }
+    Ok(receipt)
 }
 
 /// Open a mailbox blob and verify it against the local source file: the
@@ -145,9 +152,11 @@ async fn hash_file(path: &Path) -> std::io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use envoix_types::TransferId;
 
     fn receipt() -> TransferReceipt {
         TransferReceipt {
+            transfer_id: TransferId::new("transfer-aa11"),
             file_name: "photo.jpg".into(),
             file_size: 42,
             file_hash: "abc123".into(),
@@ -183,6 +192,7 @@ mod tests {
         let path = dir.join("v.bin");
         tokio::fs::write(&path, b"verified bytes").await.unwrap();
         let real = TransferReceipt {
+            transfer_id: TransferId::new("t-1"),
             file_name: "v.bin".into(),
             file_size: 14,
             file_hash: blake3::hash(b"verified bytes").to_hex().to_string(),

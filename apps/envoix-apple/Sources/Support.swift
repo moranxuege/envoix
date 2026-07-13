@@ -17,6 +17,60 @@ typealias PlatformImage = UIImage
 let minTokenLength = 12
 let defaultRendezvousBroker = "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445"
 let defaultRelayURL = "https://envoix.chkxwlyh.us:8444"
+let defaultLogServer = "https://rdz.chkxwlyh.us:8460"
+let deprecatedLogServers: Set<String> = [
+    "http://67.230.187.238:8460",
+    "https://envoix.chkxwlyh.us:8460",
+    "http://envoix.chkxwlyh.us:8460",
+]
+
+struct ActivityActionAvailability: Equatable {
+    let canPause: Bool
+    let canResume: Bool
+    let canCancel: Bool
+    let canDelete: Bool
+}
+
+/// Single lifecycle-to-UI action policy. SwiftUI must not infer buttons from
+/// presentation state independently of the canonical transfer snapshot.
+func activityActionAvailability(for record: FfiTransferActivityRecord) -> ActivityActionAvailability {
+    let isFinalizing = record.state == .verifying && record.diagnosticMessage == "confirming"
+    let publicationFailed = record.state == .publishing
+        && (record.diagnosticMessage.hasPrefix("publish failed:")
+            || record.diagnosticMessage == "publish confirmation was not accepted")
+
+    let canPause: Bool
+    switch record.state {
+    case .queued, .binding, .waitingForPeer, .pairing, .connecting, .transferring, .verifying:
+        canPause = !isFinalizing
+    case .publishing, .unconfirmed, .completed, .failed, .paused, .canceled, .unknown:
+        canPause = false
+    }
+
+    let canResume = record.state == .paused
+        || record.state == .unconfirmed
+        || (record.state == .failed && record.retryable)
+        || publicationFailed
+
+    let canCancel: Bool
+    switch record.state {
+    case .queued, .binding, .waitingForPeer, .pairing, .connecting, .transferring, .verifying,
+            .unconfirmed, .paused:
+        canCancel = !isFinalizing
+    case .publishing:
+        canCancel = publicationFailed
+    case .completed, .failed, .canceled, .unknown:
+        canCancel = false
+    }
+
+    let canDelete = record.state == .completed || record.state == .failed || record.state == .canceled
+    return ActivityActionAvailability(
+        canPause: canPause,
+        canResume: canResume,
+        canCancel: canCancel,
+        canDelete: canDelete
+    )
+}
 let appDebugBuildLabel = "Debug build 2026.07.08.19"
 
 /// Generates a short, memorable, easy-to-type pairing token of the form
@@ -217,6 +271,8 @@ struct RoomCodeField: View {
     var canGenerate: Bool = false
     var generateLabel = "Generate"
     var copyLabel = "Copy Code"
+    var showsCopyAction = true
+    var pasteAction: (() -> Void)?
     var helper: String
 
     var body: some View {
@@ -267,10 +323,12 @@ struct RoomCodeField: View {
             )
             .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
 
-            Text(helper)
-                .font(.body)
-                .foregroundStyle(Theme.muted)
-                .fixedSize(horizontal: false, vertical: true)
+            if !helper.trimmed.isEmpty {
+                Text(helper)
+                    .font(.body)
+                    .foregroundStyle(Theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
@@ -281,49 +339,68 @@ struct RoomCodeField: View {
                 .font(.headline.weight(.semibold))
                 .foregroundStyle(Theme.muted)
 
-            TextField(placeholder, text: $code)
-                .textFieldStyle(.plain)
-                .font(.body.monospaced())
-                .foregroundStyle(Theme.text)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .disabled(disabled)
-                .padding(.horizontal, 10)
-                .frame(minHeight: 44)
-                .background(Theme.surface)
-                .overlay(
-                    RoundedRectangle(cornerRadius: Theme.cardRadius)
-                        .strokeBorder(Theme.line.opacity(0.75), lineWidth: 0.8)
-                )
-                .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
-
             HStack(spacing: 8) {
-                if canGenerate {
-                    Button {
-                        code = newRoomCode()
-                        ToastCenter.shared.show(AppText.value("Room code generated", "接收码已生成", language: language))
-                    } label: {
-                        Label(generateLabel, systemImage: "wand.and.stars")
-                            .frame(maxWidth: .infinity, minHeight: 36)
+                TextField(placeholder, text: $code)
+                    .textFieldStyle(.plain)
+                    .font(.body.monospaced())
+                    .foregroundStyle(Theme.text)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .disabled(disabled)
+
+                if let pasteAction {
+                    Button(action: pasteAction) {
+                        Label(AppText.value("Paste", "粘贴", language: language), systemImage: "doc.on.clipboard")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(minHeight: 36)
                     }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
                     .disabled(disabled)
                 }
-
-                Button {
-                    copyWithToast(code, AppText.value("Room code copied", "接收码已复制", language: language))
-                } label: {
-                    Label(copyLabel == "Copy Code" ? AppText.value("Copy", "复制", language: language) : copyLabel, systemImage: "doc.on.doc")
-                        .frame(maxWidth: .infinity, minHeight: 36)
-                }
-                .disabled(code.trimmed.isEmpty)
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
+            .padding(.horizontal, 10)
+            .frame(minHeight: 48)
+            .background(Theme.surface)
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.cardRadius)
+                    .strokeBorder(Theme.line.opacity(0.75), lineWidth: 0.8)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
 
-            Text(helper)
-                .font(.footnote)
-                .foregroundStyle(Theme.muted)
-                .fixedSize(horizontal: false, vertical: true)
+            if canGenerate || showsCopyAction {
+                HStack(spacing: 8) {
+                    if canGenerate {
+                        Button {
+                            code = newRoomCode()
+                            ToastCenter.shared.show(AppText.value("Room code generated", "接收码已生成", language: language))
+                        } label: {
+                            Label(generateLabel, systemImage: "wand.and.stars")
+                                .frame(maxWidth: .infinity, minHeight: 36)
+                        }
+                        .disabled(disabled)
+                    }
+
+                    if showsCopyAction {
+                        Button {
+                            copyWithToast(code, AppText.value("Room code copied", "接收码已复制", language: language))
+                        } label: {
+                            Label(copyLabel == "Copy Code" ? AppText.value("Copy", "复制", language: language) : copyLabel, systemImage: "doc.on.doc")
+                                .frame(maxWidth: .infinity, minHeight: 36)
+                        }
+                        .disabled(code.trimmed.isEmpty)
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+
+            if !helper.trimmed.isEmpty {
+                Text(helper)
+                    .font(.footnote)
+                    .foregroundStyle(Theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
     #endif
@@ -417,6 +494,75 @@ func platformRevealTitle(language: String) -> String {
     #endif
 }
 
+/// Returns a completed receive only when the final path still names a regular
+/// file with the byte count reported by the transfer core. A completion receipt
+/// may legitimately outlive a moved/deleted file, so it must not drive a
+/// "Saved file" UI on its own.
+func availableCompletedFileURL(path: String, expectedBytes: UInt64) -> URL? {
+    let path = path.trimmed
+    guard !path.isEmpty else { return nil }
+    let url = URL(fileURLWithPath: path)
+    guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+          values.isRegularFile == true else {
+        return nil
+    }
+    if expectedBytes > 0 {
+        guard let fileSize = values.fileSize, fileSize >= 0, UInt64(fileSize) == expectedBytes else {
+            return nil
+        }
+    }
+    return url
+}
+
+/// Publishes one already-verified staging file into a user-selected Files
+/// directory. The destination becomes visible only after the full copy has
+/// completed and its size has been checked.
+func publishReceivedFile(
+    from source: URL,
+    to destinationDirectory: URL,
+    expectedBytes: UInt64
+) throws -> URL {
+    guard availableCompletedFileURL(path: source.path, expectedBytes: expectedBytes) != nil else {
+        throw RuntimeSettingsError("The verified staging file is missing or has an unexpected size.")
+    }
+    let fileManager = FileManager.default
+    try fileManager.createDirectory(at: destinationDirectory, withIntermediateDirectories: true)
+    let finalURL = destinationDirectory.appendingPathComponent(source.lastPathComponent)
+    if fileManager.fileExists(atPath: finalURL.path) {
+        guard availableCompletedFileURL(path: finalURL.path, expectedBytes: expectedBytes) != nil,
+              try filesHaveEqualContents(source, finalURL) else {
+            throw RuntimeSettingsError("A different file with the same name already exists in the selected folder.")
+        }
+        return finalURL
+    }
+    let temporaryURL = destinationDirectory.appendingPathComponent(
+        ".envoix-publish-\(UUID().uuidString).part"
+    )
+    defer { try? fileManager.removeItem(at: temporaryURL) }
+    try fileManager.copyItem(at: source, to: temporaryURL)
+    guard availableCompletedFileURL(path: temporaryURL.path, expectedBytes: expectedBytes) != nil else {
+        throw RuntimeSettingsError("The copied file did not match the verified size.")
+    }
+    try fileManager.moveItem(at: temporaryURL, to: finalURL)
+    return finalURL
+}
+
+private func filesHaveEqualContents(_ lhs: URL, _ rhs: URL) throws -> Bool {
+    let left = try FileHandle(forReadingFrom: lhs)
+    let right = try FileHandle(forReadingFrom: rhs)
+    defer {
+        try? left.close()
+        try? right.close()
+    }
+    let chunkSize = 1024 * 1024
+    while true {
+        let leftChunk = try left.read(upToCount: chunkSize) ?? Data()
+        let rightChunk = try right.read(upToCount: chunkSize) ?? Data()
+        guard leftChunk == rightChunk else { return false }
+        if leftChunk.isEmpty { return true }
+    }
+}
+
 /// Formats a byte count as a short human-readable string (auto KB/MB/GB).
 func byteString(_ bytes: UInt64) -> String {
     ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
@@ -498,6 +644,7 @@ func etaString(_ seconds: Double) -> String {
 /// Builds a compact, bounded diagnostic report for a transfer and its snapshots.
 struct TransferDiagnostics {
     static let clipboardMaxBytes = 256 * 1024
+    static let uploadMaxBytes = RemoteLogUpload.bodyMaxBytes
     private static let headerMaxBytes = 2048
     private static let failureMaxBytes = 48 * 1024
     private static let eventLinesMaxBytes = 80 * 1024
@@ -506,9 +653,11 @@ struct TransferDiagnostics {
     static func report(
         for record: FfiTransferActivityRecord,
         eventLog: [String] = [],
-        transferEventLines: [String] = []
+        transferEventLines: [String] = [],
+        budget: Int = clipboardMaxBytes,
+        includeSensitiveFields: Bool = true
     ) -> String {
-        var remaining = clipboardMaxBytes
+        var remaining = budget
         var lines: [String] = []
 
         append(
@@ -528,7 +677,7 @@ struct TransferDiagnostics {
         }
 
         append(
-            section: section("activity", activityText(for: record)),
+            section: section("activity", activityText(for: record, includeSensitiveFields: includeSensitiveFields)),
             cap: remaining,
             into: &lines,
             remaining: &remaining
@@ -544,6 +693,65 @@ struct TransferDiagnostics {
         append(
             section: section("activity_log", eventLog.joined(separator: "\n")),
             cap: eventLogMaxBytes,
+            into: &lines,
+            remaining: &remaining
+        )
+
+        return lines.joined(separator: "\n")
+    }
+
+    /// Remote reports are larger than clipboard copies but never contain pairing secrets.
+    static func remoteReport(
+        for record: FfiTransferActivityRecord,
+        eventLog: [String] = [],
+        transferEventLines: [String] = []
+    ) -> String {
+        report(
+            for: record,
+            eventLog: eventLog,
+            transferEventLines: transferEventLines,
+            budget: uploadMaxBytes,
+            includeSensitiveFields: false
+        )
+    }
+
+    /// App-level report used before a Room exists and for cross-transfer diagnosis.
+    static func appReport(
+        activities: [FfiTransferActivityRecord],
+        eventLines: [String] = []
+    ) -> String {
+        var remaining = uploadMaxBytes
+        var lines: [String] = []
+        append(
+            section: section("header", [
+                "app=envoix-ios",
+                "version=\(appVersion)",
+                "build=\(appBuild)",
+                "generated=\(isoDate())",
+                "activity_count=\(activities.count)",
+            ].joined(separator: "\n")),
+            cap: headerMaxBytes,
+            into: &lines,
+            remaining: &remaining
+        )
+
+        let activitySnapshots = activities.map { record in
+            var sections = ["[activity \(record.activityId)]", activityText(for: record, includeSensitiveFields: false)]
+            if record.state == .failed || !record.diagnosticMessage.isEmpty || !record.userMessageKey.isEmpty {
+                sections.append(failureText(for: record))
+            }
+            return sections.joined(separator: "\n")
+        }.joined(separator: "\n\n")
+        append(
+            section: section("activities", activitySnapshots),
+            cap: remaining,
+            into: &lines,
+            remaining: &remaining
+        )
+
+        append(
+            section: section("activity_events", eventLines.joined(separator: "\n")),
+            cap: remaining,
             into: &lines,
             remaining: &remaining
         )
@@ -618,7 +826,10 @@ struct TransferDiagnostics {
         ].joined(separator: "\n")
     }
 
-    private static func activityText(for record: FfiTransferActivityRecord) -> String {
+    private static func activityText(
+        for record: FfiTransferActivityRecord,
+        includeSensitiveFields: Bool
+    ) -> String {
         [
             "activity_id=\(record.activityId)",
             "attempt_id=\(record.attemptId)",
@@ -633,13 +844,18 @@ struct TransferDiagnostics {
             "file_name=\(record.fileName)",
             "bytes=\(record.bytesTransferred)/\(record.totalBytes)",
             "resumed_bytes=\(record.bytesResumed)",
-            "invite=\(record.invite)",
-            "token=\(record.token)",
-            "peer=\(record.peerDescriptor)",
+            "invite=\(sensitiveValue(record.invite, include: includeSensitiveFields))",
+            "token=\(sensitiveValue(record.token, include: includeSensitiveFields))",
+            "peer=\(sensitiveValue(record.peerDescriptor, include: includeSensitiveFields))",
             "data_path=\(record.dataPathKind) \(record.dataPathDetail)",
             "limits=\(record.limits)",
-            "completed_file_path=\(record.completedFilePath)",
+            "completed_file_path=\(sensitiveValue(record.completedFilePath, include: includeSensitiveFields))",
         ].joined(separator: "\n")
+    }
+
+    private static func sensitiveValue(_ value: String, include: Bool) -> String {
+        guard !value.isEmpty else { return "" }
+        return include ? value : "[redacted]"
     }
 
     private static var appVersion: String {

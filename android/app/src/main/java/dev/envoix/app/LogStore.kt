@@ -85,13 +85,17 @@ object LogStore {
  */
 object LogSink : LogCallback {
     private val ROOM = Regex("""room="([^"]+)"""")
+
     // "<LEVEL> <spans>: <message>" — we re-stamp in local time so core lines line
     // up with the app's own event lines instead of the core's UTC timestamp.
     private val LEVEL = Regex("""\s(TRACE|DEBUG|INFO|WARN|ERROR)\s+(.*)""")
+
     // the outer transfer{…} span is redundant in a per-transfer log — drop it
     private val TRANSFER_SPAN = Regex("""^transfer\{[^}]*\}:\s*""")
     private val clock =
-        java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss").withZone(java.time.ZoneId.systemDefault())
+        java.time.format.DateTimeFormatter
+            .ofPattern("HH:mm:ss")
+            .withZone(java.time.ZoneId.systemDefault())
 
     override fun log(line: String) {
         LogStore.append(line)
@@ -103,7 +107,10 @@ object LogSink : LogCallback {
         TransferRepository.appendCoreLog(room, "$stamp  $level  ${tail.replaceFirst(TRANSFER_SPAN, "")}")
     }
 
-    private fun writeLogcat(level: String, line: String) {
+    private fun writeLogcat(
+        level: String,
+        line: String,
+    ) {
         when (level) {
             "TRACE" -> Log.v("Envoix", line)
             "DEBUG" -> Log.d("Envoix", line)

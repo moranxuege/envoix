@@ -25,6 +25,7 @@ struct SendView: View {
     @State private var roomQRCodeImage: PlatformImage?
     @State private var roomQRCodePayload = ""
     @State private var mode: PairingMode = .room
+    @State private var pairingPanel: PairingPanelMode = .show
     @State private var dropTargeted = false
     @State private var filePathInput = ""
     @State private var isFileImporterPresented = false
@@ -60,8 +61,6 @@ struct SendView: View {
     private var scrollContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                modeSelector
-
                 if mode == .invite {
                     inviteSection
                 } else if mode == .room {
@@ -72,7 +71,10 @@ struct SendView: View {
                 }
 
                 fileSection
+                modeSelector
+                #if os(macOS)
                 TransferStatusView(viewModel: viewModel)
+                #endif
             }
             .padding(.vertical, 12)
             #if os(iOS)
@@ -90,6 +92,86 @@ struct SendView: View {
     }
 
     @ViewBuilder private var roomModeSection: some View {
+        #if os(iOS)
+        VStack(alignment: .leading, spacing: 14) {
+            PairingPanelSelector(selection: $pairingPanel, disabled: viewModel.isBusy)
+
+            Group {
+                if pairingPanel == .scan {
+                    VStack(spacing: 14) {
+                        Image(systemName: "qrcode.viewfinder")
+                            .font(.system(size: 48, weight: .medium))
+                            .foregroundStyle(Theme.accentStrong)
+                        Text(AppText.value("Scan the receiver's QR", "扫描接收端二维码", language: uiLanguage))
+                            .font(.headline.weight(.semibold))
+                            .foregroundStyle(Theme.text)
+                        Button {
+                            isQRScannerPresented = true
+                        } label: {
+                            Label(AppText.value("Open scanner", "打开扫描器", language: uiLanguage), systemImage: "camera")
+                                .frame(maxWidth: .infinity, minHeight: 48)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(Theme.accent)
+                        .accessibilityIdentifier("send_scan_receiver_qr")
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 230)
+                } else if !roomCode.trimmed.isEmpty {
+                    VStack(spacing: 12) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 42))
+                            .foregroundStyle(Theme.success)
+                        Text(AppText.value("Ready to join", "已准备加入", language: uiLanguage))
+                            .font(.headline.weight(.semibold))
+                            .foregroundStyle(Theme.text)
+                        Text(roomCode)
+                            .font(.body.monospaced().weight(.semibold))
+                            .foregroundStyle(Theme.accentStrong)
+                            .multilineTextAlignment(.center)
+                            .textSelection(.enabled)
+                        Button(AppText.value("Clear and show my QR", "清除并显示我的二维码", language: uiLanguage)) {
+                            roomCode = ""
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 230)
+                } else {
+                    VStack(spacing: 12) {
+                        if let image = roomQRCodeImage {
+                            QRCard(image: image, size: 184)
+                                .accessibilityIdentifier("send_room_qr")
+                        } else {
+                            qrPlaceholder
+                        }
+                        LinkRow(
+                            text: pairingInvite?.code ?? AppText.value("Send code", "发送码", language: uiLanguage),
+                            displaysFullText: true
+                        ) {
+                            Button {
+                                copyWithToast(pairingInvite?.code ?? "", AppText.value("Send code copied", "发送码已复制", language: uiLanguage))
+                            } label: {
+                                Label(AppText.value("Copy", "复制", language: uiLanguage), systemImage: "doc.on.doc")
+                                    .frame(minHeight: 40)
+                            }
+                            .disabled(pairingInvite == nil)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 230)
+                }
+            }
+
+            RoomCodeField(
+                code: roomCodeBinding,
+                disabled: viewModel.isBusy,
+                title: AppText.value("Or enter a code", "或输入短码", language: uiLanguage),
+                placeholder: AppText.value("Scan QR or enter code", "扫码或输入短码", language: uiLanguage),
+                showsCopyAction: false,
+                pasteAction: pastePairingInput,
+                helper: ""
+            )
+        }
+        .card(raised: true, padding: 18)
+        #else
         VStack(alignment: .center, spacing: 16) {
             VStack(spacing: 4) {
                 Text(AppText.value("Share this QR or code", "分享二维码或发送码", language: uiLanguage))
@@ -114,7 +196,8 @@ struct SendView: View {
 
             LinkRow(
                 text: pairingInvite?.code ?? AppText.value("Send code", "发送码", language: uiLanguage),
-                textIdentifier: "send_room_code"
+                textIdentifier: "send_room_code",
+                displaysFullText: true
             ) {
                 Button {
                     copyWithToast(pairingInvite?.code ?? "", AppText.value("Send code copied", "发送码已复制", language: uiLanguage))
@@ -169,6 +252,7 @@ struct SendView: View {
             .controlSize(.small)
         }
         .card(raised: true, padding: 18)
+        #endif
     }
 
     private var roomCodeBinding: Binding<String> {
@@ -189,28 +273,35 @@ struct SendView: View {
 
     private var primaryButton: some View {
         Button(action: primaryAction) {
-            Label(primaryLabel, systemImage: viewModel.isBusy ? "xmark" : "paperplane")
+            Label(
+                primaryLabel,
+                systemImage: viewModel.isBusy ? "list.bullet.rectangle" : "paperplane"
+            )
                 .frame(maxWidth: .infinity, minHeight: 44)
                 .contentShape(Rectangle())
         }
         .keyboardShortcut(.defaultAction)
         .buttonStyle(.borderedProminent)
         .controlSize(.large)
-        .tint(viewModel.isBusy ? Theme.warning : Theme.accent)
-        .disabled((!canSend || concurrencyBlocked) && !viewModel.isBusy)
+        .tint(Theme.accent)
+        .disabled(viewModel.isBusy || viewModel.isFinalizing || !canSend || concurrencyBlocked)
         .accessibilityIdentifier("send_start_button")
     }
 
     #if os(iOS)
     private var bottomActionBar: some View {
-        VStack(spacing: 8) {
-            footerMessage
-            primaryButton
+        Group {
+            if !viewModel.isBusy {
+                VStack(spacing: 8) {
+                    footerMessage
+                    primaryButton
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 10)
+                .padding(.bottom, 8)
+                .background(.regularMaterial)
+            }
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 10)
-        .padding(.bottom, 8)
-        .background(.regularMaterial)
     }
     #endif
 
@@ -219,7 +310,10 @@ struct SendView: View {
     }
 
     private var fileSection: some View {
-        VStack(spacing: 12) {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(AppText.value("File to send", "要发送的文件", language: uiLanguage))
+                .font(.headline.weight(.semibold))
+                .foregroundStyle(Theme.text)
             Button {
                 #if os(iOS)
                 isFileImporterPresented = true
@@ -294,7 +388,7 @@ struct SendView: View {
                 .font(.footnote.weight(.semibold))
                 .foregroundStyle(Theme.muted)
         }
-        .frame(maxWidth: .infinity, minHeight: 68, alignment: .leading)
+        .frame(maxWidth: .infinity, minHeight: 76, alignment: .leading)
         .contentShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
         #else
         VStack(spacing: 10) {
@@ -473,6 +567,7 @@ struct SendView: View {
                 return
             }
             roomCode = parsed.code
+            pairingPanel = .show
             if !parsed.broker.trimmed.isEmpty {
                 serverURL = parsed.broker.trimmed
             }
@@ -544,7 +639,7 @@ struct SendView: View {
     }
 
     private var primaryLabel: String {
-        if viewModel.isBusy { return AppText.value("Cancel Transfer", "取消传输", language: uiLanguage) }
+        if viewModel.isBusy { return AppText.value("Managed in Activity", "请在活动中管理", language: uiLanguage) }
         switch viewModel.phase {
         case .completed, .canceled, .failed: return AppText.value("Send Again", "再次发送", language: uiLanguage)
         default: return AppText.value("Send", "发送", language: uiLanguage)
@@ -611,10 +706,7 @@ struct SendView: View {
     }
 
     private func primaryAction() {
-        if viewModel.isBusy {
-            viewModel.cancel()
-            return
-        }
+        guard !viewModel.isBusy, !viewModel.isFinalizing else { return }
         guard let file else { return }
         do {
             let settings = try RuntimeSettingsProvider.make(

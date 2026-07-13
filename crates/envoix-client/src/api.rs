@@ -34,7 +34,7 @@ pub use transfer::{Transfer, TransferStats};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use envoix_qr::{QrInvitePayload, generate_token};
 use envoix_session::{
@@ -115,6 +115,10 @@ async fn with_summary(
 /// Invite lifetime when the source does not specify one (mDNS listener with
 /// a generated token).
 const DEFAULT_INVITE_TTL_SECS: u64 = 300;
+/// A sender that found no Room peer must eventually try the next configured
+/// rendezvous source. Receivers intentionally have no deadline: waiting for a
+/// sender is their normal steady state.
+const ROOM_SEND_PRECONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The client: local policy (identity, chunk size) shared by transfers.
 ///
@@ -267,7 +271,7 @@ impl Client {
                 })
             }
             PeerSource::Invite { invite } => {
-                let (peer_addr, token) = resolve_invite(&invite)?;
+                let (peer_addr, token) = resolve_invite(&invite, options.continuation)?;
                 let pairing = shared_token(&token)?;
                 let config = self.session_config(options);
                 let cancel = cancel.clone();
@@ -392,8 +396,8 @@ impl Client {
                     .await
                 })
             }
-            PeerSource::ShowInvite { ttl_secs } => {
-                let token = new_token()?;
+            PeerSource::ShowInvite { ttl_secs, token } => {
+                let token = token.map_or_else(new_token, Ok)?;
                 let pairing = shared_token(&token)?;
                 let config = self.session_config(options);
                 let cancel = cancel.clone();
@@ -488,6 +492,9 @@ impl Client {
                 "no peer source attempted".to_string(),
             ));
             for (i, source) in sources.into_iter().enumerate() {
+                let source_mode = source.mode();
+                let preconnect_timeout =
+                    preconnect_timeout_for_source(direction, source_mode, i + 1 < count);
                 let built = match direction {
                     TransferDirection::Send => {
                         client.build_send(source, path.clone(), &options, &events, &loop_cancel)
@@ -508,7 +515,17 @@ impl Client {
                         continue;
                     }
                 };
-                match with_summary(fut, stats.clone()).instrument(span).await {
+                let fut = with_preconnection_timeout(
+                    fut,
+                    stats.clone(),
+                    preconnect_timeout,
+                    direction,
+                    source_mode,
+                );
+                match with_summary(Box::pin(fut), stats.clone())
+                    .instrument(span)
+                    .await
+                {
                     Ok(summary) => return Ok(summary),
                     Err(error) => {
                         last = Err(error);
@@ -550,6 +567,46 @@ impl Client {
             relay_only: options.path == PathPolicy::RelayOnly,
             direct_only: options.path == PathPolicy::DirectOnly,
             candidates: self.candidates.clone(),
+        }
+    }
+}
+
+fn preconnect_timeout_for_source(
+    direction: TransferDirection,
+    mode: TransferMode,
+    has_fallback: bool,
+) -> Option<Duration> {
+    (direction == TransferDirection::Send && mode == TransferMode::Room && has_fallback)
+        .then_some(ROOM_SEND_PRECONNECT_TIMEOUT)
+}
+
+async fn with_preconnection_timeout(
+    fut: TransferFuture,
+    stats: StatsHandle,
+    timeout: Option<Duration>,
+    direction: TransferDirection,
+    mode: TransferMode,
+) -> Result<TransferSummary, PublicError> {
+    let Some(timeout) = timeout else {
+        return fut.await;
+    };
+    let deadline = tokio::time::Instant::now() + timeout;
+    tokio::pin!(fut);
+    loop {
+        if stats.connected() {
+            return fut.await;
+        }
+        tokio::select! {
+            result = &mut fut => return result,
+            _ = tokio::time::sleep_until(deadline) => {
+                if stats.connected() {
+                    return fut.await;
+                }
+                return Err(PublicError::Transfer(format!(
+                    "{direction:?} via {mode:?} timed out before connecting; trying fallback"
+                )));
+            }
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
         }
     }
 }
@@ -608,10 +665,17 @@ fn validate_path_policy(options: &TransferOptions) -> Result<(), TransferError> 
 }
 
 /// Decodes and validates an invite, returning the endpoint address to dial and the token.
-fn resolve_invite(invite: &str) -> Result<(EndpointAddr, String), TransferError> {
+fn resolve_invite(
+    invite: &str,
+    continuation: bool,
+) -> Result<(EndpointAddr, String), TransferError> {
     let to_err = |e| TransferError::input(format!("invalid invite: {e}"));
     let payload = QrInvitePayload::decode(invite).map_err(to_err)?;
-    payload.validate(unix_now()).map_err(to_err)?;
+    if continuation {
+        payload.validate_for_resume().map_err(to_err)?;
+    } else {
+        payload.validate(unix_now()).map_err(to_err)?;
+    }
     let peer_addr = payload.endpoint_addr().map_err(to_err)?;
     Ok((peer_addr, payload.token))
 }
@@ -636,7 +700,10 @@ mod tests {
     fn send_rejects_producer_sources() {
         for source in [
             PeerSource::ShowManual { token: None },
-            PeerSource::ShowInvite { ttl_secs: 300 },
+            PeerSource::ShowInvite {
+                ttl_secs: 300,
+                token: None,
+            },
         ] {
             let error = client()
                 .send("f.txt".into(), source, TransferOptions::default())
@@ -803,6 +870,43 @@ mod tests {
             })
             .unwrap_err();
         assert_eq!(error.kind, ErrorKind::Input);
+    }
+
+    #[test]
+    fn only_room_senders_with_a_fallback_get_a_preconnect_deadline() {
+        assert_eq!(
+            preconnect_timeout_for_source(TransferDirection::Send, TransferMode::Room, true),
+            Some(ROOM_SEND_PRECONNECT_TIMEOUT),
+        );
+        assert_eq!(
+            preconnect_timeout_for_source(TransferDirection::Receive, TransferMode::Room, true),
+            None,
+        );
+        assert_eq!(
+            preconnect_timeout_for_source(TransferDirection::Send, TransferMode::Room, false),
+            None,
+        );
+        assert_eq!(
+            preconnect_timeout_for_source(TransferDirection::Send, TransferMode::Mdns, true),
+            None,
+        );
+    }
+
+    #[tokio::test]
+    async fn preconnect_deadline_ends_a_stuck_attempt() {
+        let pending: TransferFuture = Box::pin(std::future::pending());
+        let (events, _receiver) = EventSender::channel();
+        let error = with_preconnection_timeout(
+            pending,
+            events.stats_handle(),
+            Some(Duration::from_millis(5)),
+            TransferDirection::Send,
+            TransferMode::Room,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("timed out before connecting"));
     }
 
     #[test]

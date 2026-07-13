@@ -30,9 +30,9 @@ use connection::IrohFrameConnection;
 pub use endpoint::{BindAddrs, BoundEndpoint, parse_broker_addr};
 use endpoint::{
     build_accept_endpoint, build_advertising_accept_endpoint, build_dial_endpoint,
-    peer_addr_from_descriptor,
+    peer_addr_from_descriptor, relay_status_summary,
 };
-pub use identity::IdentityConfig;
+pub use identity::{IdentityConfig, MemoryIdentity};
 pub use iroh::EndpointAddr;
 pub use room::{receive_file_via_room, send_file_via_room};
 
@@ -163,7 +163,8 @@ pub async fn send_file_manual(
     let result = engine
         .send_file_with_cancel(&mut connection, file_path, resume, events.as_ref(), &cancel)
         .await;
-    let _ = connection.close().await;
+    close_after_send(&mut connection, &result, &cancel).await;
+    drop(connection);
     local_endpoint.close().await;
     result
 }
@@ -195,8 +196,9 @@ pub async fn send_file_to_endpoint_addr(
     let mut connection = match dial_peer_addr(local_endpoint.clone(), peer_addr).await {
         Ok(connection) => connection,
         Err(error) => {
+            let relay_status = relay_status_summary(&local_endpoint);
             events.on_event(TransferEvent::Diagnostic {
-                message: format!("dial failed: {error}"),
+                message: format!("dial failed: {error}; {relay_status}"),
             });
             local_endpoint.close().await;
             return Err(error);
@@ -212,7 +214,8 @@ pub async fn send_file_to_endpoint_addr(
     let result = engine
         .send_file_with_cancel(&mut connection, file_path, resume, events.as_ref(), &cancel)
         .await;
-    let _ = connection.close().await;
+    close_after_send(&mut connection, &result, &cancel).await;
+    drop(connection);
     local_endpoint.close().await;
     result
 }
@@ -408,7 +411,8 @@ pub async fn receive_one_authenticated(
     let result = engine
         .receive_file_with_cancel(&mut connection, output_dir, events.as_ref(), &cancel)
         .await;
-    close_after_receive(&mut connection, &result).await;
+    close_after_receive(&mut connection, &result, &cancel).await;
+    drop(connection);
     bound_endpoint.local_endpoint.close().await;
     result
 }
@@ -439,24 +443,40 @@ pub async fn receive_with_auth_retries(
     let result = engine
         .receive_file_with_cancel(&mut connection, output_dir, events.as_ref(), &cancel)
         .await;
-    close_after_receive(&mut connection, &result).await;
+    close_after_receive(&mut connection, &result, &cancel).await;
+    drop(connection);
     bound_endpoint.local_endpoint.close().await;
     result
 }
 
-/// Close the data connection after a receive. On success the receiver sent the
-/// last frame (`CompleteAck`), so it waits for the sender to close - closing
-/// first would race that close against the sender reading the ack. On failure
-/// it closes actively, since there is no ack in flight to protect.
+/// Close the data connection after a receive. A successful `CompleteAck` or a
+/// local pause/cancel Error is our final frame, so the peer closes after reading
+/// it. Other failures close actively because no local final frame is in flight.
 async fn close_after_receive(
     connection: &mut IrohFrameConnection,
     result: &Result<TransferSummary, SessionError>,
+    cancel: &TransferCancelToken,
 ) {
-    match result {
-        Ok(_) => connection.await_peer_close().await,
-        Err(_) => {
-            let _ = connection.close().await;
-        }
+    if result.is_ok() || cancel.is_cancelled() {
+        connection.await_peer_close().await;
+    } else {
+        let _ = connection.close().await;
+    }
+}
+
+/// A local pause/cancel Error frame is the final frame on our send stream.
+/// Finish that stream and let the peer close after consuming it; actively
+/// closing the QUIC connection can discard unread stream data and turn a typed
+/// pause into an indistinguishable connection loss.
+async fn close_after_send(
+    connection: &mut IrohFrameConnection,
+    result: &Result<TransferSummary, SessionError>,
+    cancel: &TransferCancelToken,
+) {
+    if result.is_err() && cancel.is_cancelled() {
+        connection.await_peer_close().await;
+    } else {
+        let _ = connection.close().await;
     }
 }
 
@@ -560,7 +580,7 @@ async fn send_file_to_peer_addr(
     let result = engine
         .send_file_with_cancel(&mut connection, file_path, resume, events.as_ref(), cancel)
         .await;
-    let _ = connection.close().await;
+    close_after_send(&mut connection, &result, cancel).await;
     result
 }
 

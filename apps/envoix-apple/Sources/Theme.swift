@@ -54,21 +54,21 @@ extension Color {
 // MARK: - Design tokens (from the reference demo)
 
 enum Theme {
-    static let bg = Color(light: 0xf6f7f9, dark: 0x121519)
-    static let surface = Color(light: 0xffffff, dark: 0x1b2027)
-    static let surfaceRaised = Color(light: 0xfdfeff, dark: 0x232a33)
-    static let text = Color(light: 0x17202a, dark: 0xedf2f7)
-    static let muted = Color(light: 0x647181, dark: 0xaab5c2)
-    static let line = Color(light: 0xd9e0e7, dark: 0x343d49)
-    static let accent = Color(light: 0x0f6bff, dark: 0x6bb6ff)
-    static let accentStrong = Color(light: 0x084fbd, dark: 0x9ed0ff)
-    static let accentSoft = Color(light: 0xe7f0ff, dark: 0x19334f)
+    static let bg = Color(light: 0xf8fafd, dark: 0x061126)
+    static let surface = Color(light: 0xffffff, dark: 0x0a1830)
+    static let surfaceRaised = Color(light: 0xfdfeff, dark: 0x10213d)
+    static let text = Color(light: 0x0a1330, dark: 0xffffff)
+    static let muted = Color(light: 0x53627a, dark: 0xb8c5d9)
+    static let line = Color(light: 0xe6ecf5, dark: 0x263b5d)
+    static let accent = Color(light: 0x1677ff, dark: 0x66a9ff)
+    static let accentStrong = Color(light: 0x0d47a1, dark: 0xa8ceff)
+    static let accentSoft = Color(light: 0xeaf2ff, dark: 0x142f55)
     static let success = Color(light: 0x147a4b, dark: 0x61d69a)
     static let warning = Color(light: 0xa05a00, dark: 0xffc166)
     static let danger = Color(light: 0xe74c3c, dark: 0xf07167)
     static let dangerSoft = Color(light: 0xfff4f2, dark: 0x3a2020)
 
-    static let cardRadius: CGFloat = 8
+    static let cardRadius: CGFloat = 16
     static let pillRadius: CGFloat = 999
 
     /// Subtle shadow reserved for transient overlays.

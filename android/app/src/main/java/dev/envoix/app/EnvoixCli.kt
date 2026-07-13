@@ -1,74 +1,104 @@
 package dev.envoix.app
 
-import kotlinx.coroutines.channels.awaitClose
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.callbackFlow
-import kotlinx.coroutines.launch
+import android.content.Context
+import dev.envoix.app.ffi.DurableEnvoixSession
 import dev.envoix.app.ffi.EnvoixRuntimeSettings
-import dev.envoix.app.ffi.EnvoixSession
-import dev.envoix.app.ffi.FfiDataPathKind
-import dev.envoix.app.ffi.FfiFailureCode
 import dev.envoix.app.ffi.FfiPathPolicy
 import dev.envoix.app.ffi.FfiRendezvousPlan
+import dev.envoix.app.ffi.FfiTransferActivityRecord
 import dev.envoix.app.ffi.FfiTransferDirection
 import dev.envoix.app.ffi.FfiTransferEvent
-import dev.envoix.app.ffi.FfiTransferEventKind
 import dev.envoix.app.ffi.FfiTransferFailure
 import dev.envoix.app.ffi.FfiTransferLimits
 import dev.envoix.app.ffi.FfiTransferMode
 import dev.envoix.app.ffi.FfiTransferRequest
+import dev.envoix.app.ffi.MailboxObserver
 import dev.envoix.app.ffi.TransferObserver
+import dev.envoix.app.ffi.listDurableTransferRecords
+import dev.envoix.app.ffi.restoreDurableTransfer
+import dev.envoix.app.ffi.startDurableTransfer
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import java.io.File
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.CopyOnWriteArrayList
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicInteger
 
-/** Parsed events from the Envoix core (see the client event stream schema). */
-sealed interface CliEvent {
-    data class InviteReady(val invite: String) : CliEvent
-    data object Binding : CliEvent
-    data object Connecting : CliEvent
-    data class Connected(val pathType: String, val addr: String) : CliEvent
-    data class Started(val transferId: String, val fileName: String, val totalBytes: Long) : CliEvent
-    data class Progress(val bytesTransferred: Long, val totalBytes: Long) : CliEvent
-    data class Completed(val bytesTransferred: Long) : CliEvent
-    data class Failed(val error: String) : CliEvent
-    data class CoreStatus(val message: String) : CliEvent
-    data class Exit(val code: Int) : CliEvent
+sealed interface DurableUpdate {
+    data class Activity(
+        val record: FfiTransferActivityRecord,
+    ) : DurableUpdate
+
+    data class InviteReady(
+        val invite: String,
+    ) : DurableUpdate
+
+    data class Event(
+        val event: FfiTransferEvent,
+    ) : DurableUpdate
+
+    data class Status(
+        val message: String,
+    ) : DurableUpdate
 }
 
-/**
- * Runs a transfer through the shared UniFFI core and exposes its callbacks as the
- * legacy Android [CliEvent] stream consumed by [TransferService].
- */
+/** Owns one canonical durable Rust session per Android Activity card. */
 object UniffiTransferRunner {
-    private const val ROOM_SEND_FALLBACK_TIMEOUT_MS = 38_000L
+    private data class Entry(
+        val session: DurableEnvoixSession,
+        val observer: TransferObserver,
+    )
 
-    private data class SessionEntry(val generation: Int, val session: EnvoixSession)
+    private val sessions = ConcurrentHashMap<Long, Entry>()
+    private val callbacks = ConcurrentHashMap<Long, (DurableUpdate) -> Unit>()
+    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private lateinit var recordsDir: File
 
-    private class ActiveTransfer(val activityId: String) {
-        private val sessions = CopyOnWriteArrayList<SessionEntry>()
+    private val mailbox =
+        object : MailboxObserver {
+            override fun onFetchReceipt(
+                activityId: String,
+                key: String,
+            ) {
+                val id = parseActivityId(activityId) ?: return
+                if (!validMailboxKey(key)) return
+                ioScope.launch {
+                    val data = LogUpload.getBytes("${Endpoints.LOG_SERVER}/receipts/$key") ?: byteArrayOf()
+                    sessions[id]?.session?.receiptResponse(data)
+                }
+            }
 
-        fun add(generation: Int, session: EnvoixSession) {
-            sessions.add(SessionEntry(generation, session))
-        }
-
-        fun cancelOlderThan(generation: Int) {
-            sessions.filter { it.generation < generation }.forEach { entry ->
-                entry.session.cancelActivity(activityId)
+            override fun onPostReceipt(
+                activityId: String,
+                key: String,
+                blob: ByteArray,
+            ) {
+                val id = parseActivityId(activityId) ?: return
+                if (!validMailboxKey(key)) return
+                ioScope.launch {
+                    val delaysMs = longArrayOf(0, 1_000, 3_000, 10_000, 30_000)
+                    for (delayMs in delaysMs) {
+                        if (delayMs > 0) delay(delayMs)
+                        if (LogUpload.postBytes("${Endpoints.LOG_SERVER}/receipts/$key", blob)) {
+                            sessions[id]?.session?.receiptPosted()
+                            return@launch
+                        }
+                    }
+                }
             }
         }
 
-        fun cancelAll() {
-            sessions.forEach { entry -> entry.session.cancelActivity(activityId) }
-        }
+    fun initialize(context: Context) {
+        recordsDir = File(context.filesDir, "transfer-records").apply { mkdirs() }
     }
 
-    private val active = ConcurrentHashMap<Long, ActiveTransfer>()
+    fun records(): List<FfiTransferActivityRecord> {
+        check(::recordsDir.isInitialized) { "UniffiTransferRunner is not initialized" }
+        return listDurableTransferRecords(recordsDir.absolutePath)
+    }
 
-    fun run(
+    fun start(
         id: Long,
         direction: String,
         code: String,
@@ -76,162 +106,155 @@ object UniffiTransferRunner {
         relay: String,
         path: String,
         configPath: String,
-        qrPayload: String?,
         transferInvite: String?,
         internetAvailable: Boolean,
         useRoom: Boolean,
         useMdns: Boolean,
-    ): Flow<CliEvent> = callbackFlow {
-        val activityId = "android-$id"
-        val settings = EnvoixRuntimeSettings(
-            concurrentTransfers = true,
-            language = "en",
-            serverUrl = broker,
-            relayUrl = relay,
-            configPath = configPath,
-            speedLimitMbps = 40uL,
-        )
-        val activeTransfer = ActiveTransfer(activityId)
-        val terminal = AtomicBoolean(false)
-        val activeGeneration = AtomicInteger(0)
-        var fallbackJob: Job? = null
+        onUpdate: (DurableUpdate) -> Unit,
+        pathPolicy: FfiPathPolicy = FfiPathPolicy.AUTO,
+        publicationRequired: Boolean = direction == "receive",
+    ): Boolean {
+        val settings =
+            EnvoixRuntimeSettings(
+                concurrentTransfers = true,
+                language = "en",
+                serverUrl = broker,
+                relayUrl = relay,
+                configPath = configPath,
+                speedLimitMbps = 40uL,
+            )
+        val request =
+            transferRequest(
+                activityId = activityId(id),
+                direction = direction,
+                code = code,
+                broker = broker,
+                relay = relay,
+                path = path,
+                configPath = configPath,
+                transferInvite = transferInvite,
+                internetAvailable = internetAvailable,
+                useRoom = useRoom,
+                useMdns = useMdns,
+                pathPolicy = pathPolicy,
+                publicationRequired = publicationRequired,
+            )
+        callbacks[id] = onUpdate
+        val observer = observer(id)
+        return runCatching {
+            val session =
+                startDurableTransfer(
+                    settings = settings,
+                    request = request,
+                    recordsDir = recordsDir.absolutePath,
+                    observer = observer,
+                    mailbox = mailbox,
+                )
+            sessions[id] = Entry(session, observer)
+            emit(id, DurableUpdate.Activity(session.activity()))
+        }.onFailure {
+            callbacks.remove(id)
+            LogStore.append("core: durable start failed id=$id: ${it.message}")
+        }.isSuccess
+    }
 
-        fun newSession(): EnvoixSession = EnvoixSession.newWithSettings(settings)
+    fun restore(
+        id: Long,
+        onUpdate: (DurableUpdate) -> Unit,
+    ): Boolean {
+        callbacks[id] = onUpdate
+        val observer = observer(id)
+        return runCatching {
+            val session =
+                restoreDurableTransfer(
+                    activityId = activityId(id),
+                    recordsDir = recordsDir.absolutePath,
+                    observer = observer,
+                    mailbox = mailbox,
+                )
+            sessions[id] = Entry(session, observer)
+            emit(id, DurableUpdate.Activity(session.activity()))
+        }.onFailure {
+            callbacks.remove(id)
+            LogStore.append("core: durable restore failed id=$id: ${it.message}")
+        }.isSuccess
+    }
 
-        fun isCurrent(generation: Int): Boolean =
-            generation == activeGeneration.get() && !terminal.get()
+    fun pause(id: Long): Boolean = sessions[id]?.session?.pause() == true
 
-        fun complete(bytes: ULong, generation: Int) {
-            if (!isCurrent(generation)) return
-            if (terminal.compareAndSet(false, true)) {
-                fallbackJob?.cancel()
-                active.remove(id)?.cancelAll()
-                trySend(CliEvent.Completed(bytes.toLongSaturated()))
-                trySend(CliEvent.Exit(0))
-                close()
-            }
-        }
+    fun hasSession(id: Long): Boolean = sessions.containsKey(id)
 
-        fun fail(message: String, generation: Int) {
-            if (!isCurrent(generation)) return
-            if (terminal.compareAndSet(false, true)) {
-                fallbackJob?.cancel()
-                active.remove(id)?.cancelAll()
-                trySend(CliEvent.Failed(message.ifBlank { "transfer failed" }))
-                trySend(CliEvent.Exit(1))
-                close()
-            }
-        }
+    fun activity(id: Long): FfiTransferActivityRecord? = sessions[id]?.session?.activity()
 
-        fun observerFor(generation: Int) = object : TransferObserver {
+    fun resume(id: Long): Boolean = sessions[id]?.session?.resume() == true
+
+    fun cancel(id: Long): Boolean = sessions[id]?.session?.cancel() == true
+
+    fun publicationSucceeded(
+        id: Long,
+        uri: String,
+    ): Boolean = sessions[id]?.session?.publicationSucceeded(uri) == true
+
+    fun attach(
+        id: Long,
+        onUpdate: (DurableUpdate) -> Unit,
+    ) {
+        callbacks[id] = onUpdate
+    }
+
+    fun detach(id: Long) {
+        callbacks.remove(id)
+    }
+
+    fun remove(id: Long): Boolean {
+        val entry = sessions.remove(id) ?: return false
+        callbacks.remove(id)
+        val removed = entry.session.remove()
+        entry.session.close()
+        return removed
+    }
+
+    private fun observer(id: Long): TransferObserver =
+        object : TransferObserver {
             override fun onInviteReady(invite: String) {
-                if (!isCurrent(generation)) return
-                trySend(CliEvent.InviteReady(invite))
+                emit(id, DurableUpdate.InviteReady(invite))
             }
 
-            override fun onStarted(fileName: String, totalBytes: ULong) = Unit
+            override fun onStarted(
+                fileName: String,
+                totalBytes: ULong,
+            ) = Unit
 
-            override fun onProgress(transferred: ULong, total: ULong) = Unit
+            override fun onProgress(
+                transferred: ULong,
+                total: ULong,
+            ) = Unit
 
-            override fun onCompleted(bytes: ULong) = complete(bytes, generation)
+            override fun onCompleted(bytes: ULong) = Unit
 
-            override fun onTransferFailed(failure: FfiTransferFailure) = fail(failure.message(), generation)
+            override fun onTransferFailed(failure: FfiTransferFailure) = Unit
 
-            override fun onFailed(reason: String) = fail(reason, generation)
+            override fun onFailed(reason: String) = Unit
 
             override fun onTransferEvent(event: FfiTransferEvent) {
-                if (!isCurrent(generation)) return
-                if (event.mode == FfiTransferMode.MDNS) {
-                    fallbackJob?.cancel()
-                }
-                mapEvent(event)?.let { trySend(it) }
+                emit(id, DurableUpdate.Event(event))
             }
 
-            override fun onTransferActivity(record: dev.envoix.app.ffi.FfiTransferActivityRecord) = Unit
+            override fun onTransferActivity(record: FfiTransferActivityRecord) {
+                emit(id, DurableUpdate.Activity(record))
+            }
 
             override fun onStatus(message: String) {
-                if (!isCurrent(generation)) return
-                if (message.isNotBlank()) {
-                    if (message.contains("mDNS")) {
-                        fallbackJob?.cancel()
-                    }
-                    LogStore.append("core: $message")
-                    trySend(CliEvent.CoreStatus(message))
-                }
+                if (message.isNotBlank()) emit(id, DurableUpdate.Status(message))
             }
         }
 
-        fun startAttempt(generation: Int, attemptUseRoom: Boolean, attemptUseMdns: Boolean) {
-            if (terminal.get()) return
-            val session = newSession()
-            activeTransfer.add(generation, session)
-            active[id] = activeTransfer
-            val started = runCatching {
-                session.startTransfer(
-                    transferRequest(
-                        activityId = activityId,
-                        direction = direction,
-                        code = code,
-                        broker = broker,
-                        relay = relay,
-                        path = path,
-                        configPath = configPath,
-                        qrPayload = qrPayload,
-                        transferInvite = transferInvite,
-                        internetAvailable = internetAvailable,
-                        useRoom = attemptUseRoom,
-                        useMdns = attemptUseMdns,
-                    ),
-                    observerFor(generation),
-                )
-            }
-            started.exceptionOrNull()?.let { error ->
-                fail(error.message ?: "native error", generation)
-            }
-        }
-
-        active[id] = activeTransfer
-        startAttempt(generation = 0, attemptUseRoom = useRoom, attemptUseMdns = useMdns)
-
-        if (shouldRestartRoomSenderWithMdns(direction, transferInvite, internetAvailable, useRoom, useMdns)) {
-            fallbackJob = launch {
-                delay(ROOM_SEND_FALLBACK_TIMEOUT_MS)
-                if (!activeGeneration.compareAndSet(0, 1) || terminal.get()) return@launch
-                val message = "room sender did not connect within ${ROOM_SEND_FALLBACK_TIMEOUT_MS / 1000}s; restarting with mDNS"
-                LogStore.append("core: $message")
-                trySend(CliEvent.CoreStatus(message))
-                activeTransfer.cancelOlderThan(1)
-                startAttempt(generation = 1, attemptUseRoom = false, attemptUseMdns = true)
-            }
-        }
-
-        awaitClose {
-            fallbackJob?.cancel()
-            if (terminal.compareAndSet(false, true)) {
-                active.remove(id)?.cancelAll()
-            } else {
-                active.remove(id)
-            }
-        }
+    private fun emit(
+        id: Long,
+        update: DurableUpdate,
+    ) {
+        callbacks[id]?.invoke(update)
     }
-
-    fun cancel(id: Long) {
-        val transfer = active[id] ?: return
-        transfer.cancelAll()
-    }
-
-    private fun shouldRestartRoomSenderWithMdns(
-        direction: String,
-        transferInvite: String?,
-        internetAvailable: Boolean,
-        useRoom: Boolean,
-        useMdns: Boolean,
-    ): Boolean =
-        direction == "send" &&
-            transferInvite.isNullOrBlank() &&
-            internetAvailable &&
-            useRoom &&
-            useMdns
 
     private fun transferRequest(
         activityId: String,
@@ -241,24 +264,26 @@ object UniffiTransferRunner {
         relay: String,
         path: String,
         configPath: String,
-        qrPayload: String?,
         transferInvite: String?,
         internetAvailable: Boolean,
         useRoom: Boolean,
         useMdns: Boolean,
+        pathPolicy: FfiPathPolicy,
+        publicationRequired: Boolean,
     ): FfiTransferRequest {
-        val ffiDirection = when (direction) {
-            "send" -> FfiTransferDirection.SEND
-            "receive" -> FfiTransferDirection.RECEIVE
-            else -> throw IllegalArgumentException("unsupported transfer direction: $direction")
-        }
+        val ffiDirection =
+            when (direction) {
+                "send" -> FfiTransferDirection.SEND
+                "receive" -> FfiTransferDirection.RECEIVE
+                else -> throw IllegalArgumentException("unsupported transfer direction: $direction")
+            }
         val invite = transferInvite.orEmpty()
-        val mode = transferMode(
-            direction = ffiDirection,
-            invite = invite,
-            useRoom = useRoom,
-            useMdns = useMdns,
-        )
+        val mode =
+            when {
+                ffiDirection == FfiTransferDirection.SEND && invite.isNotBlank() -> FfiTransferMode.INVITE
+                ffiDirection == FfiTransferDirection.RECEIVE && !useRoom && !useMdns -> FfiTransferMode.SHOW_INVITE
+                else -> FfiTransferMode.ROOM
+            }
         return FfiTransferRequest(
             activityId = activityId,
             direction = ffiDirection,
@@ -272,72 +297,29 @@ object UniffiTransferRunner {
             broker = broker,
             relay = relay,
             configPath = configPath,
-            pathPolicy = FfiPathPolicy.AUTO,
+            pathPolicy = pathPolicy,
             resume = true,
-            limits = FfiTransferLimits(
-                maxParallelTransfers = 1u,
-                maxParallelFiles = 1u,
-                maxParallelChunksPerFile = 1u,
-                speedLimitBps = 0uL,
-            ),
-            rendezvous = FfiRendezvousPlan(
-                useRoom = mode == FfiTransferMode.ROOM && useRoom,
-                useMdns = mode == FfiTransferMode.ROOM && useMdns,
-                internetAvailable = internetAvailable,
-            ),
+            publicationRequired = ffiDirection == FfiTransferDirection.RECEIVE && publicationRequired,
+            limits =
+                FfiTransferLimits(
+                    maxParallelTransfers = 2u,
+                    maxParallelFiles = 1u,
+                    maxParallelChunksPerFile = 1u,
+                    speedLimitBps = 0uL,
+                ),
+            rendezvous =
+                FfiRendezvousPlan(
+                    useRoom = mode == FfiTransferMode.ROOM && useRoom,
+                    useMdns = mode == FfiTransferMode.ROOM && useMdns,
+                    internetAvailable = internetAvailable,
+                ),
         )
     }
 
-    private fun transferMode(
-        direction: FfiTransferDirection,
-        invite: String,
-        useRoom: Boolean,
-        useMdns: Boolean,
-    ): FfiTransferMode =
-        when {
-            direction == FfiTransferDirection.SEND && invite.isNotBlank() -> FfiTransferMode.INVITE
-            direction == FfiTransferDirection.RECEIVE && !useRoom && !useMdns -> FfiTransferMode.SHOW_INVITE
-            else -> FfiTransferMode.ROOM
-        }
+    private fun activityId(id: Long): String = "android-$id"
 
-    private fun mapEvent(event: FfiTransferEvent): CliEvent? =
-        when (event.kind) {
-            FfiTransferEventKind.BINDING,
-            FfiTransferEventKind.ADVERTISED,
-            FfiTransferEventKind.PAIRING -> CliEvent.Binding
-            FfiTransferEventKind.CONNECTING -> CliEvent.Connecting
-            FfiTransferEventKind.CONNECTED,
-            FfiTransferEventKind.PATH_CHANGED -> CliEvent.Connected(
-                pathType(event.dataPathKind),
-                event.dataPathDetail,
-            )
-            FfiTransferEventKind.STARTED -> CliEvent.Started(
-                event.transferId,
-                event.fileName,
-                event.totalBytes.toLongSaturated(),
-            )
-            FfiTransferEventKind.PROGRESS -> CliEvent.Progress(
-                event.bytesTransferred.toLongSaturated(),
-                event.totalBytes.toLongSaturated(),
-            )
-            else -> null
-        }
+    fun parseActivityId(activityId: String): Long? =
+        activityId.removePrefix("android-").takeIf { activityId.startsWith("android-") }?.toLongOrNull()
 
-    private fun pathType(kind: FfiDataPathKind): String =
-        when (kind) {
-            FfiDataPathKind.DIRECT -> "direct"
-            FfiDataPathKind.RELAY -> "relay"
-            FfiDataPathKind.OTHER -> "other"
-            FfiDataPathKind.NONE -> ""
-        }
-
-    private fun FfiTransferFailure.message(): String =
-        diagnosticMessage.ifBlank {
-            userMessageKey.ifBlank {
-                if (code == FfiFailureCode.UNKNOWN) "transfer failed" else code.name.lowercase()
-            }
-        }
-
-    private fun ULong.toLongSaturated(): Long =
-        if (this > Long.MAX_VALUE.toULong()) Long.MAX_VALUE else toLong()
+    private fun validMailboxKey(key: String): Boolean = key.length in 1..128 && key.all { it in '0'..'9' || it in 'a'..'f' }
 }

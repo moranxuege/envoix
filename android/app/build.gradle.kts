@@ -21,19 +21,20 @@ val gitCommit: String =
         "unknown"
     }
 
-val envoixAndroidAbis = (
-    providers.gradleProperty("envoix.android.abis").orNull
-        ?: providers.environmentVariable("ENVOIX_ANDROID_ABIS").orNull
-        ?: "arm64-v8a"
-)
-    .split(",")
-    .map { it.trim() }
-    .filter { it.isNotEmpty() }
+val envoixAndroidAbis =
+    (
+        providers.gradleProperty("envoix.android.abis").orNull
+            ?: providers.environmentVariable("ENVOIX_ANDROID_ABIS").orNull
+            ?: "arm64-v8a"
+    ).split(",")
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
 
-val envoixRustTargets = mapOf(
-    "arm64-v8a" to "aarch64-linux-android",
-    "x86_64" to "x86_64-linux-android",
-)
+val envoixRustTargets =
+    mapOf(
+        "arm64-v8a" to "aarch64-linux-android",
+        "x86_64" to "x86_64-linux-android",
+    )
 
 val generatedJniLibsDir = layout.buildDirectory.dir("generated/envoix/jniLibs")
 
@@ -42,7 +43,9 @@ val buildEnvoixFfiAndroid by tasks.registering {
     description = "Builds the UniFFI Rust core for Android and stages native libraries for packaging."
 
     inputs.files(
-        rootProject.layout.projectDirectory.dir("../crates").asFileTree,
+        rootProject.layout.projectDirectory
+            .dir("../crates")
+            .asFileTree,
         rootProject.layout.projectDirectory.file("../Cargo.toml"),
         rootProject.layout.projectDirectory.file("../Cargo.lock"),
     )
@@ -56,17 +59,24 @@ val buildEnvoixFfiAndroid by tasks.registering {
         envoixAndroidAbis.forEach { abi ->
             cargoArgs += listOf("-t", abi)
         }
-        cargoArgs += listOf(
-            "--platform", "26",
-            "rustc",
-            "--release",
-            "-p", "envoix-ffi",
-            "--lib",
-            "--crate-type", "cdylib",
-        )
+        cargoArgs +=
+            listOf(
+                "--platform",
+                "26",
+                "rustc",
+                "--release",
+                "-p",
+                "envoix-ffi",
+                "--lib",
+                "--crate-type",
+                "cdylib",
+            )
 
         exec {
-            workingDir = rootProject.layout.projectDirectory.dir("..").asFile
+            workingDir =
+                rootProject.layout.projectDirectory
+                    .dir("..")
+                    .asFile
             commandLine("cargo", *cargoArgs.toTypedArray())
         }
 
@@ -142,6 +152,10 @@ tasks.configureEach {
 
 ktlint {
     android = true
+    filter {
+        // UniFFI owns this file; formatting it would make regeneration noisy.
+        exclude { element -> element.file.name == "envoix_ffi.kt" }
+    }
 }
 
 dependencies {
@@ -158,8 +172,8 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.6")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.6")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
-    implementation("net.java.dev.jna:jna:5.12.0@aar")          // UniFFI Kotlin runtime loader
-    implementation("com.google.zxing:core:3.5.3")               // QR encode + decode
+    implementation("net.java.dev.jna:jna:5.12.0@aar") // UniFFI Kotlin runtime loader
+    implementation("com.google.zxing:core:3.5.3") // QR encode + decode
     // CameraX for the custom QR scanner (preview + frame analysis)
     implementation("androidx.camera:camera-core:1.3.4")
     implementation("androidx.camera:camera-camera2:1.3.4")
@@ -171,5 +185,6 @@ dependencies {
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test:rules:1.6.1")
     androidTestImplementation("androidx.test:runner:1.6.2")
+    testImplementation("junit:junit:4.13.2")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
 }

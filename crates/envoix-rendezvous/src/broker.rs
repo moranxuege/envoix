@@ -10,7 +10,7 @@ use tokio::sync::oneshot;
 
 use crate::RendezvousError;
 use crate::peer::PeerConn;
-use crate::protocol::{Join, Paired, Reply, Role};
+use crate::protocol::{Join, JoinIntent, Paired, Reply, Role};
 
 /// How long a first peer waits in a room for its partner.
 const DEFAULT_ROOM_TTL: Duration = Duration::from_secs(300);
@@ -36,11 +36,12 @@ const MAX_WAITING_ROOMS: usize = 4096;
 struct Waiter {
     ready: oneshot::Sender<PeerConn>,
     id: u64,
+    intent: Option<JoinIntent>,
 }
 
 /// Matches peers into rooms. Cheap to share behind an `Arc` across connections.
 pub struct RoomRegistry {
-    waiting: Mutex<HashMap<String, Waiter>>,
+    waiting: Mutex<HashMap<String, Vec<Waiter>>>,
     ttl: Duration,
     /// Monotonic id stamped on each parked waiter, so a timed-out waiter only
     /// removes its own map entry, never a newer waiter that reused the room id.
@@ -72,7 +73,7 @@ impl RoomRegistry {
     /// and drives the relay once the second hands its connection over; the
     /// second peer's task returns after the handoff.
     pub async fn serve(&self, mut conn: PeerConn) -> Result<(), RendezvousError> {
-        let Join { room_id } = tokio::time::timeout(JOIN_TIMEOUT, conn.read_control())
+        let Join { room_id, intent } = tokio::time::timeout(JOIN_TIMEOUT, conn.read_control())
             .await
             .map_err(|_| RendezvousError::Rejected("no join received within timeout"))??;
         if room_id.is_empty() || room_id.len() > MAX_ROOM_ID_LEN {
@@ -82,7 +83,7 @@ impl RoomRegistry {
         // transport layer), so every event below - and the peer-address line the
         // transport emits asynchronously - correlates by room without repeating it.
         tracing::Span::current().record("room", tracing::field::display(&room_id));
-        tracing::info!("joined");
+        tracing::info!(?intent, "joined");
 
         // Decide under the lock (no await held), then act once it's released, so
         // two peers arriving at once can't both park and miss each other.
@@ -94,24 +95,35 @@ impl RoomRegistry {
         loop {
             let decision = {
                 let mut waiting = self.waiting.lock().expect("registry mutex");
-                match waiting.remove(&room_id) {
-                    Some(first) => Decision::Matched(first),
-                    None if waiting.len() >= MAX_WAITING_ROOMS => {
-                        Decision::Rejected("too many waiting rooms")
+                let matching_waiter = waiting.get(&room_id).and_then(|waiters| {
+                    waiters
+                        .iter()
+                        .position(|waiter| intents_match(waiter.intent, intent))
+                });
+                if let Some(index) = matching_waiter {
+                    let (first, room_is_empty) = {
+                        let waiters = waiting
+                            .get_mut(&room_id)
+                            .expect("room exists while matching waiter");
+                        let first = waiters.swap_remove(index);
+                        (first, waiters.is_empty())
+                    };
+                    if room_is_empty {
+                        waiting.remove(&room_id);
                     }
-                    None => {
-                        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-                        let (ready_tx, ready_rx) = oneshot::channel();
-                        waiting.insert(
-                            room_id.clone(),
-                            Waiter {
-                                ready: ready_tx,
-                                id,
-                            },
-                        );
-                        tracing::debug!(id, "parked (waiting for partner)");
-                        Decision::Parked(ready_rx, id)
-                    }
+                    Decision::Matched(first)
+                } else if waiting.contains_key(&room_id) || waiting.len() < MAX_WAITING_ROOMS {
+                    let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+                    let (ready_tx, ready_rx) = oneshot::channel();
+                    waiting.entry(room_id.clone()).or_default().push(Waiter {
+                        ready: ready_tx,
+                        id,
+                        intent,
+                    });
+                    tracing::debug!(id, ?intent, "parked (waiting for compatible partner)");
+                    Decision::Parked(ready_rx, id)
+                } else {
+                    Decision::Rejected("too many waiting rooms")
                 }
             };
 
@@ -211,17 +223,36 @@ impl RoomRegistry {
         }
     }
 
-    /// Remove our own waiter entry; `false` if a match already claimed it (or a
-    /// newer waiter reused the room id).
+    /// Remove our own waiter entry; `false` if a match already claimed it.
     fn evict(&self, room_id: &str, id: u64) -> bool {
         let mut waiting = self.waiting.lock().expect("registry mutex");
-        if waiting.get(room_id).is_some_and(|w| w.id == id) {
-            waiting.remove(room_id);
-            true
+        let removed = if let Some(waiters) = waiting.get_mut(room_id) {
+            if let Some(index) = waiters.iter().position(|waiter| waiter.id == id) {
+                waiters.swap_remove(index);
+                true
+            } else {
+                false
+            }
         } else {
             false
+        };
+        if waiting.get(room_id).is_some_and(Vec::is_empty) {
+            waiting.remove(room_id);
         }
+        removed
     }
+}
+
+/// New clients must only match a peer with the opposite transfer direction.
+/// A missing intent comes from a pre-upgrade client, which retains the former
+/// room-only matching behavior until all clients have been updated.
+fn intents_match(first: Option<JoinIntent>, second: Option<JoinIntent>) -> bool {
+    matches!(
+        (first, second),
+        (Some(JoinIntent::Send), Some(JoinIntent::Receive))
+            | (Some(JoinIntent::Receive), Some(JoinIntent::Send))
+    ) || first.is_none()
+        || second.is_none()
 }
 
 impl Default for RoomRegistry {

@@ -25,8 +25,8 @@ static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 /// The durable record store (roadmap #5), set once by `initRecords`.
 static RECORDS: OnceLock<envoix_client::api::record::RecordStore> = OnceLock::new();
 
-fn record_for(id: i64) -> Option<(envoix_client::api::record::RecordStore, u64)> {
-    RECORDS.get().map(|s| (s.clone(), id as u64))
+fn record_for(id: i64) -> Option<(envoix_client::api::record::RecordStore, String)> {
+    RECORDS.get().map(|s| (s.clone(), id.to_string()))
 }
 
 /// Live transfer sessions (the state-machine driver), keyed by the Kotlin id.
@@ -499,6 +499,13 @@ fn notice_json(notice: envoix_client::api::driver::SessionNotice) -> String {
             }
             value.to_string()
         }
+        N::Event(event) => {
+            let mut value = serde_json::to_value(event).unwrap_or_default();
+            if let Some(map) = value.as_object_mut() {
+                map.insert("notice".into(), "event".into());
+            }
+            value.to_string()
+        }
         N::FetchReceipt { key } => {
             format!(r#"{{"notice":"fetch_receipt","key":{}}}"#, json_str(&key))
         }
@@ -543,6 +550,7 @@ pub extern "system" fn Java_dev_envoix_app_Native_createSession(
         chunk_size: chunk,
         candidates_allow: allow,
         candidates_deny: deny,
+        identity_file: None,
     };
 
     let code = get("code");
@@ -571,6 +579,7 @@ pub extern "system" fn Java_dev_envoix_app_Native_createSession(
             path: std::path::PathBuf::from(get("path")),
             sources,
             options,
+            publication_required: false,
         },
     };
 
@@ -661,7 +670,7 @@ pub extern "system" fn Java_dev_envoix_app_Native_restoreSession(
     let record = runtime()
         .block_on(store.load_all())
         .into_iter()
-        .find(|r| r.id == id as u64);
+        .find(|r| r.id == id.to_string());
     let Some(record) = record else {
         return emit_failed_snapshot(&vm, &cb, "transfer record not found", id);
     };
@@ -701,11 +710,21 @@ pub extern "system" fn Java_dev_envoix_app_Native_sessionIntent(
         return;
     };
     match intent.as_str() {
-        "pause" => session.pause(),
-        "resume" => session.resume(),
-        "cancel" => session.cancel(),
-        "reverify" => session.serve_reverify(),
-        "receipt_posted" => session.receipt_posted(),
+        "pause" => {
+            session.pause();
+        }
+        "resume" => {
+            session.resume();
+        }
+        "cancel" => {
+            session.cancel();
+        }
+        "reverify" => {
+            session.serve_reverify();
+        }
+        "receipt_posted" => {
+            session.receipt_posted();
+        }
         _ => tracing::warn!(id, intent, "sessionIntent: unknown intent"),
     }
 }

@@ -4,21 +4,49 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
 android_dir="$repo_root/android"
+apple_dir="$repo_root/apps/envoix-apple"
 
 adb_bin="${ADB:-${ANDROID_HOME:-$HOME/Library/Android/sdk}/platform-tools/adb}"
 main_apk="$android_dir/app/build/outputs/apk/debug/app-debug.apk"
 test_apk="$android_dir/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"
 test_runner="dev.envoix.app.test/androidx.test.runner.AndroidJUnitRunner"
 ios_project="$repo_root/apps/envoix-apple/Envoix.xcodeproj"
-ios_cross_device_scheme="${ENVOIX_IOS_CROSS_DEVICE_SCHEME:-Envoix-iOS-CrossDevice}"
+ios_cross_device_scheme="${ENVOIX_IOS_CROSS_DEVICE_SCHEME:-Envoix-iOS}"
 ios_derived_data="$repo_root/apps/envoix-apple/build-ios-ui-test"
 ios_destination="${ENVOIX_IOS_DESTINATION:-platform=iOS,id=00008130-00043154346B803A}"
 start_delay_long="${ENVOIX_CROSS_DEVICE_START_DELAY_LONG:-${ENVOIX_CROSS_DEVICE_START_DELAY:-18}}"
 start_delay_short="${ENVOIX_CROSS_DEVICE_START_DELAY_SHORT:-6}"
 ready_timeout_long="${ENVOIX_CROSS_DEVICE_READY_TIMEOUT_LONG:-${ENVOIX_CROSS_DEVICE_READY_TIMEOUT:-120}}"
-ready_timeout_short="${ENVOIX_CROSS_DEVICE_READY_TIMEOUT_SHORT:-20}"
+ready_timeout_short="${ENVOIX_CROSS_DEVICE_READY_TIMEOUT_SHORT:-60}"
+repeat_count="${ENVOIX_CROSS_DEVICE_REPEAT:-1}"
+allow_retry="${ENVOIX_CROSS_DEVICE_ALLOW_RETRY:-0}"
+base_run_id="${ENVOIX_CROSS_DEVICE_RUN_ID:-$(date +%Y%m%d-%H%M%S)-$$}"
+current_run_id="$base_run_id"
+ios_test_timeout_default="${ENVOIX_CROSS_DEVICE_TIMEOUT_SECONDS:-}"
 
-# Quick-fail then one long retry for unstable links.
+if [[ -z "$ios_test_timeout_default" && -n "${ENVOIX_CROSS_DEVICE_TIMEOUT_MS:-}" ]]; then
+  if [[ ! "$ENVOIX_CROSS_DEVICE_TIMEOUT_MS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "error: ENVOIX_CROSS_DEVICE_TIMEOUT_MS must be a positive integer" >&2
+    exit 2
+  fi
+  ios_test_timeout_default="$(((ENVOIX_CROSS_DEVICE_TIMEOUT_MS + 999) / 1000))"
+fi
+
+if [[ ! "$repeat_count" =~ ^[1-9][0-9]*$ ]]; then
+  echo "error: ENVOIX_CROSS_DEVICE_REPEAT must be a positive integer" >&2
+  exit 2
+fi
+if [[ "$allow_retry" != "0" && "$allow_retry" != "1" ]]; then
+  echo "error: ENVOIX_CROSS_DEVICE_ALLOW_RETRY must be 0 or 1" >&2
+  exit 2
+fi
+if [[ ! "$base_run_id" =~ ^[A-Za-z0-9_-]+$ || "${#base_run_id}" -gt 72 ]]; then
+  echo "error: ENVOIX_CROSS_DEVICE_RUN_ID must be at most 72 letters, digits, '-' or '_'" >&2
+  exit 2
+fi
+
+# Strict runs use the long readiness timeout and never hide a failure with a
+# retry. Set ENVOIX_CROSS_DEVICE_ALLOW_RETRY=1 only for diagnosis.
 if [[ "$start_delay_long" -lt "$start_delay_short" ]]; then
   echo "warning: long start delay (${start_delay_long}s) is shorter than short start delay (${start_delay_short}s); using ${start_delay_short}s as long start delay."
   start_delay_long="$start_delay_short"
@@ -28,10 +56,11 @@ if [[ "$ready_timeout_long" -lt "$ready_timeout_short" ]]; then
   ready_timeout_long="$ready_timeout_short"
 fi
 android_verbose_log="${ENVOIX_CROSS_DEVICE_VERBOSE_LOG:-1}"
+ios_log_filter="${ENVOIX_IOS_LOG:-envoix=trace,iroh=debug,warn}"
 android_logcat_format="${ENVOIX_ANDROID_LOGCAT_FORMAT:-threadtime}"
 android_logcat_cross_level="${ENVOIX_ANDROID_LOGCAT_CROSS_LEVEL:-V}"
 android_logcat_core_level="${ENVOIX_ANDROID_LOGCAT_CORE_LEVEL:-V}"
-log_dir="${TMPDIR:-/tmp}/envoix-cross-device-$(date +%Y%m%d-%H%M%S)"
+log_dir="${TMPDIR:-/tmp}/envoix-cross-device-$base_run_id"
 android_invite_file="cache/envoix-cross-device-ios-to-android.invite"
 
 mkdir -p "$log_dir"
@@ -63,6 +92,43 @@ install_apk() {
   fi
 }
 
+build_apple_test_artifacts() {
+  if [[ "${ENVOIX_SKIP_BUILD:-0}" == "1" ]]; then
+    return
+  fi
+  if ! command -v xcodegen >/dev/null 2>&1; then
+    echo "error: xcodegen is required to generate the Apple Xcode project" >&2
+    exit 2
+  fi
+
+  "$repo_root/scripts/build-apple-core.sh"
+  (
+    cd "$apple_dir"
+    xcodegen generate
+  )
+}
+
+build_ios_test_bundle() {
+  if [[ "${ENVOIX_SKIP_BUILD:-0}" == "1" ]]; then
+    return
+  fi
+  local log_file="$log_dir/ios-build.log"
+  local build_args=(
+    build-for-testing
+    'OTHER_SWIFT_FLAGS=$(inherited) -D ENVOIX_CROSS_DEVICE_TESTING'
+    -allowProvisioningUpdates
+    -project "$ios_project"
+    -scheme "$ios_cross_device_scheme"
+    -configuration Debug
+    -destination "$ios_destination"
+    -derivedDataPath "$ios_derived_data"
+  )
+  if ! xcodebuild "${build_args[@]}" >"$log_file" 2>&1; then
+    print_log_tail "iOS test build" "$log_file"
+    return 1
+  fi
+}
+
 build_and_install_android() {
   if [[ "${ENVOIX_SKIP_BUILD:-0}" != "1" ]]; then
     (
@@ -91,7 +157,7 @@ run_android_test() {
     shift
   fi
   local -a transfer_args
-  transfer_args=()
+  transfer_args=(-e envoixCrossDeviceRunId "$current_run_id")
   if [[ -n "$timeout_ms" ]]; then
     transfer_args+=(-e envoixCrossDeviceTimeoutMs "$timeout_ms")
   fi
@@ -106,6 +172,15 @@ run_android_test() {
   fi
   if [[ -n "${ENVOIX_IOS_TO_ANDROID_BYTES:-}" ]]; then
     transfer_args+=(-e envoixIosToAndroidBytes "$ENVOIX_IOS_TO_ANDROID_BYTES")
+  fi
+  if [[ -n "${ENVOIX_CROSS_DEVICE_PATH_POLICY:-}" ]]; then
+    transfer_args+=(-e envoixCrossDevicePathPolicy "$ENVOIX_CROSS_DEVICE_PATH_POLICY")
+  fi
+  if [[ -n "${ENVOIX_CROSS_DEVICE_PAUSE_AFTER_BYTES:-}" ]]; then
+    transfer_args+=(-e envoixCrossDevicePauseAfterBytes "$ENVOIX_CROSS_DEVICE_PAUSE_AFTER_BYTES")
+  fi
+  if [[ -n "${ENVOIX_CROSS_DEVICE_PAUSE_DURATION_MS:-}" ]]; then
+    transfer_args+=(-e envoixCrossDevicePauseDurationMs "$ENVOIX_CROSS_DEVICE_PAUSE_DURATION_MS")
   fi
   if [[ "${#transfer_args[@]}" -gt 0 ]]; then
     "$adb_bin" shell am instrument -w \
@@ -159,20 +234,6 @@ run_ios_test() {
   local log_file="$2"
   local timeout_seconds="${3:-${ENVOIX_CROSS_DEVICE_TIMEOUT_SECONDS:-}}"
   local transfer_invite="${4:-}"
-  local build_args=(
-    build-for-testing
-    'OTHER_SWIFT_FLAGS=$(inherited) -D ENVOIX_CROSS_DEVICE_TESTING'
-    -allowProvisioningUpdates
-    -project "$ios_project"
-    -scheme "$ios_cross_device_scheme"
-    -configuration Debug
-    -destination "$ios_destination"
-    -derivedDataPath "$ios_derived_data"
-  )
-  if ! xcodebuild "${build_args[@]}" >"$log_file" 2>&1; then
-    print_log_tail "iOS $method build" "$log_file"
-    return 1
-  fi
 
   local xctestrun
   xctestrun="$(find "$ios_derived_data/Build/Products" -name "${ios_cross_device_scheme}_*.xctestrun" -print | head -n 1)"
@@ -199,9 +260,23 @@ run_ios_test() {
   if [[ -n "${ENVOIX_IOS_TO_ANDROID_BYTES:-}" ]]; then
     set_xctestrun_env "$patched_xctestrun" ENVOIX_IOS_TO_ANDROID_BYTES "$ENVOIX_IOS_TO_ANDROID_BYTES"
   fi
+  if [[ -n "${ENVOIX_CROSS_DEVICE_PATH_POLICY:-}" ]]; then
+    set_xctestrun_env "$patched_xctestrun" ENVOIX_CROSS_DEVICE_PATH_POLICY "$ENVOIX_CROSS_DEVICE_PATH_POLICY"
+  fi
+  if [[ -n "${ENVOIX_CROSS_DEVICE_PAUSE_AFTER_BYTES:-}" ]]; then
+    set_xctestrun_env "$patched_xctestrun" ENVOIX_CROSS_DEVICE_PAUSE_AFTER_BYTES "$ENVOIX_CROSS_DEVICE_PAUSE_AFTER_BYTES"
+  fi
+  if [[ -n "${ENVOIX_CROSS_DEVICE_PAUSE_DURATION_MS:-}" ]]; then
+    set_xctestrun_env "$patched_xctestrun" ENVOIX_CROSS_DEVICE_PAUSE_DURATION_MS "$ENVOIX_CROSS_DEVICE_PAUSE_DURATION_MS"
+  fi
+  set_xctestrun_env "$patched_xctestrun" ENVOIX_CROSS_DEVICE_RUN_ID "$current_run_id"
+  if [[ -n "${ENVOIX_IOS_DNS_SERVER:-}" ]]; then
+    set_xctestrun_env "$patched_xctestrun" ENVOIX_IOS_DNS_SERVER "$ENVOIX_IOS_DNS_SERVER"
+  fi
   if [[ -n "$timeout_seconds" ]]; then
     set_xctestrun_env "$patched_xctestrun" ENVOIX_CROSS_DEVICE_TIMEOUT_SECONDS "$timeout_seconds"
   fi
+  set_xctestrun_env "$patched_xctestrun" ENVOIX_LOG "$ios_log_filter"
 
   local test_args=(
     test-without-building
@@ -212,7 +287,7 @@ run_ios_test() {
   local test_status=0
   xcodebuild "${test_args[@]}" >>"$log_file" 2>&1 || test_status=$?
   rm -f "$patched_xctestrun"
-  if [[ "$test_status" -ne 0 ]] || ! grep -Eq "Executed 1 test, with 0 (failures|test skipped)|\\*\\* TEST SUCCEEDED \\*\\*" "$log_file"; then
+  if [[ "$test_status" -ne 0 ]] || ! grep -Eq "Executed 1 test, with 0 failures" "$log_file"; then
     echo "error: iOS cross-device test did not execute as expected." >&2
     print_log_tail "iOS $method" "$log_file"
     return 1
@@ -281,10 +356,10 @@ stop_android_under_test() {
 run_android_to_ios() {
   local ready_timeout="$1"
   local attempt="${2:-1}"
-  local transfer_timeout_ms="${ENVOIX_CROSS_DEVICE_TIMEOUT_MS:-$((ready_timeout * 1000))}"
-  local ios_test_timeout_seconds="${ENVOIX_CROSS_DEVICE_TIMEOUT_SECONDS:-$ready_timeout}"
-  local suffix=""
-  [[ "$attempt" != "1" ]] && suffix=".attempt-$attempt"
+  local transfer_timeout_ms="${ENVOIX_CROSS_DEVICE_TIMEOUT_MS:-}"
+  local ios_test_timeout_seconds="$ios_test_timeout_default"
+  local suffix=".$current_run_id"
+  [[ "$attempt" != "1" ]] && suffix="$suffix.attempt-$attempt"
 
   local ios_log="$log_dir/android-to-ios${suffix}.ios.log"
   local android_log="$log_dir/android-to-ios${suffix}.android.log"
@@ -294,13 +369,12 @@ run_android_to_ios() {
   echo "android -> ios: receiver starting on iOS; logs in $log_dir"
   run_ios_test testCrossDeviceReceiveAndroidToIosRoom "$ios_log" "$ios_test_timeout_seconds" &
   local ios_pid=$!
-  if ! wait_for_log "$ios_log" "\\[cross-device\\] iOS receive start" "iOS receiver start" "$ready_timeout"; then
+  if ! wait_for_log "$ios_log" "\\[cross-device\\] iOS room receiver ready" "iOS receiver ready" "$ready_timeout"; then
     print_log_tail "Android logcat" "$android_logcat"
     stop_android_logcat "$logcat_pid"
     wait "$ios_pid" || true
     return 1
   fi
-  sleep "${ENVOIX_CROSS_DEVICE_RECEIVER_GRACE:-3}"
   echo "android -> ios: sender starting on Android"
   if ! run_android_test sendAndroidToIosRoom "$transfer_timeout_ms" >"$android_log" 2>&1; then
     print_log_tail "Android sender" "$android_log"
@@ -323,12 +397,10 @@ run_android_to_ios() {
 run_ios_to_android() {
   local ready_timeout="$1"
   local attempt="${2:-1}"
-  local receiver_start_delay="$start_delay_short"
-  [[ "$attempt" != "1" ]] && receiver_start_delay="$start_delay_long"
-  local transfer_timeout_ms="${ENVOIX_CROSS_DEVICE_TIMEOUT_MS:-$((ready_timeout * 1000))}"
-  local ios_test_timeout_seconds="${ENVOIX_CROSS_DEVICE_TIMEOUT_SECONDS:-$ready_timeout}"
-  local suffix=""
-  [[ "$attempt" != "1" ]] && suffix=".attempt-$attempt"
+  local transfer_timeout_ms="${ENVOIX_CROSS_DEVICE_TIMEOUT_MS:-}"
+  local ios_test_timeout_seconds="$ios_test_timeout_default"
+  local suffix=".$current_run_id"
+  [[ "$attempt" != "1" ]] && suffix="$suffix.attempt-$attempt"
 
   local ios_log="$log_dir/ios-to-android${suffix}.ios.log"
   local android_log="$log_dir/ios-to-android${suffix}.android.log"
@@ -338,8 +410,14 @@ run_ios_to_android() {
   echo "ios -> android: receiver starting on Android; logs in $log_dir"
   run_android_test receiveIosToAndroidRoom "$transfer_timeout_ms" >"$android_log" 2>&1 &
   local android_pid=$!
-  sleep "$receiver_start_delay"
-  sleep "${ENVOIX_CROSS_DEVICE_RECEIVER_GRACE:-3}"
+  if ! wait_for_log "$android_logcat" "EnvoixCrossDevice:.*\\[cross-device\\] Android status pairing: joining" "Android receiver ready" "$ready_timeout"; then
+    print_log_tail "Android receiver" "$android_log"
+    print_log_tail "Android logcat" "$android_logcat"
+    stop_android_under_test
+    stop_android_logcat "$logcat_pid"
+    wait "$android_pid" || true
+    return 1
+  fi
   echo "ios -> android: sender starting on iOS"
   if ! run_ios_test testCrossDeviceSendIosToAndroidRoom "$ios_log" "$ios_test_timeout_seconds"; then
     print_log_tail "iOS sender" "$ios_log"
@@ -363,10 +441,10 @@ run_ios_to_android() {
 run_android_to_ios_invite() {
   local ready_timeout="$1"
   local attempt="${2:-1}"
-  local transfer_timeout_ms="${ENVOIX_CROSS_DEVICE_TIMEOUT_MS:-$((ready_timeout * 1000))}"
-  local ios_test_timeout_seconds="${ENVOIX_CROSS_DEVICE_TIMEOUT_SECONDS:-$ready_timeout}"
-  local suffix=""
-  [[ "$attempt" != "1" ]] && suffix=".attempt-$attempt"
+  local transfer_timeout_ms="${ENVOIX_CROSS_DEVICE_TIMEOUT_MS:-}"
+  local ios_test_timeout_seconds="$ios_test_timeout_default"
+  local suffix=".$current_run_id"
+  [[ "$attempt" != "1" ]] && suffix="$suffix.attempt-$attempt"
 
   local ios_log="$log_dir/android-to-ios-invite${suffix}.ios.log"
   local android_log="$log_dir/android-to-ios-invite${suffix}.android.log"
@@ -415,10 +493,10 @@ run_android_to_ios_invite() {
 run_ios_to_android_invite() {
   local ready_timeout="$1"
   local attempt="${2:-1}"
-  local transfer_timeout_ms="${ENVOIX_CROSS_DEVICE_TIMEOUT_MS:-$((ready_timeout * 1000))}"
-  local ios_test_timeout_seconds="${ENVOIX_CROSS_DEVICE_TIMEOUT_SECONDS:-$ready_timeout}"
-  local suffix=""
-  [[ "$attempt" != "1" ]] && suffix=".attempt-$attempt"
+  local transfer_timeout_ms="${ENVOIX_CROSS_DEVICE_TIMEOUT_MS:-}"
+  local ios_test_timeout_seconds="$ios_test_timeout_default"
+  local suffix=".$current_run_id"
+  [[ "$attempt" != "1" ]] && suffix="$suffix.attempt-$attempt"
 
   local ios_log="$log_dir/ios-to-android-invite${suffix}.ios.log"
   local android_log="$log_dir/ios-to-android-invite${suffix}.android.log"
@@ -464,6 +542,15 @@ run_with_timeout_retry() {
   local short_timeout="$3"
   local long_timeout="$4"
   shift 4
+  if [[ "$allow_retry" != "1" ]]; then
+    echo "info: testing $label (strict, timeout=${long_timeout}s)"
+    if "$test_fn" "$long_timeout" 1 "$@"; then
+      echo "pass: $label"
+      return 0
+    fi
+    echo "fail: $label (strict run; no retry permitted)"
+    return 1
+  fi
   local attempts_total=1
   if [[ "$short_timeout" -ne "$long_timeout" ]]; then
     attempts_total=2
@@ -491,6 +578,7 @@ run_with_timeout_retry() {
 direction="${1:-both}"
 usage() {
   echo "usage: $0 [android-to-ios|ios-to-android|both|android-to-ios-invite|ios-to-android-invite|invite]"
+  echo "       ENVOIX_CROSS_DEVICE_REPEAT=N requires N consecutive successful runs (default 1)"
 }
 
 case "$direction" in
@@ -506,29 +594,37 @@ case "$direction" in
     ;;
 esac
 
+build_apple_test_artifacts
+build_ios_test_bundle
 build_and_install_android
 
-case "$direction" in
-  android-to-ios)
-    run_with_timeout_retry "android -> ios" run_android_to_ios "$ready_timeout_short" "$ready_timeout_long"
-    ;;
-  ios-to-android)
-    run_with_timeout_retry "ios -> android" run_ios_to_android "$ready_timeout_short" "$ready_timeout_long"
-    ;;
-  both)
-    run_with_timeout_retry "android -> ios" run_android_to_ios "$ready_timeout_short" "$ready_timeout_long" || exit 1
-    run_with_timeout_retry "ios -> android" run_ios_to_android "$ready_timeout_short" "$ready_timeout_long" || exit 1
-    ;;
-  android-to-ios-invite)
-    run_with_timeout_retry "android -> ios invite" run_android_to_ios_invite "$ready_timeout_short" "$ready_timeout_long"
-    ;;
-  ios-to-android-invite)
-    run_with_timeout_retry "ios -> android invite" run_ios_to_android_invite "$ready_timeout_short" "$ready_timeout_long"
-    ;;
-  invite)
-    run_with_timeout_retry "android -> ios invite" run_android_to_ios_invite "$ready_timeout_short" "$ready_timeout_long" || exit 1
-    run_with_timeout_retry "ios -> android invite" run_ios_to_android_invite "$ready_timeout_short" "$ready_timeout_long" || exit 1
-    ;;
-esac
+iteration=1
+while [[ "$iteration" -le "$repeat_count" ]]; do
+  current_run_id="$base_run_id-r$iteration"
+  echo "info: cross-device repetition $iteration/$repeat_count run_id=$current_run_id"
+  case "$direction" in
+    android-to-ios)
+      run_with_timeout_retry "android -> ios" run_android_to_ios "$ready_timeout_short" "$ready_timeout_long"
+      ;;
+    ios-to-android)
+      run_with_timeout_retry "ios -> android" run_ios_to_android "$ready_timeout_short" "$ready_timeout_long"
+      ;;
+    both)
+      run_with_timeout_retry "android -> ios" run_android_to_ios "$ready_timeout_short" "$ready_timeout_long" || exit 1
+      run_with_timeout_retry "ios -> android" run_ios_to_android "$ready_timeout_short" "$ready_timeout_long" || exit 1
+      ;;
+    android-to-ios-invite)
+      run_with_timeout_retry "android -> ios invite" run_android_to_ios_invite "$ready_timeout_short" "$ready_timeout_long"
+      ;;
+    ios-to-android-invite)
+      run_with_timeout_retry "ios -> android invite" run_ios_to_android_invite "$ready_timeout_short" "$ready_timeout_long"
+      ;;
+    invite)
+      run_with_timeout_retry "android -> ios invite" run_android_to_ios_invite "$ready_timeout_short" "$ready_timeout_long" || exit 1
+      run_with_timeout_retry "ios -> android invite" run_ios_to_android_invite "$ready_timeout_short" "$ready_timeout_long" || exit 1
+      ;;
+  esac
+  iteration=$((iteration + 1))
+done
 
-echo "cross-device room tests passed; logs in $log_dir"
+echo "cross-device tests passed; logs in $log_dir"

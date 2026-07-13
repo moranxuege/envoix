@@ -23,127 +23,141 @@ import java.io.File
 @RunWith(AndroidJUnit4::class)
 class TransferLoopbackInstrumentedTest {
     @Test
-    fun sendsSmallFileThroughUniffiInviteLoopback() = runBlocking {
-        val context = InstrumentationRegistry.getInstrumentation().targetContext
-        val root = File(context.cacheDir, "envoix-loopback-test").apply {
-            deleteRecursively()
-            mkdirs()
+    fun sendsSmallFileThroughUniffiInviteLoopback() =
+        runBlocking {
+            val context = InstrumentationRegistry.getInstrumentation().targetContext
+            val root =
+                File(context.cacheDir, "envoix-loopback-test").apply {
+                    deleteRecursively()
+                    mkdirs()
+                }
+            val sendFile = File(root, "android-loopback.txt")
+            val receiveDir = File(root, "received").apply { mkdirs() }
+            val payload = "envoix android loopback ${System.nanoTime()}\n".toByteArray()
+            sendFile.writeBytes(payload)
+
+            try {
+                val receiverSession = EnvoixSession()
+                val receiverObserver = RecordingObserver()
+                receiverSession.receive(receiveDir.absolutePath, receiverObserver)
+
+                val invite =
+                    withTimeout(10_000) {
+                        receiverObserver.invite.await()
+                    }
+                delay(300)
+
+                val senderSession = EnvoixSession()
+                val senderObserver = RecordingObserver()
+                val sender =
+                    async(Dispatchers.IO) {
+                        senderSession.sendInvite(invite, sendFile.absolutePath, senderObserver)
+                        senderObserver.awaitCompleted()
+                    }
+                val receiver =
+                    async(Dispatchers.IO) {
+                        receiverObserver.awaitCompleted()
+                    }
+
+                val (senderBytes, receiverBytes) =
+                    withTimeout(90_000) {
+                        sender.await() to receiver.await()
+                    }
+                assertTrue(
+                    "sender completed with unexpected byte count: $senderBytes",
+                    senderBytes >= payload.size.toULong(),
+                )
+                assertTrue(
+                    "receiver completed with unexpected byte count: $receiverBytes",
+                    receiverBytes >= payload.size.toULong(),
+                )
+                assertArrayEquals(payload, File(receiveDir, sendFile.name).readBytes())
+            } finally {
+                root.deleteRecursively()
+            }
         }
-        val sendFile = File(root, "android-loopback.txt")
-        val receiveDir = File(root, "received").apply { mkdirs() }
-        val payload = "envoix android loopback ${System.nanoTime()}\n".toByteArray()
-        sendFile.writeBytes(payload)
-
-        try {
-            val receiverSession = EnvoixSession()
-            val receiverObserver = RecordingObserver()
-            receiverSession.receive(receiveDir.absolutePath, receiverObserver)
-
-            val invite = withTimeout(10_000) {
-                receiverObserver.invite.await()
-            }
-            delay(300)
-
-            val senderSession = EnvoixSession()
-            val senderObserver = RecordingObserver()
-            val sender = async(Dispatchers.IO) {
-                senderSession.sendInvite(invite, sendFile.absolutePath, senderObserver)
-                senderObserver.awaitCompleted()
-            }
-            val receiver = async(Dispatchers.IO) {
-                receiverObserver.awaitCompleted()
-            }
-
-            val (senderBytes, receiverBytes) = withTimeout(90_000) {
-                sender.await() to receiver.await()
-            }
-            assertTrue(
-                "sender completed with unexpected byte count: $senderBytes",
-                senderBytes >= payload.size.toULong(),
-            )
-            assertTrue(
-                "receiver completed with unexpected byte count: $receiverBytes",
-                receiverBytes >= payload.size.toULong(),
-            )
-            assertArrayEquals(payload, File(receiveDir, sendFile.name).readBytes())
-        } finally {
-            root.deleteRecursively()
-        }
-    }
 
     @Test
-    fun nativeTransferWrapperUsesInviteModesForSmallFileLoopback() = runBlocking {
-        val context = InstrumentationRegistry.getInstrumentation().targetContext
-        val root = File(context.cacheDir, "envoix-native-transfer-loopback-test").apply {
-            deleteRecursively()
-            mkdirs()
+    fun nativeTransferWrapperUsesInviteModesForSmallFileLoopback() =
+        runBlocking {
+            val context = InstrumentationRegistry.getInstrumentation().targetContext
+            val root =
+                File(context.cacheDir, "envoix-native-transfer-loopback-test").apply {
+                    deleteRecursively()
+                    mkdirs()
+                }
+            val sendFile = File(root, "android-native-transfer-loopback.txt")
+            val receiveDir = File(root, "received").apply { mkdirs() }
+            val payload = "envoix android native transfer loopback ${System.nanoTime()}\n".toByteArray()
+            sendFile.writeBytes(payload)
+
+            try {
+                val receiverEvents = CliEventRecorder()
+                val receiverJob =
+                    launch(Dispatchers.IO) {
+                        UniffiTransferRunner
+                            .run(
+                                id = 91_001,
+                                direction = "receive",
+                                code = "invite-direct",
+                                broker = Endpoints.BROKER,
+                                relay = Endpoints.RELAY,
+                                path = receiveDir.absolutePath,
+                                configPath = "",
+                                qrPayload = "pending-invite",
+                                transferInvite = null,
+                                internetAvailable = true,
+                                useRoom = false,
+                                useMdns = false,
+                            ).collect { receiverEvents.record(it) }
+                    }
+
+                val invite =
+                    withTimeout(10_000) {
+                        receiverEvents.invite.await()
+                    }
+                delay(300)
+
+                val senderEvents = CliEventRecorder()
+                val senderJob =
+                    launch(Dispatchers.IO) {
+                        UniffiTransferRunner
+                            .run(
+                                id = 91_002,
+                                direction = "send",
+                                code = "invite-direct",
+                                broker = Endpoints.BROKER,
+                                relay = Endpoints.RELAY,
+                                path = sendFile.absolutePath,
+                                configPath = "",
+                                qrPayload = null,
+                                transferInvite = invite,
+                                internetAvailable = true,
+                                useRoom = false,
+                                useMdns = false,
+                            ).collect { senderEvents.record(it) }
+                    }
+
+                val (senderBytes, receiverBytes) =
+                    withTimeout(90_000) {
+                        senderEvents.awaitCompleted() to receiverEvents.awaitCompleted()
+                    }
+                senderJob.join()
+                receiverJob.join()
+
+                assertTrue(
+                    "sender completed with unexpected byte count: $senderBytes",
+                    senderBytes >= payload.size.toLong(),
+                )
+                assertTrue(
+                    "receiver completed with unexpected byte count: $receiverBytes",
+                    receiverBytes >= payload.size.toLong(),
+                )
+                assertArrayEquals(payload, File(receiveDir, sendFile.name).readBytes())
+            } finally {
+                root.deleteRecursively()
+            }
         }
-        val sendFile = File(root, "android-native-transfer-loopback.txt")
-        val receiveDir = File(root, "received").apply { mkdirs() }
-        val payload = "envoix android native transfer loopback ${System.nanoTime()}\n".toByteArray()
-        sendFile.writeBytes(payload)
-
-        try {
-            val receiverEvents = CliEventRecorder()
-            val receiverJob = launch(Dispatchers.IO) {
-                UniffiTransferRunner.run(
-                    id = 91_001,
-                    direction = "receive",
-                    code = "invite-direct",
-                    broker = Endpoints.BROKER,
-                    relay = Endpoints.RELAY,
-                    path = receiveDir.absolutePath,
-                    configPath = "",
-                    qrPayload = "pending-invite",
-                    transferInvite = null,
-                    internetAvailable = true,
-                    useRoom = false,
-                    useMdns = false,
-                ).collect { receiverEvents.record(it) }
-            }
-
-            val invite = withTimeout(10_000) {
-                receiverEvents.invite.await()
-            }
-            delay(300)
-
-            val senderEvents = CliEventRecorder()
-            val senderJob = launch(Dispatchers.IO) {
-                UniffiTransferRunner.run(
-                    id = 91_002,
-                    direction = "send",
-                    code = "invite-direct",
-                    broker = Endpoints.BROKER,
-                    relay = Endpoints.RELAY,
-                    path = sendFile.absolutePath,
-                    configPath = "",
-                    qrPayload = null,
-                    transferInvite = invite,
-                    internetAvailable = true,
-                    useRoom = false,
-                    useMdns = false,
-                ).collect { senderEvents.record(it) }
-            }
-
-            val (senderBytes, receiverBytes) = withTimeout(90_000) {
-                senderEvents.awaitCompleted() to receiverEvents.awaitCompleted()
-            }
-            senderJob.join()
-            receiverJob.join()
-
-            assertTrue(
-                "sender completed with unexpected byte count: $senderBytes",
-                senderBytes >= payload.size.toLong(),
-            )
-            assertTrue(
-                "receiver completed with unexpected byte count: $receiverBytes",
-                receiverBytes >= payload.size.toLong(),
-            )
-            assertArrayEquals(payload, File(receiveDir, sendFile.name).readBytes())
-        } finally {
-            root.deleteRecursively()
-        }
-    }
 
     private class RecordingObserver : TransferObserver {
         val invite = CompletableDeferred<String>()
@@ -154,9 +168,15 @@ class TransferLoopbackInstrumentedTest {
             this.invite.complete(invite)
         }
 
-        override fun onStarted(fileName: String, totalBytes: ULong) = Unit
+        override fun onStarted(
+            fileName: String,
+            totalBytes: ULong,
+        ) = Unit
 
-        override fun onProgress(transferred: ULong, total: ULong) = Unit
+        override fun onProgress(
+            transferred: ULong,
+            total: ULong,
+        ) = Unit
 
         override fun onCompleted(bytes: ULong) {
             completed.complete(bytes)

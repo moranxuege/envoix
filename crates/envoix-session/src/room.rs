@@ -10,7 +10,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use envoix_error::CoreError;
-use envoix_rendezvous_iroh::{RoomPairing, build_endpoint, drive_pairing, join_room, split_code};
+use envoix_rendezvous_iroh::{
+    JoinIntent, RoomPairing, build_endpoint_with_dns, drive_pairing, join_room_with_intent,
+    split_code,
+};
 use envoix_types::PairingStep;
 use iroh::{Endpoint, EndpointAddr, SecretKey};
 
@@ -25,10 +28,16 @@ const SEND_ROOM_PAIRING_TIMEOUT: Duration = Duration::from_secs(35);
 /// An ephemeral iroh endpoint used only to reach the rendezvous broker, routed
 /// through `relay` (a relay URL) when set so it can reach a NATed broker.
 async fn rendezvous_endpoint(relay: &Option<String>) -> Result<Endpoint, SessionError> {
-    build_endpoint(
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    let dns_resolver = Some(crate::endpoint::platform_system_dns_resolver());
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    let dns_resolver = None;
+
+    build_endpoint_with_dns(
         "0.0.0.0:0".parse().expect("valid addr"),
         SecretKey::generate(),
         crate::endpoint::relay_mode(relay)?,
+        dns_resolver,
     )
     .await
     .map_err(|error| CoreError::Transport(error.to_string()))
@@ -47,6 +56,7 @@ async fn pair_in_room_retrying<T>(
     room_id: &str,
     password: &str,
     mine: &T,
+    intent: JoinIntent,
     events: &dyn EventSink,
 ) -> Result<RoomPairing<T>, SessionError>
 where
@@ -59,7 +69,7 @@ where
         events.on_event(TransferEvent::Pairing {
             step: PairingStep::Joining,
         });
-        let session = join_room(rdz, broker.clone(), room_id)
+        let session = join_room_with_intent(rdz, broker.clone(), room_id, Some(intent))
             .await
             .map_err(|error| CoreError::Transport(error.to_string()))?;
         events.on_event(TransferEvent::Pairing {
@@ -85,12 +95,14 @@ where
 /// cancel token, so a Ctrl-C while waiting for a partner would hang; this lets
 /// it exit promptly and cleanly instead. `rdz` is also closed on a pairing
 /// error so it never drops without a graceful close.
+#[allow(clippy::too_many_arguments)]
 async fn pair_or_cancel<T>(
     rdz: &Endpoint,
     broker: &EndpointAddr,
     room_id: &str,
     password: &str,
     mine: &T,
+    intent: JoinIntent,
     cancel: &TransferCancelToken,
     events: &dyn EventSink,
     timeout: Option<Duration>,
@@ -100,7 +112,7 @@ where
 {
     let result = if let Some(timeout) = timeout {
         tokio::select! {
-            result = pair_in_room_retrying(rdz, broker, room_id, password, mine, events) => result,
+            result = pair_in_room_retrying(rdz, broker, room_id, password, mine, intent, events) => result,
             _ = cancel.cancelled() => Err(CoreError::Transfer(interrupt_message(cancel).into())),
             _ = tokio::time::sleep(timeout) => {
                 Err(CoreError::Transport("rendezvous pairing timed out".into()))
@@ -108,7 +120,7 @@ where
         }
     } else {
         tokio::select! {
-            result = pair_in_room_retrying(rdz, broker, room_id, password, mine, events) => result,
+            result = pair_in_room_retrying(rdz, broker, room_id, password, mine, intent, events) => result,
             _ = cancel.cancelled() => Err(CoreError::Transfer(interrupt_message(cancel).into())),
         }
     };
@@ -160,6 +172,7 @@ pub async fn receive_file_via_room(
         room_id,
         password,
         &my_addr,
+        JoinIntent::Receive,
         &cancel,
         events.as_ref(),
         None,
@@ -213,6 +226,7 @@ pub async fn send_file_via_room(
         room_id,
         password,
         &placeholder,
+        JoinIntent::Send,
         &cancel,
         events.as_ref(),
         Some(SEND_ROOM_PAIRING_TIMEOUT),
@@ -251,7 +265,7 @@ mod tests {
     use std::sync::Arc;
 
     use envoix_rendezvous::RoomRegistry;
-    use envoix_rendezvous_iroh::{endpoint_addr, serve_endpoint};
+    use envoix_rendezvous_iroh::{build_endpoint, endpoint_addr, serve_endpoint};
     use iroh::RelayMode;
 
     use super::*;
@@ -292,6 +306,7 @@ mod tests {
             "9999",
             "lonely-room",
             &placeholder,
+            JoinIntent::Send,
             &TransferCancelToken::new(),
             &NoopEventSink,
             Some(Duration::from_millis(150)),

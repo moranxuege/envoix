@@ -123,6 +123,22 @@ impl QrInvitePayload {
     /// `std::time::SystemTime::now()` converted to seconds, or a fixed value
     /// in tests.
     pub fn validate(&self, now: u64) -> Result<(), QrError> {
+        self.validate_versions()?;
+        if self.expires_at <= now {
+            return Err(QrError::Expired);
+        }
+        self.validate_body()
+    }
+
+    /// Validates a previously accepted invite for the continuation of that
+    /// same transfer. Expiry prevents new pairing attempts; it must not destroy
+    /// an established transfer's ability to resume after a long pause.
+    pub fn validate_for_resume(&self) -> Result<(), QrError> {
+        self.validate_versions()?;
+        self.validate_body()
+    }
+
+    fn validate_versions(&self) -> Result<(), QrError> {
         if self.version != PAYLOAD_VERSION {
             return Err(QrError::VersionMismatch {
                 found: self.version,
@@ -137,10 +153,10 @@ impl QrInvitePayload {
             });
         }
 
-        if self.expires_at <= now {
-            return Err(QrError::Expired);
-        }
+        Ok(())
+    }
 
+    fn validate_body(&self) -> Result<(), QrError> {
         if self.peer.direct_addrs.is_empty() {
             return Err(QrError::NoDirectAddresses);
         }
@@ -354,6 +370,20 @@ mod tests {
         let payload = valid_payload(0); // expires_at = 300
         let err = payload.validate(300).unwrap_err(); // now == expires_at -> expired
         assert_eq!(err, QrError::Expired);
+    }
+
+    #[test]
+    fn expired_payload_can_only_continue_an_already_accepted_transfer() {
+        let payload = valid_payload(0);
+        assert_eq!(payload.validate(300), Err(QrError::Expired));
+        payload.validate_for_resume().unwrap();
+
+        let mut incompatible = payload;
+        incompatible.protocol_version += 1;
+        assert!(matches!(
+            incompatible.validate_for_resume(),
+            Err(QrError::ProtocolVersionMismatch { .. })
+        ));
     }
 
     // expires_at == now + 1 is the tightest value that must pass.

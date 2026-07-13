@@ -19,11 +19,13 @@ ipnet.workspace = true
 iroh.workspace = true
 iroh-mdns-address-lookup.workspace = true
 n0-future.workspace = true
-noq-proto = "1.0"
 tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+
+[target.'cfg(any(target_os = "ios", target_os = "android"))'.dependencies]
+n0-error.workspace = true
 
 [dev-dependencies]
 envoix-rendezvous.workspace = true

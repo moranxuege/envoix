@@ -17,25 +17,17 @@ iOS later.
 
 ## Build & run
 
-1. Generate the Rust↔Swift bridge package (run after any change to
-   `crates/envoix-ffi`):
+1. Generate the combined macOS + iOS Rust↔Swift bridge package (run after any
+   change to `crates/envoix-ffi`):
 
    ```bash
-   cd crates/envoix-ffi
-   cargo swift package --platforms macos --name EnvoixCore --accept-all
+   scripts/build-apple-core.sh
    ```
 
    This writes `crates/envoix-ffi/EnvoixCore/` (xcframework + Swift bindings).
-   It is git-ignored and must be regenerated locally.
-
-   For a combined macOS + iOS package, generate both platforms:
-
-   ```bash
-   cd crates/envoix-ffi
-   cargo swift package --platforms macos@13 ios@16 --name EnvoixCore \
-     --lib-type static --exclude-arch x86_64-apple-ios \
-     --swift-tools-version 5.7 --accept-all
-   ```
+   It is git-ignored and must be regenerated locally. The script fixes the
+   deployment targets at macOS 13 and iOS 16, preserves reviewed UniFFI binding
+   files, and configures the Apple framework linker settings.
 
 2. Generate the Xcode project and run:
 
@@ -72,10 +64,7 @@ iOS later.
 2. Regenerate `EnvoixCore` with an iOS slice:
 
    ```bash
-   cd crates/envoix-ffi
-   cargo swift package --platforms macos@13 ios@16 --name EnvoixCore \
-     --lib-type static --exclude-arch x86_64-apple-ios \
-     --swift-tools-version 5.7 --accept-all
+   scripts/build-apple-core.sh
    ```
 
    `--exclude-arch x86_64-apple-ios` skips the Intel simulator slice. This is

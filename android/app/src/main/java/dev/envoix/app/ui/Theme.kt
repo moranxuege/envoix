@@ -31,15 +31,15 @@ data class EnvoixColors(
 
 private val LightColors =
     EnvoixColors(
-        bg = Color(0xFFF6F7F9),
+        bg = Color(0xFFF8FAFD),
         surface = Color(0xFFFFFFFF),
         surfaceRaised = Color(0xFFFDFEFE),
-        text = Color(0xFF17202A),
-        muted = Color(0xFF647181),
-        line = Color(0xFFD9E0E7),
-        accent = Color(0xFF0F6BFF),
-        accentStrong = Color(0xFF084FBD),
-        accentSoft = Color(0xFFE7F0FF),
+        text = Color(0xFF0A1330),
+        muted = Color(0xFF53627A),
+        line = Color(0xFFE6ECF5),
+        accent = Color(0xFF1677FF),
+        accentStrong = Color(0xFF0D47A1),
+        accentSoft = Color(0xFFEAF2FF),
         success = Color(0xFF147A4B),
         successSoft = Color(0xFFDDF3E7),
         warning = Color(0xFFA05A00),
@@ -48,15 +48,15 @@ private val LightColors =
 
 private val DarkColors =
     EnvoixColors(
-        bg = Color(0xFF121519),
-        surface = Color(0xFF1B2027),
-        surfaceRaised = Color(0xFF232A33),
-        text = Color(0xFFEDF2F7),
-        muted = Color(0xFFAAB5C2),
-        line = Color(0xFF343D49),
-        accent = Color(0xFF6BB6FF),
-        accentStrong = Color(0xFF9ED0FF),
-        accentSoft = Color(0xFF19334F),
+        bg = Color(0xFF061126),
+        surface = Color(0xFF0A1830),
+        surfaceRaised = Color(0xFF10213D),
+        text = Color(0xFFFFFFFF),
+        muted = Color(0xFFB8C5D9),
+        line = Color(0xFF263B5D),
+        accent = Color(0xFF66A9FF),
+        accentStrong = Color(0xFFA8CEFF),
+        accentSoft = Color(0xFF142F55),
         success = Color(0xFF61D69A),
         successSoft = Color(0xFF16362A),
         warning = Color(0xFFFFC166),
@@ -72,8 +72,8 @@ object Envoix {
 }
 
 object EnvoixDimens {
-    val CardRadius = 8.dp
-    val ControlRadius = 8.dp
+    val CardRadius = 16.dp
+    val ControlRadius = 14.dp
     val PillRadius = 999.dp
     val ScreenPadding = 16.dp
     val CardPadding = 14.dp

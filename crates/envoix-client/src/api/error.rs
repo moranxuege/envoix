@@ -9,11 +9,11 @@ use envoix_session::{
     PEER_INTERRUPT_MESSAGE, PEER_PAUSE_MESSAGE, TransferDirection, USER_INTERRUPT_MESSAGE,
     USER_PAUSE_MESSAGE,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Where in a transfer's life an error occurred, derived from the last
 /// lifecycle event the transfer emitted.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
     /// Validating input and binding local endpoints.
@@ -41,7 +41,7 @@ impl fmt::Display for Phase {
 }
 
 /// The kind of failure, mirroring the internal error taxonomy.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorKind {
     /// Invalid caller input.
@@ -84,7 +84,7 @@ impl fmt::Display for ErrorKind {
 }
 
 /// Stable failure code for native UI, retry policy, and diagnostics.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailureCode {
     UserCanceled,
@@ -104,7 +104,7 @@ pub enum FailureCode {
 }
 
 /// Broad product category for grouping failure handling.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailureCategory {
     User,
@@ -120,7 +120,7 @@ pub enum FailureCategory {
 }
 
 /// Where the failure originated, when known.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailureOrigin {
     Local,
@@ -129,7 +129,7 @@ pub enum FailureOrigin {
 }
 
 /// Product-facing phase with room for more detail than the internal phase cell.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailurePhase {
     Setup,
@@ -147,7 +147,7 @@ pub enum FailurePhase {
 }
 
 /// Suggested next user action. The UI decides how to present it.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecoveryAction {
     Retry,
@@ -162,7 +162,7 @@ pub enum RecoveryAction {
 }
 
 /// Machine-readable transfer failure suitable for native clients.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct TransferFailure {
     pub code: FailureCode,

@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""Apply the two reviewed Swift-only fixes to a UniFFI binding."""
+
+from pathlib import Path
+import sys
+
+
+def replace_once(text: str, old: str, new: str, label: str) -> str:
+    count = text.count(old)
+    if count != 1:
+        raise SystemExit(f"error: expected one {label} binding pattern, found {count}")
+    return text.replace(old, new)
+
+
+def main() -> None:
+    if len(sys.argv) != 2:
+        raise SystemExit("usage: postprocess-apple-binding.py <envoix_ffi.swift>")
+    path = Path(sys.argv[1])
+    text = path.read_text()
+    text = replace_once(
+        text,
+        """        return String(bytes: bytes, encoding: String.Encoding.utf8)!""",
+        """        // Use Swift's native UTF-8 decoder; `String(bytes:encoding:.utf8)` goes
+        // through Foundation's NSString and silently strips a leading U+FEFF BOM.
+        // Invalid UTF-8 substitutes U+FFFD instead of trapping (unreachable
+        // given Rust's `String` invariant).
+        return String(decoding: bytes, as: UTF8.self)""",
+        "UTF-8 lift",
+    )
+    text = replace_once(
+        text,
+        """        return String(bytes: try readBytes(&buf, count: Int(len)), encoding: String.Encoding.utf8)!""",
+        """        // See `lift` above for why we avoid Foundation's NSString-backed decoder here.
+        return String(decoding: try readBytes(&buf, count: Int(len)), as: UTF8.self)""",
+        "UTF-8 read",
+    )
+    old_vtable = """    static let vtablePtr: UnsafePointer<"""
+    new_vtable = """    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<"""
+    count = text.count(old_vtable)
+    if count != 2:
+        raise SystemExit(f"error: expected two callback vtables, found {count}")
+    text = text.replace(old_vtable, new_vtable)
+    path.write_text(text)
+
+
+if __name__ == "__main__":
+    main()
