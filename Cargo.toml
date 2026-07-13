@@ -65,3 +65,9 @@ toml = "0.8"
 uniffi = "0.31"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+[patch.crates-io]
+# Android kernels can advertise UDP_SEGMENT while the active Wi-Fi path rejects
+# actual GSO sends with EIO. The patched crate keeps ordinary Android UDP socket
+# behavior but schedules one datagram per send.
+noq-udp = { path = "vendor/noq-udp" }
