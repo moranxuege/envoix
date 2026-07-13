@@ -61,11 +61,16 @@ struct Cli {
     log_ttl: u64,
     /// File holding the operator bearer token that gates report RETRIEVAL
     /// (`GET /logs/<room>`); uploads stay open. A room id is a low-entropy
-    /// correlation key, not authorization — without this, report retrieval is
-    /// unauthenticated (a startup warning fires). File (not argv) so the secret
-    /// never leaks via `ps`.
+    /// correlation key, not authorization. File (not argv) so the secret never
+    /// leaks via `ps`. Without this AND without `--unsafe-open-log-view`, report
+    /// retrieval is DISABLED (fail-closed).
     #[arg(long)]
     log_view_token_file: Option<PathBuf>,
+    /// Explicitly allow ANONYMOUS report retrieval (no token). Reads become
+    /// readable by anyone who can guess a room id — a deliberate, visible opt-in
+    /// for a trusted/private deployment; never use for broad rollout.
+    #[arg(long)]
+    unsafe_open_log_view: bool,
     /// TLS certificate chain (PEM) for the log/receipt endpoint. With
     /// `--tls-key`, `--log-bind` serves HTTPS instead of plain HTTP. The PEM
     /// pair is re-read periodically, so ACME renewals that replace the files
@@ -166,27 +171,36 @@ async fn main() -> Result<()> {
     // pairing endpoint. With --tls-cert/--tls-key it terminates TLS itself
     // (there is no proxy in front of this port).
     if let Some(addr) = cli.log_bind {
-        // Operator token for report retrieval (GET). Read from a file so it
-        // never appears in `ps`; empty/whitespace-only is treated as unset.
-        let view_token: Option<std::sync::Arc<str>> = match &cli.log_view_token_file {
-            Some(path) => {
+        // How report retrieval (GET) is gated. A token file wins; else the
+        // explicit --unsafe-open-log-view opens it; else fail-CLOSED (default).
+        let view_auth = match (&cli.log_view_token_file, cli.unsafe_open_log_view) {
+            (Some(path), _) => {
+                // Read from a file so it never appears in `ps`; empty ⇒ error.
                 let raw = std::fs::read_to_string(path)
                     .with_context(|| format!("reading --log-view-token-file {}", path.display()))?;
                 let trimmed = raw.trim();
                 if trimmed.is_empty() {
                     anyhow::bail!("--log-view-token-file {} is empty", path.display());
                 }
-                Some(std::sync::Arc::from(trimmed))
+                logs::ViewAuth::Token(std::sync::Arc::from(trimmed))
             }
-            None => {
+            (None, true) => {
                 tracing::warn!(
-                    "report retrieval (GET /logs/<room>) is UNAUTHENTICATED — a room id is \
-                     enumerable; set --log-view-token-file before broad rollout"
+                    "report retrieval (GET /logs/<room>) is ANONYMOUS via \
+                     --unsafe-open-log-view — a room id is enumerable; anyone can read logs"
                 );
-                None
+                logs::ViewAuth::Open
+            }
+            (None, false) => {
+                tracing::warn!(
+                    "report retrieval (GET /logs/<room>) is DISABLED (fail-closed) — set \
+                     --log-view-token-file to enable authenticated reads, or \
+                     --unsafe-open-log-view to allow anonymous reads"
+                );
+                logs::ViewAuth::Closed
             }
         };
-        let router = logs::router(log_store.clone(), view_token)
+        let router = logs::router(log_store.clone(), view_auth)
             .merge(receipts::router(receipt_store.clone()));
         if let (Some(cert), Some(key)) = (cli.tls_cert, cli.tls_key) {
             let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert, &key)

@@ -238,16 +238,28 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 #[derive(Clone)]
 pub struct LogState {
     store: Arc<RoomLogs>,
-    view_token: Option<Arc<str>>,
+    view_auth: ViewAuth,
+}
+
+/// How report RETRIEVAL (GET) is gated. Default is fail-CLOSED — an open
+/// endpoint must be a deliberate, visible choice, not a silent default, so
+/// security does not depend on remembering to configure a token.
+#[derive(Clone)]
+pub enum ViewAuth {
+    /// A bearer token is required (from `--log-view-token-file`).
+    Token(Arc<str>),
+    /// Explicitly opened via `--unsafe-open-log-view` (anonymous reads).
+    Open,
+    /// Default: reads are refused (403) until a token or the unsafe flag is set.
+    Closed,
 }
 
 /// The axum router: `POST /logs/{room}?side=…` ingests, `GET /logs/{room}` views.
-/// `view_token` (from `--log-view-token-file`) is required on GET when set.
-pub fn router(store: Arc<RoomLogs>, view_token: Option<Arc<str>>) -> Router {
+pub fn router(store: Arc<RoomLogs>, view_auth: ViewAuth) -> Router {
     Router::new()
         .route("/logs/{room}", post(upload).get(view))
         .layer(DefaultBodyLimit::max(MAX_BODY))
-        .with_state(LogState { store, view_token })
+        .with_state(LogState { store, view_auth })
 }
 
 async fn upload(
@@ -272,19 +284,28 @@ async fn view(
     headers: HeaderMap,
     State(state): State<LogState>,
 ) -> (StatusCode, String) {
-    // A room id is a low-entropy correlation key, NOT authorization. When an
-    // operator token is configured, report retrieval requires it (401 without);
-    // when none is configured the endpoint is open (a startup warning fires).
-    if let Some(expected) = &state.view_token {
-        let ok = headers
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "))
-            .is_some_and(|p| constant_time_eq(p.as_bytes(), expected.as_bytes()));
-        if !ok {
+    // A room id is a low-entropy correlation key, NOT authorization.
+    match &state.view_auth {
+        ViewAuth::Token(expected) => {
+            let ok = headers
+                .get(header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.strip_prefix("Bearer "))
+                .is_some_and(|p| constant_time_eq(p.as_bytes(), expected.as_bytes()));
+            if !ok {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    "operator token required\n".to_string(),
+                );
+            }
+        }
+        ViewAuth::Open => {}
+        ViewAuth::Closed => {
             return (
-                StatusCode::UNAUTHORIZED,
-                "operator token required\n".to_string(),
+                StatusCode::FORBIDDEN,
+                "report retrieval disabled; set --log-view-token-file or \
+                 --unsafe-open-log-view on the server\n"
+                    .to_string(),
             );
         }
     }
