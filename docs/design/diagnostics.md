@@ -430,10 +430,18 @@ unit-commit standard); a1 is the spine, a2/a3 are independent after it.
    (`Diagnostics.headAndTail`) — the connection setup and the failure — not
    tail-only. Debug stays fully untrimmed. (No Kotlin unit-test harness exists,
    so this is a minimal, compile-verified change, not a rewrite.)
-9. **Still deferred** (need a UX/security decision or on-device verification —
-   designed below for review, not yet built): drawer-as-view; log-retrieval
-   auth (**must precede broad public rollout**); raw-trace batching; removal of
-   legacy `Transfer.log`/`OpLog` duplication.
+9. **Log-retrieval auth** (IMPLEMENTED — hardening pass): `GET /logs/{room}`
+   requires a bearer token when `--log-view-token-file` is configured (401
+   without; constant-time compare; POST stays open). Currently deployed
+   **fail-OPEN** (no token file ⇒ open + a startup warning) so private testing
+   isn't broken. FOLLOW-UP (external review): make the default **fail-CLOSED**
+   with an explicit `--unsafe-open-log-view` opt-in, so open is a deliberate,
+   visible choice rather than a silent default — before broad rollout.
+10. **Still deferred**: drawer-as-view; SEPARATE timeline/raw files (the true fix
+   for "timeline never trimmed" — one shared file with head+tail is only a
+   mitigation, middle authority events can still be evicted); raw-trace batching;
+   removal of legacy `Transfer.log`/`OpLog` duplication; the Android junit
+   harness + a `Diagnostics` byte-budget test.
 
 ### Deferred designs (for review before building)
 
@@ -448,15 +456,14 @@ RISK: purely visual — needs the user's eyes on the rendered drawer, so it's a
 review-then-build item, not a blind change. Open choice: keep a compact
 human render, or show the raw envelope with a monospace toggle.
 
-**log-retrieval auth.** `GET /logs/{room}` is unauthenticated over a low-entropy
-room id; the richer timeline leaks more (filenames are redacted, but the shape
-of a transfer is visible). Proposal: a bearer token (a secret CLI arg
-`--log-read-token` / env on the rdz) required on **GET only**; **POST stays
-open** (peers can't hold the operator secret and must still upload). 401 without
-it. Keep it OFF by default so private-group testing is unaffected; turn it on
-for broad rollout. Deploy = another rdz restart. NOT built — it would add a
-token to every `curl …/logs/{room}` the user runs during testing, so it should
-land deliberately, not now.
+**log-retrieval auth — IMPLEMENTED (hardening pass, commit 9215473).** A bearer
+token from `--log-view-token-file` gates **GET only** (constant-time compare,
+`Authorization: Bearer`, 401 without); **POST stays open** (peers can't hold the
+operator secret). Deployed fail-OPEN (no token file ⇒ open + a startup WARNING)
+so private testing keeps working. FOLLOW-UP from external review: flip the
+default to **fail-CLOSED** with an explicit `--unsafe-open-log-view` flag — so
+security doesn't "depend on deployment memory" and open is a visible, deliberate
+choice. Then broad rollout is safe-by-default and the test box carries the flag.
 
 **raw-trace batching (observer effect).** The raw tier crosses JNI synchronously
 one line at a time and does Kotlin file I/O on the logging path, which can
