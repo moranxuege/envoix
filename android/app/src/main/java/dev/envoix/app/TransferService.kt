@@ -531,7 +531,10 @@ class TransferService : Service() {
                     "platform.stage",
                     "failed",
                     outcome = "copy",
-                    fields = mapOf("cause" to (result.exceptionOrNull()?.message ?: "read failed")),
+                    // The exception TYPE, never .message — the message from
+                    // openInputStream(sourceUri) embeds the full content:// URI /
+                    // path, which would ship to the (public) log endpoint.
+                    fields = mapOf("cause" to (result.exceptionOrNull()?.javaClass?.simpleName ?: "unknown")),
                 )
                 Native.stageFailed(id, "couldn't read the picked file")
             }
@@ -848,7 +851,9 @@ class TransferService : Service() {
             tl(
                 "failed",
                 outcome = "copy",
-                fields = mapOf("cause" to (copy.exceptionOrNull()?.message ?: "copy failed")),
+                // Type only — a copy IOException's .message can carry the
+                // destination URI/path (same leak class as the staging cause).
+                fields = mapOf("cause" to (copy.exceptionOrNull()?.javaClass?.simpleName ?: "unknown")),
             )
             return
         }
