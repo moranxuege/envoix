@@ -9,6 +9,8 @@ readonly SERVICE="$PACKAGE/.TransferService"
 readonly ACTION_START="$PACKAGE.START"
 readonly DEVICE_INPUT="/data/user/0/$PACKAGE/cache/ultimate-test-input"
 readonly DEVICE_OUTPUT_DIR="/sdcard/Download/Envoix"
+readonly TRANSFER_RATE_KBITS=4194 # Approximately 512 KiB/s.
+readonly TRANSFER_QUEUE_BYTES=33554432 # 32 MiB.
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/Android/Sdk}}"
@@ -21,6 +23,7 @@ failed=0
 timeout=120
 verbose=0
 keep_emulators=0
+diagnostic_pids=()
 
 usage() {
     cat <<EOF
@@ -31,6 +34,8 @@ first with internet access, then with internet blocked while shared Wi-Fi and
 mDNS remain available. Each received file is checked against the source SHA-256.
 
 Both AVDs must use x86_64 Google APIs images, not Google Play images.
+The sender's shared Wi-Fi bandwidth is limited to approximately 512 KiB/s.
+Live diagnostics are written to android/build/ultimate-test.
 The APK defaults to:
   $apk
 
@@ -139,6 +144,15 @@ configure_peer_routes() {
         'ip rule del pref 9000 2>/dev/null || true; ip rule del pref 9001 2>/dev/null || true; ip -6 rule del pref 9000 2>/dev/null || true; ip -6 rule del pref 9001 2>/dev/null || true; ip rule add pref 9000 to 10.0.2.16/28 lookup wlan0; ip rule add pref 9001 to 224.0.0.0/4 lookup wlan0; ip -6 rule add pref 9000 to fec0::/64 lookup wlan0; ip -6 rule add pref 9001 to ff00::/8 lookup wlan0'
 }
 
+clear_bandwidth_limit() {
+    "$adb" -s "$1" shell 'tc qdisc del dev wlan0 root 2>/dev/null || true'
+}
+
+limit_bandwidth() {
+    "$adb" -s "$1" shell \
+        "tc qdisc replace dev wlan0 root tbf rate ${TRANSFER_RATE_KBITS}kbit burst 64kb limit $TRANSFER_QUEUE_BYTES"
+}
+
 wifi_address() {
     "$adb" -s "$1" shell ip -4 -o address show dev wlan0 scope global |
         awk '{print $4}' | head -n 1 | cut -d/ -f1 | tr -d '\r'
@@ -181,9 +195,48 @@ device_hashes() {
 }
 
 record_state() {
-    "$adb" -s "$1" shell \
-        "grep -h '\"state\"' /data/user/0/$PACKAGE/files/records/*.json 2>/dev/null" |
-        tail -n 1 | sed 's/.*"state": *"\([^"]*\)".*/\1/' | tr -d '\r'
+    local serial="$1"
+    local progress_log="$2"
+    local snapshot
+
+    snapshot="$("$adb" -s "$serial" shell \
+        "cat /data/user/0/$PACKAGE/files/records/*.json 2>/dev/null" 2>&1 || true)"
+    {
+        printf '\n=== %s ===\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+        printf '%s\n' "${snapshot:-<no transfer record>}"
+    } >>"$progress_log"
+    printf '%s\n' "$snapshot" |
+        sed -n 's/.*"state": *"\([^"]*\)".*/\1/p' | tail -n 1 | tr -d '\r'
+}
+
+stop_live_diagnostics() {
+    local pid
+
+    for pid in "${diagnostic_pids[@]}"; do
+        kill "$pid" 2>/dev/null || true
+    done
+    for pid in "${diagnostic_pids[@]}"; do
+        wait "$pid" 2>/dev/null || true
+    done
+    diagnostic_pids=()
+}
+
+start_live_diagnostics() {
+    local environment="$1"
+    local role serial
+
+    stop_live_diagnostics
+    for role in sender receiver; do
+        if [ "$role" = sender ]; then serial="$SERIAL_A"; else serial="$SERIAL_B"; fi
+        : >"$log_dir/$environment-$role-progress.log"
+        "$adb" -s "$serial" logcat -b all -v threadtime \
+            >"$log_dir/$environment-$role-live-logcat.log" 2>&1 &
+        diagnostic_pids+=("$!")
+        "$adb" -s "$serial" exec-out tail -n +1 -f \
+            "/data/user/0/$PACKAGE/files/logs/core.log" \
+            >"$log_dir/$environment-$role-live-core.log" 2>&1 &
+        diagnostic_pids+=("$!")
+    done
 }
 
 capture_diagnostics() {
@@ -194,7 +247,7 @@ capture_diagnostics() {
         if [ "$role" = sender ]; then serial="$SERIAL_A"; else serial="$SERIAL_B"; fi
         "$adb" -s "$serial" logcat -d >"$log_dir/$environment-$role.log" 2>&1 || true
         "$adb" -s "$serial" shell \
-            "ip -brief address; ip route show table all; dumpsys wifi | grep -E 'mNetworkInfo|mWifiInfo|Wi-Fi is'; iptables -nvL ENVOIX_OFFLINE 2>/dev/null; ip6tables -nvL ENVOIX_OFFLINE 2>/dev/null" \
+            "ip -brief address; ip route show table all; dumpsys wifi | grep -E 'mNetworkInfo|mWifiInfo|Wi-Fi is'; tc -s qdisc show dev wlan0; iptables -nvL ENVOIX_OFFLINE 2>/dev/null; ip6tables -nvL ENVOIX_OFFLINE 2>/dev/null" \
             >"$log_dir/$environment-$role-network.log" 2>&1 || true
         rm -rf "$log_dir/$environment-$role-files"
         "$adb" -s "$serial" pull "/data/user/0/$PACKAGE/files" \
@@ -212,6 +265,7 @@ run_test() {
     local receiver_state=""
 
     printf '\n[%s] Preparing devices...\n' "$environment"
+    clear_bandwidth_limit "$SERIAL_A"
     disable_firewall "$SERIAL_A"
     disable_firewall "$SERIAL_B"
     if [ "$environment" = "lan-only" ]; then
@@ -254,6 +308,9 @@ run_test() {
             die "$SERIAL_B cannot reach the internet"
     fi
 
+    printf '[%s] Limiting sender Wi-Fi to approximately 512 KiB/s...\n' "$environment"
+    limit_bandwidth "$SERIAL_A"
+    start_live_diagnostics "$environment"
     start_transfer "$SERIAL_B" receive "$room" "unused"
     sleep 2
     start_transfer "$SERIAL_A" send "$room" "$DEVICE_INPUT"
@@ -261,13 +318,14 @@ run_test() {
     deadline=$((SECONDS + timeout))
     while [ "$SECONDS" -lt "$deadline" ]; do
         actual="$(device_hashes || true)"
-        sender_state="$(record_state "$SERIAL_A" || true)"
-        receiver_state="$(record_state "$SERIAL_B" || true)"
+        sender_state="$(record_state "$SERIAL_A" "$log_dir/$environment-sender-progress.log" || true)"
+        receiver_state="$(record_state "$SERIAL_B" "$log_dir/$environment-receiver-progress.log" || true)"
         if [ "$verbose" -eq 1 ]; then
             printf '[%s] sender=%s receiver=%s\r' "$environment" "${sender_state:-unknown}" "${receiver_state:-unknown}"
         fi
         if printf '%s\n' "$actual" | grep -q "^$expected_hash " &&
             [ "$sender_state" = "completed" ] && [ "$receiver_state" = "completed" ]; then
+            stop_live_diagnostics
             [ "$verbose" -eq 0 ] || printf '\n'
             printf '[%s] PASS: both peers completed; received SHA-256 matches %s\n' "$environment" "$expected_hash"
             passed=$((passed + 1))
@@ -280,6 +338,7 @@ run_test() {
         sleep 2
     done
 
+    stop_live_diagnostics
     [ "$verbose" -eq 0 ] || printf '\n'
     printf '[%s] FAIL after %s seconds: sender=%s receiver=%s\n' \
         "$environment" "$timeout" "${sender_state:-unknown}" "${receiver_state:-unknown}" >&2
@@ -289,6 +348,8 @@ run_test() {
 }
 
 cleanup() {
+    stop_live_diagnostics
+    clear_bandwidth_limit "$SERIAL_A" >/dev/null 2>&1 || true
     disable_firewall "$SERIAL_A" >/dev/null 2>&1 || true
     disable_firewall "$SERIAL_B" >/dev/null 2>&1 || true
     if [ "$started" -eq 1 ] && [ "$keep_emulators" -eq 0 ]; then
@@ -329,9 +390,11 @@ test_file="$3"
 [ -f "$test_file" ] || die "test file not found at $test_file"
 [ -f "$apk" ] || die "APK not found at $apk; build it first or pass it as the fourth argument"
 command -v sha256sum >/dev/null || die "sha256sum is required"
+command -v pkill >/dev/null || die "pkill is required"
 check_avd "$avd_a"
 check_avd "$avd_b"
 
+pkill -KILL -x netsimd 2>/dev/null || true
 if "$adb" devices | grep -Eq '^emulator-(5554|5556)[[:space:]]'; then
     die "emulator ports 5554/5556 are already in use"
 fi
@@ -352,6 +415,8 @@ wait_for_boot "$SERIAL_A"
 wait_for_boot "$SERIAL_B"
 root_device "$SERIAL_A"
 root_device "$SERIAL_B"
+"$adb" -s "$SERIAL_A" shell 'command -v tc >/dev/null' ||
+    die "$SERIAL_A does not provide the tc traffic-control utility"
 connect_wifi "$SERIAL_A"
 connect_wifi "$SERIAL_B"
 [ "$(wifi_address "$SERIAL_A")" != "$(wifi_address "$SERIAL_B")" ] ||
