@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, Path, RawQuery, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::routing::post;
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
@@ -28,6 +28,13 @@ const MAX_BODY: usize = 64 * 1024 * 1024;
 const MAX_RDZ_LINES: usize = 2000;
 /// Reject absurd room keys.
 const MAX_ROOM_KEY: usize = 64;
+/// Memory bounds — the log store accepts UNAUTHENTICATED POSTs, so it must cap
+/// its own footprint against room-id spraying / side flooding (the sibling
+/// receipts + broker stores already cap this way; this store was the gap).
+/// Over-cap uploads are refused with 507.
+const MAX_ROOMS: usize = 1024;
+const MAX_CLIENTS_PER_ROOM: usize = 4;
+const MAX_CLIENT_BYTES: usize = 256 * 1024 * 1024;
 
 /// Collected logs for one room.
 #[derive(Default)]
@@ -71,6 +78,9 @@ impl RoomLogs {
         }
         let mut rooms = self.rooms.lock().unwrap();
         evict(&mut rooms, self.ttl);
+        if !rooms.contains_key(room) && rooms.len() >= MAX_ROOMS {
+            return;
+        }
         let entry = rooms.entry(room.to_string()).or_default();
         entry.rdz.push((epoch_ms, line));
         if entry.rdz.len() > MAX_RDZ_LINES {
@@ -80,13 +90,45 @@ impl RoomLogs {
     }
 
     /// Store a peer's uploaded log, replacing any prior upload for the same side.
-    fn upload(&self, room: &str, side: &str, body: String) {
+    /// Returns false when a memory cap (room count, sides/room, or aggregate
+    /// bytes) would be exceeded — the store is open to unauthenticated POSTs, so
+    /// it bounds its own memory.
+    fn upload(&self, room: &str, side: &str, body: String) -> bool {
         let mut rooms = self.rooms.lock().unwrap();
         evict(&mut rooms, self.ttl);
+        if !rooms.contains_key(room) && rooms.len() >= MAX_ROOMS {
+            return false;
+        }
+        // Aggregate byte cap: current total, minus this side's prior body that
+        // this upload replaces, plus the new body, must stay under the cap.
+        // `replaced` is always a subset of `stored`, so the subtraction is safe.
+        let replaced = rooms.get(room).map_or(0, |e| {
+            e.clients
+                .iter()
+                .find(|(s, _)| s == side)
+                .map_or(0, |(_, b)| b.len())
+        });
+        let stored: usize = rooms
+            .values()
+            .flat_map(|e| e.clients.iter())
+            .map(|(_, b)| b.len())
+            .sum();
+        if stored.saturating_sub(replaced) + body.len() > MAX_CLIENT_BYTES {
+            return false;
+        }
+        // Per-room side-count cap — only a genuinely new side counts (a re-upload
+        // for an existing side replaces, it does not grow cardinality).
+        let new_side = rooms
+            .get(room)
+            .map_or(true, |e| !e.clients.iter().any(|(s, _)| s == side));
+        if new_side && rooms.get(room).is_some_and(|e| e.clients.len() >= MAX_CLIENTS_PER_ROOM) {
+            return false;
+        }
         let entry = rooms.entry(room.to_string()).or_default();
         entry.clients.retain(|(s, _)| s != side);
         entry.clients.push((side.to_string(), body));
         entry.updated = Some(Instant::now());
+        true
     }
 
     /// The canonical view: one ordered lane per source (rdz, then each peer's
@@ -172,41 +214,82 @@ fn evict(rooms: &mut HashMap<String, RoomEntry>, ttl: Duration) {
     rooms.retain(|_, e| e.updated.is_some_and(|u| now.duration_since(u) < ttl));
 }
 
+/// Length-checked constant-time byte compare for the operator token (no early
+/// return on the first mismatched byte → no timing side-channel; the token
+/// length itself is not sensitive).
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Router state: the store, plus the optional operator token that gates report
+/// RETRIEVAL (GET). Uploads (POST) stay open — peers cannot hold an operator
+/// secret and must still be able to upload.
+#[derive(Clone)]
+pub struct LogState {
+    store: Arc<RoomLogs>,
+    view_token: Option<Arc<str>>,
+}
+
 /// The axum router: `POST /logs/{room}?side=…` ingests, `GET /logs/{room}` views.
-pub fn router(store: Arc<RoomLogs>) -> Router {
+/// `view_token` (from `--log-view-token-file`) is required on GET when set.
+pub fn router(store: Arc<RoomLogs>, view_token: Option<Arc<str>>) -> Router {
     Router::new()
         .route("/logs/{room}", post(upload).get(view))
         .layer(DefaultBodyLimit::max(MAX_BODY))
-        .with_state(store)
+        .with_state(LogState { store, view_token })
 }
 
 async fn upload(
     Path(room): Path<String>,
     RawQuery(query): RawQuery,
-    State(store): State<Arc<RoomLogs>>,
+    State(state): State<LogState>,
     body: String,
 ) -> StatusCode {
     if room.len() > MAX_ROOM_KEY {
         return StatusCode::BAD_REQUEST;
     }
-    store.upload(&room, &side_of(query.as_deref()), body);
-    StatusCode::NO_CONTENT
+    if state.store.upload(&room, &side_of(query.as_deref()), body) {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::INSUFFICIENT_STORAGE
+    }
 }
 
 async fn view(
     Path(room): Path<String>,
     RawQuery(query): RawQuery,
-    State(store): State<Arc<RoomLogs>>,
+    headers: HeaderMap,
+    State(state): State<LogState>,
 ) -> (StatusCode, String) {
+    // A room id is a low-entropy correlation key, NOT authorization. When an
+    // operator token is configured, report retrieval requires it (401 without);
+    // when none is configured the endpoint is open (a startup warning fires).
+    if let Some(expected) = &state.view_token {
+        let ok = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "))
+            .is_some_and(|p| constant_time_eq(p.as_bytes(), expected.as_bytes()));
+        if !ok {
+            return (StatusCode::UNAUTHORIZED, "operator token required\n".to_string());
+        }
+    }
     // Default is the canonical per-source lanes; `?merge=time` is the secondary
     // skew-sensitive interleave.
     let merged = query
         .as_deref()
         .is_some_and(|q| q.split('&').any(|kv| kv == "merge=time"));
     let result = if merged {
-        store.merge_view(&room)
+        state.store.merge_view(&room)
     } else {
-        store.view(&room)
+        state.store.view(&room)
     };
     match result {
         Some(text) => (StatusCode::OK, text),
@@ -352,16 +435,34 @@ mod tests {
         let store = RoomLogs::new(Duration::from_secs(60));
         store.push_rdz("r", 100, "INFO  paired".to_string());
         // 13-digit epochs; receive (200) predates send (300).
-        store.upload("r", "send", "0\t1\t0000000000300\t9\t3\t\tmachine\ttransition\t\n".to_string());
-        store.upload(
+        assert!(store.upload("r", "send", "0\t1\t0000000000300\t9\t3\t\tmachine\ttransition\t\n".to_string()));
+        assert!(store.upload(
             "r",
             "receive",
             "0\t1\t0000000000200\t9\t5\t\tsession\tcreated\t\n".to_string(),
-        );
+        ));
         let merged = store.merge_view("r").unwrap();
         let rdz = merged.find("[rdz").unwrap();
         let recv = merged.find("[receive").unwrap();
         let send = merged.find("[send").unwrap();
         assert!(rdz < recv && recv < send, "interleaved by epoch across sources");
+    }
+
+    #[test]
+    fn per_room_side_cap_rejects_new_but_allows_replace() {
+        let store = RoomLogs::new(Duration::from_secs(60));
+        for i in 0..MAX_CLIENTS_PER_ROOM {
+            assert!(store.upload("r", &format!("s{i}"), "x".to_string()), "side {i} within cap");
+        }
+        assert!(!store.upload("r", "overflow", "x".to_string()), "a new side past the cap is refused");
+        assert!(store.upload("r", "s0", "y".to_string()), "re-upload of an existing side still accepted");
+    }
+
+    #[test]
+    fn constant_time_eq_matches_and_rejects() {
+        assert!(constant_time_eq(b"operator-token", b"operator-token"));
+        assert!(!constant_time_eq(b"operator-token", b"operator-toke")); // length differs
+        assert!(!constant_time_eq(b"operator-token", b"operator-tokeX")); // last byte differs
+        assert!(!constant_time_eq(b"", b"x"));
     }
 }

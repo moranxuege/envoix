@@ -59,6 +59,13 @@ struct Cli {
     /// How long (seconds) collected logs are kept after their last update.
     #[arg(long, default_value_t = 3600)]
     log_ttl: u64,
+    /// File holding the operator bearer token that gates report RETRIEVAL
+    /// (`GET /logs/<room>`); uploads stay open. A room id is a low-entropy
+    /// correlation key, not authorization — without this, report retrieval is
+    /// unauthenticated (a startup warning fires). File (not argv) so the secret
+    /// never leaks via `ps`.
+    #[arg(long)]
+    log_view_token_file: Option<PathBuf>,
     /// TLS certificate chain (PEM) for the log/receipt endpoint. With
     /// `--tls-key`, `--log-bind` serves HTTPS instead of plain HTTP. The PEM
     /// pair is re-read periodically, so ACME renewals that replace the files
@@ -159,7 +166,28 @@ async fn main() -> Result<()> {
     // pairing endpoint. With --tls-cert/--tls-key it terminates TLS itself
     // (there is no proxy in front of this port).
     if let Some(addr) = cli.log_bind {
-        let router = logs::router(log_store.clone()).merge(receipts::router(receipt_store.clone()));
+        // Operator token for report retrieval (GET). Read from a file so it
+        // never appears in `ps`; empty/whitespace-only is treated as unset.
+        let view_token: Option<std::sync::Arc<str>> = match &cli.log_view_token_file {
+            Some(path) => {
+                let raw = std::fs::read_to_string(path)
+                    .with_context(|| format!("reading --log-view-token-file {}", path.display()))?;
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    anyhow::bail!("--log-view-token-file {} is empty", path.display());
+                }
+                Some(std::sync::Arc::from(trimmed))
+            }
+            None => {
+                tracing::warn!(
+                    "report retrieval (GET /logs/<room>) is UNAUTHENTICATED — a room id is \
+                     enumerable; set --log-view-token-file before broad rollout"
+                );
+                None
+            }
+        };
+        let router = logs::router(log_store.clone(), view_token)
+            .merge(receipts::router(receipt_store.clone()));
         if let (Some(cert), Some(key)) = (cli.tls_cert, cli.tls_key) {
             let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert, &key)
                 .await
