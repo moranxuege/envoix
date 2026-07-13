@@ -21,7 +21,7 @@ use tokio::time::Instant;
 
 use super::error::TransferError;
 use super::event::FailureCode;
-use super::machine::{AttemptEvent, Effect, Facts, Input, Session, State};
+use super::machine::{AttemptEvent, Effect, Input, Session};
 use super::receipt;
 use super::record::{RecordStore, TransferRecord, unix_now_ms};
 use super::{Client, PeerSource, TransferEvent, TransferOptions, TransferRequest};
@@ -812,13 +812,17 @@ impl Actor {
                 );
                 progress_only &= is_progress;
                 // Observe THIS reduction (cheap Copy snapshot of state+facts).
-                // Progress is excluded: it would flood the timeline (v2 P6).
-                let pre_state = self.session.state;
-                let pre_facts = self.session.facts;
+                // Progress is excluded: it would flood the timeline (v2 P6). For
+                // everything else, snapshot the FULL session so acceptance is
+                // read from the same authority `apply` uses below (`== before`),
+                // not guessed from the {state, facts} subset — which mislabels a
+                // legal edge touching another field (e.g. `Connected` sets only
+                // `path`) as "ignored".
+                let before_reduce = (!is_progress).then(|| self.session.clone());
                 let kind = input.kind();
                 let effects = self.session.reduce(input);
-                if !is_progress {
-                    self.observe_reduce(kind, pre_state, pre_facts, &effects);
+                if let Some(before_reduce) = &before_reduce {
+                    self.observe_reduce(kind, before_reduce, &effects);
                 }
                 for effect in effects {
                     if is_post_commit(&effect) {
@@ -863,13 +867,13 @@ impl Actor {
     fn observe_reduce(
         &self,
         kind: &'static str,
-        pre_state: State,
-        pre_facts: Facts,
+        before: &Session,
         effects: &[Effect],
     ) {
-        let changed_state = pre_state != self.session.state;
-        let changed_facts = pre_facts != self.session.facts;
-        let accepted = changed_state || changed_facts || !effects.is_empty();
+        // Acceptance from the authority: a full-session compare (matching apply's
+        // own `self.session == before`), so any legal mutation — state, facts, or
+        // any other field like `path` — counts. Effects-without-change also count.
+        let accepted = *before != self.session || !effects.is_empty();
         tracing::info!(
             target: "envoix::timeline",
             layer = "machine",
@@ -878,35 +882,35 @@ impl Actor {
             attempt = self.session.attempt,
             outcome = if accepted { "accepted" } else { "ignored" },
         );
-        if changed_state {
+        if before.state != self.session.state {
             tracing::info!(
                 target: "envoix::timeline",
                 layer = "machine",
                 event = "transition",
                 attempt = self.session.attempt,
-                from = ?pre_state,
+                from = ?before.state,
                 to = ?self.session.state,
                 outcome = "decided",
                 batch = self.apply_seq,
             );
         }
-        if pre_facts.proof_delivered != self.session.facts.proof_delivered {
+        if before.facts.proof_delivered != self.session.facts.proof_delivered {
             tracing::info!(
                 target: "envoix::timeline",
                 layer = "machine",
                 event = "fact_changed",
                 fact = "proof_delivered",
-                old = pre_facts.proof_delivered,
+                old = before.facts.proof_delivered,
                 new = self.session.facts.proof_delivered,
             );
         }
-        if pre_facts.receipt_mismatch != self.session.facts.receipt_mismatch {
+        if before.facts.receipt_mismatch != self.session.facts.receipt_mismatch {
             tracing::info!(
                 target: "envoix::timeline",
                 layer = "machine",
                 event = "fact_changed",
                 fact = "receipt_mismatch",
-                old = pre_facts.receipt_mismatch,
+                old = before.facts.receipt_mismatch,
                 new = self.session.facts.receipt_mismatch,
             );
         }
