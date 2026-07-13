@@ -247,12 +247,17 @@ both sides at the rdz. Six principles:
 
 Structured envelope, delimited encoding (NOT JSON — we debug by eyeballing raw
 logs via `adb run-as … read` and `curl rdz/logs/{room}`; a delimited line stays
-greppable AND parseable; the rdz merge needs only the leading `epoch_ms` +
-`source_seq` to order lanes, never a full JSON parse):
+greppable AND parseable; the rdz merge needs only the leading `source_seq` +
+`epoch_ms` to order lanes, never a full JSON parse):
 
 ```
-schema ⇥ epoch_ms ⇥ source_seq ⇥ process_run_id ⇥ session_id ⇥ attempt ⇥ side ⇥ layer ⇥ event ⇥ outcome ⇥ k=v ⇥ k=v …
+source_seq ⇥ schema ⇥ epoch_ms ⇥ process_run_id ⇥ session_id ⇥ attempt ⇥ side ⇥ layer ⇥ event ⇥ outcome ⇥ k=v ⇥ k=v …
 ```
+
+`source_seq` is the single writer's leading stamp (`TransferLogs.appendTimeline`);
+the remaining columns are built identically by the Rust core
+(`build_timeline_line`) and the app (`TransferTimeline.buildLine`), pinned equal
+by a golden-line test on both sides.
 
 - Fixed leading columns are positional and delimited; variable data trails as
   named `k=v` cells, so fields can be ADDED without breaking older parsers.

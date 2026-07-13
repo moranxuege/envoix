@@ -28,13 +28,37 @@ object TransferTimeline {
         attempt: String = "",
         fields: Map<String, String> = emptyMap(),
     ) {
+        // == Rust std::process::id() (same process — in-process JNI core).
+        val pid = android.os.Process.myPid()
+        val line = buildLine(SCHEMA, System.currentTimeMillis(), pid, id, attempt, side, layer, event, outcome, fields)
+        TransferLogs.appendTimeline(id, line)
+    }
+
+    /**
+     * Build the delimited envelope line, WITHOUT the leading `source_seq` (which
+     * [TransferLogs] stamps as the single writer). Pure and side-effect-free so
+     * the golden-line test can pin it against the Rust `build_timeline_line` —
+     * the two builders MUST produce byte-identical output for equal inputs.
+     */
+    internal fun buildLine(
+        schema: Int,
+        epochMs: Long,
+        pid: Int,
+        id: Long,
+        attempt: String,
+        side: String,
+        layer: String,
+        event: String,
+        outcome: String,
+        fields: Map<String, String>,
+    ): String {
         val sb = StringBuilder(64)
         sb
-            .append(SCHEMA)
+            .append(schema)
             .append('\t')
-            .append(System.currentTimeMillis())
+            .append(epochMs)
             .append('\t')
-            .append(android.os.Process.myPid()) // == Rust std::process::id() (same process)
+            .append(pid)
             .append('\t')
             .append(id)
             .append('\t')
@@ -54,7 +78,7 @@ object TransferTimeline {
                 .append('=')
                 .append(escape(v))
         }
-        TransferLogs.appendTimeline(id, sb.toString())
+        return sb.toString()
     }
 
     /** Percent-encode ONLY the three delimiter-breaking octets (matches Rust). */

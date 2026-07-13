@@ -686,6 +686,26 @@ mod timeline_tests {
         assert_eq!(cols[9], "cause=disk full = bad"); // tail, first = splits k/v
     }
 
+    /// The exact envelope a fixed input produces — the cross-language golden.
+    /// `TransferTimeline.buildLine` (Kotlin) asserts byte-identical output for
+    /// the same inputs (`TimelineEnvelopeTest`), pinning column order + escaping
+    /// across the boundary. Change one side and one of the two tests fails.
+    #[test]
+    fn golden_line_matches_the_kotlin_builder() {
+        let mut v = TimelineVisitor::default();
+        v.put("attempt", "1".into());
+        v.put("side", "sender".into());
+        v.put("layer", "machine".into());
+        v.put("event", "transition".into());
+        v.put("outcome", "ok".into());
+        v.put("cause", "a%b\tc\nd".into()); // exercises all three escaped octets
+        let line = build_timeline_line(1, 1_720_000_000_000, 42, Some(7), &v);
+        assert_eq!(
+            line,
+            "1\t1720000000000\t42\t7\t1\tsender\tmachine\ttransition\tok\tcause=a%25b%09c%0Ad"
+        );
+    }
+
     #[test]
     fn absent_session_id_is_empty_not_zero() {
         let v = TimelineVisitor::default();
