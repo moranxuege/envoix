@@ -11,6 +11,7 @@ readonly DEVICE_INPUT="/data/user/0/$PACKAGE/cache/nat-test-input"
 readonly DEVICE_OUTPUT_DIR="/sdcard/Download/Envoix"
 readonly TRANSFER_RATE_KBITS=4194 # Approximately 512 KiB/s.
 readonly TRANSFER_QUEUE_BYTES=33554432 # 32 MiB.
+readonly DATA_STREAM_WINDOW=1MB # Minimum accepted window; keeps sender progress near delivery.
 readonly AVAILABLE_TESTS=(
     symmetric-both-ipv4
     friendly-both-ipv4
@@ -76,6 +77,8 @@ OpenSSL, cargo-ndk, and the Android SDK/NDK.
 Both AVDs must use x86_64 Google APIs images, not Google Play images.
 Startup removes stale NAT-test resources and stops the global netsimd process.
 The sender's Wi-Fi bandwidth is limited to approximately 512 KiB/s.
+Each transfer uses a 1 MiB QUIC data-stream window so sender progress reflects
+the shaped link after at most the initial window has been queued.
 
 Options:
   --timeout SECONDS   Per-transfer timeout (default: $timeout)
@@ -537,6 +540,7 @@ start_transfer() {
         -n "$SERVICE" -a "$ACTION_START" \
         --es direction "$direction" --es room "$room" --es path "$path" \
         --es broker "$broker_endpoint" --es relay "$relay_url" \
+        --es data_stream_window "$DATA_STREAM_WINDOW" \
         --es receipt_server "''" >/dev/null
 }
 
