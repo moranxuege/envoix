@@ -619,7 +619,9 @@ class TransferService : Service() {
         val total = s.optLong("total")
         val speed = s.optDouble("speed_bps", 0.0)
         val avg = s.optDouble("avg_bps", 0.0)
-        val path = s.optString("path").ifEmpty { null }
+        // Typed DataPath object ({type, addr|url|description}) — read the fields,
+        // don't re-parse a Display string.
+        val path = s.optJSONObject("path")
         var entered: String? = null
 
         TransferRepository.update(id) { t ->
@@ -642,10 +644,15 @@ class TransferService : Service() {
                     } else {
                         t.speedHistory
                     },
-                pathType = path?.substringBefore(' ') ?: t.pathType,
+                pathType = path?.optString("type")?.ifEmpty { null } ?: t.pathType,
                 pathAddr =
-                    path?.substringAfter('(', "")?.removeSuffix(")")?.ifEmpty { null }
-                        ?: t.pathAddr,
+                    path?.let { p ->
+                        p
+                            .optString("addr")
+                            .ifEmpty { p.optString("url") }
+                            .ifEmpty { p.optString("description") }
+                            .ifEmpty { null }
+                    } ?: t.pathAddr,
                 error = if (status == Status.Failed || status == Status.Unconfirmed) reason else null,
                 log = entered?.let { addLog(t.log, it) } ?: t.log,
             )
@@ -911,14 +918,25 @@ class TransferService : Service() {
         Native.setSessionExtras(id, extras.toString())
     }
 
-    /** Active machine states pin the tray; everything else rests. */
+    /** Active states pin the tray; everything else rests. Exhaustive (no `else`)
+     *  so a new Status is a compile error until classified — this predicate
+     *  deliberately differs from the machine's is_active (Preparing pins here). */
     private fun isActive(st: Status) =
-        st == Status.Preparing ||
-            st == Status.Waiting ||
-            st == Status.Connecting ||
-            st == Status.Verifying ||
-            st == Status.Transferring ||
-            st == Status.Confirming
+        when (st) {
+            Status.Preparing,
+            Status.Waiting,
+            Status.Connecting,
+            Status.Verifying,
+            Status.Transferring,
+            Status.Confirming,
+            -> true
+            Status.Paused,
+            Status.Unconfirmed,
+            Status.Completed,
+            Status.Failed,
+            Status.Cancelled,
+            -> false
+        }
 
     private fun arrow(t: Transfer) = if (t.direction == Direction.Send) "↑" else "↓"
 

@@ -48,7 +48,15 @@ object OpLog {
         buffer.addLast(line)
         while (buffer.size > CAP) buffer.removeFirst()
         _lines.value = buffer.toList()
-        file?.let { runCatching { it.appendText(line + "\n") } }
+        file?.let { f ->
+            runCatching {
+                f.appendText(line + "\n")
+                // Trim in-session too, not only at init() — a long-running
+                // launch would otherwise grow op.log unbounded (breadcrumbs are
+                // low-volume, so the over-cap readText/writeText is rare).
+                if (f.length() > FILE_CAP) f.writeText(f.readText().takeLast(FILE_CAP))
+            }
+        }
         // Correspondence: every breadcrumb also lands in the core trace
         // (greppable "OP " inline with the tracing lines it explains), and in
         // the transfer's durable log when it targets a card.

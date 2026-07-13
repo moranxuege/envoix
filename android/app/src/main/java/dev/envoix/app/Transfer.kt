@@ -38,11 +38,23 @@ data class Transfer(
 )
 
 val Status.isTerminal: Boolean
+    // Exhaustive (no `else`) so a new Status must be classified here too.
     get() =
-        this == Status.Completed ||
-            this == Status.Unconfirmed ||
-            this == Status.Failed ||
-            this == Status.Cancelled
+        when (this) {
+            Status.Completed,
+            Status.Unconfirmed,
+            Status.Failed,
+            Status.Cancelled,
+            -> true
+            Status.Preparing,
+            Status.Waiting,
+            Status.Connecting,
+            Status.Verifying,
+            Status.Transferring,
+            Status.Confirming,
+            Status.Paused,
+            -> false
+        }
 
 /** Human-readable byte count (the ONE implementation - was duplicated). */
 fun humanBytes(n: Long): String =

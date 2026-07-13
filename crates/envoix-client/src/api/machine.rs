@@ -67,14 +67,23 @@ pub enum State {
 impl State {
     /// States with a live attempt underneath.
     fn is_active(self) -> bool {
-        matches!(
-            self,
+        // Exhaustive on purpose (no `_`): adding a State is a compile error until
+        // it is classified here. NB the frontend's isActive / isTerminal are
+        // deliberately DIFFERENT predicates (Preparing pins the tray there); each
+        // is independently exhaustive so a new state must be classified in all.
+        match self {
             State::Waiting
-                | State::Connecting
-                | State::Verifying
-                | State::Transferring
-                | State::Confirming
-        )
+            | State::Connecting
+            | State::Verifying
+            | State::Transferring
+            | State::Confirming => true,
+            State::Preparing
+            | State::Paused(_)
+            | State::Unconfirmed
+            | State::Completed
+            | State::Failed
+            | State::Cancelled => false,
+        }
     }
 }
 

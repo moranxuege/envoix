@@ -865,16 +865,14 @@ fn notice_json(notice: envoix_client::api::driver::SessionNotice, generation: u6
     use envoix_client::api::driver::SessionNotice as N;
     match notice {
         N::Snapshot(snapshot) => {
-            let path = snapshot.session.path.as_ref().map(|p| p.to_string());
             let mut value = serde_json::to_value(&snapshot).unwrap_or_default();
             if let Some(map) = value.as_object_mut() {
                 map.insert("notice".into(), "snapshot".into());
                 map.insert("gen".into(), generation.into());
-                // The frontend wants a display string, not the enum encoding.
-                map.insert(
-                    "path".into(),
-                    path.map(Into::into).unwrap_or(serde_json::Value::Null),
-                );
+                // `path` stays the TYPED DataPath encoding ({type, addr|url|
+                // description}); the frontend reads those fields directly, never
+                // a Display string it then has to re-parse (which lost the type
+                // for DataPath::Other and truncated relay URLs with spaces).
             }
             value.to_string()
         }
