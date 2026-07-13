@@ -27,7 +27,7 @@ use envoix_client::{
             TransferSession as CanonicalTransferSession,
         },
         machine::{PauseOrigin, State as CanonicalState},
-        record::{RecordStore, TransferRecord},
+        record::{EXTERNAL_RECORD_ID_KEY, RecordStore, TransferRecord, stable_record_id},
     },
 };
 use envoix_qr::QrInvitePayload;
@@ -689,6 +689,7 @@ pub trait MailboxObserver: Send + Sync {
 pub struct DurableEnvoixSession {
     driver: Mutex<Option<CanonicalTransferSession>>,
     activity: Arc<Mutex<FfiTransferActivityRecord>>,
+    pending_receipt_key: Arc<Mutex<Option<String>>>,
 }
 
 #[uniffi::export]
@@ -727,11 +728,14 @@ impl DurableEnvoixSession {
     }
 
     pub fn receipt_response(&self, blob: Vec<u8>) -> bool {
+        let Some(key) = self.pending_receipt_key.lock().unwrap().take() else {
+            return false;
+        };
         let driver = self.driver.lock().unwrap();
         let Some(driver) = driver.as_ref() else {
             return false;
         };
-        driver.receipt_response((!blob.is_empty()).then_some(blob))
+        driver.receipt_response(key, (!blob.is_empty()).then_some(blob))
     }
 
     pub fn receipt_posted(&self) -> bool {
@@ -825,23 +829,34 @@ pub fn start_durable_transfer(
     validate_transfer_request(&settings, &request)?;
     let records_dir = required_value(&records_dir, "records_dir")?;
     let store = RecordStore::new(records_dir);
+    let record_id = stable_record_id(&request.activity_id);
     let mut context = canonical_context_for_request(&settings, &request)?;
     if context.requires_stable_listener_identity() {
-        context.client.identity_file = Some(store.identity_path(&request.activity_id));
+        context.client.identity_file = Some(store.identity_path(record_id));
     }
     let activity = Arc::new(Mutex::new(FfiTransferActivityRecord::from_request(
         &request,
         now_ms(),
     )));
     let runtime = durable_runtime()?;
+    if let Some(existing) = runtime.block_on(store.load(record_id))
+        && external_activity_id(&existing) != request.activity_id
+    {
+        return Err(EnvoixError::Operation {
+            reason: "activity id collided with an existing durable record".to_string(),
+        });
+    }
+    let extras = serde_json::json!({ "external_record_id": request.activity_id.clone() });
     let (driver, notices) = {
         let _guard = runtime.enter();
-        CanonicalTransferSession::start(context.clone(), Some((store, request.activity_id.clone())))
+        CanonicalTransferSession::start(context.clone(), Some((store, record_id)), Some(extras))
             .map_err(op_err)?
     };
+    let pending_receipt_key = Arc::new(Mutex::new(None));
     let session = Arc::new(DurableEnvoixSession {
         driver: Mutex::new(Some(driver)),
         activity: activity.clone(),
+        pending_receipt_key: pending_receipt_key.clone(),
     });
     runtime.handle().spawn(drive_durable_notices(
         request.activity_id,
@@ -850,6 +865,7 @@ pub fn start_durable_transfer(
         activity,
         observer,
         mailbox,
+        pending_receipt_key,
     ));
     Ok(session)
 }
@@ -868,25 +884,27 @@ pub fn restore_durable_transfer(
     let mut record = runtime
         .block_on(store.load_all())
         .into_iter()
-        .find(|record| record.id == activity_id)
+        .find(|record| external_activity_id(record) == activity_id)
         .ok_or_else(|| EnvoixError::Operation {
             reason: format!("transfer record not found: {activity_id}"),
         })?;
     if record.context.requires_stable_listener_identity()
         && record.context.client.identity_file.is_none()
     {
-        record.context.client.identity_file = Some(store.identity_path(&activity_id));
+        record.context.client.identity_file = Some(store.identity_path(record.id));
     }
+    let record_id = record.id;
     let context = record.context.clone();
     let activity = Arc::new(Mutex::new(activity_from_canonical_record(&record)));
     let (driver, notices) = {
         let _guard = runtime.enter();
-        CanonicalTransferSession::restore(record, Some((store, activity_id.clone())))
-            .map_err(op_err)?
+        CanonicalTransferSession::restore(record, Some((store, record_id))).map_err(op_err)?
     };
+    let pending_receipt_key = Arc::new(Mutex::new(None));
     let session = Arc::new(DurableEnvoixSession {
         driver: Mutex::new(Some(driver)),
         activity: activity.clone(),
+        pending_receipt_key: pending_receipt_key.clone(),
     });
     runtime.handle().spawn(drive_durable_notices(
         activity_id,
@@ -895,6 +913,7 @@ pub fn restore_durable_transfer(
         activity,
         observer,
         mailbox,
+        pending_receipt_key,
     ));
     Ok(session)
 }
@@ -2123,6 +2142,7 @@ async fn drive_durable_notices(
     activity: Arc<Mutex<FfiTransferActivityRecord>>,
     observer: Arc<dyn TransferObserver>,
     mailbox: Arc<dyn MailboxObserver>,
+    pending_receipt_key: Arc<Mutex<Option<String>>>,
 ) {
     let mut previous_session = None;
     let mut last_progress_event_ms = 0;
@@ -2169,10 +2189,11 @@ async fn drive_durable_notices(
                 }
                 previous_session = Some(snapshot.session);
             }
-            SessionNotice::FetchReceipt { key } => {
+            SessionNotice::FetchReceipt { key, .. } => {
+                *pending_receipt_key.lock().unwrap() = Some(key.clone());
                 mailbox.on_fetch_receipt(activity_id.clone(), key);
             }
-            SessionNotice::PostReceipt { key, blob } => {
+            SessionNotice::PostReceipt { key, blob, .. } => {
                 mailbox.on_post_receipt(activity_id.clone(), key, blob);
             }
         }
@@ -2299,8 +2320,9 @@ fn canonical_context_for_request(
 }
 
 fn activity_from_canonical_record(record: &TransferRecord) -> FfiTransferActivityRecord {
-    let mut request = request_from_canonical_context(&record.id, &record.context);
-    request.activity_id = record.id.clone();
+    let activity_id = external_activity_id(record);
+    let mut request = request_from_canonical_context(&activity_id, &record.context);
+    request.activity_id = activity_id;
     let mut activity = FfiTransferActivityRecord::from_request(&request, record.created_ms);
     let mut session = record.session.clone();
     if matches!(
@@ -2326,6 +2348,17 @@ fn activity_from_canonical_record(record: &TransferRecord) -> FfiTransferActivit
         record.updated_ms,
     );
     activity
+}
+
+fn external_activity_id(record: &TransferRecord) -> String {
+    record
+        .platform_extras
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .and_then(|extras| extras.get(EXTERNAL_RECORD_ID_KEY))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| record.id.to_string())
 }
 
 fn request_from_canonical_context(
@@ -3578,7 +3611,7 @@ fn to_ffi_event(event: &StampedEvent, activity_id: &str) -> FfiTransferEvent {
             ffi.bytes_transferred = *bytes_hashed;
             ffi.total_bytes = *bytes_hashed;
         }
-        TransferEvent::Confirming { transfer_id } => {
+        TransferEvent::Confirming { transfer_id, .. } => {
             ffi.kind = FfiTransferEventKind::Verifying;
             ffi.transfer_id = transfer_id.to_string();
             ffi.diagnostic_message = "confirming".to_string();
@@ -4564,6 +4597,7 @@ mod tests {
                 next_chunk_index: 1,
                 hash_bytes: 4,
                 hash_checkpoint: None,
+                target_file_name: None,
             };
             let other_state = envoix_storage::TransferResumeState {
                 transfer_id: other_id.clone(),
@@ -4622,6 +4656,7 @@ mod tests {
             next_chunk_index: 1,
             hash_bytes: 4,
             hash_checkpoint: None,
+            target_file_name: None,
         };
         let runtime = Runtime::new().unwrap();
         runtime
@@ -5408,10 +5443,15 @@ mod tests {
         assert!(sender.resume());
 
         let (sent, _) = recv_completed(&srx, Duration::from_secs(45));
-        let (received, _, activity) = recv_completed_activity(&rrx, Duration::from_secs(45));
+        let (received, events, _activity) = recv_completed_activity(&rrx, Duration::from_secs(45));
         assert_eq!(sent, payload.len() as u64);
         assert_eq!(received, payload.len() as u64);
-        assert!(activity.bytes_resumed > 0);
+        assert!(
+            events
+                .iter()
+                .any(|event| event.kind == FfiTransferEventKind::Advertised),
+            "the receiver must re-advertise the stable listener after peer pause"
+        );
         assert_eq!(
             std::fs::read(output_dir.join("invite-pause.bin")).unwrap(),
             payload
@@ -5445,11 +5485,15 @@ mod tests {
         session.bytes = 4;
         session.total = 8;
         let record = TransferRecord {
-            id: request.activity_id.clone(),
+            version: envoix_client::api::record::RECORD_VERSION,
+            id: stable_record_id(&request.activity_id),
             created_ms: now_ms(),
             updated_ms: now_ms(),
             context,
             session,
+            platform_extras: Some(
+                serde_json::json!({ "external_record_id": request.activity_id.clone() }),
+            ),
         };
         let resume_state = envoix_storage::TransferResumeState {
             transfer_id: transfer_id.clone(),
@@ -5460,6 +5504,7 @@ mod tests {
             next_chunk_index: 1,
             hash_bytes: 4,
             hash_checkpoint: None,
+            target_file_name: None,
         };
         let other_state = envoix_storage::TransferResumeState {
             transfer_id: other_id.clone(),
@@ -5605,7 +5650,7 @@ mod tests {
         assert!(sender.resume());
 
         let (sent, _) = recv_completed(&srx, Duration::from_secs(45));
-        let (received, _, activity) = recv_completed_activity(&rrx, Duration::from_secs(45));
+        let (received, events, _activity) = recv_completed_activity(&rrx, Duration::from_secs(45));
         assert_eq!(sent, payload.len() as u64);
         assert_eq!(received, payload.len() as u64);
         assert_eq!(
@@ -5613,8 +5658,12 @@ mod tests {
             payload
         );
         assert!(
-            activity.bytes_resumed > 0,
-            "resumed transfer should report a retained prefix"
+            events
+                .iter()
+                .filter(|event| event.kind == FfiTransferEventKind::Binding)
+                .count()
+                >= 2,
+            "the peer must automatically launch a second rendezvous attempt"
         );
         match mailbox_rx
             .recv_timeout(Duration::from_secs(5))
@@ -5682,11 +5731,15 @@ mod tests {
         durable_runtime()
             .unwrap()
             .block_on(RecordStore::new(&records_dir).save(&TransferRecord {
-                id: request.activity_id.clone(),
+                version: envoix_client::api::record::RECORD_VERSION,
+                id: stable_record_id(&request.activity_id),
                 created_ms,
                 updated_ms: created_ms,
                 context,
                 session: machine,
+                platform_extras: Some(
+                    serde_json::json!({ "external_record_id": request.activity_id.clone() }),
+                ),
             }))
             .unwrap();
         let receipt = envoix_storage::TransferReceipt {
@@ -5772,11 +5825,15 @@ mod tests {
         durable_runtime()
             .unwrap()
             .block_on(RecordStore::new(&records_dir).save(&TransferRecord {
-                id: request.activity_id.clone(),
+                version: envoix_client::api::record::RECORD_VERSION,
+                id: stable_record_id(&request.activity_id),
                 created_ms: timestamp,
                 updated_ms: timestamp,
                 context,
                 session: machine,
+                platform_extras: Some(
+                    serde_json::json!({ "external_record_id": request.activity_id.clone() }),
+                ),
             }))
             .unwrap();
 
@@ -5876,11 +5933,15 @@ mod tests {
         durable_runtime()
             .unwrap()
             .block_on(RecordStore::new(&records_dir).save(&TransferRecord {
-                id: request.activity_id.clone(),
+                version: envoix_client::api::record::RECORD_VERSION,
+                id: stable_record_id(&request.activity_id),
                 created_ms: timestamp,
                 updated_ms: timestamp,
                 context,
                 session: machine,
+                platform_extras: Some(
+                    serde_json::json!({ "external_record_id": request.activity_id.clone() }),
+                ),
             }))
             .unwrap();
 

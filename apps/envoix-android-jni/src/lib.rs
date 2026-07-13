@@ -10,6 +10,7 @@
 
 use std::collections::HashMap;
 use std::io::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use envoix_client::TransferDirection;
@@ -25,8 +26,8 @@ static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 /// The durable record store (roadmap #5), set once by `initRecords`.
 static RECORDS: OnceLock<envoix_client::api::record::RecordStore> = OnceLock::new();
 
-fn record_for(id: i64) -> Option<(envoix_client::api::record::RecordStore, String)> {
-    RECORDS.get().map(|s| (s.clone(), id.to_string()))
+fn record_for(id: i64) -> Option<(envoix_client::api::record::RecordStore, u64)> {
+    RECORDS.get().map(|s| (s.clone(), id as u64))
 }
 
 /// Live transfer sessions (the state-machine driver), keyed by the Kotlin id.
@@ -35,6 +36,76 @@ static SESSIONS: OnceLock<Mutex<SessionMap>> = OnceLock::new();
 
 fn sessions() -> &'static Mutex<SessionMap> {
     SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Monotone pump generation: every createSession/restoreSession claims one
+/// and stamps it into all of that session's notices. Kotlin gates per card,
+/// so a stale pump (a torn-down session for the same id) can never mutate
+/// the current card - the fence is explicit, not an artifact of flow
+/// mechanics.
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+/// Intents addressed to a record id whose session is not registered yet (the
+/// restore-then-intent race: Kotlin fires "resume" right after asking for a
+/// restore, and the registration may not have happened). Queued here, drained
+/// in order on registration, cleared on destroy. Lock order is always
+/// sessions() before pending_intents().
+static PENDING_INTENTS: OnceLock<Mutex<HashMap<i64, Vec<String>>>> = OnceLock::new();
+/// Per-id bound; an id nobody registers must not accumulate garbage.
+const MAX_PENDING_INTENTS: usize = 8;
+
+fn pending_intents() -> &'static Mutex<HashMap<i64, Vec<String>>> {
+    PENDING_INTENTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Dispatch one intent string to a live session (shared by the direct path
+/// and the pending-queue drain).
+fn route_intent(id: i64, session: &envoix_client::api::driver::TransferSession, intent: &str) {
+    match intent {
+        "pause" => {
+            session.pause();
+        }
+        "resume" => {
+            session.resume();
+        }
+        "cancel" => {
+            session.cancel();
+        }
+        "reverify" => {
+            session.serve_reverify();
+        }
+        "receipt_posted" => {
+            session.receipt_posted();
+        }
+        _ => tracing::warn!(id, intent, "sessionIntent: unknown intent"),
+    }
+}
+
+/// Register a freshly created/restored session, then drain any intents that
+/// arrived before it existed. Refuses to replace a live session: silently
+/// swapping the map entry would orphan a running driver (the caller's new
+/// session is dropped, which detaches without touching the wire).
+fn register_session(id: i64, session: envoix_client::api::driver::TransferSession) -> bool {
+    let Ok(mut map) = sessions().lock() else {
+        return false;
+    };
+    if map.contains_key(&id) {
+        tracing::warn!(id, "session already live; duplicate start/restore ignored");
+        return false;
+    }
+    map.insert(id, session);
+    let queued = pending_intents()
+        .lock()
+        .ok()
+        .and_then(|mut p| p.remove(&id))
+        .unwrap_or_default();
+    if let Some(session) = map.get(&id) {
+        for intent in queued {
+            tracing::info!(id, intent, "applying queued intent");
+            route_intent(id, session, &intent);
+        }
+    }
+    true
 }
 
 /// VM + Kotlin log sink for [`Java_dev_envoix_app_Native_initLogging`]. The
@@ -130,30 +201,22 @@ pub extern "system" fn Java_dev_envoix_app_Native_parseInvite(
     input: JString,
 ) -> jni::sys::jstring {
     let input = jstr(&mut env, &input);
-    let lowercased = input.trim().to_ascii_lowercase();
-    let json = if lowercased.starts_with("envoix:") && !lowercased.starts_with("envoix://pair/") {
-        format!(
-            r#"{{"error":{}}}"#,
-            json_str("unsupported Envoix pairing invite scheme")
-        )
-    } else {
-        match Invite::parse(&input) {
-            Ok(inv) => {
-                let role = match inv.role() {
-                    Some(Role::Send) => "\"send\"",
-                    Some(Role::Receive) => "\"receive\"",
-                    None => "null",
-                };
-                format!(
-                    r#"{{"code":{},"broker":{},"relay":{},"role":{}}}"#,
-                    json_str(inv.code()),
-                    opt_json(inv.broker()),
-                    opt_json(inv.relay()),
-                    role,
-                )
-            }
-            Err(e) => format!(r#"{{"error":{}}}"#, json_str(&e.to_string())),
+    let json = match Invite::parse(&input) {
+        Ok(inv) => {
+            let role = match inv.role() {
+                Some(Role::Send) => "\"send\"",
+                Some(Role::Receive) => "\"receive\"",
+                None => "null",
+            };
+            format!(
+                r#"{{"code":{},"broker":{},"relay":{},"role":{}}}"#,
+                json_str(inv.code()),
+                opt_json(inv.broker()),
+                opt_json(inv.relay()),
+                role,
+            )
         }
+        Err(e) => format!(r#"{{"error":{}}}"#, json_str(&e.to_string())),
     };
     to_jstring(&mut env, &json)
 }
@@ -482,7 +545,7 @@ fn callback_or_log(env: &JNIEnv, callback: &JObject, context: &str) -> Option<Gl
 // ---------------------------------------------------------------------------
 
 /// One notice as JSON for the Kotlin side.
-fn notice_json(notice: envoix_client::api::driver::SessionNotice) -> String {
+fn notice_json(notice: envoix_client::api::driver::SessionNotice, generation: u64) -> String {
     use base64::Engine;
     use envoix_client::api::driver::SessionNotice as N;
     match notice {
@@ -491,6 +554,7 @@ fn notice_json(notice: envoix_client::api::driver::SessionNotice) -> String {
             let mut value = serde_json::to_value(&snapshot).unwrap_or_default();
             if let Some(map) = value.as_object_mut() {
                 map.insert("notice".into(), "snapshot".into());
+                map.insert("gen".into(), generation.into());
                 // The frontend wants a display string, not the enum encoding.
                 map.insert(
                     "path".into(),
@@ -503,16 +567,20 @@ fn notice_json(notice: envoix_client::api::driver::SessionNotice) -> String {
             let mut value = serde_json::to_value(event).unwrap_or_default();
             if let Some(map) = value.as_object_mut() {
                 map.insert("notice".into(), "event".into());
+                map.insert("gen".into(), generation.into());
             }
             value.to_string()
         }
-        N::FetchReceipt { key } => {
-            format!(r#"{{"notice":"fetch_receipt","key":{}}}"#, json_str(&key))
-        }
-        N::PostReceipt { key, blob } => format!(
-            r#"{{"notice":"post_receipt","key":{},"blob":{}}}"#,
+        N::FetchReceipt { key, server } => format!(
+            r#"{{"notice":"fetch_receipt","gen":{generation},"key":{},"server":{}}}"#,
+            json_str(&key),
+            json_str(&server.unwrap_or_default()),
+        ),
+        N::PostReceipt { key, blob, server } => format!(
+            r#"{{"notice":"post_receipt","gen":{generation},"key":{},"blob":{},"server":{}}}"#,
             json_str(&key),
             json_str(&base64::engine::general_purpose::STANDARD.encode(blob)),
+            json_str(&server.unwrap_or_default()),
         ),
     }
 }
@@ -546,10 +614,12 @@ pub extern "system" fn Java_dev_envoix_app_Native_createSession(
     let deny = split_csv(&get("candidates_deny"));
     let chunk = get("chunk_size");
     let chunk = (!chunk.is_empty()).then_some(chunk);
+    let receipt_server = get("receipt_server");
     let client_context = ClientContext {
         chunk_size: chunk,
         candidates_allow: allow,
         candidates_deny: deny,
+        receipt_server: (!receipt_server.is_empty()).then_some(receipt_server),
         identity_file: None,
     };
 
@@ -583,18 +653,14 @@ pub extern "system" fn Java_dev_envoix_app_Native_createSession(
         },
     };
 
+    let extras = v.get("platform_extras").filter(|e| e.is_object()).cloned();
     let _guard = runtime().enter();
-    let (session, notices) = match TransferSession::start(context, record_for(id)) {
+    let (session, notices) = match TransferSession::start(context, record_for(id), extras) {
         Ok(session) => session,
         Err(error) => return emit_failed_snapshot(&vm, &cb, "invalid session context", error),
     };
-    match sessions().lock() {
-        Ok(mut map) => {
-            map.insert(id, session);
-        }
-        Err(error) => {
-            return emit_failed_snapshot(&vm, &cb, "session registry unavailable", error);
-        }
+    if !register_session(id, session) {
+        return emit_failed_snapshot(&vm, &cb, "session already live or registry unavailable", id);
     }
     spawn_pump(vm, cb, notices);
 }
@@ -604,9 +670,10 @@ fn spawn_pump(
     cb: GlobalRef,
     mut notices: tokio::sync::mpsc::UnboundedReceiver<envoix_client::api::driver::SessionNotice>,
 ) {
+    let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
     runtime().spawn(async move {
         while let Some(notice) = notices.recv().await {
-            emit(&vm, &cb, &notice_json(notice));
+            emit(&vm, &cb, &notice_json(notice, generation));
         }
     });
 }
@@ -670,7 +737,7 @@ pub extern "system" fn Java_dev_envoix_app_Native_restoreSession(
     let record = runtime()
         .block_on(store.load_all())
         .into_iter()
-        .find(|r| r.id == id.to_string());
+        .find(|r| r.id == id as u64);
     let Some(record) = record else {
         return emit_failed_snapshot(&vm, &cb, "transfer record not found", id);
     };
@@ -681,13 +748,8 @@ pub extern "system" fn Java_dev_envoix_app_Native_restoreSession(
             return emit_failed_snapshot(&vm, &cb, "invalid restored session context", error);
         }
     };
-    match sessions().lock() {
-        Ok(mut map) => {
-            map.insert(id, session);
-        }
-        Err(error) => {
-            return emit_failed_snapshot(&vm, &cb, "session registry unavailable", error);
-        }
+    if !register_session(id, session) {
+        return emit_failed_snapshot(&vm, &cb, "session already live or registry unavailable", id);
     }
     spawn_pump(vm, cb, notices);
 }
@@ -706,39 +768,35 @@ pub extern "system" fn Java_dev_envoix_app_Native_sessionIntent(
         return;
     };
     let Some(session) = map.get(&id) else {
-        tracing::warn!(id, intent, "sessionIntent: session not found");
+        // Not registered (yet): queue by record id - registration drains the
+        // queue in order, so an intent can never race a restore and be lost.
+        if let Ok(mut pending) = pending_intents().lock() {
+            let queue = pending.entry(id).or_default();
+            if queue.len() < MAX_PENDING_INTENTS {
+                tracing::info!(id, intent, "session not registered; intent queued");
+                queue.push(intent);
+            } else {
+                tracing::warn!(id, intent, "pending intent queue full; dropped");
+            }
+        }
         return;
     };
-    match intent.as_str() {
-        "pause" => {
-            session.pause();
-        }
-        "resume" => {
-            session.resume();
-        }
-        "cancel" => {
-            session.cancel();
-        }
-        "reverify" => {
-            session.serve_reverify();
-        }
-        "receipt_posted" => {
-            session.receipt_posted();
-        }
-        _ => tracing::warn!(id, intent, "sessionIntent: unknown intent"),
-    }
+    route_intent(id, session, &intent);
 }
 
 /// The courier's answer to a fetch_receipt notice: the blob (base64), or ""
-/// when the mailbox slot was empty.
+/// when the mailbox slot was empty. `key` echoes the notice's mailbox key,
+/// so the driver can drop answers from a superseded attempt.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_envoix_app_Native_receiptResponse(
     mut env: JNIEnv,
     _class: JClass,
     id: jlong,
+    key: JString,
     blob_b64: JString,
 ) {
     use base64::Engine;
+    let key = jstr(&mut env, &key);
     let blob_b64 = jstr(&mut env, &blob_b64);
     let blob = if blob_b64.trim().is_empty() {
         None
@@ -759,7 +817,31 @@ pub extern "system" fn Java_dev_envoix_app_Native_receiptResponse(
         tracing::warn!(id, "receiptResponse: session not found");
         return;
     };
-    session.receipt_response(blob);
+    session.receipt_response(key, blob);
+}
+
+/// Replace the frontend-owned card context (QR payload, saved URI, ...)
+/// persisted with the transfer's record. Opaque to the core.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_setSessionExtras(
+    mut env: JNIEnv,
+    _class: JClass,
+    id: jlong,
+    extras_json: JString,
+) {
+    let raw = jstr(&mut env, &extras_json);
+    let Ok(extras) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        tracing::warn!(id, "setSessionExtras: invalid JSON");
+        return;
+    };
+    let Ok(map) = sessions().lock() else {
+        return;
+    };
+    let Some(session) = map.get(&id) else {
+        tracing::debug!(id, "setSessionExtras: session not live");
+        return;
+    };
+    session.set_extras(extras);
 }
 
 /// Tear a session down. With `discard` (D2, Remove): delete the partial,
@@ -771,16 +853,25 @@ pub extern "system" fn Java_dev_envoix_app_Native_destroySession(
     id: jlong,
     discard: jboolean,
 ) {
-    let Some(session) = sessions().lock().ok().and_then(|mut m| m.remove(&id)) else {
-        tracing::warn!(
-            id,
-            "destroySession: session not found or registry unavailable"
-        );
+    let session = sessions().lock().ok().and_then(|mut m| m.remove(&id));
+    if let Ok(mut pending) = pending_intents().lock() {
+        pending.remove(&id);
+    }
+    let Some(session) = session else {
+        // No live handle - the record is still the authority for existence:
+        // Remove must clean the durable artifacts anyway, or the record
+        // resurrects the card on the next restore.
+        if discard != 0
+            && let Some((store, id)) = record_for(id)
+        {
+            runtime().block_on(envoix_client::api::record::discard_record(&store, id));
+        }
         return;
     };
     if discard != 0 {
         session.discard();
     }
     // Dropping the handle closes the command channel; the actor drains the
-    // queued discard first, cancels any live attempt, and exits.
+    // queued discard first, then detaches any live attempt - a silent
+    // teardown (the peer sees connection loss, never a cancel) - and exits.
 }

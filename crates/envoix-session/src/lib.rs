@@ -6,6 +6,7 @@ mod endpoint;
 mod identity;
 mod room;
 
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,14 +14,16 @@ use std::time::Duration;
 pub use envoix_auth::{PairingConfig, authenticate_receiver, authenticate_sender};
 use envoix_error::CoreError;
 use envoix_protocol::{FrameConnection, PeerDescriptor};
-pub use envoix_rendezvous_iroh::{generate_code, split_code};
 pub use envoix_transfer::TransferEngine;
 pub use envoix_transfer::{
-    DEFAULT_CHUNK_SIZE, EventSink, NoopEventSink, PEER_INTERRUPT_MESSAGE, PEER_PAUSE_MESSAGE,
-    TransferCancelToken, TransferEvent, TransferSummary, USER_INTERRUPT_MESSAGE,
-    USER_PAUSE_MESSAGE, validate_chunk_size,
+    DEFAULT_CHUNK_SIZE, EventSink, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE, NoopEventSink,
+    PEER_INTERRUPT_MESSAGE, PEER_PAUSE_MESSAGE, TransferCancelToken, TransferEvent,
+    TransferSummary, USER_INTERRUPT_MESSAGE, USER_PAUSE_MESSAGE, validate_chunk_size,
 };
 pub use envoix_types::TransferDirection;
+// Re-exported so the client facade reaches rendezvous-code helpers through its
+// own service layer instead of depending on envoix-rendezvous-iroh directly.
+pub use envoix_rendezvous_iroh::{generate_code, split_code};
 use iroh::Endpoint;
 use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
 use n0_future::StreamExt;
@@ -30,7 +33,7 @@ use connection::IrohFrameConnection;
 pub use endpoint::{BindAddrs, BoundEndpoint, parse_broker_addr};
 use endpoint::{
     build_accept_endpoint, build_advertising_accept_endpoint, build_dial_endpoint,
-    peer_addr_from_descriptor, relay_status_summary,
+    peer_addr_from_descriptor,
 };
 pub use identity::{IdentityConfig, MemoryIdentity};
 pub use iroh::EndpointAddr;
@@ -38,8 +41,14 @@ pub use room::{receive_file_via_room, send_file_via_room};
 
 const ALPN: &[u8] = b"envoix/1";
 const MAX_AUTH_FAILURES: u32 = 50;
+/// Grace period for one auth handshake. An accepted (or dialed) peer that goes
+/// silent must not pin the session: without a bound, cancel only takes effect
+/// on transport failure, and a receiver's failure counter never counts an auth
+/// that refuses to *end*.
+const AUTH_TIMEOUT: Duration = Duration::from_secs(30);
 const MDNS_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
-/// Per-candidate connect budget for mDNS sends, so stale candidates fail fast.
+/// Per-candidate connect budget in the mDNS send loop: a stale or unreachable
+/// endpoint fails this fast instead of hanging until the full transport timeout.
 const MDNS_CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// Error type returned by session orchestration.
@@ -155,7 +164,7 @@ pub async fn send_file_manual(
     connection.watch_path(events.clone());
     let engine = TransferEngine::new(config.chunk_size);
 
-    if let Err(error) = authenticate_sender(&mut connection, pairing).await {
+    if let Err(error) = auth_bounded(authenticate_sender(&mut connection, pairing), &cancel).await {
         let _ = connection.close().await;
         local_endpoint.close().await;
         return Err(error);
@@ -163,8 +172,7 @@ pub async fn send_file_manual(
     let result = engine
         .send_file_with_cancel(&mut connection, file_path, resume, events.as_ref(), &cancel)
         .await;
-    close_after_send(&mut connection, &result, &cancel).await;
-    drop(connection);
+    let _ = connection.close().await;
     local_endpoint.close().await;
     result
 }
@@ -189,24 +197,17 @@ pub async fn send_file_to_endpoint_addr(
     )
     .await?;
     let events: Arc<dyn EventSink> = Arc::from(events);
-    events.on_event(TransferEvent::Diagnostic {
-        message: format!("dial start {}", endpoint_addr_shape(&peer_addr)),
-    });
     events.on_event(TransferEvent::Connecting);
     let mut connection = match dial_peer_addr(local_endpoint.clone(), peer_addr).await {
         Ok(connection) => connection,
         Err(error) => {
-            let relay_status = relay_status_summary(&local_endpoint);
-            events.on_event(TransferEvent::Diagnostic {
-                message: format!("dial failed: {error}; {relay_status}"),
-            });
             local_endpoint.close().await;
             return Err(error);
         }
     };
     connection.watch_path(events.clone());
     let engine = TransferEngine::new(config.chunk_size);
-    if let Err(error) = authenticate_sender(&mut connection, pairing).await {
+    if let Err(error) = auth_bounded(authenticate_sender(&mut connection, pairing), &cancel).await {
         let _ = connection.close().await;
         local_endpoint.close().await;
         return Err(error);
@@ -214,8 +215,7 @@ pub async fn send_file_to_endpoint_addr(
     let result = engine
         .send_file_with_cancel(&mut connection, file_path, resume, events.as_ref(), &cancel)
         .await;
-    close_after_send(&mut connection, &result, &cancel).await;
-    drop(connection);
+    let _ = connection.close().await;
     local_endpoint.close().await;
     result
 }
@@ -248,32 +248,25 @@ pub async fn send_file_enable_mdns(
         .add(mdns.clone());
 
     let mut discoveries = mdns.subscribe().await;
-    let deadline = tokio::time::Instant::now() + MDNS_DISCOVERY_TIMEOUT;
+    let mut tried: std::collections::HashSet<_> = std::collections::HashSet::new();
+    let mut next_deadline = tokio::time::Instant::now() + MDNS_DISCOVERY_TIMEOUT;
     let mut last_error = None;
 
+    // Try every freshly discovered endpoint (deduped by id) with a bounded
+    // connect, so a stale/unreachable candidate can't starve the live one: a
+    // failed connect just moves on to the next candidate. Give up only when no
+    // *new* endpoint shows up within the discovery window (re-advertisements of
+    // already-tried peers don't extend it).
     loop {
-        let now = tokio::time::Instant::now();
-        if now >= deadline {
-            break;
-        }
-
         let event = tokio::select! {
-            result = tokio::time::timeout_at(deadline, discoveries.next()) => {
-                result.map_err(|_| {
-                    CoreError::Discovery(format!(
-                        "no iroh mDNS peers discovered within {} seconds",
-                        MDNS_DISCOVERY_TIMEOUT.as_secs()
-                    ))
-                })?
-            }
+            result = tokio::time::timeout_at(next_deadline, discoveries.next()) => match result {
+                Ok(Some(event)) => event,
+                Ok(None) | Err(_) => break,
+            },
             () = cancel.cancelled() => {
                 local_endpoint.close().await;
                 return Err(interrupted_error(&cancel));
             }
-        };
-
-        let Some(event) = event else {
-            break;
         };
 
         let DiscoveryEvent::Discovered {
@@ -283,20 +276,22 @@ pub async fn send_file_enable_mdns(
         else {
             continue;
         };
-        if discovered_peer.endpoint_id == local_endpoint.id() {
+        if discovered_peer.endpoint_id == local_endpoint.id()
+            || !tried.insert(discovered_peer.endpoint_id)
+        {
             continue;
         }
-        let peer_addr = discovered_peer.to_endpoint_addr();
 
         match send_file_to_peer_addr(
             local_endpoint.clone(),
-            peer_addr,
+            discovered_peer.to_endpoint_addr(),
             file_path.clone(),
             resume,
             config.clone(),
             pairing,
             events.clone(),
             &cancel,
+            MDNS_CONNECT_TIMEOUT,
         )
         .await
         {
@@ -316,6 +311,7 @@ pub async fn send_file_enable_mdns(
                 last_error = Some(error);
             }
         }
+        next_deadline = tokio::time::Instant::now() + MDNS_DISCOVERY_TIMEOUT;
     }
 
     local_endpoint.close().await;
@@ -327,8 +323,8 @@ pub async fn send_file_enable_mdns(
     }))
 }
 
-/// Receives one file, reporting the concrete bound peer descriptor and relay
-/// URLs before accepting; stops while waiting or transferring if cancelled.
+/// Receives one file, reporting the concrete bound peer descriptor before
+/// accepting; stops while waiting or transferring if cancelled.
 pub async fn receive_file_with_bound_peer<F>(
     listen_addrs: impl Into<BindAddrs>,
     output_dir: PathBuf,
@@ -362,8 +358,10 @@ where
 }
 
 /// Receives one file over an mDNS-advertised endpoint: binds an mDNS endpoint,
-/// reports the bound peer descriptor through `on_bound_peer`, then accepts the
-/// first dialer that authenticates. Stops on cancellation.
+/// reports the bound peer descriptor through `on_bound_peer` (so the caller can
+/// advertise it), then accepts the first dialer that authenticates, ignoring
+/// failed pairings. Stops on cancellation. The mDNS counterpart of
+/// [`receive_file_with_bound_peer`].
 pub async fn receive_file_enable_mdns<F>(
     listen_addrs: impl Into<BindAddrs>,
     output_dir: PathBuf,
@@ -393,7 +391,7 @@ pub async fn receive_one_authenticated(
     cancel: TransferCancelToken,
 ) -> Result<TransferSummary, SessionError> {
     let events: Arc<dyn EventSink> = Arc::from(events);
-    let mut connection = match accept_or_cancel(&bound_endpoint, &cancel, events.as_ref()).await {
+    let mut connection = match accept_or_cancel(&bound_endpoint, &cancel, events.clone()).await {
         Ok(connection) => connection,
         Err(error) => {
             bound_endpoint.local_endpoint.close().await;
@@ -403,7 +401,8 @@ pub async fn receive_one_authenticated(
     connection.watch_path(events.clone());
     let engine = TransferEngine::new(config.chunk_size);
 
-    if let Err(error) = authenticate_receiver(&mut connection, pairing).await {
+    if let Err(error) = auth_bounded(authenticate_receiver(&mut connection, pairing), &cancel).await
+    {
         let _ = connection.close().await;
         bound_endpoint.local_endpoint.close().await;
         return Err(error);
@@ -411,8 +410,7 @@ pub async fn receive_one_authenticated(
     let result = engine
         .receive_file_with_cancel(&mut connection, output_dir, events.as_ref(), &cancel)
         .await;
-    close_after_receive(&mut connection, &result, &cancel).await;
-    drop(connection);
+    close_after_receive(&mut connection, &result).await;
     bound_endpoint.local_endpoint.close().await;
     result
 }
@@ -429,7 +427,7 @@ pub async fn receive_with_auth_retries(
 ) -> Result<TransferSummary, SessionError> {
     let events: Arc<dyn EventSink> = Arc::from(events);
     let mut connection =
-        match accept_authenticated_with_retries(&bound_endpoint, pairing, &cancel, events.as_ref())
+        match accept_authenticated_with_retries(&bound_endpoint, pairing, &cancel, events.clone())
             .await
         {
             Ok(connection) => connection,
@@ -443,40 +441,24 @@ pub async fn receive_with_auth_retries(
     let result = engine
         .receive_file_with_cancel(&mut connection, output_dir, events.as_ref(), &cancel)
         .await;
-    close_after_receive(&mut connection, &result, &cancel).await;
-    drop(connection);
+    close_after_receive(&mut connection, &result).await;
     bound_endpoint.local_endpoint.close().await;
     result
 }
 
-/// Close the data connection after a receive. A successful `CompleteAck` or a
-/// local pause/cancel Error is our final frame, so the peer closes after reading
-/// it. Other failures close actively because no local final frame is in flight.
+/// Close the data connection after a receive. On success the receiver sent the
+/// last frame (`CompleteAck`), so it waits for the sender to close - closing
+/// first would race that close against the sender reading the ack. On failure
+/// it closes actively, since there is no ack in flight to protect.
 async fn close_after_receive(
     connection: &mut IrohFrameConnection,
     result: &Result<TransferSummary, SessionError>,
-    cancel: &TransferCancelToken,
 ) {
-    if result.is_ok() || cancel.is_cancelled() {
-        connection.await_peer_close().await;
-    } else {
-        let _ = connection.close().await;
-    }
-}
-
-/// A local pause/cancel Error frame is the final frame on our send stream.
-/// Finish that stream and let the peer close after consuming it; actively
-/// closing the QUIC connection can discard unread stream data and turn a typed
-/// pause into an indistinguishable connection loss.
-async fn close_after_send(
-    connection: &mut IrohFrameConnection,
-    result: &Result<TransferSummary, SessionError>,
-    cancel: &TransferCancelToken,
-) {
-    if result.is_err() && cancel.is_cancelled() {
-        connection.await_peer_close().await;
-    } else {
-        let _ = connection.close().await;
+    match result {
+        Ok(_) => connection.await_peer_close().await,
+        Err(_) => {
+            let _ = connection.close().await;
+        }
     }
 }
 
@@ -484,12 +466,12 @@ async fn accept_authenticated_with_retries(
     bound_endpoint: &BoundEndpoint,
     pairing: &PairingConfig,
     cancel: &TransferCancelToken,
-    events: &dyn EventSink,
+    events: Arc<dyn EventSink>,
 ) -> Result<IrohFrameConnection, SessionError> {
     let mut failures = 0_u32;
     loop {
-        let mut connection = accept_or_cancel(bound_endpoint, cancel, events).await?;
-        match authenticate_receiver(&mut connection, pairing).await {
+        let mut connection = accept_or_cancel(bound_endpoint, cancel, events.clone()).await?;
+        match auth_bounded(authenticate_receiver(&mut connection, pairing), cancel).await {
             Ok(()) => return Ok(connection),
             Err(_) => {
                 let _ = connection.close().await;
@@ -542,71 +524,62 @@ async fn send_file_to_peer_addr(
     pairing: &PairingConfig,
     events: Arc<dyn EventSink>,
     cancel: &TransferCancelToken,
+    connect_timeout: Duration,
 ) -> Result<TransferSummary, SessionError> {
-    events.on_event(TransferEvent::Diagnostic {
-        message: format!("dial start {}", endpoint_addr_shape(&peer_addr)),
-    });
     events.on_event(TransferEvent::Connecting);
+    // Bound the dial so a stale/unreachable mDNS candidate fails fast instead of
+    // hanging until the full transport timeout; the transfer itself is unbounded.
     let mut connection = match tokio::time::timeout(
-        MDNS_CONNECT_TIMEOUT,
+        connect_timeout,
         dial_peer_addr(local_endpoint, peer_addr),
     )
     .await
     {
-        Ok(Ok(connection)) => connection,
-        Ok(Err(error)) => {
-            events.on_event(TransferEvent::Diagnostic {
-                message: format!("dial failed: {error}"),
-            });
-            return Err(error);
-        }
+        Ok(result) => result?,
         Err(_) => {
-            let error = CoreError::Transport(format!(
+            return Err(CoreError::Transport(format!(
                 "connect to peer timed out after {}s",
-                MDNS_CONNECT_TIMEOUT.as_secs()
-            ));
-            events.on_event(TransferEvent::Diagnostic {
-                message: format!("dial failed: {error}"),
-            });
-            return Err(error);
+                connect_timeout.as_secs()
+            )));
         }
     };
     connection.watch_path(events.clone());
     let engine = TransferEngine::new(config.chunk_size);
-    if let Err(error) = authenticate_sender(&mut connection, pairing).await {
+    if let Err(error) = auth_bounded(authenticate_sender(&mut connection, pairing), cancel).await {
         let _ = connection.close().await;
         return Err(error);
     }
     let result = engine
         .send_file_with_cancel(&mut connection, file_path, resume, events.as_ref(), cancel)
         .await;
-    close_after_send(&mut connection, &result, cancel).await;
+    let _ = connection.close().await;
     result
 }
 
 async fn accept_or_cancel(
     bound_endpoint: &BoundEndpoint,
     cancel: &TransferCancelToken,
-    events: &dyn EventSink,
+    events: Arc<dyn EventSink>,
 ) -> Result<IrohFrameConnection, SessionError> {
     tokio::select! {
-        result = bound_endpoint.accept_with_events(events) => result,
+        result = bound_endpoint.accept_with_events(events.as_ref()) => result,
         () = cancel.cancelled() => Err(interrupted_error(cancel)),
     }
 }
 
-fn endpoint_addr_shape(addr: &EndpointAddr) -> String {
-    format!(
-        "endpoint={} direct={} relay={}",
-        short_endpoint_id(&addr.id.to_string()),
-        addr.ip_addrs().count(),
-        addr.relay_urls().count()
-    )
-}
-
-fn short_endpoint_id(id: &str) -> &str {
-    let end = id.len().min(12);
-    &id[..end]
+/// One auth handshake, bounded by [`AUTH_TIMEOUT`] and the cancel token. Auth
+/// is strictly pre-transfer, so interrupting it is always safe.
+async fn auth_bounded(
+    auth: impl Future<Output = Result<(), SessionError>>,
+    cancel: &TransferCancelToken,
+) -> Result<(), SessionError> {
+    tokio::select! {
+        result = tokio::time::timeout(AUTH_TIMEOUT, auth) => match result {
+            Ok(result) => result,
+            Err(_) => Err(CoreError::Protocol("authentication timed out".into())),
+        },
+        () = cancel.cancelled() => Err(interrupted_error(cancel)),
+    }
 }
 
 fn interrupted_error(cancel: &TransferCancelToken) -> SessionError {
@@ -616,4 +589,30 @@ fn interrupted_error(cancel: &TransferCancelToken) -> SessionError {
         USER_INTERRUPT_MESSAGE
     };
     CoreError::Transfer(message.into())
+}
+
+#[cfg(test)]
+mod auth_bound_tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn wedged_auth_times_out() {
+        let cancel = TransferCancelToken::new();
+        let result = auth_bounded(std::future::pending(), &cancel).await;
+        assert!(matches!(result, Err(CoreError::Protocol(m)) if m.contains("timed out")));
+    }
+
+    #[tokio::test]
+    async fn cancel_interrupts_a_pending_auth() {
+        let cancel = TransferCancelToken::new();
+        cancel.pause();
+        let result = auth_bounded(std::future::pending(), &cancel).await;
+        assert!(matches!(result, Err(CoreError::Transfer(m)) if m == USER_PAUSE_MESSAGE));
+    }
+
+    #[tokio::test]
+    async fn a_finishing_auth_passes_through() {
+        let cancel = TransferCancelToken::new();
+        assert!(auth_bounded(async { Ok(()) }, &cancel).await.is_ok());
+    }
 }

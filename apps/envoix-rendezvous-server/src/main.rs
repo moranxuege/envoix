@@ -59,6 +59,15 @@ struct Cli {
     /// How long (seconds) collected logs are kept after their last update.
     #[arg(long, default_value_t = 3600)]
     log_ttl: u64,
+    /// TLS certificate chain (PEM) for the log/receipt endpoint. With
+    /// `--tls-key`, `--log-bind` serves HTTPS instead of plain HTTP. The PEM
+    /// pair is re-read periodically, so ACME renewals that replace the files
+    /// take effect without a restart (live rooms survive).
+    #[arg(long, requires = "tls_key")]
+    tls_cert: Option<PathBuf>,
+    /// TLS private key (PEM); see `--tls-cert`.
+    #[arg(long, requires = "tls_cert")]
+    tls_key: Option<PathBuf>,
     /// How long (seconds) mailbox completion receipts are kept.
     #[arg(long, default_value_t = 7 * 24 * 3600)]
     receipt_ttl: u64,
@@ -74,6 +83,11 @@ enum LogFormat {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Pin the process-level rustls provider before anything touches TLS; with
+    // both iroh and axum-server in the tree the automatic choice is ambiguous.
+    // (Err = already installed, which is fine.)
+    let _ = rustls::crypto::ring::default_provider().install_default();
 
     // Shared per-room log store: fed by the capture layer below, served by the
     // optional HTTP endpoint.
@@ -140,27 +154,53 @@ async fn main() -> Result<()> {
             None => None,
         };
 
-    // Optional per-room log-collection endpoint on its own HTTP port. Off unless
-    // --log-bind is given; a separate task that never touches the pairing endpoint.
+    // Optional per-room log-collection endpoint on its own HTTP(S) port. Off
+    // unless --log-bind is given; a separate task that never touches the
+    // pairing endpoint. With --tls-cert/--tls-key it terminates TLS itself
+    // (there is no proxy in front of this port).
     if let Some(addr) = cli.log_bind {
-        let store = log_store.clone();
-        let receipt_store = receipt_store.clone();
-        tokio::spawn(async move {
-            match tokio::net::TcpListener::bind(addr).await {
-                Ok(listener) => {
-                    tracing::info!(%addr, "log endpoint listening");
-                    if let Err(error) = axum::serve(
-                        listener,
-                        logs::router(store).merge(receipts::router(receipt_store)),
-                    )
-                    .await
-                    {
-                        tracing::error!(%error, "log endpoint failed");
+        let router = logs::router(log_store.clone()).merge(receipts::router(receipt_store.clone()));
+        if let (Some(cert), Some(key)) = (cli.tls_cert, cli.tls_key) {
+            let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert, &key)
+                .await
+                .with_context(|| format!("TLS cert {} / key {}", cert.display(), key.display()))?;
+            // Re-read the PEM pair on a slow cadence: certbot replaces the
+            // files on renewal, and reloading in place keeps live rooms up.
+            {
+                let config = config.clone();
+                tokio::spawn(async move {
+                    let mut tick = tokio::time::interval(Duration::from_secs(12 * 3600));
+                    tick.tick().await; // consume the immediate first tick
+                    loop {
+                        tick.tick().await;
+                        if let Err(error) = config.reload_from_pem_file(&cert, &key).await {
+                            tracing::warn!(%error, "TLS reload failed; serving previous cert");
+                        }
                     }
-                }
-                Err(error) => tracing::error!(%error, %addr, "log endpoint bind failed"),
+                });
             }
-        });
+            tokio::spawn(async move {
+                tracing::info!(%addr, "log endpoint listening (https)");
+                if let Err(error) = axum_server::bind_rustls(addr, config)
+                    .serve(router.into_make_service())
+                    .await
+                {
+                    tracing::error!(%error, "log endpoint failed");
+                }
+            });
+        } else {
+            tokio::spawn(async move {
+                match tokio::net::TcpListener::bind(addr).await {
+                    Ok(listener) => {
+                        tracing::info!(%addr, "log endpoint listening (http)");
+                        if let Err(error) = axum::serve(listener, router).await {
+                            tracing::error!(%error, "log endpoint failed");
+                        }
+                    }
+                    Err(error) => tracing::error!(%error, %addr, "log endpoint bind failed"),
+                }
+            });
+        }
     }
 
     serve_endpoint(

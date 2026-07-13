@@ -124,6 +124,10 @@ pub enum TransferEvent {
     Confirming {
         /// Transfer identifier for correlating events.
         transfer_id: TransferId,
+        /// BLAKE3 hash of the bytes actually sent (the `Complete` frame's
+        /// hash) - the committed proof basis mailbox receipts are verified
+        /// against.
+        file_hash: String,
     },
     /// Transfer completed and, on receive, the file was finalized.
     Completed {

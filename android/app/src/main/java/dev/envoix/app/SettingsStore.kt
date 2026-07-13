@@ -5,12 +5,11 @@ import android.content.SharedPreferences
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import java.io.File
 
 /**
  * Two layers, one flat holder:
  *  - core config — mirrors the CLI's `config.toml` schema (chunk_size, candidates)
- *    plus the connection defaults (broker/relay). Rendered by [SettingsStore.renderConfig].
+ *    plus the connection defaults (broker/relay). Rendered by [SettingsStore.paramsJson (TransferService.Spec)].
  *  - native prefs — platform-only defaults that seed a transfer request (save
  *    folder, default role); never sent to the core.
  */
@@ -33,6 +32,8 @@ data class Settings(
     // developer / diagnostics
     val devMode: Boolean = false,
     val verboseLog: Boolean = false,
+    /** -vvv: trace-level iroh internals (path/QUIC state machine). Very high volume. */
+    val traceIroh: Boolean = false,
     /** Base URL of the rdz log-collection endpoint. Empty = uploads off. */
     val logServer: String = Endpoints.LOG_SERVER,
 )
@@ -48,16 +49,6 @@ object SettingsStore {
 
     fun init(context: Context) {
         prefs = context.getSharedPreferences("envoix.settings", Context.MODE_PRIVATE)
-        val storedLogServer = prefs.getString("logServer", Endpoints.LOG_SERVER)!!
-        val logServer =
-            if (storedLogServer.trimEnd('/') == Endpoints.DEPRECATED_LOG_SERVER) {
-                Endpoints.LOG_SERVER
-            } else {
-                storedLogServer
-            }
-        if (logServer != storedLogServer) {
-            prefs.edit().putString("logServer", logServer).apply()
-        }
         _settings.value =
             Settings(
                 broker = prefs.getString("broker", Endpoints.BROKER)!!,
@@ -72,7 +63,13 @@ object SettingsStore {
                 useMdns = prefs.getBoolean("useMdns", true),
                 devMode = prefs.getBoolean("devMode", false),
                 verboseLog = prefs.getBoolean("verboseLog", false),
-                logServer = logServer,
+                traceIroh = prefs.getBoolean("traceIroh", false),
+                logServer =
+                    prefs.getString("logServer", Endpoints.LOG_SERVER)!!.let {
+                        // Installs from before the TLS cutover have the old
+                        // plaintext default frozen in prefs; carry them over.
+                        if (it == Endpoints.LOG_SERVER_LEGACY) Endpoints.LOG_SERVER else it
+                    },
             )
     }
 
@@ -100,6 +97,7 @@ object SettingsStore {
             .putBoolean("useMdns", s.useMdns)
             .putBoolean("devMode", s.devMode)
             .putBoolean("verboseLog", s.verboseLog)
+            .putBoolean("traceIroh", s.traceIroh)
             .putString("logServer", s.logServer)
             .apply()
         _settings.value = s
@@ -107,9 +105,18 @@ object SettingsStore {
 
     private const val LOG_BASELINE = "envoix=debug,iroh=info,warn"
     private const val LOG_VERBOSE = "envoix=trace,iroh=debug,warn"
+    private const val LOG_TRACE_IROH = "envoix=trace,iroh=trace,iroh_relay=debug,netwatch=debug,warn"
 
-    /** Push the current verbosity down to the native reloadable filter. */
-    fun applyLogLevel() = NativeBootstrap.setLogLevel(if (_settings.value.verboseLog) LOG_VERBOSE else LOG_BASELINE)
+    /** Push the current verbosity down to the native reloadable filter. -vvv (trace
+     *  iroh internals) wins over -vv (verbose) wins over the baseline. */
+    fun applyLogLevel() =
+        Native.setLogLevel(
+            when {
+                _settings.value.traceIroh -> LOG_TRACE_IROH
+                _settings.value.verboseLog -> LOG_VERBOSE
+                else -> LOG_BASELINE
+            },
+        )
 
     /** Where received files go, for display: the picked SAF folder's name, else Downloads/<folder>. */
     fun saveLabel(context: Context): String {
@@ -150,14 +157,22 @@ object SettingsStore {
             update { it.copy(saveTreeUri = "") }
             return
         }
-        runCatching {
-            context.contentResolver.takePersistableUriPermission(
-                uri,
-                android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
-                    android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
-            )
+        val granted =
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+                )
+            }.isSuccess
+        // Never persist a tree we cannot durably write: a URI without the
+        // grant would fail every future publish while the setting claims it
+        // works. On failure the previous (working) choice stays.
+        if (granted) {
+            update { it.copy(saveTreeUri = uri.toString()) }
+        } else {
+            LogStore.append("app: SAF permission grant failed for $uri; keeping previous folder")
         }
-        update { it.copy(saveTreeUri = uri.toString()) }
     }
 
     /** The "Avoid Tailscale" toggle is a *view* over `deny`: on iff the ranges are present. */
@@ -174,27 +189,4 @@ object SettingsStore {
                 }
             s.copy(candidatesDeny = deny)
         }
-
-    /**
-     * Render a `config.toml` for the core from the config-tier fields, or null
-     * when none are set. Same schema as the CLI's `RuntimeConfig`.
-     */
-    fun renderConfig(context: Context): String? {
-        val s = _settings.value
-        val lines = mutableListOf<String>()
-        if (s.chunkSize.isNotBlank()) lines += "chunk_size = ${tomlStr(s.chunkSize.trim())}"
-        if (s.candidatesAllow.isNotEmpty() || s.candidatesDeny.isNotEmpty()) {
-            lines += "[candidates]"
-            if (s.candidatesAllow.isNotEmpty()) lines += "allow = ${tomlArr(s.candidatesAllow)}"
-            if (s.candidatesDeny.isNotEmpty()) lines += "deny = ${tomlArr(s.candidatesDeny)}"
-        }
-        if (lines.isEmpty()) return null
-        return File(context.filesDir, "config.toml")
-            .apply { writeText(lines.joinToString("\n") + "\n") }
-            .absolutePath
-    }
-
-    private fun tomlStr(s: String) = "\"" + s.replace("\"", "") + "\""
-
-    private fun tomlArr(items: List<String>) = "[" + items.joinToString(", ") { tomlStr(it) } + "]"
 }

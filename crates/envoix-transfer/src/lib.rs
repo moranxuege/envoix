@@ -6,14 +6,14 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use envoix_error::CoreError;
 use envoix_protocol::{
     Chunk, Complete, CompleteAck, ErrorFrame, FileHeader, Frame, FrameConnection, Hello, Ready,
     ResumeStatus,
 };
-use envoix_storage::{LocalFileStorage, ResumeLease, TransferReceipt, TransferResumeState};
+use envoix_storage::{LocalFileStorage, TransferReceipt, TransferResumeState};
 use envoix_types::{
     DataPath, PROTOCOL_VERSION, PairingStep, PeerRole, TransferDirection, TransferId,
 };
@@ -66,7 +66,8 @@ mod chunk_size_validation_tests {
 /// Protocol error text sent when a local user interrupts a transfer.
 pub const USER_INTERRUPT_MESSAGE: &str = "transfer interrupted by user";
 /// Protocol error text sent when a local user pauses a transfer (same wire frame
-/// as an interrupt; a dead network can still degrade it to connection loss).
+/// as an interrupt — delivery is best-effort; a degraded path may drop it, so
+/// receivers must not depend on it and fall back to connection-lost handling).
 pub const USER_PAUSE_MESSAGE: &str = "transfer paused by user";
 /// Local error text when the peer reported an interrupt.
 pub const PEER_INTERRUPT_MESSAGE: &str = "transfer interrupted by peer";
@@ -76,9 +77,7 @@ pub const PEER_PAUSE_MESSAGE: &str = "transfer paused by peer";
 const COMPLETE_ACK_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(test)]
 const COMPLETE_ACK_TIMEOUT: Duration = Duration::from_millis(250);
-const RESUME_STATE_WRITE_INTERVAL_BYTES: u64 = 64 * 1024 * 1024;
-const RESUME_STATE_WRITE_INTERVAL_TIME: Duration = Duration::from_secs(10);
-const RESUME_ARTIFACT_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+const RESUME_STATE_WRITE_INTERVAL: u64 = 8 * 1024 * 1024;
 
 /// Error type returned by the transfer state machine.
 pub type TransferError = CoreError;
@@ -158,10 +157,10 @@ impl TransferCancelToken {
 /// User-visible transfer lifecycle event.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TransferEvent {
-    /// Diagnostic-only status. It is meant for logs/tests and does not change
-    /// transfer state.
+    /// Diagnostic-only status for logs and path reporting. It never changes the
+    /// canonical transfer lifecycle.
     Diagnostic {
-        /// Human-readable diagnostic message.
+        /// Human-readable diagnostic detail.
         message: String,
     },
     /// A send or receive operation has started.
@@ -183,6 +182,10 @@ pub enum TransferEvent {
     Confirming {
         /// Transfer identifier for correlating events.
         transfer_id: TransferId,
+        /// BLAKE3 hash of the bytes actually sent (the `Complete` frame's
+        /// hash) - the committed proof basis for receipt verification, so a
+        /// receipt is never checked against the (mutable) source path later.
+        file_hash: String,
     },
     /// More plaintext bytes have been sent or persisted.
     Progress {
@@ -412,18 +415,11 @@ impl TransferEngine {
             }
 
             hasher.update(&buffer[..bytes_read]);
-            match connection
-                .send_chunk_or_recv_frame(&transfer_id, index, offset, &buffer[..bytes_read])
+            if let Err(error) = connection
+                .send_chunk(&transfer_id, index, offset, &buffer[..bytes_read])
                 .await
             {
-                Ok(None) => {}
-                Ok(Some(Frame::Error(error))) => return Err(peer_error(error)),
-                Ok(Some(frame)) => {
-                    return Err(CoreError::Transfer(format!(
-                        "unexpected peer frame while sending chunks: {frame:?}"
-                    )));
-                }
-                Err(error) => return Err(peer_closed_error(error)),
+                return Err(peer_closed_error(error));
             }
 
             offset += bytes_read as u64;
@@ -442,15 +438,17 @@ impl TransferEngine {
             )));
         }
 
+        let file_hash = hasher.finalize().to_hex().to_string();
         connection
             .send_frame(Frame::Complete(Complete {
                 transfer_id: transfer_id.clone(),
-                file_hash: hasher.finalize().to_hex().to_string(),
+                file_hash: file_hash.clone(),
             }))
             .await
             .map_err(peer_closed_error)?;
         events.on_event(TransferEvent::Confirming {
             transfer_id: transfer_id.clone(),
+            file_hash,
         });
         // The whole file plus the Complete frame (which carries the file hash the
         // receiver verifies before finalizing) have been sent. Require the
@@ -460,11 +458,8 @@ impl TransferEngine {
         // close. A genuine failure surfaces as an Error frame here (or earlier,
         // during the chunk phase); only a true network death in this final round
         // trip fails an otherwise-complete send, which resume recovers on retry.
-        // From here on the receiver may have atomically finalized the file. A
-        // local cancellation must not turn that successful delivery into a
-        // sender-side cancellation, so only the bounded acknowledgement wait
-        // can now finish this transfer.
-        let ack = recv_frame_with_timeout(connection, COMPLETE_ACK_TIMEOUT).await?;
+        let ack =
+            recv_frame_or_cancel_with_timeout(connection, cancel, COMPLETE_ACK_TIMEOUT).await?;
         expect_complete_ack(ack, &transfer_id)?;
         events.on_event(TransferEvent::Completed {
             transfer_id: transfer_id.clone(),
@@ -503,21 +498,36 @@ impl TransferEngine {
         connection.send_frame(Frame::Ready(Ready)).await?;
 
         let header = expect_file_header(recv_frame_or_cancel(connection, cancel).await?)?;
-        let sender_chunk_size = validate_header(&header)?;
-        let cleanup =
-            LocalFileStorage::cleanup_stale_resume_artifacts(&output_dir, RESUME_ARTIFACT_MAX_AGE)
-                .await?;
-        if cleanup.files_deleted > 0 {
-            tracing::info!(
-                files_deleted = cleanup.files_deleted,
-                bytes_deleted = cleanup.bytes_deleted,
-                "removed stale receive partials"
-            );
+        validate_header(&header, self.chunk_size)?;
+        // One scan serves the whole ladder below: the in-flight partial (and
+        // the landing name it recorded), the existing-final answer, and the
+        // receipt short-circuit.
+        let resume_state = LocalFileStorage::find_resume_state(
+            &output_dir,
+            &header.file_name,
+            header.file_size,
+            header.chunk_size,
+        )
+        .await?;
+        // A prior fresh attempt recorded where it is landing; honor that name
+        // so resuming it continues beside the original file instead of being
+        // instantly answered by it (field bug: fresh re-send of an already-
+        // present file "completed" in 308ms off the existing final, with the
+        // fresh request silently ignored).
+        let mut target_name = resume_state
+            .as_ref()
+            .and_then(|state| state.target_file_name.clone())
+            .unwrap_or_else(|| header.file_name.clone());
+        if fs::try_exists(output_dir.join(&target_name)).await? {
+            if header.resume_requested {
+                let final_path = output_dir.join(&target_name);
+                return receive_existing_final(connection, header, final_path, events).await;
+            }
+            // A fresh send must move real bytes: never answer it from an
+            // existing same-name final - land beside it under a free name.
+            target_name = unique_final_name(&output_dir, &header.file_name).await?;
         }
-        let final_path = output_dir.join(&header.file_name);
-        if fs::try_exists(&final_path).await? {
-            return receive_existing_final(connection, header, final_path, events).await;
-        }
+        let final_path = output_dir.join(&target_name);
         // The file itself may have been moved/published away after completion;
         // its receipt then re-confirms a re-offer without any bytes re-sent.
         // Gated on resume_requested so a --fresh send forces a real re-receive,
@@ -527,34 +537,26 @@ impl TransferEngine {
         // previously-completed file "completed" instantly off the old receipt,
         // orphaning the partial and delivering nothing).
         if header.resume_requested
-            && LocalFileStorage::find_resume_state(
-                &output_dir,
-                &header.file_name,
-                header.file_size,
-                header.chunk_size,
-            )
-            .await?
-            .is_none()
+            && resume_state.is_none()
             && let Some(receipt) =
                 LocalFileStorage::read_receipt(&output_dir, &header.file_name).await?
-            && receipt.transfer_id == header.transfer_id
             && receipt.file_size == header.file_size
         {
             return receive_from_receipt(connection, header, receipt, events).await;
         }
 
-        let prepared =
-            match prepare_receive_state(&output_dir, &header, events, sender_chunk_size).await {
-                Ok(prepared) => prepared,
-                Err(error) => {
-                    notify_error(connection, &error).await;
-                    return Err(error);
-                }
-            };
+        let prepared = prepare_receive_state(
+            &output_dir,
+            &header,
+            resume_state,
+            &target_name,
+            events,
+            self.chunk_size,
+        )
+        .await?;
         let temp_path = prepared.temp_path;
         let mut file = prepared.file;
         let mut hasher = prepared.hasher;
-        let _resume_lease = prepared.resume_lease;
 
         send_resume_status(
             connection,
@@ -576,7 +578,6 @@ impl TransferEngine {
         let mut expected_index = prepared.state.next_chunk_index;
         let mut expected_offset = prepared.state.bytes_received;
         let mut last_resume_state_bytes = prepared.state.bytes_received;
-        let mut last_resume_state_at = Instant::now();
         events.on_event(TransferEvent::Progress {
             transfer_id: header.transfer_id.clone(),
             bytes_transferred: expected_offset,
@@ -591,12 +592,12 @@ impl TransferEngine {
                     write_resume_state_for_offset(
                         &output_dir,
                         &header,
+                        &target_name,
                         expected_offset,
                         expected_index,
                         Some(hasher.finalize().to_hex().to_string()),
                     )
                     .await?;
-                    notify_error(connection, &error).await;
                     return Err(error);
                 }
             };
@@ -609,99 +610,45 @@ impl TransferEngine {
                         expected_index = 0;
                         expected_offset = 0;
                         last_resume_state_bytes = 0;
-                        last_resume_state_at = Instant::now();
                         hasher = blake3::Hasher::new();
-                        write_resume_state_for_offset(&output_dir, &header, 0, 0, None).await?;
-                    }
-                    if let Err(error) = validate_chunk(
-                        &chunk,
-                        &header.transfer_id,
-                        expected_index,
-                        expected_offset,
-                        sender_chunk_size,
-                    ) {
-                        report_receive_failure(
-                            connection,
-                            &mut file,
+                        write_resume_state_for_offset(
                             &output_dir,
                             &header,
-                            expected_offset,
-                            expected_index,
-                            Some(hasher.clone().finalize().to_hex().to_string()),
-                            &error,
+                            &target_name,
+                            0,
+                            0,
+                            None,
                         )
-                        .await;
-                        return Err(error);
+                        .await?;
                     }
+                    validate_chunk(&chunk, &header.transfer_id, expected_index, expected_offset)?;
                     if chunk.bytes.len() as u64 + expected_offset > header.file_size {
-                        let error = CoreError::Transfer(format!(
+                        return Err(CoreError::Transfer(format!(
                             "chunk data exceeds expected file size: chunk offset {} + data length {} > expected file size {}",
                             chunk.offset,
                             chunk.bytes.len(),
                             header.file_size
-                        ));
-                        report_receive_failure(
-                            connection,
-                            &mut file,
-                            &output_dir,
-                            &header,
-                            expected_offset,
-                            expected_index,
-                            Some(hasher.clone().finalize().to_hex().to_string()),
-                            &error,
-                        )
-                        .await;
-                        return Err(error);
+                        )));
                     }
-                    if let Err(error) = file.write_all(&chunk.bytes).await {
-                        let error = TransferError::from(error);
-                        report_receive_failure(
-                            connection,
-                            &mut file,
-                            &output_dir,
-                            &header,
-                            expected_offset,
-                            expected_index,
-                            Some(hasher.clone().finalize().to_hex().to_string()),
-                            &error,
-                        )
-                        .await;
-                        return Err(error);
-                    }
+                    file.write_all(&chunk.bytes).await?;
                     hasher.update(&chunk.bytes);
 
                     expected_index += 1;
                     expected_offset += chunk.bytes.len() as u64;
-                    if should_checkpoint_resume_state(
-                        expected_offset,
-                        last_resume_state_bytes,
-                        last_resume_state_at.elapsed(),
-                    ) {
+                    if expected_offset.saturating_sub(last_resume_state_bytes)
+                        >= RESUME_STATE_WRITE_INTERVAL
+                    {
                         file.flush().await?;
-                        if let Err(error) = write_resume_state_for_offset(
+                        write_resume_state_for_offset(
                             &output_dir,
                             &header,
+                            &target_name,
                             expected_offset,
                             expected_index,
                             Some(hasher.finalize().to_hex().to_string()),
                         )
-                        .await
-                        {
-                            report_receive_failure(
-                                connection,
-                                &mut file,
-                                &output_dir,
-                                &header,
-                                expected_offset,
-                                expected_index,
-                                Some(hasher.clone().finalize().to_hex().to_string()),
-                                &error,
-                            )
-                            .await;
-                            return Err(error);
-                        }
+                        .await?;
                         last_resume_state_bytes = expected_offset;
-                        last_resume_state_at = Instant::now();
                     }
                     events.on_event(TransferEvent::Progress {
                         transfer_id: header.transfer_id.clone(),
@@ -715,7 +662,9 @@ impl TransferEngine {
                     // frame before returning: otherwise the sender's close-race
                     // tolerance would take a real failure (size/hash mismatch,
                     // finalize/rename error) for the benign ack-lost-on-close race.
-                    if let Err(error) = finalize_received_file(
+                    // The claim may land under a later name than the one
+                    // selected at start (see finalize_received_file).
+                    let target_name = match finalize_received_file(
                         &header,
                         &output_dir,
                         &temp_path,
@@ -728,52 +677,39 @@ impl TransferEngine {
                     )
                     .await
                     {
-                        notify_error(connection, &error).await;
-                        return Err(error);
+                        Ok(landed) => landed,
+                        Err(error) => {
+                            notify_error(connection, &error).await;
+                            return Err(error);
+                        }
+                    };
+                    // The file is finalized - a durable fact. The ack is
+                    // best-effort from here: if the path died, suppressing
+                    // Completed would also suppress the mailbox receipt post,
+                    // which exists precisely for the lost-ack case.
+                    if let Err(error) = send_complete_ack(connection, &header.transfer_id).await {
+                        tracing::warn!(
+                            %error,
+                            "complete ack undeliverable; sender will learn via mailbox"
+                        );
                     }
-                    send_complete_ack(connection, &header.transfer_id).await?;
                     events.on_event(TransferEvent::Completed {
                         transfer_id: header.transfer_id.clone(),
-                        file_name: header.file_name.clone(),
+                        file_name: target_name.clone(),
                         bytes_transferred: expected_offset,
                     });
 
                     return Ok(TransferSummary {
                         transfer_id: header.transfer_id,
-                        file_name: header.file_name,
+                        file_name: target_name,
                         bytes_transferred: expected_offset,
                     });
                 }
-                Frame::Error(error) => {
-                    let error = peer_error(error);
-                    persist_receive_failure(
-                        &mut file,
-                        &output_dir,
-                        &header,
-                        expected_offset,
-                        expected_index,
-                        Some(hasher.clone().finalize().to_hex().to_string()),
-                        &error,
-                    )
-                    .await;
-                    return Err(error);
-                }
+                Frame::Error(error) => return Err(peer_error(error)),
                 frame => {
-                    let error = CoreError::Transfer(format!(
+                    return Err(CoreError::Transfer(format!(
                         "unexpected frame while receiving chunks: {frame:?}"
-                    ));
-                    report_receive_failure(
-                        connection,
-                        &mut file,
-                        &output_dir,
-                        &header,
-                        expected_offset,
-                        expected_index,
-                        Some(hasher.clone().finalize().to_hex().to_string()),
-                        &error,
-                    )
-                    .await;
-                    return Err(error);
+                    )));
                 }
             }
         }
@@ -856,18 +792,24 @@ async fn recv_frame_or_cancel(
     }
 }
 
-async fn recv_frame_with_timeout(
+async fn recv_frame_or_cancel_with_timeout(
     connection: &mut dyn FrameConnection,
+    cancel: &TransferCancelToken,
     timeout: Duration,
 ) -> Result<Frame, TransferError> {
     tokio::select! {
         frame = connection.recv_frame() => frame,
+        () = cancel.cancelled() => {
+            notify_interrupted(connection, cancel).await;
+            Err(interrupted_error(cancel))
+        }
         () = tokio::time::sleep(timeout) => Err(CoreError::Transfer(format!(
             "receiver did not confirm completion within {} seconds; retry may resume the transfer",
             timeout.as_secs()
         ))),
     }
 }
+
 async fn check_cancelled(
     connection: &mut dyn FrameConnection,
     cancel: &TransferCancelToken,
@@ -897,7 +839,7 @@ async fn finalize_received_file(
     complete: &Complete,
     expected_offset: u64,
     expected_index: u64,
-) -> Result<(), TransferError> {
+) -> Result<String, TransferError> {
     if expected_offset != header.file_size {
         return Err(CoreError::Transfer(format!(
             "transfer complete but expected offset {expected_offset} does not match file size {}",
@@ -905,10 +847,18 @@ async fn finalize_received_file(
         )));
     }
     file.flush().await?;
+    // The landing name: differs from header.file_name for a fresh re-receive
+    // beside an existing same-name final.
+    let mut target_name = final_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(&header.file_name)
+        .to_owned();
     let actual_hash = hasher.finalize().to_hex().to_string();
     write_resume_state_for_offset(
         output_dir,
         header,
+        &target_name,
         expected_offset,
         expected_index,
         Some(actual_hash.clone()),
@@ -921,7 +871,13 @@ async fn finalize_received_file(
             complete.file_hash
         )));
     }
-    LocalFileStorage::finalize_temp_file(temp_path, final_path).await?;
+    // Claim the destination atomically; the name selected at receive start is
+    // an observation, not ownership, and the namespace may have moved on
+    // (another finalizer, the user, another app). A refused claim takes the
+    // next free name instead of failing a completed transfer.
+    while !LocalFileStorage::finalize_temp_file(temp_path, &output_dir.join(&target_name)).await? {
+        target_name = unique_final_name(output_dir, &header.file_name).await?;
+    }
     LocalFileStorage::delete_resume_state(output_dir, &header.file_name, &header.transfer_id)
         .await?;
     // Durable completion receipt: survives the final file being moved/published
@@ -931,13 +887,13 @@ async fn finalize_received_file(
         output_dir,
         &TransferReceipt {
             transfer_id: header.transfer_id.clone(),
-            file_name: header.file_name.clone(),
+            file_name: target_name.clone(),
             file_size: header.file_size,
             file_hash: actual_hash,
         },
     )
     .await?;
-    Ok(())
+    Ok(target_name)
 }
 
 /// Best-effort notify the peer of a terminal error, so the sender can tell a real
@@ -949,63 +905,6 @@ async fn notify_error(connection: &mut dyn FrameConnection, error: &TransferErro
             message: error.to_string(),
         }))
         .await;
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn report_receive_failure(
-    connection: &mut dyn FrameConnection,
-    file: &mut fs::File,
-    output_dir: &Path,
-    header: &FileHeader,
-    bytes_received: u64,
-    next_chunk_index: u64,
-    hash_checkpoint: Option<String>,
-    error: &TransferError,
-) {
-    persist_receive_failure(
-        file,
-        output_dir,
-        header,
-        bytes_received,
-        next_chunk_index,
-        hash_checkpoint,
-        error,
-    )
-    .await;
-    notify_error(connection, error).await;
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn persist_receive_failure(
-    file: &mut fs::File,
-    output_dir: &Path,
-    header: &FileHeader,
-    bytes_received: u64,
-    next_chunk_index: u64,
-    hash_checkpoint: Option<String>,
-    error: &TransferError,
-) {
-    if let Err(flush_error) = file.flush().await {
-        tracing::warn!(%flush_error, "failed to flush partial file after receive error");
-    }
-    if let Err(state_error) = write_resume_state_for_offset(
-        output_dir,
-        header,
-        bytes_received,
-        next_chunk_index,
-        hash_checkpoint,
-    )
-    .await
-    {
-        tracing::warn!(%state_error, "failed to write resume state after receive error");
-    }
-    tracing::warn!(
-        transfer_id = %header.transfer_id,
-        file = %header.file_name,
-        bytes_received,
-        %error,
-        "receive failed before completion"
-    );
 }
 
 async fn notify_interrupted(connection: &mut dyn FrameConnection, cancel: &TransferCancelToken) {
@@ -1054,7 +953,6 @@ fn validate_chunk(
     transfer_id: &TransferId,
     expected_index: u64,
     expected_offset: u64,
-    sender_chunk_size: usize,
 ) -> Result<(), TransferError> {
     if &chunk.transfer_id != transfer_id {
         return Err(CoreError::Transfer(format!(
@@ -1074,21 +972,13 @@ fn validate_chunk(
             chunk.offset
         )));
     }
-    if chunk.bytes.is_empty() {
-        return Err(CoreError::Transfer("chunk data must not be empty".into()));
-    }
-    if chunk.bytes.len() > sender_chunk_size {
-        return Err(CoreError::Transfer(format!(
-            "chunk data length {} exceeds declared chunk size {sender_chunk_size}",
-            chunk.bytes.len()
-        )));
-    }
     Ok(())
 }
 
 async fn write_resume_state_for_offset(
     output_dir: &Path,
     header: &FileHeader,
+    target_name: &str,
     bytes_received: u64,
     next_chunk_index: u64,
     hash_checkpoint: Option<String>,
@@ -1104,6 +994,7 @@ async fn write_resume_state_for_offset(
             next_chunk_index,
             hash_bytes: bytes_received,
             hash_checkpoint,
+            target_file_name: (target_name != header.file_name).then(|| target_name.to_owned()),
         },
     )
     .await
@@ -1115,12 +1006,13 @@ struct PreparedReceive {
     file: fs::File,
     hasher: blake3::Hasher,
     prefix_hash: String,
-    resume_lease: ResumeLease,
 }
 
 async fn prepare_receive_state(
     output_dir: &Path,
     header: &FileHeader,
+    resume_state: Option<TransferResumeState>,
+    target_name: &str,
     events: &dyn EventSink,
     buffer_size: usize,
 ) -> Result<PreparedReceive, TransferError> {
@@ -1128,31 +1020,10 @@ async fn prepare_receive_state(
         return Err(CoreError::Transfer("chunk size must be positive".into()));
     }
 
-    let (state, resume_lease) = if header.resume_requested {
-        match LocalFileStorage::find_resume_state(
-            output_dir,
-            &header.file_name,
-            header.file_size,
-            header.chunk_size,
-        )
-        .await?
-        {
-            Some(state) => match LocalFileStorage::try_acquire_resume_lease(
-                output_dir,
-                &state.file_name,
-                &state.transfer_id,
-            )? {
-                Some(mut lease) => {
-                    match prepare_existing_resume_state(output_dir, header, state, &mut lease)
-                        .await?
-                    {
-                        Some(state) => (state, lease),
-                        None => {
-                            drop(lease);
-                            fresh_resume_state(output_dir, header).await?
-                        }
-                    }
-                }
+    let state = if header.resume_requested {
+        match resume_state {
+            Some(state) => match prepare_existing_resume_state(output_dir, header, state).await? {
+                Some(state) => state,
                 None => fresh_resume_state(output_dir, header).await?,
             },
             None => fresh_resume_state(output_dir, header).await?,
@@ -1179,6 +1050,7 @@ async fn prepare_receive_state(
     write_resume_state_for_offset(
         output_dir,
         header,
+        target_name,
         state.bytes_received,
         state.next_chunk_index,
         Some(prefix_hash.clone()),
@@ -1193,7 +1065,6 @@ async fn prepare_receive_state(
         file,
         hasher,
         prefix_hash,
-        resume_lease,
     })
 }
 
@@ -1201,7 +1072,6 @@ async fn prepare_existing_resume_state(
     output_dir: &Path,
     header: &FileHeader,
     mut state: TransferResumeState,
-    resume_lease: &mut ResumeLease,
 ) -> Result<Option<TransferResumeState>, TransferError> {
     if state.bytes_received > state.file_size {
         tracing::warn!(
@@ -1253,7 +1123,6 @@ async fn prepare_existing_resume_state(
     }
 
     state.transfer_id = header.transfer_id.clone();
-    resume_lease.rebind(output_dir, &state.file_name, &state.transfer_id)?;
     LocalFileStorage::rebind_resume_temp(
         output_dir,
         &state.file_name,
@@ -1280,10 +1149,31 @@ async fn delete_resume_candidate(
     LocalFileStorage::delete_resume_state(output_dir, &state.file_name, &state.transfer_id).await
 }
 
+/// First `name (n).ext` (n = 1, 2, ...) that does not exist in `output_dir`;
+/// used when a fresh receive must land beside an existing same-name final.
+async fn unique_final_name(output_dir: &Path, file_name: &str) -> Result<String, TransferError> {
+    let (stem, extension) = match file_name.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() => (stem, Some(extension)),
+        _ => (file_name, None),
+    };
+    for n in 1..=9999u32 {
+        let candidate = match extension {
+            Some(extension) => format!("{stem} ({n}).{extension}"),
+            None => format!("{stem} ({n})"),
+        };
+        if !fs::try_exists(output_dir.join(&candidate)).await? {
+            return Ok(candidate);
+        }
+    }
+    Err(CoreError::Storage(format!(
+        "no free landing name for {file_name}"
+    )))
+}
+
 async fn fresh_resume_state(
     output_dir: &Path,
     header: &FileHeader,
-) -> Result<(TransferResumeState, ResumeLease), TransferError> {
+) -> Result<TransferResumeState, TransferError> {
     let state = TransferResumeState {
         transfer_id: header.transfer_id.clone(),
         file_name: header.file_name.clone(),
@@ -1293,18 +1183,8 @@ async fn fresh_resume_state(
         next_chunk_index: 0,
         hash_bytes: 0,
         hash_checkpoint: None,
+        target_file_name: None,
     };
-    let resume_lease = LocalFileStorage::try_acquire_resume_lease(
-        output_dir,
-        &state.file_name,
-        &state.transfer_id,
-    )?
-    .ok_or_else(|| {
-        CoreError::Transfer(format!(
-            "transfer {} is already receiving {}",
-            state.transfer_id, state.file_name
-        ))
-    })?;
     LocalFileStorage::delete_resume_temp(output_dir, &state.file_name, &state.transfer_id).await?;
     LocalFileStorage::write_resume_state(output_dir, &state).await?;
     let temp_path =
@@ -1312,7 +1192,7 @@ async fn fresh_resume_state(
     let file = fs::File::create(temp_path).await?;
     file.sync_data().await?;
 
-    Ok((state, resume_lease))
+    Ok(state)
 }
 
 async fn receive_existing_final(
@@ -1364,17 +1244,45 @@ async fn receive_existing_final(
         }
     }
 
-    send_complete_ack(connection, &header.transfer_id).await?;
+    let file_name = final_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_owned)
+        .unwrap_or(header.file_name.clone());
+    // Crash repair BEFORE the ack: finalize commits the file before it writes
+    // the receipt, so a death in between leaves possession without proof -
+    // and PostReceipt seals from the on-disk receipt, so a missing one makes
+    // the confirmation duty undischargeable forever. Recovery must repair,
+    // not just read; the write is an idempotent overwrite when all is well.
+    if let Some(output_dir) = final_path.parent() {
+        LocalFileStorage::write_receipt(
+            output_dir,
+            &TransferReceipt {
+                transfer_id: header.transfer_id.clone(),
+                file_name: file_name.clone(),
+                file_size: header.file_size,
+                file_hash: final_hash.clone(),
+            },
+        )
+        .await?;
+    }
+
+    // Possession is already durable; the ack is best-effort (see the
+    // receive loop: suppressing Completed here would suppress the mailbox
+    // receipt post the lost-ack design depends on).
+    if let Err(error) = send_complete_ack(connection, &header.transfer_id).await {
+        tracing::warn!(%error, "complete ack undeliverable; sender will learn via mailbox");
+    }
 
     events.on_event(TransferEvent::Completed {
         transfer_id: header.transfer_id.clone(),
-        file_name: header.file_name.clone(),
+        file_name: file_name.clone(),
         bytes_transferred: header.file_size,
     });
 
     Ok(TransferSummary {
         transfer_id: header.transfer_id,
-        file_name: header.file_name,
+        file_name,
         bytes_transferred: header.file_size,
     })
 }
@@ -1426,17 +1334,19 @@ async fn receive_from_receipt(
         }
     }
 
-    send_complete_ack(connection, &header.transfer_id).await?;
+    if let Err(error) = send_complete_ack(connection, &header.transfer_id).await {
+        tracing::warn!(%error, "complete ack undeliverable; sender will learn via mailbox");
+    }
 
     events.on_event(TransferEvent::Completed {
         transfer_id: header.transfer_id.clone(),
-        file_name: header.file_name.clone(),
+        file_name: receipt.file_name.clone(),
         bytes_transferred: header.file_size,
     });
 
     Ok(TransferSummary {
         transfer_id: header.transfer_id,
-        file_name: header.file_name,
+        file_name: receipt.file_name,
         bytes_transferred: header.file_size,
     })
 }
@@ -1573,19 +1483,21 @@ where
     Ok(filled)
 }
 
-fn validate_header(header: &FileHeader) -> Result<usize, TransferError> {
-    let sender_chunk_size = usize::try_from(header.chunk_size)
-        .map_err(|_| CoreError::Transfer("chunk size exceeds this platform's limits".into()))?;
-    if sender_chunk_size == 0 {
+fn validate_header(header: &FileHeader, receiver_chunk_size: usize) -> Result<(), TransferError> {
+    if receiver_chunk_size == 0 {
         return Err(CoreError::Transfer("chunk size must be positive".into()));
     }
-    if sender_chunk_size > MAX_CHUNK_SIZE {
+    if header.chunk_size == 0 {
+        return Err(CoreError::Transfer("chunk size must be positive".into()));
+    }
+    if header.chunk_size != receiver_chunk_size as u64 {
         return Err(CoreError::Transfer(format!(
-            "chunk size {sender_chunk_size} exceeds maximum {MAX_CHUNK_SIZE}"
+            "sender chunk size {} does not match receiver chunk size {receiver_chunk_size}",
+            header.chunk_size
         )));
     }
     LocalFileStorage::resumable_temp_path(Path::new("."), &header.file_name, &header.transfer_id)?;
-    Ok(sender_chunk_size)
+    Ok(())
 }
 
 fn random_transfer_id() -> Result<TransferId, TransferError> {
@@ -1606,15 +1518,6 @@ fn next_chunk_index(bytes_received: u64, chunk_size: u64) -> u64 {
     }
 }
 
-fn should_checkpoint_resume_state(
-    bytes_received: u64,
-    last_checkpoint_bytes: u64,
-    elapsed: Duration,
-) -> bool {
-    bytes_received.saturating_sub(last_checkpoint_bytes) >= RESUME_STATE_WRITE_INTERVAL_BYTES
-        || elapsed >= RESUME_STATE_WRITE_INTERVAL_TIME
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1625,25 +1528,6 @@ mod tests {
     use std::task::{Context, Poll};
     use tokio::io::ReadBuf;
     use tokio::sync::mpsc;
-
-    #[test]
-    fn resume_checkpoint_is_bounded_by_bytes_or_time() {
-        assert!(!should_checkpoint_resume_state(
-            RESUME_STATE_WRITE_INTERVAL_BYTES - 1,
-            0,
-            RESUME_STATE_WRITE_INTERVAL_TIME - Duration::from_millis(1),
-        ));
-        assert!(should_checkpoint_resume_state(
-            RESUME_STATE_WRITE_INTERVAL_BYTES,
-            0,
-            Duration::ZERO,
-        ));
-        assert!(should_checkpoint_resume_state(
-            1,
-            0,
-            RESUME_STATE_WRITE_INTERVAL_TIME,
-        ));
-    }
 
     #[tokio::test]
     async fn read_full_chunk_accumulates_short_reads() {
@@ -1741,7 +1625,6 @@ mod tests {
             .unwrap()
             .expect("finalize writes a receipt");
         assert_eq!(receipt.file_name, "receipt.txt");
-        assert!(!receipt.transfer_id.0.is_empty());
         assert_eq!(receipt.file_size, 10);
         assert_eq!(
             receipt.file_hash,
@@ -1750,7 +1633,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn new_transfer_ignores_stale_receipt_and_recreates_missing_file() {
+    async fn reoffer_with_receipt_completes_without_resend() {
         let root = unique_test_dir();
         let source_dir = root.join("source");
         let output_dir = root.join("output");
@@ -1767,8 +1650,7 @@ mod tests {
             .await
             .unwrap();
 
-        // A later send gets a new transfer id. The stale receipt must not make
-        // this operation claim success without recreating the missing file.
+        // Re-offer: both sides complete, re-delivering the CompleteAck...
         let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
         let receiver = tokio::spawn({
             let output_dir = output_dir.clone();
@@ -1781,66 +1663,23 @@ mod tests {
         let send_summary = TransferEngine::new(4)
             .send_file(&mut sender_connection, source_path, true, &NoopEventSink)
             .await
-            .expect("new transfer completes");
-        let receive_summary = receiver.await.unwrap().expect("receive completes");
+            .expect("re-offer against a receipt completes");
+        let receive_summary = receiver
+            .await
+            .unwrap()
+            .expect("receipted receive completes");
         assert_eq!(send_summary.bytes_transferred, 24);
         assert_eq!(receive_summary.bytes_transferred, 24);
-        assert_eq!(
-            tokio::fs::read(output_dir.join("moved.bin")).await.unwrap(),
-            b"published and moved away"
-        );
-    }
 
-    #[tokio::test]
-    async fn same_transfer_receipt_reconfirms_without_resending_bytes() {
-        let root = unique_test_dir();
-        let output_dir = root.join("output");
-        tokio::fs::create_dir_all(&output_dir).await.unwrap();
-        let content = b"ack retry needs no file resend";
-        let file_hash = blake3::hash(content).to_hex().to_string();
-        LocalFileStorage::write_receipt(
-            &output_dir,
-            &TransferReceipt {
-                transfer_id: TransferId::new("manual-transfer"),
-                file_name: "ack-retry.bin".into(),
-                file_size: content.len() as u64,
-                file_hash: file_hash.clone(),
-            },
-        )
-        .await
-        .unwrap();
-
-        let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
-        let receiver = tokio::spawn({
-            let output_dir = output_dir.clone();
-            async move {
-                TransferEngine::new(4)
-                    .receive_file(&mut receiver_connection, output_dir, &NoopEventSink)
-                    .await
-            }
-        });
-        manual_send(
-            &mut sender_connection,
-            ManualSend {
-                file_name: "ack-retry.bin",
-                source_bytes: content,
-                chunk_size: 4,
-                resume_requested: true,
-                bytes_to_send: content,
-                complete_hash: file_hash,
-                expected_resume_bytes: content.len() as u64,
-            },
-        )
-        .await;
-
-        let summary = receiver.await.unwrap().expect("receipt retry completes");
-        assert_eq!(summary.bytes_transferred, content.len() as u64);
-        assert!(
-            !tokio::fs::try_exists(output_dir.join("ack-retry.bin"))
-                .await
-                .unwrap(),
-            "same-transfer receipt confirmation must not rewrite the file"
-        );
+        // ...without recreating the file or writing any temp — zero bytes moved.
+        let mut entries = tokio::fs::read_dir(&output_dir).await.unwrap();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            assert!(
+                name.starts_with(".envoix-receipt."),
+                "unexpected file recreated by receipted re-offer: {name}"
+            );
+        }
     }
 
     /// Field bug: a receipt from an EARLIER completed transfer must not
@@ -1873,6 +1712,7 @@ mod tests {
             next_chunk_index: 2,
             hash_bytes: 0,
             hash_checkpoint: None,
+            target_file_name: None,
         };
         LocalFileStorage::write_resume_state(&output_dir, &state)
             .await
@@ -1905,7 +1745,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn new_transfer_with_different_content_replaces_stale_receipt() {
+    async fn reoffer_with_different_content_is_refused() {
         let root = unique_test_dir();
         let source_dir = root.join("source");
         let output_dir = root.join("output");
@@ -1938,11 +1778,11 @@ mod tests {
             .await;
         let receive_result = receiver.await.unwrap();
 
-        send_result.expect("new transfer must not be blocked by a stale receipt");
-        receive_result.expect("receiver accepts the new transfer identity");
-        assert_eq!(
-            tokio::fs::read(output_dir.join("swap.bin")).await.unwrap(),
-            b"altered contents"
+        assert!(send_result.is_err(), "sender must not report success");
+        let error = receive_result.unwrap_err();
+        assert!(
+            matches!(&error, CoreError::Storage(m) if m.contains("different content")),
+            "unexpected receiver error: {error:?}"
         );
     }
 
@@ -1984,7 +1824,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accepts_sender_chunk_size_when_receiver_configuration_differs() {
+    async fn rejects_sender_receiver_chunk_size_mismatch() {
         let root = unique_test_dir();
         let source_dir = root.join("source");
         let output_dir = root.join("output");
@@ -2004,24 +1844,23 @@ mod tests {
             }
         });
 
-        let send = TransferEngine::new(4)
+        let send_error = TransferEngine::new(4)
             .send_file(&mut sender_connection, source_path, false, &NoopEventSink)
-            .await;
-        let received = receiver.await.unwrap();
+            .await
+            .unwrap_err();
+        let receive_error = receiver.await.unwrap().unwrap_err();
 
-        assert!(send.is_ok());
-        assert!(received.is_ok());
-        assert_eq!(
-            tokio::fs::read(output_dir.join("mismatch.txt"))
-                .await
-                .unwrap(),
-            b"chunk size mismatch"
-        );
+        assert!(matches!(
+            send_error,
+            CoreError::Transport(_) | CoreError::Transfer(_)
+        ));
+        assert!(matches!(receive_error, CoreError::Transfer(_)));
         assert!(
-            fs::try_exists(output_dir.join(".envoix-receipt.mismatch.txt.json"))
+            !fs::try_exists(output_dir.join("mismatch.txt"))
                 .await
                 .unwrap()
         );
+        assert_no_sidecars(&output_dir).await;
     }
 
     #[tokio::test]
@@ -2138,54 +1977,6 @@ mod tests {
             "sender must fail when the receiver never sends CompleteAck"
         );
         receiver.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn cancellation_after_complete_waits_for_the_receiver_ack() {
-        let root = unique_test_dir();
-        let source_dir = root.join("source");
-        tokio::fs::create_dir_all(&source_dir).await.unwrap();
-        let source_path = source_dir.join("finalizing.txt");
-        tokio::fs::write(
-            &source_path,
-            b"the receiver may already have finalized this",
-        )
-        .await
-        .unwrap();
-
-        let (sender_connection, mut receiver_connection) = memory_connection_pair();
-        let cancel = TransferCancelToken::new();
-        let sender_cancel = cancel.clone();
-        let sender = tokio::spawn(async move {
-            let mut sender_connection = sender_connection;
-            TransferEngine::new(4)
-                .send_file_with_cancel(
-                    &mut sender_connection,
-                    source_path,
-                    false,
-                    &NoopEventSink,
-                    &cancel,
-                )
-                .await
-        });
-
-        let transfer_id = receive_header_and_resume(&mut receiver_connection).await;
-        loop {
-            match receiver_connection.recv_frame().await.unwrap() {
-                Frame::Chunk(_) => {}
-                Frame::Complete(complete) => {
-                    assert_eq!(complete.transfer_id, transfer_id);
-                    break;
-                }
-                other => panic!("unexpected frame while draining: {other:?}"),
-            }
-        }
-        sender_cancel.cancel();
-        send_complete_ack(&mut receiver_connection, &transfer_id)
-            .await
-            .unwrap();
-
-        assert!(sender.await.unwrap().is_ok());
     }
 
     #[tokio::test]
@@ -2414,76 +2205,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn peer_pause_flushes_current_prefix_for_resume() {
-        let root = unique_test_dir();
-        let output_dir = root.join("output");
-        tokio::fs::create_dir_all(&output_dir).await.unwrap();
-
-        let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
-        let receive_dir = output_dir.clone();
-        let receiver = tokio::spawn(async move {
-            TransferEngine::new(4)
-                .receive_file(&mut receiver_connection, receive_dir, &NoopEventSink)
-                .await
-        });
-        let transfer_id = TransferId::new("peer-pause-prefix");
-        sender_connection
-            .send_frame(Frame::Hello(Hello {
-                protocol_version: PROTOCOL_VERSION,
-                role: PeerRole::Sender,
-            }))
-            .await
-            .unwrap();
-        expect_ready(sender_connection.recv_frame().await.unwrap()).unwrap();
-        sender_connection
-            .send_frame(Frame::FileHeader(FileHeader {
-                transfer_id: transfer_id.clone(),
-                file_name: "resume.bin".into(),
-                file_size: 8,
-                chunk_size: 4,
-                resume_requested: true,
-            }))
-            .await
-            .unwrap();
-        expect_resume_status(
-            sender_connection.recv_frame().await.unwrap(),
-            &transfer_id,
-            4,
-        )
-        .unwrap();
-        sender_connection
-            .send_frame(Frame::Chunk(Chunk {
-                transfer_id: transfer_id.clone(),
-                index: 0,
-                offset: 0,
-                bytes: b"abcd".to_vec(),
-            }))
-            .await
-            .unwrap();
-        sender_connection
-            .send_frame(Frame::Error(ErrorFrame {
-                message: USER_PAUSE_MESSAGE.into(),
-            }))
-            .await
-            .unwrap();
-
-        let error = receiver.await.unwrap().unwrap_err();
-        assert!(matches!(
-            error,
-            CoreError::Transfer(message) if message == PEER_PAUSE_MESSAGE
-        ));
-        let state = LocalFileStorage::read_resume_state(&output_dir, "resume.bin", &transfer_id)
-            .await
-            .unwrap()
-            .expect("peer pause must preserve resume state");
-        assert_eq!(state.bytes_received, 4);
-        assert_eq!(state.next_chunk_index, 1);
-        let partial =
-            LocalFileStorage::resumable_temp_path(&output_dir, "resume.bin", &transfer_id).unwrap();
-        assert_eq!(tokio::fs::read(partial).await.unwrap(), b"abcd");
-    }
-
-    #[tokio::test]
     async fn sender_reports_explicit_peer_interrupt() {
         let root = unique_test_dir();
         let source_dir = root.join("source");
@@ -2526,43 +2247,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sender_observes_peer_pause_during_chunk_stream() {
-        let root = unique_test_dir();
-        let source_dir = root.join("source");
-        tokio::fs::create_dir_all(&source_dir).await.unwrap();
-        let source_path = source_dir.join("peer-pause.bin");
-        tokio::fs::write(&source_path, vec![7_u8; 256])
-            .await
-            .unwrap();
-
-        let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
-        let receiver = tokio::spawn(async move {
-            receive_header_and_resume(&mut receiver_connection).await;
-            assert!(matches!(
-                receiver_connection.recv_frame().await.unwrap(),
-                Frame::Chunk(_)
-            ));
-            receiver_connection
-                .send_frame(Frame::Error(ErrorFrame {
-                    message: USER_PAUSE_MESSAGE.into(),
-                }))
-                .await
-                .unwrap();
-        });
-
-        let error = TransferEngine::new(4)
-            .send_file(&mut sender_connection, source_path, false, &NoopEventSink)
-            .await
-            .unwrap_err();
-
-        receiver.await.unwrap();
-        assert!(matches!(
-            error,
-            CoreError::Transfer(message) if message == PEER_PAUSE_MESSAGE
-        ));
-    }
-
-    #[tokio::test]
     async fn sender_reports_peer_close_during_send() {
         let root = unique_test_dir();
         let source_dir = root.join("source");
@@ -2590,70 +2274,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn receiver_reports_chunk_phase_error_to_sender() {
-        let root = unique_test_dir();
-        let output_dir = root.join("output");
-        tokio::fs::create_dir_all(&output_dir).await.unwrap();
-
-        let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
-        let receiver = tokio::spawn({
-            let output_dir = output_dir.clone();
-            async move {
-                TransferEngine::new(4)
-                    .receive_file(&mut receiver_connection, output_dir, &NoopEventSink)
-                    .await
-            }
-        });
-
-        let transfer_id = TransferId::new("bad-chunk-transfer");
-        sender_connection
-            .send_frame(Frame::Hello(Hello {
-                protocol_version: PROTOCOL_VERSION,
-                role: PeerRole::Sender,
-            }))
-            .await
-            .unwrap();
-        expect_ready(sender_connection.recv_frame().await.unwrap()).unwrap();
-        sender_connection
-            .send_frame(Frame::FileHeader(FileHeader {
-                transfer_id: transfer_id.clone(),
-                file_name: "bad-chunk.txt".into(),
-                file_size: 8,
-                chunk_size: 4,
-                resume_requested: false,
-            }))
-            .await
-            .unwrap();
-        expect_resume_status(
-            sender_connection.recv_frame().await.unwrap(),
-            &transfer_id,
-            4,
-        )
-        .unwrap();
-
-        sender_connection
-            .send_frame(Frame::Chunk(Chunk {
-                transfer_id: transfer_id.clone(),
-                index: 0,
-                offset: 4,
-                bytes: b"oops".to_vec(),
-            }))
-            .await
-            .unwrap();
-
-        let frame = sender_connection.recv_frame().await.unwrap();
-        assert!(matches!(
-            frame,
-            Frame::Error(ErrorFrame { message }) if message.contains("chunk offset")
-        ));
-        let receive_error = receiver.await.unwrap().unwrap_err();
-        assert!(matches!(
-            receive_error,
-            CoreError::Transfer(message) if message.contains("chunk offset")
-        ));
-    }
-
-    #[tokio::test]
     async fn corrupted_temp_prefix_restarts_from_zero() {
         let root = unique_test_dir();
         let source_dir = root.join("source");
@@ -2674,6 +2294,7 @@ mod tests {
             next_chunk_index: 1,
             hash_bytes: 5,
             hash_checkpoint: Some(blake3::hash(b"abcde").to_hex().to_string()),
+            target_file_name: None,
         };
         LocalFileStorage::write_resume_state(&output_dir, &state)
             .await
@@ -2732,6 +2353,7 @@ mod tests {
             next_chunk_index: 0,
             hash_bytes: 0,
             hash_checkpoint: None,
+            target_file_name: None,
         };
         LocalFileStorage::write_resume_state(&output_dir, &state)
             .await
@@ -2784,6 +2406,7 @@ mod tests {
             next_chunk_index: 1,
             hash_bytes: 5,
             hash_checkpoint: Some(blake3::hash(b"abcde").to_hex().to_string()),
+            target_file_name: None,
         };
         LocalFileStorage::write_resume_state(&output_dir, &state)
             .await
@@ -2807,6 +2430,7 @@ mod tests {
         manual_send(
             &mut sender_connection,
             ManualSend {
+                transfer_id: "manual-transfer",
                 file_name: "fresh.txt",
                 source_bytes,
                 chunk_size: 5,
@@ -2842,6 +2466,7 @@ mod tests {
             next_chunk_index: 1,
             hash_bytes: 5,
             hash_checkpoint: Some(blake3::hash(b"abcde").to_hex().to_string()),
+            target_file_name: None,
         };
         LocalFileStorage::write_resume_state(&output_dir, &state)
             .await
@@ -2865,6 +2490,7 @@ mod tests {
         manual_send(
             &mut sender_connection,
             ManualSend {
+                transfer_id: "manual-transfer",
                 file_name: "short-temp.txt",
                 source_bytes,
                 chunk_size: 5,
@@ -2909,6 +2535,7 @@ mod tests {
             next_chunk_index: 7,
             hash_bytes: 5,
             hash_checkpoint: Some(blake3::hash(b"abcde").to_hex().to_string()),
+            target_file_name: None,
         };
         LocalFileStorage::write_resume_state(&output_dir, &state)
             .await
@@ -2925,14 +2552,7 @@ mod tests {
             chunk_size: 5,
             resume_requested: true,
         };
-        let mut lease = LocalFileStorage::try_acquire_resume_lease(
-            &output_dir,
-            "bad-state.txt",
-            &old_transfer_id,
-        )
-        .unwrap()
-        .unwrap();
-        let error = prepare_existing_resume_state(&output_dir, &header, state, &mut lease)
+        let error = prepare_existing_resume_state(&output_dir, &header, state)
             .await
             .unwrap_err();
 
@@ -2946,59 +2566,6 @@ mod tests {
                 .is_some()
         );
         assert!(fs::try_exists(temp_path).await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn concurrent_same_metadata_receive_does_not_steal_active_partial() {
-        let root = unique_test_dir();
-        let output_dir = root.join("output");
-        tokio::fs::create_dir_all(&output_dir).await.unwrap();
-        let old_transfer_id = TransferId::new("old-transfer");
-        let state = TransferResumeState {
-            transfer_id: old_transfer_id.clone(),
-            file_name: "same-name.bin".into(),
-            file_size: 8,
-            chunk_size: 4,
-            bytes_received: 4,
-            next_chunk_index: 1,
-            hash_bytes: 4,
-            hash_checkpoint: Some(blake3::hash(b"abcd").to_hex().to_string()),
-        };
-        LocalFileStorage::write_resume_state(&output_dir, &state)
-            .await
-            .unwrap();
-        let old_temp =
-            LocalFileStorage::resumable_temp_path(&output_dir, "same-name.bin", &old_transfer_id)
-                .unwrap();
-        tokio::fs::write(old_temp, b"abcd").await.unwrap();
-
-        let first_header = FileHeader {
-            transfer_id: TransferId::new("first-active"),
-            file_name: "same-name.bin".into(),
-            file_size: 8,
-            chunk_size: 4,
-            resume_requested: true,
-        };
-        let first = prepare_receive_state(&output_dir, &first_header, &NoopEventSink, 4)
-            .await
-            .unwrap();
-        assert_eq!(first.state.bytes_received, 4);
-
-        let second_header = FileHeader {
-            transfer_id: TransferId::new("second-active"),
-            file_name: "same-name.bin".into(),
-            file_size: 8,
-            chunk_size: 4,
-            resume_requested: true,
-        };
-        let second = prepare_receive_state(&output_dir, &second_header, &NoopEventSink, 4)
-            .await
-            .unwrap();
-
-        assert_eq!(second.state.bytes_received, 0);
-        assert_ne!(first.temp_path, second.temp_path);
-        assert_eq!(tokio::fs::read(&first.temp_path).await.unwrap(), b"abcd");
-        assert_eq!(tokio::fs::read(&second.temp_path).await.unwrap(), b"");
     }
 
     #[tokio::test]
@@ -3021,6 +2588,7 @@ mod tests {
         manual_send(
             &mut sender_connection,
             ManualSend {
+                transfer_id: "manual-transfer",
                 file_name: "bad-hash.txt",
                 source_bytes,
                 chunk_size: 5,
@@ -3077,6 +2645,389 @@ mod tests {
         assert_eq!(receive_summary.bytes_transferred, 12);
     }
 
+    /// Lost-ack window: the sender vanishes right after Complete, before the
+    /// ack can be delivered. The file is finalized (a durable fact), so the
+    /// receive must still complete - suppressing Completed here would also
+    /// suppress the mailbox receipt post that exists for exactly this case.
+    #[tokio::test]
+    async fn receiver_completes_when_the_ack_cannot_be_delivered() {
+        let root = unique_test_dir();
+        let output_dir = root.join("output");
+        tokio::fs::create_dir_all(&output_dir).await.unwrap();
+        let source_bytes = b"abcdefghij";
+
+        let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
+        let receiver = tokio::spawn({
+            let output_dir = output_dir.clone();
+            async move {
+                TransferEngine::new(5)
+                    .receive_file(&mut receiver_connection, output_dir, &NoopEventSink)
+                    .await
+            }
+        });
+
+        let transfer_id = TransferId::new("manual-transfer");
+        sender_connection
+            .send_frame(Frame::Hello(Hello {
+                protocol_version: PROTOCOL_VERSION,
+                role: PeerRole::Sender,
+            }))
+            .await
+            .unwrap();
+        expect_ready(sender_connection.recv_frame().await.unwrap()).unwrap();
+        sender_connection
+            .send_frame(Frame::FileHeader(FileHeader {
+                transfer_id: transfer_id.clone(),
+                file_name: "data.bin".into(),
+                file_size: source_bytes.len() as u64,
+                chunk_size: 5,
+                resume_requested: false,
+            }))
+            .await
+            .unwrap();
+        expect_resume_status(
+            sender_connection.recv_frame().await.unwrap(),
+            &transfer_id,
+            5,
+        )
+        .unwrap();
+        for (index, chunk) in source_bytes.chunks(5).enumerate() {
+            sender_connection
+                .send_frame(Frame::Chunk(Chunk {
+                    transfer_id: transfer_id.clone(),
+                    index: index as u64,
+                    offset: index as u64 * 5,
+                    bytes: chunk.to_vec(),
+                }))
+                .await
+                .unwrap();
+        }
+        sender_connection
+            .send_frame(Frame::Complete(Complete {
+                transfer_id: transfer_id.clone(),
+                file_hash: blake3::hash(source_bytes).to_hex().to_string(),
+            }))
+            .await
+            .unwrap();
+        // The sender dies without reading the ack.
+        drop(sender_connection);
+
+        let summary = receiver
+            .await
+            .unwrap()
+            .expect("finalized receive must complete");
+        assert_eq!(summary.bytes_transferred, source_bytes.len() as u64);
+        assert_eq!(
+            tokio::fs::read(output_dir.join("data.bin")).await.unwrap(),
+            source_bytes
+        );
+    }
+
+    /// PR #48 review P1: two concurrent receives of the same name into one
+    /// directory both selected it, both passed the finalize existence check,
+    /// and the second rename silently REPLACED the first completed file. The
+    /// atomic claim refuses the taken name and the loser lands beside it.
+    #[tokio::test]
+    async fn concurrent_same_name_receives_never_destroy_each_other() {
+        let root = unique_test_dir();
+        let output_dir = root.join("output");
+        tokio::fs::create_dir_all(&output_dir).await.unwrap();
+        let bytes_a = b"aaaaaaaaaa";
+        let bytes_b = b"bbbbbbbbbb";
+
+        let (mut sender_a, mut receiver_conn_a) = memory_connection_pair();
+        let (mut sender_b, mut receiver_conn_b) = memory_connection_pair();
+        let recv_a = tokio::spawn({
+            let dir = output_dir.clone();
+            async move {
+                TransferEngine::new(5)
+                    .receive_file(&mut receiver_conn_a, dir, &NoopEventSink)
+                    .await
+                    .unwrap()
+            }
+        });
+        let recv_b = tokio::spawn({
+            let dir = output_dir.clone();
+            async move {
+                TransferEngine::new(5)
+                    .receive_file(&mut receiver_conn_b, dir, &NoopEventSink)
+                    .await
+                    .unwrap()
+            }
+        });
+
+        // Both offers use the SAME name; neither sees a collision at start
+        // (the dir is empty), so both try to claim "c.bin" at finalize.
+        tokio::join!(
+            manual_send(
+                &mut sender_a,
+                ManualSend {
+                    transfer_id: "transfer-a",
+                    file_name: "c.bin",
+                    source_bytes: bytes_a,
+                    chunk_size: 5,
+                    resume_requested: false,
+                    bytes_to_send: bytes_a,
+                    complete_hash: blake3::hash(bytes_a).to_hex().to_string(),
+                    expected_resume_bytes: 0,
+                },
+            ),
+            manual_send(
+                &mut sender_b,
+                ManualSend {
+                    transfer_id: "transfer-b",
+                    file_name: "c.bin",
+                    source_bytes: bytes_b,
+                    chunk_size: 5,
+                    resume_requested: false,
+                    bytes_to_send: bytes_b,
+                    complete_hash: blake3::hash(bytes_b).to_hex().to_string(),
+                    expected_resume_bytes: 0,
+                },
+            ),
+        );
+        let summary_a = recv_a.await.unwrap();
+        let summary_b = recv_b.await.unwrap();
+
+        let landed_a = tokio::fs::read(output_dir.join(&summary_a.file_name))
+            .await
+            .unwrap();
+        let landed_b = tokio::fs::read(output_dir.join(&summary_b.file_name))
+            .await
+            .unwrap();
+        assert_ne!(
+            summary_a.file_name, summary_b.file_name,
+            "distinct landed names"
+        );
+        assert_eq!(landed_a, bytes_a, "receive A intact under its landed name");
+        assert_eq!(landed_b, bytes_b, "receive B intact under its landed name");
+    }
+
+    /// Crash-repair: finalize commits the file before the receipt, so a death
+    /// in between leaves possession without proof. The existing-final recovery
+    /// path must recreate the receipt - PostReceipt seals from it, and without
+    /// it the confirmation duty is undischargeable forever.
+    #[tokio::test]
+    async fn existing_final_recovery_repairs_a_missing_receipt() {
+        let root = unique_test_dir();
+        let output_dir = root.join("output");
+        tokio::fs::create_dir_all(&output_dir).await.unwrap();
+        let source_bytes = b"abcdefghij";
+        // The crash left the final file but no receipt sidecar.
+        tokio::fs::write(output_dir.join("data.bin"), source_bytes)
+            .await
+            .unwrap();
+        assert!(
+            LocalFileStorage::read_receipt(&output_dir, "data.bin")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
+        let receiver = tokio::spawn({
+            let output_dir = output_dir.clone();
+            async move {
+                TransferEngine::new(5)
+                    .receive_file(&mut receiver_connection, output_dir, &NoopEventSink)
+                    .await
+                    .unwrap()
+            }
+        });
+
+        manual_send(
+            &mut sender_connection,
+            ManualSend {
+                transfer_id: "manual-transfer",
+                file_name: "data.bin",
+                source_bytes,
+                chunk_size: 5,
+                resume_requested: true,
+                bytes_to_send: source_bytes,
+                complete_hash: blake3::hash(source_bytes).to_hex().to_string(),
+                expected_resume_bytes: source_bytes.len() as u64,
+            },
+        )
+        .await;
+        receiver.await.unwrap();
+
+        let receipt = LocalFileStorage::read_receipt(&output_dir, "data.bin")
+            .await
+            .unwrap()
+            .expect("recovery repaired the receipt");
+        assert_eq!(
+            receipt.file_hash,
+            blake3::hash(source_bytes).to_hex().to_string()
+        );
+    }
+
+    /// Field bug (rooms 223606/135499): a fresh send of an already-present
+    /// file "completed" in 308ms off the existing final - the fresh request
+    /// was silently ignored. A fresh offer must move real bytes and land
+    /// beside the original under a free name.
+    #[tokio::test]
+    async fn fresh_offer_beside_existing_final_lands_real_copy_under_new_name() {
+        let root = unique_test_dir();
+        let output_dir = root.join("output");
+        tokio::fs::create_dir_all(&output_dir).await.unwrap();
+        let source_bytes = b"abcdefghij";
+        tokio::fs::write(output_dir.join("data.bin"), source_bytes)
+            .await
+            .unwrap();
+
+        let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
+        let receiver = tokio::spawn({
+            let output_dir = output_dir.clone();
+            async move {
+                TransferEngine::new(5)
+                    .receive_file(&mut receiver_connection, output_dir, &NoopEventSink)
+                    .await
+                    .unwrap()
+            }
+        });
+
+        manual_send(
+            &mut sender_connection,
+            ManualSend {
+                transfer_id: "manual-transfer",
+                file_name: "data.bin",
+                source_bytes,
+                chunk_size: 5,
+                resume_requested: false,
+                bytes_to_send: source_bytes,
+                complete_hash: blake3::hash(source_bytes).to_hex().to_string(),
+                expected_resume_bytes: 0,
+            },
+        )
+        .await;
+        let receive_summary = receiver.await.unwrap();
+
+        assert_eq!(
+            receive_summary.bytes_transferred,
+            source_bytes.len() as u64,
+            "fresh offer must transfer real bytes, not answer from the final"
+        );
+        assert_eq!(
+            tokio::fs::read(output_dir.join("data (1).bin"))
+                .await
+                .unwrap(),
+            source_bytes,
+            "fresh copy lands beside the original under a uniquified name"
+        );
+        assert_eq!(
+            tokio::fs::read(output_dir.join("data.bin")).await.unwrap(),
+            source_bytes,
+            "the original file is untouched"
+        );
+        let receipt = LocalFileStorage::read_receipt(&output_dir, "data (1).bin")
+            .await
+            .unwrap()
+            .expect("receipt is keyed by the file that actually exists");
+        assert_eq!(receipt.file_size, source_bytes.len() as u64);
+    }
+
+    /// The pause+resume half of the same bug: an interrupted fresh re-receive
+    /// records its landing name, and the resumed attempt (resume_requested is
+    /// true on attempt 2+) must continue into that name - not be instantly
+    /// answered by the same-name final that made it uniquify in the first place.
+    #[tokio::test]
+    async fn interrupted_fresh_offer_resumes_into_recorded_target() {
+        let root = unique_test_dir();
+        let output_dir = root.join("output");
+        tokio::fs::create_dir_all(&output_dir).await.unwrap();
+        let source_bytes = b"abcdefghij";
+        tokio::fs::write(output_dir.join("data.bin"), source_bytes)
+            .await
+            .unwrap();
+        // The state an interrupted fresh attempt leaves behind: 5 of 10 bytes
+        // in the temp, landing name recorded.
+        let old_transfer_id = TransferId::new("old-transfer");
+        let state = TransferResumeState {
+            transfer_id: old_transfer_id.clone(),
+            file_name: "data.bin".into(),
+            file_size: source_bytes.len() as u64,
+            chunk_size: 5,
+            bytes_received: 5,
+            next_chunk_index: 1,
+            hash_bytes: 5,
+            hash_checkpoint: Some(blake3::hash(b"abcde").to_hex().to_string()),
+            target_file_name: Some("data (1).bin".into()),
+        };
+        LocalFileStorage::write_resume_state(&output_dir, &state)
+            .await
+            .unwrap();
+        let temp_path =
+            LocalFileStorage::resumable_temp_path(&output_dir, "data.bin", &old_transfer_id)
+                .unwrap();
+        tokio::fs::write(&temp_path, b"abcde").await.unwrap();
+
+        let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
+        let receiver = tokio::spawn({
+            let output_dir = output_dir.clone();
+            async move {
+                TransferEngine::new(5)
+                    .receive_file(&mut receiver_connection, output_dir, &NoopEventSink)
+                    .await
+                    .unwrap()
+            }
+        });
+
+        manual_send(
+            &mut sender_connection,
+            ManualSend {
+                transfer_id: "manual-transfer",
+                file_name: "data.bin",
+                source_bytes,
+                chunk_size: 5,
+                resume_requested: true,
+                bytes_to_send: source_bytes,
+                complete_hash: blake3::hash(source_bytes).to_hex().to_string(),
+                expected_resume_bytes: 5,
+            },
+        )
+        .await;
+        let receive_summary = receiver.await.unwrap();
+
+        assert_eq!(receive_summary.bytes_transferred, source_bytes.len() as u64);
+        assert_eq!(
+            tokio::fs::read(output_dir.join("data (1).bin"))
+                .await
+                .unwrap(),
+            source_bytes,
+            "resume continues into the recorded landing name"
+        );
+        assert_eq!(
+            tokio::fs::read(output_dir.join("data.bin")).await.unwrap(),
+            source_bytes,
+            "the original file is untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn unique_final_name_skips_taken_names() {
+        let root = unique_test_dir();
+        let output_dir = root.join("output");
+        tokio::fs::create_dir_all(&output_dir).await.unwrap();
+        tokio::fs::write(output_dir.join("a.txt"), b"x")
+            .await
+            .unwrap();
+        tokio::fs::write(output_dir.join("a (1).txt"), b"x")
+            .await
+            .unwrap();
+        assert_eq!(
+            unique_final_name(&output_dir, "a.txt").await.unwrap(),
+            "a (2).txt"
+        );
+        assert_eq!(
+            unique_final_name(&output_dir, "noext").await.unwrap(),
+            "noext (1)"
+        );
+        assert_eq!(
+            unique_final_name(&output_dir, ".dotfile").await.unwrap(),
+            ".dotfile (1)"
+        );
+    }
+
     struct MemoryFrameConnection {
         tx: mpsc::Sender<Frame>,
         rx: mpsc::Receiver<Frame>,
@@ -3099,6 +3050,7 @@ mod tests {
     }
 
     struct ManualSend<'a> {
+        transfer_id: &'a str,
         file_name: &'a str,
         source_bytes: &'a [u8],
         chunk_size: u64,
@@ -3109,7 +3061,7 @@ mod tests {
     }
 
     async fn manual_send(connection: &mut MemoryFrameConnection, request: ManualSend<'_>) {
-        let transfer_id = TransferId::new("manual-transfer");
+        let transfer_id = TransferId::new(request.transfer_id);
         connection
             .send_frame(Frame::Hello(Hello {
                 protocol_version: PROTOCOL_VERSION,
@@ -3174,6 +3126,22 @@ mod tests {
         header.transfer_id
     }
 
+    async fn assert_no_sidecars(output_dir: &Path) {
+        if !fs::try_exists(output_dir).await.unwrap() {
+            return;
+        }
+
+        let mut entries = fs::read_dir(output_dir).await.unwrap();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            assert!(
+                !(name.ends_with(".json") || name.ends_with(".part")),
+                "unexpected sidecar: {name}"
+            );
+        }
+    }
+
     #[async_trait]
     impl FrameConnection for MemoryFrameConnection {
         async fn send_frame(&mut self, frame: Frame) -> Result<(), CoreError> {
@@ -3197,30 +3165,6 @@ mod tests {
                 bytes: bytes.to_vec(),
             }))
             .await
-        }
-
-        async fn send_chunk_or_recv_frame(
-            &mut self,
-            transfer_id: &TransferId,
-            index: u64,
-            offset: u64,
-            bytes: &[u8],
-        ) -> Result<Option<Frame>, CoreError> {
-            let chunk = Frame::Chunk(Chunk {
-                transfer_id: transfer_id.clone(),
-                index,
-                offset,
-                bytes: bytes.to_vec(),
-            });
-            tokio::select! {
-                biased;
-                frame = self.rx.recv() => frame
-                    .map(Some)
-                    .ok_or_else(|| CoreError::Transport("memory connection closed".into())),
-                result = self.tx.send(chunk) => result
-                    .map(|()| None)
-                    .map_err(|error| CoreError::Transport(error.to_string())),
-            }
         }
 
         async fn recv_frame(&mut self) -> Result<Frame, CoreError> {

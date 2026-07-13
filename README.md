@@ -117,3 +117,7 @@ Not implemented in this walking skeleton:
 QUIC currently uses generated self-signed certificates with an explicitly
 insecure no-auth verifier. Peer/session authentication is provided by the
 required pairing layer before transfer metadata is sent.
+
+
+### Extra Notes
+* UDP GSO is disabled on android for more stable performance and compatability. If it's not disabled, emulators cannot work properly. If testing shows this impacts the performance too much, consider turning it on later.

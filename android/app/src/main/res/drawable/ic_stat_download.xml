@@ -1,0 +1,7 @@
+<!-- Status-bar download icon: a single down arrow (all active transfers are receives). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24"
+    android:tint="#FFFFFFFF">
+    <path android:fillColor="#FFFFFFFF" android:pathData="M12,21 L17,15 H14 V3 H10 V15 H7 Z" />
+</vector>

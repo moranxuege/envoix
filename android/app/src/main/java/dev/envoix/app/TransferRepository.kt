@@ -18,6 +18,15 @@ object TransferRepository {
 
     private var nextId = 1L
 
+    /** Raise the id floor to clear every persisted record. Called at app start
+     *  (before any card can be created): a new card allocated before the
+     *  service restores old records must not reuse a persisted id - the new
+     *  session would silently overwrite that record on its first persist. */
+    @Synchronized
+    fun seedNextId(min: Long) {
+        nextId = maxOf(nextId, min)
+    }
+
     /** Allocate an id + seed a Connecting card; returns the id. */
     @Synchronized
     fun create(
@@ -36,10 +45,19 @@ object TransferRepository {
         id: Long,
         direction: Direction,
         room: String,
+        qrPayload: String? = null,
+        savedUri: String? = null,
     ): Boolean {
         if (_transfers.value.any { it.id == id }) return false
         nextId = maxOf(nextId, id + 1)
-        _transfers.value = _transfers.value + Transfer(id = id, direction = direction, room = room)
+        _transfers.value = _transfers.value +
+            Transfer(
+                id = id,
+                direction = direction,
+                room = room,
+                qrPayload = qrPayload,
+                savedUri = savedUri,
+            )
         return true
     }
 
@@ -49,20 +67,6 @@ object TransferRepository {
         transform: (Transfer) -> Transfer,
     ) {
         _transfers.value = _transfers.value.map { if (it.id == id) transform(it) else it }
-    }
-
-    /** Insert a restored canonical card or replace it with a newer snapshot. */
-    @Synchronized
-    fun upsert(transfer: Transfer) {
-        nextId = maxOf(nextId, transfer.id + 1)
-        val current = _transfers.value.firstOrNull { it.id == transfer.id }
-        if (current != null && current.sequence > transfer.sequence) return
-        _transfers.value =
-            if (current == null) {
-                _transfers.value + transfer
-            } else {
-                _transfers.value.map { if (it.id == transfer.id) transfer else it }
-            }
     }
 
     /** Append an (already compacted) native-core log line to the newest transfer
@@ -100,7 +104,9 @@ object Endpoints {
         "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445"
     const val RELAY = "https://envoix.chkxwlyh.us:8444"
 
-    /** Per-room log-collection endpoint on the rdz box (dev-mode upload target). */
+    /** Per-room log-collection + receipt-mailbox endpoint on the rdz box (TLS). */
     const val LOG_SERVER = "https://rdz.chkxwlyh.us:8460"
-    const val DEPRECATED_LOG_SERVER = "http://67.230.187.238:8460"
+
+    /** Pre-TLS default; migrated to [LOG_SERVER] on settings load. */
+    const val LOG_SERVER_LEGACY = "http://67.230.187.238:8460"
 }

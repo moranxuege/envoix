@@ -90,7 +90,17 @@ pub async fn build_endpoint_with_dns(
     relay: RelayMode,
     dns_resolver: Option<DnsResolver>,
 ) -> Result<Endpoint> {
-    let mut builder = Endpoint::builder(presets::N0)
+    let builder = Endpoint::builder(presets::N0);
+    // Defined by build.rs only when the NAT harness supplies its generated CA.
+    #[cfg(envoix_nat_test_local_ca)]
+    let builder = builder.ca_tls_config(
+        iroh::tls::CaTlsConfig::embedded().with_extra_roots([include_bytes!(env!(
+            "ENVOIX_NAT_TEST_CA_DER_PATH"
+        ))
+        .to_vec()
+        .into()]),
+    );
+    let mut builder = builder
         .secret_key(secret_key)
         .relay_mode(relay)
         .clear_address_lookup()
