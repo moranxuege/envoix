@@ -95,4 +95,7 @@ dependencies {
     implementation("androidx.camera:camera-camera2:1.3.4")
     implementation("androidx.camera:camera-lifecycle:1.3.4")
     implementation("androidx.camera:camera-view:1.3.4")
+
+    // JVM unit tests (the report byte-budget / head-tail logic is pure).
+    testImplementation("junit:junit:4.13.2")
 }
