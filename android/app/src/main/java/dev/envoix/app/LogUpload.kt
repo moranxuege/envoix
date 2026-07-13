@@ -8,6 +8,9 @@ import java.net.URL
 /** Uploads a transfer's log to the rdz log-collection endpoint, keyed by room id
  *  so it lands alongside the peer's log (and the rdz's own). Dev-mode only. */
 object LogUpload {
+    /** Connect + read timeout for every log-courier HTTP call (ms). */
+    private const val TIMEOUT_MS = 8000
+
     /** POST [body] to `<server>/logs/<roomId>?side=<side>`; true on a 2xx reply. */
     suspend fun upload(
         server: String,
@@ -21,8 +24,8 @@ object LogUpload {
                 (url.openConnection() as HttpURLConnection).run {
                     requestMethod = "POST"
                     doOutput = true
-                    connectTimeout = 8000
-                    readTimeout = 8000
+                    connectTimeout = TIMEOUT_MS
+                    readTimeout = TIMEOUT_MS
                     setRequestProperty("Content-Type", "text/plain; charset=utf-8")
                     outputStream.use { it.write(body.toByteArray()) }
                     val ok = responseCode in 200..299
@@ -42,8 +45,8 @@ object LogUpload {
                 (URL(url).openConnection() as HttpURLConnection).run {
                     requestMethod = "POST"
                     doOutput = true
-                    connectTimeout = 8000
-                    readTimeout = 8000
+                    connectTimeout = TIMEOUT_MS
+                    readTimeout = TIMEOUT_MS
                     setRequestProperty("Content-Type", "application/octet-stream")
                     outputStream.use { it.write(body) }
                     val ok = responseCode in 200..299
@@ -58,8 +61,8 @@ object LogUpload {
         withContext(Dispatchers.IO) {
             runCatching {
                 (URL(url).openConnection() as HttpURLConnection).run {
-                    connectTimeout = 8000
-                    readTimeout = 8000
+                    connectTimeout = TIMEOUT_MS
+                    readTimeout = TIMEOUT_MS
                     val bytes = if (responseCode == 200) inputStream.use { it.readBytes() } else null
                     disconnect()
                     bytes
