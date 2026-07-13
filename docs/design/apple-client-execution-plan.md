@@ -1,6 +1,6 @@
 # Apple client execution plan
 
-Status: **Draft — product decisions pending**
+Status: **Draft — baseline locked; product decisions D1–D3 pending**
 
 Owner: Apple client workstream
 
@@ -13,8 +13,8 @@ clients. GitHub issues remain canonical for issue-specific discussion; this
 document owns cross-issue sequencing, gates, acceptance evidence, and the
 current decision log.
 
-No product implementation may start from this draft until Decisions D1–D4 are
-confirmed. Read-only audits and plan maintenance are allowed before that gate.
+No product implementation may start from this draft until Decisions D1–D3 are
+confirmed. D4 is now resolved by the checkpoint and dev merge recorded below.
 
 ## 1. Outcome
 
@@ -39,21 +39,39 @@ endpoint is required.
 
 ## 2. Current baseline
 
-The baseline is intentionally not called green yet.
+The source baseline is locked; the Apple build baseline is not green yet.
 
 - Branch: `feat/transfer-state-foundation`, tracking its origin branch.
-- `HEAD` and `origin/feat/transfer-state-foundation` both point to `1ca1888`;
-  there are no committed ahead/behind changes. Every newer change is currently
-  worktree-only.
-- The worktree contains extensive intentional, uncommitted Apple, Android, Rust,
-  test, script, and documentation changes. The tracked diff currently spans 85
-  files with 15,312 insertions and 6,074 deletions, plus untracked Apple, Android,
-  FFI, scripts, tests, and this plan. They must be preserved.
-- The generated `crates/envoix-ffi/EnvoixCore/` package was removed during disk
-  cleanup. An exact-source Apple build therefore requires a full
-  `scripts/build-apple-core.sh` run first.
-- The iPhone 15 Pro Max has an installed debug app, but it predates the latest
-  shared-source rename and cannot prove that the phone matches the current tree.
+- Safety checkpoint `ceff278` (`feat: checkpoint canonical mobile transfer
+  lifecycle`) contains the entire previously dirty tree and was pushed to
+  `origin/feat/transfer-state-foundation` before any merge.
+- `origin/dev` at `5577194` was merged into the checkpoint as merge commit
+  `2084944`. All 13 textual conflicts were resolved; the Android application
+  takes the latest dev implementation, while shared Rust/UniFFI files use dev
+  as the authority plus additive Apple compatibility.
+- The merged shared core compiles for `envoix-client`, `envoix-ffi`, and
+  `envoix-android-jni`. `envoix-client` has 89 passing library tests and
+  `envoix-ffi` has 40 passing library/loopback tests.
+- The Android Gradle APK build has not produced code evidence on this machine:
+  the wrapper download for Gradle 8.9 timed out at roughly 30%. This is recorded
+  as an environment failure, not treated as a passing or failing source build.
+- The merge keeps dev's record-authoritative Remove, checked commit barrier,
+  stamped receipt responses, committed sent-hash verification, durable platform
+  extras/receipt endpoint, atomic final naming, receipt repair, and Android UDP
+  compatibility changes.
+- Apple compatibility retained on top includes stable listener identity/token,
+  raw diagnostic/invite events, structured failures, staged receive publication,
+  final published path, and public string Activity IDs. Core records remain
+  `u64`; UniFFI maps string IDs deterministically through `platform_extras` and
+  migrates legacy string-ID files without duplicate cards.
+- A remote pause/loss now automatically parks a new rendezvous attempt on the
+  peer, while the locally paused side still requires the user's Resume action.
+  This is covered by QR and room loopback tests.
+- The generated `crates/envoix-ffi/EnvoixCore/` package is absent. An exact-source
+  Apple build therefore requires `scripts/build-apple-core.sh` before Xcode
+  build or device evidence.
+- The iPhone 15 Pro Max installed debug app predates this merged source and is
+  not valid evidence for the new baseline.
 - Historical simulator output reported ten tests, but four cross-device methods
   compile to empty bodies when `ENVOIX_CROSS_DEVICE_TESTING` is absent. The
   effective default coverage was six tests.
@@ -64,9 +82,9 @@ The baseline is intentionally not called green yet.
   [#40](https://github.com/ECE4410J-NUUB/envoix/issues/40) and
   [#41](https://github.com/ECE4410J-NUUB/envoix/issues/41).
 
-The July canonical lifecycle and strict transfer results are useful prior
-evidence, but they do not replace a rebuild and verification against the exact
-baseline selected in D4.
+The Rust/UniFFI merge is green at its tested boundary. G0 remains open until the
+generated Apple core, macOS build, iOS build-for-testing, honest test count, and
+physical-device installation all come from `2084944` or a documented descendant.
 
 ## 3. Decisions required before implementation
 
@@ -75,34 +93,22 @@ baseline selected in D4.
 | D1 | Supported devices and orientations | iPhone + macOS; iPhone portrait first; no iPad promise in this milestone | Pending user confirmation |
 | D2 | iOS navigation interaction | Keep the branded floating stage bar, but remove the global horizontal stage-swipe gesture | Pending user confirmation |
 | D3 | First post-foundation feature | Single-file Share Extension first; design the Wi-Fi Aware provider boundary in parallel | Pending user confirmation |
-| D4 | Baseline and shared-core authority | Preserve all current work in a local checkpoint; allow additive Rust/UniFFI changes while preserving existing callers | Pending user confirmation |
+| D4 | Baseline and shared-core authority | Full-tree checkpoint, latest dev merge, dev-authoritative Android, additive Apple Rust/UniFFI compatibility | **Confirmed and executed** |
 
-D4 must also identify whether the entire current dirty tree is accepted as the
-new baseline. If not, the user must name the commit/branch that owns the desired
-shared-core state; the Apple changes can then be selected explicitly instead of
-silently inheriting or discarding Android-side work.
+### D4 resolution
 
-### D4 audit conclusion
+The full-tree checkpoint and dev merge confirm that the Apple client cannot be
+versioned safely by copying only `apps/envoix-apple/`. Apple development now
+starts from `2084944` and follows these ownership rules:
 
-The Apple work cannot be safely checkpointed by copying only
-`apps/envoix-apple/`. Its current UI and durable-state code consumes the
-worktree-only `envoix-client` lifecycle, UniFFI implementation, generated Swift
-binding, storage/publication behavior, and Apple build scripts. Treating the
-tracked `1ca1888` commit as the Apple baseline would therefore discard required
-shared-core work, not merely Android UI work.
-
-The proposed safe interpretation of “stop depending on Android fixes” is:
-
-1. preserve the entire current worktree once in a local checkpoint;
-2. branch Apple development from that exact checkpoint;
-3. make no further Android application changes in the Apple workstream;
-4. accept only additive shared Rust/UniFFI changes required by the Apple client;
-5. validate cross-platform protocol behavior with a pinned peer/harness rather
-   than waiting for Android application development.
-
-If the intent is instead to reject some current shared-core work, D4 must name
-the exact last accepted Rust/FFI state. File-path filtering is not a safe proxy
-for that architectural decision.
+1. latest dev owns the Android application and the shared correctness fixes it
+   already merged;
+2. Apple work does not wait for subsequent Android UI work;
+3. shared Rust/UniFFI changes are additive and must compile both native callers;
+4. cross-platform protocol behavior is validated with pinned loopback/harness or
+   a known-good peer instead of depending on unfinished Android feature work;
+5. any future dev merge repeats the checkpoint → merge → compatibility tests
+   sequence used here.
 
 ## 4. Scope
 
@@ -191,19 +197,26 @@ padding patches.
 
 ### Stage 0 — Lock decisions and preserve the baseline
 
-Actions:
+Completed:
 
-- confirm D1–D4;
-- record `HEAD`, branch, `git status`, and scoped diff statistics;
-- create a user-approved local checkpoint before touching existing source;
-- do not push the checkpoint unless separately requested;
-- create the Apple feature branch/worktrees from the accepted checkpoint;
+- D4 confirmed by the user's merge instruction;
+- full-tree checkpoint `ceff278` created and pushed before merging;
+- latest `origin/dev` (`5577194`) merged as `2084944` without unresolved files;
+- shared-core/FFI/JNI compile check passed;
+- 89 `envoix-client` and 40 `envoix-ffi` tests passed, including durable
+  restore, QR/room pause-resume, mailbox receipt, publication, and legacy-ID
+  migration.
+
+Remaining actions:
+
+- confirm D1–D3;
 - rebuild `EnvoixCore` and regenerate the Xcode project;
-- build macOS Debug and iOS Simulator `build-for-testing` from exact current
-  sources;
+- build macOS Debug and iOS Simulator `build-for-testing` from the exact merged
+  source;
 - reinstall the physical iPhone before recording behavior against the baseline;
 - change disabled cross-device tests to report `XCTSkip` or isolate them in an
-  explicit cross-device scheme.
+  explicit cross-device scheme;
+- create parallel Apple worktrees only after G0 build evidence is green.
 
 Gate G0 evidence:
 
@@ -214,19 +227,10 @@ Gate G0 evidence:
 - physical-device version, installed build identity, and reproduction result for
   issue #45.
 
-Recommended checkpoint sequence after D4 approval:
-
-1. capture the full status, diff statistics, untracked-file list, and current
-   `HEAD` in the evidence log;
-2. create a local `checkpoint/apple-baseline-2026-07-13` branch from the current
-   worktree and commit all accepted files without rewriting history;
-3. create `feat/apple-client-roadmap` from the checkpoint;
-4. keep the checkpoint local until the user separately approves publication;
-5. create additional worktrees only after G0 builds prove the checkpoint is
-   reproducible.
-
-The actual branch names may change at execution time to avoid collisions. No
-checkpoint command is authorized by this draft alone.
+The original recommendation to create a separate checkpoint branch was
+superseded by the safer executed sequence: commit the entire accepted tree on
+the current feature branch, push it, then merge dev. Additional worktrees remain
+deferred until G0 proves `2084944` reproducible on Apple.
 
 ### Stage 1 — Freeze UI acceptance tests
 
@@ -275,7 +279,18 @@ Gate G2 evidence:
 
 ### Stage 3 — Make canonical state projection enforceable
 
-Actions:
+Already established by the merged core:
+
+- checked durable commit barrier before snapshots and world-facing effects;
+- key-stamped receipt responses and sent-hash verification;
+- typed `AwaitingPublication` → `Completed` transition with final path/URI;
+- structured failure retained in durable snapshots;
+- stable listener identity/token across retry and restore;
+- additive raw event notices for diagnostics/invite presentation;
+- string Apple Activity IDs adapted to dev's numeric record authority with
+  legacy migration.
+
+Remaining actions:
 
 - reject stale record sequences in the Apple model and unit-test reordering;
 - retain every non-terminal record when pruning terminal history;
@@ -287,7 +302,10 @@ Actions:
   retransmission;
 - reduce `TransferViewModel.Phase` to presentation-only projection;
 - add core API/capability/build-version reporting so an app can detect an old
-  generated XCFramework.
+  generated XCFramework;
+- add an additive mailbox callback/version that carries dev's durable per-session
+  receipt endpoint. The current Apple courier still uses `defaultLogServer`, so
+  it must not silently ignore a future custom receipt endpoint.
 
 Gate G3 evidence:
 
@@ -439,6 +457,12 @@ the command, source revision, destination, and result is insufficient.
 | Date | Revision | Gate | Environment | Command/scenario | Result | Artifact |
 |---|---|---|---|---|---|---|
 | 2026-07-13 | current dirty tree | Planning | repository audit | inspect Apple UI/tests/core boundaries | Draft plan created; implementation not started | this document |
+| 2026-07-13 | `ceff278` | G0 safety | Git/local + origin | full-tree checkpoint before dev merge | checkpoint committed and pushed to the matching remote branch | Git commit `ceff278` |
+| 2026-07-13 | `2084944` | G0 core | macOS/Rust | merge `origin/dev` `5577194`; resolve 13 conflicts | merge commit created; no unresolved paths | Git commit `2084944` |
+| 2026-07-13 | `2084944` | G0 core | macOS/Rust | `cargo check -p envoix-client -p envoix-ffi -p envoix-android-jni` | pass | terminal output |
+| 2026-07-13 | `2084944` | G0 core | macOS/Rust | `cargo test -p envoix-client --lib` | 89 passed | terminal output |
+| 2026-07-13 | `2084944` | G0 boundary | macOS/Rust | `cargo test -p envoix-ffi --lib` | 40 passed | terminal output |
+| 2026-07-13 | `2084944` | compatibility | macOS/Android toolchain | `./gradlew :app:assembleDebug --no-daemon` | not executed: Gradle 8.9 wrapper download timed out | terminal output |
 
 ## 11. Definition of done
 
@@ -461,3 +485,7 @@ The Apple milestone is complete only when all of the following are true:
 - 2026-07-13: Initial draft created from the current worktree, Apple UI/test
   audit, architecture documents, handoff, and existing project wiki. D1–D4 are
   intentionally unresolved; no implementation work is authorized by this draft.
+- 2026-07-13: D4 resolved. Full tree checkpointed and pushed as `ceff278`, then
+  latest dev merged as `2084944`. Plan updated against the dev commit barrier,
+  durable extras/receipt work, Android authority, and the retained Apple
+  publication/listener/string-ID boundary. D1–D3 remain pending.
