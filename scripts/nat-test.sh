@@ -79,6 +79,8 @@ Startup removes stale NAT-test resources and stops the global netsimd process.
 The sender's Wi-Fi bandwidth is limited to approximately 512 KiB/s.
 Each transfer uses a 1 MiB QUIC data-stream window so sender progress reflects
 the shaped link after at most the initial window has been queued.
+In symmetric-one-side-ipv4, side A uses symmetric NAT while side B is directly
+routed on the test WAN with no address translation or inbound firewall.
 
 Options:
   --timeout SECONDS   Per-transfer timeout (default: $timeout)
@@ -188,6 +190,10 @@ preflight_cleanup() {
         awk '{for (i=1; i<=NF; i++) if ($i == "dev") {print $(i+1); exit}}')"
     for link in $stale_links; do
         if [[ "$link" =~ ^ex[0-9]+w$ ]] && [ -n "$upstream" ]; then
+            while privileged iptables -C FORWARD -i "$link" -o "$link" -j ACCEPT \
+                >/dev/null 2>&1; do
+                privileged iptables -D FORWARD -i "$link" -o "$link" -j ACCEPT
+            done
             while privileged iptables -C FORWARD -i "$link" -o "$upstream" -j ACCEPT \
                 >/dev/null 2>&1; do
                 privileged iptables -D FORWARD -i "$link" -o "$upstream" -j ACCEPT
@@ -205,6 +211,11 @@ preflight_cleanup() {
         fi
     done
     if [ -n "$upstream" ]; then
+        while privileged iptables -t nat -C POSTROUTING -s 192.168.102.0/24 \
+            -o "$upstream" -j MASQUERADE >/dev/null 2>&1; do
+            privileged iptables -t nat -D POSTROUTING -s 192.168.102.0/24 \
+                -o "$upstream" -j MASQUERADE
+        done
         while privileged iptables -t nat -C POSTROUTING -s 198.18.0.0/24 \
             -o "$upstream" -j MASQUERADE >/dev/null 2>&1; do
             privileged iptables -t nat -D POSTROUTING -s 198.18.0.0/24 \
@@ -618,6 +629,11 @@ capture_diagnostics() {
         "$adb" -s "$serial" pull "/data/user/0/$PACKAGE/files" \
             "$log_dir/$profile-$role-files" >/dev/null 2>&1 || true
     done
+    {
+        privileged ip route show 192.168.102.0/24
+        privileged iptables -S FORWARD
+        privileged iptables -t nat -S POSTROUTING
+    } >"$log_dir/$profile-host-routing.log" 2>&1 || true
 }
 
 configure_nat() {
@@ -662,6 +678,40 @@ configure_nat() {
     fi
 }
 
+configure_routed() {
+    local ns="$1"
+
+    in_namespace "$ns" nft delete table ip envoix_raw >/dev/null 2>&1 || true
+    in_namespace "$ns" nft delete table ip envoix >/dev/null 2>&1 || true
+    in_namespace "$ns" nft add table ip envoix
+    in_namespace "$ns" nft add chain ip envoix forward \
+        '{ type filter hook forward priority filter; policy accept; }'
+}
+
+set_routed_side_b() {
+    local enabled="$1"
+
+    while privileged iptables -t nat -C POSTROUTING -s 192.168.102.0/24 \
+        -o "$host_upstream" -j MASQUERADE >/dev/null 2>&1; do
+        privileged iptables -t nat -D POSTROUTING -s 192.168.102.0/24 \
+            -o "$host_upstream" -j MASQUERADE
+    done
+    privileged ip route delete 192.168.102.0/24 via 198.18.0.3 \
+        dev "$wan_bridge" >/dev/null 2>&1 || true
+    while privileged iptables -C FORWARD -i "$wan_bridge" -o "$wan_bridge" \
+        -j ACCEPT >/dev/null 2>&1; do
+        privileged iptables -D FORWARD -i "$wan_bridge" -o "$wan_bridge" -j ACCEPT
+    done
+    if [ "$enabled" -eq 1 ]; then
+        privileged ip route add 192.168.102.0/24 via 198.18.0.3 dev "$wan_bridge"
+        privileged iptables -I FORWARD 1 -i "$wan_bridge" -o "$wan_bridge" -j ACCEPT
+        # Preserve Internet validation without translating any traffic inside
+        # the simulated WAN, including peer, broker, relay, and QAD traffic.
+        privileged iptables -t nat -I POSTROUTING 1 -s 192.168.102.0/24 \
+            -o "$host_upstream" -j MASQUERADE
+    fi
+}
+
 configure_ipv6_forwarding() {
     local ns="$1"
     local enabled="$2"
@@ -681,6 +731,7 @@ configure_ipv6_forwarding() {
 apply_profile() {
     local profile="$1"
 
+    set_routed_side_b 0
     case "$profile" in
         symmetric-both-ipv4)
             configure_nat "$ns_a" 192.168.101.0/24 symmetric 101
@@ -696,7 +747,8 @@ apply_profile() {
             ;;
         symmetric-one-side-ipv4)
             configure_nat "$ns_a" 192.168.101.0/24 symmetric 103
-            configure_nat "$ns_b" 192.168.102.0/24 friendly 103
+            configure_routed "$ns_b"
+            set_routed_side_b 1
             configure_ipv6_forwarding "$ns_a" 0
             configure_ipv6_forwarding "$ns_b" 0
             ;;
@@ -922,6 +974,10 @@ cleanup() {
         pids="$(privileged ip netns pids "$ns_b" 2>/dev/null)"
         [ -z "$pids" ] || privileged kill $pids >/dev/null 2>&1
         if [ "$network_ready" -eq 1 ]; then
+            privileged iptables -t nat -D POSTROUTING -s 192.168.102.0/24 \
+                -o "$host_upstream" -j MASQUERADE >/dev/null 2>&1
+            privileged iptables -D FORWARD -i "$wan_bridge" -o "$wan_bridge" \
+                -j ACCEPT >/dev/null 2>&1
             privileged iptables -t nat -D POSTROUTING -s 198.18.0.0/24 \
                 -o "$host_upstream" -j MASQUERADE >/dev/null 2>&1
             privileged iptables -D FORWARD -i "$host_upstream" -o "$wan_bridge" \
