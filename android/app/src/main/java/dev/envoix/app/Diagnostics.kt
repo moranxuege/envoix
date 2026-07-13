@@ -66,9 +66,11 @@ object Diagnostics {
                     add(Triple(section("crash", runCatching { crashFile().readText() }.getOrDefault("")), cap(CRASH_MAX), false))
                 }
                 if (kind == Kind.Transfer && transferId != null) {
-                    val (timeline, raw) = splitTransfer(transferId)
-                    add(Triple(section("timeline $transferId", timeline), Int.MAX_VALUE, false))
-                    add(Triple(section("transfer raw trace", raw), cap(TRANSFER_MAX), true))
+                    // Two separate files: the timeline (never budget-trimmed) and
+                    // the raw trace (head+tail under budget). No shared file, no
+                    // regex split — raw volume can't evict the timeline (v2 P6).
+                    add(Triple(section("timeline $transferId", TransferLogs.readTimeline(transferId)), Int.MAX_VALUE, false))
+                    add(Triple(section("transfer raw trace", TransferLogs.readRaw(transferId)), cap(TRANSFER_MAX), true))
                 }
                 add(Triple(section("operations", OpLog.report()), cap(OPS_MAX), false))
                 add(Triple(section("core trace (tail)", LogStore.dump()), Int.MAX_VALUE, false))
@@ -83,24 +85,6 @@ object Diagnostics {
             if (remaining <= 0) break
         }
         return out.toString()
-    }
-
-    // A structured timeline line begins: <source_seq>\t<schema>\t<epoch-ms>\t…
-    private val TIMELINE_LINE = Regex("""^\d+\t\d+\t\d{13}\t""")
-
-    /** Split a transfer's durable log into (structured timeline, raw trace) by
-     *  line shape — the two tiers coexist in one file (v2), separated here. */
-    private fun splitTransfer(id: Long): Pair<String, String> {
-        val timeline = StringBuilder()
-        val raw = StringBuilder()
-        for (line in TransferLogs.read(id).lineSequence()) {
-            when {
-                line.isEmpty() -> {}
-                TIMELINE_LINE.containsMatchIn(line) -> timeline.append(line).append('\n')
-                else -> raw.append(line).append('\n')
-            }
-        }
-        return timeline.toString() to raw.toString()
     }
 
     private fun section(
