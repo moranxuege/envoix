@@ -926,11 +926,10 @@ pub extern "system" fn Java_dev_envoix_app_Native_createSession(
         return;
     };
 
-    let v: serde_json::Value = match serde_json::from_str(&json) {
-        Ok(v) => v,
-        Err(e) => return emit_failed_snapshot(&vm, &cb, "invalid session params JSON", e),
+    let (context, extras) = match parse_create_params(&json, CreateMode::Normal) {
+        Ok(parsed) => parsed,
+        Err(e) => return emit_failed_snapshot(&vm, &cb, "invalid session params", e),
     };
-    let (context, extras) = session_context_from_params(&v);
     let _guard = runtime().enter();
     let (session, notices) = match TransferSession::start(context, record_for(id), extras) {
         Ok(session) => session,
@@ -942,54 +941,263 @@ pub extern "system" fn Java_dev_envoix_app_Native_createSession(
     spawn_pump(vm, cb, notices);
 }
 
-/// Build a [`SessionContext`] (and any `platform_extras`) from the frontend's
-/// params JSON. Shared by the normal and staging create paths.
-fn session_context_from_params(
-    v: &serde_json::Value,
-) -> (SessionContext, Option<serde_json::Value>) {
-    let get = |k: &str| v[k].as_str().unwrap_or("").to_string();
-    let allow = split_csv(&get("candidates_allow"));
-    let deny = split_csv(&get("candidates_deny"));
-    let chunk = get("chunk_size");
-    let chunk = (!chunk.is_empty()).then_some(chunk);
-    let receipt_server = get("receipt_server");
-    let client_context = ClientContext {
-        chunk_size: chunk,
-        candidates_allow: allow,
-        candidates_deny: deny,
-        receipt_server: (!receipt_server.is_empty()).then_some(receipt_server),
-    };
+/// Direction as the frontend sends it (lowercase). A typed enum so a typo like
+/// `"recieve"` is a loud deserialize error, not a silent fall-through to
+/// Receive. JNI-local, so the wire-adjacent `TransferDirection` serde repr
+/// (PascalCase, read by the snapshot) stays untouched.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CreateDirection {
+    Send,
+    Receive,
+}
 
-    let code = get("code");
-    let mut sources: Vec<PeerSource> = Vec::new();
-    if v["use_room"].as_bool().unwrap_or(false) {
-        sources.push(PeerSource::Room {
-            code: code.clone(),
-            broker: get("broker"),
+impl From<CreateDirection> for TransferDirection {
+    fn from(d: CreateDirection) -> Self {
+        match d {
+            CreateDirection::Send => TransferDirection::Send,
+            CreateDirection::Receive => TransferDirection::Receive,
+        }
+    }
+}
+
+/// Android platform extras. The JNI adapter knows these keys; the core keeps
+/// them opaque (they round-trip back to an untyped `Value`). Typed here with
+/// `deny_unknown_fields` only so a misspelled extras key fails loudly at the
+/// boundary instead of silently vanishing.
+#[derive(Default, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct AndroidPlatformExtras {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    qr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    saved_uri: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_uri: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_recoverable: Option<bool>,
+}
+
+/// Which create entry point is parsing — staging additionally requires a source.
+#[derive(Clone, Copy)]
+enum CreateMode {
+    Normal,
+    Staging,
+}
+
+/// The frontend's flat session-params JSON — the UI-shaped boundary DTO. Every
+/// top-level field is REQUIRED: Kotlin's `paramsJson` always emits all of them
+/// (an empty string means "use the core default"), so a *missing* field means
+/// the two sides drifted and must fail loudly, not default silently.
+/// `deny_unknown_fields` catches a renamed / typo'd / extra key the same way.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateParams {
+    direction: CreateDirection,
+    path: String,
+    code: String,
+    broker: String,
+    relay: String,
+    chunk_size: String,
+    data_stream_window: String,
+    candidates_allow: String,
+    candidates_deny: String,
+    receipt_server: String,
+    use_room: bool,
+    use_mdns: bool,
+    resume: bool,
+    /// Optional: Kotlin omits it when there are no extras (`if length > 0`).
+    #[serde(default)]
+    platform_extras: Option<AndroidPlatformExtras>,
+}
+
+impl CreateParams {
+    fn into_context(
+        self,
+        mode: CreateMode,
+    ) -> Result<(SessionContext, Option<serde_json::Value>), String> {
+        if self.path.trim().is_empty() {
+            return Err("path must not be empty".into());
+        }
+        if let Some(x) = &self.platform_extras {
+            // Kotlin writes the two together; reject a half-pair.
+            if x.source_uri.is_some() != x.source_recoverable.is_some() {
+                return Err("source_uri and source_recoverable must be set together".into());
+            }
+        }
+        if matches!(mode, CreateMode::Staging) {
+            let has_source = self
+                .platform_extras
+                .as_ref()
+                .and_then(|x| x.source_uri.as_deref())
+                .is_some_and(|s| !s.is_empty());
+            if !has_source {
+                return Err("staging session requires a source_uri in platform_extras".into());
+            }
+        }
+
+        let opt = |s: String| (!s.is_empty()).then_some(s);
+        let client = ClientContext {
+            chunk_size: opt(self.chunk_size),
+            data_stream_window: opt(self.data_stream_window),
+            candidates_allow: split_csv(&self.candidates_allow),
+            candidates_deny: split_csv(&self.candidates_deny),
+            receipt_server: opt(self.receipt_server),
+        };
+
+        let mut sources: Vec<PeerSource> = Vec::new();
+        if self.use_room {
+            sources.push(PeerSource::Room {
+                code: self.code.clone(),
+                broker: self.broker,
+            });
+        }
+        if self.use_mdns {
+            sources.push(PeerSource::Mdns {
+                token: Some(self.code),
+            });
+        }
+
+        let mut options = TransferOptions::default();
+        options.relay = opt(self.relay); // empty = default, like the CLI
+        options.resume = self.resume;
+
+        let context = SessionContext {
+            client,
+            params: SessionParams {
+                direction: self.direction.into(),
+                path: std::path::PathBuf::from(self.path),
+                sources,
+                options,
+            },
+        };
+
+        // Hand the extras to the core as an opaque object (it never interprets
+        // them); the typing above is purely boundary key-validation.
+        let extras = match self.platform_extras {
+            Some(x) => Some(serde_json::to_value(&x).map_err(|e| format!("platform_extras: {e}"))?),
+            None => None,
+        };
+        Ok((context, extras))
+    }
+}
+
+/// Parse + validate the frontend's create-session params (shared by the normal
+/// and staging entry points), producing the durable [`SessionContext`] plus the
+/// opaque platform extras. A single implementation of parse, conversion, and
+/// mode validation.
+fn parse_create_params(
+    json: &str,
+    mode: CreateMode,
+) -> Result<(SessionContext, Option<serde_json::Value>), String> {
+    let params: CreateParams =
+        serde_json::from_str(json).map_err(|e| format!("params JSON: {e}"))?;
+    params.into_context(mode)
+}
+
+#[cfg(test)]
+mod create_params_tests {
+    use super::*;
+
+    /// A complete, valid params object (a joined room receive). Tests mutate a
+    /// clone to exercise each rejection path.
+    fn valid() -> serde_json::Value {
+        serde_json::json!({
+            "direction": "receive",
+            "path": "/tmp/out",
+            "code": "123456-cobalt-flint",
+            "broker": "id@1.2.3.4:5",
+            "relay": "",
+            "chunk_size": "",
+            "data_stream_window": "",
+            "candidates_allow": "",
+            "candidates_deny": "",
+            "receipt_server": "",
+            "use_room": true,
+            "use_mdns": false,
+            "resume": false
+        })
+    }
+
+    fn parse(
+        v: &serde_json::Value,
+        mode: CreateMode,
+    ) -> Result<(SessionContext, Option<serde_json::Value>), String> {
+        parse_create_params(&v.to_string(), mode)
+    }
+
+    #[test]
+    fn valid_params_build_a_context() {
+        let (ctx, extras) = parse(&valid(), CreateMode::Normal).unwrap();
+        assert!(matches!(ctx.params.direction, TransferDirection::Receive));
+        assert_eq!(ctx.params.sources.len(), 1); // room only (use_mdns false)
+        assert!(extras.is_none());
+    }
+
+    #[test]
+    fn a_missing_field_is_rejected_not_defaulted() {
+        // The whole point: deleting a `put(...)` on the Kotlin side must error,
+        // not silently become "".
+        let mut v = valid();
+        v.as_object_mut().unwrap().remove("data_stream_window");
+        assert!(parse(&v, CreateMode::Normal).is_err());
+    }
+
+    #[test]
+    fn an_unknown_or_renamed_field_is_rejected() {
+        let mut v = valid();
+        v["chunkSize"] = serde_json::json!("64KB"); // camelCase typo of chunk_size
+        assert!(parse(&v, CreateMode::Normal).is_err());
+    }
+
+    #[test]
+    fn a_typo_direction_is_rejected() {
+        let mut v = valid();
+        v["direction"] = serde_json::json!("recieve");
+        assert!(parse(&v, CreateMode::Normal).is_err());
+    }
+
+    #[test]
+    fn an_empty_path_is_rejected() {
+        let mut v = valid();
+        v["path"] = serde_json::json!("");
+        assert!(parse(&v, CreateMode::Normal).is_err());
+    }
+
+    #[test]
+    fn staging_requires_a_source_but_normal_does_not() {
+        assert!(parse(&valid(), CreateMode::Staging).is_err());
+        assert!(parse(&valid(), CreateMode::Normal).is_ok());
+    }
+
+    #[test]
+    fn staging_with_a_source_round_trips_extras() {
+        let mut v = valid();
+        v["direction"] = serde_json::json!("send");
+        v["path"] = serde_json::json!("/tmp/staged");
+        v["platform_extras"] = serde_json::json!({
+            "source_uri": "content://x",
+            "source_recoverable": true
         });
+        let (_, extras) = parse(&v, CreateMode::Staging).unwrap();
+        let extras = extras.unwrap();
+        assert_eq!(extras["source_uri"], "content://x");
+        assert_eq!(extras["source_recoverable"], true);
     }
-    if v["use_mdns"].as_bool().unwrap_or(false) {
-        sources.push(PeerSource::Mdns { token: Some(code) });
+
+    #[test]
+    fn a_half_pair_of_source_fields_is_rejected() {
+        let mut v = valid();
+        v["platform_extras"] = serde_json::json!({ "source_uri": "content://x" });
+        assert!(parse(&v, CreateMode::Normal).is_err());
     }
-    let mut options = TransferOptions::default();
-    let relay = get("relay");
-    options.relay = (!relay.is_empty()).then_some(relay); // empty = default, like the CLI
-    options.resume = v["resume"].as_bool().unwrap_or(false);
-    let direction = match get("direction").as_str() {
-        "send" => TransferDirection::Send,
-        _ => TransferDirection::Receive,
-    };
-    let context = SessionContext {
-        client: client_context,
-        params: SessionParams {
-            direction,
-            path: std::path::PathBuf::from(get("path")),
-            sources,
-            options,
-        },
-    };
-    let extras = v.get("platform_extras").filter(|e| e.is_object()).cloned();
-    (context, extras)
+
+    #[test]
+    fn an_unknown_extras_key_is_rejected() {
+        let mut v = valid();
+        v["platform_extras"] = serde_json::json!({ "qrr": "x" }); // typo of qr
+        assert!(parse(&v, CreateMode::Normal).is_err());
+    }
 }
 
 /// Create a SEND session that stages its `content://` source first: the
@@ -1010,11 +1218,10 @@ pub extern "system" fn Java_dev_envoix_app_Native_createStagingSession(
     let Some(cb) = callback_or_log(&env, &callback, "createStagingSession") else {
         return;
     };
-    let v: serde_json::Value = match serde_json::from_str(&json) {
-        Ok(v) => v,
-        Err(e) => return emit_failed_snapshot(&vm, &cb, "invalid session params JSON", e),
+    let (context, extras) = match parse_create_params(&json, CreateMode::Staging) {
+        Ok(parsed) => parsed,
+        Err(e) => return emit_failed_snapshot(&vm, &cb, "invalid session params", e),
     };
-    let (context, extras) = session_context_from_params(&v);
     let _guard = runtime().enter();
     let (session, notices) = match TransferSession::start_staging(context, record_for(id), extras) {
         Ok(session) => session,
@@ -1264,20 +1471,32 @@ pub extern "system" fn Java_dev_envoix_app_Native_setSessionExtras(
     _class: JClass,
     id: jlong,
     extras_json: JString,
-) {
+) -> jni::sys::jstring {
     let raw = jstr(&mut env, &extras_json);
-    let Ok(extras) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        tracing::warn!(id, "setSessionExtras: invalid JSON");
-        return;
+    // Typed at the boundary (deny_unknown_fields): a misspelled/mistyped extras
+    // key is a loud error, not a silently-stored one. Re-serialized to an opaque
+    // object for the core (which never interprets it). Returns "" on success, an
+    // error message otherwise, so the caller can surface a real boundary drift.
+    let extras = match serde_json::from_str::<AndroidPlatformExtras>(&raw)
+        .and_then(|x| serde_json::to_value(&x))
+    {
+        Ok(v) => v,
+        Err(e) => {
+            let msg = format!("setSessionExtras: invalid extras: {e}");
+            tracing::warn!(id, %msg);
+            return to_jstring(&mut env, &msg);
+        }
     };
     let Ok(map) = sessions().lock() else {
-        return;
+        return to_jstring(&mut env, "");
     };
     let Some(session) = map.get(&id) else {
+        // A benign race (Kotlin syncs after teardown), not a drift — no error.
         tracing::debug!(id, "setSessionExtras: session not live");
-        return;
+        return to_jstring(&mut env, "");
     };
     session.set_extras(extras);
+    to_jstring(&mut env, "")
 }
 
 /// Tear a session down. With `discard` (D2, Remove): delete the partial,

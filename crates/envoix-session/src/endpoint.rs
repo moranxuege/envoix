@@ -307,6 +307,7 @@ pub(crate) async fn build_accept_endpoint(
     relay: &Option<String>,
     relay_only: bool,
     candidates: &CandidateFilter,
+    window: u32,
 ) -> Result<Endpoint, SessionError> {
     build_endpoint(
         Some(listen_addrs),
@@ -316,6 +317,7 @@ pub(crate) async fn build_accept_endpoint(
         relay,
         relay_only,
         candidates,
+        window,
     )
     .await
 }
@@ -326,6 +328,7 @@ pub(crate) async fn build_advertising_accept_endpoint(
     relay: &Option<String>,
     relay_only: bool,
     candidates: &CandidateFilter,
+    window: u32,
 ) -> Result<Endpoint, SessionError> {
     build_endpoint(
         Some(listen_addrs),
@@ -335,6 +338,7 @@ pub(crate) async fn build_advertising_accept_endpoint(
         relay,
         relay_only,
         candidates,
+        window,
     )
     .await
 }
@@ -344,9 +348,22 @@ pub(crate) async fn build_dial_endpoint(
     relay: &Option<String>,
     relay_only: bool,
     candidates: &CandidateFilter,
+    window: u32,
 ) -> Result<Endpoint, SessionError> {
-    build_endpoint(None, identity, false, false, relay, relay_only, candidates).await
+    build_endpoint(
+        None, identity, false, false, relay, relay_only, candidates, window,
+    )
+    .await
 }
+
+/// Default per-stream QUIC flow-control window (receive and send), in bytes.
+/// 16 MiB fills ~57 MB/s at 280 ms RTT, with headroom for lower-latency links.
+pub const DEFAULT_DATA_STREAM_WINDOW: u32 = 16 * 1024 * 1024;
+/// Accepted range for a caller-supplied window: below ~1 MiB throttles even a
+/// LAN, above 128 MiB risks excessive per-transfer memory on constrained
+/// devices. A value outside this range is rejected (never silently clamped).
+pub const MIN_DATA_STREAM_WINDOW: u32 = 1024 * 1024;
+pub const MAX_DATA_STREAM_WINDOW: u32 = 128 * 1024 * 1024;
 
 /// QUIC transport tuning for high-latency links (e.g. trans-Pacific, ~280 ms RTT).
 ///
@@ -356,12 +373,14 @@ pub(crate) async fn build_dial_endpoint(
 /// matter how fast the link is. We raise the per-stream flow-control window
 /// (and the matching send window) so one transfer can fill a long fat pipe;
 /// iroh's holepunching/multipath defaults (from the builder) are left untouched.
-fn data_transport_config() -> QuicTransportConfig {
-    // 16 MiB fills ~57 MB/s at 280 ms RTT, with headroom for lower-latency links.
-    const WINDOW: u32 = 16 * 1024 * 1024;
+///
+/// `window` is frozen per session (carried on [`crate::SessionConfig`]), never a
+/// global: it never enters the wire header, resume state, or any hash, so it
+/// affects throughput only — concurrent sessions each keep their own value.
+fn data_transport_config(window: u32) -> QuicTransportConfig {
     let mut builder = QuicTransportConfig::builder()
-        .stream_receive_window(VarInt::from_u32(WINDOW))
-        .send_window(WINDOW as u64);
+        .stream_receive_window(VarInt::from_u32(window))
+        .send_window(window as u64);
     // Default to BBRv3. The loss-based default (CUBIC) treats every packet loss
     // as congestion and backs off, which erodes throughput on lossy long-fat
     // links (e.g. trans-Pacific, ~0.3% loss at 280 ms RTT): measured ~2.5x
@@ -375,6 +394,9 @@ fn data_transport_config() -> QuicTransportConfig {
     builder.build()
 }
 
+// The endpoint knobs are independent flags/handles, not a cohesive config worth
+// its own type; the three thin wrappers above pin the common combinations.
+#[allow(clippy::too_many_arguments)]
 async fn build_endpoint(
     local_listen_addrs: Option<BindAddrs>,
     identity: &IdentityConfig,
@@ -383,12 +405,13 @@ async fn build_endpoint(
     relay: &Option<String>,
     relay_only: bool,
     candidates: &CandidateFilter,
+    window: u32,
 ) -> Result<Endpoint, SessionError> {
     let secret_key = load_secret_key(identity).await?;
     let mut builder = Endpoint::builder(presets::N0)
         .secret_key(secret_key)
         .relay_mode(relay_mode(relay)?)
-        .transport_config(data_transport_config())
+        .transport_config(data_transport_config(window))
         .clear_address_lookup();
     if accept_incoming {
         builder = builder.alpns(vec![ALPN.to_vec()]);

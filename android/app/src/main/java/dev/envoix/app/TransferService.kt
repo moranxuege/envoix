@@ -30,6 +30,7 @@ private data class Spec(
     val broker: String,
     val relay: String,
     val chunkSize: String,
+    val dataStreamWindow: String,
     val candidatesAllow: String,
     val candidatesDeny: String,
     /** Invite payload to advertise as a QR while waiting (initiated sessions only). */
@@ -60,6 +61,7 @@ private data class Spec(
                 put("relay", relay)
                 put("path", path)
                 put("chunk_size", chunkSize)
+                put("data_stream_window", dataStreamWindow)
                 put("candidates_allow", candidatesAllow)
                 put("candidates_deny", candidatesDeny)
                 put("use_room", useRoom)
@@ -269,6 +271,7 @@ class TransferService : Service() {
                         intent.getStringExtra(EXTRA_BROKER) ?: Endpoints.BROKER,
                         intent.getStringExtra(EXTRA_RELAY) ?: Endpoints.RELAY,
                         intent.getStringExtra(EXTRA_CHUNK_SIZE) ?: "",
+                        intent.getStringExtra(EXTRA_DATA_WINDOW) ?: "",
                         intent.getStringExtra(EXTRA_CAND_ALLOW) ?: "",
                         intent.getStringExtra(EXTRA_CAND_DENY) ?: "",
                         intent.getStringExtra(EXTRA_QR),
@@ -449,6 +452,7 @@ class TransferService : Service() {
                     c.optString("path"),
                     Endpoints.BROKER,
                     Endpoints.RELAY,
+                    "",
                     "",
                     "",
                     "",
@@ -915,7 +919,8 @@ class TransferService : Service() {
         val extras = org.json.JSONObject()
         t.qrPayload?.let { extras.put("qr", it) }
         t.savedUri?.let { extras.put("saved_uri", it) }
-        Native.setSessionExtras(id, extras.toString())
+        val err = Native.setSessionExtras(id, extras.toString())
+        if (err.isNotEmpty()) LogStore.append("app: $err (id=$id)")
     }
 
     /** Active states pin the tray; everything else rests. Exhaustive (no `else`)
@@ -1099,6 +1104,7 @@ class TransferService : Service() {
         private const val EXTRA_BROKER = "broker"
         private const val EXTRA_RELAY = "relay"
         private const val EXTRA_CHUNK_SIZE = "chunk_size"
+        private const val EXTRA_DATA_WINDOW = "data_stream_window"
         private const val EXTRA_CAND_ALLOW = "candidates_allow"
         private const val EXTRA_CAND_DENY = "candidates_deny"
         private const val EXTRA_QR = "qr"
@@ -1117,6 +1123,7 @@ class TransferService : Service() {
             broker: String,
             relay: String,
             chunkSize: String,
+            dataStreamWindow: String,
             candidatesAllow: String,
             candidatesDeny: String,
             qrPayload: String?,
@@ -1131,6 +1138,7 @@ class TransferService : Service() {
                     putExtra(EXTRA_BROKER, broker)
                     putExtra(EXTRA_RELAY, relay)
                     putExtra(EXTRA_CHUNK_SIZE, chunkSize)
+                    putExtra(EXTRA_DATA_WINDOW, dataStreamWindow)
                     putExtra(EXTRA_CAND_ALLOW, candidatesAllow)
                     putExtra(EXTRA_CAND_DENY, candidatesDeny)
                     putExtra(EXTRA_QR, qrPayload)

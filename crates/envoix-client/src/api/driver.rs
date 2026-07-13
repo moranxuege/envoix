@@ -63,6 +63,11 @@ pub struct ClientContext {
     /// Human-readable chunk size as supplied by the frontend. `None` means default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chunk_size: Option<String>,
+    /// Human-readable data-stream flow-control window (e.g. `32MB`) as supplied
+    /// by the frontend, frozen at session creation. `None` uses the transport
+    /// default. A transport tuning only — never enters the wire, resume, or hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_stream_window: Option<String>,
     /// CIDR allow-list for candidate addresses.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub candidates_allow: Vec<String>,
@@ -84,6 +89,7 @@ impl ClientContext {
             self.chunk_size.as_deref(),
             &self.candidates_allow,
             &self.candidates_deny,
+            self.data_stream_window.as_deref(),
         )
     }
 }

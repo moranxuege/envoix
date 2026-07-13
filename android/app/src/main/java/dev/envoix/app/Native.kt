@@ -103,11 +103,13 @@ object Native {
     )
 
     /** Replace the card context (QR payload, saved URI) persisted with the
-     *  transfer's record; opaque to the core, surfaced via listRestoreContexts. */
+     *  transfer's record; opaque to the core, surfaced via listRestoreContexts.
+     *  Returns "" on success, or an error message if [extrasJson] failed the
+     *  boundary validation (an unknown/mistyped key). */
     external fun setSessionExtras(
         id: Long,
         extrasJson: String,
-    )
+    ): String
 
     /** Tear a session down; with [discard], delete partial/resume/receipt (D2). */
     external fun destroySession(

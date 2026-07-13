@@ -162,6 +162,7 @@ pub async fn receive_file_via_room(
         &config.data_relay(),
         config.relay_only,
         &config.candidates,
+        config.data_stream_window,
     )
     .await?;
     // With direct-only the data endpoint has no relay home, so wait for a direct

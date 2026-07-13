@@ -58,6 +58,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     var broker by remember { mutableStateOf(settings.broker) }
     var relay by remember { mutableStateOf(settings.relay) }
     var chunkSize by remember { mutableStateOf(settings.chunkSize) }
+    var dataStreamWindow by remember { mutableStateOf(settings.dataStreamWindow) }
     val context = LocalContext.current
     val folderPicker =
         rememberLauncherForActivityResult(
@@ -157,9 +158,14 @@ fun SettingsScreen(onBack: () -> Unit) {
 
             Spacer(Modifier.height(22.dp))
             SectionLabel("CONFIG.TOML")
-            Field("Chunk size · e.g. 16MB", chunkSize) {
+            Field("Chunk size · e.g. 64KB (16KB–16MB)", chunkSize) {
                 chunkSize = it
                 SettingsStore.update { s -> s.copy(chunkSize = it) }
+            }
+            Spacer(Modifier.height(12.dp))
+            Field("Data stream window · e.g. 32MB (default 16MB)", dataStreamWindow) {
+                dataStreamWindow = it
+                SettingsStore.update { s -> s.copy(dataStreamWindow = it) }
             }
             Spacer(Modifier.height(12.dp))
             MultilineField("Candidate allow · one CIDR per line", allowText) {
