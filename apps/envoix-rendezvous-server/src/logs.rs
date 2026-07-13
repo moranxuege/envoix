@@ -120,8 +120,12 @@ impl RoomLogs {
         // for an existing side replaces, it does not grow cardinality).
         let new_side = rooms
             .get(room)
-            .map_or(true, |e| !e.clients.iter().any(|(s, _)| s == side));
-        if new_side && rooms.get(room).is_some_and(|e| e.clients.len() >= MAX_CLIENTS_PER_ROOM) {
+            .is_none_or(|e| !e.clients.iter().any(|(s, _)| s == side));
+        if new_side
+            && rooms
+                .get(room)
+                .is_some_and(|e| e.clients.len() >= MAX_CLIENTS_PER_ROOM)
+        {
             return false;
         }
         let entry = rooms.entry(room.to_string()).or_default();
@@ -278,7 +282,10 @@ async fn view(
             .and_then(|s| s.strip_prefix("Bearer "))
             .is_some_and(|p| constant_time_eq(p.as_bytes(), expected.as_bytes()));
         if !ok {
-            return (StatusCode::UNAUTHORIZED, "operator token required\n".to_string());
+            return (
+                StatusCode::UNAUTHORIZED,
+                "operator token required\n".to_string(),
+            );
         }
     }
     // Default is the canonical per-source lanes; `?merge=time` is the secondary
@@ -435,7 +442,11 @@ mod tests {
         let store = RoomLogs::new(Duration::from_secs(60));
         store.push_rdz("r", 100, "INFO  paired".to_string());
         // 13-digit epochs; receive (200) predates send (300).
-        assert!(store.upload("r", "send", "0\t1\t0000000000300\t9\t3\t\tmachine\ttransition\t\n".to_string()));
+        assert!(store.upload(
+            "r",
+            "send",
+            "0\t1\t0000000000300\t9\t3\t\tmachine\ttransition\t\n".to_string()
+        ));
         assert!(store.upload(
             "r",
             "receive",
@@ -445,17 +456,29 @@ mod tests {
         let rdz = merged.find("[rdz").unwrap();
         let recv = merged.find("[receive").unwrap();
         let send = merged.find("[send").unwrap();
-        assert!(rdz < recv && recv < send, "interleaved by epoch across sources");
+        assert!(
+            rdz < recv && recv < send,
+            "interleaved by epoch across sources"
+        );
     }
 
     #[test]
     fn per_room_side_cap_rejects_new_but_allows_replace() {
         let store = RoomLogs::new(Duration::from_secs(60));
         for i in 0..MAX_CLIENTS_PER_ROOM {
-            assert!(store.upload("r", &format!("s{i}"), "x".to_string()), "side {i} within cap");
+            assert!(
+                store.upload("r", &format!("s{i}"), "x".to_string()),
+                "side {i} within cap"
+            );
         }
-        assert!(!store.upload("r", "overflow", "x".to_string()), "a new side past the cap is refused");
-        assert!(store.upload("r", "s0", "y".to_string()), "re-upload of an existing side still accepted");
+        assert!(
+            !store.upload("r", "overflow", "x".to_string()),
+            "a new side past the cap is refused"
+        );
+        assert!(
+            store.upload("r", "s0", "y".to_string()),
+            "re-upload of an existing side still accepted"
+        );
     }
 
     #[test]

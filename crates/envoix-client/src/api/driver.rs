@@ -864,12 +864,7 @@ impl Actor {
     /// (accepted/ignored), any state transition (as `decided` — the commit
     /// outcome follows in [`Self::try_commit`], never marked committed here),
     /// fact deltas, and the effects this edge produced. Non-progress only.
-    fn observe_reduce(
-        &self,
-        kind: &'static str,
-        before: &Session,
-        effects: &[Effect],
-    ) {
+    fn observe_reduce(&self, kind: &'static str, before: &Session, effects: &[Effect]) {
         // Acceptance from the authority: a full-session compare (matching apply's
         // own `self.session == before`), so any legal mutation — state, facts, or
         // any other field like `path` — counts. Effects-without-change also count.

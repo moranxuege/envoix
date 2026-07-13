@@ -561,7 +561,10 @@ impl tracing::field::Visit for TimelineVisitor {
         self.put(field.name(), value.to_string());
     }
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        self.put(field.name(), format!("{value:?}").trim_matches('"').to_string());
+        self.put(
+            field.name(),
+            format!("{value:?}").trim_matches('"').to_string(),
+        );
     }
 }
 
@@ -617,7 +620,13 @@ where
         });
         let mut v = TimelineVisitor::default();
         event.record(&mut v);
-        let line = build_timeline_line(TIMELINE_SCHEMA, epoch_ms(), std::process::id(), session_id, &v);
+        let line = build_timeline_line(
+            TIMELINE_SCHEMA,
+            epoch_ms(),
+            std::process::id(),
+            session_id,
+            &v,
+        );
         timeline_line(session_id.unwrap_or(0), &line);
     }
 }
@@ -754,7 +763,10 @@ mod timeline_tests {
     #[test]
     fn perlayer_filter_hides_session_span() {
         let got = run_capture(false, true);
-        assert_eq!(got[0].0, None, "the per-layer filter hides the session span → session_id lost");
+        assert_eq!(
+            got[0].0, None,
+            "the per-layer filter hides the session span → session_id lost"
+        );
     }
 
     // The FIX: no per-layer filter (so the session span is visible → session_id
@@ -763,7 +775,11 @@ mod timeline_tests {
     fn guard_without_filter_resolves_session_id_and_drops_noise() {
         let got = run_capture(true, false);
         assert_eq!(got.len(), 1, "only the timeline event survives the guard");
-        assert_eq!(got[0].0, Some(7), "session_id resolves from the visible span");
+        assert_eq!(
+            got[0].0,
+            Some(7),
+            "session_id resolves from the visible span"
+        );
         assert_eq!(got[0].1, TIMELINE_TARGET);
     }
 }
