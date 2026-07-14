@@ -2,9 +2,10 @@
 //! short code, then transfer over iroh with the existing data plane.
 //!
 //! The rendezvous only finds + authenticates the peers and exchanges their iroh
-//! addresses; the file transfer itself is the unchanged `send_file_manual` /
-//! `receive_one_authenticated` path, authenticated with a token derived from the
-//! pairing key (so the data-plane SPAKE2 still runs and is channel-bound).
+//! addresses; the data transfer then uses either the compatible single-file
+//! path or the additive ALPN-negotiated Manifest path, authenticated with a
+//! token derived from the pairing key (so data-plane SPAKE2 still runs and is
+//! channel-bound).
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -18,9 +19,11 @@ use envoix_types::PairingStep;
 use iroh::{Endpoint, EndpointAddr, SecretKey};
 
 use crate::{
-    BindAddrs, EventSink, PairingConfig, SessionConfig, SessionError, TransferCancelToken,
-    TransferEvent, TransferSummary, bind_iroh_endpoint_with_relay, receive_with_auth_retries,
-    send_file_to_endpoint_addr,
+    BindAddrs, BoundEndpoint, EventSink, ManifestSendRequest, ManifestTransferSummary,
+    PairingConfig, SessionConfig, SessionError, SessionEventSink, SessionTransferSummary,
+    TransferCancelToken, TransferEvent, TransferSummary, bind_iroh_endpoint_with_relay,
+    bind_iroh_transfer_endpoint_with_relay, receive_transfer_with_auth_retries,
+    receive_with_auth_retries, send_file_to_endpoint_addr, send_manifest_to_endpoint_addr,
 };
 
 const SEND_ROOM_PAIRING_TIMEOUT: Duration = Duration::from_secs(35);
@@ -150,7 +153,6 @@ pub async fn receive_file_via_room(
     events: Box<dyn EventSink>,
     cancel: TransferCancelToken,
 ) -> Result<TransferSummary, SessionError> {
-    let (room_id, password) = split_code(code);
     let bound = bind_iroh_endpoint_with_relay(
         listen_addrs,
         &config.identity,
@@ -159,13 +161,55 @@ pub async fn receive_file_via_room(
         &config.candidates,
     )
     .await?;
+    let auth = pair_room_receiver(&bound, broker, code, &config, events.as_ref(), &cancel).await?;
+    receive_with_auth_retries(bound, output_dir, config, &auth, events, cancel).await
+}
+
+/// Receive a negotiated single-file or Manifest transfer through the existing
+/// room rendezvous flow.
+pub async fn receive_transfer_via_room(
+    broker: EndpointAddr,
+    code: &str,
+    listen_addrs: impl Into<BindAddrs>,
+    output_dir: PathBuf,
+    config: SessionConfig,
+    events: Box<dyn SessionEventSink>,
+    cancel: TransferCancelToken,
+) -> Result<SessionTransferSummary, SessionError> {
+    let bound = bind_iroh_transfer_endpoint_with_relay(
+        listen_addrs,
+        &config.identity,
+        &config.data_relay(),
+        config.relay_only,
+        &config.candidates,
+    )
+    .await?;
+    let auth = pair_room_receiver(&bound, broker, code, &config, events.as_ref(), &cancel).await?;
+    receive_transfer_with_auth_retries(bound, output_dir, config, &auth, events, cancel).await
+}
+
+async fn pair_room_receiver(
+    bound: &BoundEndpoint,
+    broker: EndpointAddr,
+    code: &str,
+    config: &SessionConfig,
+    events: &dyn EventSink,
+    cancel: &TransferCancelToken,
+) -> Result<PairingConfig, SessionError> {
+    let (room_id, password) = split_code(code);
     // With direct-only the data endpoint has no relay home, so wait for a direct
     // addr rather than a relay home; otherwise wait for the relay home as usual.
     let my_addr = bound
         .ready_endpoint_addr(config.data_relay().is_some())
         .await;
 
-    let rdz = rendezvous_endpoint(&config.relay).await?;
+    let rdz = match rendezvous_endpoint(&config.relay).await {
+        Ok(rdz) => rdz,
+        Err(error) => {
+            bound.local_endpoint.close().await;
+            return Err(error);
+        }
+    };
     let pairing = match pair_or_cancel(
         &rdz,
         &broker,
@@ -173,8 +217,8 @@ pub async fn receive_file_via_room(
         password,
         &my_addr,
         JoinIntent::Receive,
-        &cancel,
-        events.as_ref(),
+        cancel,
+        events,
         None,
     )
     .await
@@ -199,7 +243,7 @@ pub async fn receive_file_via_room(
     let auth = PairingConfig::Spake2SharedToken {
         token: pairing.token,
     };
-    receive_with_auth_retries(bound, output_dir, config, &auth, events, cancel).await
+    Ok(auth)
 }
 
 /// Send a file by pairing in a room: exchange descriptors with the receiver over
@@ -214,6 +258,47 @@ pub async fn send_file_via_room(
     events: Box<dyn EventSink>,
     cancel: TransferCancelToken,
 ) -> Result<TransferSummary, SessionError> {
+    let pairing = pair_room_sender(broker, code, &config, events.as_ref(), &cancel).await?;
+    let auth = PairingConfig::Spake2SharedToken {
+        token: pairing.token,
+    };
+    send_file_to_endpoint_addr(
+        pairing.peer,
+        file_path,
+        resume,
+        config,
+        &auth,
+        events,
+        cancel,
+    )
+    .await
+}
+
+/// Send one Manifest transfer set through the existing room rendezvous flow.
+pub async fn send_manifest_via_room(
+    broker: EndpointAddr,
+    code: &str,
+    request: ManifestSendRequest,
+    resume: bool,
+    config: SessionConfig,
+    events: Box<dyn SessionEventSink>,
+    cancel: TransferCancelToken,
+) -> Result<ManifestTransferSummary, SessionError> {
+    let pairing = pair_room_sender(broker, code, &config, events.as_ref(), &cancel).await?;
+    let auth = PairingConfig::Spake2SharedToken {
+        token: pairing.token,
+    };
+    send_manifest_to_endpoint_addr(pairing.peer, request, resume, config, &auth, events, cancel)
+        .await
+}
+
+async fn pair_room_sender(
+    broker: EndpointAddr,
+    code: &str,
+    config: &SessionConfig,
+    events: &dyn EventSink,
+    cancel: &TransferCancelToken,
+) -> Result<RoomPairing<EndpointAddr>, SessionError> {
     let (room_id, password) = split_code(code);
     let rdz = rendezvous_endpoint(&config.relay).await?;
     // The receiver ignores the sender's payload (the sender only dials), so any
@@ -227,8 +312,8 @@ pub async fn send_file_via_room(
         password,
         &placeholder,
         JoinIntent::Send,
-        &cancel,
-        events.as_ref(),
+        cancel,
+        events,
         Some(SEND_ROOM_PAIRING_TIMEOUT),
     )
     .await
@@ -244,20 +329,7 @@ pub async fn send_file_via_room(
     // The rendezvous endpoint is only needed for the broker handshake; close it
     // so it does not linger (and log) while the data transfer runs.
     rdz.close().await;
-
-    let auth = PairingConfig::Spake2SharedToken {
-        token: pairing.token,
-    };
-    send_file_to_endpoint_addr(
-        pairing.peer,
-        file_path,
-        resume,
-        config,
-        &auth,
-        events,
-        cancel,
-    )
-    .await
+    Ok(pairing)
 }
 
 #[cfg(test)]

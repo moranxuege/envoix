@@ -64,14 +64,20 @@ The additive contract, wire-codec, and core-engine slices are implemented as of
 - the existing mDNS discovery loop now has additive Manifest send and
   negotiated receive entry points. Its advertisement accepts both ALPNs while
   the legacy mDNS functions retain their signatures and single-file behavior;
+- the existing rendezvous room pairing is shared by additive Manifest send and
+  negotiated receive entry points; broker matching, sealed descriptor exchange,
+  derived data-plane token authentication, and legacy single-file APIs are
+  unchanged;
 - real iroh tests prove Manifest directory/multi-file routing, old single-file
   compatibility on the same dual endpoint, pre-engine authentication failure,
   legacy-peer ALPN rejection, real mDNS discovery into Manifest, and an old
-  single-file mDNS sender reaching the new negotiated receiver.
+  single-file mDNS sender reaching the new negotiated receiver. A loopback
+  rendezvous test additionally proves room pairing followed by a Manifest
+  directory/file transfer.
 
 The engine is exercised both over an in-memory full-duplex connection and the
-additive manual/direct and mDNS iroh session paths. Shipping clients still do
-**not** transfer multiple files or directories: room and client-facade source
+additive manual/direct, mDNS, and room iroh session paths. Shipping clients
+still do **not** transfer multiple files or directories: client-facade source
 selection, durable Activity results, FFI, and Apple UI remain subsequent
 slices.
 
@@ -369,7 +375,7 @@ The shared transfer record should expose:
 
 ## Follow-up Issues
 
-- Extend the authenticated Manifest session path through room, client, durable
+- Extend the authenticated Manifest session path through client, durable
   Activity, and FFI entry points without changing existing single-file APIs.
 - Add multi-file selection in Apple sender UI.
 - Add directory transfer support on desktop.

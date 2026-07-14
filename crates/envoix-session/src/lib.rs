@@ -40,7 +40,9 @@ use endpoint::{
 };
 pub use identity::{IdentityConfig, MemoryIdentity};
 pub use iroh::EndpointAddr;
-pub use room::{receive_file_via_room, send_file_via_room};
+pub use room::{
+    receive_file_via_room, receive_transfer_via_room, send_file_via_room, send_manifest_via_room,
+};
 
 const MAX_AUTH_FAILURES: u32 = 50;
 /// Grace period for one auth handshake. An accepted (or dialed) peer that goes
