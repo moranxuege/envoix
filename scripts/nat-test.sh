@@ -41,6 +41,8 @@ relay_pid=""
 broker_endpoint=""
 jni_replaced=0
 jni_had_original=0
+device_ip_a=""
+device_ip_b=""
 
 # Interface names must fit Linux's 15-character limit. The PID avoids clashes
 # with stale names from an interrupted run.
@@ -597,6 +599,10 @@ record_peer() {
         '
 }
 
+record_peer_type() {
+    record_peer "$1" | sed 's/[[:space:]].*$//'
+}
+
 print_peer_data() {
     local profile="$1"
     local sender receiver
@@ -639,11 +645,10 @@ capture_diagnostics() {
     } >"$log_dir/$profile-host-routing.log" 2>&1 || true
 }
 
-configure_nat() {
+configure_symmetric_nat() {
     local ns="$1"
     local lan_subnet="$2"
-    local nat_type="$3"
-    local conntrack_zone="$4"
+    local conntrack_zone="$3"
 
     # A distinct zone prevents a mapping from the preceding profile being
     # reused if the application happens to select the same local UDP port.
@@ -663,22 +668,63 @@ configure_nat() {
     in_namespace "$ns" nft add rule ip envoix forward iifname lan0 oifname wan0 accept
     in_namespace "$ns" nft add chain ip envoix postrouting \
         '{ type nat hook postrouting priority srcnat; policy accept; }'
-    if [ "$nat_type" = symmetric ]; then
-        # A random external port is selected for each conntrack tuple, whose
-        # key includes the remote address and port. Return traffic is accepted
-        # only when it belongs to that tuple.
-        in_namespace "$ns" nft add rule ip envoix postrouting \
-            oifname wan0 ip saddr "$lan_subnet" meta l4proto udp \
-            masquerade to :40000-59999 fully-random
-        in_namespace "$ns" nft add rule ip envoix postrouting \
-            oifname wan0 ip saddr "$lan_subnet" meta l4proto != udp masquerade
-    else
-        # Linux's default masquerade preserves/reuses the source port where
-        # possible, providing an endpoint-independent mapping. The forward
-        # chain still gives realistic port-restricted inbound filtering.
-        in_namespace "$ns" nft add rule ip envoix postrouting \
-            oifname wan0 ip saddr "$lan_subnet" masquerade
-    fi
+    # A random external port is selected for each conntrack tuple, whose key
+    # includes the remote address and port. Return traffic is accepted only
+    # when it belongs to that tuple.
+    in_namespace "$ns" nft add rule ip envoix postrouting \
+        oifname wan0 ip saddr "$lan_subnet" meta l4proto udp \
+        masquerade to :40000-59999 fully-random
+    in_namespace "$ns" nft add rule ip envoix postrouting \
+        oifname wan0 ip saddr "$lan_subnet" meta l4proto != udp masquerade
+}
+
+configure_friendly_nat() {
+    local ns="$1"
+    local lan_subnet="$2"
+    local device_ip="$3"
+    local public_ip="$4"
+    local conntrack_zone="$5"
+
+    in_namespace "$ns" nft delete table ip envoix_raw >/dev/null 2>&1 || true
+    in_namespace "$ns" nft add table ip envoix_raw
+    in_namespace "$ns" nft add set ip envoix_raw pinholes \
+        '{ type ipv4_addr . inet_service . inet_service; flags timeout,dynamic; timeout 2m; }'
+    in_namespace "$ns" nft add chain ip envoix_raw prerouting \
+        '{ type filter hook prerouting priority raw; policy accept; }'
+    in_namespace "$ns" nft add chain ip envoix_raw postrouting \
+        '{ type filter hook postrouting priority mangle; policy accept; }'
+    # Stateless one-to-one UDP translation guarantees endpoint-independent,
+    # port-preserving mappings. The set retains port-restricted filtering.
+    in_namespace "$ns" nft add rule ip envoix_raw prerouting \
+        iifname lan0 ip saddr "$device_ip" ip daddr != "$lan_subnet" \
+        meta l4proto udp update @pinholes \
+        '{ ip daddr . udp dport . udp sport timeout 2m }' \
+        counter notrack
+    in_namespace "$ns" nft add rule ip envoix_raw prerouting \
+        iifname wan0 ip daddr "$public_ip" meta l4proto udp \
+        ip saddr . udp sport . udp dport @pinholes \
+        counter ip daddr set "$device_ip" notrack
+    in_namespace "$ns" nft add rule ip envoix_raw prerouting \
+        meta l4proto != udp ct zone set "$conntrack_zone"
+    # Rewriting the local source in prerouting makes Linux reject the packet
+    # as arriving on lan0 with an address owned by wan0. Delay it until after
+    # routing; notrack was already applied above.
+    in_namespace "$ns" nft add rule ip envoix_raw postrouting \
+        oifname wan0 ip saddr "$device_ip" meta l4proto udp \
+        counter ip saddr set "$public_ip"
+
+    in_namespace "$ns" nft delete table ip envoix >/dev/null 2>&1 || true
+    in_namespace "$ns" nft add table ip envoix
+    in_namespace "$ns" nft add chain ip envoix forward \
+        '{ type filter hook forward priority filter; policy drop; }'
+    in_namespace "$ns" nft add rule ip envoix forward ct state established,related accept
+    in_namespace "$ns" nft add rule ip envoix forward iifname lan0 oifname wan0 accept
+    in_namespace "$ns" nft add rule ip envoix forward \
+        iifname wan0 oifname lan0 ip daddr "$device_ip" meta l4proto udp accept
+    in_namespace "$ns" nft add chain ip envoix postrouting \
+        '{ type nat hook postrouting priority srcnat; policy accept; }'
+    in_namespace "$ns" nft add rule ip envoix postrouting \
+        oifname wan0 ip saddr "$lan_subnet" meta l4proto != udp masquerade
 }
 
 configure_routed() {
@@ -737,27 +783,35 @@ apply_profile() {
     set_routed_side_b 0
     case "$profile" in
         symmetric-both-ipv4)
-            configure_nat "$ns_a" 192.168.101.0/24 symmetric 101
-            configure_nat "$ns_b" 192.168.102.0/24 symmetric 101
+            configure_symmetric_nat "$ns_a" 192.168.101.0/24 101
+            configure_symmetric_nat "$ns_b" 192.168.102.0/24 101
             configure_ipv6_forwarding "$ns_a" 0
             configure_ipv6_forwarding "$ns_b" 0
             ;;
         friendly-both-ipv4)
-            configure_nat "$ns_a" 192.168.101.0/24 friendly 102
-            configure_nat "$ns_b" 192.168.102.0/24 friendly 102
+            if [ -n "$device_ip_a" ] && [ -n "$device_ip_b" ]; then
+                configure_friendly_nat \
+                    "$ns_a" 192.168.101.0/24 "$device_ip_a" 198.18.0.2 102
+                configure_friendly_nat \
+                    "$ns_b" 192.168.102.0/24 "$device_ip_b" 198.18.0.3 102
+            else
+                # Bootstrap Android's network before its DHCP address is known.
+                configure_symmetric_nat "$ns_a" 192.168.101.0/24 102
+                configure_symmetric_nat "$ns_b" 192.168.102.0/24 102
+            fi
             configure_ipv6_forwarding "$ns_a" 0
             configure_ipv6_forwarding "$ns_b" 0
             ;;
         symmetric-one-side-ipv4)
-            configure_nat "$ns_a" 192.168.101.0/24 symmetric 103
+            configure_symmetric_nat "$ns_a" 192.168.101.0/24 103
             configure_routed "$ns_b"
             set_routed_side_b 1
             configure_ipv6_forwarding "$ns_a" 0
             configure_ipv6_forwarding "$ns_b" 0
             ;;
         symmetric-both-ipv6)
-            configure_nat "$ns_a" 192.168.101.0/24 symmetric 104
-            configure_nat "$ns_b" 192.168.102.0/24 symmetric 104
+            configure_symmetric_nat "$ns_a" 192.168.101.0/24 104
+            configure_symmetric_nat "$ns_b" 192.168.102.0/24 104
             configure_ipv6_forwarding "$ns_a" 1
             configure_ipv6_forwarding "$ns_b" 1
             ;;
@@ -878,12 +932,18 @@ setup_network() {
 run_test() {
     local profile="$1"
     local room deadline actual app_uid sender_state receiver_state
+    local sender_peer_type receiver_peer_type failure_reason
 
     room="$(printf '%06d' $((RANDOM % 1000000)))-nat-test"
     actual=""
     sender_state=""
     receiver_state=""
+    failure_reason=""
     printf '\n[%s] Preparing devices...\n' "$profile"
+    device_ip_a="$(wifi_address "$SERIAL_A")"
+    device_ip_b="$(wifi_address "$SERIAL_B")"
+    [ -n "$device_ip_a" ] || die "$SERIAL_A has no global Wi-Fi IPv4 address"
+    [ -n "$device_ip_b" ] || die "$SERIAL_B has no global Wi-Fi IPv4 address"
     apply_profile "$profile"
     if [ "$profile" = symmetric-both-ipv6 ]; then
         set_device_ipv6 "$SERIAL_A" 1 2001:db8:101: 192.168.101.
@@ -923,6 +983,13 @@ run_test() {
         fi
         if printf '%s\n' "$actual" | grep -q "^$expected_hash " &&
             [ "$sender_state" = completed ] && [ "$receiver_state" = completed ]; then
+            sender_peer_type="$(record_peer_type "$SERIAL_A" || true)"
+            receiver_peer_type="$(record_peer_type "$SERIAL_B" || true)"
+            if [ "$profile" = friendly-both-ipv4 ] &&
+                { [ "$sender_peer_type" != direct ] || [ "$receiver_peer_type" != direct ]; }; then
+                failure_reason="completed through sender=${sender_peer_type:-unknown}, receiver=${receiver_peer_type:-unknown}; expected direct"
+                break
+            fi
             [ "$verbose" -eq 0 ] || printf '\n'
             printf '[%s] PASS: both peers completed; received SHA-256 matches %s\n' \
                 "$profile" "$expected_hash"
@@ -938,8 +1005,12 @@ run_test() {
     done
 
     [ "$verbose" -eq 0 ] || printf '\n'
-    printf '[%s] FAIL after %s seconds: sender=%s receiver=%s\n' \
-        "$profile" "$timeout" "${sender_state:-unknown}" "${receiver_state:-unknown}" >&2
+    if [ -n "$failure_reason" ]; then
+        printf '[%s] FAIL: %s\n' "$profile" "$failure_reason" >&2
+    else
+        printf '[%s] FAIL after %s seconds: sender=%s receiver=%s\n' \
+            "$profile" "$timeout" "${sender_state:-unknown}" "${receiver_state:-unknown}" >&2
+    fi
     [ -z "$actual" ] || printf '[%s] received candidates:\n%s\n' "$profile" "$actual" >&2
     print_peer_data "$profile"
     capture_diagnostics "$profile"
