@@ -39,7 +39,7 @@ pub use identity::{IdentityConfig, MemoryIdentity};
 pub use iroh::EndpointAddr;
 pub use room::{receive_file_via_room, send_file_via_room};
 
-const ALPN: &[u8] = b"envoix/1";
+const ALPN: &[u8] = envoix_protocol::SINGLE_FILE_V1_ALPN;
 const MAX_AUTH_FAILURES: u32 = 50;
 /// Grace period for one auth handshake. An accepted (or dialed) peer that goes
 /// silent must not pin the session: without a bound, cancel only takes effect

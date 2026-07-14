@@ -3,8 +3,9 @@ use std::time::Duration;
 
 use envoix_error::CoreError;
 use envoix_protocol::{
-    Frame, FrameConnection, ProtocolError, flush_frame_writer, read_frame, write_chunk_frame,
-    write_frame,
+    Frame, FrameConnection, ManifestFrame, ManifestFrameConnection, ManifestId, ProtocolError,
+    flush_frame_writer, read_frame, read_manifest_frame, write_chunk_frame, write_frame,
+    write_manifest_chunk_frame, write_manifest_frame,
 };
 use envoix_transfer::{EventSink, TransferEvent};
 use envoix_types::DataPath;
@@ -191,6 +192,71 @@ impl FrameConnection for IrohFrameConnection {
         }
         self.connection.close(VarInt::from_u32(0), b"done");
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl ManifestFrameConnection for IrohFrameConnection {
+    async fn send_manifest_frame(&mut self, frame: ManifestFrame) -> Result<(), ProtocolError> {
+        write_manifest_frame(&mut self.send, &frame).await?;
+        flush_frame_writer(&mut self.send).await
+    }
+
+    async fn send_manifest_chunk(
+        &mut self,
+        manifest_id: &ManifestId,
+        entry_id: u32,
+        transfer_id: &envoix_types::TransferId,
+        index: u64,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<(), ProtocolError> {
+        write_manifest_chunk_frame(
+            &mut self.send,
+            manifest_id,
+            entry_id,
+            transfer_id,
+            index,
+            offset,
+            bytes,
+        )
+        .await?;
+        flush_frame_writer(&mut self.send).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn send_manifest_chunk_or_recv_frame(
+        &mut self,
+        manifest_id: &ManifestId,
+        entry_id: u32,
+        transfer_id: &envoix_types::TransferId,
+        index: u64,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<Option<ManifestFrame>, ProtocolError> {
+        let send = &mut self.send;
+        let recv = &mut self.recv;
+        tokio::select! {
+            biased;
+            frame = read_manifest_frame(recv) => frame.map(Some),
+            result = async {
+                write_manifest_chunk_frame(
+                    send,
+                    manifest_id,
+                    entry_id,
+                    transfer_id,
+                    index,
+                    offset,
+                    bytes,
+                )
+                .await?;
+                flush_frame_writer(send).await
+            } => result.map(|()| None),
+        }
+    }
+
+    async fn recv_manifest_frame(&mut self) -> Result<ManifestFrame, ProtocolError> {
+        read_manifest_frame(&mut self.recv).await
     }
 }
 

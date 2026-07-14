@@ -1154,6 +1154,8 @@ dependencies = [
  "envoix-types",
  "num_enum",
  "serde",
+ "serde_json",
+ "thiserror 2.0.18",
  "tokio",
 ]
 
