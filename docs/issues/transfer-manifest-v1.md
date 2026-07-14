@@ -73,13 +73,19 @@ The additive contract, wire-codec, and core-engine slices are implemented as of
   legacy-peer ALPN rejection, real mDNS discovery into Manifest, and an old
   single-file mDNS sender reaching the new negotiated receiver. A loopback
   rendezvous test additionally proves room pairing followed by a Manifest
-  directory/file transfer.
+  directory/file transfer;
+- the additive client facade exposes `Client::send_manifest`, negotiated
+  `Client::receive_transfer`, a `TransferSet` handle, aggregate/per-entry
+  lifecycle events, and typed single-file-or-Manifest summaries without
+  changing `TransferRequest`, `Client::send`, `Client::receive`, `Client::run`,
+  or `Transfer::wait`.
 
 The engine is exercised both over an in-memory full-duplex connection and the
-additive manual/direct, mDNS, and room iroh session paths. Shipping clients
-still do **not** transfer multiple files or directories: client-facade source
-selection, durable Activity results, FFI, and Apple UI remain subsequent
-slices.
+additive manual/direct, mDNS, and room iroh session paths. The Rust client facade
+now selects all three paths and has a real multi-file/directory loopback test.
+Shipping Apple clients still do **not** transfer multiple files or directories:
+durable Activity results, FFI, and Apple selection/publication UI remain
+subsequent slices.
 
 ## Compatibility Boundary
 
@@ -375,8 +381,8 @@ The shared transfer record should expose:
 
 ## Follow-up Issues
 
-- Extend the authenticated Manifest session path through client, durable
-  Activity, and FFI entry points without changing existing single-file APIs.
+- Project the client Manifest path through durable Activity and additive FFI
+  entry points without changing existing single-file APIs.
 - Add multi-file selection in Apple sender UI.
 - Add directory transfer support on desktop.
 - Add manifest-aware receive path validation tests.

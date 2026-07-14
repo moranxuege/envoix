@@ -1,20 +1,31 @@
 # Apple client execution plan
 
-Status: **Draft — baseline locked; product decisions D1–D3 pending**
+Status: **Approved for execution — Wave 0 verified; stable commit pending**
 
 Owner: Apple client workstream
 
-Last updated: 2026-07-13
+Last updated: 2026-07-14
 
 Design reference: [`../../../Design.png`](../../../Design.png)
 
-This document is the execution source of truth for the Envoix iOS and macOS
-clients. GitHub issues remain canonical for issue-specific discussion; this
-document owns cross-issue sequencing, gates, acceptance evidence, and the
-current decision log.
+This document is the single execution source of truth for the Envoix Apple
+client and its cross-platform dependencies. GitHub issues and local design
+drafts remain canonical for subject-specific contracts; this document owns
+their order, dependency gates, acceptance evidence, workstream ownership, and
+decision log.
 
-No product implementation may start from this draft until Decisions D1–D3 are
-confirmed. D4 is now resolved by the checkpoint and dev merge recorded below.
+Detailed specifications are routed as follows:
+
+| Subject | Canonical detail |
+|---|---|
+| Durable transfer lifecycle | [`transfer-state-machine.md`](transfer-state-machine.md) |
+| Shared client and path contracts | [`client-api.md`](client-api.md) |
+| Multi-file and directory transfer | [`../issues/transfer-manifest-v1.md`](../issues/transfer-manifest-v1.md) |
+| Cross-platform Wi-Fi Aware vertical slice | [`wifi-aware-vertical-slice.md`](wifi-aware-vertical-slice.md) |
+| Sender-first invites | [`../issues/sender-initiated-transfer-flows.md`](../issues/sender-initiated-transfer-flows.md) |
+| Trusted devices | [`../issues/trusted-device-store.md`](../issues/trusted-device-store.md) |
+| Reliable completion and resume | [`../issues/reliable-transfer-completion-resume.md`](../issues/reliable-transfer-completion-resume.md) |
+| Active issue routing | [`../issues/README.md`](../issues/README.md) |
 
 ## 1. Outcome
 
@@ -23,25 +34,39 @@ Deliver an Apple client that:
 1. behaves correctly on the agreed iPhone and macOS device matrix;
 2. renders the durable Rust transfer record instead of implementing a second
    lifecycle in Swift;
-3. can advance independently of Android application changes;
+3. can advance without continuous Android feature/UI parity, while keeping the
+   current Android application compile-compatible at shared Rust/FFI gates;
 4. keeps existing Rust/UniFFI callers source-compatible through additive API
    evolution;
-5. ships a first Apple-focused feature after the UI and state foundations are
-   proven; and
-6. is supported by reproducible builds, honest automated tests, and physical
+5. accepts one regular document through the system Open In route and one Files
+   or Photos item through a Share Extension/App Group handoff;
+6. accelerates `ManifestV1` so multi-file and directory sharing can replace the
+   temporary single-item boundary;
+7. adds Wi-Fi Aware only as a shared Apple/Android nearby path, while retaining
+   LAN and remote rendezvous/relay reachability; and
+8. keeps the macOS app usable as both a supported client and the default
+   physical counterpart for iPhone transfer verification; and
+9. is supported by reproducible builds, honest automated tests, and physical
    device evidence.
 
-“Apple-independent” means that Android UI work and unfinished Android fixes do
-not gate Apple delivery. It does not mean duplicating protocol, transfer,
-security, retry, resume, or path-selection semantics in Swift. A pinned CLI,
-Rust integration harness, or known-good mobile peer may be used when a second
-endpoint is required.
+“Apple-independent” means that Android UI feature work does not gate Apple
+delivery. It does not mean allowing shared Rust/FFI changes to break the current
+Android application, or duplicating protocol, transfer, security, retry, resume,
+or path-selection semantics in Swift. Each shared-boundary milestone therefore
+runs targeted Android compile/APK checks using the existing Android architecture;
+full Android feature parity and UI polish remain separately scheduled. A pinned
+CLI, Rust integration harness, or known-good mobile peer may be used when a
+second endpoint is required.
 
 ## 2. Current baseline
 
-The source baseline is locked; the Apple build baseline is not green yet.
+The source baseline is locked and the reproducible Apple build, simulator, and
+physical-device UI baseline is green. The remaining G0 administrative gap is a
+stable commit for the verified Wave 0 working tree.
 
-- Branch: `feat/transfer-state-foundation`, tracking its origin branch.
+- Branch: `feat/transfer-state-foundation`, tracking its origin branch at
+  `2c91047`. The Wave 0 implementation is an uncommitted documented descendant
+  of that revision and must be committed before parallel worktrees are created.
 - Safety checkpoint `ceff278` (`feat: checkpoint canonical mobile transfer
   lifecycle`) contains the entire previously dirty tree and was pushed to
   `origin/feat/transfer-state-foundation` before any merge.
@@ -52,9 +77,11 @@ The source baseline is locked; the Apple build baseline is not green yet.
 - The merged shared core compiles for `envoix-client`, `envoix-ffi`, and
   `envoix-android-jni`. `envoix-client` has 89 passing library tests and
   `envoix-ffi` has 40 passing library/loopback tests.
-- The Android Gradle APK build has not produced code evidence on this machine:
-  the wrapper download for Gradle 8.9 timed out at roughly 30%. This is recorded
-  as an environment failure, not treated as a passing or failing source build.
+- The current Android application has been realigned with its existing UniFFI
+  architecture after the shared-boundary merge. Kotlin compilation, the Debug
+  APK, and JVM unit tests pass; the APK contains the arm64-v8a
+  `libenvoix_ffi.so`. No Android device was connected, so install/startup and
+  Apple↔Android evidence remain pending.
 - The merge keeps dev's record-authoritative Remove, checked commit barrier,
   stamped receipt responses, committed sent-hash verification, durable platform
   extras/receipt endpoint, atomic final naming, receipt repair, and Android UDP
@@ -67,14 +94,62 @@ The source baseline is locked; the Apple build baseline is not green yet.
 - A remote pause/loss now automatically parks a new rendezvous attempt on the
   peer, while the locally paused side still requires the user's Resume action.
   This is covered by QR and room loopback tests.
-- The generated `crates/envoix-ffi/EnvoixCore/` package is absent. An exact-source
-  Apple build therefore requires `scripts/build-apple-core.sh` before Xcode
-  build or device evidence.
-- The iPhone 15 Pro Max installed debug app predates this merged source and is
-  not valid evidence for the new baseline.
-- Historical simulator output reported ten tests, but four cross-device methods
-  compile to empty bodies when `ENVOIX_CROSS_DEVICE_TESTING` is absent. The
-  effective default coverage was six tests.
+- `scripts/build-apple-core.sh` now regenerates the ignored
+  `crates/envoix-ffi/EnvoixCore/` package successfully from the current tree;
+  XcodeGen, macOS Debug, and iOS Simulator build-for-testing all pass.
+- Local Apple iteration now uses `scripts/apple-dev.sh`: simulator, device, and
+  macOS builds reuse three stable DerivedData directories; CLI indexing is
+  disabled; hosted and App UI tests have separate schemes; and the generated
+  Rust package and generated Xcode project are reused until their content
+  digests change. Routine runs do not create standalone `.xcresult` bundles.
+  Explicit size, log/index trim, Rust-incremental trim, and cold-cache cleanup
+  commands bound disk growth. Archive validation preserves the macOS 13/iOS 16
+  deployment contract without unconditionally cleaning BLAKE3 on every Core
+  rebuild.
+- The current default simulator suite reports 8 passes, 4 explicit skips, and
+  0 failures. The four skipped methods require the opt-in
+  `ENVOIX_CROSS_DEVICE_TESTING` configuration and a paired Android device; they
+  no longer compile to empty passing bodies.
+- A signed current-tree build was built, installed, and launched on the paired
+  iPhone 15 Pro Max. Two physical UI automation attempts timed out before test
+  execution; after the device was made ready, the third run executed and passed
+  all three selected navigation/issue-#45 regression tests.
+- The subsequent single-home UI tree passed all six app UI regressions on the
+  same physical iPhone, including a deterministic stalled-acknowledgement case
+  that proves `Cancelling…` returns to an actionable Cancel control after the
+  five-second UI timeout.
+- The iOS product now declares iPhone-only (`UIDeviceFamily=[1]`) and portrait-
+  only support. The global stage swipe and duplicate fixed bottom compensation
+  were removed, and simulator regression tests cover explicit stage controls
+  and immediate developer-mode toggle state. The send UI now clearly states
+  that only one file is supported; multi-item drops and folders are rejected
+  with a Manifest-specific explanation.
+- The first Share Extension slice is implemented for one Files or Photos
+  representation. It stages into App Group `group.com.envoix.app.shared`, uses
+  a validated versioned draft descriptor, a 4 GiB quota and 24-hour TTL, and
+  imports the draft into the existing Send sheet when the user next opens the
+  main app. The app also declares `public.data` document handling for the
+  separate, system-launched “Open in Envoix” path. Hosted draft/document-import
+  tests pass 12/12 after the lifecycle and document-entry audit, the
+  embedded-extension simulator build passes, the existing App UI suite remains
+  9/9, and macOS still builds. Xcode-managed provisioning now includes the App
+  Group on both targets; the signed product builds, installs, and launches on
+  the physical iPhone. The first Photos invocation exposed a missing foreground
+  resume check; after the `scenePhase` fix, the user confirmed that a real Photos
+  item stages successfully and appears in Send with the correct name when the
+  main app is manually reopened. Files and direct Open In acceptance remain.
+- A physical iPhone-to-macOS App hotspot gate now passes with the real macOS
+  `AppModel`, canonical Activity projection, and destination publication path:
+  33 bytes arrived over Direct IPv6 with an exact SHA-256 match. The receiver
+  test is PID-isolated from the user's Activity store. This is stronger than the
+  earlier CLI/core gate, but the final Photos UI → iOS App → macOS App → Finder
+  manual acceptance is still pending.
+- `ManifestV1` is implemented through protocol, independent wire frames,
+  sequential engine, authenticated direct/mDNS/Room session routing, and an
+  additive Rust client facade. The negotiated receiver retains legacy
+  single-file support on the same endpoint. Durable Activity projection,
+  additive FFI, and Apple multi-selection/publication remain before the Apple
+  client can truthfully expose multi-file or directory sending.
 - Apple build and test jobs are not currently part of `.github/workflows/ci.yml`.
 - GitHub issues [#44](https://github.com/ECE4410J-NUUB/envoix/issues/44)
   and [#45](https://github.com/ECE4410J-NUUB/envoix/issues/45) remain the primary
@@ -82,18 +157,28 @@ The source baseline is locked; the Apple build baseline is not green yet.
   [#40](https://github.com/ECE4410J-NUUB/envoix/issues/40) and
   [#41](https://github.com/ECE4410J-NUUB/envoix/issues/41).
 
-The Rust/UniFFI merge is green at its tested boundary. G0 remains open until the
-generated Apple core, macOS build, iOS build-for-testing, honest test count, and
-physical-device installation all come from `2084944` or a documented descendant.
+The Rust/UniFFI merge and Apple build, simulator, and targeted physical UI
+boundaries are green. G0 remains administratively open only for a commit that
+gives the implemented Wave 0 tree a stable source identity.
 
-## 3. Decisions required before implementation
+## 3. Confirmed decisions
 
-| ID | Decision | Proposed default | Status |
+| ID | Decision | Accepted direction | Status |
 |---|---|---|---|
-| D1 | Supported devices and orientations | iPhone + macOS; iPhone portrait first; no iPad promise in this milestone | Pending user confirmation |
-| D2 | iOS navigation interaction | Keep the branded floating stage bar, but remove the global horizontal stage-swipe gesture | Pending user confirmation |
-| D3 | First post-foundation feature | Single-file Share Extension first; design the Wi-Fi Aware provider boundary in parallel | Pending user confirmation |
-| D4 | Baseline and shared-core authority | Full-tree checkpoint, latest dev merge, dev-authoritative Android, additive Apple Rust/UniFFI compatibility | **Confirmed and executed** |
+| D1 | Supported devices and orientations | iPhone + macOS; iPhone portrait; no iPad or landscape promise in this milestone | **Confirmed** |
+| D2 | iOS navigation interaction | One iPhone home screen; Send, Receive, Activity, and Settings open as sheets; no permanent bottom stage bar or global stage swipe | **Confirmed and implemented** |
+| D3 | First system entry | “Open in Envoix” directly handles one regular document; Share Extension stages one Files/Photos item for import when the main app next becomes active; both expand after Manifest | **Implemented; Photos physical acceptance passed, Files/Open In pending** |
+| D4 | Baseline and shared-core authority | Full-tree checkpoint, latest dev merge, Android App compile compatibility at shared boundaries, additive Apple Rust/UniFFI evolution | **Confirmed and executed** |
+| D5 | Multi-file and directory priority | Move `ManifestV1` into the first parallel product wave; do not ship an app-side zip detour | **Confirmed** |
+| D6 | Wi-Fi Aware device matrix | iPhone↔supported Android is required; Android↔Android gets baseline evidence; macOS keeps LAN/relay until separately proven | **Confirmed** |
+| D7 | Nearby versus remote reachability | Wi-Fi Aware is nearby-only; trusted identity, presence, rendezvous, mailbox, and relay own remote reachability | **Confirmed** |
+| D8 | QR scan ownership | Send and receive choose opposite roles, but either device may show its role QR and the other may scan; the UI must not prescribe a fixed scanner | **Confirmed and implemented** |
+| D9 | Apple cross-device acceptance | Keep the macOS app in sync and use iPhone↔macOS as the default physical payload test; opening Send alone is entry evidence, not transfer acceptance | **Confirmed; iPhone→macOS App-hosted payload gate passed, manual UI-to-UI acceptance pending** |
+
+For D3, “one Photos item” means an image or video representation supplied by
+the Photos share sheet. Preserving a Live Photo as paired resources and sharing
+multiple selected assets require `ManifestV1`; the UI must describe that limit
+truthfully until the manifest path is available.
 
 ### D4 resolution
 
@@ -101,13 +186,16 @@ The full-tree checkpoint and dev merge confirm that the Apple client cannot be
 versioned safely by copying only `apps/envoix-apple/`. Apple development now
 starts from `2084944` and follows these ownership rules:
 
-1. latest dev owns the Android application and the shared correctness fixes it
-   already merged;
+1. the existing Android App architecture remains the Android application
+   authority; it is not continuously rewritten to mirror Apple UI/features;
 2. Apple work does not wait for subsequent Android UI work;
 3. shared Rust/UniFFI changes are additive and must compile both native callers;
-4. cross-platform protocol behavior is validated with pinned loopback/harness or
+4. every shared-boundary milestone includes targeted Android Kotlin/APK
+   compatibility; physical Android validation is added when the feature is
+   cross-device or transport-specific;
+5. cross-platform protocol behavior is validated with pinned loopback/harness or
    a known-good peer instead of depending on unfinished Android feature work;
-5. any future dev merge repeats the checkpoint → merge → compatibility tests
+6. any future dev merge repeats the checkpoint → merge → compatibility tests
    sequence used here.
 
 ## 4. Scope
@@ -120,13 +208,21 @@ starts from `2084944` and follows these ownership rules:
 - Additive Rust client/UniFFI contracts required to keep the Apple UI truthful.
 - Apple build generation, simulator tests, CI, previews, and physical-device
   validation.
-- One user-approved post-foundation feature.
+- macOS app maintenance as a supported product and as the stable iPhone
+  counterpart for bidirectional Room/Auto and LAN path verification.
+- Share Extension for one Files or Photos item.
+- `ManifestV1` protocol, core, FFI, and Apple integration for multiple files and
+  directories.
+- A Wi-Fi Aware vertical slice shared with Android, subject to capability,
+  entitlement, and physical-device evidence.
 
 ### Out of scope unless separately approved
 
-- Refactoring or repairing the Android application.
+- Continuous Android UI parity, broad refactoring, or unrelated Android repair.
+- Targeted Android adapters required to preserve a shared Rust/FFI contract are
+  in scope, but must follow the current Android App architecture.
 - Replacing the working transfer engine or wire protocol.
-- Multi-file/directory transport before `TransferManifest v1` is accepted.
+- Ad-hoc archive/zip packaging as a substitute for `ManifestV1`.
 - Implementing a fake speed limit, scheduler, retry policy, or path selector in
   Swift.
 - Claiming iPad, landscape, background transfer, Wi-Fi Aware, or remote-device
@@ -176,22 +272,17 @@ starts from `2084944` and follows these ownership rules:
 
 ## 6. Known UI adaptation risks
 
-The first implementation pass must address structure rather than per-device
-padding patches.
+Wave 0 removed the confirmed duplicate `88` point bottom compensation and the
+global stage-switch drag, including its `UIScreen.main.bounds` dependency.
+Wave 1 then removed the iPhone stage bar entirely: one home screen presents
+Send, Receive, Activity, and Settings as sheets, so each transfer sheet now
+owns its own bottom safe area. The remaining responsive-layout risks are:
 
-1. `ContentView` owns a custom bottom stage bar through `safeAreaInset`.
-2. `SendView` and `ReceiveView` independently own bottom CTA bars through a
-   second `safeAreaInset`.
-3. Both transfer views add a fixed `88` point bottom padding.
-4. A global stage-switch drag and the Send/Receive role drag can recognize the
-   same horizontal gesture.
-5. The global drag uses `UIScreen.main.bounds.width`, which is not the active
-   scene/container width in every window or multitasking configuration.
-6. Fixed QR and control dimensions need coverage on small screens, large
+1. Fixed QR and control dimensions need coverage on small screens, large
    Dynamic Type, landscape if supported, and translated strings.
-7. macOS card content needs an agreed maximum readable width.
-8. Camera-denied UX needs a direct route to system Settings.
-9. The dark-theme brand colors and destructive colors require contrast review.
+2. macOS card content needs an agreed maximum readable width.
+3. Camera-denied UX needs a direct route to system Settings.
+4. The dark-theme brand colors and destructive colors require contrast review.
 
 ## 7. Execution stages and gates
 
@@ -199,24 +290,30 @@ padding patches.
 
 Completed:
 
-- D4 confirmed by the user's merge instruction;
+- D1–D8 confirmed and recorded;
 - full-tree checkpoint `ceff278` created and pushed before merging;
 - latest `origin/dev` (`5577194`) merged as `2084944` without unresolved files;
 - shared-core/FFI/JNI compile check passed;
 - 89 `envoix-client` and 40 `envoix-ffi` tests passed, including durable
   restore, QR/room pause-resume, mailbox receipt, publication, and legacy-ID
-  migration.
+  migration;
+- `EnvoixCore` regenerated and the Xcode project regenerated;
+- macOS Debug and iOS Simulator build-for-testing passed;
+- default simulator tests now report 8 passed, 4 explicitly skipped, and 0
+  failed;
+- the current signed build was installed and launched on the physical iPhone;
+- three targeted physical UI tests passed on the iPhone 15 Pro Max;
+- iPhone-only portrait settings, explicit stage navigation, immediate
+  developer-mode toggle coverage, bottom-padding cleanup, and truthful
+  single-file/Manifest messaging were implemented.
+- the subsequent iPhone UI wave replaced explicit stages with one home screen,
+  sheet-based Send/Receive/Activity/Settings flows, a canonical Activity
+  capsule, symmetric QR guidance, and bounded command feedback.
 
 Remaining actions:
 
-- confirm D1–D3;
-- rebuild `EnvoixCore` and regenerate the Xcode project;
-- build macOS Debug and iOS Simulator `build-for-testing` from the exact merged
-  source;
-- reinstall the physical iPhone before recording behavior against the baseline;
-- change disabled cross-device tests to report `XCTSkip` or isolate them in an
-  explicit cross-device scheme;
-- create parallel Apple worktrees only after G0 build evidence is green.
+- commit the Wave 0 implementation so its device evidence has a stable revision;
+- create parallel Apple worktrees only after that commit is recorded.
 
 Gate G0 evidence:
 
@@ -226,6 +323,10 @@ Gate G0 evidence:
 - honest executed/skipped test counts;
 - physical-device version, installed build identity, and reproduction result for
   issue #45.
+
+The build, simulator, and targeted physical UI portions of G0 are green. The
+first two physical XCTest attempts are retained as environment-failure evidence;
+the third run executed the actual tests and passed.
 
 The original recommendation to create a separate checkpoint branch was
 superseded by the safer executed sequence: commit the entire accepted tree on
@@ -267,6 +368,40 @@ Actions:
 - correct contrast failures without changing the approved brand palette more
   than necessary.
 
+Implemented in the first iPhone UI wave:
+
+- removed the competing app-level bottom safe-area owner;
+- moved Send and Receive into large sheets whose CTA bars own their local safe
+  area;
+- moved Activity and Settings to toolbar sheets and retained an active-transfer
+  capsule derived from canonical Activity records;
+- added post-command snapshot refreshes and a five-second acknowledgement
+  timeout so Activity controls cannot display an infinite transitional spinner.
+- added a DEBUG-only stalled-command fixture and a semantic UI regression that
+  observes the pending command, waits for its bounded timeout, and verifies the
+  restored Cancel control is hittable.
+- added XCUITest accessibility audits for Home, Send, Receive, empty Activity,
+  Settings, and every Activity fixture state; corrected opaque button contrast,
+  QR descriptions, 44-point sheet dismissal, Dynamic Type action stacking, and
+  long record/helper text wrapping.
+- kept each transfer CTA fixed to its sheet safe area, then added a small-screen
+  geometry assertion proving that a scrolled room-code Copy action is hittable
+  and does not intersect the CTA. The compact input placeholder is intentionally
+  `Enter code` because the adjacent pairing panel already owns the scan guidance.
+- passed the complete six-test app UI suite on the small iPhone SE simulator;
+  a seventh targeted regression also passed there with Simplified Chinese,
+  dark appearance, and the largest accessibility content-size category.
+
+Still required before declaring all of G2 complete:
+
+- visual review and screenshot baselines for the named lifecycle and permission
+  states, not only semantic control existence;
+- VoiceOver order/labels, keyboard focus/dismissal, camera denial/recovery, and
+  foreground/background restoration;
+- minimum, normal, and wide macOS window review;
+- the remaining light/dark and English/Chinese state combinations where long
+  record names, failures, or permission copy can change layout.
+
 Gate G2 evidence:
 
 - all D1 visual-matrix cells reviewed;
@@ -290,22 +425,49 @@ Already established by the merged core:
 - string Apple Activity IDs adapted to dev's numeric record authority with
   legacy migration.
 
-Remaining actions:
+Completed in the current G3 slices:
 
-- reject stale record sequences in the Apple model and unit-test reordering;
-- retain every non-terminal record when pruning terminal history;
-- replace the `verifying + diagnosticMessage == "confirming"` convention with an
-  additive typed state/capability;
-- expose allowed actions from the canonical record or core policy instead of
-  duplicating transition policy in Swift;
-- make publication failure/target changes durable and recoverable without
+- Apple rejects a snapshot with an older canonical sequence, uses timestamp
+  only to order equal-sequence deliveries, and has hosted tests for reordered
+  callbacks;
+- Activity pruning always retains non-terminal records and spends the history
+  limit only on the newest terminal records;
+- additive `FfiTransferActivityActions` makes pause/resume/cancel/delete and
+  finalizing availability a Rust-owned policy. Swift controls no longer parse
+  `diagnosticMessage`; the legacy Confirming encoding remains contained inside
+  the compatible FFI adapter until a versioned record extension is safe;
+- additive `FfiCoreInfo` reports FFI API version, crate version, and named
+  capabilities. Settings exposes the loaded core/API version and highlights an
+  unexpected API version;
+- native publication failures, including a rejected completion callback, now
+  set structured failure and retryability fields before Apple projects actions;
+- additive `FfiNativePublicationTarget`, `set_publication_target`,
+  `publication_target`, and
+  `publication_failed` reuse the canonical record's atomic `platform_extras`
+  store. Apple restores the destination from the durable session getter, with
+  its former UserDefaults entry retained only as a migration fallback. A staged
+  receive therefore remains `Publishing` across restart, keeps its typed
+  recovery reason, and can replace the Files/Finder destination without
   retransmission;
-- reduce `TransferViewModel.Phase` to presentation-only projection;
-- add core API/capability/build-version reporting so an app can detect an old
-  generated XCFramework;
-- add an additive mailbox callback/version that carries dev's durable per-session
-  receipt endpoint. The current Apple courier still uses `defaultLogServer`, so
-  it must not silently ignore a future custom receipt endpoint.
+- Activity renders publication failure as “Save failed”: ordinary retry keeps
+  the existing target, while `ChooseFolder` opens the platform folder picker
+  and immediately republishes the bytes already received. A persisted failure
+  waits for user action after restore instead of entering an automatic retry
+  loop;
+- `TransferViewModel.Phase` is now a presentation-only projection of the
+  canonical Activity record whenever one exists. Raw observer callbacks retain
+  only a pre-record fallback, so they cannot independently drive the durable
+  lifecycle;
+- additive `MailboxObserverV2`, `start_durable_transfer_v2`, and
+  `restore_durable_transfer_v2` carry the normalized receipt endpoint frozen in
+  the durable session. Existing mailbox and start/restore APIs are unchanged;
+  records created before the endpoint field use the frontend's current
+  configured endpoint as an explicit migration fallback.
+
+G3 status:
+
+- complete. Share Activity creation is no longer blocked by canonical-state or
+  per-session receipt-endpoint work.
 
 Gate G3 evidence:
 
@@ -319,6 +481,15 @@ Gate G3 evidence:
 
 Actions:
 
+- use `scripts/apple-dev.sh` as the canonical local fast path, keeping stable
+  platform-specific caches and reserving unique `.xcresult` paths for milestone
+  evidence rather than unique DerivedData paths;
+- fingerprint Rust/binding contents and the XcodeGen input file list so a pure
+  Swift edit neither regenerates the four-platform Core package nor rewrites the
+  Xcode project; validate archive deployment targets before accepting cached C
+  objects, and clean BLAKE3 only as an automatic repair path;
+- require the generated project and every shared scheme used by the wrapper to
+  exist before accepting a matching XcodeGen input digest;
 - add a pinned Apple CI job that regenerates or consumes a reproducible
   `EnvoixCore` package;
 - compile macOS and run iOS Simulator hosted/UI tests;
@@ -333,60 +504,148 @@ Gate G4 evidence:
 - CI fails when a required test does not execute;
 - Rust public API compatibility and Apple-generated bindings are checked.
 
-### Stage 5 — Implement the selected feature
+### Stage 5 — Run the first parallel product wave
 
-The selected feature starts only after G2 and G3. Its platform shell may be
-spiked earlier, but it must not bypass the architecture contract.
+The product wave may begin after G0, but each integration point remains gated:
+Share Activity creation waits for G3, user-facing layout waits for G2, and
+shared provider APIs remain additive until both Apple and Android compile.
 
-#### Option A — Single-file Share Extension (proposed default)
+#### Track M — Accelerated `ManifestV1`
+
+Status: **protocol, wire codec, sequential engine, authenticated
+direct/mDNS/Room routing, and additive Rust client facade complete; durable
+Activity, FFI, and Apple UI slices remain**.
+
+The contract now freezes the additive compatibility direction: existing
+`envoix/1` and all single-file APIs remain unchanged, while manifest transfers
+use `envoix/manifest/1`. It also defines the entry model, BLAKE3 integrity,
+10,000-entry/4 MiB manifest limits, portable relative-path validation,
+sequential entry lifecycle, partial-result semantics, and non-overwriting
+conflict mapping. In particular, a colliding selected top-level directory is
+renamed as a unit rather than silently merged into existing user content.
+
+First slices:
+
+1. **Completed:** freeze versioned manifest types, named limits, exact ALPN/mode
+   selection, checked aggregates, and unsafe relative-path/parent rejection
+   with Rust tests;
+2. **Completed:** add a separate frame family with IDs 16 through 26, full
+   lifecycle round trips, hostile-decode revalidation, cross-family rejection,
+   and a borrowed chunk writer without changing the existing public
+   single-file `Frame`/`FrameConnection` APIs;
+3. **Completed:** implement the sequential multi-file/directory engine and
+   authenticated ALPN routing over manual/direct, the existing mDNS discovery
+   loop, and the existing Room rendezvous flow while retaining legacy
+   `single_file_v1` entry points;
+4. **Completed:** expose additive `Client::send_manifest`, negotiated
+   `Client::receive_transfer`, `TransferSet`, typed summaries, aggregate and
+   per-entry events, and all existing source modes without adding fields to
+   `TransferRequest` or changing `Transfer::wait`;
+5. expose aggregate and per-item result data through durable records and FFI;
+6. add Apple multi-selection, directory selection on macOS, conflict reporting,
+   and multi-item publication;
+7. enable multi-item Files/Photos Share Extension intake after the manifest path
+   is proven.
+
+Acceptance follows `transfer-manifest-v1.md`: no default overwrite, identical
+files may be skipped by hash, differing files keep both, path traversal is
+rejected before writes, and older peers fail clearly before payload transfer.
+
+#### Track S — Files + Photos Share Extension
+
+Status: **first code slice, direct document-open entry, automated gates,
+provisioning, physical install, launch, and Photos entry/adoption acceptance
+complete; the Photos payload run plus Files and direct Open In provider
+acceptance remain**.
 
 First slice:
 
-- expose “Send with Envoix” for exactly one regular file;
-- stage the file into an App Group while the extension is alive;
-- pass a durable draft identifier to the main app;
-- let the main app create the canonical transfer Activity;
-- provide TTL/quota cleanup for abandoned staged drafts;
-- reject multiple files/directories with truthful copy until manifest support
-  exists.
+- expose “Send with Envoix” for one item from Files or Photos;
+- asynchronously load and copy the selected representation into App Group
+  staging while the extension is alive;
+- persist a validated draft descriptor with identifier, media type, name, size,
+  creation time, and staged relative path;
+- preserve the draft until the user opens the main app, then import it when the
+  scene becomes active and create the canonical transfer Activity only when the
+  user actually starts sending;
+- register `public.data` document handling so Open In-capable source apps can
+  launch Envoix directly with one security-scoped regular file;
+- enforce App Group quota, TTL cleanup, collision-safe names, and cancellation
+  cleanup;
+- explain that multi-selection and paired Live Photo preservation are pending
+  Manifest instead of silently dropping resources.
 
 Acceptance:
 
-- Files → Share → Envoix produces a visible send draft with the correct name and
-  size;
+- Files and Photos each produce a visible send draft with the correct type,
+  name, and size;
+- a staged Photos or Files item is not considered transfer-accepted until it is
+  sent to the macOS app, received under the expected name, and verified by size
+  and hash after final publication;
+- a PDF or regular file opened through the system document route launches
+  Envoix directly and produces the same visible Send selection;
 - extension termination does not invalidate the staged source;
+- iCloud-backed item loading has progress/failure UX and no false success;
 - cancelling/import failure cleans or expires the staged file;
 - sending still follows the canonical Activity lifecycle.
 
-#### Option B — Wi-Fi Aware vertical slice
+Implemented contract for the first slice:
+
+- App Group: `group.com.envoix.app.shared`;
+- one regular file, image, or video representation per draft; folders,
+  symlinks, multiple items, and paired Live Photos are rejected explicitly;
+- UUID-scoped staging, atomic versioned descriptor and pending pointer;
+- maximum staged item size 4 GiB and expiration after 24 hours;
+- the main app retains the staged file through transfer and acknowledges the
+  pending pointer only when Send is actually requested.
+
+#### Track W — Cross-platform Wi-Fi Aware vertical slice
+
+Status: **platform/provider contract drafted; capability, pairing, and QUIC
+interoperability remain unproven on an Apple↔Android device pair**.
+
+The detailed contract lives in
+[`wifi-aware-vertical-slice.md`](wifi-aware-vertical-slice.md). It keeps remote
+rendezvous/relay untouched, requires Android API-34 NAN pairing capability for
+Apple interoperability, and treats Apple `WAEndpoint` as an opaque native
+Network.framework endpoint. The proposed additive boundary injects one reliable
+native byte channel into the existing Rust `FrameConnection`; Rust continues to
+own authentication, protocol frames, hashing, resume, receipts, Manifest, and
+canonical Activity state.
 
 First slice:
 
-- prove OS/API/entitlement availability on the target iPhone;
+- verify API, OS, hardware, entitlement, and permission availability on the
+  target iPhone and Android devices;
 - define additive discovery/data-path provider events and capabilities in the
   shared boundary;
-- establish discovery, authenticated pairing, and a data path with a supported
-  second peer;
+- implement Apple and Android providers against the same service and identity
+  contract;
+- establish authenticated iPhone↔Android and Android↔Android data paths without
+  requiring an access point or pre-existing Internet connection;
 - hand the usable path to the existing Rust transfer/session layer;
-- retain QR/rendezvous/direct fallback and resume semantics.
+- retain QR/mDNS/rendezvous/direct/relay fallback and resume semantics.
 
 Acceptance:
 
-- works without an access point or pre-existing Internet connection when the
-  hardware/OS support Wi-Fi Aware;
-- transfers a test file with final size/hash evidence;
-- loss of the Aware path follows a typed fallback/resume path;
-- unsupported devices show capability-based UX rather than a dead control.
+- physical iPhone↔Android discovery and file transfer passes final size/hash
+  verification; Android↔Android has at least one baseline transfer;
+- loss of the Aware path follows a typed fallback/resume path without creating
+  a duplicate Activity;
+- unsupported devices show capability-based UX rather than a dead control;
+- macOS remains supported through existing LAN/direct/relay paths and is not
+  falsely advertised as Wi-Fi Aware capable.
 
-#### Option C — Trusted devices and remote presence
+#### Track R — Trusted devices and remote presence
 
-This is a shared-core product milestone, not an Apple-only data store. It
-requires durable identity/trust policy, revocation, remote presence,
-rendezvous/relay reachability, and clear privacy semantics before UI work.
+This follows the first nearby vertical slice. It is a shared-core product
+milestone, not an Apple-only data store. It requires durable identity/trust
+policy, revocation, remote presence, rendezvous/relay reachability, and clear
+privacy semantics before UI work.
 
 Acceptance must include offline, revoked, identity-changed, relay-only, and
-remote-to-local transitions. The local draft
-`docs/issues/trusted-device-store.md` is the starting design input.
+remote-to-local transitions. The same logical device must not appear as
+separate Aware, mDNS, and relay peers.
 
 ### Stage 6 — Physical hardening and milestone release
 
@@ -414,20 +673,20 @@ The exact matrix is frozen by D1. The proposed minimum is:
 
 | Dimension | Proposed coverage |
 |---|---|
-| iPhone size | Small simulator, standard simulator, physical iPhone 15 Pro Max |
+| iPhone size | Small simulator, standard simulator, physical iPhone 15 Pro Max; portrait only |
 | macOS | Minimum supported window, normal window, wide window |
 | Appearance | Light, dark |
 | Language | English, Simplified Chinese |
 | Dynamic Type | Default, largest supported accessibility size |
-| Input | Touch, keyboard where applicable, camera, paste, Files/Finder picker |
+| Input | Touch, keyboard where applicable, camera, paste, Files/Finder picker, Files share sheet, Photos share sheet |
 | State | Empty, waiting, pairing, transferring, paused, confirming, publishing, failed, completed |
 | Permissions | First prompt, allowed, denied, re-enabled |
 | Destination | App-local, user-selected local folder, iCloud/FileProvider where available |
 | Lifecycle | Foreground, background/foreground, killed/restored |
+| Cross-device | iPhone↔macOS app in both directions; Room/Auto on normal LAN and iPhone Personal Hotspot where relevant; record selected Direct/Relay path and verify final size/hash |
 
-If iPad or landscape is approved, Split View, Stage Manager, compact/regular
-size-class transitions, and active-container geometry become mandatory G2
-cells.
+iPad, iPhone landscape, Split View, and Stage Manager are excluded from this
+milestone and must not be implied by target settings or documentation.
 
 ## 9. Parallel execution model
 
@@ -438,7 +697,9 @@ Parallel work begins only after the checkpoint and file ownership are recorded.
 | A — UI shell | `ContentView.swift`, responsive navigation, shared visual components | Core lifecycle or FFI policy |
 | B — State boundary | `TransferViewModel.swift`, `Support.swift`, durable Apple resources, additive Rust/FFI contract | Navigation redesign |
 | C — Verification | Apple tests, `project.yml`, Apple CI, build/readme commands | Product behavior not covered by an approved acceptance case |
-| D — Feature | New extension/provider targets and feature-specific tests | Reimplementing transfer semantics |
+| D — Share Extension | App Group staging, draft import, Files/Photos provider tests | Transfer lifecycle or Manifest framing |
+| E — Manifest | Protocol/core/record/FFI manifest path and compatibility tests | Apple navigation or platform provider loading |
+| F — Wi-Fi Aware | Shared provider contract plus Apple/Android native adapters | File framing, hashing, resume, or remote presence |
 
 Rules:
 
@@ -463,19 +724,80 @@ the command, source revision, destination, and result is insufficient.
 | 2026-07-13 | `2084944` | G0 core | macOS/Rust | `cargo test -p envoix-client --lib` | 89 passed | terminal output |
 | 2026-07-13 | `2084944` | G0 boundary | macOS/Rust | `cargo test -p envoix-ffi --lib` | 40 passed | terminal output |
 | 2026-07-13 | `2084944` | compatibility | macOS/Android toolchain | `./gradlew :app:assembleDebug --no-daemon` | not executed: Gradle 8.9 wrapper download timed out | terminal output |
+| 2026-07-13 | `2c91047` + Wave 0 tree | G0 Apple core | macOS/Xcode 26.6 | `scripts/build-apple-core.sh`; `xcodegen generate` | pass | generated ignored `crates/envoix-ffi/EnvoixCore/` and Xcode project |
+| 2026-07-13 | `2c91047` + Wave 0 tree | G0 macOS | macOS 26.5 SDK, arm64 | `xcodebuild -project Envoix.xcodeproj -scheme Envoix -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /private/tmp/envoix-g0-macos-2c91047 CODE_SIGNING_ALLOWED=NO build` | pass | `/private/tmp/envoix-g0-macos-2c91047` |
+| 2026-07-13 | `2c91047` + Wave 0 tree | G0 iOS build | iPhone 16 Pro simulator, iOS 18.3.1 | `xcodebuild ... -scheme Envoix-iOS ... build-for-testing` | pass | `/private/tmp/envoix-g0-ios-2c91047` |
+| 2026-07-14 | `2c91047` + Wave 0 tree | G0 iOS tests | iPhone 16 Pro simulator, iOS 18.3.1 | `xcodebuild ... test-without-building` | 8 passed, 4 explicitly skipped, 0 failed | `/private/tmp/envoix-g0-ios-results-final-20260714-3.xcresult` |
+| 2026-07-13 | `2c91047` + Wave 0 tree | G0 physical install | iPhone 15 Pro Max | signed `xcodebuild`; `devicectl device install app`; `devicectl device process launch` | build, install, and launch pass | `/private/tmp/envoix-g0-device-2c91047` |
+| 2026-07-13/14 | `2c91047` + Wave 0 tree | G0 physical UI | iPhone 15 Pro Max | run three issue-#45/navigation UI tests, then retry one | both blocked before test execution: timed out enabling automation mode | `/private/tmp/envoix-g0-device-ui-20260713.xcresult`; `/private/tmp/envoix-g0-device-ui-retry-20260714.xcresult` |
+| 2026-07-14 | `2c91047` + Wave 0 tree | G0 physical UI | iPhone 15 Pro Max | rerun transfer controls, explicit navigation, and developer-mode toggle tests on final tree | 3 passed, 0 failed | `/private/tmp/envoix-g0-device-ui-final-20260714.xcresult` |
+| 2026-07-14 | `2c91047` + Wave 0 tree | D1 product settings | built simulator product | inspect `UIDeviceFamily` and `UISupportedInterfaceOrientations` | `[1]`; portrait only | built `Info.plist` |
+| 2026-07-14 | `2c91047` + UI Wave 1 tree | G2 macOS regression | macOS arm64 | `xcodebuild ... -scheme Envoix ... build` | pass | `/private/tmp/envoix-ui-wave2-macos` |
+| 2026-07-14 | `2c91047` + UI Wave 1 tree | G2 iPhone UI | iPhone 16 Pro simulator, iOS 18.3.1 | build-for-testing; run complete hosted and app UI suites | 8 hosted tests (4 explicit cross-device skips) plus 5 app UI tests passed; Send and Receive CTA controls hittable in sheets | `/private/tmp/envoix-ui-wave2-all-sim-20260714-0142.xcresult` |
+| 2026-07-14 | `2c91047` + UI Wave 1 tree | cancel regression | Rust host | run pairing cancel and pause-transition cancel unit tests | 2 passed, 0 failed | terminal output |
+| 2026-07-14 | `2c91047` + UI Wave 1 tree | G2 physical UI | iPhone 15 Pro Max | signed build-for-testing, then run Send/Receive sheet regression | build passed; test did not execute because the phone remained locked and was interrupted after 325 seconds | `/private/tmp/envoix-ui-wave2-device-transfer-20260714-0140.xcresult` |
+| 2026-07-14 | `2c91047` + UI Wave 1 tree | bounded command UI | iPhone 16 Pro simulator, iOS 18.3.1 | run deterministic stalled-acknowledgement Cancel regression | 1 passed, 0 failed; pending indicator appeared and Cancel returned after the five-second timeout | `/private/tmp/envoix-ui-cancel-regression-sim-20260714.xcresult` |
+| 2026-07-14 | `2c91047` + UI Wave 1 tree | G2 physical UI | iPhone 15 Pro Max | rebuild current tree and run complete app UI suite | 6 passed, 0 failed; single home, all sheets, hittable Send/Receive actions, Activity capsule, Settings, and bounded Cancelling recovery executed | `/private/tmp/envoix-ui-wave2-device-current-6-20260714.xcresult` |
+| 2026-07-14 | `2c91047` + UI Wave 1 tree | G2 small-screen UI | iPhone SE (3rd generation) simulator, iOS 18.3.1 | run complete app UI suite at default appearance/content size | 6 passed, 0 failed | `/private/tmp/envoix-ui-wave2-small-current-6-20260714.xcresult` |
+| 2026-07-14 | `2c91047` + UI Wave 1 tree | G2 localized accessibility layout | iPhone SE (3rd generation) simulator, iOS 18.3.1 | set dark appearance and `accessibility-extra-extra-extra-large`, then run Chinese primary-action regression and restore light/large | 1 passed, 0 failed; Send/Receive remained reachable and Settings exposed `深色` | `/private/tmp/envoix-ui-wave2-se-zh-dark-axxxl-20260714.xcresult` |
+| 2026-07-14 | `2c91047` + UI Wave 1 accessibility tree | G2 semantic accessibility | iPhone 16 Pro simulator, iOS 18.3.1 | run complete app UI suite including five-surface and Activity-fixture accessibility audits | 9 passed, 0 failed | `/private/tmp/envoix-ui-wave2-a11y-full-sim-20260714.xcresult` |
+| 2026-07-14 | `2c91047` + UI Wave 1 accessibility tree | G2 small-screen accessibility | iPhone SE (3rd generation) simulator, iOS 18.3.1 | run final complete app UI suite; require scrolled Copy controls to be hittable and geometrically clear of the fixed CTA | 9 passed, 0 failed | `/private/tmp/envoix-ui-wave2-a11y-full-se-final-20260714.xcresult` |
+| 2026-07-14 | `2c91047` + UI Wave 1 accessibility tree | G2 maximum Dynamic Type audit | iPhone SE (3rd generation) simulator, iOS 18.3.1 | set the system content size to `accessibility-extra-extra-extra-large` and run the complete Activity fixture audit | pass; validates the one exact standard-size Xcode text-clipping prediction without disabling the audit category | `/private/tmp/envoix-ui-a11y-activity-se-axxxl-20260714.xcresult` |
+| 2026-07-14 | `2c91047` + UI Wave 1 accessibility tree | G2 macOS regression | macOS arm64, Xcode 26.6 | `xcodebuild -project Envoix.xcodeproj -scheme Envoix -configuration Debug -destination 'platform=macOS' build` | pass | terminal output |
+| 2026-07-14 | `2c91047` + UI Wave 1 accessibility tree | G2 physical accessibility | iPhone 15 Pro Max | run complete nine-test app UI suite | 8 passed, 1 accessibility failure; the physical device exposed clipped `Scan QR or enter code` placeholder text | `/private/tmp/envoix-ui-wave2-a11y-device-final-20260714.xcresult` |
+| 2026-07-14 | `2c91047` + UI Wave 1 accessibility tree | G2 physical fix verification | iPhone 15 Pro Max | shorten the redundant field placeholder, then rerun the five-surface accessibility audit and stalled-cancel regression | 2 passed, 0 failed | `/private/tmp/envoix-ui-wave2-a11y-device-targeted-20260714.xcresult` |
+| 2026-07-14 | `2c91047` + UI Wave 1 accessibility tree | G2 final physical UI | iPhone 15 Pro Max | rerun the complete app UI suite on the final source tree | 9 passed, 0 failed in 126 seconds | `/private/tmp/envoix-ui-wave2-a11y-device-final-pass-20260714.xcresult` |
+| 2026-07-14 | `2c91047` + G3 projection tree | G3 Rust boundary | macOS host | `cargo test -p envoix-ffi` with local socket access | 42 passed, 0 failed; includes typed actions, core info, and existing durable/loopback coverage | terminal output |
+| 2026-07-14 | `2c91047` + G3 projection tree | G3 Apple hosted | iPhone 16 Pro simulator, iOS 18.3.1 | run complete `Envoix-iOSUITests` hosted suite against regenerated core | 6 passed, 4 explicit cross-device skips, 0 failed; includes sequence ordering, terminal pruning, typed action policy, and core API reporting | `/private/tmp/envoix-g3-typed-actions-hosted-20260714.xcresult` |
+| 2026-07-14 | `2c91047` + G3 projection tree | G3 macOS | macOS arm64, Xcode 26.6 | `xcodebuild -project Envoix.xcodeproj -scheme Envoix -configuration Debug -destination 'platform=macOS' build` | pass | terminal output |
+| 2026-07-14 | `2c91047` + G3 projection tree | compatibility boundary | Android arm64-v8a / Gradle 8.9 | regenerate additive Kotlin binding; `./gradlew :app:assembleDebug --no-daemon` | Rust release `.so` built and generated binding reached Kotlin compile without binding errors; APK blocked by pre-existing Android source drift (`NativeSession`, `LogSink`, `renderConfig`, and missing `Publishing` branch) | terminal output |
+| 2026-07-14 | `2c91047` + G3 publication tree | G3 durable publication | macOS host | persist target/failure through canonical `platform_extras`, read the target back from the restored durable session, replace it, and clear failure without retransmission | final dedicated restart/replacement/getter test passed; the slice reached a full 43/43 before the additive getter, while later full reruns exposed the existing Iroh socket-cleanup timeout and all reported root loopbacks passed independently | terminal output |
+| 2026-07-14 | `2c91047` + G3 publication tree | G3 Apple hosted | iPhone 16 Pro simulator, iOS 18.3.1 | build all iOS test targets and run complete hosted suite | 6 passed, 4 explicit cross-device skips, 0 failed; loaded core advertises `durable_publication_recovery_v1` | `/private/tmp/envoix-g3-publication-hosted-20260714.xcresult` |
+| 2026-07-14 | `2c91047` + G3 publication tree | G3 publication UI | iPhone 16 Pro simulator, iOS 18.3.1 | run complete app UI suite with a retryable `Publishing/ChooseFolder` fixture | 9 passed, 0 failed; choose-folder replaces Resume, Cancelling remains bounded, and all accessibility audits pass | `/private/tmp/envoix-g3-publication-app-ui-20260714.xcresult` |
+| 2026-07-14 | `2c91047` + G3 publication tree | G3 macOS | macOS arm64, Xcode 26.6 | build desktop app against regenerated additive core | pass | `/private/tmp/envoix-g3-publication-macos` |
+| 2026-07-14 | `2c91047` + G3 final tree | G3 canonical phase + receipt endpoint | macOS host | `cargo test -p envoix-ffi` after adding the compatible V2 mailbox path | 43 passed, 0 failed; includes persisted per-session endpoint restore and legacy API coverage | terminal output |
+| 2026-07-14 | `2c91047` + G3 final tree | G3 Apple hosted | iPhone 16 Pro simulator, iOS 18.3.1 | build all test targets and run complete `Envoix-iOSUITests` suite | 7 passed, 4 explicit cross-device skips, 0 failed; includes pure canonical Phase projection and `per_session_receipt_endpoint_v1` capability | `/private/tmp/envoix-g3-final-hosted-20260714-1358.xcresult` |
+| 2026-07-14 | `2c91047` + G3 final tree | G2/G3 app UI regression | iPhone 16 Pro simulator, iOS 18.3.1 | run complete app UI suite after the Phase reducer change | 9 passed, 0 failed; single home, sheet flows, accessibility, and bounded Cancelling recovery remain green | `/private/tmp/envoix-g3-final-app-ui-20260714-1359.xcresult` |
+| 2026-07-14 | `2c91047` + G3 final tree | G3 macOS + Android compatibility | macOS arm64 / Android Gradle 8.9 | build macOS; regenerate additive Kotlin binding; run `:app:compileDebugKotlin` | macOS passed; Android reached client compilation with no generated-binding errors and remains blocked only by the pre-existing `LogSink`, `NativeSession`, `renderConfig`, and `Publishing` source drift | terminal output |
+| 2026-07-14 | `2c91047` + Android compatibility tree | Android shared-boundary compatibility | Android Gradle 8.9 / arm64-v8a | run `:app:compileDebugKotlin`, `:app:assembleDebug`, and `:app:testDebugUnitTest`; inspect APK entries | all pass; APK contains `lib/arm64-v8a/libenvoix_ffi.so`; no Android device connected for startup smoke | terminal output and `android/app/build/outputs/apk/debug/app-debug.apk` |
+| 2026-07-14 | `2c91047` + Share Extension tree | Track S hosted contract | iPhone 16 Pro simulator, iOS 18.3.1 | exercise App Group staging/load/discard, folder/quota rejection, TTL cleanup, traversal rejection, deep-link parsing, and AppModel import | 6 passed, 0 failed | `/private/tmp/envoix-share-integration/Logs/Test/Test-Envoix-iOS-2026.07.14_14-59-44-+0800.xcresult` |
+| 2026-07-14 | `2c91047` + Share Extension tree | Track S integration regression | iPhone 16 Pro simulator, iOS 18.3.1 / macOS arm64 | build full iOS product with embedded `EnvoixShare.appex`; run existing App UI suite; build macOS | iOS build passed, App UI 9/9 passed, macOS build passed | `/private/tmp/envoix-share-integration`; `/private/tmp/envoix-share-integration/Logs/Test/Test-Envoix-iOS-2026.07.14_15-18-47-+0800.xcresult`; `/private/tmp/envoix-share-macos` |
+| 2026-07-14 | `2c91047` + Share Extension tree | Track S physical provisioning | iPhone 15 Pro Max | signed device build without provisioning updates | source compilation did not start: existing app profile lacks App Groups support and no profile exists for `com.envoix.app.ios.share`; physical Files/Photos acceptance remains pending | `/private/tmp/envoix-share-physical` and terminal output |
+| 2026-07-14 | `2c91047` + audited Share Extension tree | Track S boundary audit | iPhone 16 Pro simulator, iOS 18.3.1 / macOS arm64 | reject non-canonical deep links and cross-draft path aliases; arbitrate cancellation against asynchronous staging; rebuild signed simulator product; rerun Share contract, App UI, and macOS gates | Share contract 9/9, App UI 9/9, iOS build, and macOS build passed | `/private/tmp/envoix-share-audit-tests-signed.xcresult`; `/private/tmp/envoix-share-audit-app-ui.xcresult`; `/private/tmp/envoix-share-audit-ios`; `/private/tmp/envoix-share-audit-macos` |
+| 2026-07-14 | `2c91047` + audited Share Extension tree | Track S managed provisioning | iPhone 15 Pro Max | allow Xcode to update Apple Developer provisioning, require both targets to carry `group.com.envoix.app.shared`, then build, install, and launch | Xcode created/updated development profiles for `com.envoix.app.ios` and `com.envoix.app.ios.share`; independent entitlement inspection found the shared App Group on both signed bundles; device build, install, and launch passed; Files/Photos share-sheet invocation remains pending | `/private/tmp/envoix-share-physical-provisioned` and `devicectl` output |
+| 2026-07-14 | `2c91047` + managed Share tree | Track S first user acceptance | iPhone 15 Pro Max / Photos | invoke Envoix for one image and expect the main app to present a selected Send flow | failed: no Send flow appeared; code audit found that an already-running app did not check pending drafts when returning to the foreground | user observation and source audit |
+| 2026-07-14 | `2c91047` + Share resume/Open In tree | Track S recovery + document entry | iPhone 16 Pro simulator / iPhone 15 Pro Max | observe active scene transitions; declare and validate `public.data`; retain security-scoped file URLs; rerun hosted Share contract; sign, build, and install | hosted contract 12/12 passed; signed physical build and install passed; user retest remains pending | `/private/tmp/envoix-share-resume-openin-2.xcresult`; `/private/tmp/envoix-share-resume-openin-physical` |
+| 2026-07-14 | `2c91047` + Share foreground regression tree | Track S lifecycle regression | iPhone 16 Pro simulator, iOS 18.3.1 | place the running app in the background, stage a Share fixture in the App Group, reactivate the app, and require Send to show the selected fixture; rerun the prior full App UI suite | targeted foreground recovery 1/1 passed; existing App UI 9/9 passed | `/private/tmp/envoix-share-foreground-ui.xcresult`; `/private/tmp/envoix-share-resume-openin-app-ui.xcresult` |
+| 2026-07-14 | `2c91047` + Share foreground regression tree | Track S physical lifecycle regression | iPhone 15 Pro Max | run the same background staging and foreground reactivation scenario on-device, require the selected fixture in Send, then relaunch normally without test arguments | targeted recovery 1/1 passed; normal relaunch passed | `/private/tmp/envoix-share-foreground-device.xcresult` and `devicectl` output |
+| 2026-07-14 | `2c91047` + Share foreground regression tree | Track S Photos provider acceptance | iPhone 15 Pro Max / Photos | share one ordinary image to Envoix, confirm the extension reports ready, finish the extension, manually reopen Envoix, and inspect the Send selection | passed: Send opened automatically and displayed the correct image name; the manual app switch remains required by the Share Extension platform boundary | user observation |
+| 2026-07-14 | `2c91047` + Share foreground regression tree | Track S direct document UI regression | iPhone 16 Pro simulator, iOS 18.3.1 | open a regular file URL through the system application entry and require Send to show the selected name | 1 passed, 0 failed; this proves entry/adoption only, not payload delivery | `/private/tmp/envoix-share-openin-ui-3.xcresult` |
+| 2026-07-14 | `2c91047` + D9 Apple cross-device tree | Current macOS counterpart build | macOS arm64, macOS 26.5 SDK | build the macOS app from the same source/core tree after the Share foreground and document-entry changes | passed; current macOS app is buildable for the next physical iPhone↔macOS payload run | `/private/tmp/envoix-share-macos-current` |
+| 2026-07-14 | `2c91047` + D9 Apple cross-device tree | iPhone→Mac hotspot Core path | iPhone 15 Pro Max / Mac on iPhone Personal Hotspot | run the dedicated `testCrossDeviceSendIosToMacOSRoom` against the current Mac CLI/core receiver using Room/Auto; require a selected path, final bytes, and matching SHA-256 | passed: 33/33 bytes; Direct path; received SHA-256 `9a6e0868c7da6c4a5801723bf2505033e62a72af21edd9ce310299cfa93feaf1` matches the sender fixture | `/private/tmp/envoix-apple-hotspot-macos-ios.xcresult`; `/private/tmp/envoix-apple-hotspot-macos-received/envoix-manual-ios-to-macos.bin`; terminal path log |
+| 2026-07-14 | `2c91047` + Apple build-cache tree | Apple build iteration | macOS arm64, Xcode 26.6 | replace mtime freshness and unconditional BLAKE3 cleanup with content-digest invalidation, archive deployment inspection, stable platform caches, and build-without-testing reruns; exercise unchanged and file-list invalidation paths | passed; full Core regeneration 34.96 s versus 105.05 s before, unchanged Core/project preparation 1.02 s, cold macOS hosted test 27.36 s, warm test 6.00 s, and `test-without-building` 2.23 s on this Mac; archive objects remain within macOS 13/iOS 16 limits | terminal timing and `otool` inspection output |
+| 2026-07-14 | `2c91047` + macOS App-hosted tree | Honest default macOS test gate | macOS arm64, Xcode 26.6 | run the dedicated macOS App-hosted cross-device method without `ENVOIX_CROSS_DEVICE_TESTING` | 1 explicit skip, 0 failures; the default suite cannot report a fake network success | `/private/tmp/envoix-macos-hosted-default-final-20260714.xcresult` |
+| 2026-07-14 | `2c91047` + Apple build-cache tree | Default iOS target + honest skip | iPhone 16 Pro simulator, iOS 18.3.1 | resolve the default installed simulator by identifier, then run `testCrossDeviceSendIosToMacOSRoom` without `ENVOIX_CROSS_DEVICE_TESTING` | automatic target resolution selected `72787ED4-8E08-485B-93CF-50290C5F9F8E`; 1 explicit skip, 0 failures | `$TMPDIR/envoix-apple-cache/ios-simulator-debug/Logs/Test/Test-Envoix-iOS-Hosted-2026.07.14_19-54-08-+0800.xcresult` |
+| 2026-07-14 | `2c91047` + macOS App-hosted tree | iPhone→macOS App hotspot payload | iPhone 15 Pro Max / `Envoix.app` on Mac connected to iPhone Personal Hotspot | run the physical iPhone sender against `EnvoixMacOSHostedTests.testReceiveIosToMacOSAppRoom`; require canonical Activity `Completed`, selected path, exact completed path, filename, size, file existence, and SHA-256 | passed: sender and receiver both completed; Direct IPv6 selected; 33/33 bytes; receiver Activity `0D23D28C-FFB4-4D85-9A08-FFA65D2E722F`; PID-scoped published file SHA-256 `9a6e0868c7da6c4a5801723bf2505033e62a72af21edd9ce310299cfa93feaf1` matched exactly | `/private/tmp/envoix-hotspot-macos-app-ios-sender-20260714.xcresult`; `/private/tmp/envoix-hotspot-macos-app-20260714-2.xcresult`; `$TMPDIR/envoix-macos-hosted-23906/received/envoix-manual-ios-to-macos.bin` |
+| 2026-07-14 | `2c91047` + Manifest contract/wire tree | Track M protocol contract and codec | macOS Rust host | run `cargo test -p envoix-protocol`, strict clippy, `cargo test -p envoix-session --lib`, `cargo test -p envoix-transfer --lib`, and compile client/FFI/Android JNI | protocol 23/23, session 24/24, and original single-file transfer 32/32 passed; frame IDs 1–9 and 16–26, lifecycle round trips, borrowed chunk output, hostile decode, and cross-family rejection are covered; clippy with warnings denied and all three native boundary checks passed | terminal output |
+| 2026-07-14 | `2c91047` + Manifest contract/build-cache tree | Track M native consumers | macOS arm64 / iPhone 16 Pro simulator iOS 18.3.1 / Android Gradle 8.9 | invalidate and regenerate Apple Core from the new Rust source; build macOS and iOS apps; compile current Android App Kotlin; remove one generated required scheme and rerun prepare | Apple Core regenerated; macOS and iOS builds passed; Android `:app:compileDebugKotlin` passed. The first macOS attempt exposed a missing explicit `Envoix` scheme after XcodeGen switched to declared schemes. After adding it, the missing-output probe caught and corrected a Bash condition that treated the completeness function name as a string; the final probe regenerated the project and restored the scheme | stable `$TMPDIR/envoix-apple-cache` products and terminal output |
+| 2026-07-14 | `38d1fd5`–`84dab08` | Track M engine + authenticated session routing | macOS Rust host | exercise the Manifest engine and real iroh routing over manual/direct, real mDNS discovery, and loopback Room rendezvous; retain old single-file endpoints and legacy-peer rejection | session 35/35 passed with strict clippy; tests cover multiple files, ordinary/empty directories, safe conflict mapping, resume, dual-ALPN legacy compatibility, `manifest.unsupported_peer`, mDNS, and Room; client, FFI, and Android JNI compile checks passed | commits and terminal output |
+| 2026-07-14 | `a3d6120` | Track M additive client facade | macOS Rust host | expose Manifest send and negotiated receive for Manual/Invite/mDNS/Room without changing `TransferRequest` or `Transfer`; run all client tests, strict clippy, rustdoc, and native consumer checks | 91 unit tests plus 3 real iroh loopbacks passed; the loopbacks prove old API single-file, two-file/two-directory Manifest transfer, and a legacy sender reaching the new negotiated receiver; FFI and Android JNI compile checks passed | commit and terminal output |
 
 ## 11. Definition of done
 
 The Apple milestone is complete only when all of the following are true:
 
-- D1–D4 and the selected feature are recorded as accepted decisions;
+- D1–D9 are recorded as accepted decisions;
 - G0–G5 evidence exists and has been inspected;
 - supported UI configurations pass the frozen visual/accessibility matrix;
 - canonical record and publication semantics are enforced across Rust/UniFFI and
   Swift without breaking existing callers;
 - Apple CI runs real tests and distinguishes skipped cross-device methods;
-- the selected feature passes its automated and physical acceptance cases;
+- Share Extension, Manifest, and Wi-Fi Aware each pass their own automated and
+  physical acceptance gates before being advertised as supported;
 - current iPhone and macOS builds correspond to the recorded source revision;
+- every user-facing iPhone send entry accepted in this milestone has at least
+  one iPhone↔macOS payload run with selected-path, final size, hash, and
+  publication evidence;
 - relevant issues and documentation match the shipped state;
 - reusable decisions and verified outcomes are ingested into the external
   project wiki after the milestone, not before evidence exists.
@@ -488,4 +810,146 @@ The Apple milestone is complete only when all of the following are true:
 - 2026-07-13: D4 resolved. Full tree checkpointed and pushed as `ceff278`, then
   latest dev merged as `2084944`. Plan updated against the dev commit barrier,
   durable extras/receipt work, Android authority, and the retained Apple
-  publication/listener/string-ID boundary. D1–D3 remain pending.
+  publication/listener/string-ID boundary.
+- 2026-07-13: D1–D3 confirmed. D3 now includes one item from both Files and
+  Photos. D5 accelerates Manifest without an app-side zip interim, D6 requires
+  iPhone↔Android and Android↔Android Wi-Fi Aware evidence, and D7 keeps remote
+  reachability on the trusted-presence/rendezvous/relay path. The plan changed
+  from one selected feature to a gated parallel product wave.
+- 2026-07-14: Wave 0 implementation and validation completed on the working
+  tree. Apple Core, macOS, simulator build/tests, and three targeted physical UI
+  regressions are green; disabled cross-device tests are explicit skips. The UI
+  now truthfully rejects multi-file/folder input pending Manifest. G0 awaits only
+  a stable implementation commit before parallel worktrees begin.
+- 2026-07-14: D2 was refined after physical-device feedback. The iPhone no
+  longer exposes Transfer and Activity as permanent bottom stages. A single
+  home screen opens Send, Receive, Activity, and Settings as sheets; active
+  canonical Activity is projected as a compact capsule. D8 records that QR
+  scanning is symmetric. Command snapshot refresh and bounded pending feedback
+  address an observed indefinite Cancelling indicator. The current tree then
+  passed all six app UI regressions on the physical iPhone, including a direct
+  stalled-acknowledgement recovery test.
+- 2026-07-14: G2 semantic accessibility coverage was expanded to every primary
+  sheet and canonical Activity fixture. Standard and small-screen simulator
+  suites pass 9/9. A full physical run exposed one clipped pairing placeholder;
+  the redundant scan wording was shortened and the physical accessibility plus
+  stalled-cancel regressions then passed 2/2; the final full physical suite
+  subsequently passed 9/9. Manual VoiceOver order, permission recovery,
+  screenshot baselines, and the full visual matrix remain G2 work.
+- 2026-07-14: G3 projection slices now reject reordered snapshots, preserve all
+  non-terminal Activity cards during pruning, and source action availability
+  from an additive Rust capability record. Apple no longer parses diagnostic
+  strings for controls or finalizing state. Runtime core/API/capability reporting
+  is visible in Settings, and structured publication retryability replaces the
+  prior display-string policy. Rust 42/42, Apple hosted tests, and macOS build
+  pass. Android's new Rust library builds, while the existing Android app source
+  still fails independently at its known legacy/current API drift; that client
+  repair remains outside the Apple workstream.
+- 2026-07-14: G3 publication recovery now persists the Apple destination and
+  structured save failure inside the canonical record. Restart preserves the
+  `Publishing` card and staged bytes; Apple reads the destination from the
+  restored durable session, Retry reuses it, and Choose folder replaces it and
+  republishes in place. The dedicated final Rust recovery/getter test, all
+  independently retried loopback roots, Apple hosted 6 pass plus 4 explicit
+  skips, App UI 9/9, final iOS test build, and macOS build pass. A pre-getter
+  full Rust run reached 43/43; later aggregate reruns remain timing-sensitive to
+  the existing Iroh socket-cleanup flake rather than this publication path.
+- 2026-07-14: G3 closed. Apple Phase is a pure canonical-record presentation
+  projection, while a compatible V2 mailbox contract freezes and restores each
+  session's receipt endpoint without changing legacy callers. Final validation
+  passed Rust 43/43, Apple hosted 7 pass plus 4 explicit skips, App UI 9/9, and
+  macOS build; regenerated Kotlin bindings introduced no Android binding errors.
+- 2026-07-14: The Android maintenance boundary was refined: Apple remains the
+  primary feature track, but shared Rust/FFI milestones must keep the current
+  Android App compile-compatible instead of accepting client drift. The targeted
+  UniFFI alignment now passes Kotlin compilation, Debug APK assembly, and JVM
+  tests; physical Android startup remains pending because no device is attached.
+- 2026-07-14: Track S first slice implemented one-item Files/Photos intake,
+  validated App Group staging, deep-link/pending import, and Send-sheet adoption.
+  Hosted contract tests pass 6/6, the embedded-extension build passes, the full
+  App UI regression remains 9/9, and macOS builds. Physical iPhone installation
+  is blocked only by missing App Group and extension provisioning; no Apple
+  Developer resources were changed automatically.
+- 2026-07-14: With explicit user authorization, Xcode-managed provisioning
+  created/updated development profiles for the main iOS app and Share Extension
+  and enabled `group.com.envoix.app.shared` on both signed targets. The audited
+  Share contract now passes 9/9, App UI remains 9/9, macOS builds, and the signed
+  iOS product builds, installs, and launches on iPhone 15 Pro Max. The earlier
+  provisioning failure is retained above as historical evidence; only manual
+  Files and Photos share-sheet invocation remains before Track S physical
+  acceptance can be marked complete.
+- 2026-07-14: The first real Photos Share invocation did not present Send. The
+  subsequent source audit found a concrete recovery defect: the app relied only
+  on SwiftUI `onAppear`, which foreground restoration does not necessarily
+  re-run.
+  The app now imports pending drafts whenever `scenePhase` becomes active. In
+  parallel, the main app declares `public.data` and handles security-scoped file
+  URLs for a distinct “Open in Envoix” route. The expanded hosted suite passes
+  12/12, the dedicated background-to-foreground UI regression passes 1/1 on
+  both simulator and iPhone 15 Pro Max, the prior App UI suite remains 9/9, and
+  the user-confirmed physical Photos entry/adoption flow now passes. The actual
+  Photos payload run plus Files and direct Open In provider acceptance remain
+  pending; manually returning to the containing app after the Share Extension
+  finishes is expected platform behavior, not an Envoix transfer failure.
+- 2026-07-14: The user confirmed the corrected Photos provider flow on the
+  physical iPhone, including the extension-ready state, manual return to Envoix,
+  automatic Send presentation, and correct image name. This closes only the
+  entry/adoption gate. D9 now keeps the macOS app synchronized and requires a
+  real iPhone↔macOS payload, final size/hash, publication, and selected-path
+  record before the Photos send flow is called end-to-end accepted.
+- 2026-07-14: D9 gained a dedicated iOS-to-macOS hosted test instead of
+  repurposing an Android-named case. On the current iPhone Personal Hotspot,
+  iPhone 15 Pro Max sent 33 bytes to the Mac core receiver over Room/Auto; the
+  selected payload path was Direct and the received SHA-256 matched exactly.
+  The Mac advertised `172.20.10.7`, and path probing also established the
+  hotspot host candidate `172.20.10.1`. This proves Apple hardware/core network
+  reachability, not yet the Photos UI → iOS App → macOS App product flow.
+- 2026-07-14: The side-chat build optimization was integrated before further
+  feature work. Core and Xcode project freshness now use content digests rather
+  than mtimes, platform builds reuse stable caches, hosted tests can rerun
+  without rebuilding, and every produced archive object is checked before the
+  deployment-target guard accepts cached BLAKE3 output. On this Mac the full
+  Core regeneration fell from 105.05 seconds to 34.96 seconds, while an
+  unchanged prepare takes 1.02 seconds. File addition/removal invalidation and
+  the Bash 3.2 paths were exercised explicitly. A final default-suite check
+  exposed Xcode's model-only destination ambiguity across installed runtimes;
+  the wrapper now resolves an actually installed iPhone simulator by identifier
+  while retaining an explicit environment override.
+- 2026-07-14: D9 advanced from a CLI/core receiver to the actual macOS app
+  boundary. A physical iPhone sent the 33-byte fixture over Direct IPv6 while a
+  hosted test drove the production macOS `AppModel`; canonical Activity reached
+  `Completed`, the exact PID-isolated destination existed, and its SHA-256
+  matched. The ordinary build keeps this network method as an explicit skip.
+  The evidence still does not claim the final Photos UI → iOS Send UI → macOS
+  Receive UI → Finder manual flow.
+- 2026-07-14: Track M began with the additive protocol contract rather than a
+  zip or repeated single-file workaround. `ManifestV1` now has stable IDs,
+  entry kinds, BLAKE3 metadata, exact named limits, checked aggregate sizes,
+  parent-before-child validation, and typed portable-path failures. Protocol
+  selection keeps one regular file on `envoix/1` and requires
+  `envoix/manifest/1` for multi-file or directory shapes. The independent
+  Manifest codec now freezes frame IDs 16 through 26, round-trips the full
+  sequential lifecycle, rejects single-file frames, revalidates decoded offers,
+  and provides a borrowed chunk writer without changing the existing public
+  single-file frame APIs. At that contract-only slice, the new ALPN remained
+  deliberately unadvertised until session routing and engine support landed.
+  Existing protocol/session/single-file tests, native Rust callers, both Apple
+  builds, and Android Kotlin compilation remain green. This validation also
+  exposed and fixed the missing explicit macOS scheme and strengthened Xcode
+  project-cache completeness checks. A deliberate missing-scheme probe caught
+  a Bash conditional that did not execute the completeness function; after the
+  correction, the same probe forced XcodeGen and restored the required output.
+- 2026-07-14: Track M advanced through engine, session, and client without
+  reimplementing existing mDNS or Room foundations. The sequential engine now
+  transfers multiple files plus explicit/empty directories with receiver-owned
+  safe conflict mapping and resume. Additive negotiated receivers advertise
+  both ALPNs after authentication and route Manifest over manual/direct, the
+  existing mDNS discovery loop, or the existing Room rendezvous flow; legacy
+  single-file entry points remain unchanged. The additive client facade exposes
+  `send_manifest`, `receive_transfer`, `TransferSet`, typed summaries, and all
+  Manifest events while preserving `TransferRequest`, `send`, `receive`, `run`,
+  and `Transfer::wait`. Commits `38d1fd5` through `a3d6120` carry these slices.
+  Session 35/35, client 91 unit plus 3 real iroh loopbacks, strict clippy,
+  rustdoc, and client/FFI/Android JNI compile gates pass. The remaining Track M
+  critical path is durable Activity projection → additive FFI → Apple
+  multi-selection/directory publication → multi-item Share intake.

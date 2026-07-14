@@ -4,7 +4,13 @@ GitHub issues are the canonical source for active implementation work. Do not
 read every file in this directory during repository orientation. Start from
 this index, then open only the document required by the current task.
 
-Last reconciled with GitHub: 2026-07-11.
+Last reconciled with repository implementation: 2026-07-14.
+
+Cross-issue sequencing, accepted product decisions, workstream ownership, and
+validation gates live in
+[`../design/apple-client-execution-plan.md`](../design/apple-client-execution-plan.md).
+The files below remain subject-specific contracts and must not grow independent
+roadmaps that contradict that execution plan.
 
 ## Canonical GitHub issues
 
@@ -32,7 +38,9 @@ Read these only when the task directly concerns their subject:
 - `reliable-transfer-completion-resume.md` — current P0 completion, commit,
   receipt, and resume semantics. Several GitHub issues refer to this design,
   but no dedicated cloud issue exists yet.
-- `transfer-manifest-v1.md` — future multi-file/directory protocol.
+- `transfer-manifest-v1.md` — active multi-file/directory contract; protocol,
+  engine, session, and Rust client facade are implemented, while durable
+  Activity, FFI, and product UI remain.
 - `trusted-device-store.md` — future device identity and trust policy.
 - `sender-initiated-transfer-flows.md` — future sender-first product flow.
 - `design-file-level-e2e-encryption.md` — future payload-encryption design.
