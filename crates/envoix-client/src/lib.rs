@@ -1,9 +1,10 @@
 //! Public application-facing facade for envoix clients.
 //!
 //! The API lives in [`api`]: build an [`api::Client`], start transfers with
-//! [`api::Client::send`] / [`api::Client::receive`], and observe them through
-//! the unified [`api::TransferEvent`] stream on the returned [`api::Transfer`]
-//! handle.
+//! [`api::Client::send`] / [`api::Client::receive`], or use the additive
+//! [`api::Client::send_manifest`] / [`api::Client::receive_transfer`] surface
+//! for multi-item transfers. Both are observed through the unified
+//! [`api::TransferEvent`] stream.
 
 pub mod api;
 
@@ -12,10 +13,13 @@ use std::path::Path;
 
 pub use envoix_auth::SPAKE2_EXPERIMENTAL_WARNING;
 use envoix_error::CoreError;
-pub use envoix_protocol::PeerDescriptor;
+pub use envoix_protocol::{
+    ManifestEntryKind, ManifestEntryV1, ManifestHashAlgorithm, ManifestId, ManifestV1,
+    PeerDescriptor,
+};
 pub use envoix_session::{
-    BindAddrs, IdentityConfig, MemoryIdentity, TransferCancelToken, TransferDirection,
-    TransferSummary,
+    BindAddrs, IdentityConfig, ManifestSendRequest, ManifestTransferSummary, MemoryIdentity,
+    SessionTransferSummary, TransferCancelToken, TransferDirection, TransferSummary,
 };
 pub use envoix_storage::TransferReceipt;
 // Chunk-size bounds + validation are a transfer-engine constraint; they live in

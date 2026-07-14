@@ -4,7 +4,7 @@
 //! must be an event here, never a log line. Every variant is emitted by the
 //! current implementation - no speculative vocabulary.
 
-use envoix_protocol::PeerDescriptor;
+use envoix_protocol::{ManifestEntryResultV1, ManifestId, PeerDescriptor};
 use envoix_session::TransferDirection;
 use envoix_types::{DataPath, PairingStep, TransferId};
 use serde::{Deserialize, Serialize};
@@ -137,6 +137,80 @@ pub enum TransferEvent {
         file_name: String,
         /// Plaintext bytes transferred in total.
         bytes_transferred: u64,
+    },
+    /// Sender-side preflight is hashing and validating one Manifest file.
+    ManifestPreparingEntry {
+        /// Transfer-set identifier.
+        manifest_id: ManifestId,
+        /// Stable entry identifier within the Manifest.
+        entry_id: u32,
+        /// Portable destination-relative path.
+        relative_path: String,
+        /// Expected plaintext size.
+        size: u64,
+    },
+    /// A negotiated Manifest transfer set has started.
+    ManifestStarted {
+        /// Transfer-set identifier.
+        manifest_id: ManifestId,
+        /// Direction of this local operation.
+        direction: TransferDirection,
+        /// Number of regular-file entries.
+        file_count: u32,
+        /// Number of directory entries.
+        directory_count: u32,
+        /// Aggregate expected plaintext bytes.
+        total_bytes: u64,
+    },
+    /// One Manifest file entered its sequential payload phase.
+    ManifestEntryStarted {
+        /// Transfer-set identifier.
+        manifest_id: ManifestId,
+        /// Stable entry identifier within the Manifest.
+        entry_id: u32,
+        /// Per-entry transfer identifier.
+        transfer_id: TransferId,
+        /// Portable destination-relative path.
+        relative_path: String,
+        /// Expected plaintext bytes for this entry.
+        total_bytes: u64,
+        /// Verified bytes already present before this attempt.
+        bytes_resumed: u64,
+    },
+    /// Aggregate Manifest progress plus the active entry's persisted bytes.
+    ManifestProgress {
+        /// Transfer-set identifier.
+        manifest_id: ManifestId,
+        /// Active entry identifier.
+        entry_id: u32,
+        /// Plaintext bytes sent or persisted for the active entry.
+        entry_bytes: u64,
+        /// Expected plaintext bytes for the active entry.
+        entry_total_bytes: u64,
+        /// Aggregate plaintext bytes completed or active so far.
+        completed_bytes: u64,
+        /// Aggregate expected plaintext bytes.
+        total_bytes: u64,
+    },
+    /// One Manifest entry reached a terminal result.
+    ManifestEntryCompleted {
+        /// Transfer-set identifier.
+        manifest_id: ManifestId,
+        /// Receiver-authoritative result for the entry.
+        result: ManifestEntryResultV1,
+    },
+    /// Every offered Manifest entry reached a successful terminal result.
+    ManifestCompleted {
+        /// Transfer-set identifier.
+        manifest_id: ManifestId,
+        /// Number of regular-file entries.
+        file_count: u32,
+        /// Number of directory entries.
+        directory_count: u32,
+        /// Aggregate verified plaintext bytes.
+        total_bytes: u64,
+        /// Receiver-authoritative result for every entry.
+        entries: Vec<ManifestEntryResultV1>,
     },
     /// The transfer failed; the operation's result carries the same error.
     Failed {

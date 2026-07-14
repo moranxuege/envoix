@@ -19,7 +19,12 @@ pub mod record;
 mod source;
 mod transfer;
 
-pub use envoix_session::CandidateFilter;
+pub use envoix_protocol::{
+    ManifestEntryKind, ManifestEntryV1, ManifestHashAlgorithm, ManifestId, ManifestV1,
+};
+pub use envoix_session::{
+    CandidateFilter, ManifestSendRequest, ManifestTransferSummary, SessionTransferSummary,
+};
 pub use envoix_types::{DataPath, PairingStep};
 pub use error::{
     ErrorKind, FailureCategory, FailureCode, FailureOrigin, FailurePhase, Phase, RecoveryAction,
@@ -29,7 +34,7 @@ pub use event::{SessionFailureCode, StampedEvent, TransferEvent};
 pub use invite::{Invite, Role};
 pub use options::{PathPolicy, TransferOptions};
 pub use source::{PeerSource, TransferMode};
-pub use transfer::{Transfer, TransferStats};
+pub use transfer::{Transfer, TransferSet, TransferStats};
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -40,8 +45,10 @@ use envoix_qr::{QrInvitePayload, generate_token};
 use envoix_session::{
     BindAddrs, DEFAULT_CHUNK_SIZE, EndpointAddr, SessionConfig, TransferCancelToken,
     TransferDirection, TransferSummary, parse_broker_addr, receive_file_enable_mdns,
-    receive_file_via_room, receive_file_with_bound_peer, send_file_enable_mdns, send_file_manual,
-    send_file_to_endpoint_addr, send_file_via_room,
+    receive_file_via_room, receive_file_with_bound_peer, receive_transfer_enable_mdns,
+    receive_transfer_via_room, receive_transfer_with_bound_peer, send_file_enable_mdns,
+    send_file_manual, send_file_to_endpoint_addr, send_file_via_room, send_manifest_enable_mdns,
+    send_manifest_manual, send_manifest_to_endpoint_addr, send_manifest_via_room,
 };
 use tracing::Instrument;
 
@@ -51,6 +58,11 @@ use transfer::{EventSender, SessionEventAdapter, StatsHandle};
 
 /// The transfer body each dispatch arm produces, run under the correlation span.
 type TransferFuture = Pin<Box<dyn Future<Output = Result<TransferSummary, PublicError>> + Send>>;
+
+/// An additive transfer body whose negotiated result may be one file or a
+/// Manifest set.
+type TransferSetFuture =
+    Pin<Box<dyn Future<Output = Result<SessionTransferSummary, PublicError>> + Send>>;
 
 /// The correlation span a transfer runs in: `room`/`transfer_id` are recorded
 /// once known (the room id up front for room transfers, the transfer id when
@@ -107,6 +119,58 @@ async fn with_summary(
             outcome = "failed",
             %error,
             "transfer finished"
+        ),
+    }
+    result
+}
+
+/// Run a negotiated transfer body and log its protocol-specific aggregate
+/// outcome without changing the compatible single-file summary surface.
+async fn with_transfer_set_summary(
+    fut: TransferSetFuture,
+    stats: StatsHandle,
+) -> Result<SessionTransferSummary, PublicError> {
+    let result = fut.await;
+    let stats = stats.snapshot();
+    let paths = stats
+        .paths
+        .iter()
+        .map(|path| path.to_string())
+        .collect::<Vec<_>>()
+        .join(" -> ");
+    match &result {
+        Ok(SessionTransferSummary::SingleFile(summary)) => tracing::info!(
+            protocol = "single_file_v1",
+            bytes = summary.bytes_transferred,
+            file = %summary.file_name,
+            avg_bps = stats.avg_bytes_per_sec,
+            peak_bps = stats.peak_bytes_per_sec,
+            connect_ms = stats.connect_latency_ms.unwrap_or_default(),
+            duration_ms = stats.duration_ms,
+            paths = %paths,
+            outcome = "completed",
+            "transfer set finished"
+        ),
+        Ok(SessionTransferSummary::Manifest(summary)) => tracing::info!(
+            protocol = "manifest_v1",
+            manifest_id = %summary.manifest_id,
+            files = summary.file_count,
+            directories = summary.directory_count,
+            bytes = summary.total_bytes,
+            avg_bps = stats.avg_bytes_per_sec,
+            peak_bps = stats.peak_bytes_per_sec,
+            connect_ms = stats.connect_latency_ms.unwrap_or_default(),
+            duration_ms = stats.duration_ms,
+            paths = %paths,
+            outcome = "completed",
+            "transfer set finished"
+        ),
+        Err(error) => tracing::warn!(
+            avg_bps = stats.avg_bytes_per_sec,
+            paths = %paths,
+            outcome = "failed",
+            %error,
+            "transfer set finished"
         ),
     }
     result
@@ -239,6 +303,131 @@ impl Client {
         ))
     }
 
+    /// Sends one validated Manifest transfer set to `to` without changing the
+    /// compatible single-file [`Self::send`] API.
+    ///
+    /// The receiving peer must listen through [`Self::receive_transfer`], which
+    /// negotiates either the existing single-file protocol or Manifest v1.
+    pub fn send_manifest(
+        &self,
+        request: ManifestSendRequest,
+        to: PeerSource,
+        options: TransferOptions,
+    ) -> Result<TransferSet, TransferError> {
+        crate::validate_chunk_size(self.chunk_size).map_err(setup_error)?;
+        validate_path_policy(&options)?;
+        request
+            .manifest
+            .validate_structure()
+            .map_err(|error| TransferError::input(error.to_string()))?;
+        let (events, event_receiver) = EventSender::channel();
+        let events_phase = events.phase_cell();
+        let events_stats = events.stats_handle();
+        let cancel = TransferCancelToken::new();
+        let (fut, span) = self.build_manifest_send(to, request, &options, &events, &cancel)?;
+        let task =
+            tokio::spawn(with_transfer_set_summary(fut, events_stats.clone()).instrument(span));
+        Ok(TransferSet::new(
+            event_receiver,
+            cancel,
+            events_phase,
+            events_stats,
+            task,
+        ))
+    }
+
+    fn build_manifest_send(
+        &self,
+        to: PeerSource,
+        request: ManifestSendRequest,
+        options: &TransferOptions,
+        events: &EventSender,
+        cancel: &TransferCancelToken,
+    ) -> Result<(TransferSetFuture, tracing::Span), TransferError> {
+        let sink = Box::new(SessionEventAdapter(events.clone()));
+        let resume = options.resume;
+        let mode = to.mode();
+        let span = transfer_span(TransferDirection::Send, mode);
+
+        let fut: TransferSetFuture = match to {
+            PeerSource::Manual { peer, token } => {
+                let pairing = shared_token(&token)?;
+                let config = self.session_config(options);
+                let cancel = cancel.clone();
+                let events = events.clone();
+                Box::pin(async move {
+                    events.emit(TransferEvent::Binding {
+                        direction: TransferDirection::Send,
+                        mode,
+                    });
+                    send_manifest_manual(peer, request, resume, config, &pairing, sink, cancel)
+                        .await
+                        .map(SessionTransferSummary::Manifest)
+                })
+            }
+            PeerSource::Invite { invite } => {
+                let (peer_addr, token) = resolve_invite(&invite, options.continuation)?;
+                let pairing = shared_token(&token)?;
+                let config = self.session_config(options);
+                let cancel = cancel.clone();
+                let events = events.clone();
+                Box::pin(async move {
+                    events.emit(TransferEvent::Binding {
+                        direction: TransferDirection::Send,
+                        mode,
+                    });
+                    send_manifest_to_endpoint_addr(
+                        peer_addr, request, resume, config, &pairing, sink, cancel,
+                    )
+                    .await
+                    .map(SessionTransferSummary::Manifest)
+                })
+            }
+            PeerSource::Mdns { token: Some(token) } => {
+                let pairing = shared_token(&token)?;
+                let config = self.session_config(options);
+                let cancel = cancel.clone();
+                let events = events.clone();
+                Box::pin(async move {
+                    events.emit(TransferEvent::Binding {
+                        direction: TransferDirection::Send,
+                        mode,
+                    });
+                    send_manifest_enable_mdns(request, resume, config, &pairing, sink, cancel)
+                        .await
+                        .map(SessionTransferSummary::Manifest)
+                })
+            }
+            PeerSource::Mdns { token: None } => {
+                return Err(TransferError::input("sending over mDNS requires a token"));
+            }
+            PeerSource::Room { code, broker } => {
+                span.record("room", room_id_of(&code));
+                let broker =
+                    parse_broker_addr(&broker, options.relay.as_deref()).map_err(setup_error)?;
+                let config = self.session_config(options);
+                let cancel = cancel.clone();
+                let events = events.clone();
+                Box::pin(async move {
+                    events.emit(TransferEvent::Binding {
+                        direction: TransferDirection::Send,
+                        mode,
+                    });
+                    send_manifest_via_room(broker, &code, request, resume, config, sink, cancel)
+                        .await
+                        .map(SessionTransferSummary::Manifest)
+                })
+            }
+            PeerSource::ShowManual { .. } | PeerSource::ShowInvite { .. } => {
+                return Err(TransferError::input(
+                    "this peer source listens for a dialer; sending toward it needs \
+                     protocol role negotiation and is not supported yet",
+                ));
+            }
+        };
+        Ok((fut, span))
+    }
+
     /// Builds one send attempt's future + tracing span, emitting through the
     /// given event channel and honoring the given cancel token. Shared by
     /// [`Self::send`] (a single source) and [`Self::run`] (fallback across
@@ -356,6 +545,135 @@ impl Client {
             events_stats,
             task,
         ))
+    }
+
+    /// Receives one authenticated transfer into `into`, negotiating either the
+    /// compatible single-file protocol or Manifest v1 after connection setup.
+    ///
+    /// The returned [`TransferSet`] reports the negotiated result without
+    /// changing [`Self::receive`] or [`Transfer::wait`].
+    pub fn receive_transfer(
+        &self,
+        into: PathBuf,
+        from: PeerSource,
+        options: TransferOptions,
+    ) -> Result<TransferSet, TransferError> {
+        crate::validate_chunk_size(self.chunk_size).map_err(setup_error)?;
+        validate_path_policy(&options)?;
+        let (events, event_receiver) = EventSender::channel();
+        let events_phase = events.phase_cell();
+        let events_stats = events.stats_handle();
+        let cancel = TransferCancelToken::new();
+        let (fut, span) = self.build_receive_transfer(from, into, &options, &events, &cancel)?;
+        let task =
+            tokio::spawn(with_transfer_set_summary(fut, events_stats.clone()).instrument(span));
+        Ok(TransferSet::new(
+            event_receiver,
+            cancel,
+            events_phase,
+            events_stats,
+            task,
+        ))
+    }
+
+    fn build_receive_transfer(
+        &self,
+        from: PeerSource,
+        into: PathBuf,
+        options: &TransferOptions,
+        events: &EventSender,
+        cancel: &TransferCancelToken,
+    ) -> Result<(TransferSetFuture, tracing::Span), TransferError> {
+        let sink = Box::new(SessionEventAdapter(events.clone()));
+        let listen = options
+            .listen_addrs
+            .clone()
+            .unwrap_or_else(|| BindAddrs::dual_stack(0));
+        let mode = from.mode();
+        let span = transfer_span(TransferDirection::Receive, mode);
+
+        let fut: TransferSetFuture = match from {
+            PeerSource::ShowManual { token } => {
+                let token = token.map_or_else(new_token, Ok)?;
+                let pairing = shared_token(&token)?;
+                let config = self.session_config(options);
+                let cancel = cancel.clone();
+                let on_bound = advertise(events.clone(), token, None);
+                let events = events.clone();
+                Box::pin(async move {
+                    events.emit(TransferEvent::Binding {
+                        direction: TransferDirection::Receive,
+                        mode,
+                    });
+                    receive_transfer_with_bound_peer(
+                        listen, into, config, &pairing, sink, on_bound, cancel,
+                    )
+                    .await
+                })
+            }
+            PeerSource::ShowInvite { ttl_secs, token } => {
+                let token = token.map_or_else(new_token, Ok)?;
+                let pairing = shared_token(&token)?;
+                let config = self.session_config(options);
+                let cancel = cancel.clone();
+                let on_bound = advertise(events.clone(), token, Some(ttl_secs));
+                let events = events.clone();
+                Box::pin(async move {
+                    events.emit(TransferEvent::Binding {
+                        direction: TransferDirection::Receive,
+                        mode,
+                    });
+                    receive_transfer_with_bound_peer(
+                        listen, into, config, &pairing, sink, on_bound, cancel,
+                    )
+                    .await
+                })
+            }
+            PeerSource::Mdns { token } => {
+                let (token, invite_ttl) = match token {
+                    Some(token) => (token, None),
+                    None => (new_token()?, Some(DEFAULT_INVITE_TTL_SECS)),
+                };
+                let pairing = shared_token(&token)?;
+                let config = self.session_config(options);
+                let cancel = cancel.clone();
+                let on_bound = advertise(events.clone(), token, invite_ttl);
+                let events = events.clone();
+                Box::pin(async move {
+                    events.emit(TransferEvent::Binding {
+                        direction: TransferDirection::Receive,
+                        mode,
+                    });
+                    receive_transfer_enable_mdns(
+                        listen, into, config, &pairing, sink, on_bound, cancel,
+                    )
+                    .await
+                })
+            }
+            PeerSource::Room { code, broker } => {
+                span.record("room", room_id_of(&code));
+                let broker =
+                    parse_broker_addr(&broker, options.relay.as_deref()).map_err(setup_error)?;
+                let config = self.session_config(options);
+                let cancel = cancel.clone();
+                let events = events.clone();
+                Box::pin(async move {
+                    events.emit(TransferEvent::Binding {
+                        direction: TransferDirection::Receive,
+                        mode,
+                    });
+                    receive_transfer_via_room(broker, &code, listen, into, config, sink, cancel)
+                        .await
+                })
+            }
+            PeerSource::Manual { .. } | PeerSource::Invite { .. } => {
+                return Err(TransferError::input(
+                    "this peer source dials a listener; receiving from it needs \
+                     protocol role negotiation and is not supported yet",
+                ));
+            }
+        };
+        Ok((fut, span))
     }
 
     /// Builds one receive attempt's future + tracing span, emitting through the

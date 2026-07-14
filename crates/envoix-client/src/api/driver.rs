@@ -187,6 +187,9 @@ fn stabilize_listening_tokens(context: &mut SessionContext) -> Result<(), Transf
 
 /// What the driver tells the frontend.
 #[derive(Clone, Debug)]
+// Boxing `Snapshot` would break the established public match surface merely to
+// optimize this infrequent UI notification enum.
+#[allow(clippy::large_enum_variant)]
 pub enum SessionNotice {
     Snapshot(SessionSnapshot),
     /// Raw event for diagnostics and invite/token presentation. Lifecycle UI

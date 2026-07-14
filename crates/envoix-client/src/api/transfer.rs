@@ -3,7 +3,10 @@
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
-use envoix_session::{TransferCancelToken, TransferEvent as SessionEvent, TransferSummary};
+use envoix_session::{
+    ManifestTransferEvent as SessionManifestEvent, TransferCancelToken,
+    TransferEvent as SessionEvent, TransferSummary,
+};
 use envoix_types::DataPath;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -72,27 +75,23 @@ impl StatsHandle {
                 s.paths.push(path.clone());
             }
             TransferEvent::PathChanged { path } => s.paths.push(path.clone()),
-            TransferEvent::Started { .. } => {
+            TransferEvent::Started { .. } | TransferEvent::ManifestStarted { .. } => {
                 s.started_ms.get_or_insert(ts_ms);
             }
             TransferEvent::Progress {
                 bytes_transferred, ..
-            } => {
-                let bytes = *bytes_transferred;
-                if let Some((last_ms, last_bytes)) = s.last_progress
-                    && ts_ms > last_ms
-                    && bytes >= last_bytes
-                {
-                    let bps = (bytes - last_bytes).saturating_mul(1000) / (ts_ms - last_ms);
-                    s.peak_bps = s.peak_bps.max(bps);
-                }
-                s.bytes = bytes;
-                s.last_progress = Some((ts_ms, bytes));
-            }
+            } => observe_progress(&mut s, ts_ms, *bytes_transferred),
+            TransferEvent::ManifestProgress {
+                completed_bytes, ..
+            } => observe_progress(&mut s, ts_ms, *completed_bytes),
             TransferEvent::Completed {
                 bytes_transferred, ..
             } => {
                 s.bytes = *bytes_transferred;
+                s.end_ms.get_or_insert(ts_ms);
+            }
+            TransferEvent::ManifestCompleted { total_bytes, .. } => {
+                s.bytes = *total_bytes;
                 s.end_ms.get_or_insert(ts_ms);
             }
             _ => {}
@@ -128,6 +127,18 @@ impl StatsHandle {
     pub(crate) fn connected(&self) -> bool {
         self.0.lock().expect("stats mutex").connected_ms.is_some()
     }
+}
+
+fn observe_progress(stats: &mut StatsInner, ts_ms: u64, bytes: u64) {
+    if let Some((last_ms, last_bytes)) = stats.last_progress
+        && ts_ms > last_ms
+        && bytes >= last_bytes
+    {
+        let bps = (bytes - last_bytes).saturating_mul(1000) / (ts_ms - last_ms);
+        stats.peak_bps = stats.peak_bps.max(bps);
+    }
+    stats.bytes = bytes;
+    stats.last_progress = Some((ts_ms, bytes));
 }
 
 /// Lock-free cell holding the phase the transfer has reached, updated as
@@ -171,32 +182,33 @@ fn phase_of(event: &TransferEvent) -> Phase {
         | TransferEvent::Verified { .. }
         | TransferEvent::Confirming { .. }
         | TransferEvent::Completed { .. }
+        | TransferEvent::ManifestPreparingEntry { .. }
+        | TransferEvent::ManifestStarted { .. }
+        | TransferEvent::ManifestEntryStarted { .. }
+        | TransferEvent::ManifestProgress { .. }
+        | TransferEvent::ManifestEntryCompleted { .. }
+        | TransferEvent::ManifestCompleted { .. }
         | TransferEvent::Failed { .. } => Phase::Transfer,
     }
 }
 
-/// A running transfer: observe it through [`Transfer::next_event`], stop it
-/// with [`Transfer::cancel`], and take its result with [`Transfer::wait`].
-///
-/// Dropping the handle cancels the transfer (the peer is notified where the
-/// protocol allows it).
 #[derive(Debug)]
-pub struct Transfer {
+struct TransferHandle<R> {
     events: mpsc::UnboundedReceiver<StampedEvent>,
     cancel: TransferCancelToken,
     phase: Arc<PhaseCell>,
     stats: StatsHandle,
     // Option only so `wait(self)` can move it out despite the Drop impl.
-    task: Option<JoinHandle<Result<TransferSummary, PublicError>>>,
+    task: Option<JoinHandle<Result<R, PublicError>>>,
 }
 
-impl Transfer {
-    pub(crate) fn new(
+impl<R> TransferHandle<R> {
+    fn new(
         events: mpsc::UnboundedReceiver<StampedEvent>,
         cancel: TransferCancelToken,
         phase: Arc<PhaseCell>,
         stats: StatsHandle,
-        task: JoinHandle<Result<TransferSummary, PublicError>>,
+        task: JoinHandle<Result<R, PublicError>>,
     ) -> Self {
         Self {
             events,
@@ -207,48 +219,31 @@ impl Transfer {
         }
     }
 
-    /// The phase this transfer has reached (per its last lifecycle event).
-    pub fn phase(&self) -> Phase {
+    fn phase(&self) -> Phase {
         self.phase.load()
     }
 
-    /// A snapshot of the transfer's measured stats - throughput, connect
-    /// latency, and the full data-path history - final once it has ended.
-    pub fn stats(&self) -> TransferStats {
+    fn stats(&self) -> TransferStats {
         self.stats.snapshot()
     }
 
-    /// The next lifecycle event (with its emission time), or `None` once the
-    /// transfer has ended and all events were consumed.
-    pub async fn next_event(&mut self) -> Option<StampedEvent> {
+    async fn next_event(&mut self) -> Option<StampedEvent> {
         self.events.recv().await
     }
 
-    /// Requests a graceful stop; the transfer ends with a cancellation error.
-    pub fn cancel(&self) {
+    fn cancel(&self) {
         self.cancel.cancel();
     }
 
-    /// Requests a pause: the same graceful stop as [`cancel`](Self::cancel),
-    /// but reported — locally and (best-effort) to the peer — as a pause, so
-    /// both sides can present a resumable state instead of a failure.
-    pub fn pause(&self) {
+    fn pause(&self) {
         self.cancel.pause();
     }
 
-    /// A clonable handle that cancels this transfer, for callers that drive the
-    /// event loop on one thread and want to cancel from another (e.g. the JNI
-    /// bridge). Triggering it is equivalent to [`Transfer::cancel`].
-    pub fn cancel_handle(&self) -> TransferCancelToken {
+    fn cancel_handle(&self) -> TransferCancelToken {
         self.cancel.clone()
     }
 
-    /// Cancels the attempt as an explicit user intent (the peer hears the
-    /// interrupt, best-effort) and waits for the task to end, so callers can
-    /// safely delete files the engine writes on its way out (it checkpoints
-    /// resume state even on the cancel path). A task wedged past the grace
-    /// period is aborted - never left running headless.
-    pub(crate) async fn cancel_and_join(mut self) {
+    async fn cancel_and_join(mut self) {
         self.cancel.cancel();
         let Some(mut task) = self.task.take() else {
             return;
@@ -261,21 +256,13 @@ impl Transfer {
         }
     }
 
-    /// Tears the attempt down as an infrastructure fact, not a user intent:
-    /// the task is aborted and nothing is said on the wire - no interrupt, no
-    /// pause. The peer sees the connection drop and lands in its
-    /// connection-lost handling (partial kept, durable facts), exactly as if
-    /// this process had crashed. Detach must never masquerade as a cancel: a
-    /// peer that hears "interrupted by user" discards its partial.
-    pub(crate) fn detach(mut self) {
+    fn detach(mut self) {
         if let Some(task) = self.task.take() {
             task.abort();
         }
     }
 
-    /// Waits for the transfer to finish and returns its outcome. Events not
-    /// yet consumed are discarded.
-    pub async fn wait(mut self) -> Result<TransferSummary, TransferError> {
+    async fn wait(mut self) -> Result<R, TransferError> {
         let task = self.task.take().expect("wait consumes the handle");
         let result = match task.await {
             Ok(result) => result,
@@ -287,13 +274,139 @@ impl Transfer {
     }
 }
 
-impl Drop for Transfer {
+impl<R> Drop for TransferHandle<R> {
     fn drop(&mut self) {
         // Only a still-owned attempt is interrupted; `wait` (finished) and
         // `detach` (deliberately silent) take the task out first.
         if self.task.is_some() {
             self.cancel.cancel();
         }
+    }
+}
+
+/// A running compatible single-file transfer: observe it through
+/// [`Transfer::next_event`], stop it with [`Transfer::cancel`], and take its
+/// result with [`Transfer::wait`].
+///
+/// Dropping the handle cancels the transfer (the peer is notified where the
+/// protocol allows it).
+#[derive(Debug)]
+pub struct Transfer {
+    inner: TransferHandle<TransferSummary>,
+}
+
+impl Transfer {
+    pub(crate) fn new(
+        events: mpsc::UnboundedReceiver<StampedEvent>,
+        cancel: TransferCancelToken,
+        phase: Arc<PhaseCell>,
+        stats: StatsHandle,
+        task: JoinHandle<Result<TransferSummary, PublicError>>,
+    ) -> Self {
+        Self {
+            inner: TransferHandle::new(events, cancel, phase, stats, task),
+        }
+    }
+
+    /// The phase this transfer has reached (per its last lifecycle event).
+    pub fn phase(&self) -> Phase {
+        self.inner.phase()
+    }
+
+    /// A snapshot of measured throughput, connect latency, and path history.
+    pub fn stats(&self) -> TransferStats {
+        self.inner.stats()
+    }
+
+    /// The next lifecycle event, or `None` after the event stream ends.
+    pub async fn next_event(&mut self) -> Option<StampedEvent> {
+        self.inner.next_event().await
+    }
+
+    /// Requests a graceful cancel.
+    pub fn cancel(&self) {
+        self.inner.cancel();
+    }
+
+    /// Requests a resumable pause.
+    pub fn pause(&self) {
+        self.inner.pause();
+    }
+
+    /// Returns a clonable cancel handle for another task or thread.
+    pub fn cancel_handle(&self) -> TransferCancelToken {
+        self.inner.cancel_handle()
+    }
+
+    /// Cancels the attempt and waits for its write-side cleanup to finish.
+    pub(crate) async fn cancel_and_join(self) {
+        self.inner.cancel_and_join().await;
+    }
+
+    /// Aborts as an infrastructure loss without sending a user interrupt.
+    pub(crate) fn detach(self) {
+        self.inner.detach();
+    }
+
+    /// Waits for the compatible single-file result.
+    pub async fn wait(self) -> Result<TransferSummary, TransferError> {
+        self.inner.wait().await
+    }
+}
+
+/// A running additive transfer whose negotiated result may be either one
+/// compatible single file or a Manifest transfer set.
+#[derive(Debug)]
+pub struct TransferSet {
+    inner: TransferHandle<envoix_session::SessionTransferSummary>,
+}
+
+impl TransferSet {
+    pub(crate) fn new(
+        events: mpsc::UnboundedReceiver<StampedEvent>,
+        cancel: TransferCancelToken,
+        phase: Arc<PhaseCell>,
+        stats: StatsHandle,
+        task: JoinHandle<Result<envoix_session::SessionTransferSummary, PublicError>>,
+    ) -> Self {
+        Self {
+            inner: TransferHandle::new(events, cancel, phase, stats, task),
+        }
+    }
+
+    /// The phase this transfer has reached (per its last lifecycle event).
+    pub fn phase(&self) -> Phase {
+        self.inner.phase()
+    }
+
+    /// A snapshot of measured throughput, connect latency, and path history.
+    pub fn stats(&self) -> TransferStats {
+        self.inner.stats()
+    }
+
+    /// The next lifecycle event, or `None` after the event stream ends.
+    pub async fn next_event(&mut self) -> Option<StampedEvent> {
+        self.inner.next_event().await
+    }
+
+    /// Requests a graceful cancel.
+    pub fn cancel(&self) {
+        self.inner.cancel();
+    }
+
+    /// Requests a resumable pause.
+    pub fn pause(&self) {
+        self.inner.pause();
+    }
+
+    /// Returns a clonable cancel handle for another task or thread.
+    pub fn cancel_handle(&self) -> TransferCancelToken {
+        self.inner.cancel_handle()
+    }
+
+    /// Waits for the negotiated single-file or Manifest result.
+    pub async fn wait(self) -> Result<envoix_session::SessionTransferSummary, TransferError> {
+        self.inner.wait().await
     }
 }
 
@@ -337,8 +450,16 @@ impl EventSender {
         self.stats.observe(ts_ms, &event);
         // Fold the transfer id onto the ambient transfer span the first time it
         // is known, so subsequent client log lines correlate with the peer's.
-        if let TransferEvent::Started { transfer_id, .. } = &event {
-            tracing::Span::current().record("transfer_id", tracing::field::display(transfer_id));
+        match &event {
+            TransferEvent::Started { transfer_id, .. } => {
+                tracing::Span::current()
+                    .record("transfer_id", tracing::field::display(transfer_id));
+            }
+            TransferEvent::ManifestStarted { manifest_id, .. } => {
+                tracing::Span::current()
+                    .record("transfer_id", tracing::field::display(manifest_id));
+            }
+            _ => {}
         }
         let _ = self.sender.send(StampedEvent { ts_ms, event });
     }
@@ -358,6 +479,87 @@ pub(crate) struct SessionEventAdapter(pub(crate) EventSender);
 impl envoix_session::EventSink for SessionEventAdapter {
     fn on_event(&self, event: SessionEvent) {
         self.0.emit(event.into());
+    }
+}
+
+impl envoix_session::ManifestEventSink for SessionEventAdapter {
+    fn on_manifest_event(&self, event: SessionManifestEvent) {
+        self.0.emit(event.into());
+    }
+}
+
+impl From<SessionManifestEvent> for TransferEvent {
+    fn from(event: SessionManifestEvent) -> Self {
+        match event {
+            SessionManifestEvent::PreparingEntry {
+                manifest_id,
+                entry_id,
+                relative_path,
+                size,
+            } => Self::ManifestPreparingEntry {
+                manifest_id,
+                entry_id,
+                relative_path,
+                size,
+            },
+            SessionManifestEvent::Started {
+                manifest_id,
+                direction,
+                file_count,
+                directory_count,
+                total_bytes,
+            } => Self::ManifestStarted {
+                manifest_id,
+                direction,
+                file_count,
+                directory_count,
+                total_bytes,
+            },
+            SessionManifestEvent::EntryStarted {
+                manifest_id,
+                entry_id,
+                transfer_id,
+                relative_path,
+                total_bytes,
+                bytes_resumed,
+            } => Self::ManifestEntryStarted {
+                manifest_id,
+                entry_id,
+                transfer_id,
+                relative_path,
+                total_bytes,
+                bytes_resumed,
+            },
+            SessionManifestEvent::Progress {
+                manifest_id,
+                entry_id,
+                entry_bytes,
+                entry_total_bytes,
+                completed_bytes,
+                total_bytes,
+            } => Self::ManifestProgress {
+                manifest_id,
+                entry_id,
+                entry_bytes,
+                entry_total_bytes,
+                completed_bytes,
+                total_bytes,
+            },
+            SessionManifestEvent::EntryCompleted {
+                manifest_id,
+                result,
+            } => Self::ManifestEntryCompleted {
+                manifest_id,
+                result,
+            },
+            SessionManifestEvent::Completed { summary } => Self::ManifestCompleted {
+                manifest_id: summary.manifest_id,
+                file_count: summary.file_count,
+                directory_count: summary.directory_count,
+                total_bytes: summary.total_bytes,
+                entries: summary.entries,
+            },
+        }
     }
 }
 
@@ -445,7 +647,10 @@ impl From<SessionEvent> for TransferEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use envoix_session::{EventSink as _, TransferDirection};
+    use envoix_protocol::{ManifestEntryResultStatus, ManifestEntryResultV1, ManifestId};
+    use envoix_session::{
+        EventSink as _, ManifestEventSink as _, ManifestTransferSummary, TransferDirection,
+    };
     use envoix_types::TransferId;
 
     #[tokio::test]
@@ -581,6 +786,118 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_adapter_maps_every_manifest_event() {
+        let (sender, mut receiver) = EventSender::channel();
+        let adapter = SessionEventAdapter(sender);
+        let manifest_id = ManifestId::new("manifest-client-events");
+        let transfer_id = TransferId::new("manifest-client-events:1");
+        let result = ManifestEntryResultV1 {
+            entry_id: 1,
+            status: ManifestEntryResultStatus::Completed,
+            offered_relative_path: "album/photo.jpg".into(),
+            final_relative_path: Some("album/photo.jpg".into()),
+            failure_code: None,
+        };
+
+        for event in [
+            SessionManifestEvent::PreparingEntry {
+                manifest_id: manifest_id.clone(),
+                entry_id: 1,
+                relative_path: "album/photo.jpg".into(),
+                size: 120,
+            },
+            SessionManifestEvent::Started {
+                manifest_id: manifest_id.clone(),
+                direction: TransferDirection::Receive,
+                file_count: 1,
+                directory_count: 1,
+                total_bytes: 120,
+            },
+            SessionManifestEvent::EntryStarted {
+                manifest_id: manifest_id.clone(),
+                entry_id: 1,
+                transfer_id: transfer_id.clone(),
+                relative_path: "album/photo.jpg".into(),
+                total_bytes: 120,
+                bytes_resumed: 20,
+            },
+            SessionManifestEvent::Progress {
+                manifest_id: manifest_id.clone(),
+                entry_id: 1,
+                entry_bytes: 70,
+                entry_total_bytes: 120,
+                completed_bytes: 70,
+                total_bytes: 120,
+            },
+            SessionManifestEvent::EntryCompleted {
+                manifest_id: manifest_id.clone(),
+                result: result.clone(),
+            },
+            SessionManifestEvent::Completed {
+                summary: ManifestTransferSummary {
+                    manifest_id: manifest_id.clone(),
+                    file_count: 1,
+                    directory_count: 1,
+                    total_bytes: 120,
+                    entries: vec![result.clone()],
+                },
+            },
+        ] {
+            adapter.on_manifest_event(event);
+        }
+
+        let mut actual = Vec::new();
+        for _ in 0..6 {
+            actual.push(receiver.recv().await.unwrap().event);
+        }
+        assert_eq!(
+            actual,
+            vec![
+                TransferEvent::ManifestPreparingEntry {
+                    manifest_id: manifest_id.clone(),
+                    entry_id: 1,
+                    relative_path: "album/photo.jpg".into(),
+                    size: 120,
+                },
+                TransferEvent::ManifestStarted {
+                    manifest_id: manifest_id.clone(),
+                    direction: TransferDirection::Receive,
+                    file_count: 1,
+                    directory_count: 1,
+                    total_bytes: 120,
+                },
+                TransferEvent::ManifestEntryStarted {
+                    manifest_id: manifest_id.clone(),
+                    entry_id: 1,
+                    transfer_id,
+                    relative_path: "album/photo.jpg".into(),
+                    total_bytes: 120,
+                    bytes_resumed: 20,
+                },
+                TransferEvent::ManifestProgress {
+                    manifest_id: manifest_id.clone(),
+                    entry_id: 1,
+                    entry_bytes: 70,
+                    entry_total_bytes: 120,
+                    completed_bytes: 70,
+                    total_bytes: 120,
+                },
+                TransferEvent::ManifestEntryCompleted {
+                    manifest_id: manifest_id.clone(),
+                    result: result.clone(),
+                },
+                TransferEvent::ManifestCompleted {
+                    manifest_id,
+                    file_count: 1,
+                    directory_count: 1,
+                    total_bytes: 120,
+                    entries: vec![result],
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn channel_closes_when_all_senders_drop() {
         let (sender, mut receiver) = EventSender::channel();
         sender.emit(TransferEvent::Pairing {
@@ -660,5 +977,46 @@ mod tests {
                 DataPath::Direct { addr }
             ]
         );
+    }
+
+    #[test]
+    fn stats_use_aggregate_manifest_progress() {
+        let manifest_id = ManifestId::new("manifest-stats");
+        let h = StatsHandle::new();
+        h.observe(
+            1_000,
+            &TransferEvent::ManifestStarted {
+                manifest_id: manifest_id.clone(),
+                direction: TransferDirection::Send,
+                file_count: 2,
+                directory_count: 1,
+                total_bytes: 150,
+            },
+        );
+        let progress = |completed_bytes| TransferEvent::ManifestProgress {
+            manifest_id: manifest_id.clone(),
+            entry_id: 1,
+            entry_bytes: completed_bytes,
+            entry_total_bytes: 150,
+            completed_bytes,
+            total_bytes: 150,
+        };
+        h.observe(1_100, &progress(50));
+        h.observe(1_200, &progress(150));
+        h.observe(
+            1_400,
+            &TransferEvent::ManifestCompleted {
+                manifest_id,
+                file_count: 2,
+                directory_count: 1,
+                total_bytes: 150,
+                entries: Vec::new(),
+            },
+        );
+
+        let stats = h.snapshot();
+        assert_eq!(stats.duration_ms, 400);
+        assert_eq!(stats.avg_bytes_per_sec, 375);
+        assert_eq!(stats.peak_bytes_per_sec, 1_000);
     }
 }
