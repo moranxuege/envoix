@@ -46,10 +46,12 @@ struct PairingPanelSelector: View {
 
     var body: some View {
         Picker(AppText.value("Pairing action", "配对操作", language: language), selection: $selection) {
-            Label(AppText.value("Show QR", "显示二维码", language: language), systemImage: "qrcode")
+            Label(AppText.value("Show my QR", "显示我的二维码", language: language), systemImage: "qrcode")
                 .tag(PairingPanelMode.show)
-            Label(AppText.value("Scan QR", "扫描二维码", language: language), systemImage: "qrcode.viewfinder")
+                .accessibilityIdentifier("pairing_show_qr")
+            Label(AppText.value("Scan a QR", "扫描二维码", language: language), systemImage: "qrcode.viewfinder")
                 .tag(PairingPanelMode.scan)
+                .accessibilityIdentifier("pairing_scan_qr")
         }
         .pickerStyle(.segmented)
         .controlSize(.large)
@@ -381,6 +383,7 @@ struct LinkRow<Trailing: View>: View {
                 .strokeBorder(Theme.line.opacity(0.75), lineWidth: 0.8)
         )
         .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
+        .tint(Theme.accentStrong)
     }
 }
 

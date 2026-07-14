@@ -31,10 +31,21 @@ struct SendView: View {
     @State private var isFileImporterPresented = false
     @State private var isQRScannerPresented = false
     @State private var selectedFileAccess: AnyObject?
+    @State private var selectedPendingSelectionID: UUID?
 
-    init(viewModel: TransferViewModel, initialMode: PairingMode = .room) {
+    init(
+        viewModel: TransferViewModel,
+        initialMode: PairingMode = .room,
+        initialFile: URL? = nil,
+        initialFileAccess: AnyObject? = nil,
+        initialPendingSelectionID: UUID? = nil
+    ) {
         self.viewModel = viewModel
         _mode = State(initialValue: initialMode)
+        _file = State(initialValue: initialFile)
+        _filePathInput = State(initialValue: initialFile?.path ?? "")
+        _selectedFileAccess = State(initialValue: initialFileAccess)
+        _selectedPendingSelectionID = State(initialValue: initialPendingSelectionID)
     }
 
     var body: some View {
@@ -47,6 +58,10 @@ struct SendView: View {
             QRCodeScannerSheet(language: uiLanguage) { value in
                 handleScannedInvite(value)
             }
+        }
+        .onAppear(perform: adoptSharedSelectionIfAvailable)
+        .onChange(of: model.pendingSendSelection?.id) { _ in
+            adoptSharedSelectionIfAvailable()
         }
         #else
         VStack(spacing: 0) {
@@ -61,25 +76,19 @@ struct SendView: View {
     private var scrollContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                if mode == .invite {
-                    inviteSection
-                } else if mode == .room {
-                    roomModeSection
-                } else {
-                    TokenField(token: $token, disabled: viewModel.isBusy)
-                        .card(padding: 14)
-                }
-
+                #if os(iOS)
                 fileSection
+                connectionSection
+                #else
+                connectionSection
+                fileSection
+                #endif
                 modeSelector
                 #if os(macOS)
                 TransferStatusView(viewModel: viewModel)
                 #endif
             }
             .padding(.vertical, 12)
-            #if os(iOS)
-            .padding(.bottom, 88)
-            #endif
         }
         .onAppear { refreshPairingInviteIfNeeded() }
         .onChange(of: mode) { newMode in
@@ -91,10 +100,30 @@ struct SendView: View {
         .onChange(of: relayURL) { _ in refreshPairingInviteForSettingsChange() }
     }
 
+    @ViewBuilder private var connectionSection: some View {
+        if mode == .invite {
+            inviteSection
+        } else if mode == .room {
+            roomModeSection
+        } else {
+            TokenField(token: $token, disabled: viewModel.isBusy)
+                .card(padding: 14)
+        }
+    }
+
     @ViewBuilder private var roomModeSection: some View {
         #if os(iOS)
         VStack(alignment: .leading, spacing: 14) {
             PairingPanelSelector(selection: $pairingPanel, disabled: viewModel.isBusy)
+            Text(AppText.value(
+                "Show your send QR, or scan the other device's receive QR.",
+                "可以显示本机发送码，也可以扫描另一台设备的接收码。",
+                language: uiLanguage
+            ))
+            .font(.footnote)
+            .foregroundStyle(Theme.muted)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityIdentifier("send_pairing_guidance")
 
             Group {
                 if pairingPanel == .scan {
@@ -102,7 +131,7 @@ struct SendView: View {
                         Image(systemName: "qrcode.viewfinder")
                             .font(.system(size: 48, weight: .medium))
                             .foregroundStyle(Theme.accentStrong)
-                        Text(AppText.value("Scan the receiver's QR", "扫描接收端二维码", language: uiLanguage))
+                        Text(AppText.value("Scan a receive QR", "扫描接收码", language: uiLanguage))
                             .font(.headline.weight(.semibold))
                             .foregroundStyle(Theme.text)
                         Button {
@@ -139,6 +168,7 @@ struct SendView: View {
                     VStack(spacing: 12) {
                         if let image = roomQRCodeImage {
                             QRCard(image: image, size: 184)
+                                .accessibilityLabel(AppText.value("Send QR code", "发送二维码", language: uiLanguage))
                                 .accessibilityIdentifier("send_room_qr")
                         } else {
                             qrPlaceholder
@@ -154,6 +184,7 @@ struct SendView: View {
                                     .frame(minHeight: 40)
                             }
                             .disabled(pairingInvite == nil)
+                            .accessibilityIdentifier("send_room_copy")
                         }
                     }
                     .frame(maxWidth: .infinity, minHeight: 230)
@@ -164,7 +195,7 @@ struct SendView: View {
                 code: roomCodeBinding,
                 disabled: viewModel.isBusy,
                 title: AppText.value("Or enter a code", "或输入短码", language: uiLanguage),
-                placeholder: AppText.value("Scan QR or enter code", "扫码或输入短码", language: uiLanguage),
+                placeholder: AppText.value("Enter code", "输入短码", language: uiLanguage),
                 showsCopyAction: false,
                 pasteAction: pastePairingInput,
                 helper: ""
@@ -189,6 +220,7 @@ struct SendView: View {
 
             if let image = roomQRCodeImage {
                 QRCard(image: image, size: 208)
+                    .accessibilityLabel(AppText.value("Send QR code", "发送二维码", language: uiLanguage))
                     .accessibilityIdentifier("send_room_qr")
             } else {
                 qrPlaceholder
@@ -281,9 +313,7 @@ struct SendView: View {
                 .contentShape(Rectangle())
         }
         .keyboardShortcut(.defaultAction)
-        .buttonStyle(.borderedProminent)
-        .controlSize(.large)
-        .tint(Theme.accent)
+        .buttonStyle(PrimaryActionButtonStyle())
         .disabled(viewModel.isBusy || viewModel.isFinalizing || !canSend || concurrencyBlocked)
         .accessibilityIdentifier("send_start_button")
     }
@@ -327,6 +357,15 @@ struct SendView: View {
             .disabled(viewModel.isBusy)
             .accessibilityIdentifier("send_file_picker")
 
+            Text(AppText.value(
+                "One file at a time. Multiple files and folders are coming with Manifest support.",
+                "目前一次只能发送一个文件；多文件和文件夹将在 Manifest 支持后开放。",
+                language: uiLanguage
+            ))
+            .font(.caption)
+            .foregroundStyle(Theme.muted)
+            .accessibilityIdentifier("send_selection_limit")
+
             #if os(macOS)
             filePathTools
             #endif
@@ -343,7 +382,11 @@ struct SendView: View {
         )
         .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
         .onDrop(of: [.fileURL], isTargeted: $dropTargeted) { providers in
-            guard !viewModel.isBusy, let provider = providers.first else { return false }
+            guard !viewModel.isBusy else { return false }
+            guard providers.count == 1, let provider = providers.first else {
+                ToastCenter.shared.show(unsupportedSelectionMessage)
+                return false
+            }
             _ = provider.loadObject(ofClass: URL.self) { url, _ in
                 if let url { DispatchQueue.main.async { selectFile(url) } }
             }
@@ -380,7 +423,7 @@ struct SendView: View {
                      : AppText.value("Tap to replace.", "点击可替换。", language: uiLanguage))
                     .font(.footnote)
                     .foregroundStyle(Theme.muted)
-                    .lineLimit(1)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Spacer(minLength: 8)
@@ -662,15 +705,68 @@ struct SendView: View {
         !concurrentTransfers && !viewModel.isBusy && model.receive.isBusy
     }
 
-    private func selectFile(_ url: URL, access: AnyObject? = nil) {
+    private var unsupportedSelectionMessage: String {
+        AppText.value(
+            "Multiple files and folders are not supported yet. Manifest support is coming next.",
+            "暂不支持多文件和文件夹；将在 Manifest 支持后开放。",
+            language: uiLanguage
+        )
+    }
+
+    @discardableResult
+    private func selectFile(
+        _ url: URL,
+        access: AnyObject? = nil,
+        pendingSelectionID: UUID? = nil
+    ) -> Bool {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+              !isDirectory.boolValue else {
+            ToastCenter.shared.show(unsupportedSelectionMessage)
+            return false
+        }
         selectedFileAccess = access
+        selectedPendingSelectionID = pendingSelectionID
         file = url
         filePathInput = url.path
+        return true
+    }
+
+    #if os(iOS)
+    private func adoptSharedSelectionIfAvailable() {
+        guard !viewModel.isBusy,
+              let selection = model.pendingSendSelection else { return }
+        if selection.id == selectedPendingSelectionID {
+            model.consumePendingSendSelection(id: selection.id)
+            return
+        }
+        guard selectFile(
+            selection.fileURL,
+            access: selection.sourceAccess,
+            pendingSelectionID: selection.id
+        ) else { return }
+        model.consumePendingSendSelection(id: selection.id)
+        ToastCenter.shared.show(AppText.value(
+            "Shared item ready to send",
+            "分享项目已准备发送",
+            language: uiLanguage
+        ))
+    }
+    #endif
+
+    private func acknowledgedSourceAccess() -> AnyObject? {
+        #if os(iOS)
+        (selectedFileAccess as? ShareDraftLease)?.acknowledge()
+        #endif
+        return selectedFileAccess
     }
 
     private func handleImportedFile(_ result: Result<[URL], Error>) {
         do {
-            guard let url = try result.get().first else { return }
+            let urls = try result.get()
+            guard urls.count == 1, let url = urls.first else {
+                throw RuntimeSettingsError(unsupportedSelectionMessage)
+            }
             #if os(iOS)
             let access = SecurityScopedResourceAccess(url: url)
             guard access.isActive || FileManager.default.isReadableFile(atPath: url.path) else {
@@ -680,9 +776,9 @@ struct SendView: View {
                     language: uiLanguage
                 ))
             }
-            selectFile(url, access: access)
+            guard selectFile(url, access: access) else { return }
             #else
-            selectFile(url)
+            guard selectFile(url) else { return }
             #endif
             ToastCenter.shared.show(AppText.value("File selected", "已选择文件", language: uiLanguage))
         } catch {
@@ -728,7 +824,7 @@ struct SendView: View {
                         filePath: file.path,
                         code: try activeSendRoomCode(),
                         settings: settings,
-                        sourceAccess: selectedFileAccess
+                        sourceAccess: acknowledgedSourceAccess()
                     )
                 } else if lowercasedInput.hasPrefix("envoix://pair/") {
                     let parsed = try parsePairingInvite(input: input)
@@ -745,7 +841,7 @@ struct SendView: View {
                         filePath: file.path,
                         code: parsed.code,
                         settings: roomSettings,
-                        sourceAccess: selectedFileAccess
+                        sourceAccess: acknowledgedSourceAccess()
                     )
                 } else if lowercasedInput.hasPrefix("envoix:") {
                     invite = input
@@ -754,14 +850,14 @@ struct SendView: View {
                         filePath: file.path,
                         invite: input,
                         settings: settings,
-                        sourceAccess: selectedFileAccess
+                        sourceAccess: acknowledgedSourceAccess()
                     )
                 } else {
                     viewModel.startSendingWithRoom(
                         filePath: file.path,
                         code: input,
                         settings: settings,
-                        sourceAccess: selectedFileAccess
+                        sourceAccess: acknowledgedSourceAccess()
                     )
                 }
             case .invite:
@@ -781,14 +877,14 @@ struct SendView: View {
                         filePath: file.path,
                         code: parsed.code,
                         settings: roomSettings,
-                        sourceAccess: selectedFileAccess
+                        sourceAccess: acknowledgedSourceAccess()
                     )
                 } else {
                     viewModel.startSendingWithInvite(
                         filePath: file.path,
                         invite: invite.trimmed,
                         settings: settings,
-                        sourceAccess: selectedFileAccess
+                        sourceAccess: acknowledgedSourceAccess()
                     )
                 }
             case .token:
@@ -796,7 +892,7 @@ struct SendView: View {
                     filePath: file.path,
                     token: token.trimmed,
                     settings: settings,
-                    sourceAccess: selectedFileAccess
+                    sourceAccess: acknowledgedSourceAccess()
                 )
             }
         } catch {

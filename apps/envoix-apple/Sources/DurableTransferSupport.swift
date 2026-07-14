@@ -5,7 +5,7 @@ private let receiptMailboxPath = "receipts"
 
 /// Native HTTPS courier for opaque receipt blobs. Rust owns the mailbox key,
 /// payload authentication, polling schedule, and state transition.
-final class AppleMailboxObserver: MailboxObserver, @unchecked Sendable {
+final class AppleMailboxObserver: MailboxObserverV2, @unchecked Sendable {
     private weak var model: AppModel?
     private let session: URLSession
 
@@ -14,8 +14,8 @@ final class AppleMailboxObserver: MailboxObserver, @unchecked Sendable {
         self.session = session
     }
 
-    func onFetchReceipt(activityId: String, key: String) {
-        guard let url = mailboxURL(key: key) else {
+    func onFetchReceipt(activityId: String, key: String, server: String?) {
+        guard let url = mailboxURL(key: key, server: server) else {
             deliverReceipt(Data(), activityID: activityId)
             return
         }
@@ -28,12 +28,18 @@ final class AppleMailboxObserver: MailboxObserver, @unchecked Sendable {
         }.resume()
     }
 
-    func onPostReceipt(activityId: String, key: String, blob: Data) {
-        postReceipt(activityID: activityId, key: key, blob: blob, attempt: 0)
+    func onPostReceipt(activityId: String, key: String, blob: Data, server: String?) {
+        postReceipt(activityID: activityId, key: key, blob: blob, server: server, attempt: 0)
     }
 
-    private func postReceipt(activityID: String, key: String, blob: Data, attempt: Int) {
-        guard let url = mailboxURL(key: key) else { return }
+    private func postReceipt(
+        activityID: String,
+        key: String,
+        blob: Data,
+        server: String?,
+        attempt: Int
+    ) {
+        guard let url = mailboxURL(key: key, server: server) else { return }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.httpBody = blob
@@ -51,7 +57,13 @@ final class AppleMailboxObserver: MailboxObserver, @unchecked Sendable {
             let delays: [TimeInterval] = [1, 3, 10, 30]
             guard attempt < delays.count else { return }
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delays[attempt]) { [weak self] in
-                self?.postReceipt(activityID: activityID, key: key, blob: blob, attempt: attempt + 1)
+                self?.postReceipt(
+                    activityID: activityID,
+                    key: key,
+                    blob: blob,
+                    server: server,
+                    attempt: attempt + 1
+                )
             }
         }.resume()
     }
@@ -62,9 +74,13 @@ final class AppleMailboxObserver: MailboxObserver, @unchecked Sendable {
         }
     }
 
-    private func mailboxURL(key: String) -> URL? {
+    private func mailboxURL(key: String, server: String?) -> URL? {
+        let frozenServer = server?.trimmed ?? ""
+        let effectiveServer = frozenServer.isEmpty ? currentReceiptServer() : frozenServer
         guard key.range(of: "^[0-9a-f]+$", options: .regularExpression) != nil,
-              var components = URLComponents(string: defaultLogServer) else { return nil }
+              var components = URLComponents(string: effectiveServer),
+              components.scheme == "http" || components.scheme == "https",
+              components.host != nil else { return nil }
         let basePath = components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         components.path = "/" + [basePath, receiptMailboxPath, key]
             .filter { !$0.isEmpty }
@@ -73,9 +89,36 @@ final class AppleMailboxObserver: MailboxObserver, @unchecked Sendable {
     }
 }
 
+/// Pre-field records intentionally follow the current configured endpoint;
+/// V2 sessions receive and retain this value from their Rust context instead.
+func currentReceiptServer() -> String {
+    let configured = UserDefaults.standard.string(forKey: "envoix.logServer")?.trimmed ?? ""
+    if configured.isEmpty || deprecatedLogServers.contains(configured) {
+        return defaultLogServer
+    }
+    return configured
+}
+
 struct ReceivePublicationTarget: Codable {
     let destinationPath: String
     let bookmark: Data?
+
+    init(destinationPath: String, bookmark: Data?) {
+        self.destinationPath = destinationPath
+        self.bookmark = bookmark
+    }
+
+    init(ffiTarget: FfiNativePublicationTarget) {
+        destinationPath = ffiTarget.destinationPath
+        bookmark = ffiTarget.bookmark.isEmpty ? nil : Data(ffiTarget.bookmark)
+    }
+
+    var ffiTarget: FfiNativePublicationTarget {
+        FfiNativePublicationTarget(
+            destinationPath: destinationPath,
+            bookmark: bookmark ?? Data()
+        )
+    }
 }
 
 enum ReceivePublicationStore {

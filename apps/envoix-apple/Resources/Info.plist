@@ -50,11 +50,6 @@
     <string>$(CURRENT_PROJECT_VERSION)</string>
     <key>LSSupportsOpeningDocumentsInPlace</key>
     <true/>
-    <key>NSAppTransportSecurity</key>
-    <dict>
-        <key>NSAllowsArbitraryLoads</key>
-        <true/>
-    </dict>
     <key>NSCameraUsageDescription</key>
     <string>Envoix uses the camera to scan invite QR codes from receiving devices.</string>
     <key>NSLocalNetworkUsageDescription</key>

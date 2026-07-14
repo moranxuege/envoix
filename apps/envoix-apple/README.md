@@ -1,9 +1,13 @@
 # Envoix — Apple app
 
-Native SwiftUI Apple client for envoix. The UI is a thin layer over the Rust
-core (`envoix-client`), reached through the `EnvoixCore` Swift package generated
-from `crates/envoix-ffi` (uniffi). The same Swift sources are intended to port to
-iOS later.
+Native SwiftUI macOS and iOS client for envoix. The UI is a thin layer over the
+Rust core (`envoix-client`), reached through the `EnvoixCore` Swift package
+generated from `crates/envoix-ffi` (UniFFI).
+
+The canonical product sequence, accepted device matrix, feature dependencies,
+and verification gates live in
+[`docs/design/apple-client-execution-plan.md`](../../docs/design/apple-client-execution-plan.md).
+This README only documents current build and use instructions.
 
 ## Prerequisites
 
@@ -88,16 +92,171 @@ iOS later.
      destination.
    - Open target **Envoix-iOS > Signing & Capabilities**, choose your Apple
      Development Team, and let Xcode manage signing.
+   - The Share Extension additionally requires App Group
+     `group.com.envoix.app.shared` on both `Envoix-iOS` and `EnvoixShare`, plus
+     a development profile for bundle ID `com.envoix.app.ios.share`. Xcode may
+     need permission to update these resources in the Apple Developer account.
 
 5. Press **Run** (`⌘R`). On first launch, iOS may ask for local-network access;
    allow it, or LAN discovery/transfer will fail.
 
 For a quick demo, run the macOS app on the Mac and the iOS app on the iPhone.
-Use **QR / Code** first because it avoids typing peer addresses. Start
-receiving on one device, scan or enter that code on the other device, choose a
-small file, then send. On iOS, the default receive folder is visible in Files
-as **On My iPhone > Envoix > Downloads**; choose another Files folder only when
-you need a custom location.
+On iPhone, choose **Send a file** or **Receive a file** from the single home
+screen; the selected flow opens as a sheet. Either device can show its role's
+QR code and the opposite role can scan it, so there is no fixed “sender scans”
+or “receiver scans” rule. On iOS, the default receive folder is visible in
+Files as **On My iPhone > Envoix > Downloads**; choose another Files folder only
+when you need a custom location.
+
+### Share from Files or Photos
+
+For a PDF or another regular document, choose **Open in Envoix** when the source
+app offers an Open In destination. iOS launches the main app directly, and
+Envoix presents the normal Send sheet while retaining security-scoped access to
+the file.
+
+For Photos and generic share sheets, choose one file, image, or video and select
+the **Envoix** Share Extension. The extension copies the selected representation
+into the shared App Group. Tap **Done**, then open Envoix manually; when the app
+becomes active it imports the pending draft and presents the Send sheet. iOS
+does not allow a Share Extension to launch its containing app.
+
+The current slice accepts exactly one regular item. Folders, multiple selected
+items, symbolic links, and paired Live Photo preservation are rejected with an
+explicit Manifest-pending message. Staged drafts are UUID-scoped, limited to
+4 GiB, and expire after 24 hours. The pending draft is acknowledged only when
+the user actually presses Send.
+
+## Test
+
+Use the repository wrapper for local iteration. It keeps one DerivedData cache
+per platform, disables CLI-only indexing, regenerates `EnvoixCore` only after a
+Rust/binding content digest changes, and runs XcodeGen only when `project.yml`
+or the Apple source-file list changes. It also exposes smaller hosted/UI test
+schemes. The first run establishes those fingerprints and may perform one full
+Core generation; subsequent Swift-only iterations reuse the Core and project.
+
+```bash
+export ENVOIX_IOS_SIM_DESTINATION='platform=iOS Simulator,id=<SIMULATOR_UUID>'
+
+# Build and run only the hosted contract tests. This remains incremental.
+scripts/apple-dev.sh ios-test hosted
+
+# Rerun the already-built test bundle without compiling again.
+scripts/apple-dev.sh ios-test-rerun hosted
+
+# Run UI tests or the complete pair only when their wider coverage is needed.
+scripts/apple-dev.sh ios-test ui
+scripts/apple-dev.sh ios-test all
+
+# The equivalent macOS App-hosted paths.
+scripts/apple-dev.sh macos-test
+scripts/apple-dev.sh macos-test-rerun
+```
+
+Without `ENVOIX_IOS_SIM_DESTINATION`, the wrapper chooses an installed iPhone
+16 Pro simulator by identifier, then falls back to the first available iPhone.
+Using an identifier avoids Xcode interpreting a model-only destination against
+an installed newer runtime that does not contain that model.
+
+Do not create a new `-derivedDataPath` for each run. Set
+`ENVOIX_XCRESULT_PATH=/private/tmp/<milestone>.xcresult` only when a milestone
+needs a retained result bundle; routine runs keep their logs inside the stable
+cache. To inspect or reclaim disk space:
+
+```bash
+scripts/apple-dev.sh cache-size
+scripts/apple-dev.sh trim-cache             # keeps compiled products
+scripts/apple-dev.sh trim-rust-incremental  # saves more; next Rust build is slower
+scripts/apple-dev.sh clean-cache            # cold Xcode build next time
+```
+
+The default cache root is `$TMPDIR/envoix-apple-cache`; override it with
+`ENVOIX_APPLE_CACHE_ROOT` when necessary. A signed device build uses a separate
+stable cache so it cannot invalidate the simulator products:
+
+```bash
+export ENVOIX_IOS_DEVICE_DESTINATION='platform=iOS,id=<DEVICE_UUID>'
+scripts/apple-dev.sh ios-device-build
+```
+
+`EnvoixCore` generation first reuses Cargo's target cache, then inspects every
+object in the produced macOS/iOS static archives. If an object requires a newer
+OS than macOS 13 or iOS 16, the wrapper cleans only the BLAKE3 Apple targets and
+regenerates once. This retains the deployment-target safety check without
+forcing that cleanup on every Rust change. Use `scripts/apple-dev.sh core-force`
+to rebuild Core, or set `ENVOIX_APPLE_FORCE_PROJECT_REBUILD=1` to rerun XcodeGen,
+only while diagnosing stale generated artifacts.
+
+Project reuse also requires every shared scheme used by the wrapper to exist.
+If the project bundle is incomplete even though its input digest matches, the
+wrapper regenerates it instead of accepting a partial generated project.
+
+On the 2026-07-14 development Mac, the measured paths after this change were:
+full Core regeneration 34.96 s (previous unconditional-clean path 105.05 s),
+unchanged Core plus Xcode project check 1.02 s, cold macOS hosted build/test
+27.36 s, warm build/test 6.00 s, and `test-without-building` 2.23 s. Treat these
+as a comparison on one machine, not a CI performance guarantee.
+
+Cross-device methods report `XCTSkip` in the default suite. They execute only
+with the explicit `ENVOIX_CROSS_DEVICE_TESTING` configuration and a live peer;
+skipped output must not be reported as cross-device success. In addition to the
+Android matrix, `testCrossDeviceSendIosToMacOSRoom` provides a specifically
+named iPhone-to-Mac Room/Auto network gate.
+Hosted coverage also verifies canonical snapshot ordering, terminal-only
+history pruning, Rust-owned Activity action availability, and the loaded core
+API/capability report. Durable publication coverage verifies that a save
+failure and destination survive restart, and that replacing the destination
+reuses the staged receive instead of retransmitting it. It also verifies that
+the view model projects Phase from the canonical record and that the loaded
+core advertises per-session receipt-endpoint support.
+The app UI suite also includes a stalled-command fixture that verifies an
+accepted Cancel action leaves its pending indicator and becomes actionable
+again when no canonical state acknowledgement arrives within five seconds.
+It audits the primary Home, Send, Receive, Activity, and Settings surfaces for
+clipping, contrast, descriptions, hit regions, and supported Dynamic Type. The
+small-screen checks also scroll each room-code Copy action above the fixed
+transfer CTA and assert that their frames do not overlap.
+Its localized layout regression can be paired with `simctl ui ... appearance`
+and `content_size` to exercise Chinese, dark appearance, and accessibility text
+sizes on the small-screen simulator without changing production behavior.
+
+For a physical iPhone Personal Hotspot App-level path probe, start the hosted
+receiver inside `Envoix.app`. The records and received file are isolated under
+`/private/tmp`; the default Room matches the dedicated iPhone sender test:
+
+```bash
+export ENVOIX_XCRESULT_PATH=/private/tmp/envoix-hotspot-macos-app.xcresult
+
+scripts/apple-dev.sh macos-test \
+  'OTHER_SWIFT_FLAGS=$(inherited) -D ENVOIX_CROSS_DEVICE_TESTING' \
+  -only-testing:Envoix-macOSTests/EnvoixMacOSHostedTests/testReceiveIosToMacOSAppRoom
+```
+
+The hosted scheme passes an explicit test-host argument. The App records and
+received file are written below a PID-scoped
+`$TMPDIR/envoix-macos-hosted-<PID>/` directory; the final evidence marker prints
+the exact file path. This avoids modifying the user's normal Activity store and
+keeps parallel sessions isolated.
+
+With that receiver waiting, run the physical iPhone test from a second shell:
+
+```bash
+xcodebuild -project apps/envoix-apple/Envoix.xcodeproj \
+  -scheme Envoix-iOS-Hosted -configuration Debug \
+  -destination 'platform=iOS,id=<DEVICE_UUID>' \
+  -derivedDataPath /private/tmp/envoix-apple-hotspot-ios \
+  -allowProvisioningUpdates \
+  'OTHER_SWIFT_FLAGS=$(inherited) -D ENVOIX_CROSS_DEVICE_TESTING' \
+  test \
+  -only-testing:Envoix-iOSUITests/EnvoixIOSLoopbackTests/testCrossDeviceSendIosToMacOSRoom
+```
+
+Require the macOS App activity to reach `Completed`, a non-empty Direct/Relay
+path, and matching filename, size, completed path, and SHA-256. This exercises
+the production macOS `AppModel`, `TransferViewModel`, Activity projection, and
+destination path. It still does not replace the final Photos UI → iOS App →
+macOS App manual acceptance.
 
 ## UI iteration workflow
 
@@ -116,10 +275,13 @@ Canvas > Reload Canvas** before doing a full app rebuild.
 
 ## Using it
 
-Each tab uses **QR / Code** as the default path. Both send and receive can show
-an Android-compatible `envoix://pair/<code>` QR plus the same short code, and
-the opposite side can scan the QR or enter the code. The rendezvous broker only
-pairs devices, and the file still moves over the encrypted transfer path.
+The iPhone client has one home screen. **Send** and **Receive** open as sheets;
+**Activity** and **Settings** are toolbar sheets instead of permanent bottom
+tabs. An active transfer appears as a compact home-screen activity capsule.
+Both roles can show an Android-compatible `envoix://pair/<code>` QR plus the
+same short code, and the opposite role can scan the QR or enter the code. The
+rendezvous broker only pairs devices, and the file still moves over the
+encrypted transfer path.
 
 Developer mode exposes **Shared Token** for same-LAN mDNS discovery without the
 broker. The legacy `envoix:…` direct invite path remains as a compatibility
@@ -135,6 +297,25 @@ Quality-of-life:
 
 - **QR / Code** starts ready on both sides with *New* and *Copy*. The send side
   can either share its own QR/code or join the receiver's QR/code.
+- On iPhone, each transfer setup sheet owns its bottom safe area, so the Send
+  and Receive actions remain reachable without competing with app navigation.
+- Accepted Activity commands refresh their canonical snapshot after dispatch;
+  a command indicator times out instead of spinning indefinitely when no state
+  acknowledgement arrives.
+- Once a canonical Activity record exists, it is the sole lifecycle source for
+  the transfer screen; raw callbacks are retained only as startup presentation
+  fallback.
+- Activity buttons use the Rust core's typed action policy instead of parsing
+  status text. Settings shows the loaded core and FFI API versions to make a
+  stale generated package visible during development.
+- A receive that finished transferring but could not publish to Files/Finder
+  stays in Activity as **Save failed**. Retry reuses the current folder;
+  **Choose folder** replaces the destination and saves the staged file without
+  receiving it again, including after an app restart. The restored destination
+  comes from the Rust durable session; the former native store is migration-only.
+- New durable sessions freeze their configured receipt endpoint in Rust and
+  restore it through the versioned mailbox courier. The legacy courier and
+  start/restore functions remain available for existing clients.
 - **Send** accepts a file by drag-and-drop or *Paste Path* (from the clipboard),
   as well as the file panel.
 - During a transfer the status line shows live throughput and an ETA based on a
@@ -144,19 +325,14 @@ Quality-of-life:
   the main window keeps the app running there. The window is resizable and
   supports full screen.
 
-## Roadmap (not yet implemented)
+## Planned work
 
-Planned follow-ups, captured here so they are not lost:
-
-- Multi-file / folder transfer (near-term: app-side zip; later: core manifest).
-- Enforced speed limits. The settings model has a reserved field, but current
-  transfers do not throttle bandwidth yet.
-- Parallel chunk transport / out-of-order recovery. The current core still
-  sends sequential resumable chunks.
-- Global hotkey to send a chosen file fast.
-- Saved peers: fixed token per known machine, so reconnecting needs no re-entry.
-- Launch-at-login option.
-- Proper code signing + notarization for distribution beyond the build machine.
+Do not maintain a second roadmap here. The canonical execution plan currently
+prioritizes responsive Apple UI and canonical state projection, then runs three
+gated tracks in parallel: Files/Photos Share Extension, `ManifestV1`, and a
+cross-platform Wi-Fi Aware vertical slice. Trusted devices and remote presence
+follow as shared-core work. Speed limiting, parallel transport, signing, and
+distribution remain later milestones in that plan.
 
 ## Notes
 

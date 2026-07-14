@@ -29,48 +29,22 @@ struct ActivityActionAvailability: Equatable {
     let canResume: Bool
     let canCancel: Bool
     let canDelete: Bool
+    let isFinalizing: Bool
 }
 
 /// Single lifecycle-to-UI action policy. SwiftUI must not infer buttons from
 /// presentation state independently of the canonical transfer snapshot.
 func activityActionAvailability(for record: FfiTransferActivityRecord) -> ActivityActionAvailability {
-    let isFinalizing = record.state == .verifying && record.diagnosticMessage == "confirming"
-    let publicationFailed = record.state == .publishing
-        && (record.diagnosticMessage.hasPrefix("publish failed:")
-            || record.diagnosticMessage == "publish confirmation was not accepted")
-
-    let canPause: Bool
-    switch record.state {
-    case .queued, .binding, .waitingForPeer, .pairing, .connecting, .transferring, .verifying:
-        canPause = !isFinalizing
-    case .publishing, .unconfirmed, .completed, .failed, .paused, .canceled, .unknown:
-        canPause = false
-    }
-
-    let canResume = record.state == .paused
-        || record.state == .unconfirmed
-        || (record.state == .failed && record.retryable)
-        || publicationFailed
-
-    let canCancel: Bool
-    switch record.state {
-    case .queued, .binding, .waitingForPeer, .pairing, .connecting, .transferring, .verifying,
-            .unconfirmed, .paused:
-        canCancel = !isFinalizing
-    case .publishing:
-        canCancel = publicationFailed
-    case .completed, .failed, .canceled, .unknown:
-        canCancel = false
-    }
-
-    let canDelete = record.state == .completed || record.state == .failed || record.state == .canceled
+    let actions = transferActivityActions(record: record)
     return ActivityActionAvailability(
-        canPause: canPause,
-        canResume: canResume,
-        canCancel: canCancel,
-        canDelete: canDelete
+        canPause: actions.canPause,
+        canResume: actions.canResume,
+        canCancel: actions.canCancel,
+        canDelete: actions.canDelete,
+        isFinalizing: actions.isFinalizing
     )
 }
+let expectedCoreFFIAPIVersion: UInt32 = 1
 let appDebugBuildLabel = "Debug build 2026.07.08.19"
 
 /// Generates a short, memorable, easy-to-type pairing token of the form
@@ -352,10 +326,19 @@ struct RoomCodeField: View {
                     Button(action: pasteAction) {
                         Label(AppText.value("Paste", "粘贴", language: language), systemImage: "doc.on.clipboard")
                             .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(disabled ? Theme.text : Theme.accentStrong)
+                            .padding(.horizontal, 12)
                             .frame(minHeight: 36)
+                            .background(
+                                disabled ? Theme.line : Theme.accentSoft,
+                                in: RoundedRectangle(cornerRadius: 8)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .strokeBorder(Theme.line, lineWidth: 1)
+                            )
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                    .buttonStyle(.plain)
                     .disabled(disabled)
                 }
             }
@@ -402,6 +385,7 @@ struct RoomCodeField: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
+        .tint(Theme.accentStrong)
     }
     #endif
 }

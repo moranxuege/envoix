@@ -11,7 +11,7 @@ enum PreviewFixtures {
 
     static func waitingForSender() -> TransferViewModel {
         let viewModel = TransferViewModel()
-        viewModel.phase = .waiting
+        apply(activity(id: "preview-waiting", state: .waitingForPeer), to: viewModel)
         viewModel.invite = demoInvite
         viewModel.statusText = "Invite ready. Waiting for sender."
         return viewModel
@@ -19,25 +19,39 @@ enum PreviewFixtures {
 
     static func transferring(name: String = "design-review.pdf") -> TransferViewModel {
         let viewModel = TransferViewModel()
-        viewModel.handleStarted(name, 240_000_000)
-        viewModel.transferred = 92_000_000
+        apply(activity(
+            id: "preview-transferring",
+            state: .transferring,
+            direction: .send,
+            fileName: name,
+            totalBytes: 240_000_000,
+            bytesTransferred: 92_000_000
+        ), to: viewModel)
         viewModel.bytesPerSec = 12_400_000
         return viewModel
     }
 
     static func completedReceive() -> TransferViewModel {
         let viewModel = TransferViewModel()
-        viewModel.fileName = "field-notes.zip"
-        viewModel.total = 48_000_000
-        viewModel.transferred = 48_000_000
+        apply(activity(
+            id: "preview-completed",
+            state: .completed,
+            direction: .receive,
+            fileName: "field-notes.zip",
+            totalBytes: 48_000_000,
+            bytesTransferred: 48_000_000
+        ), to: viewModel)
         viewModel.completedFileURL = URL(fileURLWithPath: "/Users/demo/Downloads/field-notes.zip")
-        viewModel.phase = .completed(bytes: 48_000_000)
         return viewModel
     }
 
     static func failed() -> TransferViewModel {
         let viewModel = TransferViewModel()
-        viewModel.phase = .failed("No device found. Check that the other side is running and the token or invite is correct.")
+        apply(activity(
+            id: "preview-failed",
+            state: .failed,
+            diagnosticMessage: "No device found. Check that the other side is running and the token or invite is correct."
+        ), to: viewModel)
         return viewModel
     }
 
@@ -76,6 +90,17 @@ enum PreviewFixtures {
             diagnosticMessage: "connection lost; partial retained",
             retryable: true
         ),
+        activity(
+            id: "ui-publish-failed",
+            state: .publishing,
+            direction: .receive,
+            fileName: "already-received.mov",
+            totalBytes: 64_000_000,
+            bytesTransferred: 64_000_000,
+            diagnosticMessage: "selected Files folder is unavailable",
+            retryable: true,
+            recoveryAction: .chooseFolder
+        ),
     ]
 
     static var activityMetrics: [String: ActivityMetrics] {
@@ -88,15 +113,23 @@ enum PreviewFixtures {
         return ["ui-transferring": metrics]
     }
 
+    private static func apply(_ record: FfiTransferActivityRecord, to viewModel: TransferViewModel) {
+        viewModel.transferActivity = record
+        viewModel.fileName = record.fileName
+        viewModel.total = record.totalBytes
+        viewModel.transferred = record.bytesTransferred
+    }
+
     private static func activity(
         id: String,
         state: FfiTransferActivityState,
-        direction: FfiTransferDirection,
-        fileName: String,
-        totalBytes: UInt64,
-        bytesTransferred: UInt64,
+        direction: FfiTransferDirection = .receive,
+        fileName: String = "",
+        totalBytes: UInt64 = 0,
+        bytesTransferred: UInt64 = 0,
         diagnosticMessage: String = "",
-        retryable: Bool = false
+        retryable: Bool = false,
+        recoveryAction: FfiRecoveryAction? = nil
     ) -> FfiTransferActivityRecord {
         FfiTransferActivityRecord(
             activityId: id,
@@ -129,7 +162,7 @@ enum PreviewFixtures {
             failureOrigin: .unknown,
             userMessageKey: "",
             retryable: retryable,
-            recoveryAction: retryable ? .retry : .none,
+            recoveryAction: recoveryAction ?? (retryable ? .retry : .none),
             limits: FfiTransferLimits(
                 maxParallelTransfers: 2,
                 maxParallelFiles: 1,

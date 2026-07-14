@@ -66,6 +66,7 @@ enum Theme {
     static let success = Color(light: 0x147a4b, dark: 0x61d69a)
     static let warning = Color(light: 0xa05a00, dark: 0xffc166)
     static let danger = Color(light: 0xe74c3c, dark: 0xf07167)
+    static let dangerStrong = Color(light: 0xb42318, dark: 0xffb4aa)
     static let dangerSoft = Color(light: 0xfff4f2, dark: 0x3a2020)
 
     static let cardRadius: CGFloat = 16
@@ -102,5 +103,33 @@ enum Appearance: String, CaseIterable {
     var next: Appearance {
         let all = Appearance.allCases
         return all[(all.firstIndex(of: self)! + 1) % all.count]
+    }
+}
+
+struct PrimaryActionButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        PrimaryActionButton(configuration: configuration)
+    }
+
+    private struct PrimaryActionButton: View {
+        @Environment(\.isEnabled) private var isEnabled
+        let configuration: Configuration
+
+        var body: some View {
+            configuration.label
+                .font(.headline.weight(.semibold))
+                .foregroundStyle(isEnabled ? Color.white : Theme.text)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(
+                    isEnabled ? Theme.accentStrong : Theme.line,
+                    in: RoundedRectangle(cornerRadius: Theme.cardRadius)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.cardRadius)
+                        .strokeBorder(isEnabled ? Color.clear : Theme.line, lineWidth: 1)
+                )
+                .opacity(configuration.isPressed ? 0.82 : 1)
+        }
     }
 }

@@ -15,44 +15,141 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
         ] {
             XCTAssertEqual(
                 activityActionAvailability(for: Self.activity(state: state)),
-                ActivityActionAvailability(canPause: true, canResume: false, canCancel: true, canDelete: false)
+                ActivityActionAvailability(canPause: true, canResume: false, canCancel: true, canDelete: false, isFinalizing: false)
             )
         }
 
         XCTAssertEqual(
             activityActionAvailability(for: Self.activity(state: .verifying, diagnostic: "confirming")),
-            ActivityActionAvailability(canPause: false, canResume: false, canCancel: false, canDelete: false)
+            ActivityActionAvailability(canPause: false, canResume: false, canCancel: false, canDelete: false, isFinalizing: true)
         )
         XCTAssertEqual(
             activityActionAvailability(for: Self.activity(state: .paused)),
-            ActivityActionAvailability(canPause: false, canResume: true, canCancel: true, canDelete: false)
+            ActivityActionAvailability(canPause: false, canResume: true, canCancel: true, canDelete: false, isFinalizing: false)
         )
         XCTAssertEqual(
             activityActionAvailability(for: Self.activity(state: .failed)),
-            ActivityActionAvailability(canPause: false, canResume: false, canCancel: false, canDelete: true)
+            ActivityActionAvailability(canPause: false, canResume: false, canCancel: false, canDelete: true, isFinalizing: false)
         )
         XCTAssertEqual(
             activityActionAvailability(for: Self.activity(state: .failed, retryable: true)),
-            ActivityActionAvailability(canPause: false, canResume: true, canCancel: false, canDelete: true)
+            ActivityActionAvailability(canPause: false, canResume: true, canCancel: false, canDelete: true, isFinalizing: false)
         )
         XCTAssertEqual(
-            activityActionAvailability(for: Self.activity(state: .publishing, diagnostic: "publish failed: denied")),
-            ActivityActionAvailability(canPause: false, canResume: true, canCancel: true, canDelete: false)
+            activityActionAvailability(for: Self.activity(state: .publishing, diagnostic: "display text is not policy", retryable: true)),
+            ActivityActionAvailability(canPause: false, canResume: true, canCancel: true, canDelete: false, isFinalizing: false)
         )
         XCTAssertEqual(
             activityActionAvailability(for: Self.activity(state: .completed)),
-            ActivityActionAvailability(canPause: false, canResume: false, canCancel: false, canDelete: true)
+            ActivityActionAvailability(canPause: false, canResume: false, canCancel: false, canDelete: true, isFinalizing: false)
+        )
+
+        let coreInfo = envoixCoreInfo()
+        XCTAssertEqual(coreInfo.ffiApiVersion, expectedCoreFFIAPIVersion)
+        XCTAssertTrue(coreInfo.capabilities.contains("activity_actions_v1"))
+        XCTAssertTrue(coreInfo.capabilities.contains("durable_publication_recovery_v1"))
+        XCTAssertTrue(coreInfo.capabilities.contains("per_session_receipt_endpoint_v1"))
+    }
+
+    func testActivityProjectionRejectsReorderedSnapshots() {
+        let current = Self.activity(
+            state: .transferring,
+            sequence: 12,
+            updatedAtMs: 200
+        )
+
+        XCTAssertFalse(ActivityProjectionPolicy.shouldAccept(
+            Self.activity(state: .waitingForPeer, sequence: 11, updatedAtMs: 300),
+            replacing: current
+        ))
+        XCTAssertFalse(ActivityProjectionPolicy.shouldAccept(
+            Self.activity(state: .transferring, sequence: 12, updatedAtMs: 199),
+            replacing: current
+        ))
+        XCTAssertTrue(ActivityProjectionPolicy.shouldAccept(
+            Self.activity(state: .transferring, sequence: 12, updatedAtMs: 201),
+            replacing: current
+        ))
+        XCTAssertTrue(ActivityProjectionPolicy.shouldAccept(
+            Self.activity(state: .paused, sequence: 13, updatedAtMs: 150),
+            replacing: current
+        ))
+        XCTAssertFalse(ActivityProjectionPolicy.shouldAccept(
+            Self.activity(id: "other", state: .transferring, sequence: 13, updatedAtMs: 300),
+            replacing: current
+        ))
+    }
+
+    func testActivityProjectionPrunesOnlyTerminalHistory() {
+        let records = [
+            Self.activity(id: "active-new", state: .transferring, updatedAtMs: 80),
+            Self.activity(id: "active-old", state: .paused, updatedAtMs: 10),
+            Self.activity(id: "done-new", state: .completed, updatedAtMs: 100),
+            Self.activity(id: "done-middle", state: .failed, updatedAtMs: 90),
+            Self.activity(id: "done-old", state: .canceled, updatedAtMs: 1),
+        ]
+
+        let retained = ActivityProjectionPolicy.pruneTerminalHistory(records, limit: 3)
+        XCTAssertEqual(retained.map(\.activityId), ["done-new", "active-new", "active-old"])
+
+        let overLimitActive = records + [
+            Self.activity(id: "active-third", state: .publishing, updatedAtMs: 70),
+            Self.activity(id: "active-fourth", state: .unconfirmed, updatedAtMs: 60),
+        ]
+        let allActiveRetained = ActivityProjectionPolicy.pruneTerminalHistory(overLimitActive, limit: 3)
+        XCTAssertEqual(
+            Set(allActiveRetained.map(\.activityId)),
+            Set(["active-new", "active-old", "active-third", "active-fourth"])
         )
     }
 
+    func testTransferPhaseIsPureCanonicalPresentation() {
+        for state in [
+            FfiTransferActivityState.queued, .binding, .waitingForPeer, .pairing,
+            .connecting, .verifying, .publishing, .unconfirmed,
+        ] {
+            XCTAssertEqual(
+                TransferViewModel.presentationPhase(for: Self.activity(state: state)),
+                .waiting
+            )
+        }
+        XCTAssertEqual(
+            TransferViewModel.presentationPhase(for: Self.activity(state: .transferring)),
+            .transferring
+        )
+        XCTAssertEqual(
+            TransferViewModel.presentationPhase(for: Self.activity(state: .paused)),
+            .paused
+        )
+        XCTAssertEqual(
+            TransferViewModel.presentationPhase(for: Self.activity(state: .completed)),
+            .completed(bytes: 512)
+        )
+        XCTAssertEqual(
+            TransferViewModel.presentationPhase(for: Self.activity(state: .canceled)),
+            .canceled
+        )
+        guard case .failed = TransferViewModel.presentationPhase(
+            for: Self.activity(state: .failed, diagnostic: "canonical failure")
+        ) else {
+            return XCTFail("failed Activity must project a failed presentation")
+        }
+        guard case .failed = TransferViewModel.presentationPhase(for: Self.activity(state: .unknown)) else {
+            return XCTFail("unknown Activity must be surfaced instead of freezing an older phase")
+        }
+    }
+
     private static func activity(
+        id: String = "activity-test",
         state: FfiTransferActivityState,
         diagnostic: String = "",
-        retryable: Bool = false
+        retryable: Bool = false,
+        sequence: UInt64 = 1,
+        updatedAtMs: UInt64 = 1
     ) -> FfiTransferActivityRecord {
         FfiTransferActivityRecord(
-            activityId: "activity-test",
-            sequence: 1,
+            activityId: id,
+            sequence: sequence,
             attemptId: "attempt-1",
             state: state,
             direction: .receive,
@@ -65,7 +162,7 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
             speedBps: 0,
             averageSpeedBps: 0,
             createdAtMs: 1,
-            updatedAtMs: 1,
+            updatedAtMs: updatedAtMs,
             startedAtMs: 1,
             completedAtMs: 0,
             completedFilePath: "",
@@ -201,6 +298,7 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
     }
 
     func testCrossDeviceReceiveAndroidToIosRoom() async throws {
+        try requireCrossDeviceTesting()
 #if ENVOIX_CROSS_DEVICE_TESTING
         Self.emitCrossDeviceMarker("iOS receive start code=\(Self.androidToIosCode)")
         let fileManager = FileManager.default
@@ -246,24 +344,55 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
     }
 
     func testCrossDeviceSendIosToAndroidRoom() async throws {
+        try requireCrossDeviceTesting()
 #if ENVOIX_CROSS_DEVICE_TESTING
-        print("[cross-device] iOS send start code=\(Self.iosToAndroidCode)")
+        try await runCrossDeviceRoomSend(
+            code: Self.iosToAndroidCode,
+            fileName: Self.iosToAndroidFileName,
+            payload: Self.iosToAndroidPayload,
+            expectedBytes: Self.iosToAndroidExpectedBytes,
+            peerLabel: "Android"
+        )
+#endif
+    }
+
+    func testCrossDeviceSendIosToMacOSRoom() async throws {
+        try requireCrossDeviceTesting()
+#if ENVOIX_CROSS_DEVICE_TESTING
+        try await runCrossDeviceRoomSend(
+            code: Self.iosToMacOSCode,
+            fileName: Self.iosToMacOSFileName,
+            payload: Self.iosToMacOSPayload,
+            expectedBytes: Self.iosToMacOSExpectedBytes,
+            peerLabel: "macOS"
+        )
+#endif
+    }
+
+#if ENVOIX_CROSS_DEVICE_TESTING
+    private func runCrossDeviceRoomSend(
+        code: String,
+        fileName: String,
+        payload: Data,
+        expectedBytes: UInt64,
+        peerLabel: String
+    ) async throws {
+        print("[cross-device] iOS to \(peerLabel) send start code=\(code)")
         let fileManager = FileManager.default
         let root = fileManager.temporaryDirectory
             .appendingPathComponent("envoix-ios-cross-device-send-\(UUID().uuidString)", isDirectory: true)
         try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? fileManager.removeItem(at: root) }
 
-        let sendFile = root.appendingPathComponent(Self.iosToAndroidFileName)
-        let expectedBytes = Self.iosToAndroidExpectedBytes
-        try Self.writeCrossDevicePayload(Self.iosToAndroidPayload, expectedBytes: expectedBytes, to: sendFile)
+        let sendFile = root.appendingPathComponent(fileName)
+        try Self.writeCrossDevicePayload(payload, expectedBytes: expectedBytes, to: sendFile)
 
         let observer = RecordingObserver()
         let session = try Self.startDurableCrossDeviceTransfer(
             request: Self.crossDeviceRequest(
                 direction: .send,
                 mode: .room,
-                code: Self.iosToAndroidCode,
+                code: code,
                 filePath: sendFile.path,
                 outputDir: "",
                 invite: ""
@@ -283,13 +412,14 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
         }
         let bytes = try await observer.waitForCompletion(timeout: Self.crossDeviceTimeout(for: expectedBytes))
         try await pauseTask.value
-        print("[cross-device] iOS send completion bytes=\(bytes)")
+        print("[cross-device] iOS to \(peerLabel) send completion bytes=\(bytes)")
         XCTAssertEqual(bytes, expectedBytes)
         observer.assertPathPolicy(Self.crossDevicePathPolicy)
-#endif
     }
+#endif
 
     func testCrossDeviceReceiveAndroidToIosInvite() async throws {
+        try requireCrossDeviceTesting()
 #if ENVOIX_CROSS_DEVICE_TESTING
         Self.emitCrossDeviceMarker("iOS invite receive start")
         let fileManager = FileManager.default
@@ -334,6 +464,7 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
     }
 
     func testCrossDeviceSendIosToAndroidInvite() async throws {
+        try requireCrossDeviceTesting()
 #if ENVOIX_CROSS_DEVICE_TESTING
         print("[cross-device] iOS invite send start")
         guard let invite = ProcessInfo.processInfo.environment["ENVOIX_TRANSFER_INVITE"], !invite.isEmpty else {
@@ -378,11 +509,19 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
 #endif
     }
 
+    private func requireCrossDeviceTesting() throws {
+#if !ENVOIX_CROSS_DEVICE_TESTING
+        throw XCTSkip("Requires the explicit ENVOIX_CROSS_DEVICE_TESTING build and a paired peer")
+#endif
+    }
+
 #if ENVOIX_CROSS_DEVICE_TESTING
     private static let defaultAndroidToIosCode = "741203-amber-comet"
     private static let defaultIosToAndroidCode = "741204-azure-river"
+    private static let defaultIosToMacOSCode = "741205-silver-forest"
     private static let androidToIosCode = envString("ENVOIX_ANDROID_TO_IOS_CODE") ?? defaultAndroidToIosCode
     private static let iosToAndroidCode = envString("ENVOIX_IOS_TO_ANDROID_CODE") ?? defaultIosToAndroidCode
+    private static let iosToMacOSCode = envString("ENVOIX_IOS_TO_MACOS_CODE") ?? defaultIosToMacOSCode
     private static let crossDeviceRunID: String = {
         let value = envString("ENVOIX_CROSS_DEVICE_RUN_ID") ?? "manual"
         guard value.count <= 80,
@@ -393,12 +532,16 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
     }()
     private static let androidToIosFileName = "envoix-\(crossDeviceRunID)-android-to-ios.bin"
     private static let iosToAndroidFileName = "envoix-\(crossDeviceRunID)-ios-to-android.bin"
+    private static let iosToMacOSFileName = "envoix-\(crossDeviceRunID)-ios-to-macos.bin"
     private static let androidToIosPayload = Data("envoix cross-device android to ios\n".utf8)
     private static let iosToAndroidPayload = Data("envoix cross-device ios to android\n".utf8)
+    private static let iosToMacOSPayload = Data("envoix cross-device ios to macos\n".utf8)
     private static let androidToIosExpectedBytes =
         envUInt64("ENVOIX_ANDROID_TO_IOS_BYTES") ?? UInt64(androidToIosPayload.count)
     private static let iosToAndroidExpectedBytes =
         envUInt64("ENVOIX_IOS_TO_ANDROID_BYTES") ?? UInt64(iosToAndroidPayload.count)
+    private static let iosToMacOSExpectedBytes =
+        envUInt64("ENVOIX_IOS_TO_MACOS_BYTES") ?? UInt64(iosToMacOSPayload.count)
     private static let pauseAfterBytes = envUInt64("ENVOIX_CROSS_DEVICE_PAUSE_AFTER_BYTES")
     private static let pauseDurationMilliseconds =
         envUInt64("ENVOIX_CROSS_DEVICE_PAUSE_DURATION_MS") ?? 2_000
@@ -876,8 +1019,9 @@ private final class RecordingObserver: TransferObserver, @unchecked Sendable {
     }
 
     func assertPathPolicy(_ policy: FfiPathPolicy) {
-        guard policy == .directOnly else { return }
         let paths = locked { pathKinds }
+        XCTAssertFalse(paths.isEmpty, "transfer did not report a selected data path")
+        guard policy == .directOnly else { return }
         XCTAssertTrue(paths.contains(.direct), "direct-only transfer did not report a direct path: \(paths)")
         XCTAssertFalse(paths.contains(.relay), "direct-only transfer reported a relay path: \(paths)")
     }

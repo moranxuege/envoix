@@ -31,7 +31,19 @@ struct EnvoixApp: App {
         #endif
     }
 
-    private var rootView: some View {
+    @ViewBuilder private var rootView: some View {
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--ui-testing-accessibility-text") {
+            appContent.dynamicTypeSize(.accessibility5)
+        } else {
+            appContent
+        }
+        #else
+        appContent
+        #endif
+    }
+
+    private var appContent: some View {
         ContentView()
             .environmentObject(model)
             .environment(\.appLanguage, language)

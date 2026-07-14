@@ -2,7 +2,6 @@ import SwiftUI
 import EnvoixCore
 #if os(iOS)
 import UniformTypeIdentifiers
-import UIKit
 #endif
 
 private enum AppStage: String, CaseIterable {
@@ -21,6 +20,14 @@ private enum AppStage: String, CaseIterable {
         case .transfer: return "arrow.up.arrow.down"
         case .activity: return "list.bullet.rectangle"
         case .settings: return "gearshape"
+        }
+    }
+
+    func mobileTitle(language: String) -> String {
+        switch self {
+        case .transfer: return AppText.value("Home", "首页", language: language)
+        case .activity: return AppText.value("Activity", "活动", language: language)
+        case .settings: return AppText.value("Settings", "设置", language: language)
         }
     }
 }
@@ -43,19 +50,29 @@ private enum TransferRole: String, CaseIterable {
     }
 }
 
+private enum MobileSheet: String, Identifiable {
+    case send, receive, activity, settings
+
+    var id: String { rawValue }
+}
+
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
+    @Environment(\.scenePhase) private var scenePhase
     @AppStorage("envoix.appearance") private var appearance: Appearance = .system
     @AppStorage("envoix.language") private var language = "en"
-    @State private var stage: AppStage = {
+    @State private var stage: AppStage = .transfer
+    @State private var mobileSheet: MobileSheet? = {
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--ui-testing-start-activity") {
             return .activity
         }
         #endif
-        return .transfer
+        return nil
     }()
-    @Namespace private var mobileStageSelection
+    #if DEBUG
+    @State private var didStageBackgroundShareFixture = false
+    #endif
 
     private let primaryStages: [AppStage] = [.transfer, .activity]
 
@@ -71,6 +88,9 @@ struct ContentView: View {
         }
         .toastHost()
         .preferredColorScheme(appearance.colorScheme)
+        #if os(iOS)
+        .onOpenURL(perform: handleIncomingURL)
+        #endif
     }
 
     private var desktopContent: some View {
@@ -91,112 +111,431 @@ struct ContentView: View {
 
     #if os(iOS)
     private var mobileContent: some View {
-        TabView(selection: $stage) {
-            ForEach(AppStage.allCases, id: \.self) { item in
-                NavigationStack {
-                    stageContent(for: item)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                        .padding(.horizontal, 16)
-                        .background(Theme.bg)
-                        .navigationTitle(item.title(language: language))
-                        .navigationBarTitleDisplayMode(.inline)
+        NavigationStack {
+            mobileHome
+                .padding(.horizontal, 16)
+                .background(Theme.bg)
+                .navigationTitle("Envoix")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button {
+                            mobileSheet = .activity
+                        } label: {
+                            Image(systemName: "clock.arrow.circlepath")
+                                .font(.body.weight(.semibold))
+                        }
+                        .accessibilityLabel(AppText.value("Activity", "活动", language: language))
+                        .accessibilityIdentifier("open_activity")
+                    }
+
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button {
+                            mobileSheet = .settings
+                        } label: {
+                            Image(systemName: "gearshape")
+                                .font(.body.weight(.semibold))
+                        }
+                        .accessibilityLabel(AppText.value("Settings", "设置", language: language))
+                        .accessibilityIdentifier("open_settings")
+                    }
                 }
-                .toolbar(.hidden, for: .tabBar)
-                .tabItem {
-                    Label(item.title(language: language), systemImage: item.icon)
-                }
-                .tag(item)
-                .badge(item == .activity ? pendingTransferCount : 0)
-            }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            mobileStageBar
+            mobileActivityCapsule
+                .padding(.bottom, 8)
         }
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 32)
-                .onEnded { value in switchStage(for: value) }
-        )
-    }
-
-    private var mobileStageBar: some View {
-        HStack(spacing: 4) {
-            ForEach(AppStage.allCases, id: \.self) { item in
-                Button {
-                    withAnimation(.easeInOut(duration: 0.24)) {
-                        stage = item
-                    }
-                } label: {
-                    ZStack {
-                        if stage == item {
-                            RoundedRectangle(cornerRadius: 21, style: .continuous)
-                                .fill(Theme.accentSoft.opacity(0.94))
-                                .matchedGeometryEffect(id: "mobile-stage-selection", in: mobileStageSelection)
-                        }
-
-                        VStack(spacing: 3) {
-                            ZStack(alignment: .topTrailing) {
-                                Image(systemName: item.icon)
-                                    .font(.system(size: 19, weight: .semibold))
-                                if item == .activity && pendingTransferCount > 0 {
-                                    Text("\(min(pendingTransferCount, 99))")
-                                        .font(.system(size: 9, weight: .bold, design: .rounded))
-                                        .foregroundStyle(.white)
-                                        .padding(.horizontal, 4)
-                                        .frame(minWidth: 17, minHeight: 17)
-                                        .background(Theme.danger, in: Capsule())
-                                        .offset(x: 11, y: -8)
-                                }
+        .sheet(item: $mobileSheet) { sheet in
+            NavigationStack {
+                mobileSheetContent(sheet)
+                    .padding(.horizontal, 16)
+                    .background(Theme.bg)
+                    .navigationTitle(mobileSheetTitle(sheet))
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button {
+                                mobileSheet = nil
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.body.weight(.semibold))
+                                    .frame(width: 44, height: 44)
                             }
-                            Text(item.title(language: language))
-                                .font(.caption.weight(stage == item ? .bold : .semibold))
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.8)
+                            .tint(Theme.accentStrong)
+                            .accessibilityLabel(AppText.value("Close", "关闭", language: language))
+                            .accessibilityIdentifier("mobile_sheet_done")
                         }
-                        .foregroundStyle(stage == item ? Theme.accentStrong : Theme.muted)
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 8)
                     }
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 58)
-                    .contentShape(RoundedRectangle(cornerRadius: 21, style: .continuous))
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(item.title(language: language))
-                .accessibilityIdentifier("stage_\(item.rawValue)")
-                .accessibilityAddTraits(stage == item ? .isSelected : [])
+            }
+            .presentationDragIndicator(.visible)
+            .presentationDetents([.large])
+        }
+        .onChange(of: model.send.isBusy) { isBusy in
+            if isBusy, mobileSheet == .send {
+                mobileSheet = nil
+            } else if !isBusy {
+                presentPendingSendSelection()
             }
         }
-        .padding(5)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .strokeBorder(Theme.line.opacity(0.72), lineWidth: 0.8)
-        )
-        .shadow(color: Theme.shadowColor, radius: 12, y: 4)
-        .padding(.horizontal, 14)
-        .padding(.top, 6)
-        .padding(.bottom, 8)
+        .onChange(of: model.receive.isBusy) { isBusy in
+            if isBusy, mobileSheet == .receive { mobileSheet = nil }
+        }
+        .onAppear(perform: presentPendingSendSelection)
+        .onChange(of: scenePhase) { phase in
+            #if DEBUG
+            if phase == .background {
+                stageBackgroundShareFixtureIfRequested()
+            }
+            #endif
+            guard phase == .active else { return }
+            presentPendingSendSelection()
+        }
+        #if DEBUG
+        .onAppear {
+            guard ProcessInfo.processInfo.arguments.contains("--ui-testing") else { return }
+            let initialSheet: MobileSheet? = ProcessInfo.processInfo.arguments.contains("--ui-testing-start-activity")
+                ? .activity
+                : nil
+            DispatchQueue.main.async {
+                mobileSheet = initialSheet
+            }
+        }
+        #endif
     }
 
-    private func switchStage(for value: DragGesture.Value) {
-        let translation = value.translation
-        guard abs(translation.width) > abs(translation.height) * 1.4 else { return }
+    private var mobileHome: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(AppText.value("Move something", "传点东西", language: language))
+                        .font(.largeTitle.bold())
+                        .foregroundStyle(Theme.text)
+                    Text(AppText.value(
+                        "Choose what this device will do. Either device may show a QR code; the other scans it.",
+                        "选择这台设备要发送还是接收。任意一台设备都可以显示二维码，由另一台扫描。",
+                        language: language
+                    ))
+                    .font(.body)
+                    .foregroundStyle(Theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
 
-        let edgeWidth: CGFloat = 28
-        let screenWidth = UIScreen.main.bounds.width
-        let movesFromLeadingEdge = value.startLocation.x <= edgeWidth && translation.width > 0
-        let movesFromTrailingEdge = value.startLocation.x >= screenWidth - edgeWidth && translation.width < 0
-        let requiredDistance: CGFloat = (movesFromLeadingEdge || movesFromTrailingEdge) ? 90 : 190
-        guard abs(translation.width) >= requiredDistance else { return }
+                mobileHomeAction(
+                    sheet: .send,
+                    role: .send,
+                    title: AppText.value("Send a file", "发送文件", language: language),
+                    subtitle: AppText.value(
+                        "Choose one file, then show your send QR or scan a receive QR.",
+                        "选择一个文件，然后显示发送码或扫描接收码。",
+                        language: language
+                    ),
+                    identifier: "home_send"
+                )
 
-        guard let index = AppStage.allCases.firstIndex(of: stage) else { return }
-        let offset = translation.width < 0 ? 1 : -1
-        let nextIndex = index + offset
-        guard AppStage.allCases.indices.contains(nextIndex) else { return }
-        withAnimation {
-            stage = AppStage.allCases[nextIndex]
+                mobileHomeAction(
+                    sheet: .receive,
+                    role: .receive,
+                    title: AppText.value("Receive a file", "接收文件", language: language),
+                    subtitle: AppText.value(
+                        "Choose where to save, then show your receive QR or scan a send QR.",
+                        "确认保存位置，然后显示接收码或扫描发送码。",
+                        language: language
+                    ),
+                    identifier: "home_receive"
+                )
+
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .foregroundStyle(Theme.accentStrong)
+                    Text(AppText.value(
+                        "The two devices choose opposite roles. It does not matter which one scans.",
+                        "两台设备选择相反角色即可，由哪一台扫码都可以。",
+                        language: language
+                    ))
+                    .font(.footnote)
+                    .foregroundStyle(Theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+                .card(padding: 14)
+            }
+            .padding(.vertical, 16)
+        }
+        .accessibilityIdentifier("transfer_home")
+    }
+
+    private func mobileHomeAction(
+        sheet: MobileSheet,
+        role: TransferRole,
+        title: String,
+        subtitle: String,
+        identifier: String
+    ) -> some View {
+        Button {
+            mobileSheet = sheet
+        } label: {
+            HStack(spacing: 14) {
+                Image(systemName: role.icon)
+                    .font(.title2.weight(.semibold))
+                    .foregroundStyle(Theme.accentStrong)
+                    .frame(width: 50, height: 50)
+                    .background(Theme.accentSoft, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(title)
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(Theme.text)
+                    Text(subtitle)
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 6)
+                Image(systemName: "chevron.up")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(Theme.muted)
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, minHeight: 96, alignment: .leading)
+            .background(Theme.surfaceRaised)
+            .overlay(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .strokeBorder(Theme.line.opacity(0.72), lineWidth: 0.8)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier(identifier)
+    }
+
+    @ViewBuilder
+    private func mobileSheetContent(_ sheet: MobileSheet) -> some View {
+        switch sheet {
+        case .send:
+            SendView(
+                viewModel: model.send,
+                initialFile: model.pendingSendSelection?.fileURL,
+                initialFileAccess: model.pendingSendSelection?.sourceAccess,
+                initialPendingSelectionID: model.pendingSendSelection?.id
+            )
+        case .receive:
+            ReceiveView(viewModel: model.receive)
+        case .activity:
+            TransferStageView(
+                records: model.activities,
+                metricsByActivityID: model.activityMetrics,
+                onCopyDiagnostics: model.diagnosticReport,
+                onRemoteLogTarget: model.remoteLogTarget,
+                onRemoteDiagnosticReport: model.remoteDiagnosticReport,
+                onAppDiagnosticReport: model.appDiagnosticReport,
+                onPause: model.pauseActivity,
+                onResume: model.resumeActivity,
+                onCancel: model.cancelActivity,
+                onReplacePublicationTarget: model.replaceReceivePublicationTarget,
+                onDelete: model.removeActivity
+            )
+        case .settings:
+            SettingsStageView()
         }
     }
+
+    private func mobileSheetTitle(_ sheet: MobileSheet) -> String {
+        switch sheet {
+        case .send: return AppText.value("Send", "发送", language: language)
+        case .receive: return AppText.value("Receive", "接收", language: language)
+        case .activity: return AppText.value("Activity", "活动", language: language)
+        case .settings: return AppText.value("Settings", "设置", language: language)
+        }
+    }
+
+    private func handleIncomingURL(_ url: URL) {
+        if let id = ShareDraftLink.draftID(from: url) {
+            presentSharedDraft(preferredID: id)
+            return
+        }
+        guard url.isFileURL else { return }
+
+        do {
+            switch try model.importOpenedSendFile(url) {
+            case .imported:
+                mobileSheet = .send
+            case .queued:
+                ToastCenter.shared.show(AppText.value(
+                    "The file is ready and will open after the current send finishes.",
+                    "文件已准备好，将在当前发送完成后打开。",
+                    language: language
+                ))
+            }
+        } catch let error as OpenedSendFileError {
+            ToastCenter.shared.show(openedSendFileErrorMessage(error))
+        } catch {
+            ToastCenter.shared.show(error.localizedDescription)
+        }
+    }
+
+    private func presentPendingSendSelection() {
+        if !model.send.isBusy, model.pendingSendSelection != nil {
+            mobileSheet = .send
+            return
+        }
+        presentSharedDraft(preferredID: nil)
+    }
+
+    private func openedSendFileErrorMessage(_ error: OpenedSendFileError) -> String {
+        switch error {
+        case .unsupportedURL:
+            return AppText.value(
+                "Envoix can open local files only.",
+                "Envoix 目前只能打开本地文件。",
+                language: language
+            )
+        case .unsupportedItem:
+            return AppText.value(
+                "Multiple files and folders are not supported yet. Manifest support is coming next.",
+                "暂不支持多文件和文件夹；将在 Manifest 支持后开放。",
+                language: language
+            )
+        case .inaccessible:
+            return AppText.value(
+                "Envoix could not access this file. Download it first, then try again.",
+                "Envoix 无法访问此文件。请先下载完成，然后重试。",
+                language: language
+            )
+        }
+    }
+
+    #if DEBUG
+    private func stageBackgroundShareFixtureIfRequested() {
+        guard !didStageBackgroundShareFixture,
+              ProcessInfo.processInfo.arguments.contains("--ui-testing-stage-share-on-background") else {
+            return
+        }
+        didStageBackgroundShareFixture = true
+
+        let sourceURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("foreground-share.txt")
+        do {
+            try Data("foreground share fixture".utf8).write(to: sourceURL, options: .atomic)
+            defer { try? FileManager.default.removeItem(at: sourceURL) }
+            _ = try ShareDraftStore.live().stage(
+                sourceURL: sourceURL,
+                contentTypeIdentifier: UTType.plainText.identifier,
+                mediaKind: .file
+            )
+        } catch {
+            assertionFailure("Could not stage the background Share fixture: \(error)")
+        }
+    }
+    #endif
+
+    private func presentSharedDraft(preferredID: UUID?) {
+        do {
+            switch try model.importSharedSendDraft(preferredID: preferredID) {
+            case .imported:
+                mobileSheet = .send
+            case .noPendingDraft:
+                break
+            case .sendBusy:
+                ToastCenter.shared.show(AppText.value(
+                    "Finish the current send, then Envoix will open the shared item.",
+                    "请先完成当前发送，随后 Envoix 会打开已分享的项目。",
+                    language: language
+                ))
+            }
+        } catch {
+            ToastCenter.shared.show(error.localizedDescription)
+        }
+    }
+
+    @ViewBuilder
+    private var mobileActivityCapsule: some View {
+        if mobileSheet != .activity, let activity = featuredActivity {
+            Button {
+                mobileSheet = .activity
+            } label: {
+                HStack(spacing: 11) {
+                    Image(systemName: mobileActivityIcon(activity))
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(Theme.accentStrong)
+                        .frame(width: 34, height: 34)
+                        .background(Theme.accentSoft, in: Circle())
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(mobileActivityTitle(activity))
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(Theme.text)
+                            .lineLimit(1)
+                        Text(mobileActivitySubtitle(activity))
+                            .font(.caption)
+                            .foregroundStyle(Theme.muted)
+                            .lineLimit(1)
+                    }
+
+                    Spacer(minLength: 8)
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(Theme.muted)
+                }
+                .padding(.horizontal, 12)
+                .frame(maxWidth: .infinity, minHeight: 54)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .strokeBorder(Theme.line.opacity(0.72), lineWidth: 0.8)
+                )
+                .shadow(color: Theme.shadowColor, radius: 8, y: 3)
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 14)
+            .accessibilityIdentifier("active_transfer_capsule")
+        }
+    }
+
+    private var featuredActivity: FfiTransferActivityRecord? {
+        model.activities.first(where: isPending)
+    }
+
+    private func mobileActivityTitle(_ record: FfiTransferActivityRecord) -> String {
+        switch record.state {
+        case .queued, .binding, .waitingForPeer:
+            return AppText.value("Waiting to connect", "等待连接", language: language)
+        case .pairing, .connecting:
+            return AppText.value("Connecting", "正在连接", language: language)
+        case .transferring:
+            return record.direction == .send
+                ? AppText.value("Sending", "正在发送", language: language)
+                : AppText.value("Receiving", "正在接收", language: language)
+        case .verifying, .publishing, .unconfirmed:
+            return AppText.value("Saving", "正在保存", language: language)
+        case .paused:
+            return AppText.value("Transfer paused", "传输已暂停", language: language)
+        case .completed:
+            return AppText.value("Transfer complete", "传输完成", language: language)
+        case .failed:
+            return AppText.value("Transfer needs attention", "传输需要处理", language: language)
+        case .canceled, .unknown:
+            return AppText.value("Transfer", "传输", language: language)
+        }
+    }
+
+    private func mobileActivitySubtitle(_ record: FfiTransferActivityRecord) -> String {
+        let name = record.fileName.trimmed.isEmpty
+            ? AppText.value("Open Activity for details", "打开活动查看详情", language: language)
+            : record.fileName
+        guard record.totalBytes > 0 else { return name }
+        let percent = min(100, Int(Double(record.bytesTransferred) / Double(record.totalBytes) * 100))
+        return "\(name) · \(percent)%"
+    }
+
+    private func mobileActivityIcon(_ record: FfiTransferActivityRecord) -> String {
+        switch record.state {
+        case .paused: return "pause.fill"
+        case .verifying, .publishing, .unconfirmed: return "tray.and.arrow.down.fill"
+        default: return record.direction == .send ? "arrow.up" : "arrow.down"
+        }
+    }
+
     #endif
 
     private var stageRail: some View {
@@ -298,6 +637,7 @@ struct ContentView: View {
                 onPause: model.pauseActivity,
                 onResume: model.resumeActivity,
                 onCancel: model.cancelActivity,
+                onReplacePublicationTarget: model.replaceReceivePublicationTarget,
                 onDelete: model.removeActivity
             )
         case .settings:
@@ -420,13 +760,14 @@ private struct TransferSetupStageView: View {
     let onShowActivity: () -> Void
 
     var body: some View {
-        #if os(iOS)
-        mobileBody
-        #else
+        #if os(macOS)
         desktopBody
+        #else
+        EmptyView()
         #endif
     }
 
+    #if os(macOS)
     private var desktopBody: some View {
         VStack(alignment: .leading, spacing: 14) {
             if showsActivityShortcut {
@@ -453,60 +794,10 @@ private struct TransferSetupStageView: View {
         }
         .onAppear(perform: applyDefaultRoleOnce)
     }
-
-    #if os(iOS)
-    private var mobileBody: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            rolePicker
-
-            Group {
-                switch role {
-                case .send:
-                    SendView(viewModel: send)
-                case .receive:
-                    ReceiveView(viewModel: receive)
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        }
-        .onAppear(perform: applyDefaultRoleOnce)
-        .onChange(of: send.isBusy) { isBusy in
-            if isBusy { onShowActivity() }
-        }
-        .onChange(of: receive.isBusy) { isBusy in
-            if isBusy { onShowActivity() }
-        }
-    }
     #endif
 
-    @ViewBuilder
+    #if os(macOS)
     private var rolePicker: some View {
-        #if os(iOS)
-        Picker(AppText.value("Transfer direction", "传输方向", language: language), selection: $role) {
-            ForEach(TransferRole.allCases, id: \.self) { item in
-                Label(item.title(language: language), systemImage: item.icon)
-                    .tag(item)
-                    .accessibilityIdentifier("transfer_role_\(item.rawValue)")
-            }
-        }
-        .pickerStyle(.segmented)
-        .controlSize(.large)
-        .font(.body.weight(.semibold))
-        .frame(minHeight: 54)
-        .labelsHidden()
-        .animation(.easeInOut(duration: 0.22), value: role)
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 18)
-                .onEnded { value in
-                    guard abs(value.translation.width) > abs(value.translation.height),
-                          abs(value.translation.width) >= 36 else { return }
-                    withAnimation(.easeInOut(duration: 0.22)) {
-                        role = value.translation.width < 0 ? .receive : .send
-                    }
-                }
-        )
-        .accessibilityIdentifier("transfer_role_selector")
-        #else
         HStack(spacing: 4) {
             ForEach(TransferRole.allCases, id: \.self) { item in
                 Button {
@@ -532,8 +823,8 @@ private struct TransferSetupStageView: View {
         }
         .padding(4)
         .background(Theme.line.opacity(0.35), in: RoundedRectangle(cornerRadius: Theme.cardRadius))
-        #endif
     }
+    #endif
 
     private func applyDefaultRoleOnce() {
         guard !didApplyDefaultRole else { return }
@@ -551,6 +842,25 @@ private struct TransferSetupStageView: View {
     }
 }
 
+private struct ActivityActionButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+    let tint: Color
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(isEnabled ? tint : Theme.text)
+            .background(
+                isEnabled ? Theme.surfaceRaised : Theme.line,
+                in: RoundedRectangle(cornerRadius: Theme.cardRadius)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.cardRadius)
+                    .strokeBorder(isEnabled ? tint.opacity(0.45) : Theme.line, lineWidth: 1)
+            )
+            .opacity(configuration.isPressed ? 0.82 : 1)
+    }
+}
+
 private struct TransferStageView: View {
     private enum UploadStatus {
         case uploading
@@ -558,13 +868,14 @@ private struct TransferStageView: View {
         case failed(String)
     }
 
-    private enum ActivityCommand {
+    private enum ActivityCommand: Equatable {
         case pause
         case resume
         case cancel
     }
 
     @Environment(\.appLanguage) private var language
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @AppStorage("envoix.developerMode") private var developerMode = false
     @AppStorage("envoix.logServer") private var logServer = defaultLogServer
     @State private var expandedActivityIDs: Set<String> = []
@@ -573,6 +884,11 @@ private struct TransferStageView: View {
     @State private var uploadStatusByActivityID: [String: UploadStatus] = [:]
     @State private var isUploadingAppDiagnostics = false
     @State private var appUploadStatus: UploadStatus?
+    #if os(iOS)
+    @State private var publicationTargetActivityID: String?
+    @State private var isPublicationFolderPickerPresented = false
+    #endif
+    private let commandAcknowledgementTimeout: TimeInterval = 5
     let records: [FfiTransferActivityRecord]
     let metricsByActivityID: [String: ActivityMetrics]
     let onCopyDiagnostics: (FfiTransferActivityRecord) -> String
@@ -582,6 +898,7 @@ private struct TransferStageView: View {
     let onPause: (String) -> Bool
     let onResume: (String) -> Bool
     let onCancel: (String) -> Bool
+    let onReplacePublicationTarget: (String, URL, Data?, AnyObject?) -> Bool
     let onDelete: (String) -> Void
 
     var body: some View {
@@ -620,6 +937,17 @@ private struct TransferStageView: View {
         .onChange(of: activityStateFingerprint) { _ in
             reconcilePendingCommands()
         }
+        #if os(iOS)
+        .sheet(isPresented: $isPublicationFolderPickerPresented) {
+            FolderPickerSheet(
+                onPick: replacePublicationTarget,
+                onCancel: {
+                    publicationTargetActivityID = nil
+                    isPublicationFolderPickerPresented = false
+                }
+            )
+        }
+        #endif
     }
 
     private var appDiagnosticsCard: some View {
@@ -684,7 +1012,7 @@ private struct TransferStageView: View {
             Text(AppText.value("No transfers yet", "暂无传输", language: language))
                 .font(.headline.weight(.semibold))
                 .foregroundStyle(Theme.text)
-            Text(AppText.value("Start a send or receive from Transfer.", "请从“传输”页面开始发送或接收。", language: language))
+            Text(AppText.value("Start a send or receive from Home.", "请从“首页”开始发送或接收。", language: language))
                 .font(.body)
                 .foregroundStyle(Theme.muted)
                 .multilineTextAlignment(.center)
@@ -695,31 +1023,38 @@ private struct TransferStageView: View {
     private func activityCard(_ record: FfiTransferActivityRecord) -> some View {
         let metrics = metrics(for: record)
         let expanded = expandedActivityIDs.contains(record.activityId)
+        let metadataLayout = dynamicTypeSize.isAccessibilitySize
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 6))
+            : AnyLayout(HStackLayout(alignment: .firstTextBaseline, spacing: 8))
+        let headerLayout = dynamicTypeSize.isAccessibilitySize
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 12))
+            : AnyLayout(HStackLayout(alignment: .top, spacing: 12))
         return VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .top, spacing: 12) {
+            headerLayout {
                 Image(systemName: activityIcon(for: record))
                     .font(.title3.weight(.semibold))
                     .foregroundStyle(activityTint(for: record))
                     .frame(width: 40, height: 40)
                     .background(activityTint(for: record).opacity(0.10), in: Circle())
-                VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: 6) {
                     Text(activityTitle(for: record))
                         .font(.headline.weight(.semibold))
                         .foregroundStyle(Theme.text)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .layoutPriority(1)
-                        .accessibilityIdentifier("activity_title_\(record.activityId)")
-                    Text(activitySubtitle(for: record))
-                        .font(.subheadline)
-                        .foregroundStyle(Theme.muted)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                        .fixedSize(horizontal: false, vertical: true)
+                    metadataLayout {
+                        Text(activitySubtitle(for: record))
+                            .font(.subheadline)
+                            .foregroundStyle(Theme.muted)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        ModePill(text: activityStateText(for: record))
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
                 }
-                Spacer(minLength: 8)
-                ModePill(text: activityStateText(for: record))
-                    .fixedSize(horizontal: true, vertical: false)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("activity_title_\(record.activityId)")
 
             activitySummary(record, metrics: metrics)
 
@@ -762,20 +1097,35 @@ private struct TransferStageView: View {
         return Text(parts.joined(separator: " · "))
             .font(.subheadline.monospacedDigit())
             .foregroundStyle(Theme.muted)
-            .lineLimit(1)
-            .truncationMode(.middle)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     @ViewBuilder
     private func activityActions(_ record: FfiTransferActivityRecord, expanded: Bool) -> some View {
-        HStack(spacing: 10) {
+        let actionLayout = dynamicTypeSize.isAccessibilitySize
+            ? AnyLayout(VStackLayout(spacing: 10))
+            : AnyLayout(HStackLayout(spacing: 10))
+        actionLayout {
             if let command = pendingCommands[record.activityId] {
-                activityCommandIndicator(command)
+                activityCommandIndicator(command, activityID: record.activityId)
+            } else if shouldChoosePublicationFolder(record) {
+                activityAction(
+                    AppText.value("Choose folder", "选择文件夹", language: language),
+                    systemImage: "folder.badge.plus",
+                    tint: Theme.accentStrong
+                ) {
+                    choosePublicationFolder(for: record.activityId)
+                }
+                .accessibilityIdentifier("activity_choose_folder_\(record.activityId)")
             } else if canResume(record) {
                 activityAction(
-                    AppText.value("Resume", "继续", language: language),
-                    systemImage: "play.fill",
-                    tint: Theme.accent
+                    record.state == .publishing || record.state == .failed
+                        ? AppText.value("Retry", "重试", language: language)
+                        : AppText.value("Resume", "继续", language: language),
+                    systemImage: record.state == .publishing || record.state == .failed
+                        ? "arrow.clockwise"
+                        : "play.fill",
+                    tint: Theme.accentStrong
                 ) {
                     requestCommand(.resume, for: record.activityId)
                 }
@@ -796,7 +1146,7 @@ private struct TransferStageView: View {
                     ? AppText.value("Hide details", "收起详情", language: language)
                     : AppText.value("Details", "查看详情", language: language),
                 systemImage: expanded ? "chevron.up" : "chevron.down",
-                tint: Theme.accent
+                tint: Theme.accentStrong
             ) {
                 toggleActivityDetail(record.activityId)
             }
@@ -822,7 +1172,7 @@ private struct TransferStageView: View {
         }
     }
 
-    private func activityCommandIndicator(_ command: ActivityCommand) -> some View {
+    private func activityCommandIndicator(_ command: ActivityCommand, activityID: String) -> some View {
         HStack(spacing: 8) {
             ProgressView()
                 .controlSize(.small)
@@ -833,6 +1183,7 @@ private struct TransferStageView: View {
         .foregroundStyle(Theme.muted)
         .frame(maxWidth: .infinity, minHeight: 44)
         .background(Theme.line.opacity(0.18), in: RoundedRectangle(cornerRadius: Theme.cardRadius))
+        .accessibilityIdentifier("activity_command_\(activityID)")
     }
 
     private func requestCommand(_ command: ActivityCommand, for activityID: String) {
@@ -848,6 +1199,15 @@ private struct TransferStageView: View {
         }
         if accepted {
             pendingCommands[activityID] = command
+            DispatchQueue.main.asyncAfter(deadline: .now() + commandAcknowledgementTimeout) {
+                guard pendingCommands[activityID] == command else { return }
+                pendingCommands.removeValue(forKey: activityID)
+                ToastCenter.shared.show(AppText.value(
+                    "The action is taking longer than expected. You can try again.",
+                    "操作响应超时，可以重试。",
+                    language: language
+                ))
+            }
         } else {
             ToastCenter.shared.show(AppText.value(
                 "This action is no longer available.",
@@ -858,8 +1218,61 @@ private struct TransferStageView: View {
     }
 
     private var activityStateFingerprint: String {
-        records.map { "\($0.activityId):\(String(describing: $0.state))" }.joined(separator: "|")
+        records.map {
+            "\($0.activityId):\(String(describing: $0.state)):\($0.retryable):\(String(describing: $0.recoveryAction))"
+        }.joined(separator: "|")
     }
+
+    private func shouldChoosePublicationFolder(_ record: FfiTransferActivityRecord) -> Bool {
+        record.state == .publishing
+            && record.retryable
+            && record.recoveryAction == .chooseFolder
+    }
+
+    private func choosePublicationFolder(for activityID: String) {
+        #if os(iOS)
+        publicationTargetActivityID = activityID
+        isPublicationFolderPickerPresented = true
+        #else
+        guard let url = chooseURL(directory: true) else { return }
+        if !onReplacePublicationTarget(activityID, url, nil, nil) {
+            ToastCenter.shared.show(AppText.value(
+                "This save target can no longer be changed.",
+                "当前已无法更换保存位置。",
+                language: language
+            ))
+        }
+        #endif
+    }
+
+    #if os(iOS)
+    private func replacePublicationTarget(_ url: URL) {
+        defer {
+            publicationTargetActivityID = nil
+            isPublicationFolderPickerPresented = false
+        }
+        guard let activityID = publicationTargetActivityID else { return }
+        do {
+            let bookmark = try makeSecurityScopedFolderBookmark(for: url)
+            let access = SecurityScopedResourceAccess(url: url)
+            guard onReplacePublicationTarget(activityID, url, bookmark, access) else {
+                ToastCenter.shared.show(AppText.value(
+                    "This save target can no longer be changed.",
+                    "当前已无法更换保存位置。",
+                    language: language
+                ))
+                return
+            }
+            ToastCenter.shared.show(AppText.value(
+                "Saving to the new folder",
+                "正在保存到新文件夹",
+                language: language
+            ))
+        } catch {
+            ToastCenter.shared.show(friendlyError(error.localizedDescription, language: language))
+        }
+    }
+    #endif
 
     private func reconcilePendingCommands() {
         pendingCommands = pendingCommands.filter { activityID, command in
@@ -892,12 +1305,10 @@ private struct TransferStageView: View {
         Button(action: action) {
             Label(title, systemImage: systemImage)
                 .font(.subheadline.weight(.semibold))
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
+                .multilineTextAlignment(.center)
                 .frame(maxWidth: .infinity, minHeight: 44)
         }
-        .buttonStyle(.bordered)
-        .tint(tint)
+        .buttonStyle(ActivityActionButtonStyle(tint: tint))
     }
 
     private func destructiveActivityAction(
@@ -908,12 +1319,10 @@ private struct TransferStageView: View {
         Button(role: .destructive, action: action) {
             Label(title, systemImage: systemImage)
                 .font(.subheadline.weight(.semibold))
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
+                .multilineTextAlignment(.center)
                 .frame(maxWidth: .infinity, minHeight: 44)
         }
-        .buttonStyle(.bordered)
-        .tint(Theme.danger)
+        .buttonStyle(ActivityActionButtonStyle(tint: Theme.dangerStrong))
     }
 
     private func uploadDiagnostics(
@@ -1093,7 +1502,7 @@ private struct TransferStageView: View {
                         activityAction(
                             AppText.value("Copy diagnostics", "复制诊断", language: language),
                             systemImage: "doc.on.doc",
-                            tint: Theme.accent
+                            tint: Theme.accentStrong
                         ) {
                             copyToPasteboard(onCopyDiagnostics(record))
                             ToastCenter.shared.show(AppText.value("Diagnostics copied", "诊断信息已复制", language: language))
@@ -1108,7 +1517,7 @@ private struct TransferStageView: View {
                             activityAction(
                                 AppText.value("Upload diagnostic log", "上传诊断日志", language: language),
                                 systemImage: "arrow.up.doc",
-                                tint: Theme.accent
+                                tint: Theme.accentStrong
                             ) {
                                 uploadDiagnostics(for: record, target: remoteLogTarget)
                             }
@@ -1278,7 +1687,8 @@ private struct TransferStageView: View {
     }
 
     private func activitySubtitle(for record: FfiTransferActivityRecord) -> String {
-        if record.state == .failed && !record.diagnosticMessage.isEmpty {
+        if (record.state == .failed || record.state == .publishing && record.retryable)
+            && !record.diagnosticMessage.isEmpty {
             if record.failureCode != .unknown {
                 return friendlyFailure(
                     code: record.failureCode,
@@ -1292,14 +1702,18 @@ private struct TransferStageView: View {
     }
 
     private func recoveryText(for record: FfiTransferActivityRecord) -> String? {
-        guard record.state == .failed else { return nil }
+        guard record.state == .failed || record.state == .publishing && record.retryable else { return nil }
         switch record.recoveryAction {
         case .retry:
             return AppText.value("Try again when both devices are online.", "请确认两台设备在线后重试。", language: language)
         case .resume:
             return AppText.value("Retry may resume from saved partial progress.", "重试时可能会从已保存的部分进度继续。", language: language)
         case .chooseFolder:
-            return AppText.value("Choose another save folder, then start the receive again.", "请选择其他保存文件夹，然后重新开始接收。", language: language)
+            return AppText.value(
+                "Choose another folder to save the file already received.",
+                "请选择其他文件夹，继续保存已经接收完成的文件。",
+                language: language
+            )
         case .openSettings:
             return AppText.value("Check local network or Files permission in system settings.", "请在系统设置中检查本地网络或文件权限。", language: language)
         case .rePair:
@@ -1326,7 +1740,10 @@ private struct TransferStageView: View {
         case .connecting: return AppText.value("Connecting", "连接", language: language)
         case .transferring: return "\(Int((progressFraction(for: record) * 100).rounded()))%"
         case .verifying: return AppText.value("Verifying", "校验", language: language)
-        case .publishing: return AppText.value("Saving", "保存中", language: language)
+        case .publishing:
+            return record.retryable
+                ? AppText.value("Save failed", "保存失败", language: language)
+                : AppText.value("Saving", "保存中", language: language)
         case .unconfirmed: return AppText.value("Confirming", "确认中", language: language)
         case .completed: return AppText.value("Done", "完成", language: language)
         case .failed: return AppText.value("Error", "错误", language: language)
@@ -1453,6 +1870,7 @@ private struct SettingsStageView: View {
     @AppStorage("envoix.verboseLog") private var verboseLog = false
     @AppStorage("envoix.logServer") private var logServer = defaultLogServer
     @State private var showAdvanced = false
+    private let coreInfo = envoixCoreInfo()
 
     var body: some View {
         ScrollView {
@@ -1472,6 +1890,7 @@ private struct SettingsStageView: View {
                 }
                 .card(padding: 14)
 
+                #if os(macOS)
                 VStack(alignment: .leading, spacing: 8) {
                     Text(AppText.value("Default role for a new code", "新建短码的默认角色", language: language))
                         .font(.title3.weight(.semibold))
@@ -1484,6 +1903,7 @@ private struct SettingsStageView: View {
                     .labelsHidden()
                 }
                 .card(padding: 14)
+                #endif
 
                 VStack(alignment: .leading, spacing: 8) {
                     Text(AppText.value("Pairing", "配对", language: language))
@@ -1562,6 +1982,7 @@ private struct SettingsStageView: View {
                         ),
                         isOn: $developerMode
                     )
+                    .accessibilityIdentifier("settings_developer_mode")
                     if developerMode {
                         Divider().overlay(Theme.line.opacity(0.5))
                         settingToggle(
@@ -1597,11 +2018,12 @@ private struct SettingsStageView: View {
                 }
                 .card(padding: 14)
 
-                Text(appDebugBuildLabel)
+                Text(coreBuildLabel)
                     .font(.caption.monospaced())
-                    .foregroundStyle(Theme.muted)
+                    .foregroundStyle(coreInfo.ffiApiVersion == expectedCoreFFIAPIVersion ? Theme.muted : Theme.danger)
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.top, 2)
+                    .accessibilityIdentifier("settings_core_version")
             }
             .padding(.vertical, 12)
         }
@@ -1612,6 +2034,10 @@ private struct SettingsStageView: View {
         if deprecatedLogServers.contains(logServer.trimmed) {
             logServer = defaultLogServer
         }
+    }
+
+    private var coreBuildLabel: String {
+        "\(appDebugBuildLabel) · Core \(coreInfo.coreVersion) · API \(coreInfo.ffiApiVersion)"
     }
 
     private var appearanceSection: some View {

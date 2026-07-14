@@ -12,7 +12,8 @@ test_apk="$android_dir/app/build/outputs/apk/androidTest/debug/app-debug-android
 test_runner="dev.envoix.app.test/androidx.test.runner.AndroidJUnitRunner"
 ios_project="$repo_root/apps/envoix-apple/Envoix.xcodeproj"
 ios_cross_device_scheme="${ENVOIX_IOS_CROSS_DEVICE_SCHEME:-Envoix-iOS}"
-ios_derived_data="$repo_root/apps/envoix-apple/build-ios-ui-test"
+apple_cache_root="${ENVOIX_APPLE_CACHE_ROOT:-${TMPDIR:-/tmp}/envoix-apple-cache}"
+ios_derived_data="${ENVOIX_IOS_DERIVED_DATA:-$apple_cache_root/ios-cross-device-debug}"
 ios_destination="${ENVOIX_IOS_DESTINATION:-platform=iOS,id=00008130-00043154346B803A}"
 start_delay_long="${ENVOIX_CROSS_DEVICE_START_DELAY_LONG:-${ENVOIX_CROSS_DEVICE_START_DELAY:-18}}"
 start_delay_short="${ENVOIX_CROSS_DEVICE_START_DELAY_SHORT:-6}"
@@ -122,6 +123,7 @@ build_ios_test_bundle() {
     -configuration Debug
     -destination "$ios_destination"
     -derivedDataPath "$ios_derived_data"
+    COMPILER_INDEX_STORE_ENABLE=NO
   )
   if ! xcodebuild "${build_args[@]}" >"$log_file" 2>&1; then
     print_log_tail "iOS test build" "$log_file"

@@ -106,16 +106,13 @@ struct ReceiveView: View {
     private var scrollContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                if mode == .invite {
-                    inviteSection
-                } else if mode == .room {
-                    roomSection
-                } else {
-                    TokenField(token: $token, disabled: viewModel.isBusy)
-                        .card(padding: 14)
-                }
-
+                #if os(iOS)
                 outputSection
+                connectionSection
+                #else
+                connectionSection
+                outputSection
+                #endif
                 modeSelector
 
                 #if os(macOS)
@@ -129,9 +126,6 @@ struct ReceiveView: View {
                 #endif
             }
             .padding(.vertical, 12)
-            #if os(iOS)
-            .padding(.bottom, 88)
-            #endif
         }
         .onAppear { refreshPairingInviteIfNeeded() }
         .onChange(of: mode) { newMode in
@@ -142,6 +136,17 @@ struct ReceiveView: View {
         .onChange(of: viewModel.invite) { invite in updateInviteQRCode(for: invite) }
         .onChange(of: serverURL) { _ in refreshPairingInviteForSettingsChange() }
         .onChange(of: relayURL) { _ in refreshPairingInviteForSettingsChange() }
+    }
+
+    @ViewBuilder private var connectionSection: some View {
+        if mode == .invite {
+            inviteSection
+        } else if mode == .room {
+            roomSection
+        } else {
+            TokenField(token: $token, disabled: viewModel.isBusy)
+                .card(padding: 14)
+        }
     }
 
     @ViewBuilder private var footerMessage: some View {
@@ -163,9 +168,7 @@ struct ReceiveView: View {
                 .contentShape(Rectangle())
         }
         .keyboardShortcut(.defaultAction)
-        .buttonStyle(.borderedProminent)
-        .controlSize(.large)
-        .tint(Theme.accent)
+        .buttonStyle(PrimaryActionButtonStyle())
         .disabled(
             (viewModel.isBusy && !canStartAnotherReceive)
                 || viewModel.isFinalizing
@@ -216,7 +219,7 @@ struct ReceiveView: View {
                             Text(outputDirDisplayText)
                                 .font(.body.weight(.semibold))
                                 .foregroundStyle(Theme.text)
-                                .lineLimit(2)
+                                .fixedSize(horizontal: false, vertical: true)
                             Text(outputFolderChooseLabel)
                                 .font(.footnote)
                                 .foregroundStyle(Theme.muted)
@@ -340,6 +343,7 @@ struct ReceiveView: View {
 
             if let image = inviteQRCodeImage, !viewModel.invite.isEmpty {
                 QRCard(image: image, size: 208)
+                    .accessibilityLabel(AppText.value("Receive invite QR code", "接收邀请二维码", language: uiLanguage))
             } else {
                 qrPlaceholder
             }
@@ -381,6 +385,15 @@ struct ReceiveView: View {
     private var mobileRoomSection: some View {
         VStack(alignment: .leading, spacing: 14) {
             PairingPanelSelector(selection: $pairingPanel, disabled: viewModel.isBusy)
+            Text(AppText.value(
+                "Show your receive QR, or scan the other device's send QR.",
+                "可以显示本机接收码，也可以扫描另一台设备的发送码。",
+                language: uiLanguage
+            ))
+            .font(.footnote)
+            .foregroundStyle(Theme.muted)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityIdentifier("receive_pairing_guidance")
 
             Group {
                 if pairingPanel == .scan {
@@ -388,7 +401,7 @@ struct ReceiveView: View {
                         Image(systemName: "qrcode.viewfinder")
                             .font(.system(size: 48, weight: .medium))
                             .foregroundStyle(Theme.accentStrong)
-                        Text(AppText.value("Scan the sender's QR", "扫描发送端二维码", language: uiLanguage))
+                        Text(AppText.value("Scan a send QR", "扫描发送码", language: uiLanguage))
                             .font(.headline.weight(.semibold))
                             .foregroundStyle(Theme.text)
                         Button {
@@ -399,6 +412,7 @@ struct ReceiveView: View {
                         }
                         .buttonStyle(.borderedProminent)
                         .tint(Theme.accent)
+                        .accessibilityIdentifier("receive_scan_sender_qr")
                     }
                     .frame(maxWidth: .infinity, minHeight: 230)
                 } else if !joinRoomCode.trimmed.isEmpty {
@@ -424,6 +438,7 @@ struct ReceiveView: View {
                     VStack(spacing: 12) {
                         if let image = roomQRCodeImage {
                             QRCard(image: image, size: 184)
+                                .accessibilityLabel(AppText.value("Receive QR code", "接收二维码", language: uiLanguage))
                         } else {
                             qrPlaceholder
                         }
@@ -439,6 +454,7 @@ struct ReceiveView: View {
                                     .frame(minHeight: 40)
                             }
                             .disabled(roomCode.trimmed.isEmpty)
+                            .accessibilityIdentifier("receive_room_copy")
                         }
                     }
                     .frame(maxWidth: .infinity, minHeight: 230)
@@ -449,7 +465,7 @@ struct ReceiveView: View {
                 code: joinRoomCodeBinding,
                 disabled: viewModel.isBusy,
                 title: AppText.value("Or enter a code", "或输入短码", language: uiLanguage),
-                placeholder: AppText.value("Scan QR or enter code", "扫码或输入短码", language: uiLanguage),
+                placeholder: AppText.value("Enter code", "输入短码", language: uiLanguage),
                 showsCopyAction: false,
                 pasteAction: pastePairingInput,
                 helper: ""
@@ -473,6 +489,7 @@ struct ReceiveView: View {
 
             if let image = roomQRCodeImage {
                 QRCard(image: image, size: 208)
+                    .accessibilityLabel(AppText.value("Receive QR code", "接收二维码", language: uiLanguage))
             } else {
                 qrPlaceholder
             }
