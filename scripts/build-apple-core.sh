@@ -4,7 +4,9 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
 ffi_dir="$repo_root/crates/envoix-ffi"
-backup_dir="$(mktemp -d "${TMPDIR:-/tmp}/envoix-apple-bindings.XXXXXX")"
+package_dir="$ffi_dir/EnvoixCore"
+input_stamp="$package_dir/.envoix-inputs.sha256"
+backup_dir=""
 generated_bindings=(
   "generated/envoix_ffi.swift"
   "generated/envoix_ffiFFI.h"
@@ -14,10 +16,57 @@ generated_bindings=(
   "generated/sources/envoix_ffi.swift"
 )
 
+apple_core_is_current() {
+  [[ -f "$package_dir/Package.swift" ]] || return 1
+  [[ -f "$input_stamp" ]] || return 1
+  local recorded_digest
+  IFS= read -r recorded_digest < "$input_stamp" || return 1
+  [[ "$recorded_digest" == "$(apple_core_input_digest)" ]]
+}
+
+apple_core_input_digest() {
+  {
+    local input
+    for input in \
+      "$repo_root/Cargo.toml" \
+      "$repo_root/Cargo.lock" \
+      "$repo_root/scripts/build-apple-core.sh" \
+      "$repo_root/scripts/configure-apple-package.sh" \
+      "$repo_root/scripts/postprocess-apple-binding.py"; do
+      printf '%s\n' "${input#$repo_root/}"
+      shasum -a 256 "$input" | cut -d ' ' -f 1
+    done
+
+    while IFS= read -r input; do
+      printf '%s\n' "${input#$repo_root/}"
+      shasum -a 256 "$input" | cut -d ' ' -f 1
+    done < <(find "$repo_root/crates" "$repo_root/vendor" \
+      -path "$package_dir" -prune -o \
+      -type f \( \
+        -name '*.rs' -o \
+        -name '*.toml' -o \
+        -name '*.udl' -o \
+        -name '*.swift' -o \
+        -name '*.c' -o \
+        -name '*.cc' -o \
+        -name '*.cpp' -o \
+        -name '*.h' -o \
+        -name '*.modulemap' \
+      \) -print | LC_ALL=C sort)
+  } | shasum -a 256 | cut -d ' ' -f 1
+}
+
+if [[ "${ENVOIX_APPLE_FORCE_CORE_REBUILD:-0}" != "1" ]] && apple_core_is_current; then
+  echo "Apple core inputs unchanged; reusing $package_dir"
+  exit 0
+fi
+
 if ! cargo swift --version >/dev/null 2>&1; then
   echo "error: cargo-swift is required to build the Apple UniFFI package" >&2
   exit 2
 fi
+
+backup_dir="$(mktemp -d "${TMPDIR:-/tmp}/envoix-apple-bindings.XXXXXX")"
 
 restore_bindings() {
   local binding
@@ -39,34 +88,89 @@ for binding in "${generated_bindings[@]}"; do
   cp "$ffi_dir/$binding" "$backup_dir/$binding"
 done
 
-# BLAKE3 compiles platform-specific C/NEON objects. Cargo can otherwise reuse
-# objects produced before deployment-target flags were introduced, leaving an
-# iOS 26/macOS 26 minimum-version load command inside an iOS 16/macOS 13 app.
-for target in \
-  aarch64-apple-darwin \
-  x86_64-apple-darwin \
-  aarch64-apple-ios \
-  aarch64-apple-ios-sim; do
-  cargo clean -p blake3 --target "$target"
-done
+generate_apple_package() {
+  (
+    cd "$ffi_dir"
+    env \
+      MACOSX_DEPLOYMENT_TARGET=13.0 \
+      IPHONEOS_DEPLOYMENT_TARGET=16.0 \
+      CFLAGS_aarch64_apple_darwin="-mmacosx-version-min=13.0" \
+      CFLAGS_x86_64_apple_darwin="-mmacosx-version-min=13.0" \
+      CFLAGS_aarch64_apple_ios="-miphoneos-version-min=16.0" \
+      CFLAGS_aarch64_apple_ios_sim="-mios-simulator-version-min=16.0" \
+      cargo swift package \
+        --platforms macos@13 ios@16 \
+        --name EnvoixCore \
+        --lib-type static \
+        --exclude-arch x86_64-apple-ios \
+        --swift-tools-version 5.7 \
+        --accept-all
+  )
+}
 
-(
-  cd "$ffi_dir"
-  env \
-    MACOSX_DEPLOYMENT_TARGET=13.0 \
-    IPHONEOS_DEPLOYMENT_TARGET=16.0 \
-    CFLAGS_aarch64_apple_darwin="-mmacosx-version-min=13.0" \
-    CFLAGS_x86_64_apple_darwin="-mmacosx-version-min=13.0" \
-    CFLAGS_aarch64_apple_ios="-miphoneos-version-min=16.0" \
-    CFLAGS_aarch64_apple_ios_sim="-mios-simulator-version-min=16.0" \
-    cargo swift package \
-      --platforms macos@13 ios@16 \
-      --name EnvoixCore \
-      --lib-type static \
-      --exclude-arch x86_64-apple-ios \
-      --swift-tools-version 5.7 \
-      --accept-all
-)
+version_exceeds() {
+  awk -v actual="$1" -v maximum="$2" 'BEGIN {
+    split(actual, a, ".")
+    split(maximum, b, ".")
+    if ((a[1] + 0) > (b[1] + 0)) exit 0
+    if ((a[1] + 0) == (b[1] + 0) && (a[2] + 0) > (b[2] + 0)) exit 0
+    exit 1
+  }'
+}
+
+validate_library_minimum_versions() {
+  local library="$1"
+  local maximum="$2"
+  local minimum
+  local inspected=0
+  while IFS= read -r minimum; do
+    inspected=$((inspected + 1))
+    if version_exceeds "$minimum" "$maximum"; then
+      echo "error: $library contains an object requiring OS $minimum (maximum $maximum)" >&2
+      return 1
+    fi
+  done < <(xcrun otool -l "$library" | awk '$1 == "minos" { print $2 }')
+  if [[ "$inspected" -eq 0 ]]; then
+    echo "error: could not inspect deployment versions in $library" >&2
+    return 1
+  fi
+}
+
+validate_apple_package_minimum_versions() {
+  validate_library_minimum_versions \
+    "$package_dir/envoix_ffiFFI.xcframework/macos-arm64_x86_64/libenvoix_ffi.a" \
+    13.0 || return 1
+  validate_library_minimum_versions \
+    "$package_dir/envoix_ffiFFI.xcframework/ios-arm64/libenvoix_ffi.a" \
+    16.0 || return 1
+  validate_library_minimum_versions \
+    "$package_dir/envoix_ffiFFI.xcframework/ios-arm64-simulator/libenvoix_ffi.a" \
+    16.0 || return 1
+}
+
+clean_blake3_apple_targets() {
+  local target
+  for target in \
+    aarch64-apple-darwin \
+    x86_64-apple-darwin \
+    aarch64-apple-ios \
+    aarch64-apple-ios-sim; do
+    cargo clean -p blake3 --target "$target"
+  done
+}
+
+generate_apple_package
+
+# BLAKE3 compiles platform-specific C/NEON objects. Reuse the Cargo cache on
+# the normal path, but inspect every archived object before accepting it. If an
+# older build left an iOS/macOS 26 load command behind, clean only BLAKE3 and
+# regenerate once with the explicit deployment flags above.
+if ! validate_apple_package_minimum_versions; then
+  echo "Apple archive deployment validation failed; rebuilding BLAKE3 objects." >&2
+  clean_blake3_apple_targets
+  generate_apple_package
+  validate_apple_package_minimum_versions
+fi
 
 apple_binding_postprocessor="$repo_root/scripts/postprocess-apple-binding.py"
 python3 "$apple_binding_postprocessor" "$ffi_dir/generated/envoix_ffi.swift"
@@ -86,5 +190,6 @@ fi
 
 restore_bindings
 "$repo_root/scripts/configure-apple-package.sh"
+apple_core_input_digest > "$input_stamp"
 
 echo "Apple core package generated at $ffi_dir/EnvoixCore"
