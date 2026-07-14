@@ -498,7 +498,10 @@ set_device_ipv6() {
 
     if [ "$enabled" -eq 0 ]; then
         "$adb" -s "$serial" shell \
-            'echo 1 > /proc/sys/net/ipv6/conf/wlan0/disable_ipv6'
+            'echo 1 > /proc/sys/net/ipv6/conf/wlan0/disable_ipv6; ip -6 address flush dev wlan0 scope global'
+        if [ -n "$(wifi_ipv6_address "$serial")" ]; then
+            die "$serial retained a global IPv6 address after IPv6 was disabled"
+        fi
         return
     fi
 
