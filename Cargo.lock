@@ -1228,6 +1228,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64",
+ "blake3",
  "envoix-auth",
  "envoix-error",
  "envoix-protocol",

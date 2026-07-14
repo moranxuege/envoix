@@ -4,8 +4,8 @@ use std::time::Duration;
 use envoix_error::CoreError;
 use envoix_protocol::{
     Frame, FrameConnection, ManifestFrame, ManifestFrameConnection, ManifestId, ProtocolError,
-    flush_frame_writer, read_frame, read_manifest_frame, write_chunk_frame, write_frame,
-    write_manifest_chunk_frame, write_manifest_frame,
+    TransferProtocol, flush_frame_writer, read_frame, read_manifest_frame, write_chunk_frame,
+    write_frame, write_manifest_chunk_frame, write_manifest_frame,
 };
 use envoix_transfer::{EventSink, TransferEvent};
 use envoix_types::DataPath;
@@ -25,6 +25,7 @@ pub(crate) struct IrohFrameConnection {
     pub(crate) connection: Connection,
     pub(crate) send: SendStream,
     pub(crate) recv: RecvStream,
+    protocol: TransferProtocol,
     /// Watches the selected data path and reports it as soon as one is selected
     /// and again on every change, so the path is visible *during* the transfer
     /// rather than only at the end. Aborted when the connection is dropped.
@@ -92,6 +93,7 @@ impl IrohFrameConnection {
         connection: Connection,
         send: SendStream,
         recv: RecvStream,
+        protocol: TransferProtocol,
     ) -> Self {
         let path_watcher = spawn_path_watcher(connection.clone(), None);
         Self {
@@ -99,8 +101,14 @@ impl IrohFrameConnection {
             connection,
             send,
             recv,
+            protocol,
             path_watcher,
         }
+    }
+
+    /// Returns the protocol selected by the QUIC/TLS ALPN handshake.
+    pub(crate) fn protocol(&self) -> TransferProtocol {
+        self.protocol
     }
 
     /// Restart the path watcher with an event sink, so path selection and

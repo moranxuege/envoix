@@ -28,5 +28,6 @@ tokio.workspace = true
 n0-error.workspace = true
 
 [dev-dependencies]
+blake3.workspace = true
 envoix-rendezvous.workspace = true
 tempfile.workspace = true

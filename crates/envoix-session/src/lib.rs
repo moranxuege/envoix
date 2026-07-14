@@ -13,12 +13,14 @@ use std::time::Duration;
 
 pub use envoix_auth::{PairingConfig, authenticate_receiver, authenticate_sender};
 use envoix_error::CoreError;
+pub use envoix_protocol::TransferProtocol;
 use envoix_protocol::{FrameConnection, PeerDescriptor};
-pub use envoix_transfer::TransferEngine;
 pub use envoix_transfer::{
-    DEFAULT_CHUNK_SIZE, EventSink, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE, NoopEventSink,
-    PEER_INTERRUPT_MESSAGE, PEER_PAUSE_MESSAGE, TransferCancelToken, TransferEvent,
-    TransferSummary, USER_INTERRUPT_MESSAGE, USER_PAUSE_MESSAGE, validate_chunk_size,
+    DEFAULT_CHUNK_SIZE, EventSink, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE, ManifestEventSink,
+    ManifestNoopEventSink, ManifestSendRequest, ManifestTransferEngine, ManifestTransferEvent,
+    ManifestTransferSummary, NoopEventSink, PEER_INTERRUPT_MESSAGE, PEER_PAUSE_MESSAGE,
+    TransferCancelToken, TransferEngine, TransferEvent, TransferSummary, USER_INTERRUPT_MESSAGE,
+    USER_PAUSE_MESSAGE, validate_chunk_size,
 };
 pub use envoix_types::TransferDirection;
 // Re-exported so the client facade reaches rendezvous-code helpers through its
@@ -33,13 +35,12 @@ use connection::IrohFrameConnection;
 pub use endpoint::{BindAddrs, BoundEndpoint, parse_broker_addr};
 use endpoint::{
     build_accept_endpoint, build_advertising_accept_endpoint, build_dial_endpoint,
-    peer_addr_from_descriptor,
+    build_transfer_accept_endpoint, peer_addr_from_descriptor,
 };
 pub use identity::{IdentityConfig, MemoryIdentity};
 pub use iroh::EndpointAddr;
 pub use room::{receive_file_via_room, send_file_via_room};
 
-const ALPN: &[u8] = envoix_protocol::SINGLE_FILE_V1_ALPN;
 const MAX_AUTH_FAILURES: u32 = 50;
 /// Grace period for one auth handshake. An accepted (or dialed) peer that goes
 /// silent must not pin the session: without a bound, cancel only takes effect
@@ -53,6 +54,50 @@ const MDNS_CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// Error type returned by session orchestration.
 pub type SessionError = CoreError;
+
+/// Stable diagnostic code for an older peer that rejects Manifest v1 during
+/// ALPN negotiation, before authentication or payload transfer.
+pub const MANIFEST_UNSUPPORTED_PEER_CODE: &str = "manifest.unsupported_peer";
+
+/// Event sink used by a receiver that can negotiate either transfer protocol.
+///
+/// Existing single-file entry points continue to accept [`EventSink`]. New
+/// negotiated entry points require both event families so the receiver can
+/// route only after ALPN negotiation without dropping lifecycle information.
+pub trait SessionEventSink: EventSink + ManifestEventSink {}
+
+impl<T> SessionEventSink for T where T: EventSink + ManifestEventSink {}
+
+/// Event sink that ignores both single-file and Manifest lifecycle events.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoopSessionEventSink;
+
+impl EventSink for NoopSessionEventSink {
+    fn on_event(&self, _event: TransferEvent) {}
+}
+
+impl ManifestEventSink for NoopSessionEventSink {
+    fn on_manifest_event(&self, _event: ManifestTransferEvent) {}
+}
+
+/// Successful result from an ALPN-negotiated receive session.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SessionTransferSummary {
+    /// Existing `envoix/1` single-file transfer result.
+    SingleFile(TransferSummary),
+    /// Additive `envoix/manifest/1` transfer-set result.
+    Manifest(ManifestTransferSummary),
+}
+
+impl SessionTransferSummary {
+    /// Returns the protocol that produced this result.
+    pub const fn protocol(&self) -> TransferProtocol {
+        match self {
+            Self::SingleFile(_) => TransferProtocol::SingleFileV1,
+            Self::Manifest(_) => TransferProtocol::ManifestV1,
+        }
+    }
+}
 
 /// Runtime options used when wiring transports into the transfer engine.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -103,6 +148,29 @@ pub(crate) async fn bind_iroh_endpoint_with_relay(
 ) -> Result<BoundEndpoint, SessionError> {
     Ok(BoundEndpoint {
         local_endpoint: build_accept_endpoint(
+            listen_addrs.into(),
+            identity,
+            relay,
+            relay_only,
+            candidates,
+        )
+        .await?,
+        candidates: candidates.clone(),
+    })
+}
+
+/// Bind an accepting endpoint for both the compatible single-file protocol and
+/// Manifest v1. The negotiated ALPN is retained on the accepted connection and
+/// routed only after the existing authentication handshake succeeds.
+pub(crate) async fn bind_iroh_transfer_endpoint_with_relay(
+    listen_addrs: impl Into<BindAddrs>,
+    identity: &IdentityConfig,
+    relay: &Option<String>,
+    relay_only: bool,
+    candidates: &CandidateFilter,
+) -> Result<BoundEndpoint, SessionError> {
+    Ok(BoundEndpoint {
+        local_endpoint: build_transfer_accept_endpoint(
             listen_addrs.into(),
             identity,
             relay,
@@ -216,6 +284,68 @@ pub async fn send_file_to_endpoint_addr(
         .send_file_with_cancel(&mut connection, file_path, resume, events.as_ref(), &cancel)
         .await;
     let _ = connection.close().await;
+    local_endpoint.close().await;
+    result
+}
+
+/// Sends one Manifest transfer set to a manually supplied peer descriptor.
+///
+/// The sender requests only `envoix/manifest/1`; it never falls back to the
+/// single-file protocol or repackages the request when the peer is older.
+pub async fn send_manifest_manual(
+    peer: PeerDescriptor,
+    request: ManifestSendRequest,
+    resume: bool,
+    config: SessionConfig,
+    pairing: &PairingConfig,
+    events: Box<dyn SessionEventSink>,
+    cancel: TransferCancelToken,
+) -> Result<ManifestTransferSummary, SessionError> {
+    let peer_addr = peer_addr_from_descriptor(&peer)?;
+    send_manifest_to_address(peer_addr, request, resume, config, pairing, events, cancel).await
+}
+
+/// Sends one Manifest transfer set to a full iroh endpoint address.
+pub async fn send_manifest_to_endpoint_addr(
+    peer_addr: EndpointAddr,
+    request: ManifestSendRequest,
+    resume: bool,
+    config: SessionConfig,
+    pairing: &PairingConfig,
+    events: Box<dyn SessionEventSink>,
+    cancel: TransferCancelToken,
+) -> Result<ManifestTransferSummary, SessionError> {
+    send_manifest_to_address(peer_addr, request, resume, config, pairing, events, cancel).await
+}
+
+async fn send_manifest_to_address(
+    peer_addr: EndpointAddr,
+    request: ManifestSendRequest,
+    resume: bool,
+    config: SessionConfig,
+    pairing: &PairingConfig,
+    events: Box<dyn SessionEventSink>,
+    cancel: TransferCancelToken,
+) -> Result<ManifestTransferSummary, SessionError> {
+    let local_endpoint = build_dial_endpoint(
+        &config.identity,
+        &config.data_relay(),
+        config.relay_only,
+        &config.candidates,
+    )
+    .await?;
+    let events: Arc<dyn SessionEventSink> = Arc::from(events);
+    let result = send_manifest_to_peer_addr(
+        local_endpoint.clone(),
+        peer_addr,
+        request,
+        resume,
+        config,
+        pairing,
+        events,
+        &cancel,
+    )
+    .await;
     local_endpoint.close().await;
     result
 }
@@ -357,6 +487,45 @@ where
     receive_one_authenticated(bound_endpoint, output_dir, config, pairing, events, cancel).await
 }
 
+/// Receives one authenticated transfer over an endpoint that advertises both
+/// supported ALPNs, reporting the bound peer descriptor before accepting.
+///
+/// Existing single-file callers keep using [`receive_file_with_bound_peer`].
+/// This additive entry point returns a typed summary because its result shape is
+/// known only after ALPN negotiation.
+pub async fn receive_transfer_with_bound_peer<F>(
+    listen_addrs: impl Into<BindAddrs>,
+    output_dir: PathBuf,
+    config: SessionConfig,
+    pairing: &PairingConfig,
+    events: Box<dyn SessionEventSink>,
+    on_bound_peer: F,
+    cancel: TransferCancelToken,
+) -> Result<SessionTransferSummary, SessionError>
+where
+    F: FnOnce(PeerDescriptor, Vec<String>) + Send,
+{
+    let bound_endpoint = bind_iroh_transfer_endpoint_with_relay(
+        listen_addrs,
+        &config.identity,
+        &config.data_relay(),
+        config.relay_only,
+        &config.candidates,
+    )
+    .await?;
+    let endpoint_addr = bound_endpoint
+        .ready_endpoint_addr(config.data_relay().is_some())
+        .await;
+    let peer = bound_endpoint.peer_descriptor()?;
+    let relay_urls = endpoint_addr
+        .relay_urls()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    on_bound_peer(peer, relay_urls);
+    receive_one_authenticated_transfer(bound_endpoint, output_dir, config, pairing, events, cancel)
+        .await
+}
+
 /// Receives one file over an mDNS-advertised endpoint: binds an mDNS endpoint,
 /// reports the bound peer descriptor through `on_bound_peer` (so the caller can
 /// advertise it), then accepts the first dialer that authenticates, ignoring
@@ -415,6 +584,47 @@ pub async fn receive_one_authenticated(
     result
 }
 
+/// Receives one authenticated transfer on an already-bound dual-protocol
+/// endpoint and routes it by the exact negotiated ALPN.
+pub async fn receive_one_authenticated_transfer(
+    bound_endpoint: BoundEndpoint,
+    output_dir: PathBuf,
+    config: SessionConfig,
+    pairing: &PairingConfig,
+    events: Box<dyn SessionEventSink>,
+    cancel: TransferCancelToken,
+) -> Result<SessionTransferSummary, SessionError> {
+    let events: Arc<dyn SessionEventSink> = Arc::from(events);
+    let transfer_events: Arc<dyn EventSink> = events.clone();
+    let mut connection =
+        match accept_or_cancel(&bound_endpoint, &cancel, transfer_events.clone()).await {
+            Ok(connection) => connection,
+            Err(error) => {
+                bound_endpoint.local_endpoint.close().await;
+                return Err(error);
+            }
+        };
+    connection.watch_path(transfer_events);
+
+    if let Err(error) = auth_bounded(authenticate_receiver(&mut connection, pairing), &cancel).await
+    {
+        let _ = connection.close().await;
+        bound_endpoint.local_endpoint.close().await;
+        return Err(error);
+    }
+    let result = receive_negotiated_transfer(
+        &mut connection,
+        output_dir,
+        &config,
+        events.as_ref(),
+        &cancel,
+    )
+    .await;
+    close_after_receive(&mut connection, &result).await;
+    bound_endpoint.local_endpoint.close().await;
+    result
+}
+
 /// Receives one file, ignoring failed pairing attempts until one peer
 /// authenticates; stops on cancellation.
 pub async fn receive_with_auth_retries(
@@ -450,9 +660,28 @@ pub async fn receive_with_auth_retries(
 /// last frame (`CompleteAck`), so it waits for the sender to close - closing
 /// first would race that close against the sender reading the ack. On failure
 /// it closes actively, since there is no ack in flight to protect.
-async fn close_after_receive(
+async fn receive_negotiated_transfer(
     connection: &mut IrohFrameConnection,
-    result: &Result<TransferSummary, SessionError>,
+    output_dir: PathBuf,
+    config: &SessionConfig,
+    events: &dyn SessionEventSink,
+    cancel: &TransferCancelToken,
+) -> Result<SessionTransferSummary, SessionError> {
+    match connection.protocol() {
+        TransferProtocol::SingleFileV1 => TransferEngine::new(config.chunk_size)
+            .receive_file_with_cancel(connection, output_dir, events, cancel)
+            .await
+            .map(SessionTransferSummary::SingleFile),
+        TransferProtocol::ManifestV1 => ManifestTransferEngine::new(config.chunk_size)
+            .receive_manifest_with_cancel(connection, output_dir, events, cancel)
+            .await
+            .map(SessionTransferSummary::Manifest),
+    }
+}
+
+async fn close_after_receive<T>(
+    connection: &mut IrohFrameConnection,
+    result: &Result<T, SessionError>,
 ) {
     match result {
         Ok(_) => connection.await_peer_close().await,
@@ -498,10 +727,32 @@ async fn dial_peer_addr(
     local_endpoint: Endpoint,
     peer_addr: EndpointAddr,
 ) -> Result<IrohFrameConnection, SessionError> {
+    dial_peer_addr_for_protocol(local_endpoint, peer_addr, TransferProtocol::SingleFileV1).await
+}
+
+async fn dial_peer_addr_for_protocol(
+    local_endpoint: Endpoint,
+    peer_addr: EndpointAddr,
+    protocol: TransferProtocol,
+) -> Result<IrohFrameConnection, SessionError> {
     let connection = local_endpoint
-        .connect(peer_addr, ALPN)
+        .connect(peer_addr, protocol.alpn())
         .await
-        .map_err(|error| CoreError::Transport(error.to_string()))?;
+        .map_err(|error| connect_error(protocol, error))?;
+    let negotiated = TransferProtocol::from_alpn(connection.alpn()).ok_or_else(|| {
+        CoreError::Protocol(format!(
+            "unsupported negotiated ALPN {:?}",
+            String::from_utf8_lossy(connection.alpn())
+        ))
+    })?;
+    if negotiated != protocol {
+        connection.close(iroh::endpoint::VarInt::from_u32(0), b"alpn mismatch");
+        return Err(CoreError::Protocol(format!(
+            "requested ALPN {:?} but negotiated {:?}",
+            String::from_utf8_lossy(protocol.alpn()),
+            String::from_utf8_lossy(negotiated.alpn())
+        )));
+    }
     let (send, recv) = connection
         .open_bi()
         .await
@@ -511,7 +762,46 @@ async fn dial_peer_addr(
         connection,
         send,
         recv,
+        protocol,
     ))
+}
+
+fn connect_error(protocol: TransferProtocol, error: iroh::endpoint::ConnectError) -> SessionError {
+    if protocol == TransferProtocol::ManifestV1 && is_no_application_protocol(&error) {
+        CoreError::Protocol(format!(
+            "{MANIFEST_UNSUPPORTED_PEER_CODE}: peer does not support {}",
+            String::from_utf8_lossy(protocol.alpn())
+        ))
+    } else {
+        CoreError::Transport(error.to_string())
+    }
+}
+
+fn is_no_application_protocol(error: &iroh::endpoint::ConnectError) -> bool {
+    const TLS_ALERT_NO_APPLICATION_PROTOCOL: u8 = 120;
+
+    fn is_tls_alert(error: &iroh::endpoint::ConnectionError) -> bool {
+        matches!(
+            error,
+            iroh::endpoint::ConnectionError::ConnectionClosed(close)
+                if close.error_code
+                    == iroh::endpoint::TransportErrorCode::crypto(
+                        TLS_ALERT_NO_APPLICATION_PROTOCOL,
+                    )
+        )
+    }
+
+    match error {
+        iroh::endpoint::ConnectError::Connection { source, .. } => is_tls_alert(source),
+        iroh::endpoint::ConnectError::Connecting { source, .. } => matches!(
+            source,
+            iroh::endpoint::ConnectingError::ConnectionError {
+                source,
+                ..
+            } if is_tls_alert(source)
+        ),
+        _ => false,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -551,6 +841,34 @@ async fn send_file_to_peer_addr(
     }
     let result = engine
         .send_file_with_cancel(&mut connection, file_path, resume, events.as_ref(), cancel)
+        .await;
+    let _ = connection.close().await;
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_manifest_to_peer_addr(
+    local_endpoint: Endpoint,
+    peer_addr: EndpointAddr,
+    request: ManifestSendRequest,
+    resume: bool,
+    config: SessionConfig,
+    pairing: &PairingConfig,
+    events: Arc<dyn SessionEventSink>,
+    cancel: &TransferCancelToken,
+) -> Result<ManifestTransferSummary, SessionError> {
+    events.on_event(TransferEvent::Connecting);
+    let mut connection =
+        dial_peer_addr_for_protocol(local_endpoint, peer_addr, TransferProtocol::ManifestV1)
+            .await?;
+    let transfer_events: Arc<dyn EventSink> = events.clone();
+    connection.watch_path(transfer_events);
+    if let Err(error) = auth_bounded(authenticate_sender(&mut connection, pairing), cancel).await {
+        let _ = connection.close().await;
+        return Err(error);
+    }
+    let result = ManifestTransferEngine::new(config.chunk_size)
+        .send_manifest_with_cancel(&mut connection, request, resume, events.as_ref(), cancel)
         .await;
     let _ = connection.close().await;
     result

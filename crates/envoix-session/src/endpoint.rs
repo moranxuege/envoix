@@ -1,5 +1,5 @@
 use envoix_error::CoreError;
-use envoix_protocol::PeerDescriptor;
+use envoix_protocol::{PeerDescriptor, TransferProtocol};
 #[cfg(any(target_os = "ios", target_os = "android"))]
 use iroh::dns::{BoxIter, DnsError, DnsResolver, Resolver, TxtRecordData};
 use iroh::endpoint::{BindOpts, QuicTransportConfig, RelayMode, VarInt, presets};
@@ -12,7 +12,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use crate::candidates::CandidateFilter;
 use crate::connection::IrohFrameConnection;
 use crate::identity::{IdentityConfig, load_secret_key};
-use crate::{ALPN, EventSink, SessionError, TransferEvent};
+use crate::{EventSink, SessionError, TransferEvent};
 
 const ENDPOINT_ADDR_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const ENDPOINT_ADDR_WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(50);
@@ -524,8 +524,18 @@ impl BoundEndpoint {
         let connection = incoming
             .await
             .map_err(|error| CoreError::Transport(error.to_string()))?;
+        let alpn = connection.alpn();
+        let protocol = TransferProtocol::from_alpn(alpn).ok_or_else(|| {
+            CoreError::Protocol(format!(
+                "unsupported negotiated ALPN {:?}",
+                String::from_utf8_lossy(alpn)
+            ))
+        })?;
         events.on_event(TransferEvent::Diagnostic {
-            message: "accept connection established; awaiting stream".to_string(),
+            message: format!(
+                "accept connection established alpn={}",
+                String::from_utf8_lossy(alpn)
+            ),
         });
         let (send, recv) = connection
             .accept_bi()
@@ -539,6 +549,7 @@ impl BoundEndpoint {
             connection,
             send,
             recv,
+            protocol,
         ))
     }
 }
@@ -640,7 +651,26 @@ pub(crate) async fn build_accept_endpoint(
     build_endpoint(
         Some(listen_addrs),
         identity,
-        true,
+        &[TransferProtocol::SingleFileV1],
+        false,
+        relay,
+        relay_only,
+        candidates,
+    )
+    .await
+}
+
+pub(crate) async fn build_transfer_accept_endpoint(
+    listen_addrs: BindAddrs,
+    identity: &IdentityConfig,
+    relay: &Option<String>,
+    relay_only: bool,
+    candidates: &CandidateFilter,
+) -> Result<Endpoint, SessionError> {
+    build_endpoint(
+        Some(listen_addrs),
+        identity,
+        &[TransferProtocol::SingleFileV1, TransferProtocol::ManifestV1],
         false,
         relay,
         relay_only,
@@ -659,7 +689,7 @@ pub(crate) async fn build_advertising_accept_endpoint(
     build_endpoint(
         Some(listen_addrs),
         identity,
-        true,
+        &[TransferProtocol::SingleFileV1],
         true,
         relay,
         relay_only,
@@ -674,7 +704,7 @@ pub(crate) async fn build_dial_endpoint(
     relay_only: bool,
     candidates: &CandidateFilter,
 ) -> Result<Endpoint, SessionError> {
-    build_endpoint(None, identity, false, false, relay, relay_only, candidates).await
+    build_endpoint(None, identity, &[], false, relay, relay_only, candidates).await
 }
 
 /// QUIC transport tuning for high-latency links (e.g. trans-Pacific, ~280 ms RTT).
@@ -703,7 +733,7 @@ fn data_transport_config() -> QuicTransportConfig {
 async fn build_endpoint(
     local_listen_addrs: Option<BindAddrs>,
     identity: &IdentityConfig,
-    accept_incoming: bool,
+    accepted_protocols: &[TransferProtocol],
     advertise_self: bool,
     relay: &Option<String>,
     relay_only: bool,
@@ -729,8 +759,13 @@ async fn build_endpoint(
     {
         builder = builder.dns_resolver(platform_system_dns_resolver());
     }
-    if accept_incoming {
-        builder = builder.alpns(vec![ALPN.to_vec()]);
+    if !accepted_protocols.is_empty() {
+        builder = builder.alpns(
+            accepted_protocols
+                .iter()
+                .map(|protocol| protocol.alpn().to_vec())
+                .collect(),
+        );
     }
     if advertise_self {
         builder = builder.address_lookup(MdnsAddressLookup::builder().advertise(true));

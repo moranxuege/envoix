@@ -53,23 +53,34 @@ The additive contract, wire-codec, and core-engine slices are implemented as of
 - the receiver persists its accepted path map by manifest ID, so a resumed
   directory transfer reuses the same claimed root instead of creating a new
   suffix on every attempt. Already committed identical entries become skips;
-- the existing session now references the shared single-file ALPN constant but
-  advertises only that protocol. It intentionally does not advertise Manifest
-  until authenticated Manifest routing and native-client integration exist.
+- existing single-file session entry points still advertise only `envoix/1`;
+  additive negotiated receive entry points advertise both ALPNs, retain the
+  selected protocol on the iroh connection, authenticate with the unchanged
+  `Frame::Auth` handshake, and only then route to the matching transfer engine;
+- Manifest manual/direct send entry points request only
+  `envoix/manifest/1`. A legacy single-file receiver rejects that ALPN before
+  authentication or payload writes and the sender reports the stable
+  `manifest.unsupported_peer` diagnostic instead of falling back;
+- real iroh tests prove Manifest directory/multi-file routing, old single-file
+  compatibility on the same dual endpoint, pre-engine authentication failure,
+  and legacy-peer ALPN rejection.
 
-The engine is currently exercised over an in-memory full-duplex connection; the
-shipping clients do **not** yet transfer multiple files or directories.
-Authenticated ALPN session routing, durable Activity results, FFI, and Apple UI
-remain subsequent slices.
+The engine is exercised both over an in-memory full-duplex connection and the
+additive manual/direct iroh session path. Shipping clients still do **not**
+transfer multiple files or directories: mDNS/room source wrappers, client
+facade selection, durable Activity results, FFI, and Apple UI remain subsequent
+slices.
 
 ## Compatibility Boundary
 
 `ManifestV1` is additive. The existing `envoix/1` ALPN, `Hello`, `FileHeader`,
 single-file engine, public client methods, and native bindings remain unchanged.
 The first implementation introduces a separate `envoix/manifest/1` ALPN and a
-manifest-specific frame family. Until the Manifest engine lands, current
-receivers advertise only `envoix/1`. The completed engine will advertise both
-ALPNs and select one from the requested transfer shape before authentication.
+manifest-specific frame family. Legacy single-file receivers continue to
+advertise only `envoix/1`. The additive negotiated receiver advertises both
+ALPNs, while the sender selects the one required by the transfer shape before
+authentication. The receiver records the negotiated ALPN, completes the
+existing authentication handshake, and only then invokes either engine.
 
 This separation is intentional:
 
@@ -354,8 +365,9 @@ The shared transfer record should expose:
 
 ## Follow-up Issues
 
-- Implement Manifest-authenticated ALPN session routing without changing the
-  existing single-file entry points.
+- Extend the authenticated Manifest session path through mDNS, room, client,
+  durable Activity, and FFI entry points without changing existing single-file
+  APIs.
 - Add multi-file selection in Apple sender UI.
 - Add directory transfer support on desktop.
 - Add manifest-aware receive path validation tests.
