@@ -142,7 +142,9 @@ kill_processes_using_binary() {
     local actual pid proc_exe target
 
     target="$(readlink -f "$binary" 2>/dev/null || true)"
-    [ -n "$target" ] || return
+    # Bare `return` yields the failed test's status (1) under `set -e`, aborting
+    # the caller on a clean box where the binary doesn't exist yet. Return 0.
+    [ -n "$target" ] || return 0
     for proc_exe in /proc/[0-9]*/exe; do
         actual="$(readlink -f "$proc_exe" 2>/dev/null || true)"
         actual="${actual% (deleted)}"
@@ -793,6 +795,7 @@ setup_network() {
     privileged iptables -t nat -I POSTROUTING 1 -s 198.18.0.0/24 -o "$upstream" -j MASQUERADE
     in_namespace "$ns_a" dnsmasq --keep-in-foreground --bind-interfaces --interface=lan0 \
         --pid-file="$dnsmasq_a_pid_file" \
+        --dhcp-leasefile="$dnsmasq_a_lease_file" \
         --log-dhcp --log-queries --log-facility=- \
         --dhcp-range=192.168.101.10,192.168.101.99,255.255.255.0,1h \
         --enable-ra --dhcp-range=2001:db8:101::,ra-only,64,2h \
@@ -802,6 +805,7 @@ setup_network() {
     dnsmasq_a_pid=$!
     in_namespace "$ns_b" dnsmasq --keep-in-foreground --bind-interfaces --interface=lan0 \
         --pid-file="$dnsmasq_b_pid_file" \
+        --dhcp-leasefile="$dnsmasq_b_lease_file" \
         --log-dhcp --log-queries --log-facility=- \
         --dhcp-range=192.168.102.10,192.168.102.99,255.255.255.0,1h \
         --enable-ra --dhcp-range=2001:db8:102::,ra-only,64,2h \
@@ -934,7 +938,8 @@ cleanup() {
         privileged ip link delete "$lan_bridge_b" >/dev/null 2>&1
         privileged ip link delete "$wan_bridge" >/dev/null 2>&1
     fi
-    rm -f "${dnsmasq_a_pid_file:-}" "${dnsmasq_b_pid_file:-}"
+    privileged rm -f "${dnsmasq_a_pid_file:-}" "${dnsmasq_b_pid_file:-}" \
+        "${dnsmasq_a_lease_file:-}" "${dnsmasq_b_lease_file:-}" 2>/dev/null || true
 }
 
 while [ "$#" -gt 0 ]; do
@@ -988,8 +993,13 @@ relay_binary="$tool_root/bin/iroh-relay"
 relay_config="$log_dir/relay.toml"
 staged_jni="$repo_root/android/app/src/main/jniLibs/x86_64/libenvoix_jni.so"
 jni_backup="$log_dir/libenvoix_jni.so.before-nat-test"
-dnsmasq_a_pid_file="$log_dir/dnsmasq-$net_id-a.pid"
-dnsmasq_b_pid_file="$log_dir/dnsmasq-$net_id-b.pid"
+# dnsmasq is AppArmor-confined to standard paths, so its pidfile must live in
+# /run as *dnsmasq*.pid (not the repo build dir) and its leasefile under
+# /var/lib/misc as dnsmasq.*.leases. Root (via `privileged`) owns both.
+dnsmasq_a_pid_file="/run/nat-test-$net_id-a-dnsmasq.pid"
+dnsmasq_b_pid_file="/run/nat-test-$net_id-b-dnsmasq.pid"
+dnsmasq_a_lease_file="/var/lib/misc/dnsmasq.nat-$net_id-a.leases"
+dnsmasq_b_lease_file="/var/lib/misc/dnsmasq.nat-$net_id-b.leases"
 mkdir -p "$log_dir"
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -1012,11 +1022,14 @@ emulator_debug=()
 if [ "$verbose" -eq 1 ]; then
     emulator_debug=(-debug wifi,socket)
 fi
-"$emulator" "@$avd_a" -port 5554 -no-snapshot \
+# -no-window + software GPU so the emulators run headless (no X/GL host deps).
+# `swiftshader` is the mode name in emulator 36+ (the old `swiftshader_indirect`
+# is rejected); the -gpu flag is authoritative over any hw.gpu.mode in config.ini.
+"$emulator" "@$avd_a" -port 5554 -no-snapshot -no-window -gpu swiftshader \
     -feature -WiFiPacketStream -wifi-tap "$tap_a" \
     "${emulator_debug[@]}" \
     >"$log_dir/emulator-5554.log" 2>&1 &
-"$emulator" "@$avd_b" -port 5556 -no-snapshot \
+"$emulator" "@$avd_b" -port 5556 -no-snapshot -no-window -gpu swiftshader \
     -feature -WiFiPacketStream -wifi-tap "$tap_b" \
     "${emulator_debug[@]}" \
     >"$log_dir/emulator-5556.log" 2>&1 &
