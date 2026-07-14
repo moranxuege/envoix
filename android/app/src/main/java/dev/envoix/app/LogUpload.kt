@@ -59,7 +59,7 @@ object LogUpload {
     internal fun uploadServers(server: String): List<String> {
         val configured = server.trim().trimEnd('/')
         val preferred =
-            if (configured == Endpoints.DEPRECATED_LOG_SERVER) {
+            if (configured == Endpoints.LOG_SERVER_LEGACY) {
                 Endpoints.LOG_SERVER
             } else {
                 configured

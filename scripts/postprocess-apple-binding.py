@@ -4,6 +4,8 @@
 from pathlib import Path
 import sys
 
+EXPECTED_CALLBACK_VTABLES = 3
+
 
 def replace_once(text: str, old: str, new: str, label: str) -> str:
     count = text.count(old)
@@ -41,8 +43,10 @@ def main() -> None:
     // and never mutated by either side of the FFI.  Its fields are C function pointers.
     nonisolated(unsafe) static let vtablePtr: UnsafePointer<"""
     count = text.count(old_vtable)
-    if count != 2:
-        raise SystemExit(f"error: expected two callback vtables, found {count}")
+    if count != EXPECTED_CALLBACK_VTABLES:
+        raise SystemExit(
+            f"error: expected {EXPECTED_CALLBACK_VTABLES} callback vtables, found {count}"
+        )
     text = text.replace(old_vtable, new_vtable)
     path.write_text(text)
 

@@ -16,6 +16,7 @@ internal data class TransferSpec(
     val internetAvailable: Boolean,
     val useRoom: Boolean,
     val useMdns: Boolean,
+    val receiptServer: String,
     val saveTreeUri: String,
     val saveFolder: String,
 ) {
@@ -63,6 +64,7 @@ internal object TransferSpecStore {
             .put("internet_available", internetAvailable)
             .put("use_room", useRoom)
             .put("use_mdns", useMdns)
+            .put("receipt_server", receiptServer)
             .put("save_tree_uri", saveTreeUri)
             .put("save_folder", saveFolder)
 
@@ -79,6 +81,7 @@ internal object TransferSpecStore {
             internetAvailable = getBoolean("internet_available"),
             useRoom = getBoolean("use_room"),
             useMdns = getBoolean("use_mdns"),
+            receiptServer = optString("receipt_server", Endpoints.LOG_SERVER),
             saveTreeUri = optString("save_tree_uri"),
             saveFolder = optString("save_folder", "Envoix"),
         )

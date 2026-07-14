@@ -54,6 +54,9 @@ const ROOM_SEND_FALLBACK_TIMEOUT: Duration = Duration::from_secs(60);
 /// Native UIs do not need one callback per network chunk. A bounded cadence
 /// prevents large transfers from flooding the Swift/Kotlin main thread.
 const NATIVE_PROGRESS_INTERVAL_MS: u64 = 500;
+/// Version of the additive native API contract exposed by this crate.
+const ENVOIX_FFI_API_VERSION: u32 = 1;
+const NATIVE_PUBLICATION_EXTRAS_KEY: &str = "native_publication";
 /// Runtime settings supplied by native UIs.
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct EnvoixRuntimeSettings {
@@ -138,6 +141,28 @@ pub fn fold_transfer_activity(
 ) -> FfiTransferActivityRecord {
     record.apply_event(&event);
     record
+}
+
+/// Reports the native bridge version and optional capabilities at runtime.
+#[uniffi::export]
+pub fn envoix_core_info() -> FfiCoreInfo {
+    FfiCoreInfo {
+        ffi_api_version: ENVOIX_FFI_API_VERSION,
+        core_version: env!("CARGO_PKG_VERSION").to_string(),
+        capabilities: vec![
+            "activity_actions_v1".to_string(),
+            "durable_activity_sequence_v1".to_string(),
+            "native_publication_v1".to_string(),
+            "durable_publication_recovery_v1".to_string(),
+            "per_session_receipt_endpoint_v1".to_string(),
+        ],
+    }
+}
+
+/// Projects canonical lifecycle state into native UI action availability.
+#[uniffi::export]
+pub fn transfer_activity_actions(record: FfiTransferActivityRecord) -> FfiTransferActivityActions {
+    FfiTransferActivityActions::for_record(&record)
 }
 
 /// Error surfaced across the FFI boundary.
@@ -342,7 +367,7 @@ pub struct FfiPairingInvite {
     pub role: FfiInviteRole,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize, uniffi::Enum)]
 pub enum FfiTransferDirection {
     Send,
     Receive,
@@ -524,6 +549,64 @@ pub enum FfiTransferActivityState {
     Unknown,
 }
 
+/// Runtime identity used to detect a stale but otherwise loadable native core.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct FfiCoreInfo {
+    pub ffi_api_version: u32,
+    pub core_version: String,
+    pub capabilities: Vec<String>,
+}
+
+/// Canonical action policy for an Activity card.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct FfiTransferActivityActions {
+    pub can_pause: bool,
+    pub can_resume: bool,
+    pub can_cancel: bool,
+    pub can_delete: bool,
+    pub is_finalizing: bool,
+}
+
+impl FfiTransferActivityActions {
+    fn for_record(activity: &FfiTransferActivityRecord) -> Self {
+        let is_finalizing = is_finalizing_activity(activity);
+        let can_pause = can_pause_durable_activity(activity);
+        let can_resume = matches!(
+            activity.state,
+            FfiTransferActivityState::Paused | FfiTransferActivityState::Unconfirmed
+        ) || matches!(activity.state, FfiTransferActivityState::Failed)
+            && activity.retryable
+            || matches!(activity.state, FfiTransferActivityState::Publishing) && activity.retryable;
+        let can_cancel = matches!(
+            activity.state,
+            FfiTransferActivityState::Queued
+                | FfiTransferActivityState::Binding
+                | FfiTransferActivityState::WaitingForPeer
+                | FfiTransferActivityState::Pairing
+                | FfiTransferActivityState::Connecting
+                | FfiTransferActivityState::Transferring
+                | FfiTransferActivityState::Verifying
+                | FfiTransferActivityState::Unconfirmed
+                | FfiTransferActivityState::Paused
+        ) && !is_finalizing
+            || matches!(activity.state, FfiTransferActivityState::Publishing) && activity.retryable;
+        let can_delete = matches!(
+            activity.state,
+            FfiTransferActivityState::Completed
+                | FfiTransferActivityState::Failed
+                | FfiTransferActivityState::Canceled
+        );
+
+        Self {
+            can_pause,
+            can_resume,
+            can_cancel,
+            can_delete,
+            is_finalizing,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct FfiTransferActivityRecord {
     pub activity_id: String,
@@ -562,7 +645,7 @@ pub struct FfiTransferActivityRecord {
     pub limits: FfiTransferLimits,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize, uniffi::Enum)]
 pub enum FfiFailureCode {
     UserCanceled,
     PeerCanceled,
@@ -580,7 +663,7 @@ pub enum FfiFailureCode {
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize, uniffi::Enum)]
 pub enum FfiFailureCategory {
     User,
     Network,
@@ -594,14 +677,14 @@ pub enum FfiFailureCategory {
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize, uniffi::Enum)]
 pub enum FfiFailureOrigin {
     Local,
     Peer,
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize, uniffi::Enum)]
 pub enum FfiFailurePhase {
     Setup,
     Binding,
@@ -617,7 +700,7 @@ pub enum FfiFailurePhase {
     CleaningUp,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize, uniffi::Enum)]
 pub enum FfiRecoveryAction {
     Retry,
     Resume,
@@ -630,7 +713,7 @@ pub enum FfiRecoveryAction {
     None,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize, uniffi::Record)]
 pub struct FfiTransferFailure {
     pub code: FfiFailureCode,
     pub category: FfiFailureCategory,
@@ -643,6 +726,21 @@ pub struct FfiTransferFailure {
     pub recovery_action: FfiRecoveryAction,
     pub user_message_key: String,
     pub diagnostic_message: String,
+}
+
+/// Frontend-owned destination for publishing a staged receive.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize, uniffi::Record)]
+pub struct FfiNativePublicationTarget {
+    pub destination_path: String,
+    pub bookmark: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
+struct PersistedNativePublication {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target: Option<FfiNativePublicationTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    failure: Option<FfiTransferFailure>,
 }
 
 /// Observer implemented by the native UI to receive transfer updates.
@@ -684,12 +782,50 @@ pub trait MailboxObserver: Send + Sync {
     fn on_post_receipt(&self, activity_id: String, key: String, blob: Vec<u8>);
 }
 
+/// Versioned native receipt courier that receives the endpoint frozen in the
+/// durable session. `None` is reserved for records created before that field
+/// existed, allowing the frontend to use its current configured endpoint.
+#[uniffi::export(with_foreign)]
+pub trait MailboxObserverV2: Send + Sync {
+    fn on_fetch_receipt(&self, activity_id: String, key: String, server: Option<String>);
+    fn on_post_receipt(
+        &self,
+        activity_id: String,
+        key: String,
+        blob: Vec<u8>,
+        server: Option<String>,
+    );
+}
+
+#[derive(Clone)]
+enum NativeMailboxObserver {
+    V1(Arc<dyn MailboxObserver>),
+    V2(Arc<dyn MailboxObserverV2>),
+}
+
+impl NativeMailboxObserver {
+    fn fetch(&self, activity_id: String, key: String, server: Option<String>) {
+        match self {
+            Self::V1(observer) => observer.on_fetch_receipt(activity_id, key),
+            Self::V2(observer) => observer.on_fetch_receipt(activity_id, key, server),
+        }
+    }
+
+    fn post(&self, activity_id: String, key: String, blob: Vec<u8>, server: Option<String>) {
+        match self {
+            Self::V1(observer) => observer.on_post_receipt(activity_id, key, blob),
+            Self::V2(observer) => observer.on_post_receipt(activity_id, key, blob, server),
+        }
+    }
+}
+
 /// One durable transfer card driven by the canonical Rust state machine.
 #[derive(uniffi::Object)]
 pub struct DurableEnvoixSession {
     driver: Mutex<Option<CanonicalTransferSession>>,
     activity: Arc<Mutex<FfiTransferActivityRecord>>,
     pending_receipt_key: Arc<Mutex<Option<String>>>,
+    platform_extras: Mutex<serde_json::Value>,
 }
 
 #[uniffi::export]
@@ -744,6 +880,104 @@ impl DurableEnvoixSession {
             return false;
         };
         driver.receipt_posted()
+    }
+
+    /// Persist or replace the native publication destination without
+    /// retransmitting the staged receive. Replacing a target clears the last
+    /// publication failure so the same card can be retried in place.
+    pub fn set_publication_target(&self, mut target: FfiNativePublicationTarget) -> bool {
+        target.destination_path = target.destination_path.trim().to_string();
+        let activity = self.activity.lock().unwrap();
+        if target.destination_path.is_empty()
+            || activity.direction != FfiTransferDirection::Receive
+            || matches!(
+                activity.state,
+                FfiTransferActivityState::Completed
+                    | FfiTransferActivityState::Canceled
+                    | FfiTransferActivityState::Failed
+            )
+        {
+            return false;
+        }
+        drop(activity);
+
+        let mut extras = self.platform_extras.lock().unwrap();
+        let mut candidate = extras.clone();
+        let Some(object) = candidate.as_object_mut() else {
+            return false;
+        };
+        object.insert(
+            NATIVE_PUBLICATION_EXTRAS_KEY.to_string(),
+            serde_json::to_value(PersistedNativePublication {
+                target: Some(target),
+                failure: None,
+            })
+            .expect("native publication metadata must serialize"),
+        );
+        let driver_guard = self.driver.lock().unwrap();
+        let Some(driver) = driver_guard.as_ref() else {
+            return false;
+        };
+        if !driver.set_extras(candidate.clone()) {
+            return false;
+        }
+        drop(driver_guard);
+        *extras = candidate;
+        drop(extras);
+        let mut activity = self.activity.lock().unwrap();
+        activity.clear_failure_metadata(now_ms());
+        true
+    }
+
+    /// Returns the canonical native publication destination after restore.
+    pub fn publication_target(&self) -> Option<FfiNativePublicationTarget> {
+        native_publication_metadata_from_extras(&self.platform_extras.lock().unwrap())?.target
+    }
+
+    /// Persist a platform publication failure while keeping the canonical
+    /// transfer in Publishing so it can retry the same staged bytes.
+    pub fn publication_failed(&self, failure: FfiTransferFailure) -> bool {
+        let activity = self.activity.lock().unwrap();
+        if activity.state != FfiTransferActivityState::Publishing
+            || !failure.retryable
+            || !matches!(
+                failure.direction,
+                FfiTransferDirection::Receive | FfiTransferDirection::Unknown
+            )
+        {
+            return false;
+        }
+        drop(activity);
+
+        let mut extras = self.platform_extras.lock().unwrap();
+        let mut candidate = extras.clone();
+        let Some(object) = candidate.as_object_mut() else {
+            return false;
+        };
+        let mut publication: PersistedNativePublication = object
+            .get(NATIVE_PUBLICATION_EXTRAS_KEY)
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .unwrap_or_default();
+        publication.failure = Some(failure.clone());
+        object.insert(
+            NATIVE_PUBLICATION_EXTRAS_KEY.to_string(),
+            serde_json::to_value(publication).expect("native publication metadata must serialize"),
+        );
+        let driver_guard = self.driver.lock().unwrap();
+        let Some(driver) = driver_guard.as_ref() else {
+            return false;
+        };
+        if !driver.set_extras(candidate.clone()) {
+            return false;
+        }
+        drop(driver_guard);
+        *extras = candidate;
+        drop(extras);
+        self.activity
+            .lock()
+            .unwrap()
+            .apply_publication_failure(&failure, now_ms());
+        true
     }
 
     /// Confirms that a staged receive is now visible in Files/MediaStore.
@@ -817,10 +1051,50 @@ fn can_cancel_durable_activity(activity: &FfiTransferActivityRecord) -> bool {
 #[uniffi::export]
 pub fn start_durable_transfer(
     settings: EnvoixRuntimeSettings,
-    mut request: FfiTransferRequest,
+    request: FfiTransferRequest,
     records_dir: String,
     observer: Arc<dyn TransferObserver>,
     mailbox: Arc<dyn MailboxObserver>,
+) -> Result<Arc<DurableEnvoixSession>, EnvoixError> {
+    start_durable_transfer_impl(
+        settings,
+        request,
+        records_dir,
+        observer,
+        NativeMailboxObserver::V1(mailbox),
+        None,
+    )
+}
+
+/// Starts a durable transfer with a versioned courier contract. The receipt
+/// endpoint is frozen into the canonical context before the first snapshot.
+#[uniffi::export]
+pub fn start_durable_transfer_v2(
+    settings: EnvoixRuntimeSettings,
+    request: FfiTransferRequest,
+    records_dir: String,
+    receipt_server: String,
+    observer: Arc<dyn TransferObserver>,
+    mailbox: Arc<dyn MailboxObserverV2>,
+) -> Result<Arc<DurableEnvoixSession>, EnvoixError> {
+    let receipt_server = normalized_receipt_server(&receipt_server)?;
+    start_durable_transfer_impl(
+        settings,
+        request,
+        records_dir,
+        observer,
+        NativeMailboxObserver::V2(mailbox),
+        receipt_server,
+    )
+}
+
+fn start_durable_transfer_impl(
+    settings: EnvoixRuntimeSettings,
+    mut request: FfiTransferRequest,
+    records_dir: String,
+    observer: Arc<dyn TransferObserver>,
+    mailbox: NativeMailboxObserver,
+    receipt_server: Option<String>,
 ) -> Result<Arc<DurableEnvoixSession>, EnvoixError> {
     if request.activity_id.trim().is_empty() {
         request.activity_id = next_activity_id();
@@ -831,6 +1105,9 @@ pub fn start_durable_transfer(
     let store = RecordStore::new(records_dir);
     let record_id = stable_record_id(&request.activity_id);
     let mut context = canonical_context_for_request(&settings, &request)?;
+    if receipt_server.is_some() {
+        context.client.receipt_server = receipt_server;
+    }
     if context.requires_stable_listener_identity() {
         context.client.identity_file = Some(store.identity_path(record_id));
     }
@@ -849,14 +1126,19 @@ pub fn start_durable_transfer(
     let extras = serde_json::json!({ "external_record_id": request.activity_id.clone() });
     let (driver, notices) = {
         let _guard = runtime.enter();
-        CanonicalTransferSession::start(context.clone(), Some((store, record_id)), Some(extras))
-            .map_err(op_err)?
+        CanonicalTransferSession::start(
+            context.clone(),
+            Some((store, record_id)),
+            Some(extras.clone()),
+        )
+        .map_err(op_err)?
     };
     let pending_receipt_key = Arc::new(Mutex::new(None));
     let session = Arc::new(DurableEnvoixSession {
         driver: Mutex::new(Some(driver)),
         activity: activity.clone(),
         pending_receipt_key: pending_receipt_key.clone(),
+        platform_extras: Mutex::new(extras),
     });
     runtime.handle().spawn(drive_durable_notices(
         request.activity_id,
@@ -877,6 +1159,37 @@ pub fn restore_durable_transfer(
     observer: Arc<dyn TransferObserver>,
     mailbox: Arc<dyn MailboxObserver>,
 ) -> Result<Arc<DurableEnvoixSession>, EnvoixError> {
+    restore_durable_transfer_impl(
+        activity_id,
+        records_dir,
+        observer,
+        NativeMailboxObserver::V1(mailbox),
+    )
+}
+
+/// Restores a durable transfer using the endpoint-aware courier. The endpoint
+/// comes exclusively from the persisted session context.
+#[uniffi::export]
+pub fn restore_durable_transfer_v2(
+    activity_id: String,
+    records_dir: String,
+    observer: Arc<dyn TransferObserver>,
+    mailbox: Arc<dyn MailboxObserverV2>,
+) -> Result<Arc<DurableEnvoixSession>, EnvoixError> {
+    restore_durable_transfer_impl(
+        activity_id,
+        records_dir,
+        observer,
+        NativeMailboxObserver::V2(mailbox),
+    )
+}
+
+fn restore_durable_transfer_impl(
+    activity_id: String,
+    records_dir: String,
+    observer: Arc<dyn TransferObserver>,
+    mailbox: NativeMailboxObserver,
+) -> Result<Arc<DurableEnvoixSession>, EnvoixError> {
     let activity_id = required_value(&activity_id, "activity_id")?;
     let records_dir = required_value(&records_dir, "records_dir")?;
     let store = RecordStore::new(records_dir);
@@ -895,6 +1208,10 @@ pub fn restore_durable_transfer(
     }
     let record_id = record.id;
     let context = record.context.clone();
+    let platform_extras = record
+        .platform_extras
+        .clone()
+        .unwrap_or_else(|| serde_json::json!({ "external_record_id": activity_id.clone() }));
     let activity = Arc::new(Mutex::new(activity_from_canonical_record(&record)));
     let (driver, notices) = {
         let _guard = runtime.enter();
@@ -905,6 +1222,7 @@ pub fn restore_durable_transfer(
         driver: Mutex::new(Some(driver)),
         activity: activity.clone(),
         pending_receipt_key: pending_receipt_key.clone(),
+        platform_extras: Mutex::new(platform_extras),
     });
     runtime.handle().spawn(drive_durable_notices(
         activity_id,
@@ -2028,6 +2346,17 @@ impl FfiTransferActivityRecord {
         self.updated_at_ms = ts_ms;
         self.completed_at_ms = ts_ms;
         self.state = FfiTransferActivityState::Failed;
+        self.apply_failure_metadata(failure);
+    }
+
+    fn apply_publication_failure(&mut self, failure: &FfiTransferFailure, ts_ms: u64) {
+        self.updated_at_ms = ts_ms;
+        self.completed_at_ms = 0;
+        self.state = FfiTransferActivityState::Publishing;
+        self.apply_failure_metadata(failure);
+    }
+
+    fn apply_failure_metadata(&mut self, failure: &FfiTransferFailure) {
         if failure.direction != FfiTransferDirection::Unknown {
             self.direction = failure.direction;
         }
@@ -2042,6 +2371,18 @@ impl FfiTransferActivityRecord {
         self.user_message_key = failure.user_message_key.clone();
         self.retryable = failure.retryable;
         self.recovery_action = failure.recovery_action;
+    }
+
+    fn clear_failure_metadata(&mut self, ts_ms: u64) {
+        self.updated_at_ms = ts_ms;
+        self.diagnostic_message.clear();
+        self.failure_code = FfiFailureCode::Unknown;
+        self.failure_category = FfiFailureCategory::Unknown;
+        self.failure_phase = FfiFailurePhase::Setup;
+        self.failure_origin = FfiFailureOrigin::Unknown;
+        self.user_message_key.clear();
+        self.retryable = false;
+        self.recovery_action = FfiRecoveryAction::None;
     }
 
     fn apply_completed(
@@ -2141,7 +2482,7 @@ async fn drive_durable_notices(
     mut notices: mpsc::UnboundedReceiver<SessionNotice>,
     activity: Arc<Mutex<FfiTransferActivityRecord>>,
     observer: Arc<dyn TransferObserver>,
-    mailbox: Arc<dyn MailboxObserver>,
+    mailbox: NativeMailboxObserver,
     pending_receipt_key: Arc<Mutex<Option<String>>>,
 ) {
     let mut previous_session = None;
@@ -2189,12 +2530,12 @@ async fn drive_durable_notices(
                 }
                 previous_session = Some(snapshot.session);
             }
-            SessionNotice::FetchReceipt { key, .. } => {
+            SessionNotice::FetchReceipt { key, server } => {
                 *pending_receipt_key.lock().unwrap() = Some(key.clone());
-                mailbox.on_fetch_receipt(activity_id.clone(), key);
+                mailbox.fetch(activity_id.clone(), key, server);
             }
-            SessionNotice::PostReceipt { key, blob, .. } => {
-                mailbox.on_post_receipt(activity_id.clone(), key, blob);
+            SessionNotice::PostReceipt { key, blob, server } => {
+                mailbox.post(activity_id.clone(), key, blob, server);
             }
         }
     }
@@ -2319,6 +2660,23 @@ fn canonical_context_for_request(
     })
 }
 
+fn normalized_receipt_server(value: &str) -> Result<Option<String>, EnvoixError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.chars().any(char::is_whitespace)
+        || !["http://", "https://"]
+            .iter()
+            .any(|prefix| value.starts_with(prefix))
+    {
+        return Err(EnvoixError::Operation {
+            reason: "receipt_server must be an HTTP(S) endpoint".to_string(),
+        });
+    }
+    Ok(Some(value.trim_end_matches('/').to_string()))
+}
+
 fn activity_from_canonical_record(record: &TransferRecord) -> FfiTransferActivityRecord {
     let activity_id = external_activity_id(record);
     let mut request = request_from_canonical_context(&activity_id, &record.context);
@@ -2347,7 +2705,29 @@ fn activity_from_canonical_record(record: &TransferRecord) -> FfiTransferActivit
         &record.context,
         record.updated_ms,
     );
+    if activity.state == FfiTransferActivityState::Publishing
+        && let Some(failure) =
+            native_publication_metadata(record).and_then(|publication| publication.failure)
+    {
+        activity.apply_publication_failure(&failure, record.updated_ms);
+    }
     activity
+}
+
+fn native_publication_metadata(record: &TransferRecord) -> Option<PersistedNativePublication> {
+    record
+        .platform_extras
+        .as_ref()
+        .and_then(native_publication_metadata_from_extras)
+}
+
+fn native_publication_metadata_from_extras(
+    extras: &serde_json::Value,
+) -> Option<PersistedNativePublication> {
+    extras
+        .as_object()
+        .and_then(|extras| extras.get(NATIVE_PUBLICATION_EXTRAS_KEY))
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
 }
 
 fn external_activity_id(record: &TransferRecord) -> String {
@@ -3880,10 +4260,7 @@ mod tests {
     }
 
     enum MailboxMsg {
-        Fetch {
-            activity_id: String,
-            key: String,
-        },
+        Fetch,
         Post {
             activity_id: String,
             key: String,
@@ -3894,8 +4271,8 @@ mod tests {
     struct TestMailbox(Sender<MailboxMsg>);
 
     impl MailboxObserver for TestMailbox {
-        fn on_fetch_receipt(&self, activity_id: String, key: String) {
-            let _ = self.0.send(MailboxMsg::Fetch { activity_id, key });
+        fn on_fetch_receipt(&self, _activity_id: String, _key: String) {
+            let _ = self.0.send(MailboxMsg::Fetch);
         }
 
         fn on_post_receipt(&self, activity_id: String, key: String, blob: Vec<u8>) {
@@ -3904,6 +4281,37 @@ mod tests {
                 key,
                 blob,
             });
+        }
+    }
+
+    enum MailboxV2Msg {
+        Fetch {
+            activity_id: String,
+            key: String,
+            server: Option<String>,
+        },
+        Post,
+    }
+
+    struct TestMailboxV2(Sender<MailboxV2Msg>);
+
+    impl MailboxObserverV2 for TestMailboxV2 {
+        fn on_fetch_receipt(&self, activity_id: String, key: String, server: Option<String>) {
+            let _ = self.0.send(MailboxV2Msg::Fetch {
+                activity_id,
+                key,
+                server,
+            });
+        }
+
+        fn on_post_receipt(
+            &self,
+            _activity_id: String,
+            _key: String,
+            _blob: Vec<u8>,
+            _server: Option<String>,
+        ) {
+            let _ = self.0.send(MailboxV2Msg::Post);
         }
     }
 
@@ -4335,6 +4743,16 @@ mod tests {
         assert!(is_finalizing_activity(&activity));
         assert!(!can_pause_durable_activity(&activity));
         assert!(!can_cancel_durable_activity(&activity));
+        assert_eq!(
+            transfer_activity_actions(activity.clone()),
+            FfiTransferActivityActions {
+                can_pause: false,
+                can_resume: false,
+                can_cancel: false,
+                can_delete: false,
+                is_finalizing: true,
+            }
+        );
 
         let session = EnvoixSession::new_with_settings(EnvoixRuntimeSettings::default());
         let (control, _receiver) = oneshot::channel();
@@ -4369,6 +4787,47 @@ mod tests {
         assert!(!can_pause_durable_activity(&activity));
         assert!(!can_cancel_durable_activity(&activity));
         assert!(!can_resume_durable_activity(&activity));
+    }
+
+    #[test]
+    fn native_activity_actions_use_structured_retryability() {
+        let request =
+            FfiTransferRequest::receive("/tmp/envoix".to_string(), FfiTransferMode::ShowInvite);
+        let mut activity = make_transfer_activity_record(request);
+        activity.state = FfiTransferActivityState::Publishing;
+        activity.diagnostic_message = "publish failed: legacy display text".to_string();
+
+        let unavailable = transfer_activity_actions(activity.clone());
+        assert!(!unavailable.can_resume);
+        assert!(!unavailable.can_cancel);
+
+        activity.retryable = true;
+        let retryable = transfer_activity_actions(activity);
+        assert!(retryable.can_resume);
+        assert!(retryable.can_cancel);
+        assert!(!retryable.can_pause);
+        assert!(!retryable.can_delete);
+        assert!(!retryable.is_finalizing);
+    }
+
+    #[test]
+    fn core_info_reports_versioned_native_capabilities() {
+        let info = envoix_core_info();
+        assert_eq!(info.ffi_api_version, ENVOIX_FFI_API_VERSION);
+        assert_eq!(info.core_version, env!("CARGO_PKG_VERSION"));
+        assert!(
+            info.capabilities
+                .contains(&"activity_actions_v1".to_string())
+        );
+        assert!(
+            info.capabilities
+                .contains(&"per_session_receipt_endpoint_v1".to_string())
+        );
+        assert_eq!(
+            normalized_receipt_server(" https://receipt.example.test:8460/ ").unwrap(),
+            Some("https://receipt.example.test:8460".to_string())
+        );
+        assert!(normalized_receipt_server("file:///tmp/receipt").is_err());
     }
 
     #[test]
@@ -5678,7 +6137,7 @@ mod tests {
                 assert_eq!(key.len(), 64);
                 assert!(!blob.is_empty());
             }
-            MailboxMsg::Fetch { .. } => panic!("receiver should post, not fetch, a receipt"),
+            MailboxMsg::Fetch => panic!("receiver should post, not fetch, a receipt"),
         }
         assert!(receiver.receipt_posted());
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -5719,8 +6178,10 @@ mod tests {
         request.activity_id = "mailbox-unconfirmed".to_string();
         request.code = code.to_string();
         request.broker = "ignored@127.0.0.1:9".to_string();
-        let context =
+        let mut context =
             canonical_context_for_request(&EnvoixRuntimeSettings::default(), &request).unwrap();
+        context.client.receipt_server =
+            Some("https://receipt.example.test:8460/session".to_string());
         let mut machine = envoix_client::api::machine::Session::new(TransferDirection::Send);
         machine.state = CanonicalState::Unconfirmed;
         machine.transfer_id = Some(transfer_id.to_string());
@@ -5752,32 +6213,33 @@ mod tests {
 
         let (activity_tx, activity_rx) = channel();
         let (mailbox_tx, mailbox_rx) = channel();
-        let restored = restore_durable_transfer(
+        let restored = restore_durable_transfer_v2(
             request.activity_id.clone(),
             records_dir.to_string_lossy().into_owned(),
             Arc::new(TestObserver(activity_tx)),
-            Arc::new(TestMailbox(mailbox_tx)),
+            Arc::new(TestMailboxV2(mailbox_tx)),
         )
         .unwrap();
         let fetch = mailbox_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("restored unconfirmed transfer should poll the mailbox");
         match fetch {
-            MailboxMsg::Fetch { activity_id, key } => {
+            MailboxV2Msg::Fetch {
+                activity_id,
+                key,
+                server,
+            } => {
                 assert_eq!(activity_id, request.activity_id);
                 assert_eq!(
                     key,
                     envoix_client::api::receipt::receipt_mailbox_key(transfer_id)
                 );
+                assert_eq!(
+                    server.as_deref(),
+                    Some("https://receipt.example.test:8460/session")
+                );
             }
-            MailboxMsg::Post {
-                activity_id,
-                key,
-                blob,
-            } => panic!(
-                "send should fetch, not post, a receipt: {activity_id} {key} {} bytes",
-                blob.len()
-            ),
+            MailboxV2Msg::Post => panic!("send should fetch, not post, a receipt"),
         }
         assert!(restored.receipt_response(blob));
 
@@ -5871,6 +6333,181 @@ mod tests {
             list_durable_transfer_records(records_dir.to_string_lossy().into_owned()).unwrap();
         assert_eq!(history[0].state, FfiTransferActivityState::Completed);
         assert_eq!(history[0].completed_file_path, final_uri);
+    }
+
+    #[test]
+    fn durable_publication_failure_and_replacement_survive_restart() {
+        let _loopback_guard = lock_loopback_tests();
+        let dir = tempfile::tempdir().unwrap();
+        let records_dir = dir.path().join("records");
+        let staging = dir.path().join("staging");
+        std::fs::create_dir_all(&staging).unwrap();
+        let staged_file = staging.join("recover.bin");
+        std::fs::write(&staged_file, b"recover bytes").unwrap();
+
+        let mut request = FfiTransferRequest::receive(
+            staging.to_string_lossy().into_owned(),
+            FfiTransferMode::ShowInvite,
+        );
+        request.activity_id = "publication-recovery".to_string();
+        request.publication_required = true;
+        let context =
+            canonical_context_for_request(&EnvoixRuntimeSettings::default(), &request).unwrap();
+        let mut machine = envoix_client::api::machine::Session::new(TransferDirection::Receive);
+        machine.state = CanonicalState::AwaitingPublication;
+        machine.publication_required = true;
+        machine.transfer_id = Some("transfer-publication-recovery".to_string());
+        machine.file_name = Some("recover.bin".to_string());
+        machine.bytes = 13;
+        machine.total = 13;
+        machine.completed_file_path = Some(staged_file.to_string_lossy().into_owned());
+        let timestamp = now_ms();
+        durable_runtime()
+            .unwrap()
+            .block_on(RecordStore::new(&records_dir).save(&TransferRecord {
+                version: envoix_client::api::record::RECORD_VERSION,
+                id: stable_record_id(&request.activity_id),
+                created_ms: timestamp,
+                updated_ms: timestamp,
+                context,
+                session: machine,
+                platform_extras: Some(
+                    serde_json::json!({ "external_record_id": request.activity_id.clone() }),
+                ),
+            }))
+            .unwrap();
+
+        let (tx, _rx) = channel();
+        let restored = restore_durable_transfer(
+            request.activity_id.clone(),
+            records_dir.to_string_lossy().into_owned(),
+            Arc::new(TestObserver(tx)),
+            Arc::new(NoopMailbox),
+        )
+        .unwrap();
+        assert_eq!(
+            restored.activity().state,
+            FfiTransferActivityState::Publishing
+        );
+        assert!(restored.set_publication_target(FfiNativePublicationTarget {
+            destination_path: "/first/destination".to_string(),
+            bookmark: vec![1, 2, 3],
+        }));
+        assert_eq!(
+            restored.publication_target(),
+            Some(FfiNativePublicationTarget {
+                destination_path: "/first/destination".to_string(),
+                bookmark: vec![1, 2, 3],
+            })
+        );
+        let failure = FfiTransferFailure {
+            code: FfiFailureCode::DestinationConflict,
+            category: FfiFailureCategory::Storage,
+            phase: FfiFailurePhase::Committing,
+            origin: FfiFailureOrigin::Local,
+            direction: FfiTransferDirection::Receive,
+            transfer_id: "transfer-publication-recovery".to_string(),
+            attempt_id: "publication-attempt".to_string(),
+            retryable: true,
+            recovery_action: FfiRecoveryAction::ChooseFolder,
+            user_message_key: "transfer.publish_failed".to_string(),
+            diagnostic_message: "destination is unavailable".to_string(),
+        };
+        assert!(!restored.publication_failed(FfiTransferFailure {
+            retryable: false,
+            ..failure.clone()
+        }));
+        assert!(restored.publication_failed(failure.clone()));
+        assert_eq!(
+            restored.activity().state,
+            FfiTransferActivityState::Publishing
+        );
+        assert_eq!(restored.activity().failure_code, failure.code);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let records = durable_runtime()
+                .unwrap()
+                .block_on(RecordStore::new(&records_dir).load_all());
+            let publication = records.first().and_then(native_publication_metadata);
+            if publication
+                .as_ref()
+                .and_then(|value| value.failure.as_ref())
+                == Some(&failure)
+            {
+                assert_eq!(
+                    publication.unwrap().target.unwrap().destination_path,
+                    "/first/destination"
+                );
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "publication failure was not persisted"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+
+        drop(restored);
+        let (tx, _rx) = channel();
+        let restarted = restore_durable_transfer(
+            request.activity_id,
+            records_dir.to_string_lossy().into_owned(),
+            Arc::new(TestObserver(tx)),
+            Arc::new(NoopMailbox),
+        )
+        .unwrap();
+        let restarted_activity = restarted.activity();
+        assert_eq!(
+            restarted_activity.state,
+            FfiTransferActivityState::Publishing
+        );
+        assert_eq!(restarted_activity.failure_code, failure.code);
+        assert!(restarted_activity.retryable);
+        assert_eq!(
+            restarted_activity.recovery_action,
+            FfiRecoveryAction::ChooseFolder
+        );
+        assert_eq!(
+            restarted.publication_target(),
+            Some(FfiNativePublicationTarget {
+                destination_path: "/first/destination".to_string(),
+                bookmark: vec![1, 2, 3],
+            })
+        );
+
+        assert!(
+            restarted.set_publication_target(FfiNativePublicationTarget {
+                destination_path: " /replacement/destination ".to_string(),
+                bookmark: vec![4, 5, 6],
+            })
+        );
+        let cleared = restarted.activity();
+        assert_eq!(cleared.state, FfiTransferActivityState::Publishing);
+        assert_eq!(cleared.failure_code, FfiFailureCode::Unknown);
+        assert!(!cleared.retryable);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let records = durable_runtime()
+                .unwrap()
+                .block_on(RecordStore::new(&records_dir).load_all());
+            let publication = records.first().and_then(native_publication_metadata);
+            if publication
+                .as_ref()
+                .is_some_and(|value| value.failure.is_none())
+            {
+                let target = publication.unwrap().target.unwrap();
+                assert_eq!(target.destination_path, "/replacement/destination");
+                assert_eq!(target.bookmark, vec![4, 5, 6]);
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "replacement publication target was not persisted"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]

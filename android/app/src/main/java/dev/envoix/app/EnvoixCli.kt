@@ -12,17 +12,18 @@ import dev.envoix.app.ffi.FfiTransferFailure
 import dev.envoix.app.ffi.FfiTransferLimits
 import dev.envoix.app.ffi.FfiTransferMode
 import dev.envoix.app.ffi.FfiTransferRequest
-import dev.envoix.app.ffi.MailboxObserver
+import dev.envoix.app.ffi.MailboxObserverV2
 import dev.envoix.app.ffi.TransferObserver
 import dev.envoix.app.ffi.listDurableTransferRecords
-import dev.envoix.app.ffi.restoreDurableTransfer
-import dev.envoix.app.ffi.startDurableTransfer
+import dev.envoix.app.ffi.restoreDurableTransferV2
+import dev.envoix.app.ffi.startDurableTransferV2
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
+import java.net.URL
 import java.util.concurrent.ConcurrentHashMap
 
 sealed interface DurableUpdate {
@@ -56,15 +57,17 @@ object UniffiTransferRunner {
     private lateinit var recordsDir: File
 
     private val mailbox =
-        object : MailboxObserver {
+        object : MailboxObserverV2 {
             override fun onFetchReceipt(
                 activityId: String,
                 key: String,
+                server: String?,
             ) {
                 val id = parseActivityId(activityId) ?: return
+                val endpoint = receiptEndpoint(server) ?: return
                 if (!validMailboxKey(key)) return
                 ioScope.launch {
-                    val data = LogUpload.getBytes("${Endpoints.LOG_SERVER}/receipts/$key") ?: byteArrayOf()
+                    val data = LogUpload.getBytes("$endpoint/receipts/$key") ?: byteArrayOf()
                     sessions[id]?.session?.receiptResponse(data)
                 }
             }
@@ -73,14 +76,16 @@ object UniffiTransferRunner {
                 activityId: String,
                 key: String,
                 blob: ByteArray,
+                server: String?,
             ) {
                 val id = parseActivityId(activityId) ?: return
+                val endpoint = receiptEndpoint(server) ?: return
                 if (!validMailboxKey(key)) return
                 ioScope.launch {
                     val delaysMs = longArrayOf(0, 1_000, 3_000, 10_000, 30_000)
                     for (delayMs in delaysMs) {
                         if (delayMs > 0) delay(delayMs)
-                        if (LogUpload.postBytes("${Endpoints.LOG_SERVER}/receipts/$key", blob)) {
+                        if (LogUpload.postBytes("$endpoint/receipts/$key", blob)) {
                             sessions[id]?.session?.receiptPosted()
                             return@launch
                         }
@@ -110,6 +115,7 @@ object UniffiTransferRunner {
         internetAvailable: Boolean,
         useRoom: Boolean,
         useMdns: Boolean,
+        receiptServer: String,
         onUpdate: (DurableUpdate) -> Unit,
         pathPolicy: FfiPathPolicy = FfiPathPolicy.AUTO,
         publicationRequired: Boolean = direction == "receive",
@@ -143,10 +149,11 @@ object UniffiTransferRunner {
         val observer = observer(id)
         return runCatching {
             val session =
-                startDurableTransfer(
+                startDurableTransferV2(
                     settings = settings,
                     request = request,
                     recordsDir = recordsDir.absolutePath,
+                    receiptServer = receiptServer,
                     observer = observer,
                     mailbox = mailbox,
                 )
@@ -166,7 +173,7 @@ object UniffiTransferRunner {
         val observer = observer(id)
         return runCatching {
             val session =
-                restoreDurableTransfer(
+                restoreDurableTransferV2(
                     activityId = activityId(id),
                     recordsDir = recordsDir.absolutePath,
                     observer = observer,
@@ -322,4 +329,12 @@ object UniffiTransferRunner {
         activityId.removePrefix("android-").takeIf { activityId.startsWith("android-") }?.toLongOrNull()
 
     private fun validMailboxKey(key: String): Boolean = key.length in 1..128 && key.all { it in '0'..'9' || it in 'a'..'f' }
+
+    private fun receiptEndpoint(server: String?): String? {
+        val candidate = server?.trim().orEmpty().ifEmpty { SettingsStore.settings.value.logServer.trim() }
+        val parsed = runCatching { URL(candidate) }.getOrNull() ?: return null
+        if (parsed.protocol != "http" && parsed.protocol != "https") return null
+        if (parsed.host.isNullOrBlank()) return null
+        return candidate.trimEnd('/')
+    }
 }

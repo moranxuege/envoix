@@ -5,11 +5,12 @@ import android.content.SharedPreferences
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.io.File
 
 /**
  * Two layers, one flat holder:
  *  - core config — mirrors the CLI's `config.toml` schema (chunk_size, candidates)
- *    plus the connection defaults (broker/relay). Rendered by [SettingsStore.paramsJson (TransferService.Spec)].
+ *    plus the connection defaults (broker/relay). Rendered by [SettingsStore.renderConfig].
  *  - native prefs — platform-only defaults that seed a transfer request (save
  *    folder, default role); never sent to the core.
  */
@@ -110,7 +111,7 @@ object SettingsStore {
     /** Push the current verbosity down to the native reloadable filter. -vvv (trace
      *  iroh internals) wins over -vv (verbose) wins over the baseline. */
     fun applyLogLevel() =
-        Native.setLogLevel(
+        NativeBootstrap.setLogLevel(
             when {
                 _settings.value.traceIroh -> LOG_TRACE_IROH
                 _settings.value.verboseLog -> LOG_VERBOSE
@@ -189,4 +190,35 @@ object SettingsStore {
                 }
             s.copy(candidatesDeny = deny)
         }
+
+    /**
+     * Render the config-tier fields into the shared core's RuntimeConfig TOML.
+     * Returns null when no override is configured.
+     */
+    fun renderConfig(context: Context): String? {
+        val settings = _settings.value
+        val lines = mutableListOf<String>()
+        if (settings.chunkSize.isNotBlank()) {
+            lines += "chunk_size = ${tomlString(settings.chunkSize.trim())}"
+        }
+        if (settings.candidatesAllow.isNotEmpty() || settings.candidatesDeny.isNotEmpty()) {
+            lines += "[candidates]"
+            if (settings.candidatesAllow.isNotEmpty()) {
+                lines += "allow = ${tomlArray(settings.candidatesAllow)}"
+            }
+            if (settings.candidatesDeny.isNotEmpty()) {
+                lines += "deny = ${tomlArray(settings.candidatesDeny)}"
+            }
+        }
+        if (lines.isEmpty()) return null
+        return File(context.filesDir, "config.toml")
+            .apply { writeText(lines.joinToString("\n") + "\n") }
+            .absolutePath
+    }
+
+    private fun tomlString(value: String): String =
+        "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
+    private fun tomlArray(values: List<String>): String =
+        values.joinToString(prefix = "[", postfix = "]") { tomlString(it) }
 }

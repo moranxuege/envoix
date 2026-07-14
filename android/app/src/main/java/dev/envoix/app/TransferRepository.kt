@@ -69,6 +69,20 @@ object TransferRepository {
         _transfers.value = _transfers.value.map { if (it.id == id) transform(it) else it }
     }
 
+    /** Insert a restored canonical card or replace it with a newer snapshot. */
+    @Synchronized
+    fun upsert(transfer: Transfer) {
+        nextId = maxOf(nextId, transfer.id + 1)
+        val current = _transfers.value.firstOrNull { it.id == transfer.id }
+        if (current != null && current.sequence > transfer.sequence) return
+        _transfers.value =
+            if (current == null) {
+                _transfers.value + transfer
+            } else {
+                _transfers.value.map { if (it.id == transfer.id) transfer else it }
+            }
+    }
+
     /** Append an (already compacted) native-core log line to the newest transfer
      *  whose room matches [roomPrefix], so the core's per-transfer logs show up
      *  in that transfer's detail drawer. No-op if no transfer matches. */
@@ -109,4 +123,8 @@ object Endpoints {
 
     /** Pre-TLS default; migrated to [LOG_SERVER] on settings load. */
     const val LOG_SERVER_LEGACY = "http://67.230.187.238:8460"
+
+    /** Compatibility alias retained for existing Android callers and tests. */
+    @Deprecated("Use LOG_SERVER_LEGACY")
+    const val DEPRECATED_LOG_SERVER = LOG_SERVER_LEGACY
 }

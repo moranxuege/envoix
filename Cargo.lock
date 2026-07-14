@@ -1123,6 +1123,7 @@ dependencies = [
  "iroh",
  "jni 0.21.1",
  "ndk-context",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",

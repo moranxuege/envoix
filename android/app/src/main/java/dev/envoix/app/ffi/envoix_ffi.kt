@@ -621,6 +621,12 @@ internal interface UniffiCallbackInterfaceMailboxObserverMethod0 : com.sun.jna.C
 internal interface UniffiCallbackInterfaceMailboxObserverMethod1 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`activityId`: RustBuffer.ByValue,`key`: RustBuffer.ByValue,`blob`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
+internal interface UniffiCallbackInterfaceMailboxObserverV2Method0 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`activityId`: RustBuffer.ByValue,`key`: RustBuffer.ByValue,`server`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+}
+internal interface UniffiCallbackInterfaceMailboxObserverV2Method1 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`activityId`: RustBuffer.ByValue,`key`: RustBuffer.ByValue,`blob`: RustBuffer.ByValue,`server`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+}
 internal interface UniffiCallbackInterfaceTransferObserverMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`invite`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
@@ -663,6 +669,28 @@ internal open class UniffiVTableCallbackInterfaceMailboxObserver(
     ): UniffiVTableCallbackInterfaceMailboxObserver(`uniffiFree`,`uniffiClone`,`onFetchReceipt`,`onPostReceipt`,), Structure.ByValue
 
    internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceMailboxObserver) {
+        `uniffiFree` = other.`uniffiFree`
+        `uniffiClone` = other.`uniffiClone`
+        `onFetchReceipt` = other.`onFetchReceipt`
+        `onPostReceipt` = other.`onPostReceipt`
+    }
+
+}
+@Structure.FieldOrder("uniffiFree", "uniffiClone", "onFetchReceipt", "onPostReceipt")
+internal open class UniffiVTableCallbackInterfaceMailboxObserverV2(
+    @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+    @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+    @JvmField internal var `onFetchReceipt`: UniffiCallbackInterfaceMailboxObserverV2Method0? = null,
+    @JvmField internal var `onPostReceipt`: UniffiCallbackInterfaceMailboxObserverV2Method1? = null,
+) : Structure() {
+    class UniffiByValue(
+        `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+        `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+        `onFetchReceipt`: UniffiCallbackInterfaceMailboxObserverV2Method0? = null,
+        `onPostReceipt`: UniffiCallbackInterfaceMailboxObserverV2Method1? = null,
+    ): UniffiVTableCallbackInterfaceMailboxObserverV2(`uniffiFree`,`uniffiClone`,`onFetchReceipt`,`onPostReceipt`,), Structure.ByValue
+
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceMailboxObserverV2) {
         `uniffiFree` = other.`uniffiFree`
         `uniffiClone` = other.`uniffiClone`
         `onFetchReceipt` = other.`onFetchReceipt`
@@ -736,6 +764,8 @@ internal object IntegrityCheckingUniffiLib {
         uniffiCheckContractApiVersion(this)
         uniffiCheckApiChecksums(this)
     }
+    external fun uniffi_envoix_ffi_checksum_func_envoix_core_info(
+    ): Int
     external fun uniffi_envoix_ffi_checksum_func_fold_transfer_activity(
     ): Int
     external fun uniffi_envoix_ffi_checksum_func_generate_room_code(
@@ -750,7 +780,13 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_envoix_ffi_checksum_func_restore_durable_transfer(
     ): Int
+    external fun uniffi_envoix_ffi_checksum_func_restore_durable_transfer_v2(
+    ): Int
     external fun uniffi_envoix_ffi_checksum_func_start_durable_transfer(
+    ): Int
+    external fun uniffi_envoix_ffi_checksum_func_start_durable_transfer_v2(
+    ): Int
+    external fun uniffi_envoix_ffi_checksum_func_transfer_activity_actions(
     ): Int
     external fun uniffi_envoix_ffi_checksum_method_durableenvoixsession_activity(
     ): Int
@@ -758,7 +794,11 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_envoix_ffi_checksum_method_durableenvoixsession_pause(
     ): Int
+    external fun uniffi_envoix_ffi_checksum_method_durableenvoixsession_publication_failed(
+    ): Int
     external fun uniffi_envoix_ffi_checksum_method_durableenvoixsession_publication_succeeded(
+    ): Int
+    external fun uniffi_envoix_ffi_checksum_method_durableenvoixsession_publication_target(
     ): Int
     external fun uniffi_envoix_ffi_checksum_method_durableenvoixsession_receipt_posted(
     ): Int
@@ -767,6 +807,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_envoix_ffi_checksum_method_durableenvoixsession_remove(
     ): Int
     external fun uniffi_envoix_ffi_checksum_method_durableenvoixsession_resume(
+    ): Int
+    external fun uniffi_envoix_ffi_checksum_method_durableenvoixsession_set_publication_target(
     ): Int
     external fun uniffi_envoix_ffi_checksum_method_envoixsession_cancel(
     ): Int
@@ -801,6 +843,10 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_envoix_ffi_checksum_method_mailboxobserver_on_fetch_receipt(
     ): Int
     external fun uniffi_envoix_ffi_checksum_method_mailboxobserver_on_post_receipt(
+    ): Int
+    external fun uniffi_envoix_ffi_checksum_method_mailboxobserverv2_on_fetch_receipt(
+    ): Int
+    external fun uniffi_envoix_ffi_checksum_method_mailboxobserverv2_on_post_receipt(
     ): Int
     external fun uniffi_envoix_ffi_checksum_method_transferobserver_on_invite_ready(
     ): Int
@@ -841,6 +887,7 @@ internal object UniffiLib {
     init {
         Native.register(UniffiLib::class.java, findLibraryName(componentName = "envoix_ffi"))
         uniffiCallbackInterfaceMailboxObserver.register(this)
+        uniffiCallbackInterfaceMailboxObserverV2.register(this)
         uniffiCallbackInterfaceTransferObserver.register(this)
         
     }
@@ -854,8 +901,12 @@ external fun uniffi_envoix_ffi_fn_method_durableenvoixsession_cancel(`ptr`: Long
 ): Byte
 external fun uniffi_envoix_ffi_fn_method_durableenvoixsession_pause(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Byte
+external fun uniffi_envoix_ffi_fn_method_durableenvoixsession_publication_failed(`ptr`: Long,`failure`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): Byte
 external fun uniffi_envoix_ffi_fn_method_durableenvoixsession_publication_succeeded(`ptr`: Long,`path`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Byte
+external fun uniffi_envoix_ffi_fn_method_durableenvoixsession_publication_target(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
 external fun uniffi_envoix_ffi_fn_method_durableenvoixsession_receipt_posted(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Byte
 external fun uniffi_envoix_ffi_fn_method_durableenvoixsession_receipt_response(`ptr`: Long,`blob`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -863,6 +914,8 @@ external fun uniffi_envoix_ffi_fn_method_durableenvoixsession_receipt_response(`
 external fun uniffi_envoix_ffi_fn_method_durableenvoixsession_remove(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Byte
 external fun uniffi_envoix_ffi_fn_method_durableenvoixsession_resume(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Byte
+external fun uniffi_envoix_ffi_fn_method_durableenvoixsession_set_publication_target(`ptr`: Long,`target`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): Byte
 external fun uniffi_envoix_ffi_fn_clone_envoixsession(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
@@ -912,6 +965,16 @@ external fun uniffi_envoix_ffi_fn_method_mailboxobserver_on_fetch_receipt(`ptr`:
 ): Unit
 external fun uniffi_envoix_ffi_fn_method_mailboxobserver_on_post_receipt(`ptr`: Long,`activityId`: RustBuffer.ByValue,`key`: RustBuffer.ByValue,`blob`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_envoix_ffi_fn_clone_mailboxobserverv2(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+): Long
+external fun uniffi_envoix_ffi_fn_free_mailboxobserverv2(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+): Unit
+external fun uniffi_envoix_ffi_fn_init_callback_vtable_mailboxobserverv2(`vtable`: UniffiVTableCallbackInterfaceMailboxObserverV2,
+): Unit
+external fun uniffi_envoix_ffi_fn_method_mailboxobserverv2_on_fetch_receipt(`ptr`: Long,`activityId`: RustBuffer.ByValue,`key`: RustBuffer.ByValue,`server`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): Unit
+external fun uniffi_envoix_ffi_fn_method_mailboxobserverv2_on_post_receipt(`ptr`: Long,`activityId`: RustBuffer.ByValue,`key`: RustBuffer.ByValue,`blob`: RustBuffer.ByValue,`server`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): Unit
 external fun uniffi_envoix_ffi_fn_clone_transferobserver(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
 external fun uniffi_envoix_ffi_fn_free_transferobserver(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -936,6 +999,8 @@ external fun uniffi_envoix_ffi_fn_method_transferobserver_on_transfer_activity(`
 ): Unit
 external fun uniffi_envoix_ffi_fn_method_transferobserver_on_status(`ptr`: Long,`message`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_envoix_ffi_fn_func_envoix_core_info(uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
 external fun uniffi_envoix_ffi_fn_func_fold_transfer_activity(`record`: RustBuffer.ByValue,`event`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_envoix_ffi_fn_func_generate_room_code(uniffi_out_err: UniffiRustCallStatus, 
@@ -950,8 +1015,14 @@ external fun uniffi_envoix_ffi_fn_func_parse_pairing_invite(`input`: RustBuffer.
 ): RustBuffer.ByValue
 external fun uniffi_envoix_ffi_fn_func_restore_durable_transfer(`activityId`: RustBuffer.ByValue,`recordsDir`: RustBuffer.ByValue,`observer`: Long,`mailbox`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
+external fun uniffi_envoix_ffi_fn_func_restore_durable_transfer_v2(`activityId`: RustBuffer.ByValue,`recordsDir`: RustBuffer.ByValue,`observer`: Long,`mailbox`: Long,uniffi_out_err: UniffiRustCallStatus,
+): Long
 external fun uniffi_envoix_ffi_fn_func_start_durable_transfer(`settings`: RustBuffer.ByValue,`request`: RustBuffer.ByValue,`recordsDir`: RustBuffer.ByValue,`observer`: Long,`mailbox`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
+external fun uniffi_envoix_ffi_fn_func_start_durable_transfer_v2(`settings`: RustBuffer.ByValue,`request`: RustBuffer.ByValue,`recordsDir`: RustBuffer.ByValue,`receiptServer`: RustBuffer.ByValue,`observer`: Long,`mailbox`: Long,uniffi_out_err: UniffiRustCallStatus,
+): Long
+external fun uniffi_envoix_ffi_fn_func_transfer_activity_actions(`record`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
 external fun ffi_envoix_ffi_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun ffi_envoix_ffi_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1071,6 +1142,9 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
 }
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
+    if (lib.uniffi_envoix_ffi_checksum_func_envoix_core_info() != 59125) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_envoix_ffi_checksum_func_fold_transfer_activity() != 61995) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1092,7 +1166,16 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_envoix_ffi_checksum_func_restore_durable_transfer() != 23328) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_envoix_ffi_checksum_func_restore_durable_transfer_v2() != 14022) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_envoix_ffi_checksum_func_start_durable_transfer() != 47700) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_envoix_ffi_checksum_func_start_durable_transfer_v2() != 36773) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_envoix_ffi_checksum_func_transfer_activity_actions() != 54118) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_envoix_ffi_checksum_method_durableenvoixsession_activity() != 20671) {
@@ -1104,7 +1187,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_envoix_ffi_checksum_method_durableenvoixsession_pause() != 11329) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_envoix_ffi_checksum_method_durableenvoixsession_publication_failed() != 56491) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_envoix_ffi_checksum_method_durableenvoixsession_publication_succeeded() != 40069) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_envoix_ffi_checksum_method_durableenvoixsession_publication_target() != 49002) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_envoix_ffi_checksum_method_durableenvoixsession_receipt_posted() != 63722) {
@@ -1117,6 +1206,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_envoix_ffi_checksum_method_durableenvoixsession_resume() != 24085) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_envoix_ffi_checksum_method_durableenvoixsession_set_publication_target() != 2725) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_envoix_ffi_checksum_method_envoixsession_cancel() != 34138) {
@@ -1168,6 +1260,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_envoix_ffi_checksum_method_mailboxobserver_on_post_receipt() != 44118) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_envoix_ffi_checksum_method_mailboxobserverv2_on_fetch_receipt() != 120) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_envoix_ffi_checksum_method_mailboxobserverv2_on_post_receipt() != 34143) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_envoix_ffi_checksum_method_transferobserver_on_invite_ready() != 30310) {
@@ -1644,10 +1742,21 @@ public interface DurableEnvoixSessionInterface {
     fun `pause`(): kotlin.Boolean
     
     /**
+     * Persist a platform publication failure while keeping the canonical
+     * transfer in Publishing so it can retry the same staged bytes.
+     */
+    fun `publicationFailed`(`failure`: FfiTransferFailure): kotlin.Boolean
+
+    /**
      * Confirms that a staged receive is now visible in Files/MediaStore.
      */
     fun `publicationSucceeded`(`path`: kotlin.String): kotlin.Boolean
     
+    /**
+     * Returns the canonical native publication destination after restore.
+     */
+    fun `publicationTarget`(): FfiNativePublicationTarget?
+
     fun `receiptPosted`(): kotlin.Boolean
     
     fun `receiptResponse`(`blob`: kotlin.ByteArray): kotlin.Boolean
@@ -1660,6 +1769,13 @@ public interface DurableEnvoixSessionInterface {
     
     fun `resume`(): kotlin.Boolean
     
+    /**
+     * Persist or replace the native publication destination without
+     * retransmitting the staged receive. Replacing a target clears the last
+     * publication failure so the same card can be retried in place.
+     */
+    fun `setPublicationTarget`(`target`: FfiNativePublicationTarget): kotlin.Boolean
+
     companion object
 }
 
@@ -1803,6 +1919,23 @@ open class DurableEnvoixSession: Disposable, AutoCloseable, DurableEnvoixSession
 
     
     /**
+     * Persist a platform publication failure while keeping the canonical
+     * transfer in Publishing so it can retry the same staged bytes.
+     */override fun `publicationFailed`(`failure`: FfiTransferFailure): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_envoix_ffi_fn_method_durableenvoixsession_publication_failed(
+        it,
+        FfiConverterTypeFfiTransferFailure.lower(`failure`),_status)
+}
+    }
+    )
+    }
+
+
+
+    /**
      * Confirms that a staged receive is now visible in Files/MediaStore.
      */override fun `publicationSucceeded`(`path`: kotlin.String): kotlin.Boolean {
             return FfiConverterBoolean.lift(
@@ -1816,6 +1949,21 @@ open class DurableEnvoixSession: Disposable, AutoCloseable, DurableEnvoixSession
     )
     }
     
+
+
+    /**
+     * Returns the canonical native publication destination after restore.
+     */override fun `publicationTarget`(): FfiNativePublicationTarget? {
+            return FfiConverterOptionalTypeFfiNativePublicationTarget.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_envoix_ffi_fn_method_durableenvoixsession_publication_target(
+        it,
+        _status)
+}
+    }
+    )
+    }
 
     override fun `receiptPosted`(): kotlin.Boolean {
             return FfiConverterBoolean.lift(
@@ -1874,6 +2022,24 @@ open class DurableEnvoixSession: Disposable, AutoCloseable, DurableEnvoixSession
     
 
     
+    /**
+     * Persist or replace the native publication destination without
+     * retransmitting the staged receive. Replacing a target clears the last
+     * publication failure so the same card can be retried in place.
+     */override fun `setPublicationTarget`(`target`: FfiNativePublicationTarget): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_envoix_ffi_fn_method_durableenvoixsession_set_publication_target(
+        it,
+        FfiConverterTypeFfiNativePublicationTarget.lower(`target`),_status)
+}
+    }
+    )
+    }
+
+
+
 
     
 
@@ -2979,6 +3145,353 @@ public object FfiConverterTypeMailboxObserver: FfiConverter<MailboxObserver, Lon
 
 
 /**
+ * Versioned native receipt courier that receives the endpoint frozen in the
+ * durable session. `None` is reserved for records created before that field
+ * existed, allowing the frontend to use its current configured endpoint.
+ */
+public interface MailboxObserverV2 {
+    
+    fun `onFetchReceipt`(`activityId`: kotlin.String, `key`: kotlin.String, `server`: kotlin.String?)
+    
+    fun `onPostReceipt`(`activityId`: kotlin.String, `key`: kotlin.String, `blob`: kotlin.ByteArray, `server`: kotlin.String?)
+    
+    companion object
+}
+
+/**
+ * Versioned native receipt courier that receives the endpoint frozen in the
+ * durable session. `None` is reserved for records created before that field
+ * existed, allowing the frontend to use its current configured endpoint.
+ */
+open class MailboxObserverV2Impl: Disposable, AutoCloseable, MailboxObserverV2
+{
+
+    @Suppress("UNUSED_PARAMETER")
+    /**
+     * @suppress
+     */
+    constructor(withHandle: UniffiWithHandle, handle: Long) {
+        this.handle = handle
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
+    }
+
+    /**
+     * @suppress
+     *
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noHandle: NoHandle) {
+        this.handle = 0
+        this.cleanable = null
+    }
+
+    protected val handle: Long
+    protected val cleanable: UniffiCleaner.Cleanable?
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the handle being freed concurrently.
+        try {
+            return block(this.uniffiCloneHandle())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
+        override fun run() {
+            if (handle == 0.toLong()) {
+                // Fake object created with `NoHandle`, don't try to free.
+                return;
+            }
+            uniffiRustCall { status ->
+                UniffiLib.uniffi_envoix_ffi_fn_free_mailboxobserverv2(handle, status)
+            }
+        }
+    }
+
+    /**
+     * @suppress
+     */
+    fun uniffiCloneHandle(): Long {
+        if (handle == 0.toLong()) {
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
+        }
+        return uniffiRustCall() { status ->
+            UniffiLib.uniffi_envoix_ffi_fn_clone_mailboxobserverv2(handle, status)
+        }
+    }
+
+    override fun `onFetchReceipt`(`activityId`: kotlin.String, `key`: kotlin.String, `server`: kotlin.String?)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_envoix_ffi_fn_method_mailboxobserverv2_on_fetch_receipt(
+        it,
+        FfiConverterString.lower(`activityId`),FfiConverterString.lower(`key`),FfiConverterOptionalString.lower(`server`),_status)
+}
+    }
+    
+    
+
+    override fun `onPostReceipt`(`activityId`: kotlin.String, `key`: kotlin.String, `blob`: kotlin.ByteArray, `server`: kotlin.String?)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_envoix_ffi_fn_method_mailboxobserverv2_on_post_receipt(
+        it,
+        FfiConverterString.lower(`activityId`),FfiConverterString.lower(`key`),FfiConverterByteArray.lower(`blob`),FfiConverterOptionalString.lower(`server`),_status)
+}
+    }
+    
+    
+
+    
+
+    
+
+
+    
+    
+    /**
+     * @suppress
+     */
+    companion object
+    
+}
+
+
+
+// Put the implementation in an object so we don't pollute the top-level namespace
+internal object uniffiCallbackInterfaceMailboxObserverV2 {
+    internal object `onFetchReceipt`: UniffiCallbackInterfaceMailboxObserverV2Method0 {
+        override fun callback(`uniffiHandle`: Long,`activityId`: RustBuffer.ByValue,`key`: RustBuffer.ByValue,`server`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeMailboxObserverV2.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`onFetchReceipt`(
+                    FfiConverterString.lift(`activityId`),
+                    FfiConverterString.lift(`key`),
+                    FfiConverterOptionalString.lift(`server`),
+                )
+            }
+            val writeReturn = { _: Unit -> Unit }
+            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+        }
+    }
+    internal object `onPostReceipt`: UniffiCallbackInterfaceMailboxObserverV2Method1 {
+        override fun callback(`uniffiHandle`: Long,`activityId`: RustBuffer.ByValue,`key`: RustBuffer.ByValue,`blob`: RustBuffer.ByValue,`server`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeMailboxObserverV2.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`onPostReceipt`(
+                    FfiConverterString.lift(`activityId`),
+                    FfiConverterString.lift(`key`),
+                    FfiConverterByteArray.lift(`blob`),
+                    FfiConverterOptionalString.lift(`server`),
+                )
+            }
+            val writeReturn = { _: Unit -> Unit }
+            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+        }
+    }
+
+    internal object uniffiFree: UniffiCallbackInterfaceFree {
+        override fun callback(handle: Long) {
+            FfiConverterTypeMailboxObserverV2.handleMap.remove(handle)
+        }
+    }
+
+    internal object uniffiClone: UniffiCallbackInterfaceClone {
+        override fun callback(handle: Long): Long {
+            return FfiConverterTypeMailboxObserverV2.handleMap.clone(handle)
+        }
+    }
+
+    internal var vtable = UniffiVTableCallbackInterfaceMailboxObserverV2.UniffiByValue(
+        uniffiFree,
+        uniffiClone,
+        `onFetchReceipt`,
+        `onPostReceipt`,
+    )
+
+    // Registers the foreign callback with the Rust side.
+    // This method is generated for each callback interface.
+    internal fun register(lib: UniffiLib) {
+        lib.uniffi_envoix_ffi_fn_init_callback_vtable_mailboxobserverv2(vtable)
+    }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeMailboxObserverV2: FfiConverter<MailboxObserverV2, Long> {
+    internal val handleMap = UniffiHandleMap<MailboxObserverV2>()
+
+    override fun lower(value: MailboxObserverV2): Long {
+        if (value is MailboxObserverV2Impl) {
+             // Rust-implemented object.  Clone the handle and return it
+            return value.uniffiCloneHandle()
+         } else {
+            // Kotlin object, generate a new vtable handle and return that.
+            return handleMap.insert(value)
+         }
+    }
+
+    override fun lift(value: Long): MailboxObserverV2 {
+        if ((value and 1.toLong()) == 0.toLong()) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return MailboxObserverV2Impl(UniffiWithHandle, value)
+        } else {
+            // Kotlin-generated handle, get the object from the handle map
+            return handleMap.remove(value)
+        }
+    }
+
+    override fun read(buf: ByteBuffer): MailboxObserverV2 {
+        return lift(buf.getLong())
+    }
+
+    override fun allocationSize(value: MailboxObserverV2) = 8UL
+
+    override fun write(value: MailboxObserverV2, buf: ByteBuffer) {
+        buf.putLong(lower(value))
+    }
+}
+
+
+// This template implements a class for working with a Rust struct via a handle
+// to the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque handle to the underlying Rust struct.
+//     Method calls need to read this handle from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its handle should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the handle, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the handle, but is interrupted
+//      before it can pass the handle over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read handle value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
+/**
  * Observer implemented by the native UI to receive transfer updates.
  *
  * Callbacks arrive on a Rust runtime thread; the UI must marshal to its main
@@ -2989,52 +3502,52 @@ public object FfiConverterTypeMailboxObserver: FfiConverter<MailboxObserver, Lon
  * [`on_failed`]: TransferObserver::on_failed
  */
 public interface TransferObserver {
-    
+
     /**
      * Receiver only: the `envoix:…` invite string to render as a QR / share.
      */
     fun `onInviteReady`(`invite`: kotlin.String)
-    
+
     /**
      * A transfer started; `total_bytes` is the full file size.
      */
     fun `onStarted`(`fileName`: kotlin.String, `totalBytes`: kotlin.ULong)
-    
+
     /**
      * Progress update: `transferred` of `total` plaintext bytes.
      */
     fun `onProgress`(`transferred`: kotlin.ULong, `total`: kotlin.ULong)
-    
+
     /**
      * Terminal success: the transfer finished and was verified.
      */
     fun `onCompleted`(`bytes`: kotlin.ULong)
-    
+
     /**
      * Terminal failure with machine-readable classification.
      */
     fun `onTransferFailed`(`failure`: FfiTransferFailure)
-    
+
     /**
      * Terminal failure with a human-readable reason.
      */
     fun `onFailed`(`reason`: kotlin.String)
-    
+
     /**
      * Structured lifecycle event for Activity, queues, and diagnostics.
      */
     fun `onTransferEvent`(`event`: FfiTransferEvent)
-    
+
     /**
      * Folded Activity/queue snapshot after each lifecycle event.
      */
     fun `onTransferActivity`(`record`: FfiTransferActivityRecord)
-    
+
     /**
      * Free-form lifecycle/status text for display or logging.
      */
     fun `onStatus`(`message`: kotlin.String)
-    
+
     companion object
 }
 
@@ -3144,11 +3657,11 @@ open class TransferObserverImpl: Disposable, AutoCloseable, TransferObserver
         }
     }
 
-    
+
     /**
      * Receiver only: the `envoix:…` invite string to render as a QR / share.
      */override fun `onInviteReady`(`invite`: kotlin.String)
-        = 
+        =
     callWithHandle {
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_envoix_ffi_fn_method_transferobserver_on_invite_ready(
@@ -3156,14 +3669,14 @@ open class TransferObserverImpl: Disposable, AutoCloseable, TransferObserver
         FfiConverterString.lower(`invite`),_status)
 }
     }
-    
-    
 
-    
+
+
+
     /**
      * A transfer started; `total_bytes` is the full file size.
      */override fun `onStarted`(`fileName`: kotlin.String, `totalBytes`: kotlin.ULong)
-        = 
+        =
     callWithHandle {
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_envoix_ffi_fn_method_transferobserver_on_started(
@@ -3171,14 +3684,14 @@ open class TransferObserverImpl: Disposable, AutoCloseable, TransferObserver
         FfiConverterString.lower(`fileName`),FfiConverterULong.lower(`totalBytes`),_status)
 }
     }
-    
-    
 
-    
+
+
+
     /**
      * Progress update: `transferred` of `total` plaintext bytes.
      */override fun `onProgress`(`transferred`: kotlin.ULong, `total`: kotlin.ULong)
-        = 
+        =
     callWithHandle {
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_envoix_ffi_fn_method_transferobserver_on_progress(
@@ -3186,14 +3699,14 @@ open class TransferObserverImpl: Disposable, AutoCloseable, TransferObserver
         FfiConverterULong.lower(`transferred`),FfiConverterULong.lower(`total`),_status)
 }
     }
-    
-    
 
-    
+
+
+
     /**
      * Terminal success: the transfer finished and was verified.
      */override fun `onCompleted`(`bytes`: kotlin.ULong)
-        = 
+        =
     callWithHandle {
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_envoix_ffi_fn_method_transferobserver_on_completed(
@@ -3201,14 +3714,14 @@ open class TransferObserverImpl: Disposable, AutoCloseable, TransferObserver
         FfiConverterULong.lower(`bytes`),_status)
 }
     }
-    
-    
 
-    
+
+
+
     /**
      * Terminal failure with machine-readable classification.
      */override fun `onTransferFailed`(`failure`: FfiTransferFailure)
-        = 
+        =
     callWithHandle {
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_envoix_ffi_fn_method_transferobserver_on_transfer_failed(
@@ -3216,14 +3729,14 @@ open class TransferObserverImpl: Disposable, AutoCloseable, TransferObserver
         FfiConverterTypeFfiTransferFailure.lower(`failure`),_status)
 }
     }
-    
-    
 
-    
+
+
+
     /**
      * Terminal failure with a human-readable reason.
      */override fun `onFailed`(`reason`: kotlin.String)
-        = 
+        =
     callWithHandle {
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_envoix_ffi_fn_method_transferobserver_on_failed(
@@ -3231,14 +3744,14 @@ open class TransferObserverImpl: Disposable, AutoCloseable, TransferObserver
         FfiConverterString.lower(`reason`),_status)
 }
     }
-    
-    
 
-    
+
+
+
     /**
      * Structured lifecycle event for Activity, queues, and diagnostics.
      */override fun `onTransferEvent`(`event`: FfiTransferEvent)
-        = 
+        =
     callWithHandle {
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_envoix_ffi_fn_method_transferobserver_on_transfer_event(
@@ -3246,14 +3759,14 @@ open class TransferObserverImpl: Disposable, AutoCloseable, TransferObserver
         FfiConverterTypeFfiTransferEvent.lower(`event`),_status)
 }
     }
-    
-    
 
-    
+
+
+
     /**
      * Folded Activity/queue snapshot after each lifecycle event.
      */override fun `onTransferActivity`(`record`: FfiTransferActivityRecord)
-        = 
+        =
     callWithHandle {
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_envoix_ffi_fn_method_transferobserver_on_transfer_activity(
@@ -3560,6 +4073,93 @@ public object FfiConverterTypeEnvoixRuntimeSettings: FfiConverterRustBuffer<Envo
 
 
 
+/**
+ * Runtime identity used to detect a stale but otherwise loadable native core.
+ */
+data class FfiCoreInfo (
+    var `ffiApiVersion`: kotlin.UInt
+    ,
+    var `coreVersion`: kotlin.String
+    ,
+    var `capabilities`: List<kotlin.String>
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFfiCoreInfo: FfiConverterRustBuffer<FfiCoreInfo> {
+    override fun read(buf: ByteBuffer): FfiCoreInfo {
+        return FfiCoreInfo(
+            FfiConverterUInt.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterSequenceString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiCoreInfo) = (
+            FfiConverterUInt.allocationSize(value.`ffiApiVersion`) +
+            FfiConverterString.allocationSize(value.`coreVersion`) +
+            FfiConverterSequenceString.allocationSize(value.`capabilities`)
+    )
+
+    override fun write(value: FfiCoreInfo, buf: ByteBuffer) {
+            FfiConverterUInt.write(value.`ffiApiVersion`, buf)
+            FfiConverterString.write(value.`coreVersion`, buf)
+            FfiConverterSequenceString.write(value.`capabilities`, buf)
+    }
+}
+
+
+
+/**
+ * Frontend-owned destination for publishing a staged receive.
+ */
+data class FfiNativePublicationTarget (
+    var `destinationPath`: kotlin.String
+    ,
+    var `bookmark`: kotlin.ByteArray
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFfiNativePublicationTarget: FfiConverterRustBuffer<FfiNativePublicationTarget> {
+    override fun read(buf: ByteBuffer): FfiNativePublicationTarget {
+        return FfiNativePublicationTarget(
+            FfiConverterString.read(buf),
+            FfiConverterByteArray.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiNativePublicationTarget) = (
+            FfiConverterString.allocationSize(value.`destinationPath`) +
+            FfiConverterByteArray.allocationSize(value.`bookmark`)
+    )
+
+    override fun write(value: FfiNativePublicationTarget, buf: ByteBuffer) {
+            FfiConverterString.write(value.`destinationPath`, buf)
+            FfiConverterByteArray.write(value.`bookmark`, buf)
+    }
+}
+
+
+
 data class FfiPairingInvite (
     /**
      * Short pairing code typed by users and reused as the mDNS token.
@@ -3675,6 +4275,62 @@ public object FfiConverterTypeFfiRendezvousPlan: FfiConverterRustBuffer<FfiRende
             FfiConverterBoolean.write(value.`useRoom`, buf)
             FfiConverterBoolean.write(value.`useMdns`, buf)
             FfiConverterBoolean.write(value.`internetAvailable`, buf)
+    }
+}
+
+
+
+/**
+ * Canonical action policy for an Activity card.
+ */
+data class FfiTransferActivityActions (
+    var `canPause`: kotlin.Boolean
+    ,
+    var `canResume`: kotlin.Boolean
+    ,
+    var `canCancel`: kotlin.Boolean
+    ,
+    var `canDelete`: kotlin.Boolean
+    ,
+    var `isFinalizing`: kotlin.Boolean
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFfiTransferActivityActions: FfiConverterRustBuffer<FfiTransferActivityActions> {
+    override fun read(buf: ByteBuffer): FfiTransferActivityActions {
+        return FfiTransferActivityActions(
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiTransferActivityActions) = (
+            FfiConverterBoolean.allocationSize(value.`canPause`) +
+            FfiConverterBoolean.allocationSize(value.`canResume`) +
+            FfiConverterBoolean.allocationSize(value.`canCancel`) +
+            FfiConverterBoolean.allocationSize(value.`canDelete`) +
+            FfiConverterBoolean.allocationSize(value.`isFinalizing`)
+    )
+
+    override fun write(value: FfiTransferActivityActions, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`canPause`, buf)
+            FfiConverterBoolean.write(value.`canResume`, buf)
+            FfiConverterBoolean.write(value.`canCancel`, buf)
+            FfiConverterBoolean.write(value.`canDelete`, buf)
+            FfiConverterBoolean.write(value.`isFinalizing`, buf)
     }
 }
 
@@ -4864,6 +5520,67 @@ public object FfiConverterTypeFfiTransferMode: FfiConverterRustBuffer<FfiTransfe
 /**
  * @suppress
  */
+public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?> {
+    override fun read(buf: ByteBuffer): kotlin.String? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterString.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.String?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterString.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.String?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterString.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeFfiNativePublicationTarget: FfiConverterRustBuffer<FfiNativePublicationTarget?> {
+    override fun read(buf: ByteBuffer): FfiNativePublicationTarget? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeFfiNativePublicationTarget.read(buf)
+    }
+
+    override fun allocationSize(value: FfiNativePublicationTarget?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeFfiNativePublicationTarget.allocationSize(value)
+        }
+    }
+
+    override fun write(value: FfiNativePublicationTarget?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeFfiNativePublicationTarget.write(value, buf)
+        }
+    }
+}
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeFfiTransferActivityRecord: FfiConverterRustBuffer<FfiTransferActivityRecord?> {
     override fun read(buf: ByteBuffer): FfiTransferActivityRecord? {
         if (buf.get().toInt() == 0) {
@@ -4896,6 +5613,34 @@ public object FfiConverterOptionalTypeFfiTransferActivityRecord: FfiConverterRus
 /**
  * @suppress
  */
+public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.String>> {
+    override fun read(buf: ByteBuffer): List<kotlin.String> {
+        val len = buf.getInt()
+        return List<kotlin.String>(len) {
+            FfiConverterString.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<kotlin.String>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterString.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<kotlin.String>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterString.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeFfiTransferActivityRecord: FfiConverterRustBuffer<List<FfiTransferActivityRecord>> {
     override fun read(buf: ByteBuffer): List<FfiTransferActivityRecord> {
         val len = buf.getInt()
@@ -4917,6 +5662,19 @@ public object FfiConverterSequenceTypeFfiTransferActivityRecord: FfiConverterRus
         }
     }
 }
+        /**
+         * Reports the native bridge version and optional capabilities at runtime.
+         */ fun `envoixCoreInfo`(): FfiCoreInfo {
+            return FfiConverterTypeFfiCoreInfo.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_envoix_ffi_fn_func_envoix_core_info(
+
+        _status)
+}
+    )
+    }
+
+
         /**
          * Folds one lifecycle event into an Activity/queue record.
          */ fun `foldTransferActivity`(`record`: FfiTransferActivityRecord, `event`: FfiTransferEvent): FfiTransferActivityRecord {
@@ -5007,15 +5765,57 @@ public object FfiConverterSequenceTypeFfiTransferActivityRecord: FfiConverterRus
     }
     
 
+        /**
+         * Restores a durable transfer using the endpoint-aware courier. The endpoint
+         * comes exclusively from the persisted session context.
+         */
+    @Throws(EnvoixException::class) fun `restoreDurableTransferV2`(`activityId`: kotlin.String, `recordsDir`: kotlin.String, `observer`: TransferObserver, `mailbox`: MailboxObserverV2): DurableEnvoixSession {
+            return FfiConverterTypeDurableEnvoixSession.lift(
+    uniffiRustCallWithError(EnvoixException) { _status ->
+    UniffiLib.uniffi_envoix_ffi_fn_func_restore_durable_transfer_v2(
+
+        FfiConverterString.lower(`activityId`),FfiConverterString.lower(`recordsDir`),FfiConverterTypeTransferObserver.lower(`observer`),FfiConverterTypeMailboxObserverV2.lower(`mailbox`),_status)
+}
+    )
+    }
+
+
     @Throws(EnvoixException::class) fun `startDurableTransfer`(`settings`: EnvoixRuntimeSettings, `request`: FfiTransferRequest, `recordsDir`: kotlin.String, `observer`: TransferObserver, `mailbox`: MailboxObserver): DurableEnvoixSession {
             return FfiConverterTypeDurableEnvoixSession.lift(
     uniffiRustCallWithError(EnvoixException) { _status ->
     UniffiLib.uniffi_envoix_ffi_fn_func_start_durable_transfer(
-    
+
         FfiConverterTypeEnvoixRuntimeSettings.lower(`settings`),FfiConverterTypeFfiTransferRequest.lower(`request`),FfiConverterString.lower(`recordsDir`),FfiConverterTypeTransferObserver.lower(`observer`),FfiConverterTypeMailboxObserver.lower(`mailbox`),_status)
 }
     )
     }
-    
+
+
+        /**
+         * Starts a durable transfer with a versioned courier contract. The receipt
+         * endpoint is frozen into the canonical context before the first snapshot.
+         */
+    @Throws(EnvoixException::class) fun `startDurableTransferV2`(`settings`: EnvoixRuntimeSettings, `request`: FfiTransferRequest, `recordsDir`: kotlin.String, `receiptServer`: kotlin.String, `observer`: TransferObserver, `mailbox`: MailboxObserverV2): DurableEnvoixSession {
+            return FfiConverterTypeDurableEnvoixSession.lift(
+    uniffiRustCallWithError(EnvoixException) { _status ->
+    UniffiLib.uniffi_envoix_ffi_fn_func_start_durable_transfer_v2(
+
+        FfiConverterTypeEnvoixRuntimeSettings.lower(`settings`),FfiConverterTypeFfiTransferRequest.lower(`request`),FfiConverterString.lower(`recordsDir`),FfiConverterString.lower(`receiptServer`),FfiConverterTypeTransferObserver.lower(`observer`),FfiConverterTypeMailboxObserverV2.lower(`mailbox`),_status)
+}
+    )
+    }
+
+
+        /**
+         * Projects canonical lifecycle state into native UI action availability.
+         */ fun `transferActivityActions`(`record`: FfiTransferActivityRecord): FfiTransferActivityActions {
+            return FfiConverterTypeFfiTransferActivityActions.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_envoix_ffi_fn_func_transfer_activity_actions(
+
+        FfiConverterTypeFfiTransferActivityRecord.lower(`record`),_status)
+}
+    )
+    }
 
 
