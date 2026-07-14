@@ -10,10 +10,11 @@ use envoix_protocol::{
     TransferProtocol,
 };
 use envoix_session::{
-    DEFAULT_CHUNK_SIZE, IdentityConfig, MANIFEST_UNSUPPORTED_PEER_CODE, ManifestSendRequest,
-    NoopEventSink, NoopSessionEventSink, PairingConfig, SessionConfig, SessionTransferSummary,
-    TransferCancelToken, receive_file_with_bound_peer, receive_transfer_with_bound_peer,
-    send_file_manual, send_manifest_manual,
+    BindAddrs, DEFAULT_CHUNK_SIZE, IdentityConfig, MANIFEST_UNSUPPORTED_PEER_CODE,
+    ManifestSendRequest, NoopEventSink, NoopSessionEventSink, PairingConfig, SessionConfig,
+    SessionTransferSummary, TransferCancelToken, receive_file_with_bound_peer,
+    receive_transfer_enable_mdns, receive_transfer_with_bound_peer, send_file_enable_mdns,
+    send_file_manual, send_manifest_enable_mdns, send_manifest_manual,
 };
 use tempfile::tempdir;
 use tokio::sync::oneshot;
@@ -118,6 +119,32 @@ async fn bound_peer_receiver(
         }
     };
     (peer, receive)
+}
+
+async fn mdns_receiver(
+    output_dir: PathBuf,
+) -> tokio::task::JoinHandle<Result<SessionTransferSummary, envoix_session::SessionError>> {
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let mut receive = tokio::spawn(async move {
+        let pairing = pairing();
+        receive_transfer_enable_mdns(
+            BindAddrs::single("127.0.0.1:0".parse().unwrap()),
+            output_dir,
+            config(),
+            &pairing,
+            Box::new(NoopSessionEventSink),
+            move |_peer, _relay_urls| {
+                let _ = ready_tx.send(());
+            },
+            TransferCancelToken::new(),
+        )
+        .await
+    });
+    if let callback @ (Err(_) | Ok(Err(_))) = tokio::time::timeout(TEST_TIMEOUT, ready_rx).await {
+        let task = tokio::time::timeout(Duration::from_secs(1), &mut receive).await;
+        panic!("mDNS receiver failed before advertising: callback={callback:?}, task={task:?}");
+    }
+    receive
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -315,5 +342,87 @@ async fn manifest_routing_never_starts_before_authentication_succeeds() {
     assert!(
         std::fs::read_dir(&output_dir).unwrap().next().is_none(),
         "authentication failure must happen before Manifest creates state or output"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mdns_dual_receiver_routes_manifest() {
+    let _guard = IROH_TEST_LOCK.lock().await;
+    let temp = tempdir().unwrap();
+    let source_root = temp.path().join("source");
+    let output_dir = temp.path().join("received");
+    std::fs::create_dir_all(&source_root).unwrap();
+    std::fs::create_dir_all(&output_dir).unwrap();
+    let request = manifest_request(&source_root);
+    let receive = mdns_receiver(output_dir.clone()).await;
+
+    let pairing = pairing();
+    let sent = tokio::time::timeout(
+        TEST_TIMEOUT,
+        send_manifest_enable_mdns(
+            request,
+            true,
+            config(),
+            &pairing,
+            Box::new(NoopSessionEventSink),
+            TransferCancelToken::new(),
+        ),
+    )
+    .await
+    .expect("mDNS Manifest sender timed out")
+    .expect("mDNS Manifest sender failed");
+    let received = tokio::time::timeout(TEST_TIMEOUT, receive)
+        .await
+        .expect("mDNS Manifest receiver timed out")
+        .expect("mDNS Manifest receiver task panicked")
+        .expect("mDNS Manifest receiver failed");
+
+    assert_eq!(sent.file_count, 2);
+    assert_eq!(received.protocol(), TransferProtocol::ManifestV1);
+    assert_eq!(
+        std::fs::read(output_dir.join("album/first.txt")).unwrap(),
+        b"first file over manifest session routing"
+    );
+    assert_eq!(
+        std::fs::read(output_dir.join("second.txt")).unwrap(),
+        b"second file over manifest session routing"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mdns_dual_receiver_preserves_single_file_sender() {
+    let _guard = IROH_TEST_LOCK.lock().await;
+    let temp = tempdir().unwrap();
+    let source = temp.path().join("legacy-mdns.txt");
+    let output_dir = temp.path().join("received");
+    std::fs::write(&source, b"existing mDNS single-file protocol").unwrap();
+    std::fs::create_dir_all(&output_dir).unwrap();
+    let receive = mdns_receiver(output_dir.clone()).await;
+
+    let pairing = pairing();
+    tokio::time::timeout(
+        TEST_TIMEOUT,
+        send_file_enable_mdns(
+            source,
+            false,
+            config(),
+            &pairing,
+            Box::new(NoopEventSink),
+            TransferCancelToken::new(),
+        ),
+    )
+    .await
+    .expect("mDNS single-file sender timed out")
+    .expect("mDNS single-file sender failed");
+    let received = tokio::time::timeout(TEST_TIMEOUT, receive)
+        .await
+        .expect("mDNS single-file receiver timed out")
+        .expect("mDNS single-file receiver task panicked")
+        .expect("mDNS single-file receiver failed");
+
+    assert_eq!(received.protocol(), TransferProtocol::SingleFileV1);
+    assert_eq!(
+        std::fs::read(output_dir.join("legacy-mdns.txt")).unwrap(),
+        b"existing mDNS single-file protocol"
     );
 }

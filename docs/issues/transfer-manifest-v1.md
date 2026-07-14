@@ -61,14 +61,18 @@ The additive contract, wire-codec, and core-engine slices are implemented as of
   `envoix/manifest/1`. A legacy single-file receiver rejects that ALPN before
   authentication or payload writes and the sender reports the stable
   `manifest.unsupported_peer` diagnostic instead of falling back;
+- the existing mDNS discovery loop now has additive Manifest send and
+  negotiated receive entry points. Its advertisement accepts both ALPNs while
+  the legacy mDNS functions retain their signatures and single-file behavior;
 - real iroh tests prove Manifest directory/multi-file routing, old single-file
   compatibility on the same dual endpoint, pre-engine authentication failure,
-  and legacy-peer ALPN rejection.
+  legacy-peer ALPN rejection, real mDNS discovery into Manifest, and an old
+  single-file mDNS sender reaching the new negotiated receiver.
 
 The engine is exercised both over an in-memory full-duplex connection and the
-additive manual/direct iroh session path. Shipping clients still do **not**
-transfer multiple files or directories: mDNS/room source wrappers, client
-facade selection, durable Activity results, FFI, and Apple UI remain subsequent
+additive manual/direct and mDNS iroh session paths. Shipping clients still do
+**not** transfer multiple files or directories: room and client-facade source
+selection, durable Activity results, FFI, and Apple UI remain subsequent
 slices.
 
 ## Compatibility Boundary
@@ -365,9 +369,8 @@ The shared transfer record should expose:
 
 ## Follow-up Issues
 
-- Extend the authenticated Manifest session path through mDNS, room, client,
-  durable Activity, and FFI entry points without changing existing single-file
-  APIs.
+- Extend the authenticated Manifest session path through room, client, durable
+  Activity, and FFI entry points without changing existing single-file APIs.
 - Add multi-file selection in Apple sender UI.
 - Add directory transfer support on desktop.
 - Add manifest-aware receive path validation tests.

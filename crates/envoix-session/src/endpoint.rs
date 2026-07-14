@@ -698,6 +698,25 @@ pub(crate) async fn build_advertising_accept_endpoint(
     .await
 }
 
+pub(crate) async fn build_transfer_advertising_accept_endpoint(
+    listen_addrs: BindAddrs,
+    identity: &IdentityConfig,
+    relay: &Option<String>,
+    relay_only: bool,
+    candidates: &CandidateFilter,
+) -> Result<Endpoint, SessionError> {
+    build_endpoint(
+        Some(listen_addrs),
+        identity,
+        &[TransferProtocol::SingleFileV1, TransferProtocol::ManifestV1],
+        true,
+        relay,
+        relay_only,
+        candidates,
+    )
+    .await
+}
+
 pub(crate) async fn build_dial_endpoint(
     identity: &IdentityConfig,
     relay: &Option<String>,

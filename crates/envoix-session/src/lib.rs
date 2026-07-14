@@ -35,7 +35,8 @@ use connection::IrohFrameConnection;
 pub use endpoint::{BindAddrs, BoundEndpoint, parse_broker_addr};
 use endpoint::{
     build_accept_endpoint, build_advertising_accept_endpoint, build_dial_endpoint,
-    build_transfer_accept_endpoint, peer_addr_from_descriptor,
+    build_transfer_accept_endpoint, build_transfer_advertising_accept_endpoint,
+    peer_addr_from_descriptor,
 };
 pub use identity::{IdentityConfig, MemoryIdentity};
 pub use iroh::EndpointAddr;
@@ -201,6 +202,26 @@ pub async fn bind_iroh_endpoint_enable_mdns(
     })
 }
 
+/// Bind and advertise an mDNS endpoint that accepts both the compatible
+/// single-file protocol and Manifest v1.
+pub async fn bind_iroh_transfer_endpoint_enable_mdns(
+    listen_addrs: impl Into<BindAddrs>,
+    identity: &IdentityConfig,
+    candidates: &CandidateFilter,
+) -> Result<BoundEndpoint, SessionError> {
+    Ok(BoundEndpoint {
+        local_endpoint: build_transfer_advertising_accept_endpoint(
+            listen_addrs.into(),
+            identity,
+            &None,
+            false,
+            candidates,
+        )
+        .await?,
+        candidates: candidates.clone(),
+    })
+}
+
 /// Sends one file to a manually supplied peer descriptor, stopping on cancellation.
 pub async fn send_file_manual(
     peer: PeerDescriptor,
@@ -344,6 +365,7 @@ async fn send_manifest_to_address(
         pairing,
         events,
         &cancel,
+        None,
     )
     .await;
     local_endpoint.close().await;
@@ -368,6 +390,102 @@ pub async fn send_file_enable_mdns(
         &config.candidates,
     )
     .await?;
+    let send_endpoint = local_endpoint.clone();
+    let send_events = events.clone();
+    let send_cancel = cancel.clone();
+    let result = send_to_first_mdns_peer(
+        &local_endpoint,
+        events.as_ref(),
+        &cancel,
+        move |peer_addr| {
+            let local_endpoint = send_endpoint.clone();
+            let file_path = file_path.clone();
+            let config = config.clone();
+            let events = send_events.clone();
+            let cancel = send_cancel.clone();
+            async move {
+                send_file_to_peer_addr(
+                    local_endpoint,
+                    peer_addr,
+                    file_path,
+                    resume,
+                    config,
+                    pairing,
+                    events,
+                    &cancel,
+                    MDNS_CONNECT_TIMEOUT,
+                )
+                .await
+            }
+        },
+    )
+    .await;
+    local_endpoint.close().await;
+    result
+}
+
+/// Sends one Manifest transfer set to the first mDNS-discovered endpoint that
+/// authenticates and supports Manifest v1.
+pub async fn send_manifest_enable_mdns(
+    request: ManifestSendRequest,
+    resume: bool,
+    config: SessionConfig,
+    pairing: &PairingConfig,
+    events: Box<dyn SessionEventSink>,
+    cancel: TransferCancelToken,
+) -> Result<ManifestTransferSummary, SessionError> {
+    let events: Arc<dyn SessionEventSink> = Arc::from(events);
+    let local_endpoint = build_dial_endpoint(
+        &config.identity,
+        &config.data_relay(),
+        config.relay_only,
+        &config.candidates,
+    )
+    .await?;
+    let send_endpoint = local_endpoint.clone();
+    let send_events = events.clone();
+    let send_cancel = cancel.clone();
+    let result = send_to_first_mdns_peer(
+        &local_endpoint,
+        events.as_ref(),
+        &cancel,
+        move |peer_addr| {
+            let local_endpoint = send_endpoint.clone();
+            let request = request.clone();
+            let config = config.clone();
+            let events = send_events.clone();
+            let cancel = send_cancel.clone();
+            async move {
+                send_manifest_to_peer_addr(
+                    local_endpoint,
+                    peer_addr,
+                    request,
+                    resume,
+                    config,
+                    pairing,
+                    events,
+                    &cancel,
+                    Some(MDNS_CONNECT_TIMEOUT),
+                )
+                .await
+            }
+        },
+    )
+    .await;
+    local_endpoint.close().await;
+    result
+}
+
+async fn send_to_first_mdns_peer<T, F, Fut>(
+    local_endpoint: &Endpoint,
+    events: &dyn EventSink,
+    cancel: &TransferCancelToken,
+    mut send: F,
+) -> Result<T, SessionError>
+where
+    F: FnMut(EndpointAddr) -> Fut,
+    Fut: Future<Output = Result<T, SessionError>>,
+{
     let mdns = MdnsAddressLookup::builder()
         .advertise(false)
         .build(local_endpoint.id())
@@ -394,8 +512,7 @@ pub async fn send_file_enable_mdns(
                 Ok(None) | Err(_) => break,
             },
             () = cancel.cancelled() => {
-                local_endpoint.close().await;
-                return Err(interrupted_error(&cancel));
+                return Err(interrupted_error(cancel));
             }
         };
 
@@ -412,30 +529,14 @@ pub async fn send_file_enable_mdns(
             continue;
         }
 
-        match send_file_to_peer_addr(
-            local_endpoint.clone(),
-            discovered_peer.to_endpoint_addr(),
-            file_path.clone(),
-            resume,
-            config.clone(),
-            pairing,
-            events.clone(),
-            &cancel,
-            MDNS_CONNECT_TIMEOUT,
-        )
-        .await
-        {
-            Ok(summary) => {
-                local_endpoint.close().await;
-                return Ok(summary);
-            }
+        match send(discovered_peer.to_endpoint_addr()).await {
+            Ok(summary) => return Ok(summary),
             Err(error) => {
                 events.on_event(TransferEvent::Failed {
                     direction: TransferDirection::Send,
                     reason: error.to_string(),
                 });
                 if cancel.is_cancelled() {
-                    local_endpoint.close().await;
                     return Err(error);
                 }
                 last_error = Some(error);
@@ -444,7 +545,6 @@ pub async fn send_file_enable_mdns(
         next_deadline = tokio::time::Instant::now() + MDNS_DISCOVERY_TIMEOUT;
     }
 
-    local_endpoint.close().await;
     Err(last_error.unwrap_or_else(|| {
         CoreError::Discovery(format!(
             "no iroh mDNS peers discovered within {} seconds",
@@ -550,6 +650,30 @@ where
     receive_with_auth_retries(bound_endpoint, output_dir, config, pairing, events, cancel).await
 }
 
+/// Receives one authenticated single-file or Manifest transfer over the
+/// existing mDNS discovery path. Failed pairing attempts are ignored using the
+/// same bounded retry policy as [`receive_file_enable_mdns`].
+pub async fn receive_transfer_enable_mdns<F>(
+    listen_addrs: impl Into<BindAddrs>,
+    output_dir: PathBuf,
+    config: SessionConfig,
+    pairing: &PairingConfig,
+    events: Box<dyn SessionEventSink>,
+    on_bound_peer: F,
+    cancel: TransferCancelToken,
+) -> Result<SessionTransferSummary, SessionError>
+where
+    F: FnOnce(PeerDescriptor, Vec<String>) + Send,
+{
+    let bound_endpoint =
+        bind_iroh_transfer_endpoint_enable_mdns(listen_addrs, &config.identity, &config.candidates)
+            .await?;
+    let peer = bound_endpoint.peer_descriptor()?;
+    on_bound_peer(peer, Vec::new());
+    receive_transfer_with_auth_retries(bound_endpoint, output_dir, config, pairing, events, cancel)
+        .await
+}
+
 /// Receives one file on an already-bound endpoint, stopping on cancellation.
 pub async fn receive_one_authenticated(
     bound_endpoint: BoundEndpoint,
@@ -651,6 +775,46 @@ pub async fn receive_with_auth_retries(
     let result = engine
         .receive_file_with_cancel(&mut connection, output_dir, events.as_ref(), &cancel)
         .await;
+    close_after_receive(&mut connection, &result).await;
+    bound_endpoint.local_endpoint.close().await;
+    result
+}
+
+/// Receives one negotiated single-file or Manifest transfer on an already
+/// bound dual-protocol endpoint, ignoring failed pairing attempts.
+pub async fn receive_transfer_with_auth_retries(
+    bound_endpoint: BoundEndpoint,
+    output_dir: PathBuf,
+    config: SessionConfig,
+    pairing: &PairingConfig,
+    events: Box<dyn SessionEventSink>,
+    cancel: TransferCancelToken,
+) -> Result<SessionTransferSummary, SessionError> {
+    let events: Arc<dyn SessionEventSink> = Arc::from(events);
+    let transfer_events: Arc<dyn EventSink> = events.clone();
+    let mut connection = match accept_authenticated_with_retries(
+        &bound_endpoint,
+        pairing,
+        &cancel,
+        transfer_events.clone(),
+    )
+    .await
+    {
+        Ok(connection) => connection,
+        Err(error) => {
+            bound_endpoint.local_endpoint.close().await;
+            return Err(error);
+        }
+    };
+    connection.watch_path(transfer_events);
+    let result = receive_negotiated_transfer(
+        &mut connection,
+        output_dir,
+        &config,
+        events.as_ref(),
+        &cancel,
+    )
+    .await;
     close_after_receive(&mut connection, &result).await;
     bound_endpoint.local_endpoint.close().await;
     result
@@ -856,11 +1020,22 @@ async fn send_manifest_to_peer_addr(
     pairing: &PairingConfig,
     events: Arc<dyn SessionEventSink>,
     cancel: &TransferCancelToken,
+    connect_timeout: Option<Duration>,
 ) -> Result<ManifestTransferSummary, SessionError> {
     events.on_event(TransferEvent::Connecting);
-    let mut connection =
-        dial_peer_addr_for_protocol(local_endpoint, peer_addr, TransferProtocol::ManifestV1)
-            .await?;
+    let dial = dial_peer_addr_for_protocol(local_endpoint, peer_addr, TransferProtocol::ManifestV1);
+    let mut connection = match connect_timeout {
+        Some(connect_timeout) => match tokio::time::timeout(connect_timeout, dial).await {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(CoreError::Transport(format!(
+                    "connect to peer timed out after {}s",
+                    connect_timeout.as_secs()
+                )));
+            }
+        },
+        None => dial.await?,
+    };
     let transfer_events: Arc<dyn EventSink> = events.clone();
     connection.watch_path(transfer_events);
     if let Err(error) = auth_bounded(authenticate_sender(&mut connection, pairing), cancel).await {
