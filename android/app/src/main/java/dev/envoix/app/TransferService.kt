@@ -862,7 +862,20 @@ class TransferService : Service() {
             )
             return
         }
-        MediaStoreSaver.commit(this, target)
+        val committed = MediaStoreSaver.commit(this, target)
+        if (committed.isFailure) {
+            // A colliding _data (same-named file already published) or other
+            // publish error must not crash the service: drop the pending target
+            // and leave the file in staging for a later retry.
+            MediaStoreSaver.delete(this, target.uri)
+            journal.delete()
+            tl(
+                "failed",
+                outcome = "commit",
+                fields = mapOf("cause" to (committed.exceptionOrNull()?.javaClass?.simpleName ?: "unknown")),
+            )
+            return
+        }
         // Record the commit BEFORE clearing staging, so a crash here recovers
         // by adopting (never re-publishing = duplicate).
         writePublishJournal(journal, target.uri.toString(), target.mediaStorePending, committed = target.uri.toString())
