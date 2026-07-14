@@ -1272,6 +1272,7 @@ dependencies = [
  "envoix-storage",
  "envoix-types",
  "getrandom 0.3.4",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",

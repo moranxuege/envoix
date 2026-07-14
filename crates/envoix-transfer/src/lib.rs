@@ -1,5 +1,12 @@
 //! File-transfer state machine.
 
+mod manifest;
+
+pub use manifest::{
+    ManifestEventSink, ManifestNoopEventSink, ManifestSendRequest, ManifestTransferEngine,
+    ManifestTransferEvent, ManifestTransferSummary,
+};
+
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use std::sync::{

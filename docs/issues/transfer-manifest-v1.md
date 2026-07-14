@@ -26,8 +26,8 @@ The design direction is that a single-file transfer can eventually be represente
 
 ## Implementation Status
 
-The first additive contract and wire-codec slices are implemented as of
-2026-07-14 in `envoix-protocol`:
+The additive contract, wire-codec, and core-engine slices are implemented as of
+2026-07-14 in `envoix-protocol` and `envoix-transfer`:
 
 - exact `envoix/1` and `envoix/manifest/1` ALPN constants and transfer-shape
   selection distinguish `single_file_v1` from `manifest_v1` without fallback;
@@ -45,13 +45,22 @@ The first additive contract and wire-codec slices are implemented as of
   borrowed chunk writer that avoids an extra payload copy;
 - the existing public single-file `Frame` enum and `FrameConnection` trait are
   unchanged, and their established frame IDs 1 through 9 are fixture-tested;
+- the independent sequential engine preflights every source file, negotiates a
+  complete receiver-owned conflict map, preserves top-level directory roots by
+  renaming them as a unit, skips identical files without payload, stages active
+  entries under a symlink-safe private directory, resumes verified prefixes,
+  and exclusively commits hash-verified files without overwriting;
+- the receiver persists its accepted path map by manifest ID, so a resumed
+  directory transfer reuses the same claimed root instead of creating a new
+  suffix on every attempt. Already committed identical entries become skips;
 - the existing session now references the shared single-file ALPN constant but
   advertises only that protocol. It intentionally does not advertise Manifest
-  until the Manifest transfer engine exists.
+  until authenticated Manifest routing and native-client integration exist.
 
-These slices do **not** yet transfer multiple files or directories.
-Authenticated session routing, the sequential send/receive engine, conflict
-planning, staging, durable results, FFI, and Apple UI remain subsequent slices.
+The engine is currently exercised over an in-memory full-duplex connection; the
+shipping clients do **not** yet transfer multiple files or directories.
+Authenticated ALPN session routing, durable Activity results, FFI, and Apple UI
+remain subsequent slices.
 
 ## Compatibility Boundary
 
@@ -345,8 +354,8 @@ The shared transfer record should expose:
 
 ## Follow-up Issues
 
-- Implement Manifest-authenticated session routing and the sequential transfer
-  engine.
+- Implement Manifest-authenticated ALPN session routing without changing the
+  existing single-file entry points.
 - Add multi-file selection in Apple sender UI.
 - Add directory transfer support on desktop.
 - Add manifest-aware receive path validation tests.
