@@ -3,7 +3,49 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
-struct FolderPickerSheet: UIViewControllerRepresentable {
+private struct DocumentPickerSheet: UIViewControllerRepresentable {
+    let contentTypes: [UTType]
+    let allowsMultipleSelection: Bool
+    let initialDirectoryURL: URL?
+    let onPick: ([URL]) -> Void
+    let onCancel: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let controller = UIDocumentPickerViewController(forOpeningContentTypes: contentTypes, asCopy: false)
+        controller.allowsMultipleSelection = allowsMultipleSelection
+        controller.directoryURL = initialDirectoryURL
+        controller.delegate = context.coordinator
+        return controller
+    }
+
+    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
+
+    final class Coordinator: NSObject, UIDocumentPickerDelegate {
+        private let parent: DocumentPickerSheet
+
+        init(parent: DocumentPickerSheet) {
+            self.parent = parent
+        }
+
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            guard !urls.isEmpty else {
+                parent.onCancel()
+                return
+            }
+            parent.onPick(urls)
+        }
+
+        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+            parent.onCancel()
+        }
+    }
+}
+
+struct FolderPickerSheet: View {
     let initialDirectoryURL: URL?
     let onPick: (URL) -> Void
     let onCancel: () -> Void
@@ -18,46 +60,67 @@ struct FolderPickerSheet: UIViewControllerRepresentable {
         self.onCancel = onCancel
     }
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(parent: self)
+    var body: some View {
+        DocumentPickerSheet(
+            contentTypes: [.folder],
+            allowsMultipleSelection: false,
+            initialDirectoryURL: initialDirectoryURL,
+            onPick: { urls in
+                guard let url = urls.first else {
+                    onCancel()
+                    return
+                }
+                onPick(url)
+            },
+            onCancel: onCancel
+        )
+    }
+}
+
+struct FilePickerSheet: View {
+    let initialDirectoryURL: URL?
+    let onPick: ([URL]) -> Void
+    let onCancel: () -> Void
+
+    init(
+        initialDirectoryURL: URL? = nil,
+        onPick: @escaping ([URL]) -> Void,
+        onCancel: @escaping () -> Void
+    ) {
+        self.initialDirectoryURL = initialDirectoryURL
+        self.onPick = onPick
+        self.onCancel = onCancel
     }
 
-    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        let controller = UIDocumentPickerViewController(forOpeningContentTypes: [.folder], asCopy: false)
-        controller.allowsMultipleSelection = false
-        controller.directoryURL = initialDirectoryURL
-        controller.delegate = context.coordinator
-        return controller
-    }
-
-    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
-
-    final class Coordinator: NSObject, UIDocumentPickerDelegate {
-        private let parent: FolderPickerSheet
-
-        init(parent: FolderPickerSheet) {
-            self.parent = parent
-        }
-
-        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-            guard let url = urls.first else {
-                parent.onCancel()
-                return
-            }
-            parent.onPick(url)
-        }
-
-        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
-            parent.onCancel()
-        }
+    var body: some View {
+        DocumentPickerSheet(
+            contentTypes: [.data],
+            allowsMultipleSelection: true,
+            initialDirectoryURL: initialDirectoryURL,
+            onPick: onPick,
+            onCancel: onCancel
+        )
     }
 }
 
 #if DEBUG
+private enum PickerUITestFixtureRunID {
+    static let environmentKey = "ENVOIX_CROSS_DEVICE_RUN_ID"
+
+    static func current() -> String? {
+        guard let runID = ProcessInfo.processInfo.environment[environmentKey],
+              runID.count <= 80,
+              runID.range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil else {
+            assertionFailure("\(environmentKey) must contain only letters, digits, '-' or '_'")
+            return nil
+        }
+        return runID
+    }
+}
+
 enum FolderPickerUITestFixture {
     static let payloadArgument = "--ui-testing-folder-payload"
     static let cleanupArgument = "--ui-testing-clean-folder-payload"
-    static let runIDEnvironmentKey = "ENVOIX_CROSS_DEVICE_RUN_ID"
 
     static func initialDirectoryURL() -> URL? {
         guard let documents = FileManager.default.urls(
@@ -94,18 +157,62 @@ enum FolderPickerUITestFixture {
     }
 
     private static func fixture(in documents: URL) -> (directory: URL, file: URL, payload: Data)? {
-        guard let runID = ProcessInfo.processInfo.environment[runIDEnvironmentKey],
-              runID.count <= 80,
-              runID.range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil else {
-            assertionFailure("\(runIDEnvironmentKey) must contain only letters, digits, '-' or '_'")
-            return nil
-        }
+        guard let runID = PickerUITestFixtureRunID.current() else { return nil }
         let directory = documents.appendingPathComponent("envoix-\(runID)-folder", isDirectory: true)
         return (
             directory,
             directory.appendingPathComponent("payload.txt"),
             Data("envoix folder picker payload \(runID)\n".utf8)
         )
+    }
+}
+
+enum FilePickerUITestFixture {
+    static let payloadArgument = "--ui-testing-file-payload"
+    static let cleanupArgument = "--ui-testing-clean-file-payload"
+
+    static func initialDirectoryURL() -> URL? {
+        guard let documents = FileManager.default.urls(
+            for: .documentDirectory,
+            in: .userDomainMask
+        ).first else { return nil }
+        guard ProcessInfo.processInfo.arguments.contains(payloadArgument),
+              let files = files(in: documents) else { return documents }
+        do {
+            for file in files where (try? Data(contentsOf: file.url)) != file.payload {
+                try file.payload.write(to: file.url, options: .atomic)
+            }
+            return documents
+        } catch {
+            assertionFailure("Could not prepare Files picker UI fixture: \(error)")
+            return documents
+        }
+    }
+
+    static func cleanIfRequested() {
+        guard ProcessInfo.processInfo.arguments.contains(cleanupArgument),
+              let documents = FileManager.default.urls(
+                for: .documentDirectory,
+                in: .userDomainMask
+              ).first,
+              let files = files(in: documents) else { return }
+        for file in files {
+            try? FileManager.default.removeItem(at: file.url)
+        }
+    }
+
+    private static func files(in documents: URL) -> [(url: URL, payload: Data)]? {
+        guard let runID = PickerUITestFixtureRunID.current() else { return nil }
+        return [
+            (
+                documents.appendingPathComponent("envoix-\(runID)-file-first.txt"),
+                Data("envoix file picker payload first \(runID)\n".utf8)
+            ),
+            (
+                documents.appendingPathComponent("envoix-\(runID)-file-second.txt"),
+                Data("envoix file picker payload second \(runID)\n".utf8)
+            ),
+        ]
     }
 }
 #endif

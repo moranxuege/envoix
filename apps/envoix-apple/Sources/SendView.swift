@@ -80,6 +80,16 @@ struct SendView: View {
                 handleScannedInvite(value)
             }
         }
+        .sheet(isPresented: $isFileImporterPresented) {
+            FilePickerSheet(
+                initialDirectoryURL: filePickerInitialDirectoryURL,
+                onPick: { urls in
+                    isFileImporterPresented = false
+                    handleImportedItems(.success(urls))
+                },
+                onCancel: { isFileImporterPresented = false }
+            )
+        }
         .sheet(isPresented: $isFolderPickerPresented) {
             FolderPickerSheet(
                 initialDirectoryURL: folderPickerInitialDirectoryURL,
@@ -453,15 +463,6 @@ struct SendView: View {
             loadDroppedItems(providers)
             return true
         }
-        #if os(iOS)
-        .fileImporter(
-            isPresented: $isFileImporterPresented,
-            allowedContentTypes: [.data],
-            allowsMultipleSelection: true
-        ) { result in
-            handleImportedItems(result)
-        }
-        #endif
     }
 
     private var selectionGuidance: String {
@@ -481,6 +482,17 @@ struct SendView: View {
     }
 
     #if os(iOS)
+    private var filePickerInitialDirectoryURL: URL? {
+        #if DEBUG
+        guard ProcessInfo.processInfo.arguments.contains("--ui-testing-file-picker") else {
+            return nil
+        }
+        return FilePickerUITestFixture.initialDirectoryURL()
+        #else
+        return nil
+        #endif
+    }
+
     private var folderPickerInitialDirectoryURL: URL? {
         #if DEBUG
         guard ProcessInfo.processInfo.arguments.contains("--ui-testing-folder-picker") else {

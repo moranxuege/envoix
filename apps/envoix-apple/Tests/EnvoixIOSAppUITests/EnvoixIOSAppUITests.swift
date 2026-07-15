@@ -420,6 +420,35 @@ final class EnvoixIOSAppUITests: XCTestCase {
         )
     }
 
+    func testFilePickerSelectsTwoFiles() throws {
+        let runID = "selection"
+        let fileNames = [
+            "envoix-\(runID)-file-first.txt",
+            "envoix-\(runID)-file-second.txt",
+        ]
+        let app = XCUIApplication()
+        app.launchArguments += [
+            "--ui-testing",
+            "--ui-testing-file-picker",
+            "--ui-testing-file-payload",
+        ]
+        app.launchEnvironment["ENVOIX_CROSS_DEVICE_RUN_ID"] = runID
+        defer { cleanFilePayloadFixture(app: app, runID: runID) }
+
+        app.launch()
+        app.tap()
+        dismissSheetIfNeeded(app)
+        XCTAssertTrue(app.buttons["home_send"].waitForExistence(timeout: 8))
+        app.buttons["home_send"].tap()
+
+        XCTAssertTrue(app.buttons["send_file_picker"].waitForExistence(timeout: 5))
+        guard selectFiles(named: fileNames, in: app) else { return }
+
+        let selection = app.descendants(matching: .any)["send_selection_summary"]
+        XCTAssertTrue(selection.waitForExistence(timeout: 8))
+        XCTAssertEqual(selection.value as? String, "2")
+    }
+
     func testFolderPickerSendsCurrentDirectoryToMacOSApp() throws {
 #if !ENVOIX_CROSS_DEVICE_TESTING
         throw XCTSkip("Requires the explicit cross-device build and a macOS production App receiver")
@@ -533,6 +562,54 @@ final class EnvoixIOSAppUITests: XCTestCase {
         return true
     }
 
+    private func selectFiles(named fileNames: [String], in app: XCUIApplication) -> Bool {
+        app.buttons["send_file_picker"].tap()
+        let files = XCUIApplication(bundleIdentifier: "com.apple.DocumentsApp")
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let applications = [app, files, springboard]
+        for fileName in fileNames {
+            let visibleName = URL(fileURLWithPath: fileName).deletingPathExtension().lastPathComponent
+            guard let file = firstHittableElement(
+                containing: visibleName,
+                in: applications,
+                timeout: 8
+            ) else {
+                XCTFail("The Files picker did not expose \(fileName)")
+                return false
+            }
+            file.tap()
+        }
+        guard let open = firstHittableButton(
+            named: ["Open", "打开"],
+            in: applications,
+            timeout: 8
+        ) else {
+            XCTFail("The Files picker did not expose its system Open action")
+            return false
+        }
+        open.tap()
+        return true
+    }
+
+    private func firstHittableElement(
+        containing label: String,
+        in applications: [XCUIApplication],
+        timeout: TimeInterval
+    ) -> XCUIElement? {
+        let predicate = NSPredicate(format: "label CONTAINS[c] %@", label)
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            for application in applications {
+                let element = application.descendants(matching: .any).matching(predicate).firstMatch
+                if element.exists, element.isHittable {
+                    return element
+                }
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        } while Date() < deadline
+        return nil
+    }
+
     private func waitForFolderActivityCompletion(
         named folderName: String,
         in app: XCUIApplication,
@@ -563,6 +640,15 @@ final class EnvoixIOSAppUITests: XCTestCase {
     private func cleanFolderPayloadFixture(app: XCUIApplication, runID: String) {
         app.terminate()
         app.launchArguments = ["--ui-testing", "--ui-testing-clean-folder-payload"]
+        app.launchEnvironment = ["ENVOIX_CROSS_DEVICE_RUN_ID": runID]
+        app.launch()
+        _ = app.buttons["home_send"].waitForExistence(timeout: 5)
+        app.terminate()
+    }
+
+    private func cleanFilePayloadFixture(app: XCUIApplication, runID: String) {
+        app.terminate()
+        app.launchArguments = ["--ui-testing", "--ui-testing-clean-file-payload"]
         app.launchEnvironment = ["ENVOIX_CROSS_DEVICE_RUN_ID": runID]
         app.launch()
         _ = app.buttons["home_send"].waitForExistence(timeout: 5)
