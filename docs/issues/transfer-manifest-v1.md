@@ -83,9 +83,13 @@ The additive contract, wire-codec, and core-engine slices are implemented as of
 The engine is exercised both over an in-memory full-duplex connection and the
 additive manual/direct, mDNS, and room iroh session paths. The Rust client facade
 now selects all three paths and has a real multi-file/directory loopback test.
-Shipping Apple clients still do **not** transfer multiple files or directories:
-durable Activity results, FFI, and Apple selection/publication UI remain
-subsequent slices.
+As of 2026-07-15, the Apple app also has durable Manifest Activity/FFI
+projection, multi-file and folder selection, Manifest preparation cancellation,
+multi-root receive publication, and Manifest-aware Activity details. One
+regular file deliberately remains on the compatible single-file path. Generic
+iOS build/build-for-testing and macOS hosted tests pass; real Apple↔Apple and
+Apple↔Android Manifest payload evidence remains pending, so this status must
+not be read as physical cross-device acceptance.
 
 ## Compatibility Boundary
 
@@ -381,12 +385,12 @@ The shared transfer record should expose:
 
 ## Follow-up Issues
 
-- Project the client Manifest path through durable Activity and additive FFI
-  entry points without changing existing single-file APIs.
-- Add multi-file selection in Apple sender UI.
-- Add directory transfer support on desktop.
-- Add manifest-aware receive path validation tests.
-- Add manifest-aware Activity records.
+- Enable multi-item Files/Photos Share Extension intake using the proven Apple
+  Manifest send path. The extension currently stages exactly one item.
+- Run physical Apple↔Apple and Apple↔Android multi-file/folder transfers and
+  retain final path, size/hash, result mapping, and publication evidence.
+- Add full Apple UI visual/accessibility coverage for long Manifest names,
+  partial results, and large top-level selections.
 - Add per-file resume after manifest transfer is stable.
 - Evaluate tar streaming for partial readability under poor network conditions.
 - Evaluate compression after measuring CPU cost and network bottlenecks.

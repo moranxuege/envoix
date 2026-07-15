@@ -110,10 +110,17 @@ when you need a custom location.
 
 ### Share from Files or Photos
 
+Inside Envoix, the Send picker accepts multiple files, one or more folders, or
+a mixed selection. macOS also accepts multiple files/folders by drag-and-drop.
+One regular file uses the legacy-compatible single-file protocol; a folder or
+multiple roots uses `ManifestV1`. Manifest preparation may hash many files, so
+the Send sheet stays open and exposes cancellation until a durable Activity has
+been created.
+
 For a PDF or another regular document, choose **Open in Envoix** when the source
 app offers an Open In destination. iOS launches the main app directly, and
 Envoix presents the normal Send sheet while retaining security-scoped access to
-the file.
+one file or folder supplied by that route.
 
 For Photos and generic share sheets, choose one file, image, or video and select
 the **Envoix** Share Extension. The extension copies the selected representation
@@ -121,11 +128,12 @@ into the shared App Group. Tap **Done**, then open Envoix manually; when the app
 becomes active it imports the pending draft and presents the Send sheet. iOS
 does not allow a Share Extension to launch its containing app.
 
-The current slice accepts exactly one regular item. Folders, multiple selected
-items, symbolic links, and paired Live Photo preservation are rejected with an
-explicit Manifest-pending message. Staged drafts are UUID-scoped, limited to
-4 GiB, and expire after 24 hours. The pending draft is acknowledged only when
-the user actually presses Send.
+The Share Extension still stages exactly one regular item. Multiple selected
+items and paired Live Photo preservation remain pending even though the main
+app now supports Manifest selections. Symbolic links and special files are
+rejected. Staged drafts are UUID-scoped, limited to 4 GiB, and expire after 24
+hours. The pending draft is acknowledged only when the user actually presses
+Send.
 
 ## Test
 
@@ -316,8 +324,9 @@ Quality-of-life:
 - New durable sessions freeze their configured receipt endpoint in Rust and
   restore it through the versioned mailbox courier. The legacy courier and
   start/restore functions remain available for existing clients.
-- **Send** accepts a file by drag-and-drop or *Paste Path* (from the clipboard),
-  as well as the file panel.
+- **Send** accepts multiple files/folders from its picker. On macOS,
+  drag-and-drop accepts multiple roots, while *Paste Path* imports one file or
+  folder path from the clipboard.
 - During a transfer the status line shows live throughput and an ETA based on a
   short rolling average; on macOS completion includes *Reveal in Finder* and a
   copyable absolute path.

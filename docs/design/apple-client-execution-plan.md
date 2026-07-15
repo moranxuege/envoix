@@ -1,10 +1,10 @@
 # Apple client execution plan
 
-Status: **Approved for execution — Wave 0 verified; stable commit pending**
+Status: **In execution — Apple Manifest app slice automated green; physical cross-device acceptance pending**
 
 Owner: Apple client workstream
 
-Last updated: 2026-07-14
+Last updated: 2026-07-15
 
 Design reference: [`../../../Design.png`](../../../Design.png)
 
@@ -61,12 +61,13 @@ second endpoint is required.
 ## 2. Current baseline
 
 The source baseline is locked and the reproducible Apple build, simulator, and
-physical-device UI baseline is green. The remaining G0 administrative gap is a
-stable commit for the verified Wave 0 working tree.
+physical-device UI baseline is green. Wave 0 has stable commits; the current
+branch is intentionally ahead of its remote while Manifest work is committed in
+reviewable local stages.
 
-- Branch: `feat/transfer-state-foundation`, tracking its origin branch at
-  `2c91047`. The Wave 0 implementation is an uncommitted documented descendant
-  of that revision and must be committed before parallel worktrees are created.
+- Branch: `feat/transfer-state-foundation`. Apple Manifest implementation
+  checkpoint `dae6154` and its preceding staged commits remain local and have
+  not been pushed as part of this execution stage.
 - Safety checkpoint `ceff278` (`feat: checkpoint canonical mobile transfer
   lifecycle`) contains the entire previously dirty tree and was pushed to
   `origin/feat/transfer-state-foundation` before any merge.
@@ -121,9 +122,10 @@ stable commit for the verified Wave 0 working tree.
 - The iOS product now declares iPhone-only (`UIDeviceFamily=[1]`) and portrait-
   only support. The global stage swipe and duplicate fixed bottom compensation
   were removed, and simulator regression tests cover explicit stage controls
-  and immediate developer-mode toggle state. The send UI now clearly states
-  that only one file is supported; multi-item drops and folders are rejected
-  with a Manifest-specific explanation.
+  and immediate developer-mode toggle state. The app Send flow now accepts
+  multiple files, folders, and mixed selections; one regular file stays on the
+  compatible single-file path, while folders or multiple roots require
+  `ManifestV1`.
 - The first Share Extension slice is implemented for one Files or Photos
   representation. It stages into App Group `group.com.envoix.app.shared`, uses
   a validated versioned draft descriptor, a 4 GiB quota and 24-hour TTL, and
@@ -145,11 +147,13 @@ stable commit for the verified Wave 0 working tree.
   earlier CLI/core gate, but the final Photos UI → iOS App → macOS App → Finder
   manual acceptance is still pending.
 - `ManifestV1` is implemented through protocol, independent wire frames,
-  sequential engine, authenticated direct/mDNS/Room session routing, and an
-  additive Rust client facade. The negotiated receiver retains legacy
-  single-file support on the same endpoint. Durable Activity projection,
-  additive FFI, and Apple multi-selection/publication remain before the Apple
-  client can truthfully expose multi-file or directory sending.
+  sequential engine, authenticated direct/mDNS/Room session routing, durable
+  client Activity, additive FFI, and Apple selection/publication UI. The
+  negotiated receiver retains legacy single-file support on the same endpoint.
+  Activity cards now show aggregate inventory, current item, top-level roots,
+  exceptional per-item results, and the correct completed destination. Generic
+  iOS build/build-for-testing and macOS hosted tests are green; physical
+  Apple↔Apple and Apple↔Android Manifest payload evidence remains pending.
 - Apple build and test jobs are not currently part of `.github/workflows/ci.yml`.
 - GitHub issues [#44](https://github.com/ECE4410J-NUUB/envoix/issues/44)
   and [#45](https://github.com/ECE4410J-NUUB/envoix/issues/45) remain the primary
@@ -158,8 +162,8 @@ stable commit for the verified Wave 0 working tree.
   [#41](https://github.com/ECE4410J-NUUB/envoix/issues/41).
 
 The Rust/UniFFI merge and Apple build, simulator, and targeted physical UI
-boundaries are green. G0 remains administratively open only for a commit that
-gives the implemented Wave 0 tree a stable source identity.
+boundaries are green. G0 is closed; later product tracks retain their own
+automated and physical-device acceptance gates.
 
 ## 3. Confirmed decisions
 
@@ -312,8 +316,9 @@ Completed:
 
 Remaining actions:
 
-- commit the Wave 0 implementation so its device evidence has a stable revision;
-- create parallel Apple worktrees only after that commit is recorded.
+- keep later feature slices in independent commits with their own evidence;
+- create additional worktrees only when concurrently executing a separately
+  owned track.
 
 Gate G0 evidence:
 
@@ -324,9 +329,9 @@ Gate G0 evidence:
 - physical-device version, installed build identity, and reproduction result for
   issue #45.
 
-The build, simulator, and targeted physical UI portions of G0 are green. The
-first two physical XCTest attempts are retained as environment-failure evidence;
-the third run executed the actual tests and passed.
+G0 is closed. The build, simulator, and targeted physical UI portions are
+green. The first two physical XCTest attempts are retained as environment-
+failure evidence; the third run executed the actual tests and passed.
 
 The original recommendation to create a separate checkpoint branch was
 superseded by the safer executed sequence: commit the entire accepted tree on
@@ -513,8 +518,9 @@ shared provider APIs remain additive until both Apple and Android compile.
 #### Track M — Accelerated `ManifestV1`
 
 Status: **protocol, wire codec, sequential engine, authenticated
-direct/mDNS/Room routing, and additive Rust client facade complete; durable
-Activity, FFI, and Apple UI slices remain**.
+direct/mDNS/Room routing, durable Activity, additive FFI, and Apple app
+selection/publication/Activity UI complete; Share Extension multi-item intake
+and physical cross-device acceptance remain**.
 
 The contract now freezes the additive compatibility direction: existing
 `envoix/1` and all single-file APIs remain unchanged, while manifest transfers
@@ -541,9 +547,11 @@ First slices:
    `Client::receive_transfer`, `TransferSet`, typed summaries, aggregate and
    per-entry events, and all existing source modes without adding fields to
    `TransferRequest` or changing `Transfer::wait`;
-5. expose aggregate and per-item result data through durable records and FFI;
-6. add Apple multi-selection, directory selection on macOS, conflict reporting,
-   and multi-item publication;
+5. **Completed:** expose aggregate and per-item result data through durable
+   records and additive FFI without changing existing single-file APIs;
+6. **Completed:** add Apple multi-selection, directory selection on macOS,
+   Manifest preparation cancellation, multi-item publication, and Activity
+   inventory/current-item/result/destination reporting;
 7. enable multi-item Files/Photos Share Extension intake after the manifest path
    is proven.
 
@@ -781,6 +789,8 @@ the command, source revision, destination, and result is insufficient.
 | 2026-07-14 | `2c91047` + Manifest contract/build-cache tree | Track M native consumers | macOS arm64 / iPhone 16 Pro simulator iOS 18.3.1 / Android Gradle 8.9 | invalidate and regenerate Apple Core from the new Rust source; build macOS and iOS apps; compile current Android App Kotlin; remove one generated required scheme and rerun prepare | Apple Core regenerated; macOS and iOS builds passed; Android `:app:compileDebugKotlin` passed. The first macOS attempt exposed a missing explicit `Envoix` scheme after XcodeGen switched to declared schemes. After adding it, the missing-output probe caught and corrected a Bash condition that treated the completeness function name as a string; the final probe regenerated the project and restored the scheme | stable `$TMPDIR/envoix-apple-cache` products and terminal output |
 | 2026-07-14 | `38d1fd5`–`84dab08` | Track M engine + authenticated session routing | macOS Rust host | exercise the Manifest engine and real iroh routing over manual/direct, real mDNS discovery, and loopback Room rendezvous; retain old single-file endpoints and legacy-peer rejection | session 35/35 passed with strict clippy; tests cover multiple files, ordinary/empty directories, safe conflict mapping, resume, dual-ALPN legacy compatibility, `manifest.unsupported_peer`, mDNS, and Room; client, FFI, and Android JNI compile checks passed | commits and terminal output |
 | 2026-07-14 | `a3d6120` | Track M additive client facade | macOS Rust host | expose Manifest send and negotiated receive for Manual/Invite/mDNS/Room without changing `TransferRequest` or `Transfer`; run all client tests, strict clippy, rustdoc, and native consumer checks | 91 unit tests plus 3 real iroh loopbacks passed; the loopbacks prove old API single-file, two-file/two-directory Manifest transfer, and a legacy sender reaching the new negotiated receiver; FFI and Android JNI compile checks passed | commit and terminal output |
+| 2026-07-15 | `efa3ac6`–`01a417c` | Track M durable client + FFI | macOS Rust host / native consumers | persist accepted plans and per-entry results in one durable Manifest Activity; expose additive UniFFI session, observer, runner, and record types; keep negotiated legacy single-file receive available | targeted Rust tests and native boundary compile gates passed; existing single-file APIs remain additive-compatible | commits and terminal output |
+| 2026-07-15 | `055cdbc`–`dae6154` | Track M Apple app integration | generic iOS / macOS arm64 host | build Manifests from validated selections; route one regular file through the legacy path and folders/multiple roots through Manifest; publish received roots; render Manifest Activity inventory and results | generic iOS build and build-for-testing passed; macOS hosted suite executed 8 tests with 7 passes, 1 explicit live-device skip, and 0 failures; no Simulator was launched | commits and terminal output |
 
 ## 11. Definition of done
 
@@ -950,6 +960,19 @@ The Apple milestone is complete only when all of the following are true:
   Manifest events while preserving `TransferRequest`, `send`, `receive`, `run`,
   and `Transfer::wait`. Commits `38d1fd5` through `a3d6120` carry these slices.
   Session 35/35, client 91 unit plus 3 real iroh loopbacks, strict clippy,
-  rustdoc, and client/FFI/Android JNI compile gates pass. The remaining Track M
-  critical path is durable Activity projection → additive FFI → Apple
-  multi-selection/directory publication → multi-item Share intake.
+  rustdoc, and client/FFI/Android JNI compile gates pass. At that stage, the
+  remaining Track M critical path was durable Activity projection → additive
+  FFI → Apple multi-selection/directory publication → multi-item Share
+  intake.
+- 2026-07-15: Track M reached the Apple app boundary in staged commits
+  `efa3ac6` through `dae6154`. Durable Manifest runners and additive FFI project
+  accepted plans, aggregate/current-item progress, and final per-entry results.
+  The Apple Send flow accepts multiple files, folders, and mixed roots; keeps
+  one regular file on the legacy-compatible path; retains security-scoped
+  resources through asynchronous Manifest preparation; and provides explicit
+  cancellation. Receive publication handles multiple top-level roots without
+  overwriting existing content. Activity shows Manifest inventory, root
+  preview, current item, exceptional results, and the correct completed item or
+  destination directory. Generic iOS build/build-for-testing and the macOS
+  hosted suite passed without launching Simulator. Multi-item Share Extension
+  intake and real Apple↔Apple/Apple↔Android Manifest payload evidence remain.
