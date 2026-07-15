@@ -44,7 +44,7 @@ func activityActionAvailability(for record: FfiTransferActivityRecord) -> Activi
         isFinalizing: actions.isFinalizing
     )
 }
-let expectedCoreFFIAPIVersion: UInt32 = 1
+let expectedCoreFFIAPIVersion: UInt32 = 2
 let appDebugBuildLabel = "Debug build 2026.07.08.19"
 
 /// Generates a short, memorable, easy-to-type pairing token of the form
@@ -498,6 +498,53 @@ func availableCompletedFileURL(path: String, expectedBytes: UInt64) -> URL? {
     return url
 }
 
+func availableCompletedDirectoryURL(path: String) -> URL? {
+    let path = path.trimmed
+    guard !path.isEmpty else { return nil }
+    let url = URL(fileURLWithPath: path, isDirectory: true)
+    guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
+          values.isDirectory == true,
+          values.isSymbolicLink != true else {
+        return nil
+    }
+    return url
+}
+
+/// Resolves the most useful completed location for a Manifest receive. A
+/// single root opens that item; a multi-root transfer opens its destination.
+func availableCompletedManifestURL(record: FfiManifestActivityRecord) -> URL? {
+    let activity = record.activity
+    guard activity.direction == .receive,
+          activity.state == .completed,
+          record.rootCount > 0 else { return nil }
+    let destination = URL(fileURLWithPath: activity.completedFilePath, isDirectory: true)
+    guard record.rootCount == 1 else {
+        return availableCompletedDirectoryURL(path: destination.path)
+    }
+
+    let successfulStatuses: Set<FfiManifestEntryResultStatus> = [
+        .completed, .skippedIdentical, .renamed,
+    ]
+    let roots = record.entries.filter { isSafeManifestTopLevelName($0.relativePath) }
+    guard roots.count == 1,
+          let entry = roots.first,
+          let result = record.entryResults.first(where: { $0.entryId == entry.entryId }),
+          successfulStatuses.contains(result.status),
+          isSafeManifestTopLevelName(result.finalRelativePath) else {
+        return nil
+    }
+    let finalURL = destination.appendingPathComponent(
+        result.finalRelativePath,
+        isDirectory: entry.kind == .directory
+    )
+    switch entry.kind {
+    case .file:
+        return availableCompletedFileURL(path: finalURL.path, expectedBytes: entry.size)
+    case .directory:
+        return availableCompletedDirectoryURL(path: finalURL.path)
+    }
+}
+
 /// Publishes one already-verified staging file into a user-selected Files
 /// directory. The destination becomes visible only after the full copy has
 /// completed and its size has been checked.
@@ -529,6 +576,168 @@ func publishReceivedFile(
     }
     try fileManager.moveItem(at: temporaryURL, to: finalURL)
     return finalURL
+}
+
+/// Publishes every verified top-level Manifest root. Existing identical roots
+/// make retries idempotent; a conflicting root fails before any new copy starts.
+func publishReceivedManifest(
+    from sourceRoot: URL,
+    to destinationDirectory: URL,
+    record: FfiManifestActivityRecord
+) throws -> URL {
+    let fileManager = FileManager.default
+    let successfulStatuses: Set<FfiManifestEntryResultStatus> = [
+        .completed, .skippedIdentical, .renamed,
+    ]
+    let results = Dictionary(
+        record.entryResults.map { ($0.entryId, $0) },
+        uniquingKeysWith: { first, _ in first }
+    )
+    let roots = try record.entries.filter { !$0.relativePath.contains("/") }.map { entry in
+        guard let result = results[entry.entryId],
+              successfulStatuses.contains(result.status),
+              isSafeManifestTopLevelName(entry.relativePath),
+              isSafeManifestTopLevelName(result.finalRelativePath) else {
+            throw RuntimeSettingsError("The verified Manifest is missing a safe top-level result.")
+        }
+        return (
+            entry,
+            sourceRoot.appendingPathComponent(result.finalRelativePath),
+            destinationDirectory.appendingPathComponent(result.finalRelativePath)
+        )
+    }
+    guard roots.count == Int(record.rootCount), !roots.isEmpty else {
+        throw RuntimeSettingsError("The verified Manifest root count is inconsistent.")
+    }
+
+    try fileManager.createDirectory(at: destinationDirectory, withIntermediateDirectories: true)
+    for (entry, source, destination) in roots where fileManager.fileExists(atPath: destination.path) {
+        guard try publishedItemMatches(entry: entry, source: source, destination: destination) else {
+            throw RuntimeSettingsError(
+                "A different item named \(destination.lastPathComponent) already exists in the selected folder."
+            )
+        }
+    }
+
+    for (entry, source, destination) in roots where !fileManager.fileExists(atPath: destination.path) {
+        switch entry.kind {
+        case .file:
+            _ = try publishReceivedFile(
+                from: source,
+                to: destinationDirectory,
+                expectedBytes: entry.size
+            )
+        case .directory:
+            try publishReceivedDirectory(from: source, to: destination)
+        }
+    }
+    return destinationDirectory
+}
+
+private func isSafeManifestTopLevelName(_ name: String) -> Bool {
+    !name.isEmpty
+        && name != "."
+        && name != ".."
+        && !name.contains("/")
+        && !name.contains("\\")
+        && !name.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
+}
+
+private func publishReceivedDirectory(from source: URL, to destination: URL) throws {
+    let fileManager = FileManager.default
+    let sourceValues = try source.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+    guard sourceValues.isDirectory == true, sourceValues.isSymbolicLink != true else {
+        throw RuntimeSettingsError("A verified Manifest directory is missing or invalid.")
+    }
+    let temporaryURL = destination.deletingLastPathComponent().appendingPathComponent(
+        ".envoix-publish-\(UUID().uuidString).part",
+        isDirectory: true
+    )
+    defer { try? fileManager.removeItem(at: temporaryURL) }
+    try fileManager.copyItem(at: source, to: temporaryURL)
+    guard try directoryTreesHaveEqualContents(source, temporaryURL) else {
+        throw RuntimeSettingsError("The copied directory did not match the verified staging data.")
+    }
+    try fileManager.moveItem(at: temporaryURL, to: destination)
+}
+
+private func publishedItemMatches(
+    entry: FfiPreparedManifestEntry,
+    source: URL,
+    destination: URL
+) throws -> Bool {
+    switch entry.kind {
+    case .file:
+        guard availableCompletedFileURL(path: destination.path, expectedBytes: entry.size) != nil else {
+            return false
+        }
+        return try filesHaveEqualContents(source, destination)
+    case .directory:
+        return try directoryTreesHaveEqualContents(source, destination)
+    }
+}
+
+private func directoryTreesHaveEqualContents(_ lhs: URL, _ rhs: URL) throws -> Bool {
+    let leftItems = try directoryInventory(lhs)
+    let rightItems = try directoryInventory(rhs)
+    guard leftItems.keys == rightItems.keys else { return false }
+    for path in leftItems.keys {
+        guard let left = leftItems[path], let right = rightItems[path], left.kind == right.kind else {
+            return false
+        }
+        if left.kind == .file {
+            guard left.size == right.size,
+                  try filesHaveEqualContents(
+                    lhs.appendingPathComponent(path),
+                    rhs.appendingPathComponent(path)
+                  ) else { return false }
+        }
+    }
+    return true
+}
+
+private enum PublishedItemKind: Equatable {
+    case file
+    case directory
+}
+
+private func directoryInventory(_ root: URL) throws -> [String: (kind: PublishedItemKind, size: Int)] {
+    let keys: Set<URLResourceKey> = [
+        .isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey,
+    ]
+    let rootValues = try root.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+    guard rootValues.isDirectory == true, rootValues.isSymbolicLink != true else {
+        throw RuntimeSettingsError("A Manifest directory is missing or invalid.")
+    }
+    let resolvedRoot = root.resolvingSymlinksInPath().standardizedFileURL
+    let rootPrefix = resolvedRoot.path + "/"
+    guard let enumerator = FileManager.default.enumerator(
+        at: resolvedRoot,
+        includingPropertiesForKeys: Array(keys),
+        options: []
+    ) else {
+        throw RuntimeSettingsError("Could not inspect a Manifest directory.")
+    }
+    var inventory: [String: (kind: PublishedItemKind, size: Int)] = [:]
+    while let url = enumerator.nextObject() as? URL {
+        let values = try url.resourceValues(forKeys: keys)
+        guard values.isSymbolicLink != true else {
+            throw RuntimeSettingsError("Symbolic links are not supported in a Manifest directory.")
+        }
+        let resolvedURL = url.resolvingSymlinksInPath().standardizedFileURL
+        guard resolvedURL.path.hasPrefix(rootPrefix) else {
+            throw RuntimeSettingsError("A Manifest directory entry escaped its root.")
+        }
+        let relativePath = String(resolvedURL.path.dropFirst(rootPrefix.count))
+        if values.isDirectory == true {
+            inventory[relativePath] = (.directory, 0)
+        } else if values.isRegularFile == true {
+            inventory[relativePath] = (.file, values.fileSize ?? -1)
+        } else {
+            throw RuntimeSettingsError("A Manifest directory contains an unsupported item.")
+        }
+    }
+    return inventory
 }
 
 private func filesHaveEqualContents(_ lhs: URL, _ rhs: URL) throws -> Bool {

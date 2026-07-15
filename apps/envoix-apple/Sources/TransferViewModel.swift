@@ -78,6 +78,7 @@ final class AppModel: ObservableObject {
     let receive = TransferViewModel()
     let send = TransferViewModel()
     @Published private(set) var activities: [FfiTransferActivityRecord] = []
+    @Published private(set) var manifestActivities: [String: FfiManifestActivityRecord] = [:]
     @Published private(set) var activityMetrics: [String: ActivityMetrics] = [:]
     #if os(iOS)
     @Published private(set) var pendingSendSelection: PendingSendSelection?
@@ -87,6 +88,7 @@ final class AppModel: ObservableObject {
     private var activityResourceAccess: [String: AnyObject] = [:]
     private var receivePublications: [String: ReceivePublication] = [:]
     private var durableSessions: [String: DurableEnvoixSession] = [:]
+    private var durableManifestSessions: [String: DurableEnvoixManifestSession] = [:]
 
     private var cancellables = Set<AnyCancellable>()
     private var removedActivityIDs = Set<String>()
@@ -208,7 +210,8 @@ final class AppModel: ObservableObject {
 
     @discardableResult
     func pauseActivity(_ activityID: String) -> Bool {
-        if durableSessions[activityID]?.pause() == true {
+        if durableManifestSessions[activityID]?.pause() == true
+            || durableSessions[activityID]?.pause() == true {
             syncActivitySnapshots()
             scheduleCommandSnapshotRefreshes()
             return true
@@ -221,7 +224,8 @@ final class AppModel: ObservableObject {
         if retryReceivePublication(activityID) {
             return true
         }
-        if durableSessions[activityID]?.resume() == true {
+        if durableManifestSessions[activityID]?.resume() == true
+            || durableSessions[activityID]?.resume() == true {
             syncActivitySnapshots()
             scheduleCommandSnapshotRefreshes()
             return true
@@ -231,7 +235,8 @@ final class AppModel: ObservableObject {
 
     @discardableResult
     func cancelActivity(_ activityID: String) -> Bool {
-        if durableSessions[activityID]?.cancel() == true {
+        if durableManifestSessions[activityID]?.cancel() == true
+            || durableSessions[activityID]?.cancel() == true {
             syncActivitySnapshots()
             scheduleCommandSnapshotRefreshes()
             return true
@@ -247,7 +252,9 @@ final class AppModel: ObservableObject {
 
     func removeActivity(_ activityID: String) {
         removedActivityIDs.insert(activityID)
+        _ = durableManifestSessions.removeValue(forKey: activityID)?.remove()
         _ = durableSessions.removeValue(forKey: activityID)?.remove()
+        manifestActivities.removeValue(forKey: activityID)
         activityResourceAccess.removeValue(forKey: activityID)
         if let publication = receivePublications.removeValue(forKey: activityID),
            let path = publication.completedRecord?.completedFilePath,
@@ -271,6 +278,15 @@ final class AppModel: ObservableObject {
         let uniqueRecords = Dictionary(records.map { ($0.activityId, $0) }, uniquingKeysWith: { _, latest in latest })
         for record in uniqueRecords.values where !removedActivityIDs.contains(record.activityId) {
             upsertActivity(record, speedBps: speedBps(for: record.activityId))
+        }
+        let persistedManifests = (try? listDurableManifestRecords(recordsDir: recordsDirectory.path)) ?? []
+        let liveManifests = durableManifestSessions.values.map { $0.activity() }
+        let manifestRecords = Dictionary(
+            (persistedManifests + liveManifests).map { ($0.activity.activityId, $0) },
+            uniquingKeysWith: { _, latest in latest }
+        )
+        for record in manifestRecords.values where !removedActivityIDs.contains(record.activity.activityId) {
+            handleManifestActivity(record)
         }
     }
 
@@ -301,6 +317,45 @@ final class AppModel: ObservableObject {
             _ = session.setPublicationTarget(target: target.ffiTarget)
         }
         upsertActivity(session.activity(), speedBps: 0)
+        return session
+    }
+
+    func startDurableManifestSendSession(
+        settings: EnvoixRuntimeSettings,
+        request: FfiTransferRequest,
+        prepared: FfiPreparedManifestSend,
+        observer: ManifestTransferObserver
+    ) throws -> DurableEnvoixManifestSession {
+        try FileManager.default.createDirectory(at: recordsDirectory, withIntermediateDirectories: true)
+        let session = try startDurableManifestSend(
+            settings: settings,
+            request: request,
+            prepared: prepared,
+            recordsDir: recordsDirectory.path,
+            observer: observer
+        )
+        durableManifestSessions[request.activityId] = session
+        handleManifestActivity(session.activity())
+        return session
+    }
+
+    func startDurableManifestReceiveSession(
+        settings: EnvoixRuntimeSettings,
+        request: FfiTransferRequest,
+        observer: ManifestTransferObserver
+    ) throws -> DurableEnvoixManifestSession {
+        try FileManager.default.createDirectory(at: recordsDirectory, withIntermediateDirectories: true)
+        let session = try startDurableManifestReceive(
+            settings: settings,
+            request: request,
+            recordsDir: recordsDirectory.path,
+            observer: observer
+        )
+        durableManifestSessions[request.activityId] = session
+        if let target = ReceivePublicationStore.loadAll()[request.activityId] {
+            _ = session.setPublicationTarget(target: target.ffiTarget)
+        }
+        handleManifestActivity(session.activity())
         return session
     }
 
@@ -347,6 +402,36 @@ final class AppModel: ObservableObject {
                     handleCoreStatus("restore failed: \(error.localizedDescription)", activityID: record.activityId)
                 }
             }
+            let manifestRecords = try listDurableManifestRecords(recordsDir: recordsDirectory.path)
+            for record in manifestRecords where !removedActivityIDs.contains(record.activity.activityId) {
+                handleManifestActivity(record)
+                let activityID = record.activity.activityId
+                let observer = AppleManifestObserver(
+                    viewModel: nil,
+                    appModel: self,
+                    activityID: activityID
+                )
+                do {
+                    let session = try restoreDurableManifestTransfer(
+                        activityId: activityID,
+                        recordsDir: recordsDirectory.path,
+                        observer: observer
+                    )
+                    durableManifestSessions[activityID] = session
+                    let restoredRecord = session.activity()
+                    if restoredRecord.activity.state == .publishing {
+                        let canonicalTarget = session.publicationTarget().map(ReceivePublicationTarget.init)
+                        let target = canonicalTarget ?? legacyPublicationTargets[activityID]
+                        if canonicalTarget == nil, let target {
+                            _ = session.setPublicationTarget(target: target.ffiTarget)
+                        }
+                        restoreReceivePublicationTarget(target, for: restoredRecord.activity)
+                    }
+                    handleManifestActivity(restoredRecord)
+                } catch {
+                    handleCoreStatus("Manifest restore failed: \(error.localizedDescription)", activityID: activityID)
+                }
+            }
         } catch {
             transferLogByActivityID["app", default: []].append("restore scan failed: \(error.localizedDescription)")
         }
@@ -379,6 +464,17 @@ final class AppModel: ObservableObject {
             isPublishing: false
         )
         retainResourceAccess(access, for: record.activityId)
+    }
+
+    func handleManifestActivity(_ record: FfiManifestActivityRecord) {
+        let activityID = record.activity.activityId
+        guard !removedActivityIDs.contains(activityID) else { return }
+        if let current = manifestActivities[activityID],
+           !ActivityProjectionPolicy.shouldAccept(record.activity, replacing: current.activity) {
+            return
+        }
+        manifestActivities[activityID] = record
+        handleCoreActivity(record.activity)
     }
 
     func handleCoreActivity(_ record: FfiTransferActivityRecord) {
@@ -451,18 +547,17 @@ final class AppModel: ObservableObject {
         resourceAccess: AnyObject?
     ) -> Bool {
         guard var publication = receivePublications[activityID],
-              publication.completedRecord != nil,
-              let session = durableSessions[activityID] else { return false }
+              publication.completedRecord != nil else { return false }
         let target = ReceivePublicationTarget(
             destinationPath: destinationDirectory.path,
             bookmark: bookmark
         )
-        guard session.setPublicationTarget(target: target.ffiTarget) else { return false }
+        guard setPublicationTarget(target, activityID: activityID) else { return false }
 
         ReceivePublicationStore.save(target, activityID: activityID)
         publication.destinationDirectory = destinationDirectory
         publication.resourceAccess = resourceAccess
-        publication.completedRecord = session.activity()
+        publication.completedRecord = publicationActivity(activityID: activityID)
         publication.isPublishing = false
         receivePublications[activityID] = publication
         if let resourceAccess {
@@ -470,7 +565,7 @@ final class AppModel: ObservableObject {
         } else {
             activityResourceAccess.removeValue(forKey: activityID)
         }
-        let record = session.activity()
+        guard let record = publicationActivity(activityID: activityID) else { return false }
         upsertActivity(record, speedBps: 0)
         beginReceivePublication(record)
         return true
@@ -482,6 +577,35 @@ final class AppModel: ObservableObject {
         activityResourceAccess.removeValue(forKey: activityID)
     }
 
+    private func setPublicationTarget(
+        _ target: ReceivePublicationTarget,
+        activityID: String
+    ) -> Bool {
+        if let session = durableManifestSessions[activityID] {
+            return session.setPublicationTarget(target: target.ffiTarget)
+        }
+        return durableSessions[activityID]?.setPublicationTarget(target: target.ffiTarget) == true
+    }
+
+    private func publicationActivity(activityID: String) -> FfiTransferActivityRecord? {
+        durableManifestSessions[activityID]?.activity().activity
+            ?? durableSessions[activityID]?.activity()
+    }
+
+    private func confirmPublication(activityID: String, path: String) -> Bool {
+        if let session = durableManifestSessions[activityID] {
+            return session.publicationSucceeded(path: path)
+        }
+        return durableSessions[activityID]?.publicationSucceeded(path: path) == true
+    }
+
+    private func failPublication(activityID: String, failure: FfiTransferFailure) -> Bool {
+        if let session = durableManifestSessions[activityID] {
+            return session.publicationFailed(failure: failure)
+        }
+        return durableSessions[activityID]?.publicationFailed(failure: failure) == true
+    }
+
     private func beginReceivePublication(_ record: FfiTransferActivityRecord) {
         guard var publication = receivePublications[record.activityId],
               !publication.isPublishing else { return }
@@ -491,9 +615,17 @@ final class AppModel: ObservableObject {
 
         let source = URL(fileURLWithPath: record.completedFilePath)
         let destination = publication.destinationDirectory
+        let manifest = manifestActivities[record.activityId]
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let result = Result {
-                try publishReceivedFile(
+                if let manifest {
+                    return try publishReceivedManifest(
+                        from: source,
+                        to: destination,
+                        record: manifest
+                    )
+                }
+                return try publishReceivedFile(
                     from: source,
                     to: destination,
                     expectedBytes: record.bytesTransferred
@@ -514,7 +646,7 @@ final class AppModel: ObservableObject {
         receivePublications[record.activityId] = publication
         switch result {
         case .success(let finalURL):
-            guard durableSessions[record.activityId]?.publicationSucceeded(path: finalURL.path) == true else {
+            guard confirmPublication(activityID: record.activityId, path: finalURL.path) else {
                 recordPublicationFailure(
                     record,
                     code: .internalError,
@@ -527,7 +659,9 @@ final class AppModel: ObservableObject {
             }
             let stagingURL = URL(fileURLWithPath: record.completedFilePath)
             try? FileManager.default.removeItem(at: stagingURL)
-            try? FileManager.default.removeItem(at: stagingURL.deletingLastPathComponent())
+            if manifestActivities[record.activityId] == nil {
+                try? FileManager.default.removeItem(at: stagingURL.deletingLastPathComponent())
+            }
         case .failure(let error):
             recordPublicationFailure(
                 record,
@@ -561,9 +695,12 @@ final class AppModel: ObservableObject {
             userMessageKey: userMessageKey,
             diagnosticMessage: diagnosticMessage
         )
-        if let session = durableSessions[record.activityId],
-           session.publicationFailed(failure: failure) {
-            upsertActivity(session.activity(), speedBps: 0)
+        if failPublication(activityID: record.activityId, failure: failure) {
+            if let manifest = durableManifestSessions[record.activityId]?.activity() {
+                handleManifestActivity(manifest)
+            } else if let activity = durableSessions[record.activityId]?.activity() {
+                upsertActivity(activity, speedBps: 0)
+            }
             return
         }
         var pending = record
@@ -582,15 +719,14 @@ final class AppModel: ObservableObject {
     private func retryReceivePublication(_ activityID: String) -> Bool {
         guard var publication = receivePublications[activityID],
               !publication.isPublishing,
-              publication.completedRecord != nil,
-              let session = durableSessions[activityID] else { return false }
+              publication.completedRecord != nil else { return false }
         let storedTarget = ReceivePublicationStore.loadAll()[activityID]
             ?? ReceivePublicationTarget(
                 destinationPath: publication.destinationDirectory.path,
                 bookmark: nil
             )
-        guard session.setPublicationTarget(target: storedTarget.ffiTarget) else { return false }
-        let record = session.activity()
+        guard setPublicationTarget(storedTarget, activityID: activityID),
+              let record = publicationActivity(activityID: activityID) else { return false }
         publication.completedRecord = record
         receivePublications[activityID] = publication
         upsertActivity(record, speedBps: 0)
@@ -695,6 +831,7 @@ final class AppModel: ObservableObject {
             for id in removed {
                 receive.forgetRoomID(for: id)
                 send.forgetRoomID(for: id)
+                manifestActivities.removeValue(forKey: id)
                 activityMetrics.removeValue(forKey: id)
                 transferEventLinesByActivityID.removeValue(forKey: id)
                 transferLogByActivityID.removeValue(forKey: id)
@@ -820,6 +957,7 @@ final class TransferViewModel: ObservableObject {
     weak var appModel: AppModel?
 
     private var session: DurableEnvoixSession?
+    private var manifestSession: DurableEnvoixManifestSession?
     private var destinationDir: String?       // receiver only
     private var resourceAccess: AnyObject?    // keeps iOS Files permission alive
     private var rate = RateTracker()
@@ -992,7 +1130,7 @@ final class TransferViewModel: ObservableObject {
             if mode == .room {
                 rememberRoomID(for: request.activityId, code: code)
             }
-            let started = start(settings: settings, request: request)
+            let started = startManifestReceive(settings: settings, request: request)
             guard started else {
                 forgetRoomID(for: activityID)
                 if publishDestinationDir != nil {
@@ -1035,6 +1173,52 @@ final class TransferViewModel: ObservableObject {
         retainResourceAccess(sourceAccess)
     }
 
+    func startSendingManifestWithToken(
+        selectedPaths: [String],
+        token: String,
+        settings: EnvoixRuntimeSettings,
+        sourceAccess: AnyObject? = nil
+    ) {
+        let request = makeRequest(direction: .send, mode: .mdns, settings: settings, token: token)
+        prepareAndStartManifestSend(
+            settings: settings,
+            request: request,
+            selectedPaths: selectedPaths,
+            sourceAccess: sourceAccess
+        )
+    }
+
+    func startSendingManifestWithRoom(
+        selectedPaths: [String],
+        code: String,
+        settings: EnvoixRuntimeSettings,
+        sourceAccess: AnyObject? = nil
+    ) {
+        let request = makeRequest(direction: .send, mode: .room, settings: settings, code: code)
+        rememberRoomID(for: request.activityId, code: code)
+        prepareAndStartManifestSend(
+            settings: settings,
+            request: request,
+            selectedPaths: selectedPaths,
+            sourceAccess: sourceAccess
+        )
+    }
+
+    func startSendingManifestWithInvite(
+        selectedPaths: [String],
+        invite: String,
+        settings: EnvoixRuntimeSettings,
+        sourceAccess: AnyObject? = nil
+    ) {
+        let request = makeRequest(direction: .send, mode: .invite, settings: settings, invite: invite)
+        prepareAndStartManifestSend(
+            settings: settings,
+            request: request,
+            selectedPaths: selectedPaths,
+            sourceAccess: sourceAccess
+        )
+    }
+
     /// Requests cancellation without detaching the observer. Activity owns
     /// lifecycle controls after a transfer starts, so its terminal state must
     /// still flow back from the core before this view model resets.
@@ -1045,7 +1229,7 @@ final class TransferViewModel: ObservableObject {
               !activityID.isEmpty,
               activityID == currentActivityID else { return false }
         suppressNextFailure = true
-        let accepted = session?.cancel() ?? false
+        let accepted = manifestSession?.cancel() ?? session?.cancel() ?? false
         if accepted {
             bytesPerSec = 0
             statusText = AppText.value("Cancelling…", "正在取消…", language: displayLanguage)
@@ -1058,7 +1242,7 @@ final class TransferViewModel: ObservableObject {
     @discardableResult
     func discardActivityForRemoval(_ activityID: String) -> Bool {
         guard !activityID.isEmpty else { return false }
-        let discarded = session?.remove() ?? false
+        let discarded = manifestSession?.remove() ?? session?.remove() ?? false
         if activityID == currentActivityID {
             suppressNextFailure = true
             operationID = UUID()
@@ -1070,7 +1254,10 @@ final class TransferViewModel: ObservableObject {
     }
 
     func listTransferActivities() -> [FfiTransferActivityRecord] {
-        session.map { [$0.activity()] } ?? []
+        if let manifestSession {
+            return [manifestSession.activity().activity]
+        }
+        return session.map { [$0.activity()] } ?? []
     }
 
     func ownsActivity(_ activityID: String) -> Bool {
@@ -1090,7 +1277,7 @@ final class TransferViewModel: ObservableObject {
     @discardableResult
     func pauseActivity(_ activityID: String) -> Bool {
         guard isBusy, !activityID.isEmpty, activityID == currentActivityID else { return false }
-        let paused = session?.pause() ?? false
+        let paused = manifestSession?.pause() ?? session?.pause() ?? false
         if paused {
             bytesPerSec = 0
             statusText = AppText.value("Pausing…", "正在暂停…", language: displayLanguage)
@@ -1101,12 +1288,99 @@ final class TransferViewModel: ObservableObject {
     @discardableResult
     func resumeActivity(_ activityID: String) -> Bool {
         guard !activityID.isEmpty, activityID == currentActivityID else { return false }
-        let resumed = session?.resume() ?? false
+        let resumed = manifestSession?.resume() ?? session?.resume() ?? false
         if resumed {
             suppressNextFailure = false
             statusText = AppText.value("Resuming…", "正在继续…", language: displayLanguage)
         }
         return resumed
+    }
+
+    @discardableResult
+    private func startManifestReceive(
+        settings: EnvoixRuntimeSettings,
+        request: FfiTransferRequest
+    ) -> Bool {
+        beginManifestOperation(settings: settings, request: request)
+        do {
+            guard let appModel else {
+                throw RuntimeSettingsError("The transfer service is unavailable.")
+            }
+            let observer = AppleManifestObserver(
+                viewModel: self,
+                appModel: appModel,
+                activityID: request.activityId
+            )
+            let startedSession = try appModel.startDurableManifestReceiveSession(
+                settings: settings,
+                request: request,
+                observer: observer
+            )
+            manifestSession = startedSession
+            handleManifestActivity(startedSession.activity())
+            return true
+        } catch {
+            fallbackPhase = .failed(friendlyError(error.localizedDescription, language: displayLanguage))
+            return false
+        }
+    }
+
+    private func prepareAndStartManifestSend(
+        settings: EnvoixRuntimeSettings,
+        request: FfiTransferRequest,
+        selectedPaths: [String],
+        sourceAccess: AnyObject?
+    ) {
+        destinationDir = nil
+        beginManifestOperation(settings: settings, request: request)
+        statusText = AppText.value("Preparing selected items…", "正在准备所选项目…", language: displayLanguage)
+        resourceAccess = sourceAccess
+        let operationID = operationID
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let prepared = try await prepareManifestSend(
+                    activityId: request.activityId,
+                    selectedPaths: selectedPaths
+                )
+                guard operationID == self.operationID,
+                      request.activityId == self.currentActivityID,
+                      let appModel = self.appModel else { return }
+                let observer = AppleManifestObserver(
+                    viewModel: self,
+                    appModel: appModel,
+                    activityID: request.activityId
+                )
+                let startedSession = try appModel.startDurableManifestSendSession(
+                    settings: settings,
+                    request: request,
+                    prepared: prepared,
+                    observer: observer
+                )
+                self.manifestSession = startedSession
+                self.handleManifestActivity(startedSession.activity())
+                self.retainResourceAccess(sourceAccess)
+            } catch {
+                guard operationID == self.operationID else { return }
+                self.forgetRoomID(for: request.activityId)
+                self.resourceAccess = nil
+                self.handleFailed(error.localizedDescription)
+            }
+        }
+    }
+
+    private func beginManifestOperation(
+        settings: EnvoixRuntimeSettings,
+        request: FfiTransferRequest
+    ) {
+        suppressNextFailure = false
+        reset()
+        session = nil
+        manifestSession = nil
+        currentActivityID = request.activityId
+        displayLanguage = settings.language
+        operationID = UUID()
+        fallbackPhase = .waiting
     }
 
     /// Creates one independently durable session for the new Activity card.
@@ -1117,6 +1391,8 @@ final class TransferViewModel: ObservableObject {
     ) -> Bool {
         suppressNextFailure = false
         reset()
+        session = nil
+        manifestSession = nil
         currentActivityID = request.activityId
         displayLanguage = settings.language
         operationID = UUID()
@@ -1257,15 +1533,19 @@ final class TransferViewModel: ObservableObject {
         }
     }
 
-    func handleTransferActivity(_ record: FfiTransferActivityRecord) {
+    func handleTransferActivity(
+        _ record: FfiTransferActivityRecord,
+        manifest: FfiManifestActivityRecord? = nil
+    ) {
         transferActivity = record
         if record.state == .completed,
            record.direction == .receive,
            !record.completedFilePath.isEmpty {
-            completedFileURL = availableCompletedFileURL(
-                path: record.completedFilePath,
-                expectedBytes: record.bytesTransferred
-            )
+            completedFileURL = manifest.flatMap(availableCompletedManifestURL)
+                ?? availableCompletedFileURL(
+                    path: record.completedFilePath,
+                    expectedBytes: record.bytesTransferred
+                )
             if completedFileURL == nil {
                 statusText = AppText.value(
                     "Transfer confirmed, but the saved file is not currently available.",
@@ -1274,11 +1554,21 @@ final class TransferViewModel: ObservableObject {
                 )
             }
         }
-        if record.state == .canceled {
-            suppressNextFailure = false
+        if ActivityProjectionPolicy.isTerminal(record.state) {
             resourceAccess = nil
         }
+        if record.state == .canceled {
+            suppressNextFailure = false
+        }
         syncPhase(with: record)
+    }
+
+    func handleManifestActivity(_ record: FfiManifestActivityRecord) {
+        guard record.activity.activityId == currentActivityID else { return }
+        fileName = record.activity.fileName
+        transferred = record.activity.bytesTransferred
+        total = record.activity.totalBytes
+        handleTransferActivity(record.activity, manifest: record)
     }
 
     func handleStarted(_ name: String, _ total: UInt64) {
@@ -1582,6 +1872,29 @@ final class Observer: TransferObserver, @unchecked Sendable {
     private func hop(_ body: @escaping (TransferViewModel) -> Void) {
         DispatchQueue.main.async { [weak viewModel, operationID] in
             if let viewModel, viewModel.operationID == operationID { body(viewModel) }
+        }
+    }
+}
+
+/// Manifest snapshots already contain the aggregate Activity and item-level
+/// progress, so one callback updates both the app-wide history and active sheet.
+final class AppleManifestObserver: ManifestTransferObserver, @unchecked Sendable {
+    private weak var viewModel: TransferViewModel?
+    private weak var appModel: AppModel?
+    private let activityID: String
+
+    init(viewModel: TransferViewModel?, appModel: AppModel, activityID: String) {
+        self.viewModel = viewModel
+        self.appModel = appModel
+        self.activityID = activityID
+    }
+
+    func onManifestActivity(record: FfiManifestActivityRecord) {
+        DispatchQueue.main.async { [weak viewModel, weak appModel, activityID] in
+            appModel?.handleManifestActivity(record)
+            if let viewModel, viewModel.activeActivityID == activityID {
+                viewModel.handleManifestActivity(record)
+            }
         }
     }
 }
