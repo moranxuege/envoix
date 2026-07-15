@@ -260,6 +260,78 @@ final class EnvoixMacOSHostedTests: XCTestCase {
 #endif
     }
 
+    func testReceiveIosToMacOSAppManifestRoom() async throws {
+        try requireCrossDeviceTesting()
+#if ENVOIX_CROSS_DEVICE_TESTING
+        let outputDirectory = outputDirectory()
+        let model = AppModel.shared
+        let existingActivityIDs = Set(model.activities.map(\.activityId))
+        let defaults = UserDefaults.standard
+        let previousUseRoom = defaults.object(forKey: Self.useRoomDefaultsKey)
+        let previousUseMdns = defaults.object(forKey: Self.useMdnsDefaultsKey)
+        defaults.set(true, forKey: Self.useRoomDefaultsKey)
+        defaults.set(true, forKey: Self.useMdnsDefaultsKey)
+        defer {
+            Self.restoreDefault(previousUseRoom, key: Self.useRoomDefaultsKey, defaults: defaults)
+            Self.restoreDefault(previousUseMdns, key: Self.useMdnsDefaultsKey, defaults: defaults)
+        }
+
+        try? FileManager.default.removeItem(at: outputDirectory)
+        try FileManager.default.createDirectory(
+            at: outputDirectory,
+            withIntermediateDirectories: true
+        )
+        model.receive.startReceivingWithRoom(
+            outputDir: outputDirectory.path,
+            code: Self.roomCode,
+            settings: Self.runtimeSettings
+        )
+
+        let activityID = try await waitForNewReceiveActivity(
+            in: model,
+            excluding: existingActivityIDs
+        )
+        emitEvidence("manifest-receiver-ready activity=\(activityID) room=\(Self.roomCode)")
+        let manifest = try await waitForManifestCompletion(activityID: activityID, in: model)
+        let activity = manifest.activity
+        XCTAssertEqual(activity.state, .completed)
+        XCTAssertEqual(manifest.rootCount, 2)
+        XCTAssertEqual(manifest.fileCount, 2)
+        XCTAssertEqual(manifest.directoryCount, 2)
+        XCTAssertEqual(manifest.completedFiles, 2)
+        XCTAssertEqual(URL(fileURLWithPath: activity.completedFilePath), outputDirectory)
+        XCTAssertNotEqual(activity.dataPathKind, .none)
+        XCTAssertTrue(manifest.entryResults.allSatisfy {
+            $0.status == .completed || $0.status == .skippedIdentical || $0.status == .renamed
+        })
+
+        let album = outputDirectory.appendingPathComponent(Self.manifestAlbumName, isDirectory: true)
+        let emptyDirectory = album.appendingPathComponent("Empty", isDirectory: true)
+        let photo = album.appendingPathComponent("photo.bin")
+        let loose = outputDirectory.appendingPathComponent(Self.manifestLooseName)
+        let emptyValues = try emptyDirectory.resourceValues(forKeys: [.isDirectoryKey])
+        XCTAssertEqual(emptyValues.isDirectory, true)
+        XCTAssertEqual(try Data(contentsOf: photo), Self.manifestPhotoPayload)
+        XCTAssertEqual(try Data(contentsOf: loose), Self.manifestLoosePayload)
+
+        let photoHash = try Self.fileSHA256(photo)
+        let looseHash = try Self.fileSHA256(loose)
+        XCTAssertEqual(photoHash, Data(SHA256.hash(data: Self.manifestPhotoPayload)))
+        XCTAssertEqual(looseHash, Data(SHA256.hash(data: Self.manifestLoosePayload)))
+        XCTAssertEqual(
+            activity.bytesTransferred,
+            UInt64(Self.manifestPhotoPayload.count + Self.manifestLoosePayload.count)
+        )
+        emitEvidence(
+            "manifest-completed activity=\(activityID) pathKind=\(activity.dataPathKind) " +
+            "pathDetail=\(activity.dataPathDetail) root=\(outputDirectory.path) " +
+            "roots=\(manifest.rootCount) files=\(manifest.completedFiles)/\(manifest.fileCount) " +
+            "directories=\(manifest.directoryCount) bytes=\(activity.bytesTransferred) " +
+            "photoSha256=\(photoHash.hexString) looseSha256=\(looseHash.hexString)"
+        )
+#endif
+    }
+
     private static func manifestEntry(
         id: UInt32,
         path: String,
@@ -354,6 +426,10 @@ final class EnvoixMacOSHostedTests: XCTestCase {
     private static let runID = environment("ENVOIX_CROSS_DEVICE_RUN_ID") ?? "manual"
     private static let expectedFileName = "envoix-\(runID)-ios-to-macos.bin"
     private static let payload = Data("envoix cross-device ios to macos\n".utf8)
+    private static let manifestAlbumName = "envoix-\(runID)-album"
+    private static let manifestLooseName = "envoix-\(runID)-loose.txt"
+    private static let manifestPhotoPayload = Data("envoix manifest photo \(runID)\n".utf8)
+    private static let manifestLoosePayload = Data("envoix manifest loose file \(runID)\n".utf8)
     private static let expectedBytes = environment("ENVOIX_IOS_TO_MACOS_BYTES")
         .flatMap(UInt64.init) ?? UInt64(payload.count)
     private static let timeout = environment("ENVOIX_CROSS_DEVICE_TIMEOUT_SECONDS")
@@ -421,6 +497,29 @@ final class EnvoixMacOSHostedTests: XCTestCase {
             try await Task.sleep(nanoseconds: 200_000_000)
         }
         throw HostedTestError.timedOut("waiting for macOS App completion")
+    }
+
+    private func waitForManifestCompletion(
+        activityID: String,
+        in model: AppModel
+    ) async throws -> FfiManifestActivityRecord {
+        let deadline = Date().addingTimeInterval(Self.timeout)
+        while Date() < deadline {
+            if let record = model.manifestActivities[activityID] {
+                switch record.activity.state {
+                case .completed:
+                    return record
+                case .failed, .canceled:
+                    throw HostedTestError.transferFailed(record.activity.diagnosticMessage)
+                case .queued, .binding, .waitingForPeer, .pairing, .connecting,
+                        .transferring, .verifying, .publishing, .unconfirmed,
+                        .paused, .unknown:
+                    break
+                }
+            }
+            try await Task.sleep(nanoseconds: 200_000_000)
+        }
+        throw HostedTestError.timedOut("waiting for macOS App Manifest completion")
     }
 
     private static func restoreDefault(_ value: Any?, key: String, defaults: UserDefaults) {

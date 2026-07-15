@@ -369,6 +369,75 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
 #endif
     }
 
+    func testCrossDeviceSendIosToMacOSManifestRoom() async throws {
+        try requireCrossDeviceTesting()
+#if ENVOIX_CROSS_DEVICE_TESTING
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("envoix-ios-manifest-send-\(UUID().uuidString)", isDirectory: true)
+        let album = root.appendingPathComponent(Self.iosToMacOSManifestAlbumName, isDirectory: true)
+        let emptyDirectory = album.appendingPathComponent("Empty", isDirectory: true)
+        let photo = album.appendingPathComponent("photo.bin")
+        let loose = root.appendingPathComponent(Self.iosToMacOSManifestLooseName)
+        try fileManager.createDirectory(at: emptyDirectory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: root) }
+        try Self.iosToMacOSManifestPhotoPayload.write(to: photo)
+        try Self.iosToMacOSManifestLoosePayload.write(to: loose)
+
+        let activityID = "ios-manifest-\(UUID().uuidString)"
+        let prepared = try await prepareManifestSend(
+            activityId: activityID,
+            selectedPaths: [album.path, loose.path]
+        )
+        XCTAssertEqual(prepared.rootCount, 2)
+        XCTAssertEqual(prepared.fileCount, 2)
+        XCTAssertEqual(prepared.directoryCount, 2)
+        XCTAssertEqual(
+            prepared.totalBytes,
+            UInt64(Self.iosToMacOSManifestPhotoPayload.count + Self.iosToMacOSManifestLoosePayload.count)
+        )
+
+        let recordsDirectory = root.appendingPathComponent("records", isDirectory: true)
+        let request = Self.crossDeviceRequest(
+            activityID: activityID,
+            direction: .send,
+            mode: .room,
+            code: Self.iosToMacOSCode,
+            filePath: "",
+            outputDir: "",
+            invite: ""
+        )
+        let observer = ManifestEvidenceObserver(peerLabel: "macOS")
+        let session = try startDurableManifestSend(
+            settings: Self.crossDeviceSettings(),
+            request: request,
+            prepared: prepared,
+            recordsDir: recordsDirectory.path,
+            observer: observer
+        )
+        defer { _ = session.remove() }
+
+        let completed = try await Self.waitForManifestCompletion(
+            session: session,
+            timeout: Self.crossDeviceTimeout(for: prepared.totalBytes)
+        )
+        XCTAssertEqual(completed.activity.state, .completed)
+        XCTAssertEqual(completed.completedFiles, prepared.fileCount)
+        XCTAssertEqual(completed.rootCount, prepared.rootCount)
+        XCTAssertEqual(completed.activity.bytesTransferred, prepared.totalBytes)
+        XCTAssertNotEqual(completed.activity.dataPathKind, .none)
+        XCTAssertTrue(completed.entryResults.allSatisfy {
+            $0.status == .completed || $0.status == .skippedIdentical || $0.status == .renamed
+        })
+        Self.emitCrossDeviceMarker(
+            "manifest evidence id=\(completed.manifestId) roots=\(completed.rootCount) " +
+            "files=\(completed.completedFiles)/\(completed.fileCount) " +
+            "bytes=\(completed.activity.bytesTransferred) " +
+            "path=\(completed.activity.dataPathKind):\(completed.activity.dataPathDetail)"
+        )
+#endif
+    }
+
 #if ENVOIX_CROSS_DEVICE_TESTING
     private func runCrossDeviceRoomSend(
         code: String,
@@ -533,9 +602,17 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
     private static let androidToIosFileName = "envoix-\(crossDeviceRunID)-android-to-ios.bin"
     private static let iosToAndroidFileName = "envoix-\(crossDeviceRunID)-ios-to-android.bin"
     private static let iosToMacOSFileName = "envoix-\(crossDeviceRunID)-ios-to-macos.bin"
+    private static let iosToMacOSManifestAlbumName = "envoix-\(crossDeviceRunID)-album"
+    private static let iosToMacOSManifestLooseName = "envoix-\(crossDeviceRunID)-loose.txt"
     private static let androidToIosPayload = Data("envoix cross-device android to ios\n".utf8)
     private static let iosToAndroidPayload = Data("envoix cross-device ios to android\n".utf8)
     private static let iosToMacOSPayload = Data("envoix cross-device ios to macos\n".utf8)
+    private static let iosToMacOSManifestPhotoPayload = Data(
+        "envoix manifest photo \(crossDeviceRunID)\n".utf8
+    )
+    private static let iosToMacOSManifestLoosePayload = Data(
+        "envoix manifest loose file \(crossDeviceRunID)\n".utf8
+    )
     private static let androidToIosExpectedBytes =
         envUInt64("ENVOIX_ANDROID_TO_IOS_BYTES") ?? UInt64(androidToIosPayload.count)
     private static let iosToAndroidExpectedBytes =
@@ -752,6 +829,7 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
     }
 
     private static func crossDeviceRequest(
+        activityID: String = "ios-\(UUID().uuidString)",
         direction: FfiTransferDirection,
         mode: FfiTransferMode,
         code: String,
@@ -761,7 +839,7 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
         publicationRequired: Bool = false
     ) -> FfiTransferRequest {
         FfiTransferRequest(
-            activityId: "ios-\(UUID().uuidString)",
+            activityId: activityID,
             direction: direction,
             mode: mode,
             filePath: filePath,
@@ -796,7 +874,45 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
             return FfiRendezvousPlan(useRoom: false, useMdns: false, internetAvailable: true)
         }
     }
+
+    private static func waitForManifestCompletion(
+        session: DurableEnvoixManifestSession,
+        timeout: TimeInterval
+    ) async throws -> FfiManifestActivityRecord {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            let record = session.activity()
+            switch record.activity.state {
+            case .completed:
+                return record
+            case .failed, .canceled:
+                throw LoopbackTestError.transferFailed(record.activity.diagnosticMessage)
+            case .queued, .binding, .waitingForPeer, .pairing, .connecting,
+                    .transferring, .verifying, .publishing, .unconfirmed,
+                    .paused, .unknown:
+                break
+            }
+            try await Task.sleep(nanoseconds: 200_000_000)
+        }
+        throw LoopbackTestError.timeout("iOS Manifest completion")
+    }
 #endif
+}
+
+private final class ManifestEvidenceObserver: ManifestTransferObserver, @unchecked Sendable {
+    private let peerLabel: String
+
+    init(peerLabel: String) {
+        self.peerLabel = peerLabel
+    }
+
+    func onManifestActivity(record: FfiManifestActivityRecord) {
+        print(
+            "[cross-device] iOS to \(peerLabel) Manifest state=\(record.activity.state) " +
+            "files=\(record.completedFiles)/\(record.fileCount) " +
+            "bytes=\(record.activity.bytesTransferred)/\(record.activity.totalBytes)"
+        )
+    }
 }
 
 private final class NoopTestMailboxObserver: MailboxObserver, @unchecked Sendable {
