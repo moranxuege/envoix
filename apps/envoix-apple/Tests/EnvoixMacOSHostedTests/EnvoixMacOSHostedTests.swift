@@ -278,6 +278,78 @@ final class EnvoixMacOSHostedTests: XCTestCase {
 #endif
     }
 
+    func testSendMacOSToIosAppManifestInvite() async throws {
+        try requireCrossDeviceTesting()
+#if ENVOIX_CROSS_DEVICE_TESTING
+        let model = AppModel.shared
+        guard !model.send.isBusy else {
+            throw HostedTestError.transferFailed("the production sender is already busy")
+        }
+
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("envoix-macos-app-manifest-send-\(UUID().uuidString)", isDirectory: true)
+        let album = root.appendingPathComponent(Self.macOSToIosManifestAlbumName, isDirectory: true)
+        let emptyDirectory = album.appendingPathComponent("Empty", isDirectory: true)
+        let photo = album.appendingPathComponent("photo.bin")
+        let loose = root.appendingPathComponent(Self.macOSToIosManifestLooseName)
+        try fileManager.createDirectory(at: emptyDirectory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: root) }
+        try Self.macOSToIosManifestPhotoPayload.write(to: photo)
+        try Self.macOSToIosManifestLoosePayload.write(to: loose)
+
+        let defaults = UserDefaults.standard
+        let invite = Self.environment("ENVOIX_MACOS_TO_IOS_MANIFEST_INVITE")
+            ?? defaults.string(forKey: Self.macOSToIosManifestInviteDefaultsKey)
+        defaults.removeObject(forKey: Self.macOSToIosManifestInviteDefaultsKey)
+        guard let invite, !invite.isEmpty else {
+            throw HostedTestError.transferFailed("ENVOIX_MACOS_TO_IOS_MANIFEST_INVITE is required")
+        }
+        model.send.startSendingManifestWithInvite(
+            selectedPaths: [album.path, loose.path],
+            invite: invite,
+            settings: Self.runtimeSettings,
+            pathPolicy: .relayOnly
+        )
+        let activityID = model.send.activeActivityID
+        guard !activityID.isEmpty else {
+            throw HostedTestError.transferFailed("production macOS sender did not create a Manifest Activity")
+        }
+        defer { model.removeActivity(activityID) }
+        emitEvidence("manifest-sender-started activity=\(activityID) mode=invite pathPolicy=relay-only")
+
+        let manifest = try await waitForManifestCompletion(activityID: activityID, in: model)
+        let activity = manifest.activity
+        let expectedBytes = UInt64(
+            Self.macOSToIosManifestPhotoPayload.count + Self.macOSToIosManifestLoosePayload.count
+        )
+        XCTAssertEqual(activity.direction, .send)
+        XCTAssertEqual(activity.state, .completed)
+        XCTAssertEqual(activity.bytesTransferred, expectedBytes)
+        XCTAssertEqual(activity.totalBytes, expectedBytes)
+        XCTAssertEqual(activity.dataPathKind, .relay)
+        XCTAssertEqual(manifest.rootCount, 2)
+        XCTAssertEqual(manifest.fileCount, 2)
+        XCTAssertEqual(manifest.directoryCount, 2)
+        XCTAssertEqual(manifest.completedFiles, 2)
+        XCTAssertTrue(manifest.entryResults.allSatisfy {
+            $0.status == .completed || $0.status == .skippedIdentical || $0.status == .renamed
+        })
+
+        let photoHash = try Self.fileSHA256(photo)
+        let looseHash = try Self.fileSHA256(loose)
+        XCTAssertEqual(photoHash, Data(SHA256.hash(data: Self.macOSToIosManifestPhotoPayload)))
+        XCTAssertEqual(looseHash, Data(SHA256.hash(data: Self.macOSToIosManifestLoosePayload)))
+        emitEvidence(
+            "manifest-sender-completed activity=\(activityID) pathKind=\(activity.dataPathKind) " +
+            "pathDetail=\(activity.dataPathDetail) roots=\(manifest.rootCount) " +
+            "files=\(manifest.completedFiles)/\(manifest.fileCount) " +
+            "directories=\(manifest.directoryCount) bytes=\(activity.bytesTransferred) " +
+            "photoSha256=\(photoHash.hexString) looseSha256=\(looseHash.hexString)"
+        )
+#endif
+    }
+
 #if ENVOIX_CROSS_DEVICE_TESTING
     private func receiveSingleFile(
         fileName: String,
@@ -519,6 +591,14 @@ final class EnvoixMacOSHostedTests: XCTestCase {
     )!
     private static let macOSToIosFileName = "envoix-\(runID)-macos-to-ios.bin"
     private static let macOSToIosPayload = Data("envoix cross-device macos to ios app\n".utf8)
+    private static let macOSToIosManifestAlbumName = "envoix-\(runID)-macos-album"
+    private static let macOSToIosManifestLooseName = "envoix-\(runID)-macos-loose.txt"
+    private static let macOSToIosManifestPhotoPayload = Data(
+        "envoix manifest macos photo \(runID)\n".utf8
+    )
+    private static let macOSToIosManifestLoosePayload = Data(
+        "envoix manifest macos loose file \(runID)\n".utf8
+    )
     private static let manifestAlbumName = "envoix-\(runID)-album"
     private static let manifestLooseName = "envoix-\(runID)-loose.txt"
     private static let manifestPhotoPayload = Data("envoix manifest photo \(runID)\n".utf8)
@@ -530,6 +610,7 @@ final class EnvoixMacOSHostedTests: XCTestCase {
     private static let useRoomDefaultsKey = "envoix.useRoom"
     private static let useMdnsDefaultsKey = "envoix.useMdns"
     private static let macOSToIosInviteDefaultsKey = "envoix.test.macOSToIosInvite"
+    private static let macOSToIosManifestInviteDefaultsKey = "envoix.test.macOSToIosManifestInvite"
     private static let hashBlockBytes = 1024 * 1024
     private static let runtimeSettings = EnvoixRuntimeSettings(
         concurrentTransfers: true,

@@ -1397,9 +1397,16 @@ final class TransferViewModel: ObservableObject {
         selectedPaths: [String],
         invite: String,
         settings: EnvoixRuntimeSettings,
+        pathPolicy: FfiPathPolicy = .auto,
         sourceAccess: AnyObject? = nil
     ) {
-        let request = makeRequest(direction: .send, mode: .invite, settings: settings, invite: invite)
+        let request = makeRequest(
+            direction: .send,
+            mode: .invite,
+            settings: settings,
+            invite: invite,
+            pathPolicy: pathPolicy
+        )
         prepareAndStartManifestSend(
             settings: settings,
             request: request,

@@ -567,6 +567,87 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
 #endif
     }
 
+    @MainActor
+    func testCrossDeviceReceiveMacOSToIosAppManifestInvite() async throws {
+        try requireCrossDeviceTesting()
+#if ENVOIX_CROSS_DEVICE_TESTING
+        let model = AppModel.shared
+        guard !model.receive.isBusy else {
+            throw LoopbackTestError.transferFailed("the production receiver is already busy")
+        }
+
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("envoix-ios-app-manifest-receive-\(UUID().uuidString)", isDirectory: true)
+        let destination = root.appendingPathComponent("published", isDirectory: true)
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: root) }
+
+        model.receive.startReceivingWithInvite(
+            outputDir: destination.path,
+            settings: Self.crossDeviceSettings(),
+            publishDestinationDir: destination.path
+        )
+        let activityID = model.receive.activeActivityID
+        guard !activityID.isEmpty else {
+            throw LoopbackTestError.missingValue("production iOS Manifest receive Activity ID")
+        }
+        defer { model.removeActivity(activityID) }
+        let expectedBytes = UInt64(
+            Self.macOSToIosManifestPhotoPayload.count + Self.macOSToIosManifestLoosePayload.count
+        )
+        let invite = try await Self.waitForAppInvite(
+            in: model,
+            timeout: Self.crossDeviceTimeout(for: expectedBytes)
+        )
+        Self.emitCrossDeviceMarker("iOS App Manifest invite \(invite)")
+
+        let manifest = try await Self.waitForAppManifestCompletion(
+            activityID: activityID,
+            in: model,
+            timeout: Self.crossDeviceTimeout(for: expectedBytes)
+        )
+        let activity = manifest.activity
+        XCTAssertEqual(activity.direction, .receive)
+        XCTAssertEqual(activity.state, .completed)
+        XCTAssertEqual(activity.bytesTransferred, expectedBytes)
+        XCTAssertEqual(activity.totalBytes, expectedBytes)
+        XCTAssertEqual(activity.dataPathKind, .relay)
+        XCTAssertEqual(URL(fileURLWithPath: activity.completedFilePath), destination)
+        XCTAssertEqual(manifest.rootCount, 2)
+        XCTAssertEqual(manifest.fileCount, 2)
+        XCTAssertEqual(manifest.directoryCount, 2)
+        XCTAssertEqual(manifest.completedFiles, 2)
+        XCTAssertTrue(manifest.entryResults.allSatisfy {
+            $0.status == .completed || $0.status == .skippedIdentical || $0.status == .renamed
+        })
+
+        let album = destination.appendingPathComponent(Self.macOSToIosManifestAlbumName, isDirectory: true)
+        let emptyDirectory = album.appendingPathComponent("Empty", isDirectory: true)
+        let photo = album.appendingPathComponent("photo.bin")
+        let loose = destination.appendingPathComponent(Self.macOSToIosManifestLooseName)
+        let emptyValues = try emptyDirectory.resourceValues(forKeys: [.isDirectoryKey])
+        XCTAssertEqual(emptyValues.isDirectory, true)
+        XCTAssertEqual(try Data(contentsOf: photo), Self.macOSToIosManifestPhotoPayload)
+        XCTAssertEqual(try Data(contentsOf: loose), Self.macOSToIosManifestLoosePayload)
+
+        let photoHash = try Self.fileSHA256(photo)
+        let looseHash = try Self.fileSHA256(loose)
+        XCTAssertEqual(photoHash, Data(SHA256.hash(data: Self.macOSToIosManifestPhotoPayload)))
+        XCTAssertEqual(looseHash, Data(SHA256.hash(data: Self.macOSToIosManifestLoosePayload)))
+        let photoHashHex = photoHash.map { String(format: "%02x", $0) }.joined()
+        let looseHashHex = looseHash.map { String(format: "%02x", $0) }.joined()
+        Self.emitCrossDeviceMarker(
+            "iOS App Manifest receive-completed activity=\(activityID) " +
+            "path=\(activity.dataPathKind):\(activity.dataPathDetail) " +
+            "publishedRoot=\(destination.path) roots=\(manifest.rootCount) " +
+            "files=\(manifest.completedFiles)/\(manifest.fileCount) " +
+            "directories=\(manifest.directoryCount) bytes=\(activity.bytesTransferred) " +
+            "photoSha256=\(photoHashHex) looseSha256=\(looseHashHex)"
+        )
+#endif
+    }
+
     func testCrossDeviceSendIosToMacOSManifestRoom() async throws {
         try requireCrossDeviceTesting()
 #if ENVOIX_CROSS_DEVICE_TESTING
@@ -808,6 +889,14 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
     private static let iosToAndroidPayload = Data("envoix cross-device ios to android\n".utf8)
     private static let iosToMacOSPayload = Data("envoix cross-device ios to macos\n".utf8)
     private static let macOSToIosPayload = Data("envoix cross-device macos to ios app\n".utf8)
+    private static let macOSToIosManifestAlbumName = "envoix-\(crossDeviceRunID)-macos-album"
+    private static let macOSToIosManifestLooseName = "envoix-\(crossDeviceRunID)-macos-loose.txt"
+    private static let macOSToIosManifestPhotoPayload = Data(
+        "envoix manifest macos photo \(crossDeviceRunID)\n".utf8
+    )
+    private static let macOSToIosManifestLoosePayload = Data(
+        "envoix manifest macos loose file \(crossDeviceRunID)\n".utf8
+    )
     private static let iosToMacOSPhotoPayload = Data(
         base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
     )!
@@ -1099,6 +1188,31 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
             try await Task.sleep(nanoseconds: 200_000_000)
         }
         throw LoopbackTestError.timeout("iOS Manifest completion")
+    }
+
+    @MainActor
+    private static func waitForAppManifestCompletion(
+        activityID: String,
+        in model: AppModel,
+        timeout: TimeInterval
+    ) async throws -> FfiManifestActivityRecord {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let record = model.manifestActivities[activityID] {
+                switch record.activity.state {
+                case .completed:
+                    return record
+                case .failed, .canceled:
+                    throw LoopbackTestError.transferFailed(record.activity.diagnosticMessage)
+                case .queued, .binding, .waitingForPeer, .pairing, .connecting,
+                        .transferring, .verifying, .publishing, .unconfirmed,
+                        .paused, .unknown:
+                    break
+                }
+            }
+            try await Task.sleep(nanoseconds: 200_000_000)
+        }
+        throw LoopbackTestError.timeout("production iOS Manifest Activity completion")
     }
 
     @MainActor
