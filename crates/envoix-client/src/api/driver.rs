@@ -1140,7 +1140,7 @@ impl Actor {
 }
 
 /// The machine's failure code for an attempt result.
-fn failure_code_of(error: &TransferError) -> FailureCode {
+pub(super) fn failure_code_of(error: &TransferError) -> FailureCode {
     use super::ErrorKind;
     match error.kind {
         ErrorKind::Cancelled => match FailureCode::classify(&error.message) {
@@ -1155,7 +1155,7 @@ fn failure_code_of(error: &TransferError) -> FailureCode {
     }
 }
 
-fn transfer_failure_for_session(
+pub(super) fn transfer_failure_for_session(
     error: &TransferError,
     session: &Session,
     direction: TransferDirection,

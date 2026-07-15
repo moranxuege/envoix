@@ -406,6 +406,16 @@ impl TransferSet {
         self.inner.cancel_handle()
     }
 
+    /// Cancels the attempt and waits for its write-side cleanup to finish.
+    pub(crate) async fn cancel_and_join(self) {
+        self.inner.cancel_and_join().await;
+    }
+
+    /// Aborts as an infrastructure loss without sending a user interrupt.
+    pub(crate) fn detach(self) {
+        self.inner.detach();
+    }
+
     /// Waits for the negotiated single-file or Manifest result.
     pub async fn wait(self) -> Result<envoix_session::SessionTransferSummary, TransferError> {
         self.inner.wait().await

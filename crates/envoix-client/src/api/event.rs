@@ -256,6 +256,18 @@ pub enum SessionFailureCode {
 }
 
 impl SessionFailureCode {
+    /// Stable string form for durable per-entry diagnostics.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cancelled => "cancelled",
+            Self::Paused => "paused",
+            Self::PeerCancelled => "peer_cancelled",
+            Self::PeerPaused => "peer_paused",
+            Self::ConnectionLost => "connection_lost",
+            Self::Other => "other",
+        }
+    }
+
     /// Classify a failure reason string. This is the ONE place the canonical
     /// interrupt messages (and the connection-drop phrasings the session layer
     /// produces) are matched — frontends must branch on the resulting enum,

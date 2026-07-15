@@ -46,7 +46,42 @@ pub type ManifestTransferError = CoreError;
 pub struct ManifestSendRequest {
     /// Offered transfer-set description.
     pub manifest: ManifestV1,
+    #[serde(with = "source_paths_serde")]
     source_paths: BTreeMap<u32, PathBuf>,
+}
+
+mod source_paths_serde {
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    use serde::ser::SerializeMap;
+
+    pub fn serialize<S>(paths: &BTreeMap<u32, PathBuf>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(paths.len()))?;
+        for (entry_id, path) in paths {
+            map.serialize_entry(&entry_id.to_string(), path)?;
+        }
+        map.end()
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<BTreeMap<u32, PathBuf>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let encoded = <BTreeMap<String, PathBuf> as serde::Deserialize>::deserialize(deserializer)?;
+        encoded
+            .into_iter()
+            .map(|(entry_id, path)| {
+                entry_id
+                    .parse::<u32>()
+                    .map(|entry_id| (entry_id, path))
+                    .map_err(serde::de::Error::custom)
+            })
+            .collect()
+    }
 }
 
 impl ManifestSendRequest {
@@ -86,6 +121,11 @@ impl ManifestSendRequest {
             manifest,
             source_paths,
         })
+    }
+
+    /// Revalidates a deserialized durable request without changing it.
+    pub fn validate(&self) -> Result<(), ManifestTransferError> {
+        Self::new(self.manifest.clone(), self.source_paths.clone()).map(|_| ())
     }
 
     fn source_path(&self, entry_id: u32) -> Result<&Path, ManifestTransferError> {
@@ -1306,6 +1346,44 @@ async fn manifest_state_directory(
     ensure_private_directory(&state_root, &digest).await
 }
 
+/// Removes only the private resume state for one Manifest receive.
+///
+/// Completed destination entries are deliberately preserved. The function
+/// refuses symlinked state paths so an explicit Remove action cannot escape
+/// the receiver-owned state namespace.
+pub async fn discard_manifest_resume_state(
+    output_dir: &Path,
+    manifest_id: &ManifestId,
+) -> Result<(), ManifestTransferError> {
+    let state_root = output_dir.join(STATE_ROOT_NAME);
+    let digest = blake3::hash(manifest_id.0.as_bytes()).to_hex().to_string();
+    let state_dir = state_root.join(digest);
+    for path in [&state_root, &state_dir] {
+        match fs::symlink_metadata(path).await {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(CoreError::Storage(format!(
+                    "manifest state path is not a safe directory: {}",
+                    path.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    fs::remove_dir_all(&state_dir).await?;
+    match fs::remove_dir(&state_root).await {
+        Ok(()) => {}
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::DirectoryNotEmpty | std::io::ErrorKind::NotFound
+            ) => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
 async fn ensure_private_directory(
     parent: &Path,
     name: &str,
@@ -2425,6 +2503,53 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn discard_removes_only_the_selected_manifest_state() {
+        let output = tempdir().unwrap();
+        let selected = ManifestId::new("selected");
+        let kept = ManifestId::new("kept");
+        let selected_dir = manifest_state_directory(output.path(), &selected)
+            .await
+            .unwrap();
+        let kept_dir = manifest_state_directory(output.path(), &kept)
+            .await
+            .unwrap();
+        fs::write(selected_dir.join("partial"), b"partial")
+            .await
+            .unwrap();
+        fs::write(kept_dir.join("partial"), b"kept").await.unwrap();
+        fs::write(output.path().join("completed.txt"), b"completed")
+            .await
+            .unwrap();
+
+        discard_manifest_resume_state(output.path(), &selected)
+            .await
+            .unwrap();
+
+        assert!(!fs::try_exists(selected_dir).await.unwrap());
+        assert!(fs::try_exists(kept_dir).await.unwrap());
+        assert_eq!(
+            fs::read(output.path().join("completed.txt")).await.unwrap(),
+            b"completed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn discard_refuses_symlinked_manifest_state() {
+        use std::os::unix::fs::symlink;
+
+        let output = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        symlink(outside.path(), output.path().join(STATE_ROOT_NAME)).unwrap();
+
+        let result = discard_manifest_resume_state(output.path(), &ManifestId::new("unsafe")).await;
+
+        assert!(
+            matches!(result, Err(CoreError::Storage(message)) if message.contains("safe directory"))
         );
     }
 

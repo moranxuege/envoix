@@ -4,7 +4,7 @@ mod manifest;
 
 pub use manifest::{
     ManifestEventSink, ManifestNoopEventSink, ManifestSendRequest, ManifestTransferEngine,
-    ManifestTransferEvent, ManifestTransferSummary,
+    ManifestTransferEvent, ManifestTransferSummary, discard_manifest_resume_state,
 };
 
 use std::io::SeekFrom;

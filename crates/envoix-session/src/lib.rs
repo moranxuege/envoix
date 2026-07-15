@@ -20,7 +20,7 @@ pub use envoix_transfer::{
     ManifestNoopEventSink, ManifestSendRequest, ManifestTransferEngine, ManifestTransferEvent,
     ManifestTransferSummary, NoopEventSink, PEER_INTERRUPT_MESSAGE, PEER_PAUSE_MESSAGE,
     TransferCancelToken, TransferEngine, TransferEvent, TransferSummary, USER_INTERRUPT_MESSAGE,
-    USER_PAUSE_MESSAGE, validate_chunk_size,
+    USER_PAUSE_MESSAGE, discard_manifest_resume_state, validate_chunk_size,
 };
 pub use envoix_types::TransferDirection;
 // Re-exported so the client facade reaches rendezvous-code helpers through its

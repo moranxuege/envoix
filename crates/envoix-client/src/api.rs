@@ -13,6 +13,8 @@ mod error;
 mod event;
 mod invite;
 pub mod machine;
+pub mod manifest_activity;
+pub mod manifest_driver;
 mod options;
 pub mod receipt;
 pub mod record;
