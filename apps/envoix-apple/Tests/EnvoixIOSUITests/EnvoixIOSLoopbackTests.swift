@@ -444,31 +444,13 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
 
         let providerSource = root.appendingPathComponent(Self.iosToMacOSPhotoFileName)
         try Self.iosToMacOSPhotoPayload.write(to: providerSource)
-        let provider = NSItemProvider()
-        provider.suggestedName = Self.iosToMacOSPhotoFileName
-        provider.registerFileRepresentation(
-            forTypeIdentifier: UTType.png.identifier,
-            fileOptions: [],
-            visibility: .all
-        ) { completion in
-            completion(providerSource, false, nil)
-            return nil
-        }
+        let provider = Self.photoProvider(
+            fileName: Self.iosToMacOSPhotoFileName,
+            sourceURL: providerSource
+        )
 
         let store = ShareDraftStore(rootDirectory: root.appendingPathComponent("drafts", isDirectory: true))
-        let importer = PhotoDraftImporter(store: store)
-        let imported = try await withCheckedThrowingContinuation {
-            (continuation: CheckedContinuation<PhotoDraftImporter.ImportedDraft, Error>) in
-            do {
-                try importer.start(
-                    providers: [provider],
-                    onProgress: { _, _ in },
-                    completion: { continuation.resume(with: $0) }
-                )
-            } catch {
-                continuation.resume(throwing: error)
-            }
-        }
+        let imported = try await Self.importPhotoDraft(providers: [provider], store: store)
         let stagedURL = try XCTUnwrap(imported.draft.fileURLs.first)
         XCTAssertEqual(imported.draft.descriptor.mediaKind, .image)
         XCTAssertEqual(imported.draft.descriptor.fileName, Self.iosToMacOSPhotoFileName)
@@ -502,6 +484,90 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
             "photo-draft completed activity=\(activityID) " +
             "path=\(completed.dataPathKind):\(completed.dataPathDetail) " +
             "file=\(completed.fileName) bytes=\(completed.bytesTransferred)"
+        )
+#endif
+    }
+
+    @MainActor
+    func testCrossDeviceSendMultiPhotoDraftIosToMacOSAppManifestRoom() async throws {
+        try requireCrossDeviceTesting()
+#if ENVOIX_CROSS_DEVICE_TESTING
+        let model = AppModel.shared
+        guard !model.send.isBusy else {
+            throw LoopbackTestError.transferFailed("the production sender is already busy")
+        }
+
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("envoix-ios-multi-photo-draft-send-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: root) }
+
+        let firstSource = root.appendingPathComponent(Self.iosToMacOSMultiPhotoFirstName)
+        let secondSource = root.appendingPathComponent(Self.iosToMacOSMultiPhotoSecondName)
+        try Self.iosToMacOSPhotoPayload.write(to: firstSource)
+        try Self.iosToMacOSPhotoPayload.write(to: secondSource)
+        let providers = [
+            Self.photoProvider(fileName: Self.iosToMacOSMultiPhotoFirstName, sourceURL: firstSource),
+            Self.photoProvider(fileName: Self.iosToMacOSMultiPhotoSecondName, sourceURL: secondSource),
+        ]
+
+        let store = ShareDraftStore(rootDirectory: root.appendingPathComponent("drafts", isDirectory: true))
+        let imported = try await Self.importPhotoDraft(providers: providers, store: store)
+        let stagedURLs = imported.draft.fileURLs
+        let expectedBytes = UInt64(Self.iosToMacOSPhotoPayload.count * stagedURLs.count)
+        XCTAssertEqual(imported.draft.descriptor.schemaVersion, ShareDraftDescriptor.currentSchemaVersion)
+        XCTAssertEqual(imported.draft.descriptor.items.map(\.fileName), [
+            Self.iosToMacOSMultiPhotoFirstName,
+            Self.iosToMacOSMultiPhotoSecondName,
+        ])
+        XCTAssertEqual(imported.draft.descriptor.byteCount, expectedBytes)
+        XCTAssertEqual(stagedURLs.count, 2)
+        XCTAssertTrue(sendSelectionRequiresManifest(stagedURLs))
+        for stagedURL in stagedURLs {
+            XCTAssertEqual(try Data(contentsOf: stagedURL), Self.iosToMacOSPhotoPayload)
+        }
+
+        let sourceAccess = ShareDraftLease(id: imported.draft.descriptor.id, store: imported.store)
+        sourceAccess.acknowledge()
+        model.send.startSendingManifestWithRoom(
+            selectedPaths: stagedURLs.map(\.path),
+            code: Self.iosToMacOSCode,
+            settings: Self.crossDeviceSettings(),
+            sourceAccess: sourceAccess
+        )
+        let activityID = model.send.activeActivityID
+        guard !activityID.isEmpty else {
+            throw LoopbackTestError.missingValue("production iOS multi-Photo Manifest Activity ID")
+        }
+        defer { model.removeActivity(activityID) }
+
+        let manifest = try await Self.waitForAppManifestCompletion(
+            activityID: activityID,
+            in: model,
+            timeout: Self.crossDeviceTimeout(for: expectedBytes)
+        )
+        let activity = manifest.activity
+        XCTAssertEqual(activity.direction, .send)
+        XCTAssertEqual(activity.state, .completed)
+        XCTAssertEqual(activity.bytesTransferred, expectedBytes)
+        XCTAssertEqual(activity.totalBytes, expectedBytes)
+        XCTAssertNotEqual(activity.dataPathKind, .none)
+        XCTAssertEqual(manifest.rootCount, 2)
+        XCTAssertEqual(manifest.fileCount, 2)
+        XCTAssertEqual(manifest.directoryCount, 0)
+        XCTAssertEqual(manifest.completedFiles, 2)
+        XCTAssertTrue(manifest.entryResults.allSatisfy {
+            $0.status == .completed || $0.status == .skippedIdentical || $0.status == .renamed
+        })
+        let hash = try Self.fileSHA256(stagedURLs[0])
+        XCTAssertEqual(hash, Data(SHA256.hash(data: Self.iosToMacOSPhotoPayload)))
+        let hashHex = hash.map { String(format: "%02x", $0) }.joined()
+        Self.emitCrossDeviceMarker(
+            "multi-photo-draft completed activity=\(activityID) " +
+            "path=\(activity.dataPathKind):\(activity.dataPathDetail) " +
+            "roots=\(manifest.rootCount) files=\(manifest.completedFiles)/\(manifest.fileCount) " +
+            "bytes=\(activity.bytesTransferred) eachSha256=\(hashHex)"
         )
 #endif
     }
@@ -882,6 +948,8 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
     private static let iosToAndroidFileName = "envoix-\(crossDeviceRunID)-ios-to-android.bin"
     private static let iosToMacOSFileName = "envoix-\(crossDeviceRunID)-ios-to-macos.bin"
     private static let iosToMacOSPhotoFileName = "envoix-\(crossDeviceRunID)-photo.png"
+    private static let iosToMacOSMultiPhotoFirstName = "envoix-\(crossDeviceRunID)-photo-first.png"
+    private static let iosToMacOSMultiPhotoSecondName = "envoix-\(crossDeviceRunID)-photo-second.png"
     private static let macOSToIosFileName = "envoix-\(crossDeviceRunID)-macos-to-ios.bin"
     private static let iosToMacOSManifestAlbumName = "envoix-\(crossDeviceRunID)-album"
     private static let iosToMacOSManifestLooseName = "envoix-\(crossDeviceRunID)-loose.txt"
@@ -948,6 +1016,40 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
             let count = Int(min(remaining, UInt64(block.count)))
             try handle.write(contentsOf: block.prefix(count))
             remaining -= UInt64(count)
+        }
+    }
+
+    private static func photoProvider(fileName: String, sourceURL: URL) -> NSItemProvider {
+        let provider = NSItemProvider()
+        provider.suggestedName = fileName
+        provider.registerFileRepresentation(
+            forTypeIdentifier: UTType.png.identifier,
+            fileOptions: [],
+            visibility: .all
+        ) { completion in
+            completion(sourceURL, false, nil)
+            return nil
+        }
+        return provider
+    }
+
+    @MainActor
+    private static func importPhotoDraft(
+        providers: [NSItemProvider],
+        store: ShareDraftStore
+    ) async throws -> PhotoDraftImporter.ImportedDraft {
+        let importer = PhotoDraftImporter(store: store)
+        return try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<PhotoDraftImporter.ImportedDraft, Error>) in
+            do {
+                try importer.start(
+                    providers: providers,
+                    onProgress: { _, _ in },
+                    completion: { continuation.resume(with: $0) }
+                )
+            } catch {
+                continuation.resume(throwing: error)
+            }
         }
     }
 

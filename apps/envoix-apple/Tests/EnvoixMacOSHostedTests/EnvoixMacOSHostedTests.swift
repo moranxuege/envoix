@@ -226,6 +226,63 @@ final class EnvoixMacOSHostedTests: XCTestCase {
 #endif
     }
 
+    func testReceiveIosMultiPhotoDraftToMacOSAppManifestRoom() async throws {
+        try requireCrossDeviceTesting()
+#if ENVOIX_CROSS_DEVICE_TESTING
+        let outputDirectory = outputDirectory()
+        let model = AppModel.shared
+        let existingActivityIDs = Set(model.activities.map(\.activityId))
+        try? FileManager.default.removeItem(at: outputDirectory)
+        try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+
+        model.receive.startReceivingWithRoom(
+            outputDir: outputDirectory.path,
+            code: Self.roomCode,
+            settings: Self.runtimeSettings
+        )
+        let activityID = try await waitForNewReceiveActivity(
+            in: model,
+            excluding: existingActivityIDs
+        )
+        defer { model.removeActivity(activityID) }
+        emitEvidence("multi-photo-manifest-receiver-ready activity=\(activityID) room=\(Self.roomCode)")
+
+        let manifest = try await waitForManifestCompletion(activityID: activityID, in: model)
+        let activity = manifest.activity
+        let expectedBytes = UInt64(Self.photoPayload.count * 2)
+        XCTAssertEqual(activity.direction, .receive)
+        XCTAssertEqual(activity.state, .completed)
+        XCTAssertEqual(activity.bytesTransferred, expectedBytes)
+        XCTAssertEqual(activity.totalBytes, expectedBytes)
+        XCTAssertNotEqual(activity.dataPathKind, .none)
+        XCTAssertEqual(URL(fileURLWithPath: activity.completedFilePath), outputDirectory)
+        XCTAssertEqual(manifest.rootCount, 2)
+        XCTAssertEqual(manifest.fileCount, 2)
+        XCTAssertEqual(manifest.directoryCount, 0)
+        XCTAssertEqual(manifest.completedFiles, 2)
+        XCTAssertTrue(manifest.entryResults.allSatisfy {
+            $0.status == .completed || $0.status == .skippedIdentical || $0.status == .renamed
+        })
+
+        let first = outputDirectory.appendingPathComponent(Self.multiPhotoFirstName)
+        let second = outputDirectory.appendingPathComponent(Self.multiPhotoSecondName)
+        XCTAssertEqual(try Data(contentsOf: first), Self.photoPayload)
+        XCTAssertEqual(try Data(contentsOf: second), Self.photoPayload)
+        let firstHash = try Self.fileSHA256(first)
+        let secondHash = try Self.fileSHA256(second)
+        let expectedHash = Data(SHA256.hash(data: Self.photoPayload))
+        XCTAssertEqual(firstHash, expectedHash)
+        XCTAssertEqual(secondHash, expectedHash)
+        emitEvidence(
+            "multi-photo-manifest-completed activity=\(activityID) " +
+            "pathKind=\(activity.dataPathKind) pathDetail=\(activity.dataPathDetail) " +
+            "root=\(outputDirectory.path) roots=\(manifest.rootCount) " +
+            "files=\(manifest.completedFiles)/\(manifest.fileCount) bytes=\(activity.bytesTransferred) " +
+            "eachSha256=\(firstHash.hexString)"
+        )
+#endif
+    }
+
     func testSendMacOSToIosAppInvite() async throws {
         try requireCrossDeviceTesting()
 #if ENVOIX_CROSS_DEVICE_TESTING
@@ -586,6 +643,8 @@ final class EnvoixMacOSHostedTests: XCTestCase {
     private static let expectedFileName = "envoix-\(runID)-ios-to-macos.bin"
     private static let payload = Data("envoix cross-device ios to macos\n".utf8)
     private static let photoFileName = "envoix-\(runID)-photo.png"
+    private static let multiPhotoFirstName = "envoix-\(runID)-photo-first.png"
+    private static let multiPhotoSecondName = "envoix-\(runID)-photo-second.png"
     private static let photoPayload = Data(
         base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
     )!
