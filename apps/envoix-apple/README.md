@@ -310,6 +310,41 @@ and a selected Direct/Relay path. This does not read personal Photos, replace a
 live App Group draft, or prove multi-item acceptance inside the system Photos
 share sheet or Share Extension host.
 
+The physical Folder-picker payload gate exercises the user-facing path rather
+than calling the sender directly. Start the macOS production receiver first:
+
+```bash
+export ENVOIX_XCRESULT_PATH=/private/tmp/envoix-folder-picker-macos.xcresult
+
+scripts/apple-dev.sh macos-test \
+  'OTHER_SWIFT_FLAGS=$(inherited) -D ENVOIX_CROSS_DEVICE_TESTING' \
+  -only-testing:Envoix-macOSTests/EnvoixMacOSHostedTests/testReceiveIosFolderPickerToMacOSAppManifestRoom
+```
+
+After `folder-picker-manifest-receiver-ready` appears, run the iPhone App UI
+test from another shell:
+
+```bash
+xcodebuild -project apps/envoix-apple/Envoix.xcodeproj \
+  -scheme Envoix-iOS-AppUI -configuration Debug \
+  -destination 'platform=iOS,id=<DEVICE_UUID>' \
+  -derivedDataPath /private/tmp/envoix-folder-picker-device-build \
+  -allowProvisioningUpdates COMPILER_INDEX_STORE_ENABLE=NO \
+  -resultBundlePath /private/tmp/envoix-folder-picker-ios.xcresult \
+  'OTHER_SWIFT_FLAGS=$(inherited) -D ENVOIX_CROSS_DEVICE_TESTING' \
+  test \
+  -only-testing:Envoix-iOSAppUITests/EnvoixIOSAppUITests/testFolderPickerSendsCurrentDirectoryToMacOSApp
+```
+
+The iPhone test creates an isolated directory under the app's Documents
+container, opens the real system Folder picker, taps **Open/打开** without
+selecting a child, enters the Room code in the production Send sheet, checks
+the Activity state, and removes the fixture afterward. The macOS test requires
+one root, one file, one directory, exact bytes and SHA-256, plus a non-empty
+Direct/Relay path. This proves the system picker and production app path for the
+fixture directory; arbitrary iCloud or third-party File Provider behavior still
+needs separate acceptance.
+
 The physical Manifest gate uses the same two-peer order. Set the same run ID
 and Room code in both shells, start
 `EnvoixMacOSHostedTests.testReceiveIosToMacOSAppManifestRoom`, wait for its

@@ -1,6 +1,6 @@
 # Apple client execution plan
 
-Status: **In execution — bidirectional Apple Manifest and multi-Photos provider gates green; manual system-picker and Share host acceptance pending**
+Status: **In execution — bidirectional Apple Manifest, multi-Photos provider, and iOS Folder-picker payload gates green; Files/Photos and Share host acceptance pending**
 
 Owner: Apple client workstream
 
@@ -66,7 +66,7 @@ branch is intentionally ahead of its remote while Manifest work is committed in
 reviewable local stages.
 
 - Branch: `feat/transfer-state-foundation`. The latest committed checkpoint is
-  `e1b6c0e`; it and the preceding staged Manifest, cache, and paused-session
+  `19ce9da`; it and the preceding staged Manifest, cache, and paused-session
   commits remain local and have not been pushed as part of this execution stage.
 - Safety checkpoint `ceff278` (`feat: checkpoint canonical mobile transfer
   lifecycle`) contains the entire previously dirty tree and was pushed to
@@ -140,8 +140,11 @@ reviewable local stages.
   regressions. Isolated single- and two-item synthetic Photos providers have
   also passed through the production iOS sender to the production macOS App
   with exact final bytes and hashes; the two-item run selected `ManifestV1`.
-  Manual interaction with each system picker plus Files and Folder payload runs
-  remain pending.
+  The real Folder picker now has a physical-device acceptance gate: tapping the
+  system **Open** action selected the current directory, and the production Send
+  UI delivered its exact directory tree and payload to the production macOS
+  App over Direct. Manual Photos/Files picker acceptance, arbitrary File
+  Provider coverage, and the Files payload run remain pending.
 - The Share Extension accepts multiple Files or Photos representations. It
   stages each provider directly into App Group `group.com.envoix.app.shared`,
   uses a validated versioned draft descriptor, checks actual available storage
@@ -215,7 +218,7 @@ automated and physical-device acceptance gates.
 |---|---|---|---|
 | D1 | Supported devices and orientations | iPhone + macOS; iPhone portrait; no iPad or landscape promise in this milestone | **Confirmed** |
 | D2 | iOS navigation interaction | One iPhone home screen; Send, Receive, Activity, and Settings open as sheets; no permanent bottom stage bar or global stage swipe | **Confirmed and implemented** |
-| D3 | First system entry | “Open in Envoix” directly handles one regular document; Share Extension stages one or more Files/Photos items for import when the main app next becomes active; in-app Send separately exposes Photos, Files, and Folder; multiple items/folders use Manifest | **Implemented in source; single-Photos Share Extension entry/adoption, explicit-source physical UI/provider staging, and synthetic single-/multi-Photos provider→macOS payload acceptance pass; system-picker, Share Extension multi-item host, Files/Folder/Open In, and manual Photos payload acceptance pending** |
+| D3 | First system entry | “Open in Envoix” directly handles one regular document; Share Extension stages one or more Files/Photos items for import when the main app next becomes active; in-app Send separately exposes Photos, Files, and Folder; multiple items/folders use Manifest | **Implemented in source; single-Photos Share Extension entry/adoption, explicit-source physical UI/provider staging, synthetic single-/multi-Photos provider→macOS payload, and real Folder-picker→macOS payload acceptance pass; Share Extension multi-item host, Files/Open In, arbitrary File Provider, and manual Photos acceptance pending** |
 | D4 | Baseline and shared-core authority | Full-tree checkpoint, latest dev merge, Android App compile compatibility at shared boundaries, additive Apple Rust/UniFFI evolution | **Confirmed and executed** |
 | D5 | Multi-file and directory priority | Move `ManifestV1` into the first parallel product wave; do not ship an app-side zip detour | **Confirmed** |
 | D6 | Wi-Fi Aware device matrix | iPhone↔supported Android is required; Android↔Android gets baseline evidence; macOS keeps LAN/relay until separately proven | **Confirmed** |
@@ -627,9 +630,10 @@ Status: **multi-item source intake, direct document-open entry, explicit in-app
 Photos/Files/Folder sources, automated cache/lifecycle gates, provisioning,
 physical install, launch, and single-Photos entry/adoption acceptance complete;
 synthetic single- and multi-Photos provider→production iOS Send→macOS App
-payload acceptance complete; manual system-picker acceptance, Share Extension
-multi-item Photos/Files host acceptance, manual Photos payload, Files/Folder
-payload, and direct Open In provider acceptance remain**.
+payload acceptance complete; the real Folder picker→production Send→macOS App
+payload gate is complete; Share Extension multi-item Photos/Files host
+acceptance, manual Photos/Files payload, arbitrary File Provider, and direct
+Open In provider acceptance remain**.
 
 First slice:
 
@@ -676,6 +680,9 @@ Implemented contract for the first slice:
 - the main iOS Send sheet has distinct Photos, Files, and Folder controls;
   Apple owns the directory picker's **Open** label, so Envoix documents that it
   uploads the current folder instead of depending on private UIKit mutation;
+- the real system Folder picker and its **Open** action pass on the physical
+  iPhone, followed by exact Manifest directory/file publication to the macOS
+  app; this does not claim every third-party File Provider behaves identically;
 - App Group: `group.com.envoix.app.shared`;
 - one or more regular file, image, or video representations per draft; folders,
   symlinks, special files, and paired Live Photos are rejected explicitly;
@@ -905,6 +912,8 @@ the command, source revision, destination, and result is insufficient.
 | 2026-07-15 | `a1d0dd5` | D9 reverse Apple production payload | production macOS `AppModel` / physical iPhone 15 Pro Max on Personal Hotspot | start the iPhone production Manifest receiver, hand its Invite once to the macOS hosted sender, force Relay-only for this topology, and require canonical completion plus the exact final file, size, SHA-256, selected path, and Manifest-aware iOS resolver | sender 1/1 and receiver 1/1 passed; Relay selected through `https://envoix.chkxwlyh.us:8444/`; `envoix-manual-macos-to-ios.bin`, 37/37 bytes, SHA-256 `7168fd00a9cc516cb7502c53760d5740f38c0671edc338f32ab6ce606fb32165`; `envoix-ffi` 47/47 passed and no Simulator was launched | `/private/tmp/envoix-macos-to-ios-ios-invite-20260715g.xcresult`; `/private/tmp/envoix-macos-to-ios-macos-invite-20260715g.xcresult` |
 | 2026-07-15 | `78fde8d` | Track M physical macOS→iPhone Manifest publication | production macOS `AppModel` / physical iPhone 15 Pro Max on Personal Hotspot | send one folder containing `photo.bin` and an empty directory plus one loose file through Invite/Relay; require canonical sender/receiver completion, app-private iOS staging-to-destination publication, exact root/file/directory counts, final tree and bytes, both SHA-256 values, and selected path | sender 1/1 and receiver 1/1 passed; Relay selected through `https://envoix.chkxwlyh.us:8444/`; 2 roots, 2/2 files, 2 directories, 75/75 bytes; SHA-256 `23ca433fae5ce4a6564cd115b38c8cd327e0d4dc9ae0b463fee48bcd55fc0b4d` and `4ab2bfb892f14047d3fc1550fd45414a74927e8f07d36c1c4cc5293ad0cc1736` matched; no Simulator was launched | `/private/tmp/envoix-macos-to-ios-manifest-ios-20260715a.xcresult`; `/private/tmp/envoix-macos-to-ios-manifest-macos-20260715a.xcresult` |
 | 2026-07-15 | `e1b6c0e` | Track S multi-Photos provider Manifest payload | physical iPhone 15 Pro Max / production macOS `AppModel` | stage two named synthetic PNG providers through `PhotoDraftImporter` into an isolated v2 draft, require Manifest selection, send through production `AppModel.send`, and verify both final files, aggregate counts, exact bytes, per-file SHA-256, and selected path | sender 1/1 and receiver 1/1 passed; Direct IPv6 selected; 2 roots, 2/2 files, 0 directories, 136/136 bytes; both SHA-256 values were `431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460`; no personal Photos data or live App Group draft was read or replaced, and no Simulator was launched | `/private/tmp/envoix-multi-photo-ios-20260715a.xcresult`; `/private/tmp/envoix-multi-photo-macos-20260715a.xcresult` |
+| 2026-07-15 | `0a98c3a` | Track S current-folder system action | physical iPhone 15 Pro Max / real iOS Folder picker | open Send, enter the dedicated Folder picker, tap Apple's system **Open/打开** action without selecting a child, and require the current Documents directory to return as one selected folder | 1 passed, 0 failed, 0 skipped; the real picker returned the current directory; no Simulator was launched | `/private/tmp/envoix-folder-picker-device-20260715b.xcresult` |
+| 2026-07-15 | `19ce9da` | Track S Folder-picker production payload | physical iPhone 15 Pro Max / production macOS `AppModel` on Personal Hotspot | prepare one isolated directory containing `payload.txt`, select the current directory through the real Folder picker, enter the Room code through the production Send UI, and require both Activity completion plus exact Manifest tree, bytes, hash, and selected data path | sender 1/1 and receiver 1/1 passed with 0 failures/skips; Direct `172.20.10.1:58075` selected; 1 root, 1/1 file, 1 directory, 36/36 bytes; SHA-256 `8c809b310917bd7eb88dc6ba24b1f11f340e24c934db1575f00e9a57c4a72e54` matched; the isolated iPhone fixture was cleaned and no Simulator was launched | `/private/tmp/envoix-folder-picker-ios-20260715d.xcresult`; `/private/tmp/envoix-folder-picker-macos-20260715f.xcresult` |
 
 ## 11. Definition of done
 
@@ -1152,3 +1161,13 @@ The Apple milestone is complete only when all of the following are true:
   checks over Direct IPv6. This proves the main-app multi-Photos provider
   payload path; it does not substitute for Photos' system share-sheet or Share
   Extension multi-item host acceptance. No Simulator was launched.
+- 2026-07-15: The dedicated iOS Folder picker now passes its real system-action
+  and payload gates on the physical iPhone. Apple's **Open/打开** action selected
+  the current directory without a child selection; the same production Send UI
+  then transferred one directory containing `payload.txt` to the production
+  macOS `AppModel`. Both result bundles contain one executed pass, Direct over
+  the Personal Hotspot network was selected, and the receiver verified 1 root,
+  1/1 file, 1 directory, 36 exact bytes, and SHA-256
+  `8c809b310917bd7eb88dc6ba24b1f11f340e24c934db1575f00e9a57c4a72e54`.
+  Arbitrary third-party File Provider behavior and the Files picker payload
+  remain separate gates; no Simulator was launched.

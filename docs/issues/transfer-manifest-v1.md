@@ -107,8 +107,14 @@ without changing the FFI surface. Multi-item Share intake is implemented and
 hosted-tested. Separately, two synthetic Photos providers have now passed the
 physical main-app `PhotoDraftImporter` → v2 draft → production Manifest sender
 → production macOS receiver path with 2 roots, 2 files, and 136 exact bytes.
-The system Share Extension multi-item host path and Files provider path have not
-yet passed the physical-device gate.
+The dedicated iOS Folder path has also passed on a physical iPhone: the real
+system picker selected its current directory through Apple's **Open/打开**
+action, the production Send UI started the Manifest transfer, and the
+production macOS receiver verified 1 root, 1 file, 1 directory, 36 exact bytes,
+and SHA-256 over a selected Direct path. This proves the app-owned fixture path,
+not every iCloud or third-party File Provider. The system Share Extension
+multi-item host path and Files provider path have not yet passed the
+physical-device gate.
 
 ## Compatibility Boundary
 
