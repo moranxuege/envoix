@@ -329,6 +329,7 @@ struct ContentView: View {
         case .activity:
             TransferStageView(
                 records: model.activities,
+                manifestByActivityID: model.manifestActivities,
                 metricsByActivityID: model.activityMetrics,
                 onCopyDiagnostics: model.diagnosticReport,
                 onRemoteLogTarget: model.remoteLogTarget,
@@ -634,6 +635,7 @@ struct ContentView: View {
         case .activity:
             TransferStageView(
                 records: model.activities,
+                manifestByActivityID: model.manifestActivities,
                 metricsByActivityID: model.activityMetrics,
                 onCopyDiagnostics: model.diagnosticReport,
                 onRemoteLogTarget: model.remoteLogTarget,
@@ -866,6 +868,17 @@ private struct ActivityActionButtonStyle: ButtonStyle {
     }
 }
 
+func manifestRootEntriesForDisplay(
+    _ record: FfiManifestActivityRecord
+) -> [FfiPreparedManifestEntry] {
+    guard record.rootCount > 0 else { return [] }
+    return Array(
+        record.entries.lazy
+            .filter { !$0.relativePath.contains("/") }
+            .prefix(Int(record.rootCount))
+    )
+}
+
 private struct TransferStageView: View {
     private enum UploadStatus {
         case uploading
@@ -878,6 +891,8 @@ private struct TransferStageView: View {
         case resume
         case cancel
     }
+
+    private static let manifestRootPreviewLimit = 6
 
     @Environment(\.appLanguage) private var language
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -895,6 +910,7 @@ private struct TransferStageView: View {
     #endif
     private let commandAcknowledgementTimeout: TimeInterval = 5
     let records: [FfiTransferActivityRecord]
+    let manifestByActivityID: [String: FfiManifestActivityRecord]
     let metricsByActivityID: [String: ActivityMetrics]
     let onCopyDiagnostics: (FfiTransferActivityRecord) -> String
     let onRemoteLogTarget: (FfiTransferActivityRecord) -> RemoteLogUpload.Target?
@@ -1063,6 +1079,10 @@ private struct TransferStageView: View {
 
             activitySummary(record, metrics: metrics)
 
+            if let manifest = manifestByActivityID[record.activityId] {
+                manifestSummary(manifest)
+            }
+
             if record.totalBytes > 0 && !isTerminal(record) {
                 ProgressBar(value: progressFraction(for: record))
             }
@@ -1103,6 +1123,50 @@ private struct TransferStageView: View {
             .font(.subheadline.monospacedDigit())
             .foregroundStyle(Theme.muted)
             .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func manifestSummary(_ manifest: FfiManifestActivityRecord) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 8) {
+                Label(manifestInventoryText(manifest), systemImage: "square.stack.3d.up")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Theme.text)
+                    .lineLimit(2)
+                Spacer(minLength: 8)
+                if manifest.fileCount > 0 {
+                    Text("\(manifest.completedFiles)/\(manifest.fileCount)")
+                        .font(.subheadline.monospacedDigit().weight(.semibold))
+                        .foregroundStyle(Theme.accentStrong)
+                        .accessibilityLabel(AppText.value(
+                            "\(manifest.completedFiles) of \(manifest.fileCount) files complete",
+                            "\(manifest.fileCount) 个文件中已完成 \(manifest.completedFiles) 个",
+                            language: language
+                        ))
+                }
+            }
+
+            if let current = manifest.currentEntry, !current.relativePath.isEmpty {
+                HStack(spacing: 7) {
+                    Image(systemName: "arrow.right")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(Theme.accentStrong)
+                    Text(current.relativePath)
+                        .font(.footnote)
+                        .foregroundStyle(Theme.muted)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 6)
+                    if current.totalBytes > 0 {
+                        Text("\(byteString(current.bytesTransferred)) / \(byteString(current.totalBytes))")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(Theme.muted)
+                    }
+                }
+            }
+        }
+        .padding(11)
+        .background(Theme.accentSoft.opacity(0.55), in: RoundedRectangle(cornerRadius: Theme.cardRadius))
+        .accessibilityIdentifier("activity_manifest_summary_\(manifest.activity.activityId)")
     }
 
     @ViewBuilder
@@ -1468,8 +1532,15 @@ private struct TransferStageView: View {
                 }
             }
 
+            if let manifest = manifestByActivityID[record.activityId] {
+                manifestDetail(manifest)
+            }
+
             if record.direction == .receive {
-                receiveDestinationDetail(record)
+                receiveDestinationDetail(
+                    record,
+                    manifest: manifestByActivityID[record.activityId]
+                )
             }
 
             if developerMode {
@@ -1578,25 +1649,156 @@ private struct TransferStageView: View {
         }
     }
 
+    private func manifestDetail(_ manifest: FfiManifestActivityRecord) -> some View {
+        let roots = manifestRootEntriesForDisplay(manifest)
+        let visibleRoots = Array(roots.prefix(Self.manifestRootPreviewLimit))
+        let hiddenRootCount = max(0, roots.count - visibleRoots.count)
+        return VStack(alignment: .leading, spacing: 8) {
+            Divider().overlay(Theme.line.opacity(0.6))
+            Text(AppText.value("Transfer contents", "传输内容", language: language))
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(Theme.text)
+
+            VStack(spacing: 6) {
+                if manifest.rootCount > 0 {
+                    detailRow(
+                        AppText.value("Selected", "已选择", language: language),
+                        AppText.value(
+                            "\(manifest.rootCount) top-level items",
+                            "\(manifest.rootCount) 个顶层项目",
+                            language: language
+                        )
+                    )
+                }
+                if manifest.fileCount > 0 {
+                    detailRow(
+                        AppText.value("Files complete", "已完成文件", language: language),
+                        "\(manifest.completedFiles) / \(manifest.fileCount)"
+                    )
+                }
+                if let resultText = manifestResultSummaryText(manifest) {
+                    detailRow(AppText.value("Results", "处理结果", language: language), resultText)
+                }
+                if let current = manifest.currentEntry, !current.relativePath.isEmpty {
+                    detailRow(AppText.value("Current item", "当前项目", language: language), current.relativePath)
+                }
+            }
+
+            if !visibleRoots.isEmpty {
+                VStack(alignment: .leading, spacing: 7) {
+                    ForEach(visibleRoots, id: \.entryId) { entry in
+                        Label(
+                            entry.relativePath,
+                            systemImage: entry.kind == .directory ? "folder" : "doc"
+                        )
+                        .font(.footnote)
+                        .foregroundStyle(Theme.muted)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                    }
+                    if hiddenRootCount > 0 {
+                        Text(AppText.value(
+                            "+ \(hiddenRootCount) more",
+                            "另有 \(hiddenRootCount) 个",
+                            language: language
+                        ))
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(Theme.muted)
+                    }
+                }
+                .padding(.top, 2)
+            }
+        }
+        .accessibilityIdentifier("activity_manifest_detail_\(manifest.activity.activityId)")
+    }
+
+    private func manifestInventoryText(_ manifest: FfiManifestActivityRecord) -> String {
+        var parts: [String] = []
+        if manifest.fileCount > 0 {
+            parts.append(AppText.value(
+                "\(manifest.fileCount) files",
+                "\(manifest.fileCount) 个文件",
+                language: language
+            ))
+        }
+        if manifest.directoryCount > 0 {
+            parts.append(AppText.value(
+                "\(manifest.directoryCount) folders",
+                "\(manifest.directoryCount) 个文件夹",
+                language: language
+            ))
+        }
+        if parts.isEmpty {
+            return AppText.value("Waiting for item list", "正在等待项目清单", language: language)
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private func manifestResultSummaryText(_ manifest: FfiManifestActivityRecord) -> String? {
+        var skipped = 0
+        var renamed = 0
+        var failed = 0
+        var canceled = 0
+        for result in manifest.entryResults {
+            switch result.status {
+            case .completed:
+                break
+            case .skippedIdentical:
+                skipped += 1
+            case .renamed:
+                renamed += 1
+            case .failed:
+                failed += 1
+            case .canceled:
+                canceled += 1
+            }
+        }
+        var parts: [String] = []
+        if skipped > 0 {
+            parts.append(AppText.value("\(skipped) already present", "\(skipped) 个已存在", language: language))
+        }
+        if renamed > 0 {
+            parts.append(AppText.value("\(renamed) renamed", "\(renamed) 个已重命名", language: language))
+        }
+        if failed > 0 {
+            parts.append(AppText.value("\(failed) failed", "\(failed) 个失败", language: language))
+        }
+        if canceled > 0 {
+            parts.append(AppText.value("\(canceled) canceled", "\(canceled) 个已取消", language: language))
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
     @ViewBuilder
-    private func receiveDestinationDetail(_ record: FfiTransferActivityRecord) -> some View {
+    private func receiveDestinationDetail(
+        _ record: FfiTransferActivityRecord,
+        manifest: FfiManifestActivityRecord?
+    ) -> some View {
         Divider().overlay(Theme.line.opacity(0.6))
-        if record.state == .completed,
-           let url = availableCompletedFileURL(
-               path: record.completedFilePath,
-               expectedBytes: record.bytesTransferred
-           ) {
+        if record.state == .completed, let url = completedReceiveURL(record, manifest: manifest) {
+            let isMultiRootManifest = manifest.map { $0.rootCount > 1 } == true
             VStack(alignment: .leading, spacing: 8) {
-                Label(AppText.value("Saved file", "已保存文件", language: language), systemImage: "checkmark.circle.fill")
+                Label(
+                    isMultiRootManifest
+                        ? AppText.value("Saved items", "已保存项目", language: language)
+                        : AppText.value("Saved item", "已保存项目", language: language),
+                    systemImage: "checkmark.circle.fill"
+                )
                     .font(.callout.weight(.semibold))
                     .foregroundStyle(Theme.success)
-                Text(url.lastPathComponent)
+                Text(isMultiRootManifest
+                     ? AppText.value(
+                        "\(manifest?.rootCount ?? 0) items",
+                        "\(manifest?.rootCount ?? 0) 个项目",
+                        language: language
+                     )
+                     : url.lastPathComponent)
                     .font(.body.weight(.semibold))
                     .foregroundStyle(Theme.text)
                     .lineLimit(2)
                 Text(AppText.value(
-                    "Saved to \(url.deletingLastPathComponent().lastPathComponent)",
-                    "保存到 \(url.deletingLastPathComponent().lastPathComponent)",
+                    "Saved to \((isMultiRootManifest ? url : url.deletingLastPathComponent()).lastPathComponent)",
+                    "保存到 \((isMultiRootManifest ? url : url.deletingLastPathComponent()).lastPathComponent)",
                     language: language
                 ))
                 .font(.footnote)
@@ -1616,11 +1818,17 @@ private struct TransferStageView: View {
             }
         } else if record.state == .completed {
             Label(
-                AppText.value(
-                    "Transfer confirmed, but the file is not currently available in the selected folder.",
-                    "传输已确认，但当前在所选文件夹中找不到该文件。",
-                    language: language
-                ),
+                manifest == nil
+                    ? AppText.value(
+                        "Transfer confirmed, but the file is not currently available in the selected folder.",
+                        "传输已确认，但当前在所选文件夹中找不到该文件。",
+                        language: language
+                    )
+                    : AppText.value(
+                        "Transfer confirmed, but the received items are not currently available in the selected folder.",
+                        "传输已确认，但当前在所选文件夹中找不到接收的项目。",
+                        language: language
+                    ),
                 systemImage: "exclamationmark.folder"
             )
             .font(.footnote)
@@ -1628,17 +1836,34 @@ private struct TransferStageView: View {
             .fixedSize(horizontal: false, vertical: true)
         } else if !isTerminal(record) {
             Label(
-                AppText.value(
-                    "The file appears in Files after transfer and verification finish.",
-                    "传输及校验完成后，文件才会出现在“文件”中。",
-                    language: language
-                ),
+                manifest == nil
+                    ? AppText.value(
+                        "The file appears in Files after transfer and verification finish.",
+                        "传输及校验完成后，文件才会出现在“文件”中。",
+                        language: language
+                    )
+                    : AppText.value(
+                        "The items appear in Files after the full transfer and verification finish.",
+                        "全部传输及校验完成后，项目才会出现在“文件”中。",
+                        language: language
+                    ),
                 systemImage: record.state == .verifying ? "checkmark.shield" : "arrow.down.doc"
             )
             .font(.footnote)
             .foregroundStyle(Theme.muted)
             .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    private func completedReceiveURL(
+        _ record: FfiTransferActivityRecord,
+        manifest: FfiManifestActivityRecord?
+    ) -> URL? {
+        manifest.flatMap(availableCompletedManifestURL)
+            ?? availableCompletedFileURL(
+                path: record.completedFilePath,
+                expectedBytes: record.bytesTransferred
+            )
     }
 
     private func uploadStatusText(_ status: UploadStatus) -> String {

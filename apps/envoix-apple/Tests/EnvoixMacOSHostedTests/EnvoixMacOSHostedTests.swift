@@ -26,6 +26,23 @@ final class EnvoixMacOSHostedTests: XCTestCase {
         XCTAssertTrue(sendSelectionRequiresManifest([first, second]))
     }
 
+    func testManifestDisplayListsOnlyTopLevelSelectionRoots() {
+        let record = Self.manifestRecord(
+            completedRoot: URL(fileURLWithPath: "/tmp/envoix-display"),
+            rootCount: 2,
+            entries: [
+                Self.manifestEntry(id: 0, path: "Album", kind: .directory),
+                Self.manifestEntry(id: 1, path: "Album/photo.jpg"),
+                Self.manifestEntry(id: 2, path: "notes.txt"),
+            ]
+        )
+
+        XCTAssertEqual(
+            manifestRootEntriesForDisplay(record).map(\.relativePath),
+            ["Album", "notes.txt"]
+        )
+    }
+
     func testManifestPublicationCopiesFilesDirectoriesAndSupportsRetry() throws {
         let fileManager = FileManager.default
         let root = fileManager.temporaryDirectory
@@ -160,6 +177,29 @@ final class EnvoixMacOSHostedTests: XCTestCase {
         record.activity.state = .completed
 
         XCTAssertEqual(availableCompletedManifestURL(record: record), file)
+    }
+
+    func testCompletedMultiRootManifestResolvesTheDestinationDirectory() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("envoix-manifest-multi-completed-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fileManager.removeItem(at: root) }
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        let first = Data("first".utf8)
+        let second = Data("second".utf8)
+        try first.write(to: root.appendingPathComponent("first.bin"))
+        try second.write(to: root.appendingPathComponent("second.bin"))
+        var record = Self.manifestRecord(
+            completedRoot: root,
+            rootCount: 2,
+            entries: [
+                Self.manifestEntry(id: 0, path: "first.bin", size: UInt64(first.count)),
+                Self.manifestEntry(id: 1, path: "second.bin", size: UInt64(second.count)),
+            ]
+        )
+        record.activity.state = .completed
+
+        XCTAssertEqual(availableCompletedManifestURL(record: record), root)
     }
 
     func testReceiveIosToMacOSAppRoom() async throws {
