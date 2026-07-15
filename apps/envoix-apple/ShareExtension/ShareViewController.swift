@@ -35,14 +35,9 @@ final class ShareViewController: UIViewController {
         }
     }
 
-    private struct ProviderSelection {
-        let typeIdentifier: String
-        let mediaKind: ShareDraftDescriptor.MediaKind
-    }
-
     private struct ProviderImport {
         let provider: NSItemProvider
-        let selection: ProviderSelection
+        let selection: ShareProviderSelection
     }
 
     private static let logger = Logger(
@@ -257,29 +252,16 @@ final class ShareViewController: UIViewController {
         }
     }
 
-    private func selection(for provider: NSItemProvider) throws -> ProviderSelection {
-        let identifiers = provider.registeredTypeIdentifiers
-        let types = identifiers.compactMap { identifier in
-            UTType(identifier).map { (identifier, $0) }
-        }
-        if types.contains(where: { $0.1.conforms(to: .livePhoto) }) {
+    private func selection(for provider: NSItemProvider) throws -> ShareProviderSelection {
+        do {
+            return try shareProviderSelection(for: provider)
+        } catch ShareProviderSelectionError.livePhotoUnsupported {
             throw ImportError.livePhotoUnsupported
-        }
-        if types.contains(where: { $0.1.conforms(to: .directory) }) {
+        } catch ShareProviderSelectionError.folderUnsupported {
             throw ImportError.folderUnsupported
+        } catch {
+            throw ImportError.unsupportedItem
         }
-        if let movie = types.first(where: { $0.1.conforms(to: .movie) }) {
-            return ProviderSelection(typeIdentifier: movie.0, mediaKind: .video)
-        }
-        if let image = types.first(where: { $0.1.conforms(to: .image) }) {
-            return ProviderSelection(typeIdentifier: image.0, mediaKind: .image)
-        }
-        if let file = types.first(where: {
-            $0.1.conforms(to: .data) && !$0.1.conforms(to: .text)
-        }) ?? types.first(where: { $0.1.conforms(to: .item) && $0.1 != .url }) {
-            return ProviderSelection(typeIdentifier: file.0, mediaKind: .file)
-        }
-        throw ImportError.unsupportedItem
     }
 
     private func finishImport(_ result: Result<ShareDraft, Error>) {

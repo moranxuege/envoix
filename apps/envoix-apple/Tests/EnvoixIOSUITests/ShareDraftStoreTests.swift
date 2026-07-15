@@ -1,4 +1,5 @@
 import Foundation
+import UniformTypeIdentifiers
 import XCTest
 @testable import Envoix_iOS
 
@@ -59,6 +60,76 @@ final class ShareDraftStoreTests: XCTestCase {
         XCTAssertNil(ShareDraftLink.draftID(from: URL(string: "envoix://share/not-a-uuid")!))
         XCTAssertNil(ShareDraftLink.draftID(from: URL(string: "envoix://share/\(id)/extra")!))
         XCTAssertNil(ShareDraftLink.draftID(from: URL(string: "envoix://share/\(id)?source=other")!))
+    }
+
+    func testProviderSelectionAcceptsPhotosAndRejectsLivePhotosAndFolders() throws {
+        let image = NSItemProvider(item: Data() as NSData, typeIdentifier: UTType.jpeg.identifier)
+        XCTAssertEqual(
+            try shareProviderSelection(for: image),
+            ShareProviderSelection(typeIdentifier: UTType.jpeg.identifier, mediaKind: .image)
+        )
+
+        let movie = NSItemProvider(item: Data() as NSData, typeIdentifier: UTType.movie.identifier)
+        XCTAssertEqual(
+            try shareProviderSelection(for: movie),
+            ShareProviderSelection(typeIdentifier: UTType.movie.identifier, mediaKind: .video)
+        )
+
+        let livePhoto = NSItemProvider(
+            item: Data() as NSData,
+            typeIdentifier: UTType.livePhoto.identifier
+        )
+        XCTAssertThrowsError(try shareProviderSelection(for: livePhoto)) { error in
+            XCTAssertEqual(error as? ShareProviderSelectionError, .livePhotoUnsupported)
+        }
+
+        let folder = NSItemProvider(item: Data() as NSData, typeIdentifier: UTType.folder.identifier)
+        XCTAssertThrowsError(try shareProviderSelection(for: folder)) { error in
+            XCTAssertEqual(error as? ShareProviderSelectionError, .folderUnsupported)
+        }
+    }
+
+    func testPhotoDraftImporterCopiesProviderRepresentationIntoDraft() throws {
+        let source = root.appendingPathComponent("provider-photo.jpg")
+        let payload = Data("photo provider payload".utf8)
+        try payload.write(to: source)
+        let provider = NSItemProvider()
+        provider.suggestedName = "Selected Photo"
+        provider.registerFileRepresentation(
+            forTypeIdentifier: UTType.jpeg.identifier,
+            fileOptions: [],
+            visibility: .all
+        ) { completion in
+            completion(source, false, nil)
+            return nil
+        }
+
+        let store = ShareDraftStore(rootDirectory: root.appendingPathComponent("drafts"))
+        let importer = PhotoDraftImporter(store: store)
+        let completed = expectation(description: "Photo representation is staged")
+        var result: Result<PhotoDraftImporter.ImportedDraft, Error>?
+        var progress: [(Int, Int)] = []
+
+        try importer.start(
+            providers: [provider],
+            onProgress: { progress.append(($0, $1)) },
+            completion: {
+                result = $0
+                completed.fulfill()
+            }
+        )
+        wait(for: [completed], timeout: 5)
+
+        let imported = try XCTUnwrap(result).get()
+        defer { try? store.discard(id: imported.draft.descriptor.id) }
+        XCTAssertEqual(progress.map { [$0.0, $0.1] }, [[1, 1]])
+        XCTAssertEqual(imported.draft.descriptor.mediaKind, .image)
+        XCTAssertEqual(
+            imported.draft.descriptor.fileName,
+            "Selected Photo.\(try XCTUnwrap(UTType.jpeg.preferredFilenameExtension))"
+        )
+        XCTAssertEqual(try Data(contentsOf: imported.draft.fileURLs[0]), payload)
+        XCTAssertEqual(try store.pending()?.descriptor.id, imported.draft.descriptor.id)
     }
 
     func testAppModelImportsPendingDraftForSendSheet() throws {

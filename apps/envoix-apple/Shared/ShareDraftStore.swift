@@ -1,4 +1,5 @@
 import Foundation
+import UniformTypeIdentifiers
 
 struct ShareDraftDescriptor: Codable, Equatable, Identifiable {
     enum MediaKind: String, Codable {
@@ -150,6 +151,41 @@ struct ShareDraftStagingItem {
     let contentTypeIdentifier: String
     let mediaKind: ShareDraftDescriptor.MediaKind
     let preferredFileName: String?
+}
+
+struct ShareProviderSelection: Equatable {
+    let typeIdentifier: String
+    let mediaKind: ShareDraftDescriptor.MediaKind
+}
+
+enum ShareProviderSelectionError: Error, Equatable {
+    case livePhotoUnsupported
+    case folderUnsupported
+    case unsupportedItem
+}
+
+func shareProviderSelection(for provider: NSItemProvider) throws -> ShareProviderSelection {
+    let types = provider.registeredTypeIdentifiers.compactMap { identifier in
+        UTType(identifier).map { (identifier, $0) }
+    }
+    if types.contains(where: { $0.1.conforms(to: .livePhoto) }) {
+        throw ShareProviderSelectionError.livePhotoUnsupported
+    }
+    if types.contains(where: { $0.1.conforms(to: .directory) }) {
+        throw ShareProviderSelectionError.folderUnsupported
+    }
+    if let movie = types.first(where: { $0.1.conforms(to: .movie) }) {
+        return ShareProviderSelection(typeIdentifier: movie.0, mediaKind: .video)
+    }
+    if let image = types.first(where: { $0.1.conforms(to: .image) }) {
+        return ShareProviderSelection(typeIdentifier: image.0, mediaKind: .image)
+    }
+    if let file = types.first(where: {
+        $0.1.conforms(to: .data) && !$0.1.conforms(to: .text)
+    }) ?? types.first(where: { $0.1.conforms(to: .item) && $0.1 != .url }) {
+        return ShareProviderSelection(typeIdentifier: file.0, mediaKind: .file)
+    }
+    throw ShareProviderSelectionError.unsupportedItem
 }
 
 struct ShareDraft: Equatable {

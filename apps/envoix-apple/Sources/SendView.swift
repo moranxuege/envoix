@@ -46,6 +46,13 @@ struct SendView: View {
     @State private var isQRScannerPresented = false
     @State private var selectedSourceAccess: AnyObject?
     @State private var selectedPendingSelectionID: UUID?
+    #if os(iOS)
+    @State private var isFolderPickerPresented = false
+    @State private var isPhotoPickerPresented = false
+    @State private var photoImporter: PhotoDraftImporter?
+    @State private var photoImportItemNumber = 0
+    @State private var photoImportItemCount = 0
+    #endif
 
     init(
         viewModel: TransferViewModel,
@@ -73,10 +80,29 @@ struct SendView: View {
                 handleScannedInvite(value)
             }
         }
+        .sheet(isPresented: $isFolderPickerPresented) {
+            FolderPickerSheet(
+                onPick: { url in
+                    isFolderPickerPresented = false
+                    handleImportedFolder(url)
+                },
+                onCancel: { isFolderPickerPresented = false }
+            )
+        }
+        .sheet(isPresented: $isPhotoPickerPresented) {
+            PhotoPickerSheet(
+                onPick: { providers in
+                    isPhotoPickerPresented = false
+                    beginPhotoImport(providers)
+                },
+                onCancel: { isPhotoPickerPresented = false }
+            )
+        }
         .onAppear(perform: adoptSharedSelectionIfAvailable)
         .onChange(of: model.pendingSendSelection?.id) { _ in
             adoptSharedSelectionIfAvailable()
         }
+        .onDisappear(perform: cancelPhotoImport)
         #else
         VStack(spacing: 0) {
             scrollContent
@@ -332,7 +358,7 @@ struct SendView: View {
         .buttonStyle(PrimaryActionButtonStyle())
         .disabled(
             !viewModel.isPreparingManifest
-                && (viewModel.isBusy || viewModel.isFinalizing || !canSend || concurrencyBlocked)
+                && (viewModel.isBusy || viewModel.isFinalizing || isPhotoImporting || !canSend || concurrencyBlocked)
         )
         .accessibilityIdentifier("send_start_button")
     }
@@ -363,13 +389,35 @@ struct SendView: View {
             Text(AppText.value("Items to send", "要发送的项目", language: uiLanguage))
                 .font(.headline.weight(.semibold))
                 .foregroundStyle(Theme.text)
+            #if os(iOS)
+            selectionSourceActions
+
+            if isPhotoImporting {
+                HStack(spacing: 10) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text(AppText.value(
+                        "Preparing photo \(photoImportItemNumber) of \(photoImportItemCount)…",
+                        "正在准备第 \(photoImportItemNumber)/\(photoImportItemCount) 个照片项目…",
+                        language: uiLanguage
+                    ))
+                    .font(.footnote)
+                    .foregroundStyle(Theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+                .accessibilityIdentifier("send_photo_import_progress")
+            }
+
+            if !selectedItems.isEmpty {
+                fileChooserLabel
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("send_selection_summary")
+                    .accessibilityValue(String(selectedItems.count))
+            }
+            #else
             Button {
-                #if os(iOS)
-                isFileImporterPresented = true
-                #else
                 let urls = chooseSendItems()
                 if !urls.isEmpty { selectItems(urls) }
-                #endif
             } label: {
                 fileChooserLabel
             }
@@ -377,12 +425,9 @@ struct SendView: View {
             .disabled(viewModel.isBusy)
             .accessibilityIdentifier("send_file_picker")
             .accessibilityValue(String(selectedItems.count))
+            #endif
 
-            Text(AppText.value(
-                "Choose one or more files, or a folder. Folder structure is preserved.",
-                "可选择一个或多个文件，也可选择文件夹；目录结构会完整保留。",
-                language: uiLanguage
-            ))
+            Text(selectionGuidance)
             .font(.caption)
             .foregroundStyle(Theme.muted)
             .accessibilityIdentifier("send_selection_limit")
@@ -410,13 +455,82 @@ struct SendView: View {
         #if os(iOS)
         .fileImporter(
             isPresented: $isFileImporterPresented,
-            allowedContentTypes: [.item, .folder],
+            allowedContentTypes: [.data],
             allowsMultipleSelection: true
         ) { result in
             handleImportedItems(result)
         }
         #endif
     }
+
+    private var selectionGuidance: String {
+        #if os(iOS)
+        AppText.value(
+            "Choose Photos, one or more files, or one folder. In the folder picker, Open uploads the current folder.",
+            "可选择照片、一个或多个文件，或一个文件夹；在文件夹选择器中点“打开”即上传当前文件夹。",
+            language: uiLanguage
+        )
+        #else
+        AppText.value(
+            "Choose one or more files, or a folder. Folder structure is preserved.",
+            "可选择一个或多个文件，也可选择文件夹；目录结构会完整保留。",
+            language: uiLanguage
+        )
+        #endif
+    }
+
+    #if os(iOS)
+    private var selectionSourceActions: some View {
+        HStack(spacing: 10) {
+            selectionSourceAction(
+                AppText.value("Photos", "照片", language: uiLanguage),
+                systemImage: "photo.on.rectangle",
+                identifier: "send_photo_picker"
+            ) {
+                isPhotoPickerPresented = true
+            }
+            selectionSourceAction(
+                AppText.value("Files", "文件", language: uiLanguage),
+                systemImage: "doc.badge.plus",
+                identifier: "send_file_picker"
+            ) {
+                isFileImporterPresented = true
+            }
+            selectionSourceAction(
+                AppText.value("Folder", "文件夹", language: uiLanguage),
+                systemImage: "folder.badge.plus",
+                identifier: "send_folder_picker"
+            ) {
+                isFolderPickerPresented = true
+            }
+        }
+    }
+
+    private func selectionSourceAction(
+        _ title: String,
+        systemImage: String,
+        identifier: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            VStack(spacing: 8) {
+                Image(systemName: systemImage)
+                    .font(.title3.weight(.semibold))
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+            .foregroundStyle(Theme.accentStrong)
+            .frame(maxWidth: .infinity, minHeight: 72)
+            .background(Theme.accentSoft.opacity(0.65), in: RoundedRectangle(cornerRadius: Theme.cardRadius))
+            .contentShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
+        }
+        .buttonStyle(.plain)
+        .disabled(viewModel.isBusy || viewModel.isPreparingManifest || isPhotoImporting)
+        .accessibilityIdentifier(identifier)
+    }
+    #endif
 
     @ViewBuilder private var fileChooserLabel: some View {
         #if os(iOS)
@@ -440,9 +554,9 @@ struct SendView: View {
             }
 
             Spacer(minLength: 8)
-            Image(systemName: "chevron.right")
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(Theme.muted)
+            Image(systemName: "checkmark.circle.fill")
+                .font(.body.weight(.semibold))
+                .foregroundStyle(Theme.success)
         }
         .frame(maxWidth: .infinity, minHeight: 76, alignment: .leading)
         .contentShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
@@ -707,6 +821,14 @@ struct SendView: View {
         }
     }
 
+    private var isPhotoImporting: Bool {
+        #if os(iOS)
+        photoImporter?.isRunning == true
+        #else
+        false
+        #endif
+    }
+
     private var canSend: Bool {
         guard !selectedItems.isEmpty else { return false }
         switch mode {
@@ -816,6 +938,124 @@ struct SendView: View {
     }
 
     #if os(iOS)
+    private func handleImportedFolder(_ url: URL) {
+        do {
+            guard try url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else {
+                throw RuntimeSettingsError(AppText.value(
+                    "Choose a folder, not a file.",
+                    "请选择文件夹，而不是文件。",
+                    language: uiLanguage
+                ))
+            }
+            guard try adoptUserSelectedItems([url]) else { return }
+            ToastCenter.shared.show(AppText.value(
+                "Folder ready to upload",
+                "文件夹已准备上传",
+                language: uiLanguage
+            ))
+        } catch {
+            ToastCenter.shared.show(error.localizedDescription)
+        }
+    }
+
+    private func beginPhotoImport(_ providers: [NSItemProvider]) {
+        guard !providers.isEmpty else { return }
+        guard providers.count <= ShareDraftStore.maxItemCount else {
+            ToastCenter.shared.show(AppText.value(
+                "Select no more than \(ShareDraftStore.maxItemCount) Photos items.",
+                "照片项目不能超过 \(ShareDraftStore.maxItemCount) 个。",
+                language: uiLanguage
+            ))
+            return
+        }
+
+        do {
+            let store = try ShareDraftStore.live()
+            let importer = PhotoDraftImporter(store: store)
+            photoImporter = importer
+            try importer.start(
+                providers: providers,
+                onProgress: { itemNumber, itemCount in
+                    photoImportItemNumber = itemNumber
+                    photoImportItemCount = itemCount
+                },
+                completion: finishPhotoImport
+            )
+        } catch let error as ShareProviderSelectionError {
+            photoImporter = nil
+            ToastCenter.shared.show(photoSelectionErrorMessage(error))
+        } catch {
+            photoImporter = nil
+            ToastCenter.shared.show(error.localizedDescription)
+        }
+    }
+
+    private func finishPhotoImport(_ result: Result<PhotoDraftImporter.ImportedDraft, Error>) {
+        photoImporter = nil
+        photoImportItemNumber = 0
+        photoImportItemCount = 0
+        switch result {
+        case .success(let imported):
+            let draft = imported.draft
+            let store = imported.store
+            do {
+                try store.claim(id: draft.descriptor.id)
+                store.acknowledgePending(id: draft.descriptor.id)
+                let lease = ShareDraftLease(id: draft.descriptor.id, store: store)
+                guard selectItems(
+                    draft.fileURLs,
+                    access: lease,
+                    pendingSelectionID: draft.descriptor.id
+                ) else {
+                    try? store.discard(id: draft.descriptor.id)
+                    return
+                }
+                ToastCenter.shared.show(AppText.value(
+                    draft.fileURLs.count == 1
+                        ? "Photo ready to send"
+                        : "\(draft.fileURLs.count) Photos items ready to send",
+                    draft.fileURLs.count == 1
+                        ? "照片已准备发送"
+                        : "\(draft.fileURLs.count) 个照片项目已准备发送",
+                    language: uiLanguage
+                ))
+            } catch {
+                try? store.discard(id: draft.descriptor.id)
+                ToastCenter.shared.show(error.localizedDescription)
+            }
+        case .failure(let error):
+            if let selectionError = error as? ShareProviderSelectionError {
+                ToastCenter.shared.show(photoSelectionErrorMessage(selectionError))
+            } else {
+                ToastCenter.shared.show(error.localizedDescription)
+            }
+        }
+    }
+
+    private func cancelPhotoImport() {
+        photoImporter?.cancel()
+        photoImporter = nil
+        photoImportItemNumber = 0
+        photoImportItemCount = 0
+    }
+
+    private func photoSelectionErrorMessage(_ error: ShareProviderSelectionError) -> String {
+        switch error {
+        case .livePhotoUnsupported:
+            return AppText.value(
+                "Paired Live Photos are not supported yet. Choose a still image or video instead.",
+                "暂不支持成对的 Live Photo，请改选静态照片或视频。",
+                language: uiLanguage
+            )
+        case .folderUnsupported, .unsupportedItem:
+            return AppText.value(
+                "Envoix could not read this Photos item as an image or video.",
+                "Envoix 无法将这个照片项目读取为图片或视频。",
+                language: uiLanguage
+            )
+        }
+    }
+
     private func adoptSharedSelectionIfAvailable() {
         guard !viewModel.isBusy,
               let selection = model.pendingSendSelection else { return }
@@ -852,8 +1092,17 @@ struct SendView: View {
         do {
             let urls = try result.get()
             guard !urls.isEmpty else { return }
+            for url in urls {
+                guard try url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true else {
+                    throw RuntimeSettingsError(AppText.value(
+                        "Use the Folder button to upload a folder.",
+                        "请使用“文件夹”按钮上传文件夹。",
+                        language: uiLanguage
+                    ))
+                }
+            }
             guard try adoptUserSelectedItems(urls) else { return }
-            ToastCenter.shared.show(AppText.value("Items selected", "已选择项目", language: uiLanguage))
+            ToastCenter.shared.show(AppText.value("Files selected", "已选择文件", language: uiLanguage))
         } catch {
             ToastCenter.shared.show(error.localizedDescription)
         }

@@ -39,7 +39,9 @@ final class EnvoixIOSAppUITests: XCTestCase {
 
         sendEntry.tap()
 
-        XCTAssertTrue(app.buttons["send_file_picker"].isHittable)
+        for identifier in ["send_photo_picker", "send_file_picker", "send_folder_picker"] {
+            XCTAssertTrue(app.buttons[identifier].isHittable, identifier)
+        }
         XCTAssertTrue(app.descendants(matching: .any)["send_selection_limit"].exists)
         XCTAssertTrue(app.descendants(matching: .any)["send_pairing_guidance"].exists)
         XCTAssertTrue(app.descendants(matching: .any)["pairing_panel_selector"].exists)
@@ -76,7 +78,9 @@ final class EnvoixIOSAppUITests: XCTestCase {
         XCTAssertTrue(send.isHittable)
         send.tap()
 
-        XCTAssertTrue(app.buttons["send_file_picker"].isHittable)
+        for identifier in ["send_photo_picker", "send_file_picker", "send_folder_picker"] {
+            XCTAssertTrue(app.buttons[identifier].isHittable, identifier)
+        }
         XCTAssertTrue(app.buttons["send_start_button"].exists)
         app.buttons["mobile_sheet_done"].tap()
 
@@ -346,9 +350,9 @@ final class EnvoixIOSAppUITests: XCTestCase {
         app.activate()
 
         XCTAssertTrue(app.buttons["mobile_sheet_done"].waitForExistence(timeout: 8))
-        let filePicker = app.buttons["send_file_picker"]
-        XCTAssertTrue(filePicker.waitForExistence(timeout: 5))
-        XCTAssertEqual(filePicker.value as? String, "2")
+        let selection = app.descendants(matching: .any)["send_selection_summary"]
+        XCTAssertTrue(selection.waitForExistence(timeout: 5))
+        XCTAssertEqual(selection.value as? String, "2")
     }
 
     func testSystemOpenedFilePresentsSendSelection() throws {
@@ -366,14 +370,14 @@ final class EnvoixIOSAppUITests: XCTestCase {
         app.open(sourceURL)
 
         XCTAssertTrue(app.buttons["mobile_sheet_done"].waitForExistence(timeout: 8))
-        let filePicker = app.buttons["send_file_picker"]
-        XCTAssertTrue(filePicker.waitForExistence(timeout: 5))
+        let selection = app.descendants(matching: .any)["send_selection_summary"]
+        XCTAssertTrue(selection.waitForExistence(timeout: 5))
         let selectedFile = NSPredicate(format: "label CONTAINS %@", "open-in-envoix.txt")
-        let selectionExpectation = XCTNSPredicateExpectation(predicate: selectedFile, object: filePicker)
+        let selectionExpectation = XCTNSPredicateExpectation(predicate: selectedFile, object: selection)
         XCTAssertEqual(
             XCTWaiter.wait(for: [selectionExpectation], timeout: 3),
             .completed,
-            "Unexpected file picker label: \(filePicker.label)"
+            "Unexpected selection label: \(selection.label)"
         )
     }
 
