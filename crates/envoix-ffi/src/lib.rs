@@ -39,6 +39,9 @@ use tokio::sync::{mpsc, oneshot};
 
 uniffi::setup_scaffolding!();
 
+mod manifest;
+pub use manifest::*;
+
 /// Lifetime of a generated invite before it expires, in seconds.
 const INVITE_TTL_SECS: u64 = 300;
 /// Default rendezvous broker used by the macOS app for room pairing.
@@ -55,7 +58,7 @@ const ROOM_SEND_FALLBACK_TIMEOUT: Duration = Duration::from_secs(60);
 /// prevents large transfers from flooding the Swift/Kotlin main thread.
 const NATIVE_PROGRESS_INTERVAL_MS: u64 = 500;
 /// Version of the additive native API contract exposed by this crate.
-const ENVOIX_FFI_API_VERSION: u32 = 1;
+const ENVOIX_FFI_API_VERSION: u32 = 2;
 const NATIVE_PUBLICATION_EXTRAS_KEY: &str = "native_publication";
 /// Runtime settings supplied by native UIs.
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
@@ -155,6 +158,8 @@ pub fn envoix_core_info() -> FfiCoreInfo {
             "native_publication_v1".to_string(),
             "durable_publication_recovery_v1".to_string(),
             "per_session_receipt_endpoint_v1".to_string(),
+            "manifest_activity_v1".to_string(),
+            "manifest_selection_builder_v1".to_string(),
         ],
     }
 }

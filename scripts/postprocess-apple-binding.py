@@ -4,14 +4,16 @@
 from pathlib import Path
 import sys
 
-EXPECTED_CALLBACK_VTABLES = 3
+EXPECTED_CALLBACK_VTABLES = 4
 
 
 def replace_once(text: str, old: str, new: str, label: str) -> str:
     count = text.count(old)
-    if count != 1:
-        raise SystemExit(f"error: expected one {label} binding pattern, found {count}")
-    return text.replace(old, new)
+    if count == 1:
+        return text.replace(old, new)
+    if count == 0 and text.count(new) == 1:
+        return text
+    raise SystemExit(f"error: expected one raw or reviewed {label} binding pattern")
 
 
 def main() -> None:
@@ -42,12 +44,16 @@ def main() -> None:
     // This is safe because the pointee is initialized once during static init
     // and never mutated by either side of the FFI.  Its fields are C function pointers.
     nonisolated(unsafe) static let vtablePtr: UnsafePointer<"""
-    count = text.count(old_vtable)
-    if count != EXPECTED_CALLBACK_VTABLES:
+    raw_count = text.count(old_vtable)
+    reviewed_count = text.count(new_vtable)
+    if raw_count + reviewed_count != EXPECTED_CALLBACK_VTABLES:
         raise SystemExit(
-            f"error: expected {EXPECTED_CALLBACK_VTABLES} callback vtables, found {count}"
+            "error: expected "
+            f"{EXPECTED_CALLBACK_VTABLES} callback vtables, found "
+            f"{raw_count + reviewed_count}"
         )
     text = text.replace(old_vtable, new_vtable)
+    text = "\n".join(line.rstrip() for line in text.splitlines()) + "\n"
     path.write_text(text)
 
 

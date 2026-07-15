@@ -22,7 +22,8 @@ mod source;
 mod transfer;
 
 pub use envoix_protocol::{
-    ManifestEntryKind, ManifestEntryV1, ManifestHashAlgorithm, ManifestId, ManifestV1,
+    ManifestEntryKind, ManifestEntryResultStatus, ManifestEntryV1, ManifestHashAlgorithm,
+    ManifestId, ManifestV1,
 };
 pub use envoix_session::{
     CandidateFilter, ManifestSendRequest, ManifestTransferSummary, SessionTransferSummary,
