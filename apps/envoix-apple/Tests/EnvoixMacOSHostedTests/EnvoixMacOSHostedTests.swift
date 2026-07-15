@@ -226,6 +226,58 @@ final class EnvoixMacOSHostedTests: XCTestCase {
 #endif
     }
 
+    func testSendMacOSToIosAppInvite() async throws {
+        try requireCrossDeviceTesting()
+#if ENVOIX_CROSS_DEVICE_TESTING
+        let model = AppModel.shared
+        guard !model.send.isBusy else {
+            throw HostedTestError.transferFailed("the production sender is already busy")
+        }
+
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("envoix-macos-app-send-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: root) }
+        let sourceURL = root.appendingPathComponent(Self.macOSToIosFileName)
+        try Self.macOSToIosPayload.write(to: sourceURL)
+
+        let defaults = UserDefaults.standard
+        let invite = Self.environment("ENVOIX_MACOS_TO_IOS_INVITE")
+            ?? defaults.string(forKey: Self.macOSToIosInviteDefaultsKey)
+        defaults.removeObject(forKey: Self.macOSToIosInviteDefaultsKey)
+        guard let invite, !invite.isEmpty else {
+            throw HostedTestError.transferFailed("ENVOIX_MACOS_TO_IOS_INVITE is required")
+        }
+        model.send.startSendingWithInvite(
+            filePath: sourceURL.path,
+            invite: invite,
+            settings: Self.runtimeSettings,
+            pathPolicy: .relayOnly
+        )
+        let activityID = model.send.activeActivityID
+        guard !activityID.isEmpty else {
+            throw HostedTestError.transferFailed("production macOS sender did not create an Activity")
+        }
+        defer { model.removeActivity(activityID) }
+        emitEvidence("sender-started activity=\(activityID) mode=invite pathPolicy=relay-only")
+
+        let completed = try await waitForCompletion(activityID: activityID, in: model)
+        XCTAssertEqual(completed.direction, .send)
+        XCTAssertEqual(completed.fileName, Self.macOSToIosFileName)
+        XCTAssertEqual(completed.bytesTransferred, UInt64(Self.macOSToIosPayload.count))
+        XCTAssertEqual(completed.totalBytes, UInt64(Self.macOSToIosPayload.count))
+        XCTAssertNotEqual(completed.dataPathKind, .none)
+        let hash = try Self.fileSHA256(sourceURL)
+        XCTAssertEqual(hash, Data(SHA256.hash(data: Self.macOSToIosPayload)))
+        emitEvidence(
+            "sender-completed activity=\(activityID) pathKind=\(completed.dataPathKind) " +
+            "pathDetail=\(completed.dataPathDetail) file=\(completed.fileName) " +
+            "size=\(completed.bytesTransferred) sha256=\(hash.hexString)"
+        )
+#endif
+    }
+
 #if ENVOIX_CROSS_DEVICE_TESTING
     private func receiveSingleFile(
         fileName: String,
@@ -465,6 +517,8 @@ final class EnvoixMacOSHostedTests: XCTestCase {
     private static let photoPayload = Data(
         base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
     )!
+    private static let macOSToIosFileName = "envoix-\(runID)-macos-to-ios.bin"
+    private static let macOSToIosPayload = Data("envoix cross-device macos to ios app\n".utf8)
     private static let manifestAlbumName = "envoix-\(runID)-album"
     private static let manifestLooseName = "envoix-\(runID)-loose.txt"
     private static let manifestPhotoPayload = Data("envoix manifest photo \(runID)\n".utf8)
@@ -475,6 +529,7 @@ final class EnvoixMacOSHostedTests: XCTestCase {
         .flatMap(TimeInterval.init) ?? 180
     private static let useRoomDefaultsKey = "envoix.useRoom"
     private static let useMdnsDefaultsKey = "envoix.useMdns"
+    private static let macOSToIosInviteDefaultsKey = "envoix.test.macOSToIosInvite"
     private static let hashBlockBytes = 1024 * 1024
     private static let runtimeSettings = EnvoixRuntimeSettings(
         concurrentTransfers: true,

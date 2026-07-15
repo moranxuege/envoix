@@ -298,13 +298,16 @@ final class AppModel: ObservableObject {
         _ = durableSessions.removeValue(forKey: activityID)?.remove()
         manifestActivities.removeValue(forKey: activityID)
         activityResourceAccess.removeValue(forKey: activityID)
-        if let publication = receivePublications.removeValue(forKey: activityID),
+        let publication = receivePublications.removeValue(forKey: activityID)
+        if let publication,
            let path = publication.completedRecord?.completedFilePath,
            !path.isEmpty {
             try? FileManager.default.removeItem(at: URL(fileURLWithPath: path))
         }
-        cleanupReceiveStaging(activityID: activityID)
-        ReceivePublicationStore.remove(activityID: activityID)
+        if publication != nil {
+            cleanupReceiveStaging(activityID: activityID)
+            ReceivePublicationStore.remove(activityID: activityID)
+        }
         receive.forgetRoomID(for: activityID)
         send.forgetRoomID(for: activityID)
         activities.removeAll { $0.activityId == activityID }
@@ -644,11 +647,15 @@ final class AppModel: ObservableObject {
             if !preservesResumeData {
                 activityResourceAccess.removeValue(forKey: record.activityId)
             }
-            if record.state == .completed || record.state == .canceled
+            if record.direction == .receive,
+               record.state == .completed
+                || record.state == .canceled
                 || (record.state == .failed && !record.retryable) {
-                receivePublications.removeValue(forKey: record.activityId)
-                cleanupReceiveStaging(activityID: record.activityId)
-                ReceivePublicationStore.remove(activityID: record.activityId)
+                let publication = receivePublications.removeValue(forKey: record.activityId)
+                if publication != nil {
+                    cleanupReceiveStaging(activityID: record.activityId)
+                    ReceivePublicationStore.remove(activityID: record.activityId)
+                }
             }
         }
     }
@@ -1335,9 +1342,22 @@ final class TransferViewModel: ObservableObject {
     }
 
     /// Send to the peer encoded in an invite string.
-    func startSendingWithInvite(filePath: String, invite: String, settings: EnvoixRuntimeSettings, sourceAccess: AnyObject? = nil) {
+    func startSendingWithInvite(
+        filePath: String,
+        invite: String,
+        settings: EnvoixRuntimeSettings,
+        pathPolicy: FfiPathPolicy = .auto,
+        sourceAccess: AnyObject? = nil
+    ) {
         destinationDir = nil
-        let request = makeRequest(direction: .send, mode: .invite, settings: settings, filePath: filePath, invite: invite)
+        let request = makeRequest(
+            direction: .send,
+            mode: .invite,
+            settings: settings,
+            filePath: filePath,
+            invite: invite,
+            pathPolicy: pathPolicy
+        )
         start(settings: settings, request: request)
         retainResourceAccess(sourceAccess)
     }
@@ -1651,6 +1671,7 @@ final class TransferViewModel: ObservableObject {
         invite: String = "",
         code: String = "",
         token: String = "",
+        pathPolicy: FfiPathPolicy = .auto,
         publicationRequired: Bool = false
     ) -> FfiTransferRequest {
         FfiTransferRequest(
@@ -1666,7 +1687,7 @@ final class TransferViewModel: ObservableObject {
             broker: settings.serverUrl,
             relay: settings.relayUrl,
             configPath: settings.configPath,
-            pathPolicy: .auto,
+            pathPolicy: pathPolicy,
             resume: true,
             publicationRequired: publicationRequired,
             limits: FfiTransferLimits(
@@ -1763,6 +1784,9 @@ final class TransferViewModel: ObservableObject {
         fileName = record.activity.fileName
         transferred = record.activity.bytesTransferred
         total = record.activity.totalBytes
+        if !record.activity.invite.isEmpty {
+            invite = record.activity.invite
+        }
         handleTransferActivity(record.activity, manifest: record)
     }
 

@@ -663,7 +663,9 @@ async fn drive_manifest_notices(
     while let Some(notice) = notices.recv().await {
         match notice {
             ManifestSessionNotice::Event(event) => {
-                observe_manifest_transport_event(&activity, event);
+                if observe_manifest_transport_event(&activity, event) {
+                    observer.on_manifest_activity(activity.lock().unwrap().clone());
+                }
             }
             ManifestSessionNotice::Snapshot(snapshot) => {
                 let timestamp = now_ms();
@@ -702,10 +704,12 @@ async fn drive_manifest_notices(
 fn observe_manifest_transport_event(
     activity: &Arc<Mutex<FfiManifestActivityRecord>>,
     event: StampedEvent,
-) {
+) -> bool {
     let mut activity = activity.lock().unwrap();
     let ffi_event = to_ffi_event(&event, &activity.activity.activity_id);
+    let invite_ready = !ffi_event.invite.is_empty();
     activity.activity.apply_observation(&ffi_event);
+    invite_ready
 }
 
 fn is_manifest_progress_only(previous: &ManifestActivity, current: &ManifestActivity) -> bool {
@@ -1062,6 +1066,42 @@ mod tests {
         assert_eq!(projected.file_count, 1);
         assert_eq!(projected.directory_count, 1);
         assert_eq!(projected.entries.len(), 2);
+    }
+
+    #[test]
+    fn invite_transport_event_requests_an_immediate_native_snapshot() {
+        let mut request = FfiTransferRequest::receive(
+            "/tmp/envoix".into(),
+            super::super::FfiTransferMode::ShowInvite,
+        );
+        request.activity_id = "manifest-invite".into();
+        let activity = Arc::new(Mutex::new(FfiManifestActivityRecord {
+            activity: FfiTransferActivityRecord::from_request(&request, 1),
+            manifest_id: String::new(),
+            root_count: 0,
+            file_count: 0,
+            directory_count: 0,
+            completed_files: 0,
+            entries: Vec::new(),
+            current_entry: None,
+            entry_results: Vec::new(),
+        }));
+        let invite = "envoix:test-invite";
+        let event = StampedEvent {
+            ts_ms: 2,
+            event: envoix_client::api::TransferEvent::Advertised {
+                peer: envoix_client::PeerDescriptor::new(
+                    "peer",
+                    vec!["127.0.0.1:9000".parse().unwrap()],
+                )
+                .unwrap(),
+                token: Some("token".into()),
+                invite: Some(invite.into()),
+            },
+        };
+
+        assert!(observe_manifest_transport_event(&activity, event));
+        assert_eq!(activity.lock().unwrap().activity.invite, invite);
     }
 
     #[test]

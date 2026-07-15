@@ -488,7 +488,7 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
         }
         defer { model.removeActivity(activityID) }
 
-        let completed = try await Self.waitForAppSendCompletion(
+        let completed = try await Self.waitForAppCompletion(
             activityID: activityID,
             in: model,
             timeout: Self.crossDeviceTimeout(for: UInt64(Self.iosToMacOSPhotoPayload.count))
@@ -502,6 +502,67 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
             "photo-draft completed activity=\(activityID) " +
             "path=\(completed.dataPathKind):\(completed.dataPathDetail) " +
             "file=\(completed.fileName) bytes=\(completed.bytesTransferred)"
+        )
+#endif
+    }
+
+    @MainActor
+    func testCrossDeviceReceiveMacOSToIosAppInvite() async throws {
+        try requireCrossDeviceTesting()
+#if ENVOIX_CROSS_DEVICE_TESTING
+        let model = AppModel.shared
+        guard !model.receive.isBusy else {
+            throw LoopbackTestError.transferFailed("the production receiver is already busy")
+        }
+
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("envoix-ios-app-receive-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: root) }
+        let finalURL = root.appendingPathComponent(Self.macOSToIosFileName)
+
+        model.receive.startReceivingWithInvite(
+            outputDir: root.path,
+            settings: Self.crossDeviceSettings()
+        )
+        let activityID = model.receive.activeActivityID
+        guard !activityID.isEmpty else {
+            throw LoopbackTestError.missingValue("production iOS receive Activity ID")
+        }
+        defer { model.removeActivity(activityID) }
+        let invite = try await Self.waitForAppInvite(
+            in: model,
+            timeout: Self.crossDeviceTimeout(for: UInt64(Self.macOSToIosPayload.count))
+        )
+        Self.emitCrossDeviceMarker("iOS App invite \(invite)")
+
+        let completed = try await Self.waitForAppCompletion(
+            activityID: activityID,
+            in: model,
+            timeout: Self.crossDeviceTimeout(for: UInt64(Self.macOSToIosPayload.count))
+        )
+        XCTAssertEqual(completed.direction, .receive)
+        XCTAssertEqual(completed.fileName, Self.macOSToIosFileName)
+        XCTAssertEqual(completed.bytesTransferred, UInt64(Self.macOSToIosPayload.count))
+        XCTAssertEqual(completed.totalBytes, UInt64(Self.macOSToIosPayload.count))
+        XCTAssertNotEqual(completed.dataPathKind, .none)
+        let resolvedURL = model.manifestActivities[activityID]
+            .flatMap(availableCompletedManifestURL)
+            ?? availableCompletedFileURL(
+                path: completed.completedFilePath,
+                expectedBytes: UInt64(Self.macOSToIosPayload.count)
+            )
+        XCTAssertEqual(resolvedURL, finalURL)
+        XCTAssertEqual(try Data(contentsOf: finalURL), Self.macOSToIosPayload)
+        let hash = try Self.fileSHA256(finalURL)
+        XCTAssertEqual(hash, Data(SHA256.hash(data: Self.macOSToIosPayload)))
+        let hashHex = hash.map { String(format: "%02x", $0) }.joined()
+        Self.emitCrossDeviceMarker(
+            "iOS App receive-completed activity=\(activityID) " +
+            "path=\(completed.dataPathKind):\(completed.dataPathDetail) " +
+            "corePath=\(completed.completedFilePath) resolvedFile=\(finalURL.path) " +
+            "bytes=\(completed.bytesTransferred) sha256=\(hashHex)"
         )
 #endif
     }
@@ -740,11 +801,13 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
     private static let iosToAndroidFileName = "envoix-\(crossDeviceRunID)-ios-to-android.bin"
     private static let iosToMacOSFileName = "envoix-\(crossDeviceRunID)-ios-to-macos.bin"
     private static let iosToMacOSPhotoFileName = "envoix-\(crossDeviceRunID)-photo.png"
+    private static let macOSToIosFileName = "envoix-\(crossDeviceRunID)-macos-to-ios.bin"
     private static let iosToMacOSManifestAlbumName = "envoix-\(crossDeviceRunID)-album"
     private static let iosToMacOSManifestLooseName = "envoix-\(crossDeviceRunID)-loose.txt"
     private static let androidToIosPayload = Data("envoix cross-device android to ios\n".utf8)
     private static let iosToAndroidPayload = Data("envoix cross-device ios to android\n".utf8)
     private static let iosToMacOSPayload = Data("envoix cross-device ios to macos\n".utf8)
+    private static let macOSToIosPayload = Data("envoix cross-device macos to ios app\n".utf8)
     private static let iosToMacOSPhotoPayload = Data(
         base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
     )!
@@ -1039,7 +1102,7 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
     }
 
     @MainActor
-    private static func waitForAppSendCompletion(
+    private static func waitForAppCompletion(
         activityID: String,
         in model: AppModel,
         timeout: TimeInterval
@@ -1060,7 +1123,25 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
             }
             try await Task.sleep(nanoseconds: 200_000_000)
         }
-        throw LoopbackTestError.timeout("production iOS send completion")
+        throw LoopbackTestError.timeout("production iOS Activity completion")
+    }
+
+    @MainActor
+    private static func waitForAppInvite(
+        in model: AppModel,
+        timeout: TimeInterval
+    ) async throws -> String {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if !model.receive.invite.isEmpty {
+                return model.receive.invite
+            }
+            if case .failed(let message) = model.receive.phase {
+                throw LoopbackTestError.transferFailed(message)
+            }
+            try await Task.sleep(nanoseconds: 200_000_000)
+        }
+        throw LoopbackTestError.timeout("production iOS invite")
     }
 #endif
 }
