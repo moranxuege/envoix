@@ -335,6 +335,65 @@ final class EnvoixMacOSHostedTests: XCTestCase {
 #endif
     }
 
+    func testReceiveIosFilePickerToMacOSAppManifestRoom() async throws {
+        try requireCrossDeviceTesting()
+#if ENVOIX_CROSS_DEVICE_TESTING
+        let outputDirectory = outputDirectory()
+        let model = AppModel.shared
+        let existingActivityIDs = Set(model.activities.map(\.activityId))
+        try? FileManager.default.removeItem(at: outputDirectory)
+        try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+
+        model.receive.startReceivingWithRoom(
+            outputDir: outputDirectory.path,
+            code: Self.roomCode,
+            settings: Self.runtimeSettings
+        )
+        let activityID = try await waitForNewReceiveActivity(
+            in: model,
+            excluding: existingActivityIDs
+        )
+        defer { model.removeActivity(activityID) }
+        emitEvidence(
+            "file-picker-manifest-receiver-ready activity=\(activityID) room=\(Self.roomCode)"
+        )
+
+        let manifest = try await waitForManifestCompletion(activityID: activityID, in: model)
+        let activity = manifest.activity
+        let expectedBytes = UInt64(
+            Self.filePickerFirstPayload.count + Self.filePickerSecondPayload.count
+        )
+        let first = outputDirectory.appendingPathComponent(Self.filePickerFirstName)
+        let second = outputDirectory.appendingPathComponent(Self.filePickerSecondName)
+        XCTAssertEqual(activity.direction, .receive)
+        XCTAssertEqual(activity.state, .completed)
+        XCTAssertEqual(activity.bytesTransferred, expectedBytes)
+        XCTAssertEqual(activity.totalBytes, expectedBytes)
+        XCTAssertNotEqual(activity.dataPathKind, .none)
+        XCTAssertEqual(URL(fileURLWithPath: activity.completedFilePath), outputDirectory)
+        XCTAssertEqual(manifest.rootCount, 2)
+        XCTAssertEqual(manifest.fileCount, 2)
+        XCTAssertEqual(manifest.directoryCount, 0)
+        XCTAssertEqual(manifest.completedFiles, 2)
+        XCTAssertTrue(manifest.entryResults.allSatisfy {
+            $0.status == .completed || $0.status == .skippedIdentical || $0.status == .renamed
+        })
+        XCTAssertEqual(try Data(contentsOf: first), Self.filePickerFirstPayload)
+        XCTAssertEqual(try Data(contentsOf: second), Self.filePickerSecondPayload)
+        let firstHash = try Self.fileSHA256(first)
+        let secondHash = try Self.fileSHA256(second)
+        XCTAssertEqual(firstHash, Data(SHA256.hash(data: Self.filePickerFirstPayload)))
+        XCTAssertEqual(secondHash, Data(SHA256.hash(data: Self.filePickerSecondPayload)))
+        emitEvidence(
+            "file-picker-manifest-completed activity=\(activityID) " +
+            "pathKind=\(activity.dataPathKind) pathDetail=\(activity.dataPathDetail) " +
+            "root=\(outputDirectory.path) roots=\(manifest.rootCount) " +
+            "files=\(manifest.completedFiles)/\(manifest.fileCount) bytes=\(activity.bytesTransferred) " +
+            "firstSha256=\(firstHash.hexString) secondSha256=\(secondHash.hexString)"
+        )
+#endif
+    }
+
     func testSendMacOSToIosAppInvite() async throws {
         try requireCrossDeviceTesting()
 #if ENVOIX_CROSS_DEVICE_TESTING
@@ -700,6 +759,14 @@ final class EnvoixMacOSHostedTests: XCTestCase {
     private static let folderPickerFolderName = "envoix-\(runID)-folder"
     private static let folderPickerFileName = "payload.txt"
     private static let folderPickerPayload = Data("envoix folder picker payload \(runID)\n".utf8)
+    private static let filePickerFirstName = "envoix-\(runID)-file-first.txt"
+    private static let filePickerSecondName = "envoix-\(runID)-file-second.txt"
+    private static let filePickerFirstPayload = Data(
+        "envoix file picker payload first \(runID)\n".utf8
+    )
+    private static let filePickerSecondPayload = Data(
+        "envoix file picker payload second \(runID)\n".utf8
+    )
     private static let photoPayload = Data(
         base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
     )!
