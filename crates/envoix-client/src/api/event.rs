@@ -4,7 +4,7 @@
 //! must be an event here, never a log line. Every variant is emitted by the
 //! current implementation - no speculative vocabulary.
 
-use envoix_protocol::{ManifestEntryResultV1, ManifestId, PeerDescriptor};
+use envoix_protocol::{ManifestEntryResultV1, ManifestId, ManifestV1, PeerDescriptor};
 use envoix_session::TransferDirection;
 use envoix_types::{DataPath, PairingStep, TransferId};
 use serde::{Deserialize, Serialize};
@@ -148,6 +148,14 @@ pub enum TransferEvent {
         relative_path: String,
         /// Expected plaintext size.
         size: u64,
+    },
+    /// Both peers accepted the complete Manifest plan. Durable consumers use
+    /// this one event as the authoritative entry inventory.
+    ManifestPlanned {
+        /// Direction of this local operation.
+        direction: TransferDirection,
+        /// Validated transfer-set description, including every entry.
+        manifest: ManifestV1,
     },
     /// A negotiated Manifest transfer set has started.
     ManifestStarted {

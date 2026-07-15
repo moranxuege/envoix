@@ -3,8 +3,9 @@
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
+use envoix_protocol::ManifestV1;
 use envoix_session::{
-    ManifestTransferEvent as SessionManifestEvent, TransferCancelToken,
+    ManifestTransferEvent as SessionManifestEvent, TransferCancelToken, TransferDirection,
     TransferEvent as SessionEvent, TransferSummary,
 };
 use envoix_types::DataPath;
@@ -183,6 +184,7 @@ fn phase_of(event: &TransferEvent) -> Phase {
         | TransferEvent::Confirming { .. }
         | TransferEvent::Completed { .. }
         | TransferEvent::ManifestPreparingEntry { .. }
+        | TransferEvent::ManifestPlanned { .. }
         | TransferEvent::ManifestStarted { .. }
         | TransferEvent::ManifestEntryStarted { .. }
         | TransferEvent::ManifestProgress { .. }
@@ -483,6 +485,13 @@ impl envoix_session::EventSink for SessionEventAdapter {
 }
 
 impl envoix_session::ManifestEventSink for SessionEventAdapter {
+    fn on_manifest_plan(&self, direction: TransferDirection, manifest: &ManifestV1) {
+        self.0.emit(TransferEvent::ManifestPlanned {
+            direction,
+            manifest: manifest.clone(),
+        });
+    }
+
     fn on_manifest_event(&self, event: SessionManifestEvent) {
         self.0.emit(event.into());
     }
@@ -647,7 +656,10 @@ impl From<SessionEvent> for TransferEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use envoix_protocol::{ManifestEntryResultStatus, ManifestEntryResultV1, ManifestId};
+    use envoix_protocol::{
+        ManifestEntryKind, ManifestEntryResultStatus, ManifestEntryResultV1, ManifestEntryV1,
+        ManifestHashAlgorithm, ManifestId,
+    };
     use envoix_session::{
         EventSink as _, ManifestEventSink as _, ManifestTransferSummary, TransferDirection,
     };
@@ -791,6 +803,32 @@ mod tests {
         let adapter = SessionEventAdapter(sender);
         let manifest_id = ManifestId::new("manifest-client-events");
         let transfer_id = TransferId::new("manifest-client-events:1");
+        let manifest = ManifestV1 {
+            manifest_id: manifest_id.clone(),
+            entries: vec![
+                ManifestEntryV1 {
+                    entry_id: 0,
+                    relative_path: "album".into(),
+                    kind: ManifestEntryKind::Directory,
+                    size: 0,
+                    hash: None,
+                    modified_at_unix_ms: None,
+                },
+                ManifestEntryV1 {
+                    entry_id: 1,
+                    relative_path: "album/photo.jpg".into(),
+                    kind: ManifestEntryKind::RegularFile,
+                    size: 120,
+                    hash: Some([7; 32]),
+                    modified_at_unix_ms: None,
+                },
+            ],
+            file_count: 1,
+            directory_count: 1,
+            root_count: 1,
+            total_bytes: 120,
+            hash_algorithm: ManifestHashAlgorithm::Blake3_256,
+        };
         let result = ManifestEntryResultV1 {
             entry_id: 1,
             status: ManifestEntryResultStatus::Completed,
@@ -798,6 +836,8 @@ mod tests {
             final_relative_path: Some("album/photo.jpg".into()),
             failure_code: None,
         };
+
+        adapter.on_manifest_plan(TransferDirection::Receive, &manifest);
 
         for event in [
             SessionManifestEvent::PreparingEntry {
@@ -847,12 +887,16 @@ mod tests {
         }
 
         let mut actual = Vec::new();
-        for _ in 0..6 {
+        for _ in 0..7 {
             actual.push(receiver.recv().await.unwrap().event);
         }
         assert_eq!(
             actual,
             vec![
+                TransferEvent::ManifestPlanned {
+                    direction: TransferDirection::Receive,
+                    manifest: manifest.clone(),
+                },
                 TransferEvent::ManifestPreparingEntry {
                     manifest_id: manifest_id.clone(),
                     entry_id: 1,

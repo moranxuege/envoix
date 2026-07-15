@@ -100,6 +100,11 @@ impl ManifestSendRequest {
 
 /// Observer for aggregate and per-entry Manifest transfer lifecycle events.
 pub trait ManifestEventSink: Send + Sync {
+    /// Announces the complete validated plan once both peers have accepted it.
+    ///
+    /// The default keeps existing sink implementations source-compatible.
+    fn on_manifest_plan(&self, _direction: TransferDirection, _manifest: &ManifestV1) {}
+
     /// Handles one Manifest transfer event.
     fn on_manifest_event(&self, event: ManifestTransferEvent);
 }
@@ -245,6 +250,8 @@ impl ManifestTransferEngine {
             .await?,
             &request.manifest,
         )?;
+
+        events.on_manifest_plan(TransferDirection::Send, &request.manifest);
 
         events.on_manifest_event(ManifestTransferEvent::Started {
             manifest_id: request.manifest.manifest_id.clone(),
@@ -534,6 +541,7 @@ impl ManifestTransferEngine {
         connection
             .send_manifest_frame(ManifestFrame::Accept(plan.accept.clone()))
             .await?;
+        events.on_manifest_plan(TransferDirection::Receive, &offer.manifest);
         events.on_manifest_event(ManifestTransferEvent::Started {
             manifest_id: manifest_id.clone(),
             direction: TransferDirection::Receive,
@@ -2371,6 +2379,14 @@ mod tests {
             event,
             ManifestTransferEvent::EntryStarted { bytes_resumed, .. } if *bytes_resumed > 0
         )));
+        let plans = recording_sink.plans();
+        assert_eq!(plans.len(), 2);
+        assert!(plans.iter().any(|(direction, manifest)| {
+            *direction == TransferDirection::Send && manifest.manifest_id.0 == "resume-entry"
+        }));
+        assert!(plans.iter().any(|(direction, manifest)| {
+            *direction == TransferDirection::Receive && manifest.manifest_id.0 == "resume-entry"
+        }));
     }
 
     #[cfg(unix)]
@@ -2560,15 +2576,27 @@ mod tests {
     #[derive(Default)]
     struct RecordingManifestSink {
         events: Mutex<Vec<ManifestTransferEvent>>,
+        plans: Mutex<Vec<(TransferDirection, ManifestV1)>>,
     }
 
     impl RecordingManifestSink {
         fn events(&self) -> Vec<ManifestTransferEvent> {
             self.events.lock().unwrap().clone()
         }
+
+        fn plans(&self) -> Vec<(TransferDirection, ManifestV1)> {
+            self.plans.lock().unwrap().clone()
+        }
     }
 
     impl ManifestEventSink for RecordingManifestSink {
+        fn on_manifest_plan(&self, direction: TransferDirection, manifest: &ManifestV1) {
+            self.plans
+                .lock()
+                .unwrap()
+                .push((direction, manifest.clone()));
+        }
+
         fn on_manifest_event(&self, event: ManifestTransferEvent) {
             self.events.lock().unwrap().push(event);
         }
