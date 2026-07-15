@@ -104,8 +104,11 @@ exact bytes and SHA-256
 `7168fd00a9cc516cb7502c53760d5740f38c0671edc338f32ab6ce606fb32165`.
 That gate also proves Manifest invite delivery to the existing native observer
 without changing the FFI surface. Multi-item Share intake is implemented and
-hosted-tested, but the Photos/Files multi-select provider path has not yet
-passed the physical-device gate.
+hosted-tested. Separately, two synthetic Photos providers have now passed the
+physical main-app `PhotoDraftImporter` → v2 draft → production Manifest sender
+→ production macOS receiver path with 2 roots, 2 files, and 136 exact bytes.
+The system Share Extension multi-item host path and Files provider path have not
+yet passed the physical-device gate.
 
 ## Compatibility Boundary
 
@@ -402,7 +405,8 @@ The shared transfer record should expose:
 ## Follow-up Issues
 
 - Run the physical Photos/Files multi-select acceptance gate for the implemented
-  multi-item Share Extension → Apple Manifest send path.
+  multi-item Share Extension → Apple Manifest send path. This is distinct from
+  the completed main-app multi-Photos provider payload gate in `e1b6c0e`.
 - Extend physical Manifest/multi-root coverage to Apple↔Android transfers,
   retaining final path, size/hash, result mapping, and publication evidence.
   The compatible single-file reverse direction is covered by

@@ -298,6 +298,18 @@ resolver used by Activity UI to identify the final file, followed by exact
 filename, size, SHA-256, and Direct/Relay checks. This gate still does not
 replace final manual Photos UI → iOS App → macOS App acceptance.
 
+The paired multi-Photos provider gate starts
+`EnvoixMacOSHostedTests.testReceiveIosMultiPhotoDraftToMacOSAppManifestRoom`
+before
+`EnvoixIOSLoopbackTests.testCrossDeviceSendMultiPhotoDraftIosToMacOSAppManifestRoom`.
+The physical iPhone stages two named synthetic PNG providers through the same
+`PhotoDraftImporter` into an isolated v2 draft and requires the production Send
+model to choose `ManifestV1`. The production macOS receiver verifies 2 roots,
+2 files, 0 directories, 136 exact bytes, both final names and SHA-256 values,
+and a selected Direct/Relay path. This does not read personal Photos, replace a
+live App Group draft, or prove multi-item acceptance inside the system Photos
+share sheet or Share Extension host.
+
 The physical Manifest gate uses the same two-peer order. Set the same run ID
 and Room code in both shells, start
 `EnvoixMacOSHostedTests.testReceiveIosToMacOSAppManifestRoom`, wait for its

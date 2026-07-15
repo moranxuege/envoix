@@ -1,6 +1,6 @@
 # Apple client execution plan
 
-Status: **In execution — bidirectional Apple Manifest production gates green; manual system-picker and Share multi-item acceptance pending**
+Status: **In execution — bidirectional Apple Manifest and multi-Photos provider gates green; manual system-picker and Share host acceptance pending**
 
 Owner: Apple client workstream
 
@@ -66,7 +66,7 @@ branch is intentionally ahead of its remote while Manifest work is committed in
 reviewable local stages.
 
 - Branch: `feat/transfer-state-foundation`. The latest committed checkpoint is
-  `78fde8d`; it and the preceding staged Manifest, cache, and paused-session
+  `e1b6c0e`; it and the preceding staged Manifest, cache, and paused-session
   commits remain local and have not been pushed as part of this execution stage.
 - Safety checkpoint `ceff278` (`feat: checkpoint canonical mobile transfer
   lifecycle`) contains the entire previously dirty tree and was pushed to
@@ -137,10 +137,11 @@ reviewable local stages.
   folder. The public document-picker API does not allow the app to rename that
   system action. Synthetic provider staging passes on the physical iPhone, and
   the three controls remain reachable in English and Chinese/dark physical UI
-  regressions. A synthetic Photos provider has also passed through the
-  production iOS sender to the production macOS App with exact final bytes and
-  hash. Manual interaction with each system picker plus Files and Folder
-  payload runs remain pending.
+  regressions. Isolated single- and two-item synthetic Photos providers have
+  also passed through the production iOS sender to the production macOS App
+  with exact final bytes and hashes; the two-item run selected `ManifestV1`.
+  Manual interaction with each system picker plus Files and Folder payload runs
+  remain pending.
 - The Share Extension accepts multiple Files or Photos representations. It
   stages each provider directly into App Group `group.com.envoix.app.shared`,
   uses a validated versioned draft descriptor, checks actual available storage
@@ -163,9 +164,12 @@ reviewable local stages.
   test is PID-isolated from the user's Activity store. A second physical gate
   now stages a synthetic PNG through `PhotoDraftImporter`, sends it through the
   production iOS `AppModel.send`, and verifies the macOS Activity UI resolver,
-  68 final bytes, and SHA-256 after a Direct transfer. This is stronger than the
-  earlier CLI/core gate, but the final Photos UI → iOS App → macOS App → Finder
-  manual acceptance is still pending.
+  68 final bytes, and SHA-256 after a Direct transfer. A paired follow-up stages
+  two named PNG providers, selects the production Manifest path, and verifies 2
+  roots, 2 files, 136 bytes, and both hashes over Direct IPv6. These are stronger
+  than the earlier CLI/core gate, but the final Photos UI → iOS App → macOS App
+  → Finder manual acceptance and Share Extension multi-item host acceptance are
+  still pending.
 - The reverse compatible single-file gate is also green: the production macOS
   `AppModel` sent 37 bytes through an Invite/Relay path to the production iPhone
   `AppModel`, and both canonical Activities completed with the exact
@@ -211,7 +215,7 @@ automated and physical-device acceptance gates.
 |---|---|---|---|
 | D1 | Supported devices and orientations | iPhone + macOS; iPhone portrait; no iPad or landscape promise in this milestone | **Confirmed** |
 | D2 | iOS navigation interaction | One iPhone home screen; Send, Receive, Activity, and Settings open as sheets; no permanent bottom stage bar or global stage swipe | **Confirmed and implemented** |
-| D3 | First system entry | “Open in Envoix” directly handles one regular document; Share Extension stages one or more Files/Photos items for import when the main app next becomes active; in-app Send separately exposes Photos, Files, and Folder; multiple items/folders use Manifest | **Implemented in source; single-Photos Share Extension acceptance, explicit-source physical UI/provider staging, and synthetic Photos provider→macOS payload acceptance pass; system-picker, multi-item, Files/Folder/Open In, and manual Photos payload acceptance pending** |
+| D3 | First system entry | “Open in Envoix” directly handles one regular document; Share Extension stages one or more Files/Photos items for import when the main app next becomes active; in-app Send separately exposes Photos, Files, and Folder; multiple items/folders use Manifest | **Implemented in source; single-Photos Share Extension entry/adoption, explicit-source physical UI/provider staging, and synthetic single-/multi-Photos provider→macOS payload acceptance pass; system-picker, Share Extension multi-item host, Files/Folder/Open In, and manual Photos payload acceptance pending** |
 | D4 | Baseline and shared-core authority | Full-tree checkpoint, latest dev merge, Android App compile compatibility at shared boundaries, additive Apple Rust/UniFFI evolution | **Confirmed and executed** |
 | D5 | Multi-file and directory priority | Move `ManifestV1` into the first parallel product wave; do not ship an app-side zip detour | **Confirmed** |
 | D6 | Wi-Fi Aware device matrix | iPhone↔supported Android is required; Android↔Android gets baseline evidence; macOS keeps LAN/relay until separately proven | **Confirmed** |
@@ -622,10 +626,10 @@ rejected before writes, and older peers fail clearly before payload transfer.
 Status: **multi-item source intake, direct document-open entry, explicit in-app
 Photos/Files/Folder sources, automated cache/lifecycle gates, provisioning,
 physical install, launch, and single-Photos entry/adoption acceptance complete;
-synthetic Photos provider→production iOS Send→macOS App payload acceptance
-complete; manual system-picker acceptance, multi-item Photos/Files acceptance,
-manual Photos payload, Files/Folder payload, and direct Open In provider
-acceptance remain**.
+synthetic single- and multi-Photos provider→production iOS Send→macOS App
+payload acceptance complete; manual system-picker acceptance, Share Extension
+multi-item Photos/Files host acceptance, manual Photos payload, Files/Folder
+payload, and direct Open In provider acceptance remain**.
 
 First slice:
 
@@ -900,6 +904,7 @@ the command, source revision, destination, and result is insufficient.
 | 2026-07-15 | `82e9cf7` | Track S Photos-provider production payload | physical iPhone 15 Pro Max / production macOS `AppModel` | stage a valid synthetic PNG from `NSItemProvider` through `PhotoDraftImporter`, send it with production `AppModel.send`, resolve the negotiated single-root Manifest through the same Activity UI helper, and verify final name, bytes, SHA-256, and data path | sender 1/1 and receiver 1/1 passed; Direct selected; `envoix-manual-photo.png`, 68/68 bytes, SHA-256 `431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460`; no personal Photos or pending App Group draft was read or replaced | `/private/tmp/envoix-photo-production-ios-photo20260715c.xcresult`; `/private/tmp/envoix-photo-production-macos-photo20260715c.xcresult` |
 | 2026-07-15 | `a1d0dd5` | D9 reverse Apple production payload | production macOS `AppModel` / physical iPhone 15 Pro Max on Personal Hotspot | start the iPhone production Manifest receiver, hand its Invite once to the macOS hosted sender, force Relay-only for this topology, and require canonical completion plus the exact final file, size, SHA-256, selected path, and Manifest-aware iOS resolver | sender 1/1 and receiver 1/1 passed; Relay selected through `https://envoix.chkxwlyh.us:8444/`; `envoix-manual-macos-to-ios.bin`, 37/37 bytes, SHA-256 `7168fd00a9cc516cb7502c53760d5740f38c0671edc338f32ab6ce606fb32165`; `envoix-ffi` 47/47 passed and no Simulator was launched | `/private/tmp/envoix-macos-to-ios-ios-invite-20260715g.xcresult`; `/private/tmp/envoix-macos-to-ios-macos-invite-20260715g.xcresult` |
 | 2026-07-15 | `78fde8d` | Track M physical macOS→iPhone Manifest publication | production macOS `AppModel` / physical iPhone 15 Pro Max on Personal Hotspot | send one folder containing `photo.bin` and an empty directory plus one loose file through Invite/Relay; require canonical sender/receiver completion, app-private iOS staging-to-destination publication, exact root/file/directory counts, final tree and bytes, both SHA-256 values, and selected path | sender 1/1 and receiver 1/1 passed; Relay selected through `https://envoix.chkxwlyh.us:8444/`; 2 roots, 2/2 files, 2 directories, 75/75 bytes; SHA-256 `23ca433fae5ce4a6564cd115b38c8cd327e0d4dc9ae0b463fee48bcd55fc0b4d` and `4ab2bfb892f14047d3fc1550fd45414a74927e8f07d36c1c4cc5293ad0cc1736` matched; no Simulator was launched | `/private/tmp/envoix-macos-to-ios-manifest-ios-20260715a.xcresult`; `/private/tmp/envoix-macos-to-ios-manifest-macos-20260715a.xcresult` |
+| 2026-07-15 | `e1b6c0e` | Track S multi-Photos provider Manifest payload | physical iPhone 15 Pro Max / production macOS `AppModel` | stage two named synthetic PNG providers through `PhotoDraftImporter` into an isolated v2 draft, require Manifest selection, send through production `AppModel.send`, and verify both final files, aggregate counts, exact bytes, per-file SHA-256, and selected path | sender 1/1 and receiver 1/1 passed; Direct IPv6 selected; 2 roots, 2/2 files, 0 directories, 136/136 bytes; both SHA-256 values were `431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460`; no personal Photos data or live App Group draft was read or replaced, and no Simulator was launched | `/private/tmp/envoix-multi-photo-ios-20260715a.xcresult`; `/private/tmp/envoix-multi-photo-macos-20260715a.xcresult` |
 
 ## 11. Definition of done
 
@@ -1140,3 +1145,10 @@ The Apple milestone is complete only when all of the following are true:
   used the production app-private staging and multi-root publication path, not
   a direct test copy. Both result bundles contain one executed pass, the
   one-shot Invite key was removed, and no Simulator was launched.
+- 2026-07-15: Two named synthetic PNG `NSItemProvider`s now pass through
+  `PhotoDraftImporter`, an isolated v2 draft, production Manifest selection,
+  the physical-iPhone sender, and the production macOS receiver. The paired
+  tests completed 2 roots, 2/2 files, 136/136 exact bytes, and both SHA-256
+  checks over Direct IPv6. This proves the main-app multi-Photos provider
+  payload path; it does not substitute for Photos' system share-sheet or Share
+  Extension multi-item host acceptance. No Simulator was launched.
