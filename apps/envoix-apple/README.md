@@ -110,12 +110,18 @@ when you need a custom location.
 
 ### Share from Files or Photos
 
-Inside Envoix, the Send picker accepts multiple files, one or more folders, or
-a mixed selection. macOS also accepts multiple files/folders by drag-and-drop.
-One regular file uses the legacy-compatible single-file protocol; a folder or
-multiple roots uses `ManifestV1`. Manifest preparation may hash many files, so
-the Send sheet stays open and exposes cancellation until a durable Activity has
-been created.
+Inside Envoix on iOS, Send exposes three explicit sources: **Photos** accepts
+one or more images/videos, **Files** accepts one or more regular files, and
+**Folder** opens a dedicated directory picker. In the Folder picker, navigate
+to the directory and tap the system **Open** action without selecting a child;
+that uploads the current folder. Apple owns this system action title and does
+not expose a public API for renaming it, so Envoix explains the behavior beside
+the picker entry instead of modifying private UIKit views. macOS accepts
+multiple files/folders, including mixed selections, through its picker or
+drag-and-drop. One regular file uses the legacy-compatible single-file
+protocol; a folder or multiple roots uses `ManifestV1`. Manifest preparation
+may hash many files, so the Send sheet stays open and exposes cancellation
+until a durable Activity has been created.
 
 For a PDF or another regular document, choose **Open in Envoix** when the source
 app offers an Open In destination. iOS launches the main app directly, and

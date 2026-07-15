@@ -1,6 +1,6 @@
 # Apple client execution plan
 
-Status: **In execution — Apple Manifest app slice automated green; physical cross-device acceptance pending**
+Status: **In execution — Manifest and explicit iOS source entry green; remaining system-picker and payload acceptance pending**
 
 Owner: Apple client workstream
 
@@ -65,9 +65,9 @@ physical-device UI baseline is green. Wave 0 has stable commits; the current
 branch is intentionally ahead of its remote while Manifest work is committed in
 reviewable local stages.
 
-- Branch: `feat/transfer-state-foundation`. Apple Manifest implementation
-  checkpoint `dae6154` and its preceding staged commits remain local and have
-  not been pushed as part of this execution stage.
+- Branch: `feat/transfer-state-foundation`. The latest committed checkpoint is
+  `e64b7e8`; it and the preceding staged Manifest, cache, and paused-session
+  commits remain local and have not been pushed as part of this execution stage.
 - Safety checkpoint `ceff278` (`feat: checkpoint canonical mobile transfer
   lifecycle`) contains the entire previously dirty tree and was pushed to
   `origin/feat/transfer-state-foundation` before any merge.
@@ -126,10 +126,19 @@ reviewable local stages.
 - The iOS product now declares iPhone-only (`UIDeviceFamily=[1]`) and portrait-
   only support. The global stage swipe and duplicate fixed bottom compensation
   were removed, and simulator regression tests cover explicit stage controls
-  and immediate developer-mode toggle state. The app Send flow now accepts
-  multiple files, folders, and mixed selections; one regular file stays on the
-  compatible single-file path, while folders or multiple roots require
-  `ManifestV1`.
+  and immediate developer-mode toggle state. The Apple Send flow now accepts
+  multiple files and folders; macOS additionally permits mixed top-level
+  selections. One regular file stays on the compatible single-file path, while
+  folders or multiple roots require `ManifestV1`.
+- The iOS Send sheet now exposes three unambiguous sources: Photos, Files, and
+  Folder. Photos copies each provider representation directly into its durable
+  App Group draft; Files accepts regular files only; Folder uses the system's
+  dedicated directory picker and explains that **Open** confirms the current
+  folder. The public document-picker API does not allow the app to rename that
+  system action. Synthetic provider staging passes on the physical iPhone, and
+  the three controls remain reachable in English and Chinese/dark physical UI
+  regressions. Manual interaction with each system picker and a payload run
+  from each source remain pending.
 - The Share Extension accepts multiple Files or Photos representations. It
   stages each provider directly into App Group `group.com.envoix.app.shared`,
   uses a validated versioned draft descriptor, checks actual available storage
@@ -158,8 +167,9 @@ reviewable local stages.
   negotiated receiver retains legacy single-file support on the same endpoint.
   Activity cards now show aggregate inventory, current item, top-level roots,
   exceptional per-item results, and the correct completed destination. Generic
-  iOS build/build-for-testing and macOS hosted tests are green; physical
-  Apple↔Apple and Apple↔Android Manifest payload evidence remains pending.
+  iOS build/build-for-testing and macOS hosted tests are green. The
+  iPhone→macOS physical Manifest payload gate is also green; macOS→iPhone,
+  Share-provider payload, and Apple↔Android Manifest evidence remain pending.
 - Apple build and test jobs are not currently part of `.github/workflows/ci.yml`.
 - GitHub issues [#44](https://github.com/ECE4410J-NUUB/envoix/issues/44)
   and [#45](https://github.com/ECE4410J-NUUB/envoix/issues/45) remain the primary
@@ -177,7 +187,7 @@ automated and physical-device acceptance gates.
 |---|---|---|---|
 | D1 | Supported devices and orientations | iPhone + macOS; iPhone portrait; no iPad or landscape promise in this milestone | **Confirmed** |
 | D2 | iOS navigation interaction | One iPhone home screen; Send, Receive, Activity, and Settings open as sheets; no permanent bottom stage bar or global stage swipe | **Confirmed and implemented** |
-| D3 | First system entry | “Open in Envoix” directly handles one regular document; Share Extension stages one or more Files/Photos items for import when the main app next becomes active; multiple items use Manifest | **Implemented in source; single-Photos physical acceptance passed, multi-item/Files/Open In physical acceptance pending** |
+| D3 | First system entry | “Open in Envoix” directly handles one regular document; Share Extension stages one or more Files/Photos items for import when the main app next becomes active; in-app Send separately exposes Photos, Files, and Folder; multiple items/folders use Manifest | **Implemented in source; single-Photos Share Extension acceptance and explicit-source physical UI/provider staging pass; system-picker, multi-item, Files/Open In, and per-source payload acceptance pending** |
 | D4 | Baseline and shared-core authority | Full-tree checkpoint, latest dev merge, Android App compile compatibility at shared boundaries, additive Apple Rust/UniFFI evolution | **Confirmed and executed** |
 | D5 | Multi-file and directory priority | Move `ManifestV1` into the first parallel product wave; do not ship an app-side zip detour | **Confirmed** |
 | D6 | Wi-Fi Aware device matrix | iPhone↔supported Android is required; Android↔Android gets baseline evidence; macOS keeps LAN/relay until separately proven | **Confirmed** |
@@ -575,13 +585,16 @@ rejected before writes, and older peers fail clearly before payload transfer.
 
 #### Track S — Files + Photos Share Extension
 
-Status: **multi-item source intake, direct document-open entry, automated
-cache/lifecycle gates, provisioning, physical install, launch, and single-Photos
-entry/adoption acceptance complete; multi-item Photos/Files physical acceptance,
-the Photos payload run, and direct Open In provider acceptance remain**.
+Status: **multi-item source intake, direct document-open entry, explicit in-app
+Photos/Files/Folder sources, automated cache/lifecycle gates, provisioning,
+physical install, launch, and single-Photos entry/adoption acceptance complete;
+manual system-picker acceptance, multi-item Photos/Files acceptance, the Photos
+payload run, and direct Open In provider acceptance remain**.
 
 First slice:
 
+- expose separate Photos, Files, and Folder choices in the main Send sheet so
+  users do not have to infer directory selection from the generic Files UI;
 - expose “Send with Envoix” for one or more items from Files or Photos;
 - asynchronously load and copy each selected representation directly into App
   Group staging while the provider callback is alive, without an intermediate
@@ -603,6 +616,9 @@ First slice:
 
 Acceptance:
 
+- the in-app Photos, Files, and Folder controls each open the intended system
+  picker; in the Folder picker, **Open** with no selected child confirms the
+  current directory;
 - Files and Photos each produce a visible send draft with the correct type,
   name, and size;
 - a staged Photos or Files item is not considered transfer-accepted until it is
@@ -617,6 +633,9 @@ Acceptance:
 
 Implemented contract for the first slice:
 
+- the main iOS Send sheet has distinct Photos, Files, and Folder controls;
+  Apple owns the directory picker's **Open** label, so Envoix documents that it
+  uploads the current folder instead of depending on private UIKit mutation;
 - App Group: `group.com.envoix.app.shared`;
 - one or more regular file, image, or video representations per draft; folders,
   symlinks, special files, and paired Live Photos are rejected explicitly;
@@ -839,6 +858,9 @@ the command, source revision, destination, and result is insufficient.
 | 2026-07-15 | `9c34353` | iOS Files publication I/O | iPhone 16 Pro simulator on APFS | materialize a 1 MiB verified staging file through the production publication helper; require copy-on-write clone selection and exact source/destination bytes | 1 passed, 0 failed; `.clone` selected | `/private/tmp/envoix-publication-clone-20260715.xcresult` |
 | 2026-07-15 | `bab895b` | Transfer cache UI entry | iPhone 16 Pro simulator, iOS 18.3.1 | open Settings, require the manual cache cleanup control, and retain the existing immediate developer-mode toggle regression | 1 passed, 0 failed; the single Simulator returned to Shutdown | `/private/tmp/envoix-cache-ui-20260715.xcresult` |
 | 2026-07-15 | `fcb47cb` | Apple paused-session parking | physical iPhone 15 Pro Max / macOS arm64 | park a paused Activity without releasing its durable owner; require active records to retain the setup slot, paused records to release it, and resume controls to obey the recorded concurrency limit; rerun Activity UI in a Chinese environment and compile the shared macOS app | state tests 3/3 and Activity UI 1/1 passed on the physical iPhone; macOS Debug build passed | `/private/tmp/envoix-paused-slot-device-20260715.xcresult`; `/private/tmp/envoix-paused-slot-ui-device-language-fix-20260715.xcresult`; `/private/tmp/envoix-paused-slot-macos` |
+| 2026-07-15 | `e64b7e8` | Track S in-app Photos staging | physical iPhone 15 Pro Max | register a JPEG `NSItemProvider`, require direct provider-callback copy into a versioned App Group draft, retain the name/type/bytes, and publish the pending pointer | 1 passed, 0 failed; no personal Photos data was read | `/private/tmp/envoix-source-picker-importer-device-pass-20260715.xcresult` |
+| 2026-07-15 | `e64b7e8` | Track S explicit source UI | physical iPhone 15 Pro Max | open Send in the default and Chinese/dark layouts; require Photos, Files, and Folder controls plus the fixed Send action to remain reachable | 2 passed, 0 failed | `/private/tmp/envoix-source-picker-ui-refactor-device-20260715.xcresult` |
+| 2026-07-15 | `e64b7e8` | Track S macOS compatibility | macOS arm64 | build the shared macOS app after isolating the iOS-only picker/importer | build passed | `/private/tmp/envoix-source-picker-macos` |
 
 ## 11. Definition of done
 
@@ -1043,3 +1065,12 @@ The Apple milestone is complete only when all of the following are true:
   durable session and protected resources in `AppModel`. Resume admission
   follows the Activity's recorded parallel-transfer limit, and the physical
   iPhone Activity UI regression is language-independent.
+- 2026-07-15: The main iOS Send entry is now split into Photos, Files, and
+  Folder. Photos uses the same direct provider-to-App-Group staging contract as
+  the Share Extension, Files rejects directories, and Folder uses a dedicated
+  directory picker. Apple's public API keeps the final system button titled
+  **Open**; Envoix explicitly explains that this action uploads the current
+  folder instead of mutating private picker views. Synthetic provider staging
+  passed 1/1 and the physical source-entry UI passed 2/2. Manual selection from
+  the real Photos/Files/Folder interfaces and their final payload evidence are
+  still required.
