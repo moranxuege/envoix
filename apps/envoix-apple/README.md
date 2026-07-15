@@ -41,12 +41,12 @@ This README only documents current build and use instructions.
    open Envoix.xcodeproj   # then ⌘R in Xcode
    ```
 
-   Or build/run from the command line:
+   Or build/run from the repository root:
 
    ```bash
-   xcodebuild -project Envoix.xcodeproj -scheme Envoix \
-     -configuration Debug -derivedDataPath build build
-   open build/Build/Products/Debug/Envoix.app
+   scripts/apple-dev.sh macos-build
+   cache_root="${TMPDIR:-/tmp}"
+   open "${cache_root%/}/envoix-apple-cache/macos-debug/Build/Products/Debug/Envoix.app"
    ```
 
 ### Run on iPhone
@@ -188,18 +188,53 @@ an installed newer runtime that does not contain that model.
 Do not create a new `-derivedDataPath` for each run. Set
 `ENVOIX_XCRESULT_PATH=/private/tmp/<milestone>.xcresult` only when a milestone
 needs a retained result bundle; routine runs keep their logs inside the stable
-cache. To inspect or reclaim disk space:
+cache. Before build-producing wrapper commands, the cache guard checks free
+space. Below the 96 GiB target it removes only regenerable Envoix build
+artifacts; it refuses to start a new build if safe cleanup cannot restore the
+64 GiB hard minimum. The hard minimum leaves headroom above the roughly 57 GiB
+largest Cargo build tree observed on this Mac. Disposable candidates are
+`.xcresult` bundles, cache directories carrying the
+regenerable-cache marker, and ignored Apple build directories in this
+repository. The stable default Envoix Xcode cache and Cargo `target/` directory
+are emergency-only candidates when required to restore the hard minimum, in
+that order. Transfer staging, Android diagnostic
+evidence, App Group data, received files, and caches owned by other projects are
+never candidates.
+
+`test-without-building` reruns take the shared lease but do not trigger cleanup,
+because they require the existing compiled products and add negligible build
+data. To inspect or reclaim disk space:
 
 ```bash
+scripts/apple-dev.sh guard-status
 scripts/apple-dev.sh cache-size
 scripts/apple-dev.sh trim-cache             # keeps compiled products
 scripts/apple-dev.sh trim-rust-incremental  # saves more; next Rust build is slower
 scripts/apple-dev.sh clean-cache            # cold Xcode build next time
 ```
 
+Override the automatic watermarks with positive integer GiB values when the
+host has a different disk budget:
+
+```bash
+export ENVOIX_BUILD_CACHE_MIN_FREE_GIB=64
+export ENVOIX_BUILD_CACHE_TARGET_FREE_GIB=96
+```
+
+Wrap direct Cargo, Xcode, or Gradle commands that bypass `apple-dev.sh` with
+`scripts/with-build-cache-guard.sh`. The lease prevents multiple Codex sessions
+from growing Envoix build caches concurrently. For a dedicated temporary
+DerivedData root, pass `--cache-path /private/tmp/envoix-<milestone>` before the
+command; the wrapper marks it only after preflight cleanup. Build-free paired
+tests use `--preserve-build-products`, which takes a shared reader lease while
+still enforcing the hard free-space minimum. `build-cache-guard.sh --dry-run`
+shows eligible paths without deleting them.
+
 The default cache root is `$TMPDIR/envoix-apple-cache`; override it with
-`ENVOIX_APPLE_CACHE_ROOT` when necessary. A signed device build uses a separate
-stable cache so it cannot invalidate the simulator products:
+`ENVOIX_APPLE_CACHE_ROOT` when necessary. Only the default temporary root is an
+automatic deletion candidate; a custom root remains manual so the guard cannot
+erase a directory whose ownership it cannot prove. A signed device build uses
+a separate stable cache so it cannot invalidate the simulator products:
 
 ```bash
 export ENVOIX_IOS_DEVICE_DESTINATION='platform=iOS,id=<DEVICE_UUID>'
@@ -247,14 +282,33 @@ Its localized layout regression can be paired with `simctl ui ... appearance`
 and `content_size` to exercise Chinese, dark appearance, and accessibility text
 sizes on the small-screen simulator without changing production behavior.
 
-For a physical iPhone Personal Hotspot App-level path probe, start the hosted
-receiver inside `Envoix.app`. The records and received file are isolated under
-`/private/tmp`; the default Room matches the dedicated iPhone sender test:
+For a physical iPhone Personal Hotspot App-level path probe, build both test
+bundles serially before either endpoint starts waiting. The dedicated iPhone
+cache is marked as regenerable only after preflight cleanup:
+
+```bash
+scripts/apple-dev.sh macos-test-build \
+  'OTHER_SWIFT_FLAGS=$(inherited) -D ENVOIX_CROSS_DEVICE_TESTING'
+
+scripts/with-build-cache-guard.sh \
+  --cache-path /private/tmp/envoix-apple-hotspot-ios \
+  xcodebuild -project apps/envoix-apple/Envoix.xcodeproj \
+  -scheme Envoix-iOS-Hosted -configuration Debug \
+  -destination 'platform=iOS,id=<DEVICE_UUID>' \
+  -derivedDataPath /private/tmp/envoix-apple-hotspot-ios \
+  -allowProvisioningUpdates \
+  'OTHER_SWIFT_FLAGS=$(inherited) -D ENVOIX_CROSS_DEVICE_TESTING' \
+  build-for-testing
+```
+
+Then start the hosted receiver inside `Envoix.app`. The records and received
+file are isolated under `/private/tmp`; the default Room matches the dedicated
+iPhone sender test:
 
 ```bash
 export ENVOIX_XCRESULT_PATH=/private/tmp/envoix-hotspot-macos-app.xcresult
 
-scripts/apple-dev.sh macos-test \
+scripts/apple-dev.sh macos-test-rerun \
   'OTHER_SWIFT_FLAGS=$(inherited) -D ENVOIX_CROSS_DEVICE_TESTING' \
   -only-testing:Envoix-macOSTests/EnvoixMacOSHostedTests/testReceiveIosToMacOSAppRoom
 ```
@@ -268,13 +322,14 @@ keeps parallel sessions isolated.
 With that receiver waiting, run the physical iPhone test from a second shell:
 
 ```bash
-xcodebuild -project apps/envoix-apple/Envoix.xcodeproj \
+scripts/with-build-cache-guard.sh --preserve-build-products \
+  xcodebuild -project apps/envoix-apple/Envoix.xcodeproj \
   -scheme Envoix-iOS-Hosted -configuration Debug \
   -destination 'platform=iOS,id=<DEVICE_UUID>' \
   -derivedDataPath /private/tmp/envoix-apple-hotspot-ios \
   -allowProvisioningUpdates \
   'OTHER_SWIFT_FLAGS=$(inherited) -D ENVOIX_CROSS_DEVICE_TESTING' \
-  test \
+  test-without-building \
   -only-testing:Envoix-iOSUITests/EnvoixIOSLoopbackTests/testCrossDeviceSendIosToMacOSRoom
 ```
 
@@ -311,12 +366,29 @@ live App Group draft, or prove multi-item acceptance inside the system Photos
 share sheet or Share Extension host.
 
 The physical Folder-picker payload gate exercises the user-facing path rather
-than calling the sender directly. Start the macOS production receiver first:
+than calling the sender directly. Prebuild both endpoints before pairing:
+
+```bash
+scripts/apple-dev.sh macos-test-build \
+  'OTHER_SWIFT_FLAGS=$(inherited) -D ENVOIX_CROSS_DEVICE_TESTING'
+
+scripts/with-build-cache-guard.sh \
+  --cache-path /private/tmp/envoix-folder-picker-device-build \
+  xcodebuild -project apps/envoix-apple/Envoix.xcodeproj \
+  -scheme Envoix-iOS-AppUI -configuration Debug \
+  -destination 'platform=iOS,id=<DEVICE_UUID>' \
+  -derivedDataPath /private/tmp/envoix-folder-picker-device-build \
+  -allowProvisioningUpdates COMPILER_INDEX_STORE_ENABLE=NO \
+  'OTHER_SWIFT_FLAGS=$(inherited) -D ENVOIX_CROSS_DEVICE_TESTING' \
+  build-for-testing
+```
+
+Then start the macOS production receiver first:
 
 ```bash
 export ENVOIX_XCRESULT_PATH=/private/tmp/envoix-folder-picker-macos.xcresult
 
-scripts/apple-dev.sh macos-test \
+scripts/apple-dev.sh macos-test-rerun \
   'OTHER_SWIFT_FLAGS=$(inherited) -D ENVOIX_CROSS_DEVICE_TESTING' \
   -only-testing:Envoix-macOSTests/EnvoixMacOSHostedTests/testReceiveIosFolderPickerToMacOSAppManifestRoom
 ```
@@ -325,14 +397,15 @@ After `folder-picker-manifest-receiver-ready` appears, run the iPhone App UI
 test from another shell:
 
 ```bash
-xcodebuild -project apps/envoix-apple/Envoix.xcodeproj \
+scripts/with-build-cache-guard.sh --preserve-build-products \
+  xcodebuild -project apps/envoix-apple/Envoix.xcodeproj \
   -scheme Envoix-iOS-AppUI -configuration Debug \
   -destination 'platform=iOS,id=<DEVICE_UUID>' \
   -derivedDataPath /private/tmp/envoix-folder-picker-device-build \
   -allowProvisioningUpdates COMPILER_INDEX_STORE_ENABLE=NO \
   -resultBundlePath /private/tmp/envoix-folder-picker-ios.xcresult \
   'OTHER_SWIFT_FLAGS=$(inherited) -D ENVOIX_CROSS_DEVICE_TESTING' \
-  test \
+  test-without-building \
   -only-testing:Envoix-iOSAppUITests/EnvoixIOSAppUITests/testFolderPickerSendsCurrentDirectoryToMacOSApp
 ```
 

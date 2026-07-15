@@ -5,6 +5,20 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
 android_dir="$repo_root/android"
 
+if [[ "${ENVOIX_BUILD_LEASE_HELD:-0}" == "1" \
+      && "${ENVOIX_BUILD_LEASE_MODE:-writer}" == "reader" \
+      && "${ENVOIX_SKIP_BUILD:-0}" != "1" ]]; then
+  echo "error: Android build cannot run under a reader lease" >&2
+  exit 3
+fi
+if [[ "${ENVOIX_BUILD_LEASE_HELD:-0}" != "1" ]]; then
+  if [[ "${ENVOIX_SKIP_BUILD:-0}" == "1" ]]; then
+    exec "$repo_root/scripts/with-build-cache-guard.sh" \
+      --preserve-build-products "$0" "$@"
+  fi
+  exec "$repo_root/scripts/with-build-cache-guard.sh" "$0" "$@"
+fi
+
 adb_bin="${ADB:-${ANDROID_HOME:-$HOME/Library/Android/sdk}/platform-tools/adb}"
 main_apk="$android_dir/app/build/outputs/apk/debug/app-debug.apk"
 test_apk="$android_dir/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"

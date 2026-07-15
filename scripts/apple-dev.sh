@@ -26,15 +26,18 @@ Usage: scripts/apple-dev.sh <command> [arguments]
 Build commands:
   prepare                         Refresh the Rust package only when inputs changed, then run XcodeGen
   ios-build [xcodebuild args]     Incrementally build the iOS Simulator app
+  ios-test-build <suite> [...]   Build an iOS test suite without running it
   ios-test <hosted|ui|all> [...] Incrementally build and run one test suite
   ios-test-rerun <suite> [...]   Rerun an already-built suite with test-without-building
   ios-device-build [...]         Build for ENVOIX_IOS_DEVICE_DESTINATION
   macos-build [...]              Incrementally build the macOS app
+  macos-test-build [...]         Build the macOS App-hosted tests without running them
   macos-test [...]               Run the macOS App-hosted test target
   macos-test-rerun [...]         Rerun the built macOS App-hosted tests
   core-force                     Force regeneration of the Rust-to-Swift package
 
 Space commands:
+  guard-status                  Show free-space cleanup watermarks
   cache-size                     Show Envoix Xcode, generated core, and Cargo cache sizes
   trim-cache                     Remove Xcode logs/indexes but retain compiled products
   trim-rust-incremental          Remove Cargo incremental state but retain dependency artifacts
@@ -45,6 +48,10 @@ Environment:
   ENVOIX_IOS_SIM_DESTINATION    Simulator destination passed to xcodebuild
   ENVOIX_IOS_DEVICE_DESTINATION Required by ios-device-build
   ENVOIX_XCRESULT_PATH          Optional milestone-only .xcresult output path
+  ENVOIX_BUILD_CACHE_MIN_FREE_GIB
+                                Hard free-space minimum (default: 64)
+  ENVOIX_BUILD_CACHE_TARGET_FREE_GIB
+                                Auto-clean target (default: 96)
   ENVOIX_APPLE_FORCE_PROJECT_REBUILD
                                 Force XcodeGen even when project inputs match
 EOF
@@ -217,6 +224,25 @@ if [[ "$#" -gt 0 ]]; then
 fi
 
 case "$command_name" in
+  prepare|ios-build|ios-test-build|ios-test|ios-device-build|macos-build|macos-test-build|macos-test|core-force)
+    if [[ "${ENVOIX_BUILD_LEASE_HELD:-0}" == "1" \
+          && "${ENVOIX_BUILD_LEASE_MODE:-writer}" == "reader" ]]; then
+      echo "error: $command_name cannot mutate products under a reader lease" >&2
+      exit 3
+    fi
+    if [[ "${ENVOIX_BUILD_LEASE_HELD:-0}" != "1" ]]; then
+      exec "$repo_root/scripts/with-build-cache-guard.sh" "$0" "$command_name" "$@"
+    fi
+    ;;
+  ios-test-rerun|macos-test-rerun)
+    if [[ "${ENVOIX_BUILD_LEASE_HELD:-0}" != "1" ]]; then
+      exec "$repo_root/scripts/with-build-cache-guard.sh" \
+        --preserve-build-products "$0" "$command_name" "$@"
+    fi
+    ;;
+esac
+
+case "$command_name" in
   prepare)
     prepare_project
     ;;
@@ -231,6 +257,14 @@ case "$command_name" in
     scheme="$(scheme_for_suite "$suite")"
     prepare_project
     run_ios "$scheme" test "$@"
+    ;;
+  ios-test-build)
+    [[ "$#" -gt 0 ]] || { echo "error: ios-test-build requires hosted, ui, or all" >&2; exit 2; }
+    suite="$1"
+    shift
+    scheme="$(scheme_for_suite "$suite")"
+    prepare_project
+    run_ios "$scheme" build-for-testing "$@"
     ;;
   ios-test-rerun)
     [[ "$#" -gt 0 ]] || { echo "error: ios-test-rerun requires hosted, ui, or all" >&2; exit 2; }
@@ -286,6 +320,18 @@ case "$command_name" in
       test \
       "$@"
     ;;
+  macos-test-build)
+    prepare_project
+    xcodebuild \
+      -project "$project" \
+      -scheme Envoix-macOS-Hosted \
+      -configuration Debug \
+      -destination 'platform=macOS,arch=arm64' \
+      -derivedDataPath "$macos_cache" \
+      COMPILER_INDEX_STORE_ENABLE=NO \
+      build-for-testing \
+      "$@"
+    ;;
   macos-test-rerun)
     result_args=()
     while IFS= read -r argument; do
@@ -304,6 +350,9 @@ case "$command_name" in
     ;;
   core-force)
     ENVOIX_APPLE_FORCE_CORE_REBUILD=1 "$repo_root/scripts/build-apple-core.sh"
+    ;;
+  guard-status)
+    "$repo_root/scripts/build-cache-guard.sh" --status
     ;;
   cache-size)
     show_sizes

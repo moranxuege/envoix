@@ -111,6 +111,26 @@ reviewable local stages.
   commands bound disk growth. Archive validation preserves the macOS 13/iOS 16
   deployment contract without unconditionally cleaning BLAKE3 on every Core
   rebuild.
+- Build-producing Apple wrapper commands now run a free-space guard. The default
+  hard-minimum/target watermarks are 64/96 GiB, based on the roughly 57 GiB
+  largest Cargo build tree observed on this Mac. Cleanup is serialized; a new
+  build is refused below the hard minimum or while another build is active, and
+  deletion toward the target is limited to explicitly marked one-off Envoix
+  build/test artifacts and repository-local legacy Apple build state. The
+  stable default Apple cache and this repository's Cargo `target/` are eligible,
+  in that order, only when required to restore the hard minimum. Android
+  diagnostic evidence, transfer staging, App Group data, received files, and
+  other projects are outside its boundary.
+  A process-owned writer lease covers the guard and the complete build command,
+  so parallel Codex sessions cannot race between preflight and cache growth.
+  Build-free test reruns use shared reader leases: paired endpoints may run
+  together, while cache-mutating writers are excluded. Fifteen-second
+  heartbeats make an abandoned lease reclaimable after two minutes without
+  allowing a live long-running test to look stale.
+  Apple, Android instrumentation, cross-device Room, NAT, optional JNI staging,
+  and installed pre-commit build entry points all use the same lease.
+  Build-free test reruns retain their required compiled cache and still refuse
+  to start below the hard free-space minimum.
 - The current default simulator suite reports 8 passes, 4 explicit skips, and
   0 failures. The four skipped methods require the opt-in
   `ENVOIX_CROSS_DEVICE_TESTING` configuration and a paired Android device; they
@@ -923,6 +943,7 @@ the command, source revision, destination, and result is insufficient.
 | 2026-07-15 | `19ce9da` | Track S Folder-picker production payload | physical iPhone 15 Pro Max / production macOS `AppModel` on Personal Hotspot | prepare one isolated directory containing `payload.txt`, select the current directory through the real Folder picker, enter the Room code through the production Send UI, and require both Activity completion plus exact Manifest tree, bytes, hash, and selected data path | sender 1/1 and receiver 1/1 passed with 0 failures/skips; Direct `172.20.10.1:58075` selected; 1 root, 1/1 file, 1 directory, 36/36 bytes; SHA-256 `8c809b310917bd7eb88dc6ba24b1f11f340e24c934db1575f00e9a57c4a72e54` matched; the isolated iPhone fixture was cleaned and no Simulator was launched | `/private/tmp/envoix-folder-picker-ios-20260715d.xcresult`; `/private/tmp/envoix-folder-picker-macos-20260715f.xcresult` |
 | 2026-07-15 | `7387599` | Track S Files-picker system multi-selection | physical iPhone 15 Pro Max / real iOS Files picker | open Send, enter the dedicated Files picker at an isolated app-owned directory, select two regular files, tap Apple's system **Open/打开** action, and require the Send selection summary to report both items | 1 passed, 0 failed, 0 skipped; both system-visible files were selected and returned through the production picker delegate; no Simulator was launched | `/private/tmp/envoix-file-picker-selection-20260715d.xcresult` |
 | 2026-07-15 | `4ec2a9b` | Track S Files-picker production payload | physical iPhone 15 Pro Max / production macOS `AppModel` on Personal Hotspot | select two isolated regular files through the real Files picker, enter the Room code through the production Send UI, require Manifest selection and both Activity completions, then verify final names, counts, exact bytes, both hashes, destination, and selected data path | sender 1/1 and receiver 1/1 passed with 0 failures/skips; Direct `172.20.10.1:57115` selected; 2 roots, 2/2 files, 0 directories, 81/81 bytes; SHA-256 `7ddd6832a64a5f1b7612cc58ef96f855539c4a9391e41f32f32c2066bf42305f` and `b059309e001627222aada44fd13e85b6ae347bb954bab646a1a38630ca66ff03` matched; fixtures were cleaned and no Simulator was launched | `/private/tmp/envoix-file-picker-ios-20260715a.xcresult`; `/private/tmp/envoix-file-picker-macos-20260715a.xcresult` |
+| 2026-07-15 | cache-guard working tree | Local build-cache recovery | development Mac, APFS | stop cross-machine validation; inspect filesystem and active build processes; clean only repository Cargo output and Envoix build/test artifacts; exercise syntax/status, marked allowlist and unsafe-directory preservation, hard-minimum refusal, healthy-range stable-cache retention, emergency-only stable/target deletion, stale/recent heartbeat handling, shared readers, writer exclusion, and reader-mutation rejection | available space increased from 5.1 GiB to about 93.5 GiB (about 88 GiB physically reclaimed); `cargo clean` reported 57.0 GiB/185,701 files and temporary Envoix artifacts accounted for about 116 GiB logically before APFS accounting; the final 64/96 GiB guard and build lease passed the bounded no-build checks without launching Simulator or rebuilding Core | terminal output; `scripts/build-cache-guard.sh`; `scripts/with-build-cache-guard.sh` |
 
 ## 11. Definition of done
 

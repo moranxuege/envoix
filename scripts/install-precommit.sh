@@ -14,7 +14,7 @@ set -eu
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
-cargo clippy --workspace --all-targets -- -D warnings
+scripts/with-build-cache-guard.sh cargo clippy --workspace --all-targets -- -D warnings
 HOOK
 
 chmod +x "$hook_path"

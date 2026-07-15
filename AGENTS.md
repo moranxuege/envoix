@@ -59,6 +59,15 @@ For multi-step tasks, state a brief plan:
 
 Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
 
+## 5. Build Cache Discipline
+
+- Wrap direct Cargo, Xcode, or Gradle builds with `scripts/with-build-cache-guard.sh`; it checks free space and prevents concurrent Envoix builds.
+- Prefer `scripts/apple-dev.sh` and its stable DerivedData roots; do not create a new `-derivedDataPath` for routine runs.
+- If milestone validation needs a dedicated temporary DerivedData root, pass it through `--cache-path /private/tmp/envoix-<milestone>` so the wrapper can mark and later reclaim it.
+- Prebuild paired endpoints serially, then run both `test-without-building` commands through `--preserve-build-products`; shared reader leases allow the pair while excluding cache cleanup.
+- Create standalone `.xcresult` bundles only for milestone evidence. They are regenerable build artifacts, not durable project data.
+- The guard may delete only exact/marked Envoix build/test caches and this repository's allowlisted build directories; never include transfer staging, App Group data, received files, or another project's caches.
+
 ---
 
 Summary: fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.

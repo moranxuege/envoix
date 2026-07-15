@@ -16,6 +16,15 @@ generated_bindings=(
   "generated/sources/envoix_ffi.swift"
 )
 
+if [[ "${ENVOIX_BUILD_LEASE_HELD:-0}" == "1" \
+      && "${ENVOIX_BUILD_LEASE_MODE:-writer}" == "reader" ]]; then
+  echo "error: build-apple-core cannot mutate products under a reader lease" >&2
+  exit 3
+fi
+if [[ "${ENVOIX_BUILD_LEASE_HELD:-0}" != "1" ]]; then
+  exec "$repo_root/scripts/with-build-cache-guard.sh" "$0" "$@"
+fi
+
 apple_core_is_current() {
   [[ -f "$package_dir/Package.swift" ]] || return 1
   [[ -f "$input_stamp" ]] || return 1
