@@ -1,12 +1,12 @@
 //! End-to-end loopback transfer through the new unified API: a ShowManual
 //! listener and a Manual dialer over real iroh endpoints on this host.
 
-use envoix_client::PeerDescriptor;
 use envoix_client::api::{
     Client, ManifestEntryKind, ManifestEntryV1, ManifestHashAlgorithm, ManifestId,
-    ManifestSendRequest, ManifestV1, PeerSource, SessionTransferSummary, TransferEvent,
-    TransferOptions,
+    ManifestSendRequest, ManifestTransferRequest, ManifestV1, PeerSource, SessionTransferSummary,
+    TransferEvent, TransferOptions, TransferRequest,
 };
+use envoix_client::{PeerDescriptor, TransferDirection};
 
 static IROH_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -200,26 +200,27 @@ async fn manual_manifest_loopback_roundtrip() {
     let client = Client::new();
     let token = "loopback-api-manifest-token-1".to_string();
     let mut receive = client
-        .receive_transfer(
-            out_dir.clone(),
-            PeerSource::ShowManual {
+        .run_receive_transfer(TransferRequest {
+            direction: TransferDirection::Receive,
+            path: out_dir.clone(),
+            sources: vec![PeerSource::ShowManual {
                 token: Some(token.clone()),
-            },
-            TransferOptions::default(),
-        )
+            }],
+            options: TransferOptions::default(),
+        })
         .unwrap();
 
     let peer = wait_for_transfer_set_advertisement(&mut receive, &token).await;
 
     let mut send = client
-        .send_manifest(
+        .run_manifest(ManifestTransferRequest {
             request,
-            PeerSource::Manual {
+            sources: vec![PeerSource::Manual {
                 peer,
                 token: token.clone(),
-            },
-            TransferOptions::default(),
-        )
+            }],
+            options: TransferOptions::default(),
+        })
         .unwrap();
     let mut sender_prepared = 0;
     let mut sender_completed = false;

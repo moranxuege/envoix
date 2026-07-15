@@ -42,7 +42,7 @@ const ERROR_RECEIVE_FAILED: &str = "manifest.receive_failed";
 pub type ManifestTransferError = CoreError;
 
 /// Validated mapping from Manifest file entries to local source paths.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct ManifestSendRequest {
     /// Offered transfer-set description.
     pub manifest: ManifestV1,
@@ -2434,6 +2434,23 @@ mod tests {
         };
         manifest.validate_structure().unwrap();
         manifest
+    }
+
+    #[test]
+    fn send_request_round_trips_for_durable_sessions() {
+        let request = ManifestSendRequest::new(
+            test_manifest(
+                "durable-request",
+                vec![file_entry(0, "file.bin", b"durable")],
+            ),
+            [(0, PathBuf::from("/private/source/file.bin"))],
+        )
+        .unwrap();
+
+        let encoded = serde_json::to_vec(&request).unwrap();
+        let decoded: ManifestSendRequest = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.manifest, request.manifest);
+        assert_eq!(decoded.source_paths, request.source_paths);
     }
 
     fn directory_entry(entry_id: u32, relative_path: &str) -> ManifestEntryV1 {

@@ -225,6 +225,20 @@ pub struct TransferRequest {
     pub options: TransferOptions,
 }
 
+/// One Manifest send run with ordered rendezvous fallback.
+///
+/// This is additive to [`TransferRequest`], whose established fields and
+/// single-file behavior remain unchanged.
+#[derive(Clone, Debug)]
+pub struct ManifestTransferRequest {
+    /// Validated transfer-set description plus its local source mapping.
+    pub request: ManifestSendRequest,
+    /// Rendezvous sources to attempt in order.
+    pub sources: Vec<PeerSource>,
+    /// Per-transfer options (relay, resume, bind addrs, path policy).
+    pub options: TransferOptions,
+}
+
 impl Client {
     /// A client with the default chunk size and an ephemeral identity.
     pub fn new() -> Self {
@@ -877,6 +891,185 @@ impl Client {
         ))
     }
 
+    /// Runs one Manifest send, falling back to the next source only when the
+    /// previous source failed before selecting a live data path.
+    pub fn run_manifest(
+        &self,
+        request: ManifestTransferRequest,
+    ) -> Result<TransferSet, TransferError> {
+        let ManifestTransferRequest {
+            request,
+            sources,
+            options,
+        } = request;
+        if sources.is_empty() {
+            return Err(TransferError::input(
+                "a Manifest transfer needs at least one peer source",
+            ));
+        }
+        crate::validate_chunk_size(self.chunk_size).map_err(setup_error)?;
+        validate_path_policy(&options)?;
+        request
+            .manifest
+            .validate_structure()
+            .map_err(|error| TransferError::input(error.to_string()))?;
+
+        let (events, event_receiver) = EventSender::channel();
+        let events_phase = events.phase_cell();
+        let events_stats = events.stats_handle();
+        let cancel = TransferCancelToken::new();
+        let client = self.clone();
+        let stats = events_stats.clone();
+        let loop_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            let count = sources.len();
+            let mut last: Result<SessionTransferSummary, PublicError> = Err(PublicError::Transfer(
+                "no peer source attempted".to_string(),
+            ));
+            for (index, source) in sources.into_iter().enumerate() {
+                let mode = source.mode();
+                let timeout =
+                    preconnect_timeout_for_source(TransferDirection::Send, mode, index + 1 < count);
+                let (fut, span) = match client.build_manifest_send(
+                    source,
+                    request.clone(),
+                    &options,
+                    &events,
+                    &loop_cancel,
+                ) {
+                    Ok(pair) => pair,
+                    Err(error) => {
+                        last = Err(PublicError::InvalidInput(error.to_string()));
+                        if index + 1 == count {
+                            break;
+                        }
+                        continue;
+                    }
+                };
+                let fut = with_preconnection_timeout(
+                    fut,
+                    stats.clone(),
+                    timeout,
+                    TransferDirection::Send,
+                    mode,
+                );
+                match with_transfer_set_summary(Box::pin(fut), stats.clone())
+                    .instrument(span)
+                    .await
+                {
+                    Ok(summary) => return Ok(summary),
+                    Err(error) => {
+                        last = Err(error);
+                        if stats.connected() || index + 1 == count {
+                            break;
+                        }
+                    }
+                }
+            }
+            emit_terminal_transfer_set_failure(&events, TransferDirection::Send, &last);
+            last
+        });
+        Ok(TransferSet::new(
+            event_receiver,
+            cancel,
+            events_phase,
+            events_stats,
+            task,
+        ))
+    }
+
+    /// Runs an ALPN-negotiated receive across ordered rendezvous sources.
+    /// The request must be receive-direction; senders use [`Self::run_manifest`].
+    pub fn run_receive_transfer(
+        &self,
+        request: TransferRequest,
+    ) -> Result<TransferSet, TransferError> {
+        let TransferRequest {
+            direction,
+            path,
+            sources,
+            options,
+        } = request;
+        if direction != TransferDirection::Receive {
+            return Err(TransferError::input(
+                "run_receive_transfer requires receive direction",
+            ));
+        }
+        if sources.is_empty() {
+            return Err(TransferError::input(
+                "a negotiated receive needs at least one peer source",
+            ));
+        }
+        crate::validate_chunk_size(self.chunk_size).map_err(setup_error)?;
+        validate_path_policy(&options)?;
+
+        let (events, event_receiver) = EventSender::channel();
+        let events_phase = events.phase_cell();
+        let events_stats = events.stats_handle();
+        let cancel = TransferCancelToken::new();
+        let client = self.clone();
+        let stats = events_stats.clone();
+        let loop_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            let count = sources.len();
+            let mut last: Result<SessionTransferSummary, PublicError> = Err(PublicError::Transfer(
+                "no peer source attempted".to_string(),
+            ));
+            for (index, source) in sources.into_iter().enumerate() {
+                let mode = source.mode();
+                let timeout = preconnect_timeout_for_source(
+                    TransferDirection::Receive,
+                    mode,
+                    index + 1 < count,
+                );
+                let (fut, span) = match client.build_receive_transfer(
+                    source,
+                    path.clone(),
+                    &options,
+                    &events,
+                    &loop_cancel,
+                ) {
+                    Ok(pair) => pair,
+                    Err(error) => {
+                        last = Err(PublicError::InvalidInput(error.to_string()));
+                        if index + 1 == count {
+                            break;
+                        }
+                        continue;
+                    }
+                };
+                let fut = with_preconnection_timeout(
+                    fut,
+                    stats.clone(),
+                    timeout,
+                    TransferDirection::Receive,
+                    mode,
+                );
+                match with_transfer_set_summary(Box::pin(fut), stats.clone())
+                    .instrument(span)
+                    .await
+                {
+                    Ok(summary) => return Ok(summary),
+                    Err(error) => {
+                        last = Err(error);
+                        if stats.connected() || index + 1 == count {
+                            break;
+                        }
+                    }
+                }
+            }
+            emit_terminal_transfer_set_failure(&events, TransferDirection::Receive, &last);
+            last
+        });
+        Ok(TransferSet::new(
+            event_receiver,
+            cancel,
+            events_phase,
+            events_stats,
+            task,
+        ))
+    }
+
     fn session_config(&self, options: &TransferOptions) -> SessionConfig {
         SessionConfig {
             chunk_size: self.chunk_size,
@@ -898,13 +1091,13 @@ fn preconnect_timeout_for_source(
         .then_some(ROOM_SEND_PRECONNECT_TIMEOUT)
 }
 
-async fn with_preconnection_timeout(
-    fut: TransferFuture,
+async fn with_preconnection_timeout<R>(
+    fut: Pin<Box<dyn Future<Output = Result<R, PublicError>> + Send>>,
     stats: StatsHandle,
     timeout: Option<Duration>,
     direction: TransferDirection,
     mode: TransferMode,
-) -> Result<TransferSummary, PublicError> {
+) -> Result<R, PublicError> {
     let Some(timeout) = timeout else {
         return fut.await;
     };
@@ -926,6 +1119,21 @@ async fn with_preconnection_timeout(
             }
             _ = tokio::time::sleep(Duration::from_millis(100)) => {}
         }
+    }
+}
+
+fn emit_terminal_transfer_set_failure(
+    events: &EventSender,
+    direction: TransferDirection,
+    result: &Result<SessionTransferSummary, PublicError>,
+) {
+    if let Err(error) = result {
+        let reason = error.to_string();
+        events.emit(TransferEvent::Failed {
+            direction,
+            reason_code: event::SessionFailureCode::classify(&reason),
+            reason,
+        });
     }
 }
 
@@ -1009,6 +1217,29 @@ fn unix_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn manifest_send_request() -> ManifestSendRequest {
+        ManifestSendRequest::new(
+            ManifestV1 {
+                manifest_id: ManifestId::new("client-run-manifest"),
+                entries: vec![ManifestEntryV1 {
+                    entry_id: 0,
+                    relative_path: "file.bin".into(),
+                    kind: ManifestEntryKind::RegularFile,
+                    size: 1,
+                    hash: Some([7; 32]),
+                    modified_at_unix_ms: None,
+                }],
+                file_count: 1,
+                directory_count: 0,
+                root_count: 1,
+                total_bytes: 1,
+                hash_algorithm: ManifestHashAlgorithm::Blake3_256,
+            },
+            [(0, PathBuf::from("file.bin"))],
+        )
+        .unwrap()
+    }
 
     fn client() -> Client {
         Client::new()
@@ -1188,6 +1419,61 @@ mod tests {
             })
             .unwrap_err();
         assert_eq!(error.kind, ErrorKind::Input);
+    }
+
+    #[test]
+    fn run_manifest_rejects_empty_sources() {
+        let error = client()
+            .run_manifest(ManifestTransferRequest {
+                request: manifest_send_request(),
+                sources: vec![],
+                options: TransferOptions::default(),
+            })
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Input);
+    }
+
+    #[test]
+    fn negotiated_receive_rejects_send_direction() {
+        let error = client()
+            .run_receive_transfer(TransferRequest {
+                direction: TransferDirection::Send,
+                path: "file.bin".into(),
+                sources: vec![PeerSource::Mdns { token: None }],
+                options: TransferOptions::default(),
+            })
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Input);
+    }
+
+    #[tokio::test]
+    async fn run_manifest_advances_past_a_source_that_fails_to_build() {
+        let mut transfer = client()
+            .run_manifest(ManifestTransferRequest {
+                request: manifest_send_request(),
+                sources: vec![
+                    PeerSource::Invite {
+                        invite: "not-an-invite".into(),
+                    },
+                    PeerSource::Mdns { token: None },
+                ],
+                options: TransferOptions::default(),
+            })
+            .unwrap();
+
+        let event = transfer.next_event().await.expect("terminal failure event");
+        assert!(matches!(
+            event.event,
+            TransferEvent::Failed {
+                direction: TransferDirection::Send,
+                ..
+            }
+        ));
+        let error = transfer.wait().await.unwrap_err();
+        assert!(
+            error.message.contains("mDNS requires a token"),
+            "the final error must come from the second source: {error:?}"
+        );
     }
 
     #[test]
