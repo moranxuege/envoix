@@ -82,6 +82,7 @@ struct SendView: View {
         }
         .sheet(isPresented: $isFolderPickerPresented) {
             FolderPickerSheet(
+                initialDirectoryURL: folderPickerInitialDirectoryURL,
                 onPick: { url in
                     isFolderPickerPresented = false
                     handleImportedFolder(url)
@@ -480,6 +481,17 @@ struct SendView: View {
     }
 
     #if os(iOS)
+    private var folderPickerInitialDirectoryURL: URL? {
+        #if DEBUG
+        guard ProcessInfo.processInfo.arguments.contains("--ui-testing-folder-picker") else {
+            return nil
+        }
+        return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+        #else
+        return nil
+        #endif
+    }
+
     private var selectionSourceActions: some View {
         HStack(spacing: 10) {
             selectionSourceAction(

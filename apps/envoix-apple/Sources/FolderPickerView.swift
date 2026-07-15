@@ -4,8 +4,19 @@ import UIKit
 import UniformTypeIdentifiers
 
 struct FolderPickerSheet: UIViewControllerRepresentable {
+    let initialDirectoryURL: URL?
     let onPick: (URL) -> Void
     let onCancel: () -> Void
+
+    init(
+        initialDirectoryURL: URL? = nil,
+        onPick: @escaping (URL) -> Void,
+        onCancel: @escaping () -> Void
+    ) {
+        self.initialDirectoryURL = initialDirectoryURL
+        self.onPick = onPick
+        self.onCancel = onCancel
+    }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -14,6 +25,7 @@ struct FolderPickerSheet: UIViewControllerRepresentable {
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
         let controller = UIDocumentPickerViewController(forOpeningContentTypes: [.folder], asCopy: false)
         controller.allowsMultipleSelection = false
+        controller.directoryURL = initialDirectoryURL
         controller.delegate = context.coordinator
         return controller
     }

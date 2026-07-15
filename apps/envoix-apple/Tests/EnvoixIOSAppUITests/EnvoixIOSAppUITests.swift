@@ -381,6 +381,52 @@ final class EnvoixIOSAppUITests: XCTestCase {
         )
     }
 
+    func testFolderPickerOpenSelectsCurrentDirectory() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["--ui-testing", "--ui-testing-folder-picker"]
+
+        addUIInterruptionMonitor(withDescription: "System permissions") { alert in
+            for label in ["Allow", "允许", "OK", "好"] where alert.buttons[label].exists {
+                alert.buttons[label].tap()
+                return true
+            }
+            return false
+        }
+
+        app.launch()
+        app.tap()
+
+        dismissSheetIfNeeded(app)
+        let send = app.buttons["home_send"]
+        XCTAssertTrue(send.waitForExistence(timeout: 8))
+        XCTAssertTrue(send.isHittable)
+        send.tap()
+
+        let folder = app.buttons["send_folder_picker"]
+        XCTAssertTrue(folder.waitForExistence(timeout: 5))
+        folder.tap()
+
+        let files = XCUIApplication(bundleIdentifier: "com.apple.DocumentsApp")
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        guard let open = firstHittableButton(
+            named: ["Open", "打开"],
+            in: [app, files, springboard],
+            timeout: 8
+        ) else {
+            XCTFail("The folder picker did not expose its system Open action")
+            return
+        }
+        open.tap()
+
+        let selection = app.descendants(matching: .any)["send_selection_summary"]
+        XCTAssertTrue(selection.waitForExistence(timeout: 8))
+        XCTAssertEqual(selection.value as? String, "1")
+        XCTAssertTrue(
+            selection.label.contains("Documents"),
+            "The picker did not return the current app Documents directory: \(selection.label)"
+        )
+    }
+
     private func dismissSheetIfNeeded(_ app: XCUIApplication) {
         let close = app.buttons["mobile_sheet_done"]
         if close.waitForExistence(timeout: 1) {
@@ -392,5 +438,25 @@ final class EnvoixIOSAppUITests: XCTestCase {
         let predicate = NSPredicate(format: "value == %@", value)
         let expectation = XCTNSPredicateExpectation(predicate: predicate, object: element)
         XCTAssertEqual(XCTWaiter.wait(for: [expectation], timeout: 3), .completed)
+    }
+
+    private func firstHittableButton(
+        named labels: [String],
+        in applications: [XCUIApplication],
+        timeout: TimeInterval
+    ) -> XCUIElement? {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            for application in applications {
+                for label in labels {
+                    let button = application.buttons[label]
+                    if button.exists, button.isHittable {
+                        return button
+                    }
+                }
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        } while Date() < deadline
+        return nil
     }
 }
