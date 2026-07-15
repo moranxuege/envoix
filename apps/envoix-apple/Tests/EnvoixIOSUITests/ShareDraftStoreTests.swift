@@ -102,13 +102,22 @@ final class ShareDraftStoreTests: XCTestCase {
         XCTAssertTrue(selection.sourceAccess is SecurityScopedResourceAccess)
     }
 
-    func testAppModelRejectsOpenedDirectory() throws {
+    func testAppModelImportsDirectoryOpenedBySystem() throws {
         let directory = root.appendingPathComponent("opened-folder", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
-        XCTAssertThrowsError(try AppModel.shared.importOpenedSendFile(directory)) { error in
-            XCTAssertEqual(error as? OpenedSendFileError, .unsupportedItem)
+        switch try AppModel.shared.importOpenedSendFile(directory) {
+        case .imported:
+            break
+        case .queued:
+            XCTFail("An opened folder should be immediately available while the sender is idle")
         }
+        guard let selection = AppModel.shared.pendingSendSelection else {
+            return XCTFail("The opened folder should become the pending send selection")
+        }
+        defer { AppModel.shared.consumePendingSendSelection(id: selection.id) }
+        XCTAssertEqual(selection.fileURL, directory)
+        XCTAssertTrue(selection.sourceAccess is SecurityScopedResourceAccess)
     }
 
     func testAppDeclaresGenericDataDocumentType() {

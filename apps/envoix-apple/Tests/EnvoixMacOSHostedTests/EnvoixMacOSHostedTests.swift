@@ -9,6 +9,23 @@ final class EnvoixMacOSHostedTests: XCTestCase {
         continueAfterFailure = false
     }
 
+    func testSendSelectionUsesManifestOnlyForFoldersOrMultipleItems() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("envoix-send-selection-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fileManager.removeItem(at: root) }
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        let first = root.appendingPathComponent("first.bin")
+        let second = root.appendingPathComponent("second.bin")
+        try Data("first".utf8).write(to: first)
+        try Data("second".utf8).write(to: second)
+
+        XCTAssertFalse(sendSelectionRequiresManifest([]))
+        XCTAssertFalse(sendSelectionRequiresManifest([first]))
+        XCTAssertTrue(sendSelectionRequiresManifest([root]))
+        XCTAssertTrue(sendSelectionRequiresManifest([first, second]))
+    }
+
     func testManifestPublicationCopiesFilesDirectoriesAndSupportsRetry() throws {
         let fileManager = FileManager.default
         let root = fileManager.temporaryDirectory

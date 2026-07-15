@@ -186,11 +186,14 @@ final class AppModel: ObservableObject {
 
         let values: URLResourceValues
         do {
-            values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+            values = try url.resourceValues(
+                forKeys: [.isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey]
+            )
         } catch {
             throw OpenedSendFileError.inaccessible
         }
-        guard values.isRegularFile == true, values.isSymbolicLink != true else {
+        guard values.isSymbolicLink != true,
+              values.isRegularFile == true || values.isDirectory == true else {
             throw OpenedSendFileError.unsupportedItem
         }
 
@@ -953,11 +956,13 @@ final class TransferViewModel: ObservableObject {
     @Published private var fallbackFailure: FfiTransferFailure?
     @Published var transferEvents: [FfiTransferEvent] = []
     @Published var transferActivity: FfiTransferActivityRecord?
+    @Published private(set) var isPreparingManifest = false
 
     weak var appModel: AppModel?
 
     private var session: DurableEnvoixSession?
     private var manifestSession: DurableEnvoixManifestSession?
+    private var manifestPreparationTask: Task<Void, Never>?
     private var destinationDir: String?       // receiver only
     private var resourceAccess: AnyObject?    // keeps iOS Files permission alive
     private var rate = RateTracker()
@@ -1044,6 +1049,7 @@ final class TransferViewModel: ObservableObject {
     }
 
     var isBusy: Bool {
+        if isPreparingManifest { return true }
         switch phase {
         case .waiting, .transferring, .paused: return true
         default: return false
@@ -1253,6 +1259,20 @@ final class TransferViewModel: ObservableObject {
         return discarded
     }
 
+    @discardableResult
+    func cancelManifestPreparation() -> Bool {
+        guard isPreparingManifest else { return false }
+        manifestPreparationTask?.cancel()
+        manifestPreparationTask = nil
+        isPreparingManifest = false
+        operationID = UUID()
+        forgetRoomID(for: currentActivityID)
+        resourceAccess = nil
+        fallbackPhase = .canceled
+        statusText = AppText.value("Canceled", "已取消", language: displayLanguage)
+        return true
+    }
+
     func listTransferActivities() -> [FfiTransferActivityRecord] {
         if let manifestSession {
             return [manifestSession.activity().activity]
@@ -1335,8 +1355,9 @@ final class TransferViewModel: ObservableObject {
         beginManifestOperation(settings: settings, request: request)
         statusText = AppText.value("Preparing selected items…", "正在准备所选项目…", language: displayLanguage)
         resourceAccess = sourceAccess
+        isPreparingManifest = true
         let operationID = operationID
-        Task { @MainActor [weak self] in
+        manifestPreparationTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
                 let prepared = try await prepareManifestSend(
@@ -1346,6 +1367,8 @@ final class TransferViewModel: ObservableObject {
                 guard operationID == self.operationID,
                       request.activityId == self.currentActivityID,
                       let appModel = self.appModel else { return }
+                self.manifestPreparationTask = nil
+                self.isPreparingManifest = false
                 let observer = AppleManifestObserver(
                     viewModel: self,
                     appModel: appModel,
@@ -1362,6 +1385,8 @@ final class TransferViewModel: ObservableObject {
                 self.retainResourceAccess(sourceAccess)
             } catch {
                 guard operationID == self.operationID else { return }
+                self.manifestPreparationTask = nil
+                self.isPreparingManifest = false
                 self.forgetRoomID(for: request.activityId)
                 self.resourceAccess = nil
                 self.handleFailed(error.localizedDescription)
@@ -1373,6 +1398,9 @@ final class TransferViewModel: ObservableObject {
         settings: EnvoixRuntimeSettings,
         request: FfiTransferRequest
     ) {
+        manifestPreparationTask?.cancel()
+        manifestPreparationTask = nil
+        isPreparingManifest = false
         suppressNextFailure = false
         reset()
         session = nil
@@ -1389,6 +1417,9 @@ final class TransferViewModel: ObservableObject {
         settings: EnvoixRuntimeSettings,
         request: FfiTransferRequest
     ) -> Bool {
+        manifestPreparationTask?.cancel()
+        manifestPreparationTask = nil
+        isPreparingManifest = false
         suppressNextFailure = false
         reset()
         session = nil
@@ -1681,6 +1712,7 @@ final class TransferViewModel: ObservableObject {
         completedFileURL = nil
         fallbackFailure = nil
         transferActivity = nil
+        isPreparingManifest = false
         resourceAccess = nil
         eventLog.removeAll()
         transferEvents.removeAll()

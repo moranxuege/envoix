@@ -171,10 +171,15 @@ struct ContentView: View {
             .presentationDetents([.large])
         }
         .onChange(of: model.send.isBusy) { isBusy in
-            if isBusy, mobileSheet == .send {
+            if isBusy, !model.send.isPreparingManifest, mobileSheet == .send {
                 mobileSheet = nil
             } else if !isBusy {
                 presentPendingSendSelection()
+            }
+        }
+        .onChange(of: model.send.transferActivity?.activityId) { activityID in
+            if activityID != nil, mobileSheet == .send {
+                mobileSheet = nil
             }
         }
         .onChange(of: model.receive.isBusy) { isBusy in
@@ -223,10 +228,10 @@ struct ContentView: View {
                 mobileHomeAction(
                     sheet: .send,
                     role: .send,
-                    title: AppText.value("Send a file", "发送文件", language: language),
+                    title: AppText.value("Send items", "发送项目", language: language),
                     subtitle: AppText.value(
-                        "Choose one file, then show your send QR or scan a receive QR.",
-                        "选择一个文件，然后显示发送码或扫描接收码。",
+                        "Choose files or a folder, then show your send QR or scan a receive QR.",
+                        "选择文件或文件夹，然后显示发送码或扫描接收码。",
                         language: language
                     ),
                     identifier: "home_send"
@@ -392,8 +397,8 @@ struct ContentView: View {
             )
         case .unsupportedItem:
             return AppText.value(
-                "Multiple files and folders are not supported yet. Manifest support is coming next.",
-                "暂不支持多文件和文件夹；将在 Manifest 支持后开放。",
+                "This item type is not supported. Choose a regular file or folder.",
+                "暂不支持此项目类型。请选择普通文件或文件夹。",
                 language: language
             )
         case .inaccessible:
