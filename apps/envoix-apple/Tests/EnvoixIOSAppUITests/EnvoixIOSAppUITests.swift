@@ -1,6 +1,11 @@
 import XCTest
 
 final class EnvoixIOSAppUITests: XCTestCase {
+    private static let folderPickerRoomCode = "741205-silver-forest"
+    private static let rendezvousBroker = "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445"
+    private static let relayURL = "https://envoix.chkxwlyh.us:8444"
+    private static let crossDeviceTimeout: TimeInterval = 180
+
     override func setUpWithError() throws {
         continueAfterFailure = false
     }
@@ -404,19 +409,7 @@ final class EnvoixIOSAppUITests: XCTestCase {
 
         let folder = app.buttons["send_folder_picker"]
         XCTAssertTrue(folder.waitForExistence(timeout: 5))
-        folder.tap()
-
-        let files = XCUIApplication(bundleIdentifier: "com.apple.DocumentsApp")
-        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
-        guard let open = firstHittableButton(
-            named: ["Open", "打开"],
-            in: [app, files, springboard],
-            timeout: 8
-        ) else {
-            XCTFail("The folder picker did not expose its system Open action")
-            return
-        }
-        open.tap()
+        guard openCurrentFolder(in: app) else { return }
 
         let selection = app.descendants(matching: .any)["send_selection_summary"]
         XCTAssertTrue(selection.waitForExistence(timeout: 8))
@@ -425,6 +418,70 @@ final class EnvoixIOSAppUITests: XCTestCase {
             selection.label.contains("Documents"),
             "The picker did not return the current app Documents directory: \(selection.label)"
         )
+    }
+
+    func testFolderPickerSendsCurrentDirectoryToMacOSApp() throws {
+#if !ENVOIX_CROSS_DEVICE_TESTING
+        throw XCTSkip("Requires the explicit cross-device build and a macOS production App receiver")
+#else
+        let runID = ProcessInfo.processInfo.environment["ENVOIX_CROSS_DEVICE_RUN_ID"] ?? "manual"
+        let roomCode = ProcessInfo.processInfo.environment["ENVOIX_IOS_TO_MACOS_CODE"]
+            ?? Self.folderPickerRoomCode
+        let folderName = "envoix-\(runID)-folder"
+        let app = XCUIApplication()
+        app.launchArguments += [
+            "--ui-testing",
+            "--ui-testing-folder-picker",
+            "--ui-testing-folder-payload",
+            "-envoix.language", "en",
+            "-envoix.serverURL", Self.rendezvousBroker,
+            "-envoix.relayURL", Self.relayURL,
+            "-envoix.useRoom", "YES",
+            "-envoix.useMdns", "YES",
+        ]
+        app.launchEnvironment["ENVOIX_CROSS_DEVICE_RUN_ID"] = runID
+        defer { cleanFolderPayloadFixture(app: app, runID: runID) }
+
+        app.launch()
+        app.tap()
+        dismissSheetIfNeeded(app)
+        XCTAssertTrue(app.buttons["home_send"].waitForExistence(timeout: 8))
+        app.buttons["home_send"].tap()
+
+        XCTAssertTrue(app.buttons["send_folder_picker"].waitForExistence(timeout: 5))
+        guard openCurrentFolder(in: app) else { return }
+        let selection = app.descendants(matching: .any)["send_selection_summary"]
+        XCTAssertTrue(selection.waitForExistence(timeout: 8))
+        XCTAssertEqual(selection.value as? String, "1")
+        XCTAssertTrue(selection.label.contains(folderName), selection.label)
+
+        let codeField = app.textFields.firstMatch
+        let scrollView = app.scrollViews.firstMatch
+        for _ in 0..<4 where codeField.frame.maxY > app.frame.height - 180 {
+            scrollView.swipeUp()
+        }
+        XCTAssertTrue(codeField.isHittable)
+        codeField.tap()
+        codeField.typeText(roomCode)
+
+        let send = app.buttons["send_start_button"]
+        XCTAssertTrue(send.isEnabled)
+        XCTAssertTrue(send.isHittable)
+        send.tap()
+
+        let capsule = app.buttons["active_transfer_capsule"]
+        if capsule.waitForExistence(timeout: 20) {
+            capsule.tap()
+        }
+        let close = app.buttons["mobile_sheet_done"]
+        if !close.waitForExistence(timeout: 2) {
+            let activity = app.buttons["open_activity"]
+            XCTAssertTrue(activity.waitForExistence(timeout: 5))
+            activity.tap()
+        }
+        XCTAssertTrue(close.waitForExistence(timeout: 8))
+        waitForFolderActivityCompletion(named: folderName, in: app, timeout: Self.crossDeviceTimeout)
+#endif
     }
 
     private func dismissSheetIfNeeded(_ app: XCUIApplication) {
@@ -458,5 +515,57 @@ final class EnvoixIOSAppUITests: XCTestCase {
             RunLoop.current.run(until: Date().addingTimeInterval(0.1))
         } while Date() < deadline
         return nil
+    }
+
+    private func openCurrentFolder(in app: XCUIApplication) -> Bool {
+        app.buttons["send_folder_picker"].tap()
+        let files = XCUIApplication(bundleIdentifier: "com.apple.DocumentsApp")
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        guard let open = firstHittableButton(
+            named: ["Open", "打开"],
+            in: [app, files, springboard],
+            timeout: 8
+        ) else {
+            XCTFail("The folder picker did not expose its system Open action")
+            return false
+        }
+        open.tap()
+        return true
+    }
+
+    private func waitForFolderActivityCompletion(
+        named folderName: String,
+        in app: XCUIApplication,
+        timeout: TimeInterval
+    ) {
+        let completedPredicate = NSPredicate(
+            format: "label CONTAINS[c] %@ AND (label CONTAINS[c] 'Done' OR label CONTAINS[c] '完成')",
+            folderName
+        )
+        let failedPredicate = NSPredicate(
+            format: "label CONTAINS[c] %@ AND (label CONTAINS[c] 'Error' OR label CONTAINS[c] '错误')",
+            folderName
+        )
+        let completed = app.descendants(matching: .any).matching(completedPredicate).firstMatch
+        let failed = app.descendants(matching: .any).matching(failedPredicate).firstMatch
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if completed.exists { return }
+            if failed.exists {
+                XCTFail("The Folder picker transfer reached a failed Activity")
+                return
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+        XCTFail("The Folder picker transfer did not complete within \(timeout) seconds")
+    }
+
+    private func cleanFolderPayloadFixture(app: XCUIApplication, runID: String) {
+        app.terminate()
+        app.launchArguments = ["--ui-testing", "--ui-testing-clean-folder-payload"]
+        app.launchEnvironment = ["ENVOIX_CROSS_DEVICE_RUN_ID": runID]
+        app.launch()
+        _ = app.buttons["home_send"].waitForExistence(timeout: 5)
+        app.terminate()
     }
 }

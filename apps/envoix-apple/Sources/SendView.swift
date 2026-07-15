@@ -486,7 +486,7 @@ struct SendView: View {
         guard ProcessInfo.processInfo.arguments.contains("--ui-testing-folder-picker") else {
             return nil
         }
-        return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+        return FolderPickerUITestFixture.initialDirectoryURL()
         #else
         return nil
         #endif

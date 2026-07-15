@@ -197,6 +197,7 @@ struct ContentView: View {
         }
         #if DEBUG
         .onAppear {
+            FolderPickerUITestFixture.cleanIfRequested()
             guard ProcessInfo.processInfo.arguments.contains("--ui-testing") else { return }
             let initialSheet: MobileSheet? = ProcessInfo.processInfo.arguments.contains("--ui-testing-start-activity")
                 ? .activity

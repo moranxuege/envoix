@@ -53,6 +53,63 @@ struct FolderPickerSheet: UIViewControllerRepresentable {
     }
 }
 
+#if DEBUG
+enum FolderPickerUITestFixture {
+    static let payloadArgument = "--ui-testing-folder-payload"
+    static let cleanupArgument = "--ui-testing-clean-folder-payload"
+    static let runIDEnvironmentKey = "ENVOIX_CROSS_DEVICE_RUN_ID"
+
+    static func initialDirectoryURL() -> URL? {
+        guard let documents = FileManager.default.urls(
+            for: .documentDirectory,
+            in: .userDomainMask
+        ).first else { return nil }
+        guard ProcessInfo.processInfo.arguments.contains(payloadArgument) else {
+            return documents
+        }
+        guard let fixture = fixture(in: documents) else { return documents }
+        do {
+            try FileManager.default.createDirectory(
+                at: fixture.directory,
+                withIntermediateDirectories: true
+            )
+            if (try? Data(contentsOf: fixture.file)) != fixture.payload {
+                try fixture.payload.write(to: fixture.file, options: .atomic)
+            }
+            return fixture.directory
+        } catch {
+            assertionFailure("Could not prepare Folder picker UI fixture: \(error)")
+            return documents
+        }
+    }
+
+    static func cleanIfRequested() {
+        guard ProcessInfo.processInfo.arguments.contains(cleanupArgument),
+              let documents = FileManager.default.urls(
+                for: .documentDirectory,
+                in: .userDomainMask
+              ).first,
+              let fixture = fixture(in: documents) else { return }
+        try? FileManager.default.removeItem(at: fixture.directory)
+    }
+
+    private static func fixture(in documents: URL) -> (directory: URL, file: URL, payload: Data)? {
+        guard let runID = ProcessInfo.processInfo.environment[runIDEnvironmentKey],
+              runID.count <= 80,
+              runID.range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil else {
+            assertionFailure("\(runIDEnvironmentKey) must contain only letters, digits, '-' or '_'")
+            return nil
+        }
+        let directory = documents.appendingPathComponent("envoix-\(runID)-folder", isDirectory: true)
+        return (
+            directory,
+            directory.appendingPathComponent("payload.txt"),
+            Data("envoix folder picker payload \(runID)\n".utf8)
+        )
+    }
+}
+#endif
+
 final class SecurityScopedResourceAccess {
     let url: URL
     private let didStart: Bool
