@@ -137,8 +137,10 @@ reviewable local stages.
   folder. The public document-picker API does not allow the app to rename that
   system action. Synthetic provider staging passes on the physical iPhone, and
   the three controls remain reachable in English and Chinese/dark physical UI
-  regressions. Manual interaction with each system picker and a payload run
-  from each source remain pending.
+  regressions. A synthetic Photos provider has also passed through the
+  production iOS sender to the production macOS App with exact final bytes and
+  hash. Manual interaction with each system picker plus Files and Folder
+  payload runs remain pending.
 - The Share Extension accepts multiple Files or Photos representations. It
   stages each provider directly into App Group `group.com.envoix.app.shared`,
   uses a validated versioned draft descriptor, checks actual available storage
@@ -158,7 +160,10 @@ reviewable local stages.
 - A physical iPhone-to-macOS App hotspot gate now passes with the real macOS
   `AppModel`, canonical Activity projection, and destination publication path:
   33 bytes arrived over Direct IPv6 with an exact SHA-256 match. The receiver
-  test is PID-isolated from the user's Activity store. This is stronger than the
+  test is PID-isolated from the user's Activity store. A second physical gate
+  now stages a synthetic PNG through `PhotoDraftImporter`, sends it through the
+  production iOS `AppModel.send`, and verifies the macOS Activity UI resolver,
+  68 final bytes, and SHA-256 after a Direct transfer. This is stronger than the
   earlier CLI/core gate, but the final Photos UI → iOS App → macOS App → Finder
   manual acceptance is still pending.
 - `ManifestV1` is implemented through protocol, independent wire frames,
@@ -187,13 +192,13 @@ automated and physical-device acceptance gates.
 |---|---|---|---|
 | D1 | Supported devices and orientations | iPhone + macOS; iPhone portrait; no iPad or landscape promise in this milestone | **Confirmed** |
 | D2 | iOS navigation interaction | One iPhone home screen; Send, Receive, Activity, and Settings open as sheets; no permanent bottom stage bar or global stage swipe | **Confirmed and implemented** |
-| D3 | First system entry | “Open in Envoix” directly handles one regular document; Share Extension stages one or more Files/Photos items for import when the main app next becomes active; in-app Send separately exposes Photos, Files, and Folder; multiple items/folders use Manifest | **Implemented in source; single-Photos Share Extension acceptance and explicit-source physical UI/provider staging pass; system-picker, multi-item, Files/Open In, and per-source payload acceptance pending** |
+| D3 | First system entry | “Open in Envoix” directly handles one regular document; Share Extension stages one or more Files/Photos items for import when the main app next becomes active; in-app Send separately exposes Photos, Files, and Folder; multiple items/folders use Manifest | **Implemented in source; single-Photos Share Extension acceptance, explicit-source physical UI/provider staging, and synthetic Photos provider→macOS payload acceptance pass; system-picker, multi-item, Files/Folder/Open In, and manual Photos payload acceptance pending** |
 | D4 | Baseline and shared-core authority | Full-tree checkpoint, latest dev merge, Android App compile compatibility at shared boundaries, additive Apple Rust/UniFFI evolution | **Confirmed and executed** |
 | D5 | Multi-file and directory priority | Move `ManifestV1` into the first parallel product wave; do not ship an app-side zip detour | **Confirmed** |
 | D6 | Wi-Fi Aware device matrix | iPhone↔supported Android is required; Android↔Android gets baseline evidence; macOS keeps LAN/relay until separately proven | **Confirmed** |
 | D7 | Nearby versus remote reachability | Wi-Fi Aware is nearby-only; trusted identity, presence, rendezvous, mailbox, and relay own remote reachability | **Confirmed** |
 | D8 | QR scan ownership | Send and receive choose opposite roles, but either device may show its role QR and the other may scan; the UI must not prescribe a fixed scanner | **Confirmed and implemented** |
-| D9 | Apple cross-device acceptance | Keep the macOS app in sync and use iPhone↔macOS as the default physical payload test; opening Send alone is entry evidence, not transfer acceptance | **Confirmed; iPhone→macOS App-hosted payload gate passed, manual UI-to-UI acceptance pending** |
+| D9 | Apple cross-device acceptance | Keep the macOS app in sync and use iPhone↔macOS as the default physical payload test; opening Send alone is entry evidence, not transfer acceptance | **Confirmed; generic and synthetic Photos-provider iPhone→macOS App-hosted payload gates passed, manual UI-to-UI acceptance pending** |
 
 For D3, a Photos item means an image or video representation supplied by the
 Photos share sheet. Multiple selected assets now use `ManifestV1`. Preserving a
@@ -588,8 +593,10 @@ rejected before writes, and older peers fail clearly before payload transfer.
 Status: **multi-item source intake, direct document-open entry, explicit in-app
 Photos/Files/Folder sources, automated cache/lifecycle gates, provisioning,
 physical install, launch, and single-Photos entry/adoption acceptance complete;
-manual system-picker acceptance, multi-item Photos/Files acceptance, the Photos
-payload run, and direct Open In provider acceptance remain**.
+synthetic Photos provider→production iOS Send→macOS App payload acceptance
+complete; manual system-picker acceptance, multi-item Photos/Files acceptance,
+manual Photos payload, Files/Folder payload, and direct Open In provider
+acceptance remain**.
 
 First slice:
 
@@ -861,6 +868,7 @@ the command, source revision, destination, and result is insufficient.
 | 2026-07-15 | `e64b7e8` | Track S in-app Photos staging | physical iPhone 15 Pro Max | register a JPEG `NSItemProvider`, require direct provider-callback copy into a versioned App Group draft, retain the name/type/bytes, and publish the pending pointer | 1 passed, 0 failed; no personal Photos data was read | `/private/tmp/envoix-source-picker-importer-device-pass-20260715.xcresult` |
 | 2026-07-15 | `e64b7e8` | Track S explicit source UI | physical iPhone 15 Pro Max | open Send in the default and Chinese/dark layouts; require Photos, Files, and Folder controls plus the fixed Send action to remain reachable | 2 passed, 0 failed | `/private/tmp/envoix-source-picker-ui-refactor-device-20260715.xcresult` |
 | 2026-07-15 | `e64b7e8` | Track S macOS compatibility | macOS arm64 | build the shared macOS app after isolating the iOS-only picker/importer | build passed | `/private/tmp/envoix-source-picker-macos` |
+| 2026-07-15 | `82e9cf7` | Track S Photos-provider production payload | physical iPhone 15 Pro Max / production macOS `AppModel` | stage a valid synthetic PNG from `NSItemProvider` through `PhotoDraftImporter`, send it with production `AppModel.send`, resolve the negotiated single-root Manifest through the same Activity UI helper, and verify final name, bytes, SHA-256, and data path | sender 1/1 and receiver 1/1 passed; Direct selected; `envoix-manual-photo.png`, 68/68 bytes, SHA-256 `431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460`; no personal Photos or pending App Group draft was read or replaced | `/private/tmp/envoix-photo-production-ios-photo20260715c.xcresult`; `/private/tmp/envoix-photo-production-macos-photo20260715c.xcresult` |
 
 ## 11. Definition of done
 
@@ -1071,6 +1079,8 @@ The Apple milestone is complete only when all of the following are true:
   directory picker. Apple's public API keeps the final system button titled
   **Open**; Envoix explicitly explains that this action uploads the current
   folder instead of mutating private picker views. Synthetic provider staging
-  passed 1/1 and the physical source-entry UI passed 2/2. Manual selection from
-  the real Photos/Files/Folder interfaces and their final payload evidence are
-  still required.
+  passed 1/1, the physical source-entry UI passed 2/2, and an isolated synthetic
+  Photos provider passed production iPhone→macOS payload acceptance 1/1 on both
+  peers with exact bytes/hash over Direct. Manual selection from the real
+  Photos/Files/Folder interfaces, manual Photos payload evidence, and
+  Files/Folder payload evidence are still required.

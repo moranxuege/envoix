@@ -279,10 +279,24 @@ xcodebuild -project apps/envoix-apple/Envoix.xcodeproj \
 ```
 
 Require the macOS App activity to reach `Completed`, a non-empty Direct/Relay
-path, and matching filename, size, completed path, and SHA-256. This exercises
-the production macOS `AppModel`, `TransferViewModel`, Activity projection, and
-destination path. It still does not replace the final Photos UI → iOS App →
-macOS App manual acceptance.
+path, and matching filename, size, user-visible resolved destination, and
+SHA-256. This exercises the production macOS `AppModel`, `TransferViewModel`,
+Activity projection, and destination path.
+
+The physical Photos-provider payload gate uses the same receiver-first order.
+Start
+`EnvoixMacOSHostedTests.testReceiveIosPhotoDraftToMacOSAppRoom`, wait for its
+`photo-receiver-ready` marker, and then run
+`EnvoixIOSLoopbackTests.testCrossDeviceSendPhotoDraftIosToMacOSAppRoom` on the
+physical iPhone. The sender creates a valid synthetic PNG provider in an
+isolated test draft, stages it through `PhotoDraftImporter`, and starts the
+production `AppModel.send` Room path. It does not read the user's Photos library
+or replace a pending App Group draft. The macOS production receiver uses the
+negotiated Manifest model even for this single item, so its canonical completed
+path is the destination root; acceptance requires the same Manifest-aware URL
+resolver used by Activity UI to identify the final file, followed by exact
+filename, size, SHA-256, and Direct/Relay checks. This gate still does not
+replace final manual Photos UI → iOS App → macOS App acceptance.
 
 The physical Manifest gate uses the same two-peer order. Set the same run ID
 and Room code in both shells, start
