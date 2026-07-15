@@ -519,8 +519,9 @@ shared provider APIs remain additive until both Apple and Android compile.
 
 Status: **protocol, wire codec, sequential engine, authenticated
 direct/mDNS/Room routing, durable Activity, additive FFI, and Apple app
-selection/publication/Activity UI complete; Share Extension multi-item intake
-and physical cross-device acceptance remain**.
+selection/publication/Activity UI complete; physical iPhone→macOS Manifest
+engine/AppModel acceptance complete; Share Extension multi-item intake,
+macOS→iPhone, and Apple↔Android physical acceptance remain**.
 
 The contract now freezes the additive compatibility direction: existing
 `envoix/1` and all single-file APIs remain unchanged, while manifest transfers
@@ -552,8 +553,12 @@ First slices:
 6. **Completed:** add Apple multi-selection, directory selection on macOS,
    Manifest preparation cancellation, multi-item publication, and Activity
    inventory/current-item/result/destination reporting;
-7. enable multi-item Files/Photos Share Extension intake after the manifest path
-   is proven.
+7. **Completed:** send one folder containing a regular file and an empty
+   directory plus one loose file from a physical iPhone to the production
+   macOS `AppModel`, then verify both canonical Activities, the final directory
+   tree, exact bytes, aggregate counts, and per-file SHA-256;
+8. enable multi-item Files/Photos Share Extension intake using the proven
+   Manifest path.
 
 Acceptance follows `transfer-manifest-v1.md`: no default overwrite, identical
 files may be skipped by hash, differing files keep both, path traversal is
@@ -791,6 +796,7 @@ the command, source revision, destination, and result is insufficient.
 | 2026-07-14 | `a3d6120` | Track M additive client facade | macOS Rust host | expose Manifest send and negotiated receive for Manual/Invite/mDNS/Room without changing `TransferRequest` or `Transfer`; run all client tests, strict clippy, rustdoc, and native consumer checks | 91 unit tests plus 3 real iroh loopbacks passed; the loopbacks prove old API single-file, two-file/two-directory Manifest transfer, and a legacy sender reaching the new negotiated receiver; FFI and Android JNI compile checks passed | commit and terminal output |
 | 2026-07-15 | `efa3ac6`–`01a417c` | Track M durable client + FFI | macOS Rust host / native consumers | persist accepted plans and per-entry results in one durable Manifest Activity; expose additive UniFFI session, observer, runner, and record types; keep negotiated legacy single-file receive available | targeted Rust tests and native boundary compile gates passed; existing single-file APIs remain additive-compatible | commits and terminal output |
 | 2026-07-15 | `055cdbc`–`dae6154` | Track M Apple app integration | generic iOS / macOS arm64 host | build Manifests from validated selections; route one regular file through the legacy path and folders/multiple roots through Manifest; publish received roots; render Manifest Activity inventory and results | generic iOS build and build-for-testing passed; macOS hosted suite executed 8 tests with 7 passes, 1 explicit live-device skip, and 0 failures; no Simulator was launched | commits and terminal output |
+| 2026-07-15 | `9999b81` | Track M physical iPhone→macOS Manifest | iPhone 15 Pro Max / production macOS `AppModel` | send a folder containing `photo.bin` and an empty directory plus one loose file through Room/Auto; require canonical sender/receiver completion, exact root/file/directory counts, final tree and bytes, per-file SHA-256, and a selected data path | sender 1/1 and receiver 1/1 passed; Direct IPv6 selected; 2 roots, 2/2 files, 2 directories, 63/63 bytes; SHA-256 `36f392e18be2a72d6220d2773fc572aa8d9332bcf0a37c1ebba7a0c81e34b9c4` and `3d6a25e6964bb76c6bb916f991b370d0f9f301f00bc30c735082c162bc7e001b` matched | `/private/tmp/envoix-manifest-ios-20260715-physical02.xcresult`; `/private/tmp/envoix-manifest-macos-20260715-physical02.xcresult` |
 
 ## 11. Definition of done
 
@@ -974,5 +980,11 @@ The Apple milestone is complete only when all of the following are true:
   overwriting existing content. Activity shows Manifest inventory, root
   preview, current item, exceptional results, and the correct completed item or
   destination directory. Generic iOS build/build-for-testing and the macOS
-  hosted suite passed without launching Simulator. Multi-item Share Extension
-  intake and real Apple↔Apple/Apple↔Android Manifest payload evidence remain.
+  hosted suite passed without launching Simulator. Commit `9999b81` then added
+  a paired physical gate: iPhone 15 Pro Max sent one folder containing a file
+  and an empty directory plus one loose file to the production macOS
+  `AppModel`; both canonical Activities completed over Direct IPv6, and the
+  receiver verified 2 roots, 2 files, 2 directories, 63 bytes, the exact final
+  tree, and both SHA-256 values. This closes the iPhone→macOS engine/AppModel
+  direction only. Multi-item Share Extension intake, macOS→iPhone, full manual
+  UI acceptance, and Apple↔Android Manifest payload evidence remain.

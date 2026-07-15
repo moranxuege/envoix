@@ -87,9 +87,14 @@ As of 2026-07-15, the Apple app also has durable Manifest Activity/FFI
 projection, multi-file and folder selection, Manifest preparation cancellation,
 multi-root receive publication, and Manifest-aware Activity details. One
 regular file deliberately remains on the compatible single-file path. Generic
-iOS build/build-for-testing and macOS hosted tests pass; real Apple↔Apple and
-Apple↔Android Manifest payload evidence remains pending, so this status must
-not be read as physical cross-device acceptance.
+iOS build/build-for-testing and macOS hosted tests pass. A physical iPhone 15
+Pro Max has also sent one folder containing a regular file and an empty
+directory plus one loose file to the production macOS `AppModel`: both
+canonical Activities completed over Direct IPv6, and the receiver verified 2
+roots, 2 files, 2 directories, 63 bytes, the final tree, exact payload bytes,
+and both SHA-256 values. This is physical iPhone→macOS engine/AppModel evidence,
+not macOS→iPhone, final manual UI, Share Extension multi-item, or Apple↔Android
+acceptance.
 
 ## Compatibility Boundary
 
@@ -387,8 +392,11 @@ The shared transfer record should expose:
 
 - Enable multi-item Files/Photos Share Extension intake using the proven Apple
   Manifest send path. The extension currently stages exactly one item.
-- Run physical Apple↔Apple and Apple↔Android multi-file/folder transfers and
-  retain final path, size/hash, result mapping, and publication evidence.
+- Extend physical coverage to macOS→iPhone and Apple↔Android multi-file/folder
+  transfers, retaining final path, size/hash, result mapping, and publication
+  evidence. The iPhone→macOS engine/AppModel direction is covered by
+  `EnvoixIOSLoopbackTests.testCrossDeviceSendIosToMacOSManifestRoom` paired with
+  `EnvoixMacOSHostedTests.testReceiveIosToMacOSAppManifestRoom`.
 - Add full Apple UI visual/accessibility coverage for long Manifest names,
   partial results, and large top-level selections.
 - Add per-file resume after manifest transfer is stable.

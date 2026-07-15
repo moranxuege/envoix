@@ -266,6 +266,17 @@ the production macOS `AppModel`, `TransferViewModel`, Activity projection, and
 destination path. It still does not replace the final Photos UI → iOS App →
 macOS App manual acceptance.
 
+The physical Manifest gate uses the same two-peer order. Set the same run ID
+and Room code in both shells, start
+`EnvoixMacOSHostedTests.testReceiveIosToMacOSAppManifestRoom`, wait for its
+`manifest-receiver-ready` marker, and then run
+`EnvoixIOSLoopbackTests.testCrossDeviceSendIosToMacOSManifestRoom` on the
+physical iPhone. The fixture sends one folder containing a regular file and an
+empty directory plus one loose file. The receiver verifies the final tree,
+exact payload bytes, aggregate root/file/directory counts, and both SHA-256
+values. Cross-device compilation or an explicit skip does not satisfy this
+gate; both result bundles must contain one executed passing test.
+
 ## UI iteration workflow
 
 For layout and visual work, use Xcode previews instead of repeatedly launching
