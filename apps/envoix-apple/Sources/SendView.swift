@@ -376,6 +376,7 @@ struct SendView: View {
             .buttonStyle(.plain)
             .disabled(viewModel.isBusy)
             .accessibilityIdentifier("send_file_picker")
+            .accessibilityValue(String(selectedItems.count))
 
             Text(AppText.value(
                 "Choose one or more files, or a folder. Folder structure is preserved.",

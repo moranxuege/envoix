@@ -345,7 +345,7 @@ final class EnvoixIOSAppUITests: XCTestCase {
         XCTAssertTrue(app.buttons["mobile_sheet_done"].waitForExistence(timeout: 8))
         let filePicker = app.buttons["send_file_picker"]
         XCTAssertTrue(filePicker.waitForExistence(timeout: 5))
-        XCTAssertTrue(filePicker.label.contains("2 items selected"))
+        XCTAssertEqual(filePicker.value as? String, "2")
     }
 
     func testSystemOpenedFilePresentsSendSelection() throws {
