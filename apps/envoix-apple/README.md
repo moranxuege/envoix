@@ -329,6 +329,23 @@ the Relay path plus the exact final size, SHA-256, and Manifest-aware resolved
 destination on iOS. This is reverse compatible single-file evidence, not
 macOS-to-iPhone multi-root Manifest acceptance.
 
+The reverse Manifest gate uses the same receiver-first handoff. Start
+`EnvoixIOSLoopbackTests.testCrossDeviceReceiveMacOSToIosAppManifestInvite`,
+copy the payload after `[cross-device] iOS App Manifest invite`, and write it to
+the separate one-shot key before running
+`EnvoixMacOSHostedTests.testSendMacOSToIosAppManifestInvite`:
+
+```bash
+defaults write com.envoix.app envoix.test.macOSToIosManifestInvite -string '<INVITE>'
+```
+
+The fixture sends one folder containing a regular file and an empty directory
+plus one loose file. The iPhone uses the production receive-publication path,
+so acceptance requires staging-to-destination publication, two final roots,
+the exact file/directory counts and bytes, both SHA-256 values, Relay selection,
+and one executed passing test in each result bundle. The macOS test consumes
+and removes the handoff key immediately.
+
 ## UI iteration workflow
 
 For layout and visual work, use Xcode previews instead of repeatedly launching

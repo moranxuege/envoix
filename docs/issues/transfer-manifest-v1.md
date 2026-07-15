@@ -92,9 +92,13 @@ Pro Max has also sent one folder containing a regular file and an empty
 directory plus one loose file to the production macOS `AppModel`: both
 canonical Activities completed over Direct IPv6, and the receiver verified 2
 roots, 2 files, 2 directories, 63 bytes, the final tree, exact payload bytes,
-and both SHA-256 values. This is physical iPhone→macOS engine/AppModel evidence,
-not macOS→iPhone Manifest/multi-root, final manual UI, physical Share Extension
-multi-item, or Apple↔Android acceptance. A separate compatible single-file
+and both SHA-256 values. A paired physical reverse gate now sends one folder
+containing a file and an empty directory plus one loose file from the production
+macOS `AppModel` through Invite/Relay to the production iPhone `AppModel`. The
+iPhone completes app-private staging and multi-root publication with 2 roots,
+2 files, 2 directories, 75 exact bytes, the final tree, and both SHA-256 values.
+These gates do not prove final manual UI, physical Share Extension multi-item,
+or Apple↔Android acceptance. A separate compatible single-file
 macOS `AppModel`→iPhone `AppModel` gate now passes through Invite/Relay with 37
 exact bytes and SHA-256
 `7168fd00a9cc516cb7502c53760d5740f38c0671edc338f32ab6ce606fb32165`.
@@ -399,13 +403,15 @@ The shared transfer record should expose:
 
 - Run the physical Photos/Files multi-select acceptance gate for the implemented
   multi-item Share Extension → Apple Manifest send path.
-- Extend physical Manifest/multi-root coverage to macOS→iPhone and
-  Apple↔Android multi-file/folder transfers, retaining final path, size/hash,
-  result mapping, and publication evidence. The compatible single-file reverse
-  direction is covered by
+- Extend physical Manifest/multi-root coverage to Apple↔Android transfers,
+  retaining final path, size/hash, result mapping, and publication evidence.
+  The compatible single-file reverse direction is covered by
   `EnvoixMacOSHostedTests.testSendMacOSToIosAppInvite` paired with
-  `EnvoixIOSLoopbackTests.testCrossDeviceReceiveMacOSToIosAppInvite`; the
-  iPhone→macOS Manifest direction is covered by
+  `EnvoixIOSLoopbackTests.testCrossDeviceReceiveMacOSToIosAppInvite`; reverse
+  Manifest publication is covered by
+  `EnvoixMacOSHostedTests.testSendMacOSToIosAppManifestInvite` paired with
+  `EnvoixIOSLoopbackTests.testCrossDeviceReceiveMacOSToIosAppManifestInvite`;
+  the iPhone→macOS Manifest direction is covered by
   `EnvoixIOSLoopbackTests.testCrossDeviceSendIosToMacOSManifestRoom` paired with
   `EnvoixMacOSHostedTests.testReceiveIosToMacOSAppManifestRoom`.
 - Add full Apple UI visual/accessibility coverage for long Manifest names,
