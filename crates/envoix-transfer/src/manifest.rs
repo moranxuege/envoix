@@ -7,12 +7,13 @@ use std::time::Duration;
 
 use envoix_error::CoreError;
 use envoix_protocol::{
-    MANIFEST_V1_PROTOCOL_VERSION, ManifestAcceptV1, ManifestChunkV1, ManifestCompleteAckV1,
-    ManifestCompleteV1, ManifestEntryCompleteAckV1, ManifestEntryCompleteV1,
+    MANIFEST_V1_PROTOCOL_VERSION, MAX_MANIFEST_V1_ENTRIES, ManifestAcceptV1, ManifestChunkV1,
+    ManifestCompleteAckV1, ManifestCompleteV1, ManifestEntryCompleteAckV1, ManifestEntryCompleteV1,
     ManifestEntryDispositionKind, ManifestEntryDispositionV1, ManifestEntryKind,
     ManifestEntryResultStatus, ManifestEntryResultV1, ManifestEntryStartV1, ManifestEntryV1,
-    ManifestErrorV1, ManifestFrame, ManifestFrameConnection, ManifestHelloV1, ManifestId,
-    ManifestOfferV1, ManifestResumeStatusV1, ManifestV1, validate_manifest_relative_path,
+    ManifestErrorV1, ManifestFrame, ManifestFrameConnection, ManifestHashAlgorithm,
+    ManifestHelloV1, ManifestId, ManifestOfferV1, ManifestResumeStatusV1, ManifestV1,
+    validate_manifest_relative_path,
 };
 use envoix_storage::{LocalFileStorage, ResumeLease, TransferReceipt, TransferResumeState};
 use envoix_types::{PeerRole, TransferDirection, TransferId};
@@ -20,8 +21,8 @@ use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::{
-    PEER_INTERRUPT_MESSAGE, PEER_PAUSE_MESSAGE, TransferCancelToken, USER_INTERRUPT_MESSAGE,
-    USER_PAUSE_MESSAGE, validate_chunk_size,
+    DEFAULT_CHUNK_SIZE, PEER_INTERRUPT_MESSAGE, PEER_PAUSE_MESSAGE, TransferCancelToken,
+    USER_INTERRUPT_MESSAGE, USER_PAUSE_MESSAGE, validate_chunk_size,
 };
 
 const STATE_ROOT_NAME: &str = ".envoix-manifest-state";
@@ -123,12 +124,124 @@ impl ManifestSendRequest {
         })
     }
 
+    /// Builds a validated Manifest from user-selected file and directory roots.
+    ///
+    /// Entries are deterministic (root selection order, then lexical children),
+    /// directories precede their descendants, and symbolic links or special
+    /// files are rejected rather than followed.
+    pub async fn from_paths(
+        manifest_id: ManifestId,
+        roots: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<Self, ManifestTransferError> {
+        let roots = roots.into_iter().collect::<Vec<_>>();
+        if roots.is_empty() {
+            return Err(CoreError::InvalidInput(
+                "a Manifest send needs at least one selected path".into(),
+            ));
+        }
+        let mut root_names = HashSet::with_capacity(roots.len());
+        let mut pending = Vec::with_capacity(roots.len());
+        for root in roots.into_iter().rev() {
+            let name = portable_file_name(&root)?;
+            if !root_names.insert(name.clone()) {
+                return Err(CoreError::InvalidInput(format!(
+                    "selected Manifest roots have the same name: {name}"
+                )));
+            }
+            pending.push((root, name));
+        }
+
+        let cancel = TransferCancelToken::new();
+        let mut entries = Vec::new();
+        let mut source_paths = BTreeMap::new();
+        while let Some((source, relative_path)) = pending.pop() {
+            if entries.len() >= MAX_MANIFEST_V1_ENTRIES {
+                return Err(CoreError::InvalidInput(format!(
+                    "manifest entry count exceeds {MAX_MANIFEST_V1_ENTRIES}"
+                )));
+            }
+            validate_manifest_relative_path(&relative_path)
+                .map_err(|error| CoreError::InvalidInput(error.to_string()))?;
+            let metadata = fs::symlink_metadata(&source).await?;
+            if metadata.file_type().is_symlink() {
+                return Err(CoreError::InvalidInput(format!(
+                    "symbolic links are not supported in a Manifest: {}",
+                    source.display()
+                )));
+            }
+            let entry_id = entries.len() as u32;
+            let modified_at_unix_ms = modified_at_unix_ms(&metadata);
+            if metadata.is_dir() {
+                entries.push(ManifestEntryV1 {
+                    entry_id,
+                    relative_path: relative_path.clone(),
+                    kind: ManifestEntryKind::Directory,
+                    size: 0,
+                    hash: None,
+                    modified_at_unix_ms,
+                });
+                let mut children = Vec::new();
+                let mut directory = fs::read_dir(&source).await?;
+                while let Some(child) = directory.next_entry().await? {
+                    let name = child.file_name().into_string().map_err(|_| {
+                        CoreError::InvalidInput(format!(
+                            "Manifest path is not valid UTF-8: {}",
+                            child.path().display()
+                        ))
+                    })?;
+                    let child_relative = format!("{relative_path}/{name}");
+                    validate_manifest_relative_path(&child_relative)
+                        .map_err(|error| CoreError::InvalidInput(error.to_string()))?;
+                    children.push((child.path(), child_relative));
+                }
+                children.sort_by(|left, right| left.1.cmp(&right.1));
+                pending.extend(children.into_iter().rev());
+            } else if metadata.is_file() {
+                let (size, hash) = hash_path(&source, DEFAULT_CHUNK_SIZE, &cancel).await?;
+                entries.push(ManifestEntryV1 {
+                    entry_id,
+                    relative_path,
+                    kind: ManifestEntryKind::RegularFile,
+                    size,
+                    hash: Some(hash),
+                    modified_at_unix_ms,
+                });
+                source_paths.insert(entry_id, source);
+            } else {
+                return Err(CoreError::InvalidInput(format!(
+                    "Manifest source is not a regular file or directory: {}",
+                    source.display()
+                )));
+            }
+        }
+
+        let file_count = source_paths.len() as u32;
+        let directory_count = entries.len() as u32 - file_count;
+        let total_bytes = entries
+            .iter()
+            .try_fold(0_u64, |total, entry| total.checked_add(entry.size))
+            .ok_or_else(|| CoreError::InvalidInput("Manifest total size overflow".into()))?;
+        Self::new(
+            ManifestV1 {
+                manifest_id,
+                entries,
+                file_count,
+                directory_count,
+                root_count: root_names.len() as u32,
+                total_bytes,
+                hash_algorithm: ManifestHashAlgorithm::Blake3_256,
+            },
+            source_paths,
+        )
+    }
+
     /// Revalidates a deserialized durable request without changing it.
     pub fn validate(&self) -> Result<(), ManifestTransferError> {
         Self::new(self.manifest.clone(), self.source_paths.clone()).map(|_| ())
     }
 
-    fn source_path(&self, entry_id: u32) -> Result<&Path, ManifestTransferError> {
+    /// Local source for one regular-file entry.
+    pub fn source_path(&self, entry_id: u32) -> Result<&Path, ManifestTransferError> {
         self.source_paths
             .get(&entry_id)
             .map(PathBuf::as_path)
@@ -136,6 +249,31 @@ impl ManifestSendRequest {
                 CoreError::InvalidInput(format!("no source path for manifest entry {entry_id}"))
             })
     }
+}
+
+fn portable_file_name(path: &Path) -> Result<String, ManifestTransferError> {
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| {
+            CoreError::InvalidInput(format!(
+                "selected Manifest path has no portable file name: {}",
+                path.display()
+            ))
+        })?
+        .to_owned();
+    validate_manifest_relative_path(&name)
+        .map_err(|error| CoreError::InvalidInput(error.to_string()))?;
+    Ok(name)
+}
+
+fn modified_at_unix_ms(metadata: &std::fs::Metadata) -> Option<u64> {
+    metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
 }
 
 /// Observer for aggregate and per-entry Manifest transfer lifecycle events.
@@ -2592,6 +2730,81 @@ mod tests {
         let decoded: ManifestSendRequest = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(decoded.manifest, request.manifest);
         assert_eq!(decoded.source_paths, request.source_paths);
+    }
+
+    #[tokio::test]
+    async fn send_request_builds_selected_roots_in_deterministic_tree_order() {
+        let selected = tempdir().unwrap();
+        let folder = selected.path().join("Album");
+        fs::create_dir(&folder).await.unwrap();
+        fs::write(folder.join("b.jpg"), b"b").await.unwrap();
+        fs::write(folder.join("a.jpg"), b"aa").await.unwrap();
+        let note = selected.path().join("note.txt");
+        fs::write(&note, b"note").await.unwrap();
+
+        let request = ManifestSendRequest::from_paths(
+            ManifestId::new("selected-roots"),
+            [folder.clone(), note.clone()],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(request.manifest.root_count, 2);
+        assert_eq!(request.manifest.file_count, 3);
+        assert_eq!(request.manifest.directory_count, 1);
+        assert_eq!(request.manifest.total_bytes, 7);
+        assert_eq!(
+            request
+                .manifest
+                .entries
+                .iter()
+                .map(|entry| entry.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            ["Album", "Album/a.jpg", "Album/b.jpg", "note.txt"]
+        );
+        assert_eq!(request.source_path(1).unwrap(), folder.join("a.jpg"));
+        assert_eq!(request.source_path(3).unwrap(), note);
+    }
+
+    #[tokio::test]
+    async fn send_request_rejects_duplicate_root_names() {
+        let selected = tempdir().unwrap();
+        let first = selected.path().join("one");
+        let second = selected.path().join("two");
+        fs::create_dir(&first).await.unwrap();
+        fs::create_dir(&second).await.unwrap();
+        let first_file = first.join("same.txt");
+        let second_file = second.join("same.txt");
+        fs::write(&first_file, b"one").await.unwrap();
+        fs::write(&second_file, b"two").await.unwrap();
+
+        let result = ManifestSendRequest::from_paths(
+            ManifestId::new("duplicate-roots"),
+            [first_file, second_file],
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(CoreError::InvalidInput(message)) if message.contains("same name"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn send_request_rejects_symbolic_links() {
+        use std::os::unix::fs::symlink;
+
+        let selected = tempdir().unwrap();
+        let source = selected.path().join("source.txt");
+        let link = selected.path().join("link.txt");
+        fs::write(&source, b"source").await.unwrap();
+        symlink(&source, &link).unwrap();
+
+        let result = ManifestSendRequest::from_paths(ManifestId::new("symlink-root"), [link]).await;
+
+        assert!(
+            matches!(result, Err(CoreError::InvalidInput(message)) if message.contains("Symbolic links") || message.contains("symbolic links"))
+        );
     }
 
     fn directory_entry(entry_id: u32, relative_path: &str) -> ManifestEntryV1 {
