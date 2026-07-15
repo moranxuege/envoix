@@ -95,6 +95,10 @@ reviewable local stages.
 - A remote pause/loss now automatically parks a new rendezvous attempt on the
   peer, while the locally paused side still requires the user's Resume action.
   This is covered by QR and room loopback tests.
+- A paused Apple Activity now releases its Send/Receive presentation slot while
+  the durable session, diagnostics, and protected cache remain owned by
+  `AppModel`. Starting another transfer is allowed; resuming a parked Activity
+  is disabled until its recorded parallel-transfer limit has capacity.
 - `scripts/build-apple-core.sh` now regenerates the ignored
   `crates/envoix-ffi/EnvoixCore/` package successfully from the current tree;
   XcodeGen, macOS Debug, and iOS Simulator build-for-testing all pass.
@@ -639,11 +643,12 @@ Publication and disk-I/O boundary:
   and FileProvider destinations fall back to a full copy;
 - top-level staged directories still use a recursive copy during publication.
 
-Known session boundary: preserving paused/resumable cache does not yet free the
-single active Send/Receive setup slot. `TransferViewModel.isBusy` deliberately
-still includes `Paused`; a separate queue/parking slice must let a user detach a
-paused Activity and start another transfer before the product can claim that a
-long-running resumable transfer never blocks a new same-direction transfer.
+Paused-session parking is now implemented at the Apple presentation boundary.
+When a canonical Activity reaches `Paused`, its Send/Receive view model snapshots
+diagnostics and returns to setup while `AppModel` retains the durable session and
+resource access. Resume is admitted against the Activity's recorded
+`maxParallelTransfers` limit, so a parked transfer cannot silently overbook the
+engine when another transfer is executing.
 
 #### Track W — Cross-platform Wi-Fi Aware vertical slice
 
@@ -833,6 +838,7 @@ the command, source revision, destination, and result is insufficient.
 | 2026-07-15 | `bab895b` | Track S multi-item + cache contract | iPhone 16 Pro simulator, iOS 18.3.1 | exercise v1 compatibility, multi-item direct App Group staging, available-capacity failure, collision/path validation, claims, startup/manual cleanup, and paused/retryable receive protection | 20 passed, 0 failed; no fixed Envoix byte quota remains | `/private/tmp/envoix-share-cache-contract-20260715.xcresult` |
 | 2026-07-15 | `9c34353` | iOS Files publication I/O | iPhone 16 Pro simulator on APFS | materialize a 1 MiB verified staging file through the production publication helper; require copy-on-write clone selection and exact source/destination bytes | 1 passed, 0 failed; `.clone` selected | `/private/tmp/envoix-publication-clone-20260715.xcresult` |
 | 2026-07-15 | `bab895b` | Transfer cache UI entry | iPhone 16 Pro simulator, iOS 18.3.1 | open Settings, require the manual cache cleanup control, and retain the existing immediate developer-mode toggle regression | 1 passed, 0 failed; the single Simulator returned to Shutdown | `/private/tmp/envoix-cache-ui-20260715.xcresult` |
+| 2026-07-15 | `fcb47cb` | Apple paused-session parking | physical iPhone 15 Pro Max / macOS arm64 | park a paused Activity without releasing its durable owner; require active records to retain the setup slot, paused records to release it, and resume controls to obey the recorded concurrency limit; rerun Activity UI in a Chinese environment and compile the shared macOS app | state tests 3/3 and Activity UI 1/1 passed on the physical iPhone; macOS Debug build passed | `/private/tmp/envoix-paused-slot-device-20260715.xcresult`; `/private/tmp/envoix-paused-slot-ui-device-language-fix-20260715.xcresult`; `/private/tmp/envoix-paused-slot-macos` |
 
 ## 11. Definition of done
 
@@ -1032,3 +1038,8 @@ The Apple milestone is complete only when all of the following are true:
   receive-path audit confirmed that macOS and default iOS outputs are direct;
   iOS custom Files publication now uses APFS copy-on-write cloning when possible
   and a full-copy fallback where required.
+- 2026-07-15: Apple paused-session parking now detaches the Send/Receive
+  presentation slot from a canonical paused Activity while retaining its
+  durable session and protected resources in `AppModel`. Resume admission
+  follows the Activity's recorded parallel-transfer limit, and the physical
+  iPhone Activity UI regression is language-independent.
