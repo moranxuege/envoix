@@ -14,6 +14,10 @@ final class ShareDraftLease {
         store.acknowledgePending(id: id)
     }
 
+    func bind(to activityID: String) throws {
+        try store.bindClaim(id: id, activityID: activityID)
+    }
+
     deinit {
         try? store.discard(id: id)
     }
@@ -21,7 +25,7 @@ final class ShareDraftLease {
 
 struct PendingSendSelection: Identifiable {
     let id: UUID
-    let fileURL: URL
+    let fileURLs: [URL]
     let sourceAccess: AnyObject
 }
 

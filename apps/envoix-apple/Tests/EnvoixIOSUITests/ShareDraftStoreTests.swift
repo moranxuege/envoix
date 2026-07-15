@@ -37,7 +37,9 @@ final class ShareDraftStoreTests: XCTestCase {
         XCTAssertEqual(staged.descriptor.fileName, "photo.jpg")
         XCTAssertEqual(staged.descriptor.byteCount, UInt64(payload.count))
         XCTAssertEqual(staged.descriptor.mediaKind, .image)
-        XCTAssertEqual(try Data(contentsOf: staged.fileURL), payload)
+        XCTAssertEqual(staged.descriptor.items.count, 1)
+        XCTAssertEqual(staged.fileURLs.count, 1)
+        XCTAssertEqual(try Data(contentsOf: staged.fileURLs[0]), payload)
         XCTAssertEqual(try store.load(id: staged.descriptor.id), staged)
         XCTAssertEqual(try store.pending(), staged)
         XCTAssertEqual(try store.claimPending(), staged)
@@ -60,14 +62,25 @@ final class ShareDraftStoreTests: XCTestCase {
     }
 
     func testAppModelImportsPendingDraftForSendSheet() throws {
-        let source = root.appendingPathComponent("shared-from-files.txt")
-        try Data("shared through app group".utf8).write(to: source)
+        let firstSource = root.appendingPathComponent("shared-photo.jpg")
+        let secondSource = root.appendingPathComponent("shared-video.mov")
+        try Data("shared photo through app group".utf8).write(to: firstSource)
+        try Data("shared video through app group".utf8).write(to: secondSource)
         let store = try ShareDraftStore.live()
-        let staged = try store.stage(
-            sourceURL: source,
-            contentTypeIdentifier: "public.plain-text",
-            mediaKind: .file
-        )
+        let staged = try store.stage(items: [
+            ShareDraftStagingItem(
+                sourceURL: firstSource,
+                contentTypeIdentifier: "public.jpeg",
+                mediaKind: .image,
+                preferredFileName: nil
+            ),
+            ShareDraftStagingItem(
+                sourceURL: secondSource,
+                contentTypeIdentifier: "com.apple.quicktime-movie",
+                mediaKind: .video,
+                preferredFileName: nil
+            ),
+        ])
         defer {
             AppModel.shared.consumePendingSendSelection(id: staged.descriptor.id)
             try? store.discard(id: staged.descriptor.id)
@@ -80,8 +93,69 @@ final class ShareDraftStoreTests: XCTestCase {
             XCTFail("A staged share draft should be imported while the sender is idle")
         }
         XCTAssertEqual(AppModel.shared.pendingSendSelection?.id, staged.descriptor.id)
-        XCTAssertEqual(AppModel.shared.pendingSendSelection?.fileURL, staged.fileURL)
+        XCTAssertEqual(AppModel.shared.pendingSendSelection?.fileURLs, staged.fileURLs)
+        XCTAssertTrue(sendSelectionRequiresManifest(staged.fileURLs))
         XCTAssertEqual(try store.pending()?.descriptor.id, staged.descriptor.id)
+    }
+
+    func testStageMultipleFilesKeepsOrderAndRenamesCollisions() throws {
+        let first = root.appendingPathComponent("first.jpg")
+        let second = root.appendingPathComponent("second.jpg")
+        let firstPayload = Data("first photo".utf8)
+        let secondPayload = Data("second photo".utf8)
+        try firstPayload.write(to: first)
+        try secondPayload.write(to: second)
+        let store = ShareDraftStore(rootDirectory: root.appendingPathComponent("drafts"))
+
+        let staged = try store.stage(items: [
+            ShareDraftStagingItem(
+                sourceURL: first,
+                contentTypeIdentifier: "public.jpeg",
+                mediaKind: .image,
+                preferredFileName: "Photo.jpg"
+            ),
+            ShareDraftStagingItem(
+                sourceURL: second,
+                contentTypeIdentifier: "public.jpeg",
+                mediaKind: .image,
+                preferredFileName: "photo.jpg"
+            ),
+        ])
+
+        XCTAssertEqual(staged.descriptor.items.map(\.fileName), ["Photo.jpg", "photo (2).jpg"])
+        XCTAssertEqual(staged.descriptor.byteCount, UInt64(firstPayload.count + secondPayload.count))
+        XCTAssertEqual(try Data(contentsOf: staged.fileURLs[0]), firstPayload)
+        XCTAssertEqual(try Data(contentsOf: staged.fileURLs[1]), secondPayload)
+        XCTAssertEqual(try store.load(id: staged.descriptor.id), staged)
+    }
+
+    func testLoadsLegacySingleItemDescriptor() throws {
+        let drafts = root.appendingPathComponent("drafts", isDirectory: true)
+        let id = UUID()
+        let draftDirectory = drafts.appendingPathComponent(id.uuidString, isDirectory: true)
+        let payloadURL = draftDirectory.appendingPathComponent("legacy.txt")
+        let payload = Data("legacy share draft".utf8)
+        try FileManager.default.createDirectory(at: draftDirectory, withIntermediateDirectories: true)
+        try payload.write(to: payloadURL)
+        let descriptor = ShareDraftDescriptor(
+            schemaVersion: ShareDraftDescriptor.legacySchemaVersion,
+            id: id,
+            mediaKind: .file,
+            contentTypeIdentifier: "public.plain-text",
+            fileName: "legacy.txt",
+            byteCount: UInt64(payload.count),
+            createdAtMilliseconds: 1_000,
+            stagedRelativePath: "\(id.uuidString)/legacy.txt"
+        )
+        try JSONEncoder().encode(descriptor).write(
+            to: draftDirectory.appendingPathComponent("draft.json"),
+            options: .atomic
+        )
+
+        let loaded = try ShareDraftStore(rootDirectory: drafts).load(id: id)
+        XCTAssertEqual(loaded.descriptor.schemaVersion, ShareDraftDescriptor.legacySchemaVersion)
+        XCTAssertEqual(loaded.fileURLs, [payloadURL])
+        XCTAssertEqual(try Data(contentsOf: loaded.fileURLs[0]), payload)
     }
 
     func testAppModelImportsFileOpenedBySystem() throws {
@@ -98,7 +172,7 @@ final class ShareDraftStoreTests: XCTestCase {
             return XCTFail("The opened file should become the pending send selection")
         }
         defer { AppModel.shared.consumePendingSendSelection(id: selection.id) }
-        XCTAssertEqual(selection.fileURL, source)
+        XCTAssertEqual(selection.fileURLs, [source])
         XCTAssertTrue(selection.sourceAccess is SecurityScopedResourceAccess)
     }
 
@@ -116,7 +190,7 @@ final class ShareDraftStoreTests: XCTestCase {
             return XCTFail("The opened folder should become the pending send selection")
         }
         defer { AppModel.shared.consumePendingSendSelection(id: selection.id) }
-        XCTAssertEqual(selection.fileURL, directory)
+        XCTAssertEqual(selection.fileURLs, [directory])
         XCTAssertTrue(selection.sourceAccess is SecurityScopedResourceAccess)
     }
 
@@ -131,12 +205,36 @@ final class ShareDraftStoreTests: XCTestCase {
         XCTAssertTrue(supportsGenericData)
     }
 
-    func testRejectsDirectoryAndQuotaOverflow() throws {
+    func testShareExtensionActivationMatchesDraftItemLimit() throws {
+        let extensionURL = try XCTUnwrap(Bundle.main.builtInPlugInsURL)
+            .appendingPathComponent("EnvoixShare.appex", isDirectory: true)
+        let extensionBundle = try XCTUnwrap(Bundle(url: extensionURL))
+        let extensionInfo = try XCTUnwrap(extensionBundle.infoDictionary)
+        let extensionConfiguration = try XCTUnwrap(
+            extensionInfo["NSExtension"] as? [String: Any]
+        )
+        let attributes = try XCTUnwrap(
+            extensionConfiguration["NSExtensionAttributes"] as? [String: Any]
+        )
+        let activation = try XCTUnwrap(
+            attributes["NSExtensionActivationRule"] as? [String: Any]
+        )
+        for key in [
+            "NSExtensionActivationSupportsAttachmentsWithMaxCount",
+            "NSExtensionActivationSupportsFileWithMaxCount",
+            "NSExtensionActivationSupportsImageWithMaxCount",
+            "NSExtensionActivationSupportsMovieWithMaxCount",
+        ] {
+            XCTAssertEqual(activation[key] as? Int, ShareDraftStore.maxItemCount, key)
+        }
+    }
+
+    func testRejectsDirectoryAndInsufficientStorage() throws {
         let sourceDirectory = root.appendingPathComponent("folder", isDirectory: true)
         try FileManager.default.createDirectory(at: sourceDirectory, withIntermediateDirectories: true)
         let store = ShareDraftStore(
             rootDirectory: root.appendingPathComponent("drafts"),
-            quotaBytes: 3
+            availableCapacity: { _ in 3 }
         )
 
         XCTAssertThrowsError(try store.stage(
@@ -154,7 +252,87 @@ final class ShareDraftStoreTests: XCTestCase {
             contentTypeIdentifier: "public.data",
             mediaKind: .file
         )) { error in
-            XCTAssertEqual(error as? ShareDraftStoreError, .quotaExceeded(limitBytes: 3))
+            XCTAssertEqual(
+                error as? ShareDraftStoreError,
+                .insufficientStorage(requiredBytes: 4, availableBytes: 3)
+            )
+        }
+
+        let twoBytes = root.appendingPathComponent("two-bytes.bin")
+        try Data([0, 1]).write(to: twoBytes)
+        var availableBytes: Int64 = 3
+        let aggregateStore = ShareDraftStore(
+            rootDirectory: root.appendingPathComponent("aggregate-drafts"),
+            availableCapacity: { _ in
+                defer { availableBytes -= 2 }
+                return availableBytes
+            }
+        )
+        XCTAssertThrowsError(try aggregateStore.stage(items: [
+            ShareDraftStagingItem(
+                sourceURL: twoBytes,
+                contentTypeIdentifier: "public.data",
+                mediaKind: .file,
+                preferredFileName: nil
+            ),
+            ShareDraftStagingItem(
+                sourceURL: twoBytes,
+                contentTypeIdentifier: "public.data",
+                mediaKind: .file,
+                preferredFileName: nil
+            ),
+        ])) { error in
+            XCTAssertEqual(
+                error as? ShareDraftStoreError,
+                .insufficientStorage(requiredBytes: 2, availableBytes: 1)
+            )
+        }
+    }
+
+    func testIncrementalStagingNeedsOnlyTheAppGroupCopy() throws {
+        let source = root.appendingPathComponent("provider-temporary.bin")
+        let payload = Data("provider callback payload".utf8)
+        try payload.write(to: source)
+        let store = ShareDraftStore(rootDirectory: root.appendingPathComponent("drafts"))
+        let staging = try store.beginStaging(expectedItemCount: 1)
+
+        try staging.append(ShareDraftStagingItem(
+            sourceURL: source,
+            contentTypeIdentifier: "public.data",
+            mediaKind: .file,
+            preferredFileName: "payload.bin"
+        ))
+        try FileManager.default.removeItem(at: source)
+        let draft = try staging.finalize()
+
+        XCTAssertEqual(draft.descriptor.items.map(\.fileName), ["payload.bin"])
+        XCTAssertEqual(try Data(contentsOf: draft.fileURLs[0]), payload)
+    }
+
+    func testRejectsEmptyAndOversizedItemLists() throws {
+        let store = ShareDraftStore(rootDirectory: root.appendingPathComponent("drafts"))
+        XCTAssertThrowsError(try store.stage(items: [])) { error in
+            XCTAssertEqual(
+                error as? ShareDraftStoreError,
+                .itemCountExceeded(limit: ShareDraftStore.maxItemCount)
+            )
+        }
+
+        let source = root.appendingPathComponent("payload.bin")
+        try Data([1]).write(to: source)
+        let item = ShareDraftStagingItem(
+            sourceURL: source,
+            contentTypeIdentifier: "public.data",
+            mediaKind: .file,
+            preferredFileName: nil
+        )
+        XCTAssertThrowsError(
+            try store.stage(items: Array(repeating: item, count: ShareDraftStore.maxItemCount + 1))
+        ) { error in
+            XCTAssertEqual(
+                error as? ShareDraftStoreError,
+                .itemCountExceeded(limit: ShareDraftStore.maxItemCount)
+            )
         }
     }
 
@@ -182,6 +360,101 @@ final class ShareDraftStoreTests: XCTestCase {
 
         XCTAssertThrowsError(try store.load(id: expired.descriptor.id))
         XCTAssertEqual(try store.load(id: fresh.descriptor.id), fresh)
+    }
+
+    func testCleanupProtectsClaimedResumableDraft() throws {
+        var currentDate = Date(timeIntervalSince1970: 10_000)
+        let source = root.appendingPathComponent("payload.bin")
+        try Data([1, 2]).write(to: source)
+        let store = ShareDraftStore(
+            rootDirectory: root.appendingPathComponent("drafts"),
+            timeToLive: 60,
+            now: { currentDate }
+        )
+        let draft = try store.stage(
+            sourceURL: source,
+            contentTypeIdentifier: "public.data",
+            mediaKind: .file
+        )
+        try store.claim(id: draft.descriptor.id, activityID: "resume-activity")
+
+        currentDate = currentDate.addingTimeInterval(61)
+        try store.cleanupExpired()
+        XCTAssertEqual(try store.load(id: draft.descriptor.id), draft)
+
+        try store.reconcileCache(
+            protectingDraftIDs: [],
+            protectingActivityIDs: ["resume-activity"]
+        )
+        XCTAssertEqual(try store.load(id: draft.descriptor.id), draft)
+
+        try store.reconcileCache(protectingDraftIDs: [], protectingActivityIDs: [])
+        XCTAssertThrowsError(try store.load(id: draft.descriptor.id)) { error in
+            XCTAssertEqual(error as? ShareDraftStoreError, .draftNotFound)
+        }
+    }
+
+    func testManualCleanupKeepsOnlyProtectedDrafts() throws {
+        let firstSource = root.appendingPathComponent("first.bin")
+        let secondSource = root.appendingPathComponent("second.bin")
+        try Data([1, 2]).write(to: firstSource)
+        try Data([3, 4, 5]).write(to: secondSource)
+        let store = ShareDraftStore(rootDirectory: root.appendingPathComponent("drafts"))
+        let protected = try store.stage(
+            sourceURL: firstSource,
+            contentTypeIdentifier: "public.data",
+            mediaKind: .file
+        )
+        try store.claim(id: protected.descriptor.id, activityID: "paused-activity")
+        let removable = try store.stage(
+            sourceURL: secondSource,
+            contentTypeIdentifier: "public.data",
+            mediaKind: .file
+        )
+
+        let before = try store.cacheSummary(
+            protectingDraftIDs: [],
+            protectingActivityIDs: ["paused-activity"]
+        )
+        XCTAssertGreaterThan(before.totalBytes, before.protectedBytes)
+        XCTAssertGreaterThan(before.removableBytes, 0)
+
+        try store.cleanUnprotected(
+            protectingDraftIDs: [],
+            protectingActivityIDs: ["paused-activity"]
+        )
+        XCTAssertEqual(try store.load(id: protected.descriptor.id), protected)
+        XCTAssertThrowsError(try store.load(id: removable.descriptor.id))
+    }
+
+    func testReceiveCacheCleanupKeepsPausedActivityData() throws {
+        let support = root.appendingPathComponent("Application Support", isDirectory: true)
+        let staging = support.appendingPathComponent("envoix/receive-staging", isDirectory: true)
+        let paused = staging.appendingPathComponent("paused-activity", isDirectory: true)
+        let orphan = staging.appendingPathComponent("orphan-activity", isDirectory: true)
+        try FileManager.default.createDirectory(at: paused, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: orphan, withIntermediateDirectories: true)
+        try Data([1, 2, 3]).write(to: paused.appendingPathComponent("paused.bin"))
+        try Data([4, 5]).write(to: orphan.appendingPathComponent("orphan.bin"))
+        let store = TransferCacheStore(
+            applicationSupportDirectory: support,
+            includeSharedDrafts: false
+        )
+
+        let before = try store.summary(
+            protectingDraftIDs: [],
+            protectingActivityIDs: ["paused-activity"]
+        )
+        XCTAssertEqual(before.totalBytes, 5)
+        XCTAssertEqual(before.protectedBytes, 3)
+
+        try store.cleanUnprotected(
+            protectingDraftIDs: [],
+            protectingActivityIDs: ["paused-activity"],
+            createdBefore: .distantFuture
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: paused.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: orphan.path))
     }
 
     func testLoadRejectsDescriptorPathOutsideDraftRoot() throws {

@@ -80,6 +80,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var activities: [FfiTransferActivityRecord] = []
     @Published private(set) var manifestActivities: [String: FfiManifestActivityRecord] = [:]
     @Published private(set) var activityMetrics: [String: ActivityMetrics] = [:]
+    @Published private(set) var transferCacheSummary = TransferCacheSummary()
+    @Published private(set) var isCleaningTransferCache = false
+    @Published private(set) var transferCacheError: String?
     #if os(iOS)
     @Published private(set) var pendingSendSelection: PendingSendSelection?
     #endif
@@ -167,9 +170,10 @@ final class AppModel: ObservableObject {
             return .noPendingDraft
         }
         if pendingSendSelection?.id != draft.descriptor.id {
+            try store.claim(id: draft.descriptor.id)
             pendingSendSelection = PendingSendSelection(
                 id: draft.descriptor.id,
-                fileURL: draft.fileURL,
+                fileURLs: draft.fileURLs,
                 sourceAccess: ShareDraftLease(id: draft.descriptor.id, store: store)
             )
         }
@@ -199,7 +203,7 @@ final class AppModel: ObservableObject {
 
         pendingSendSelection = PendingSendSelection(
             id: UUID(),
-            fileURL: url,
+            fileURLs: [url],
             sourceAccess: access
         )
         return send.isBusy ? .queued : .imported
@@ -371,6 +375,10 @@ final class AppModel: ObservableObject {
     }
 
     private func restoreDurableTransfers() {
+        defer {
+            restoreClaimedShareDrafts()
+            reconcileTransferCache()
+        }
         do {
             try FileManager.default.createDirectory(at: recordsDirectory, withIntermediateDirectories: true)
             let records = try listDurableTransferRecords(recordsDir: recordsDirectory.path)
@@ -440,6 +448,110 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private var protectedCacheActivityIDs: Set<String> {
+        var ids = Set(activities.compactMap { record -> String? in
+            if !ActivityProjectionPolicy.isTerminal(record.state)
+                || record.state == .failed && record.retryable {
+                return record.activityId
+            }
+            return nil
+        })
+        ids.formUnion(receivePublications.keys)
+        for viewModel in [receive, send] where !viewModel.activeActivityID.isEmpty {
+            ids.insert(viewModel.activeActivityID)
+        }
+        return ids
+    }
+
+    private var protectedCacheDraftIDs: Set<UUID> {
+        #if os(iOS)
+        var ids = Set(activityResourceAccess.values.compactMap { ($0 as? ShareDraftLease)?.id })
+        if let pendingSendSelection {
+            ids.insert(pendingSendSelection.id)
+        }
+        return ids
+        #else
+        return []
+        #endif
+    }
+
+    private func restoreClaimedShareDrafts() {
+        #if os(iOS)
+        do {
+            let store = try ShareDraftStore.live()
+            let protectedActivityIDs = protectedCacheActivityIDs
+            for (activityID, draftID) in try store.claimedDraftsByActivityID()
+                where protectedActivityIDs.contains(activityID)
+                    && activityResourceAccess[activityID] == nil {
+                _ = try store.load(id: draftID)
+                activityResourceAccess[activityID] = ShareDraftLease(id: draftID, store: store)
+            }
+        } catch {
+            transferCacheError = error.localizedDescription
+        }
+        #endif
+    }
+
+    func refreshTransferCache() {
+        performTransferCacheWork(cleanup: nil)
+    }
+
+    func cleanTransferCache() {
+        performTransferCacheWork(cleanup: .manual)
+    }
+
+    private func reconcileTransferCache() {
+        performTransferCacheWork(cleanup: .automatic)
+    }
+
+    private enum TransferCacheCleanup {
+        case automatic
+        case manual
+    }
+
+    private func performTransferCacheWork(cleanup: TransferCacheCleanup?) {
+        guard !isCleaningTransferCache else { return }
+        let protectedActivityIDs = protectedCacheActivityIDs
+        let protectedDraftIDs = protectedCacheDraftIDs
+        let startedAt = Date()
+        isCleaningTransferCache = true
+        transferCacheError = nil
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            do {
+                let store = TransferCacheStore()
+                switch cleanup {
+                case .automatic:
+                    try store.reconcile(
+                        protectingDraftIDs: protectedDraftIDs,
+                        protectingActivityIDs: protectedActivityIDs,
+                        createdBefore: startedAt
+                    )
+                case .manual:
+                    try store.cleanUnprotected(
+                        protectingDraftIDs: protectedDraftIDs,
+                        protectingActivityIDs: protectedActivityIDs,
+                        createdBefore: startedAt
+                    )
+                case nil:
+                    break
+                }
+                let summary = try store.summary(
+                    protectingDraftIDs: protectedDraftIDs,
+                    protectingActivityIDs: protectedActivityIDs
+                )
+                DispatchQueue.main.async {
+                    self?.transferCacheSummary = summary
+                    self?.isCleaningTransferCache = false
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self?.transferCacheError = error.localizedDescription
+                    self?.isCleaningTransferCache = false
+                }
+            }
+        }
+    }
+
     private func restoreReceivePublicationTarget(
         _ target: ReceivePublicationTarget?,
         for record: FfiTransferActivityRecord
@@ -493,8 +605,12 @@ final class AppModel: ObservableObject {
         }
         upsertActivity(record, speedBps: speedBps(for: record.activityId))
         if ActivityProjectionPolicy.isTerminal(record.state) {
-            activityResourceAccess.removeValue(forKey: record.activityId)
-            if record.state == .completed || record.state == .canceled {
+            let preservesResumeData = record.state == .failed && record.retryable
+            if !preservesResumeData {
+                activityResourceAccess.removeValue(forKey: record.activityId)
+            }
+            if record.state == .completed || record.state == .canceled
+                || (record.state == .failed && !record.retryable) {
                 receivePublications.removeValue(forKey: record.activityId)
                 cleanupReceiveStaging(activityID: record.activityId)
                 ReceivePublicationStore.remove(activityID: record.activityId)
@@ -518,6 +634,18 @@ final class AppModel: ObservableObject {
 
     func retainResourceAccess(_ access: AnyObject?, for activityID: String) {
         guard let access, !activityID.isEmpty else { return }
+        #if os(iOS)
+        if let lease = access as? ShareDraftLease {
+            do {
+                try lease.bind(to: activityID)
+            } catch {
+                handleCoreStatus(
+                    "Share source claim failed: \(error.localizedDescription)",
+                    activityID: activityID
+                )
+            }
+        }
+        #endif
         activityResourceAccess[activityID] = access
     }
 

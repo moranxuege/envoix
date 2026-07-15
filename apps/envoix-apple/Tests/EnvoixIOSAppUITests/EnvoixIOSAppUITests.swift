@@ -286,6 +286,9 @@ final class EnvoixIOSAppUITests: XCTestCase {
         XCTAssertTrue(settings.waitForExistence(timeout: 8))
         settings.tap()
 
+        XCTAssertTrue(
+            app.buttons["settings_clean_transfer_cache"].waitForExistence(timeout: 5)
+        )
         let developerMode = app.buttons["settings_developer_mode"]
         XCTAssertTrue(developerMode.waitForExistence(timeout: 5))
         for _ in 0..<4 where !developerMode.isHittable {
@@ -324,11 +327,11 @@ final class EnvoixIOSAppUITests: XCTestCase {
         XCTAssertFalse(app.buttons["active_transfer_capsule"].exists)
     }
 
-    func testPendingShareOpensWhenAppReturnsToForeground() throws {
+    func testPendingMultiShareOpensWhenAppReturnsToForeground() throws {
         let app = XCUIApplication()
         app.launchArguments += [
             "--ui-testing",
-            "--ui-testing-stage-share-on-background",
+            "--ui-testing-stage-multi-share-on-background",
         ]
         app.launch()
 
@@ -342,7 +345,7 @@ final class EnvoixIOSAppUITests: XCTestCase {
         XCTAssertTrue(app.buttons["mobile_sheet_done"].waitForExistence(timeout: 8))
         let filePicker = app.buttons["send_file_picker"]
         XCTAssertTrue(filePicker.waitForExistence(timeout: 5))
-        XCTAssertTrue(filePicker.label.contains("foreground-share.txt"))
+        XCTAssertTrue(filePicker.label.contains("2 items selected"))
     }
 
     func testSystemOpenedFilePresentsSendSelection() throws {

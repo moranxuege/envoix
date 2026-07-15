@@ -50,14 +50,14 @@ struct SendView: View {
     init(
         viewModel: TransferViewModel,
         initialMode: PairingMode = .room,
-        initialFile: URL? = nil,
+        initialFiles: [URL] = [],
         initialFileAccess: AnyObject? = nil,
         initialPendingSelectionID: UUID? = nil
     ) {
         self.viewModel = viewModel
         _mode = State(initialValue: initialMode)
-        _selectedItems = State(initialValue: initialFile.map { [$0] } ?? [])
-        _filePathInput = State(initialValue: initialFile?.path ?? "")
+        _selectedItems = State(initialValue: initialFiles)
+        _filePathInput = State(initialValue: initialFiles.count == 1 ? initialFiles[0].path : "")
         _selectedSourceAccess = State(initialValue: initialFileAccess)
         _selectedPendingSelectionID = State(initialValue: initialPendingSelectionID)
     }
@@ -821,14 +821,18 @@ struct SendView: View {
             return
         }
         guard selectItems(
-            [selection.fileURL],
+            selection.fileURLs,
             access: selection.sourceAccess,
             pendingSelectionID: selection.id
         ) else { return }
         model.consumePendingSendSelection(id: selection.id)
         ToastCenter.shared.show(AppText.value(
-            "Shared item ready to send",
-            "分享项目已准备发送",
+            selection.fileURLs.count == 1
+                ? "Shared item ready to send"
+                : "\(selection.fileURLs.count) shared items ready to send",
+            selection.fileURLs.count == 1
+                ? "分享项目已准备发送"
+                : "\(selection.fileURLs.count) 个分享项目已准备发送",
             language: uiLanguage
         ))
     }

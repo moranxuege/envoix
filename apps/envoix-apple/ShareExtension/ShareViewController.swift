@@ -4,17 +4,17 @@ import UniformTypeIdentifiers
 
 final class ShareViewController: UIViewController {
     private enum ImportError: LocalizedError {
-        case selectOneItem
+        case itemCountExceeded
         case livePhotoUnsupported
         case folderUnsupported
         case unsupportedItem
 
         var errorDescription: String? {
             switch self {
-            case .selectOneItem:
+            case .itemCountExceeded:
                 return localized(
-                    "Select one item. Multiple files are coming with Manifest support.",
-                    "请选择一个项目；多文件将在 Manifest 支持后开放。"
+                    "Select between 1 and \(ShareDraftStore.maxItemCount) items.",
+                    "请选择 1 到 \(ShareDraftStore.maxItemCount) 个项目。"
                 )
             case .livePhotoUnsupported:
                 return localized(
@@ -23,8 +23,8 @@ final class ShareViewController: UIViewController {
                 )
             case .folderUnsupported:
                 return localized(
-                    "Folders are coming with Manifest support. Choose one file for now.",
-                    "文件夹将在 Manifest 支持后开放，目前请选择一个文件。"
+                    "Open folders from the Envoix app. The Share Extension accepts files and Photos.",
+                    "请从 Envoix App 内选择文件夹；分享扩展支持文件和照片。"
                 )
             case .unsupportedItem:
                 return localized(
@@ -38,6 +38,11 @@ final class ShareViewController: UIViewController {
     private struct ProviderSelection {
         let typeIdentifier: String
         let mediaKind: ShareDraftDescriptor.MediaKind
+    }
+
+    private struct ProviderImport {
+        let provider: NSItemProvider
+        let selection: ProviderSelection
     }
 
     private static let logger = Logger(
@@ -54,6 +59,7 @@ final class ShareViewController: UIViewController {
     private let importGate = ShareDraftImportGate()
     private var loadProgress: Progress?
     private var stagedDraft: ShareDraft?
+    private var stagingSession: ShareDraftStagingSession?
     private var isFinishing = false
     private var preservesStagedDraftOnClose = false
 
@@ -142,55 +148,112 @@ final class ShareViewController: UIViewController {
 
         showLoading(
             title: localized("Preparing to send", "正在准备发送"),
-            detail: localized("Copying one item securely into Envoix…", "正在将一个项目安全暂存到 Envoix…")
+            detail: localized("Reading the selected items…", "正在读取所选项目…")
         )
     }
 
     private func beginImport() {
         let providers = (extensionContext?.inputItems as? [NSExtensionItem] ?? [])
             .flatMap { $0.attachments ?? [] }
-        guard providers.count == 1, let provider = providers.first else {
-            showFailure(ImportError.selectOneItem)
+        guard !providers.isEmpty, providers.count <= ShareDraftStore.maxItemCount else {
+            showFailure(ImportError.itemCountExceeded)
             return
         }
 
         do {
-            let selection = try selection(for: provider)
-            loadProgress = provider.loadFileRepresentation(
-                forTypeIdentifier: selection.typeIdentifier
-            ) { [weak self] temporaryURL, error in
-                guard let self else { return }
-                let result: Result<ShareDraft, Error>
-                if let error {
-                    result = .failure(error)
-                } else if let temporaryURL {
-                    do {
-                        let store = try ShareDraftStore.live()
-                        let draft = try store.stage(
-                            sourceURL: temporaryURL,
-                            contentTypeIdentifier: selection.typeIdentifier,
-                            mediaKind: selection.mediaKind,
-                            preferredFileName: preferredFileName(
-                                providerName: provider.suggestedName,
-                                temporaryURL: temporaryURL
-                            )
-                        )
-                        if self.importGate.accept(draft.descriptor.id) {
-                            result = .success(draft)
-                        } else {
-                            try? store.discard(id: draft.descriptor.id)
-                            result = .failure(CancellationError())
-                        }
-                    } catch {
-                        result = .failure(error)
-                    }
-                } else {
-                    result = .failure(ImportError.unsupportedItem)
-                }
-                DispatchQueue.main.async { self.finishImport(result) }
+            let imports = try providers.map {
+                ProviderImport(provider: $0, selection: try selection(for: $0))
             }
+            let session = try ShareDraftStore.live().beginStaging(
+                expectedItemCount: imports.count
+            )
+            stagingSession = session
+            loadProvider(imports, at: 0, stagingSession: session)
         } catch {
             showFailure(error)
+        }
+    }
+
+    private func loadProvider(
+        _ imports: [ProviderImport],
+        at index: Int,
+        stagingSession: ShareDraftStagingSession
+    ) {
+        guard !isFinishing else {
+            stagingSession.cancel()
+            return
+        }
+        guard imports.indices.contains(index) else {
+            finishImport(.failure(ImportError.unsupportedItem))
+            return
+        }
+        let providerImport = imports[index]
+        showLoading(
+            title: localized("Preparing to send", "正在准备发送"),
+            detail: localized(
+                "Copying item \(index + 1) of \(imports.count) securely into Envoix…",
+                "正在将第 \(index + 1)/\(imports.count) 个项目安全暂存到 Envoix…"
+            )
+        )
+        loadProgress = providerImport.provider.loadFileRepresentation(
+            forTypeIdentifier: providerImport.selection.typeIdentifier
+        ) { [weak self] temporaryURL, error in
+            guard let self else { return }
+            if let error {
+                stagingSession.cancel()
+                DispatchQueue.main.async { self.finishImport(.failure(error)) }
+                return
+            }
+            guard let temporaryURL else {
+                stagingSession.cancel()
+                DispatchQueue.main.async {
+                    self.finishImport(.failure(ImportError.unsupportedItem))
+                }
+                return
+            }
+
+            do {
+                try stagingSession.append(ShareDraftStagingItem(
+                    sourceURL: temporaryURL,
+                    contentTypeIdentifier: providerImport.selection.typeIdentifier,
+                    mediaKind: providerImport.selection.mediaKind,
+                    preferredFileName: preferredFileName(
+                        providerName: providerImport.provider.suggestedName,
+                        temporaryURL: temporaryURL
+                    )
+                ))
+                if imports.indices.contains(index + 1) {
+                    DispatchQueue.main.async {
+                        self.loadProvider(
+                            imports,
+                            at: index + 1,
+                            stagingSession: stagingSession
+                        )
+                    }
+                } else {
+                    let result = self.finalize(stagingSession)
+                    DispatchQueue.main.async { self.finishImport(result) }
+                }
+            } catch {
+                stagingSession.cancel()
+                DispatchQueue.main.async { self.finishImport(.failure(error)) }
+            }
+        }
+    }
+
+    private func finalize(
+        _ stagingSession: ShareDraftStagingSession
+    ) -> Result<ShareDraft, Error> {
+        do {
+            let store = try ShareDraftStore.live()
+            let draft = try stagingSession.finalize()
+            guard importGate.accept(draft.descriptor.id) else {
+                try? store.discard(id: draft.descriptor.id)
+                return .failure(CancellationError())
+            }
+            return .success(draft)
+        } catch {
+            return .failure(error)
         }
     }
 
@@ -221,6 +284,7 @@ final class ShareViewController: UIViewController {
 
     private func finishImport(_ result: Result<ShareDraft, Error>) {
         loadProgress = nil
+        stagingSession = nil
         guard !isFinishing else {
             if case let .success(draft) = result {
                 try? ShareDraftStore.live().discard(id: draft.descriptor.id)
@@ -230,7 +294,7 @@ final class ShareViewController: UIViewController {
         switch result {
         case let .success(draft):
             stagedDraft = draft
-            Self.logger.info("Staged one share draft id=\(draft.descriptor.id.uuidString, privacy: .public) bytes=\(draft.descriptor.byteCount)")
+            Self.logger.info("Staged share draft id=\(draft.descriptor.id.uuidString, privacy: .public) items=\(draft.descriptor.items.count) bytes=\(draft.descriptor.byteCount)")
             showReadyForContainingApp()
         case let .failure(error):
             Self.logger.error("Share staging failed: \(error.localizedDescription, privacy: .public)")
@@ -243,8 +307,8 @@ final class ShareViewController: UIViewController {
         activityIndicator.stopAnimating()
         titleLabel.text = localized("Ready in Envoix", "已在 Envoix 中准备好")
         detailLabel.text = localized(
-            "Tap Done, then open Envoix to choose the receiving device and send.",
-            "点击“完成”，然后打开 Envoix 选择接收设备并发送。"
+            "Tap Done, then open Envoix to pair with the receiver and send.",
+            "点击“完成”，然后打开 Envoix 与接收端配对并发送。"
         )
         primaryButton.setTitle(localized("Done", "完成"), for: .normal)
         primaryButton.isHidden = false
@@ -262,7 +326,7 @@ final class ShareViewController: UIViewController {
 
     private func showFailure(_ error: Error) {
         activityIndicator.stopAnimating()
-        titleLabel.text = localized("Couldn’t prepare this item", "无法准备此项目")
+        titleLabel.text = localized("Couldn’t prepare this selection", "无法准备所选项目")
         detailLabel.text = localizedError(error)
         primaryButton.isHidden = true
         secondaryButton.isHidden = false
@@ -277,9 +341,11 @@ final class ShareViewController: UIViewController {
 
     @objc private func cancelAction() {
         isFinishing = true
+        let draftID = importGate.cancel() ?? stagedDraft?.descriptor.id
         loadProgress?.cancel()
+        stagingSession?.cancel()
+        stagingSession = nil
         if !preservesStagedDraftOnClose {
-            let draftID = importGate.cancel() ?? stagedDraft?.descriptor.id
             if let draftID {
                 try? ShareDraftStore.live().discard(id: draftID)
             }
@@ -290,6 +356,8 @@ final class ShareViewController: UIViewController {
     private func localizedError(_ error: Error) -> String {
         if let error = error as? ShareDraftStoreError {
             switch error {
+            case .itemCountExceeded:
+                return ImportError.itemCountExceeded.localizedDescription
             case .sourceIsNotRegularFile:
                 return ImportError.folderUnsupported.localizedDescription
             case .sourceIsUnreadable:
@@ -297,11 +365,22 @@ final class ShareViewController: UIViewController {
                     "Wait for this item to finish downloading, then share it again.",
                     "请等待该项目下载完成，然后重新分享。"
                 )
-            case let .quotaExceeded(limitBytes):
-                let limit = ByteCountFormatter.string(fromByteCount: Int64(limitBytes), countStyle: .file)
+            case let .insufficientStorage(requiredBytes, availableBytes):
+                let required = ByteCountFormatter.string(
+                    fromByteCount: Int64(clamping: requiredBytes),
+                    countStyle: .file
+                )
+                let available = availableBytes.map {
+                    ByteCountFormatter.string(
+                        fromByteCount: Int64(clamping: $0),
+                        countStyle: .file
+                    )
+                }
                 return localized(
-                    "This item exceeds Envoix's \(limit) temporary sharing limit.",
-                    "此项目超过 Envoix 的 \(limit) 临时分享上限。"
+                    available.map { "Envoix needs \(required), but only \($0) is available." }
+                        ?? "There is not enough free storage to stage this item.",
+                    available.map { "Envoix 需要 \(required) 临时空间，但目前只有 \($0) 可用。" }
+                        ?? "设备没有足够的可用空间来暂存此项目。"
                 )
             case .appGroupUnavailable, .invalidDraft, .draftNotFound:
                 return localized(
@@ -312,6 +391,7 @@ final class ShareViewController: UIViewController {
         }
         return error.localizedDescription
     }
+
 }
 
 private func preferredFileName(providerName: String?, temporaryURL: URL) -> String {

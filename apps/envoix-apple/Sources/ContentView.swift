@@ -320,7 +320,7 @@ struct ContentView: View {
         case .send:
             SendView(
                 viewModel: model.send,
-                initialFile: model.pendingSendSelection?.fileURL,
+                initialFiles: model.pendingSendSelection?.fileURLs ?? [],
                 initialFileAccess: model.pendingSendSelection?.sourceAccess,
                 initialPendingSelectionID: model.pendingSendSelection?.id
             )
@@ -413,22 +413,35 @@ struct ContentView: View {
 
     #if DEBUG
     private func stageBackgroundShareFixtureIfRequested() {
+        let arguments = ProcessInfo.processInfo.arguments
+        let stagesSingleItem = arguments.contains("--ui-testing-stage-share-on-background")
+        let stagesMultipleItems = arguments.contains("--ui-testing-stage-multi-share-on-background")
         guard !didStageBackgroundShareFixture,
-              ProcessInfo.processInfo.arguments.contains("--ui-testing-stage-share-on-background") else {
+              stagesSingleItem || stagesMultipleItems else {
             return
         }
         didStageBackgroundShareFixture = true
 
-        let sourceURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("foreground-share.txt")
+        let sourceURLs = stagesMultipleItems
+            ? ["foreground-photo.jpg", "foreground-notes.txt"].map {
+                FileManager.default.temporaryDirectory.appendingPathComponent($0)
+            }
+            : [FileManager.default.temporaryDirectory.appendingPathComponent("foreground-share.txt")]
         do {
-            try Data("foreground share fixture".utf8).write(to: sourceURL, options: .atomic)
-            defer { try? FileManager.default.removeItem(at: sourceURL) }
-            _ = try ShareDraftStore.live().stage(
-                sourceURL: sourceURL,
-                contentTypeIdentifier: UTType.plainText.identifier,
-                mediaKind: .file
-            )
+            for (index, sourceURL) in sourceURLs.enumerated() {
+                try Data("foreground share fixture \(index)".utf8).write(to: sourceURL, options: .atomic)
+            }
+            defer { sourceURLs.forEach { try? FileManager.default.removeItem(at: $0) } }
+            let items = sourceURLs.map {
+                ShareDraftStagingItem(
+                    sourceURL: $0,
+                    contentTypeIdentifier: UTType(filenameExtension: $0.pathExtension)?.identifier
+                        ?? UTType.data.identifier,
+                    mediaKind: $0.pathExtension == "jpg" ? .image : .file,
+                    preferredFileName: nil
+                )
+            }
+            _ = try ShareDraftStore.live().stage(items: items)
         } catch {
             assertionFailure("Could not stage the background Share fixture: \(error)")
         }
@@ -2086,6 +2099,7 @@ private struct SpeedSparkline: View {
 }
 
 private struct SettingsStageView: View {
+    @EnvironmentObject private var model: AppModel
     @AppStorage("envoix.appearance") private var appearance: Appearance = .system
     @AppStorage("envoix.language") private var language = "en"
     @AppStorage("envoix.defaultRole") private var defaultRole = "send"
@@ -2158,6 +2172,8 @@ private struct SettingsStageView: View {
                     )
                 }
                 .card(padding: 14)
+
+                transferCacheSection
 
                 advancedHeader
 
@@ -2257,7 +2273,10 @@ private struct SettingsStageView: View {
             }
             .padding(.vertical, 12)
         }
-        .onAppear(perform: migrateLogServerIfNeeded)
+        .onAppear {
+            migrateLogServerIfNeeded()
+            model.refreshTransferCache()
+        }
     }
 
     private func migrateLogServerIfNeeded() {
@@ -2268,6 +2287,64 @@ private struct SettingsStageView: View {
 
     private var coreBuildLabel: String {
         "\(appDebugBuildLabel) · Core \(coreInfo.coreVersion) · API \(coreInfo.ffiApiVersion)"
+    }
+
+    private var transferCacheSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(AppText.value("Transfer cache", "传输缓存", language: language))
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(Theme.muted)
+            Text(ByteCountFormatter.string(
+                fromByteCount: Int64(clamping: model.transferCacheSummary.totalBytes),
+                countStyle: .file
+            ))
+                .font(.title2.weight(.semibold))
+                .foregroundStyle(Theme.text)
+            Text(AppText.value(
+                "Temporary Share and receive data. Active, paused, and resumable transfers are always protected.",
+                "用于分享和接收的临时数据；活动中、已暂停和可续传的任务始终会被保护。",
+                language: language
+            ))
+                .font(.body)
+                .foregroundStyle(Theme.muted)
+                .fixedSize(horizontal: false, vertical: true)
+            if model.transferCacheSummary.protectedBytes > 0 {
+                Text(AppText.value(
+                    "Protected: \(cacheByteString(model.transferCacheSummary.protectedBytes))",
+                    "受保护：\(cacheByteString(model.transferCacheSummary.protectedBytes))",
+                    language: language
+                ))
+                    .font(.footnote)
+                    .foregroundStyle(Theme.muted)
+            }
+            if let error = model.transferCacheError {
+                Text(error)
+                    .font(.footnote)
+                    .foregroundStyle(Theme.danger)
+            }
+            Button {
+                model.cleanTransferCache()
+            } label: {
+                HStack(spacing: 8) {
+                    if model.isCleaningTransferCache {
+                        ProgressView().controlSize(.small)
+                    }
+                    Text(AppText.value("Clean Up", "清理缓存", language: language))
+                }
+                .frame(maxWidth: .infinity, minHeight: 40)
+            }
+            .buttonStyle(.bordered)
+            .disabled(model.isCleaningTransferCache)
+            .accessibilityIdentifier("settings_clean_transfer_cache")
+        }
+        .card(padding: 14)
+    }
+
+    private func cacheByteString(_ bytes: UInt64) -> String {
+        ByteCountFormatter.string(
+            fromByteCount: Int64(clamping: bytes),
+            countStyle: .file
+        )
     }
 
     private var appearanceSection: some View {
