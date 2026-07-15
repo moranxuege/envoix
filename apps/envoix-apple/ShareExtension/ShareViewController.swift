@@ -76,6 +76,7 @@ final class ShareViewController: UIViewController {
         titleLabel.adjustsFontForContentSizeCategory = true
         titleLabel.textAlignment = .center
         titleLabel.numberOfLines = 0
+        titleLabel.accessibilityIdentifier = "share_status_title"
 
         detailLabel.font = .preferredFont(forTextStyle: .body)
         detailLabel.adjustsFontForContentSizeCategory = true
@@ -91,6 +92,7 @@ final class ShareViewController: UIViewController {
         primaryButton.configuration = primaryConfiguration
         primaryButton.addTarget(self, action: #selector(primaryAction), for: .touchUpInside)
         primaryButton.isHidden = true
+        primaryButton.accessibilityIdentifier = "share_primary_action"
 
         var secondaryConfiguration = UIButton.Configuration.plain()
         secondaryConfiguration.cornerStyle = .large

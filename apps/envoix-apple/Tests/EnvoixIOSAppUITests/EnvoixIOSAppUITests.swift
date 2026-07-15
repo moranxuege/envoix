@@ -449,6 +449,175 @@ final class EnvoixIOSAppUITests: XCTestCase {
         XCTAssertEqual(selection.value as? String, "2")
     }
 
+    func testShareExtensionStagesTwoFilesFromFilesHost() throws {
+        let runID = "sharehost"
+        let fileNames = [
+            "envoix-\(runID)-file-first.txt",
+            "envoix-\(runID)-file-second.txt",
+        ]
+        let app = XCUIApplication()
+        app.launchArguments += [
+            "--ui-testing",
+            "--ui-testing-file-picker",
+            "--ui-testing-file-payload",
+        ]
+        app.launchEnvironment["ENVOIX_CROSS_DEVICE_RUN_ID"] = runID
+        defer { cleanFilePayloadFixture(app: app, runID: runID) }
+        let files = XCUIApplication(bundleIdentifier: "com.apple.DocumentsApp")
+        files.terminate()
+
+        app.launch()
+        app.tap()
+        dismissSheetIfNeeded(app)
+        XCTAssertTrue(app.buttons["home_send"].waitForExistence(timeout: 8))
+        app.buttons["home_send"].tap()
+        XCTAssertTrue(app.buttons["send_file_picker"].waitForExistence(timeout: 5))
+        app.buttons["send_file_picker"].tap()
+
+        XCTAssertNotNil(firstHittableElement(
+            containing: "envoix-\(runID)-file-first",
+            in: [app, files],
+            timeout: 8
+        ))
+        XCUIDevice.shared.press(.home)
+        files.activate()
+        if firstHittableElement(
+            containing: "envoix-\(runID)-file-first",
+            in: [files],
+            timeout: 1
+        ) == nil {
+            let appFolder = files.cells["Envoix, Container"]
+            guard appFolder.waitForExistence(timeout: 8), appFolder.isHittable else {
+                XCTFail("The Files host did not expose the Envoix app folder")
+                return
+            }
+            appFolder.tap()
+        }
+        XCTAssertNotNil(firstHittableElement(
+            containing: "envoix-\(runID)-file-first",
+            in: [files],
+            timeout: 8
+        ))
+        let more = files.buttons["OverflowBarButtonItem"]
+        XCTAssertTrue(more.waitForExistence(timeout: 5))
+        more.tap()
+        guard let select = firstHittableButton(
+            named: ["Select", "选择"],
+            in: [files],
+            timeout: 5
+        ) else {
+            XCTFail("The Files host did not expose its Select action")
+            return
+        }
+        select.tap()
+        for fileName in fileNames {
+            let visibleName = URL(fileURLWithPath: fileName).deletingPathExtension().lastPathComponent
+            guard let file = firstHittableElement(
+                containing: visibleName,
+                in: [files],
+                timeout: 5
+            ) else {
+                XCTFail("The Files host did not expose \(fileName) in selection mode")
+                return
+            }
+            file.tap()
+        }
+        guard let share = firstHittableButton(
+            named: ["Share", "共享"],
+            in: [files],
+            timeout: 5
+        ) else {
+            XCTFail("The Files host did not expose its Share action")
+            return
+        }
+        share.tap()
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let shareSheetApplications = [files, springboard]
+        let appRow = files.scrollViews.allElementsBoundByIndex.first {
+            $0.descendants(matching: .cell)
+                .matching(NSPredicate(format: "identifier == 'shareCell'"))
+                .count > 0
+        }
+        guard let appRow else {
+            XCTFail("The share sheet did not expose its application row")
+            return
+        }
+        var envoix = firstHittableShareCell(named: ["Envoix"], in: files)
+        var moreShareCell: XCUIElement?
+        for _ in 0..<12 where envoix == nil && moreShareCell == nil {
+            appRow.swipeLeft()
+            envoix = firstHittableShareCell(named: ["Envoix"], in: files)
+            moreShareCell = firstHittableShareCell(named: ["More", "更多"], in: files)
+        }
+        if envoix != nil {
+            guard tapSettledShareCell(
+                named: ["Envoix"],
+                in: files,
+                within: appRow,
+                timeout: 5
+            ) else {
+                XCTFail("The share sheet did not expose a stable Envoix extension cell")
+                return
+            }
+        } else if moreShareCell != nil {
+            guard tapSettledShareCell(
+                named: ["More", "更多"],
+                in: files,
+                within: appRow,
+                timeout: 5
+            ) else {
+                XCTFail("The share sheet did not expose a stable More extension cell")
+                return
+            }
+            guard let envoix = firstHittableElement(
+                containing: "Envoix",
+                in: shareSheetApplications,
+                timeout: 8
+            ) else {
+                XCTFail("The share sheet activity list did not expose Envoix")
+                return
+            }
+            envoix.tap()
+        } else {
+            XCTFail("The share sheet did not expose the Envoix extension")
+            return
+        }
+
+        let shareExtension = XCUIApplication(bundleIdentifier: "com.envoix.app.ios.share")
+        let extensionApplications = [shareExtension, files, springboard]
+        guard let ready = firstHittableElement(
+            identifier: "share_status_title",
+            in: extensionApplications,
+            timeout: 20
+        ) else {
+            XCTFail("The Envoix Share Extension did not finish staging the selection")
+            return
+        }
+        XCTAssertTrue(
+            ready.label == "Ready in Envoix" || ready.label == "已在 Envoix 中准备好",
+            ready.label
+        )
+        guard let done = firstHittableElement(
+            identifier: "share_primary_action",
+            in: extensionApplications,
+            timeout: 5
+        ) else {
+            XCTFail("The Envoix Share Extension did not expose its Done action")
+            return
+        }
+        done.tap()
+
+        app.activate()
+        let selection = app.descendants(matching: .any)["send_selection_summary"]
+        XCTAssertTrue(selection.waitForExistence(timeout: 10))
+        XCTAssertEqual(selection.value as? String, "2")
+
+        let close = app.buttons["mobile_sheet_done"]
+        XCTAssertTrue(close.waitForExistence(timeout: 5))
+        close.tap()
+        XCTAssertTrue(app.buttons["home_send"].waitForExistence(timeout: 5))
+    }
+
     func testFolderPickerSendsCurrentDirectoryToMacOSApp() throws {
 #if !ENVOIX_CROSS_DEVICE_TESTING
         throw XCTSkip("Requires the explicit cross-device build and a macOS production App receiver")
@@ -618,7 +787,76 @@ final class EnvoixIOSAppUITests: XCTestCase {
         let deadline = Date().addingTimeInterval(timeout)
         repeat {
             for application in applications {
-                let element = application.descendants(matching: .any).matching(predicate).firstMatch
+                let elements = application.descendants(matching: .any)
+                    .matching(predicate)
+                    .allElementsBoundByIndex
+                if let element = elements.first(where: { $0.exists && $0.isHittable }) {
+                    return element
+                }
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        } while Date() < deadline
+        return nil
+    }
+
+    private func firstHittableShareCell(
+        named labels: [String],
+        in application: XCUIApplication
+    ) -> XCUIElement? {
+        let predicate = NSPredicate(
+            format: "identifier == 'shareCell' AND label IN %@",
+            labels
+        )
+        return application.cells.matching(predicate).allElementsBoundByIndex.first {
+            $0.exists && $0.isHittable
+        }
+    }
+
+    private func tapSettledShareCell(
+        named labels: [String],
+        in application: XCUIApplication,
+        within row: XCUIElement,
+        timeout: TimeInterval
+    ) -> Bool {
+        let minimumVisibleRatio = 0.9
+        let positionTolerance = 1.0
+        let deadline = Date().addingTimeInterval(timeout)
+        var previousFrame: CGRect?
+
+        repeat {
+            if let element = firstHittableShareCell(named: labels, in: application) {
+                let frame = element.frame
+                let visibleWidth = frame.intersection(row.frame).width
+                let isFullyVisible = frame.width > 0
+                    && visibleWidth / frame.width >= minimumVisibleRatio
+                let isSettled = previousFrame.map {
+                    abs($0.minX - frame.minX) <= positionTolerance
+                        && abs($0.minY - frame.minY) <= positionTolerance
+                } ?? false
+                if isFullyVisible, isSettled {
+                    element.coordinate(
+                        withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)
+                    ).tap()
+                    return true
+                }
+                previousFrame = isFullyVisible ? frame : nil
+            } else {
+                previousFrame = nil
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        } while Date() < deadline
+        return false
+    }
+
+    private func firstHittableElement(
+        identifier: String,
+        in applications: [XCUIApplication],
+        timeout: TimeInterval
+    ) -> XCUIElement? {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            for application in applications {
+                let element = application.descendants(matching: .any)[identifier]
                 if element.exists, element.isHittable {
                     return element
                 }
