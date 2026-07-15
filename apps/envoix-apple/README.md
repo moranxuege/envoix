@@ -122,18 +122,30 @@ app offers an Open In destination. iOS launches the main app directly, and
 Envoix presents the normal Send sheet while retaining security-scoped access to
 one file or folder supplied by that route.
 
-For Photos and generic share sheets, choose one file, image, or video and select
-the **Envoix** Share Extension. The extension copies the selected representation
-into the shared App Group. Tap **Done**, then open Envoix manually; when the app
-becomes active it imports the pending draft and presents the Send sheet. iOS
-does not allow a Share Extension to launch its containing app.
+For Photos and generic share sheets, choose one or more files, images, or videos
+and select the **Envoix** Share Extension. The extension copies each selected
+representation directly into the shared App Group. Tap **Done**, then open
+Envoix manually; when the app becomes active it imports the pending draft and
+presents the Send sheet. iOS does not allow a Share Extension to launch its
+containing app.
 
-The Share Extension still stages exactly one regular item. Multiple selected
-items and paired Live Photo preservation remain pending even though the main
-app now supports Manifest selections. Symbolic links and special files are
-rejected. Staged drafts are UUID-scoped, limited to 4 GiB, and expire after 24
-hours. The pending draft is acknowledged only when the user actually presses
-Send.
+One item uses the compatible single-file path; multiple items use `ManifestV1`.
+The 10,000-item boundary comes from the Manifest protocol and is not a practical
+promise that iOS will let an extension process that many providers before its
+execution budget expires. Paired Live Photo preservation, symbolic links, and
+special files remain unsupported. There is no fixed Envoix byte quota: staging
+preflights the device's available capacity and reports a storage error only when
+the copy cannot fit. Unclaimed drafts expire after 24 hours. Settings also
+offers manual cache cleanup, while startup cleanup and manual cleanup always
+protect active, paused, and retryable transfers.
+
+macOS receives directly into the selected output directory and does not copy a
+payload from the App Group. Core finalization uses a same-filesystem hard link
+or checked rename. iOS also receives directly into its default local output;
+only a user-selected Files/FileProvider directory uses app-private staging.
+Publishing a regular file tries same-volume copy-on-write cloning first and
+falls back to a full copy for unsupported, cross-volume, or FileProvider
+destinations. Publishing a staged directory still requires a recursive copy.
 
 ## Test
 

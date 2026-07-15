@@ -38,10 +38,10 @@ Deliver an Apple client that:
    current Android application compile-compatible at shared Rust/FFI gates;
 4. keeps existing Rust/UniFFI callers source-compatible through additive API
    evolution;
-5. accepts one regular document through the system Open In route and one Files
-   or Photos item through a Share Extension/App Group handoff;
-6. accelerates `ManifestV1` so multi-file and directory sharing can replace the
-   temporary single-item boundary;
+5. accepts one regular document through the system Open In route and one or
+   more Files or Photos items through a Share Extension/App Group handoff;
+6. uses `ManifestV1` for multi-file and directory sharing while retaining the
+   compatible single-file path;
 7. adds Wi-Fi Aware only as a shared Apple/Android nearby path, while retaining
    LAN and remote rendezvous/relay reachability; and
 8. keeps the macOS app usable as both a supported client and the default
@@ -126,12 +126,14 @@ reviewable local stages.
   multiple files, folders, and mixed selections; one regular file stays on the
   compatible single-file path, while folders or multiple roots require
   `ManifestV1`.
-- The first Share Extension slice is implemented for one Files or Photos
-  representation. It stages into App Group `group.com.envoix.app.shared`, uses
-  a validated versioned draft descriptor, a 4 GiB quota and 24-hour TTL, and
-  imports the draft into the existing Send sheet when the user next opens the
-  main app. The app also declares `public.data` document handling for the
-  separate, system-launched “Open in Envoix” path. Hosted draft/document-import
+- The Share Extension accepts multiple Files or Photos representations. It
+  stages each provider directly into App Group `group.com.envoix.app.shared`,
+  uses a validated versioned draft descriptor, checks actual available storage
+  instead of imposing a fixed byte quota, and imports the draft into the
+  existing Send sheet when the user next opens the main app. Unclaimed drafts
+  retain a 24-hour TTL; automatic and manual cleanup protect active, paused,
+  and retryable transfer sources. The app also declares `public.data` document
+  handling for the separate, system-launched “Open in Envoix” path. Hosted draft/document-import
   tests pass 12/12 after the lifecycle and document-entry audit, the
   embedded-extension simulator build passes, the existing App UI suite remains
   9/9, and macOS still builds. Xcode-managed provisioning now includes the App
@@ -171,7 +173,7 @@ automated and physical-device acceptance gates.
 |---|---|---|---|
 | D1 | Supported devices and orientations | iPhone + macOS; iPhone portrait; no iPad or landscape promise in this milestone | **Confirmed** |
 | D2 | iOS navigation interaction | One iPhone home screen; Send, Receive, Activity, and Settings open as sheets; no permanent bottom stage bar or global stage swipe | **Confirmed and implemented** |
-| D3 | First system entry | “Open in Envoix” directly handles one regular document; Share Extension stages one Files/Photos item for import when the main app next becomes active; both expand after Manifest | **Implemented; Photos physical acceptance passed, Files/Open In pending** |
+| D3 | First system entry | “Open in Envoix” directly handles one regular document; Share Extension stages one or more Files/Photos items for import when the main app next becomes active; multiple items use Manifest | **Implemented in source; single-Photos physical acceptance passed, multi-item/Files/Open In physical acceptance pending** |
 | D4 | Baseline and shared-core authority | Full-tree checkpoint, latest dev merge, Android App compile compatibility at shared boundaries, additive Apple Rust/UniFFI evolution | **Confirmed and executed** |
 | D5 | Multi-file and directory priority | Move `ManifestV1` into the first parallel product wave; do not ship an app-side zip detour | **Confirmed** |
 | D6 | Wi-Fi Aware device matrix | iPhone↔supported Android is required; Android↔Android gets baseline evidence; macOS keeps LAN/relay until separately proven | **Confirmed** |
@@ -179,10 +181,10 @@ automated and physical-device acceptance gates.
 | D8 | QR scan ownership | Send and receive choose opposite roles, but either device may show its role QR and the other may scan; the UI must not prescribe a fixed scanner | **Confirmed and implemented** |
 | D9 | Apple cross-device acceptance | Keep the macOS app in sync and use iPhone↔macOS as the default physical payload test; opening Send alone is entry evidence, not transfer acceptance | **Confirmed; iPhone→macOS App-hosted payload gate passed, manual UI-to-UI acceptance pending** |
 
-For D3, “one Photos item” means an image or video representation supplied by
-the Photos share sheet. Preserving a Live Photo as paired resources and sharing
-multiple selected assets require `ManifestV1`; the UI must describe that limit
-truthfully until the manifest path is available.
+For D3, a Photos item means an image or video representation supplied by the
+Photos share sheet. Multiple selected assets now use `ManifestV1`. Preserving a
+Live Photo as paired resources remains unsupported and must be described
+truthfully.
 
 ### D4 resolution
 
@@ -214,7 +216,8 @@ starts from `2084944` and follows these ownership rules:
   validation.
 - macOS app maintenance as a supported product and as the stable iPhone
   counterpart for bidirectional Room/Auto and LAN path verification.
-- Share Extension for one Files or Photos item.
+- Share Extension for one or more Files or Photos items, subject to the
+  Manifest entry-count boundary and the extension's runtime budget.
 - `ManifestV1` protocol, core, FFI, and Apple integration for multiple files and
   directories.
 - A Wi-Fi Aware vertical slice shared with Android, subject to capability,
@@ -518,10 +521,11 @@ shared provider APIs remain additive until both Apple and Android compile.
 #### Track M — Accelerated `ManifestV1`
 
 Status: **protocol, wire codec, sequential engine, authenticated
-direct/mDNS/Room routing, durable Activity, additive FFI, and Apple app
-selection/publication/Activity UI complete; physical iPhone→macOS Manifest
-engine/AppModel acceptance complete; Share Extension multi-item intake,
-macOS→iPhone, and Apple↔Android physical acceptance remain**.
+direct/mDNS/Room routing, durable Activity, additive FFI, Apple app
+selection/publication/Activity UI, and Share Extension multi-item source intake
+complete; physical iPhone→macOS Manifest engine/AppModel acceptance complete;
+Share Extension multi-item physical acceptance, macOS→iPhone, and
+Apple↔Android physical acceptance remain**.
 
 The contract now freezes the additive compatibility direction: existing
 `envoix/1` and all single-file APIs remain unchanged, while manifest transfers
@@ -557,8 +561,9 @@ First slices:
    directory plus one loose file from a physical iPhone to the production
    macOS `AppModel`, then verify both canonical Activities, the final directory
    tree, exact bytes, aggregate counts, and per-file SHA-256;
-8. enable multi-item Files/Photos Share Extension intake using the proven
-   Manifest path.
+8. **Completed in source and hosted tests:** enable multi-item Files/Photos
+   Share Extension intake using the proven Manifest path; physical
+   Photos/Files multi-select acceptance remains.
 
 Acceptance follows `transfer-manifest-v1.md`: no default overwrite, identical
 files may be skipped by hash, differing files keep both, path traversal is
@@ -566,27 +571,31 @@ rejected before writes, and older peers fail clearly before payload transfer.
 
 #### Track S — Files + Photos Share Extension
 
-Status: **first code slice, direct document-open entry, automated gates,
-provisioning, physical install, launch, and Photos entry/adoption acceptance
-complete; the Photos payload run plus Files and direct Open In provider
-acceptance remain**.
+Status: **multi-item source intake, direct document-open entry, automated
+cache/lifecycle gates, provisioning, physical install, launch, and single-Photos
+entry/adoption acceptance complete; multi-item Photos/Files physical acceptance,
+the Photos payload run, and direct Open In provider acceptance remain**.
 
 First slice:
 
-- expose “Send with Envoix” for one item from Files or Photos;
-- asynchronously load and copy the selected representation into App Group
-  staging while the extension is alive;
-- persist a validated draft descriptor with identifier, media type, name, size,
-  creation time, and staged relative path;
+- expose “Send with Envoix” for one or more items from Files or Photos;
+- asynchronously load and copy each selected representation directly into App
+  Group staging while the provider callback is alive, without an intermediate
+  scratch copy;
+- persist a validated draft descriptor with identifier, item list, media types,
+  names, sizes, creation time, and staged relative paths;
 - preserve the draft until the user opens the main app, then import it when the
   scene becomes active and create the canonical transfer Activity only when the
   user actually starts sending;
 - register `public.data` document handling so Open In-capable source apps can
   launch Envoix directly with one security-scoped regular file;
-- enforce App Group quota, TTL cleanup, collision-safe names, and cancellation
-  cleanup;
-- explain that multi-selection and paired Live Photo preservation are pending
-  Manifest instead of silently dropping resources.
+- preflight actual available storage, apply TTL/manual cleanup, retain
+  collision-safe names, and clean up cancellation without imposing a fixed byte
+  quota;
+- protect active, paused, and retryable transfer sources from automatic and
+  manual cleanup;
+- explain that paired Live Photo preservation remains unsupported instead of
+  silently dropping resources.
 
 Acceptance:
 
@@ -605,12 +614,30 @@ Acceptance:
 Implemented contract for the first slice:
 
 - App Group: `group.com.envoix.app.shared`;
-- one regular file, image, or video representation per draft; folders,
-  symlinks, multiple items, and paired Live Photos are rejected explicitly;
+- one or more regular file, image, or video representations per draft; folders,
+  symlinks, special files, and paired Live Photos are rejected explicitly;
 - UUID-scoped staging, atomic versioned descriptor and pending pointer;
-- maximum staged item size 4 GiB and expiration after 24 hours;
+- no fixed staged-byte quota; actual available capacity and write-out-of-space
+  errors are authoritative;
+- 10,000 items is the Manifest protocol entry-count boundary, not a promise
+  about Share Extension runtime capacity;
+- unclaimed drafts expire after 24 hours; manual cleanup is available in
+  Settings and startup cleanup preserves all resumable state;
 - the main app retains the staged file through transfer and acknowledges the
   pending pointer only when Send is actually requested.
+
+Publication and disk-I/O boundary:
+
+- macOS ordinary receive never routes through the App Group: Rust writes into
+  the selected/default destination and finalizes with a same-filesystem hard
+  link or checked rename, so no full-payload migration copy is added;
+- iOS default local receive likewise writes directly to its output directory;
+- only an iOS user-selected Files/FileProvider destination uses app-private
+  receive staging so verified bytes remain available for publication retry;
+- a staged regular file tries `clonefile` first. On local same-volume APFS this
+  is copy-on-write metadata work; unsupported filesystems, cross-volume targets,
+  and FileProvider destinations fall back to a full copy;
+- top-level staged directories still use a recursive copy during publication.
 
 #### Track W — Cross-platform Wi-Fi Aware vertical slice
 
@@ -797,6 +824,9 @@ the command, source revision, destination, and result is insufficient.
 | 2026-07-15 | `efa3ac6`–`01a417c` | Track M durable client + FFI | macOS Rust host / native consumers | persist accepted plans and per-entry results in one durable Manifest Activity; expose additive UniFFI session, observer, runner, and record types; keep negotiated legacy single-file receive available | targeted Rust tests and native boundary compile gates passed; existing single-file APIs remain additive-compatible | commits and terminal output |
 | 2026-07-15 | `055cdbc`–`dae6154` | Track M Apple app integration | generic iOS / macOS arm64 host | build Manifests from validated selections; route one regular file through the legacy path and folders/multiple roots through Manifest; publish received roots; render Manifest Activity inventory and results | generic iOS build and build-for-testing passed; macOS hosted suite executed 8 tests with 7 passes, 1 explicit live-device skip, and 0 failures; no Simulator was launched | commits and terminal output |
 | 2026-07-15 | `9999b81` | Track M physical iPhone→macOS Manifest | iPhone 15 Pro Max / production macOS `AppModel` | send a folder containing `photo.bin` and an empty directory plus one loose file through Room/Auto; require canonical sender/receiver completion, exact root/file/directory counts, final tree and bytes, per-file SHA-256, and a selected data path | sender 1/1 and receiver 1/1 passed; Direct IPv6 selected; 2 roots, 2/2 files, 2 directories, 63/63 bytes; SHA-256 `36f392e18be2a72d6220d2773fc572aa8d9332bcf0a37c1ebba7a0c81e34b9c4` and `3d6a25e6964bb76c6bb916f991b370d0f9f301f00bc30c735082c162bc7e001b` matched | `/private/tmp/envoix-manifest-ios-20260715-physical02.xcresult`; `/private/tmp/envoix-manifest-macos-20260715-physical02.xcresult` |
+| 2026-07-15 | `bab895b` | Track S multi-item + cache contract | iPhone 16 Pro simulator, iOS 18.3.1 | exercise v1 compatibility, multi-item direct App Group staging, available-capacity failure, collision/path validation, claims, startup/manual cleanup, and paused/retryable receive protection | 20 passed, 0 failed; no fixed Envoix byte quota remains | `/private/tmp/envoix-share-cache-contract-20260715.xcresult` |
+| 2026-07-15 | `9c34353` | iOS Files publication I/O | iPhone 16 Pro simulator on APFS | materialize a 1 MiB verified staging file through the production publication helper; require copy-on-write clone selection and exact source/destination bytes | 1 passed, 0 failed; `.clone` selected | `/private/tmp/envoix-publication-clone-20260715.xcresult` |
+| 2026-07-15 | `bab895b` | Transfer cache UI entry | iPhone 16 Pro simulator, iOS 18.3.1 | open Settings, require the manual cache cleanup control, and retain the existing immediate developer-mode toggle regression | 1 passed, 0 failed; the single Simulator returned to Shutdown | `/private/tmp/envoix-cache-ui-20260715.xcresult` |
 
 ## 11. Definition of done
 
@@ -827,8 +857,8 @@ The Apple milestone is complete only when all of the following are true:
   latest dev merged as `2084944`. Plan updated against the dev commit barrier,
   durable extras/receipt work, Android authority, and the retained Apple
   publication/listener/string-ID boundary.
-- 2026-07-13: D1–D3 confirmed. D3 now includes one item from both Files and
-  Photos. D5 accelerates Manifest without an app-side zip interim, D6 requires
+- 2026-07-13: D1–D3 confirmed. D3 initially included one item from both Files
+  and Photos. D5 accelerates Manifest without an app-side zip interim, D6 requires
   iPhone↔Android and Android↔Android Wi-Fi Aware evidence, and D7 keeps remote
   reachability on the trusted-presence/rendezvous/relay path. The plan changed
   from one selected feature to a gated parallel product wave.
@@ -986,5 +1016,13 @@ The Apple milestone is complete only when all of the following are true:
   `AppModel`; both canonical Activities completed over Direct IPv6, and the
   receiver verified 2 roots, 2 files, 2 directories, 63 bytes, the exact final
   tree, and both SHA-256 values. This closes the iPhone→macOS engine/AppModel
-  direction only. Multi-item Share Extension intake, macOS→iPhone, full manual
-  UI acceptance, and Apple↔Android Manifest payload evidence remain.
+  direction only. Multi-item Share Extension intake is now source-complete and
+  hosted-tested; its physical Photos/Files gate, macOS→iPhone, full manual UI
+  acceptance, and Apple↔Android Manifest payload evidence remain.
+- 2026-07-15: Removed the Apple Share staging 4 GiB policy limit. The extension
+  now performs a direct provider-to-App-Group copy, preflights real available
+  capacity, supports multi-item Manifest drafts, and records claims so startup
+  and Settings cleanup preserve active, paused, and retryable sessions. The
+  receive-path audit confirmed that macOS and default iOS outputs are direct;
+  iOS custom Files publication now uses APFS copy-on-write cloning when possible
+  and a full-copy fallback where required.

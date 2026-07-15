@@ -93,8 +93,10 @@ directory plus one loose file to the production macOS `AppModel`: both
 canonical Activities completed over Direct IPv6, and the receiver verified 2
 roots, 2 files, 2 directories, 63 bytes, the final tree, exact payload bytes,
 and both SHA-256 values. This is physical iPhone→macOS engine/AppModel evidence,
-not macOS→iPhone, final manual UI, Share Extension multi-item, or Apple↔Android
-acceptance.
+not macOS→iPhone, final manual UI, physical Share Extension multi-item, or
+Apple↔Android acceptance. Multi-item Share intake is implemented and hosted-
+tested, but the Photos/Files multi-select provider path has not yet passed the
+physical-device gate.
 
 ## Compatibility Boundary
 
@@ -390,8 +392,8 @@ The shared transfer record should expose:
 
 ## Follow-up Issues
 
-- Enable multi-item Files/Photos Share Extension intake using the proven Apple
-  Manifest send path. The extension currently stages exactly one item.
+- Run the physical Photos/Files multi-select acceptance gate for the implemented
+  multi-item Share Extension → Apple Manifest send path.
 - Extend physical coverage to macOS→iPhone and Apple↔Android multi-file/folder
   transfers, retaining final path, size/hash, result mapping, and publication
   evidence. The iPhone→macOS engine/AppModel direction is covered by
