@@ -7,10 +7,12 @@
 
 use std::time::Duration;
 
-use envoix_protocol::{ManifestEntryKind, ManifestEntryResultStatus, ManifestId};
+use envoix_protocol::{
+    ManifestEntryKind, ManifestEntryResultStatus, ManifestEntryResultV1, ManifestId,
+};
 use envoix_session::{
-    IdentityConfig, MemoryIdentity, SessionTransferSummary, TransferDirection,
-    discard_manifest_resume_state,
+    IdentityConfig, ManifestSendRequest, MemoryIdentity, SessionTransferSummary, TransferDirection,
+    TransferSummary, discard_manifest_resume_state,
 };
 use serde::Serialize;
 use tokio::sync::mpsc;
@@ -637,20 +639,26 @@ impl Actor {
                 }
                 self.finish_attempt(None, None).await;
             }
-            Ok(SessionTransferSummary::SingleFile(_)) => {
-                let error = protocol_event_error(
-                    "Manifest activity negotiated the compatible single-file protocol",
-                );
-                let structured = transfer_failure_for_session(
-                    &error,
-                    &self.activity.session,
-                    self.context.params.direction(),
-                );
-                self.finish_attempt(
-                    Some((SessionFailureCode::Other, error.message)),
-                    Some(structured),
-                )
-                .await;
+            Ok(SessionTransferSummary::SingleFile(summary)) => {
+                match self.adopt_compatible_single_file(summary).await {
+                    Ok(effects) => {
+                        self.queue_effects(effects).await;
+                        self.try_commit().await;
+                        self.finish_attempt(None, None).await;
+                    }
+                    Err(error) => {
+                        let structured = transfer_failure_for_session(
+                            &error,
+                            &self.activity.session,
+                            self.context.params.direction(),
+                        );
+                        self.finish_attempt(
+                            Some((failure_code_of(&error), error.message)),
+                            Some(structured),
+                        )
+                        .await;
+                    }
+                }
             }
             Err(error) => {
                 let structured = transfer_failure_for_session(
@@ -665,6 +673,65 @@ impl Actor {
                 .await;
             }
         }
+    }
+
+    async fn adopt_compatible_single_file(
+        &mut self,
+        summary: TransferSummary,
+    ) -> Result<Vec<Effect>, TransferError> {
+        let output_dir = self.context.params.operation.output_dir().ok_or_else(|| {
+            protocol_event_error("Manifest send unexpectedly negotiated single-file receive")
+        })?;
+        let final_path = output_dir.join(&summary.file_name);
+        let manifest_id = ManifestId::new(summary.transfer_id.to_string());
+        let request = ManifestSendRequest::from_paths(manifest_id, [final_path])
+            .await
+            .map_err(|error| TransferError::from_core(error, Phase::Transfer))?;
+        let manifest = request.manifest;
+        let entry = manifest.entries.first().ok_or_else(|| {
+            protocol_event_error("compatible single-file projection produced an empty Manifest")
+        })?;
+        if manifest.entries.len() != 1
+            || manifest.file_count != 1
+            || manifest.directory_count != 0
+            || entry.size != summary.bytes_transferred
+        {
+            return Err(protocol_event_error(
+                "compatible single-file result contradicts the received file",
+            ));
+        }
+
+        self.activity
+            .accept_plan(TransferDirection::Receive, manifest.clone())?;
+        let mut effects = self.activity.started()?;
+        self.activity.entry_started(
+            entry.entry_id,
+            summary.transfer_id.to_string(),
+            entry.relative_path.clone(),
+            entry.size,
+            0,
+        )?;
+        self.activity
+            .progress(entry.entry_id, entry.size, manifest.total_bytes);
+        let result = ManifestEntryResultV1 {
+            entry_id: entry.entry_id,
+            status: ManifestEntryResultStatus::Completed,
+            offered_relative_path: entry.relative_path.clone(),
+            final_relative_path: Some(entry.relative_path.clone()),
+            failure_code: None,
+        };
+        self.activity.entry_completed(result.clone())?;
+        effects.extend(self.activity.completed(
+            envoix_session::ManifestTransferSummary {
+                manifest_id: manifest.manifest_id,
+                file_count: manifest.file_count,
+                directory_count: manifest.directory_count,
+                total_bytes: manifest.total_bytes,
+                entries: vec![result],
+            },
+            self.completed_root(),
+        )?);
+        Ok(effects)
     }
 
     async fn apply_input(
@@ -1096,6 +1163,66 @@ mod tests {
         assert_eq!(
             store.load(4).await.unwrap().activity.session.state,
             State::Paused(PauseOrigin::Lost)
+        );
+    }
+
+    #[tokio::test]
+    async fn negotiated_single_file_becomes_one_entry_manifest_activity() {
+        let temp = tempdir().unwrap();
+        tokio::fs::write(temp.path().join("legacy.txt"), b"legacy")
+            .await
+            .unwrap();
+        let context = receive_context(temp.path());
+        let activity = ManifestActivity::new(&context).unwrap();
+        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (notice_tx, _notice_rx) = mpsc::unbounded_channel();
+        let mut actor = Actor {
+            client: context.client.client().unwrap(),
+            context,
+            activity,
+            cmds: cmd_rx,
+            notices: notice_tx,
+            current: None,
+            pending_run_end: None,
+            seq: 0,
+            rate: RateTracker::default(),
+            last_progress_snapshot: None,
+            created_ms: 1,
+            record: None,
+            platform_extras: None,
+            staged: Vec::new(),
+            commit_failures: 0,
+            commit_retry_at: None,
+            launch: false,
+        };
+
+        let effects = actor
+            .adopt_compatible_single_file(TransferSummary {
+                transfer_id: TransferId::new("legacy-transfer"),
+                file_name: "legacy.txt".into(),
+                bytes_transferred: 6,
+            })
+            .await
+            .unwrap();
+
+        assert!(effects.contains(&Effect::PostReceipt));
+        assert_eq!(actor.activity.session.state, State::AwaitingPublication);
+        assert_eq!(
+            actor.activity.session.completed_file_path,
+            temp.path().to_str().map(ToOwned::to_owned)
+        );
+        let manifest = actor.activity.manifest.as_ref().unwrap();
+        assert_eq!(manifest.manifest_id.to_string(), "legacy-transfer");
+        assert_eq!(manifest.file_count, 1);
+        assert_eq!(manifest.directory_count, 0);
+        assert_eq!(manifest.total_bytes, 6);
+        assert_eq!(manifest.entries[0].relative_path, "legacy.txt");
+        assert!(manifest.entries[0].hash.is_some());
+        assert_eq!(actor.activity.completed_files, 1);
+        assert_eq!(actor.activity.entry_results.len(), 1);
+        assert_eq!(
+            actor.activity.entry_results[0].status,
+            ManifestEntryResultStatus::Completed
         );
     }
 
