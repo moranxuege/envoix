@@ -1,5 +1,6 @@
 import EnvoixCore
 import CryptoKit
+import UniformTypeIdentifiers
 import XCTest
 @testable import Envoix_iOS
 
@@ -426,6 +427,85 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
 #endif
     }
 
+    @MainActor
+    func testCrossDeviceSendPhotoDraftIosToMacOSAppRoom() async throws {
+        try requireCrossDeviceTesting()
+#if ENVOIX_CROSS_DEVICE_TESTING
+        let model = AppModel.shared
+        guard !model.send.isBusy else {
+            throw LoopbackTestError.transferFailed("the production sender is already busy")
+        }
+
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("envoix-ios-photo-draft-send-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: root) }
+
+        let providerSource = root.appendingPathComponent(Self.iosToMacOSPhotoFileName)
+        try Self.iosToMacOSPhotoPayload.write(to: providerSource)
+        let provider = NSItemProvider()
+        provider.suggestedName = Self.iosToMacOSPhotoFileName
+        provider.registerFileRepresentation(
+            forTypeIdentifier: UTType.png.identifier,
+            fileOptions: [],
+            visibility: .all
+        ) { completion in
+            completion(providerSource, false, nil)
+            return nil
+        }
+
+        let store = ShareDraftStore(rootDirectory: root.appendingPathComponent("drafts", isDirectory: true))
+        let importer = PhotoDraftImporter(store: store)
+        let imported = try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<PhotoDraftImporter.ImportedDraft, Error>) in
+            do {
+                try importer.start(
+                    providers: [provider],
+                    onProgress: { _, _ in },
+                    completion: { continuation.resume(with: $0) }
+                )
+            } catch {
+                continuation.resume(throwing: error)
+            }
+        }
+        let stagedURL = try XCTUnwrap(imported.draft.fileURLs.first)
+        XCTAssertEqual(imported.draft.descriptor.mediaKind, .image)
+        XCTAssertEqual(imported.draft.descriptor.fileName, Self.iosToMacOSPhotoFileName)
+        XCTAssertEqual(try Data(contentsOf: stagedURL), Self.iosToMacOSPhotoPayload)
+
+        let sourceAccess = ShareDraftLease(id: imported.draft.descriptor.id, store: imported.store)
+        sourceAccess.acknowledge()
+        model.send.startSendingWithRoom(
+            filePath: stagedURL.path,
+            code: Self.iosToMacOSCode,
+            settings: Self.crossDeviceSettings(),
+            sourceAccess: sourceAccess
+        )
+        let activityID = model.send.activeActivityID
+        guard !activityID.isEmpty else {
+            throw LoopbackTestError.missingValue("production iOS send Activity ID")
+        }
+        defer { model.removeActivity(activityID) }
+
+        let completed = try await Self.waitForAppSendCompletion(
+            activityID: activityID,
+            in: model,
+            timeout: Self.crossDeviceTimeout(for: UInt64(Self.iosToMacOSPhotoPayload.count))
+        )
+        XCTAssertEqual(completed.fileName, Self.iosToMacOSPhotoFileName)
+        XCTAssertEqual(completed.bytesTransferred, UInt64(Self.iosToMacOSPhotoPayload.count))
+        XCTAssertEqual(completed.totalBytes, UInt64(Self.iosToMacOSPhotoPayload.count))
+        XCTAssertNotEqual(completed.dataPathKind, .none)
+        XCTAssertEqual(try Self.fileSHA256(stagedURL), Data(SHA256.hash(data: Self.iosToMacOSPhotoPayload)))
+        Self.emitCrossDeviceMarker(
+            "photo-draft completed activity=\(activityID) " +
+            "path=\(completed.dataPathKind):\(completed.dataPathDetail) " +
+            "file=\(completed.fileName) bytes=\(completed.bytesTransferred)"
+        )
+#endif
+    }
+
     func testCrossDeviceSendIosToMacOSManifestRoom() async throws {
         try requireCrossDeviceTesting()
 #if ENVOIX_CROSS_DEVICE_TESTING
@@ -659,11 +739,15 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
     private static let androidToIosFileName = "envoix-\(crossDeviceRunID)-android-to-ios.bin"
     private static let iosToAndroidFileName = "envoix-\(crossDeviceRunID)-ios-to-android.bin"
     private static let iosToMacOSFileName = "envoix-\(crossDeviceRunID)-ios-to-macos.bin"
+    private static let iosToMacOSPhotoFileName = "envoix-\(crossDeviceRunID)-photo.png"
     private static let iosToMacOSManifestAlbumName = "envoix-\(crossDeviceRunID)-album"
     private static let iosToMacOSManifestLooseName = "envoix-\(crossDeviceRunID)-loose.txt"
     private static let androidToIosPayload = Data("envoix cross-device android to ios\n".utf8)
     private static let iosToAndroidPayload = Data("envoix cross-device ios to android\n".utf8)
     private static let iosToMacOSPayload = Data("envoix cross-device ios to macos\n".utf8)
+    private static let iosToMacOSPhotoPayload = Data(
+        base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )!
     private static let iosToMacOSManifestPhotoPayload = Data(
         "envoix manifest photo \(crossDeviceRunID)\n".utf8
     )
@@ -952,6 +1036,31 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
             try await Task.sleep(nanoseconds: 200_000_000)
         }
         throw LoopbackTestError.timeout("iOS Manifest completion")
+    }
+
+    @MainActor
+    private static func waitForAppSendCompletion(
+        activityID: String,
+        in model: AppModel,
+        timeout: TimeInterval
+    ) async throws -> FfiTransferActivityRecord {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let record = model.activities.first(where: { $0.activityId == activityID }) {
+                switch record.state {
+                case .completed:
+                    return record
+                case .failed, .canceled:
+                    throw LoopbackTestError.transferFailed(record.diagnosticMessage)
+                case .queued, .binding, .waitingForPeer, .pairing, .connecting,
+                        .transferring, .verifying, .publishing, .unconfirmed,
+                        .paused, .unknown:
+                    break
+                }
+            }
+            try await Task.sleep(nanoseconds: 200_000_000)
+        }
+        throw LoopbackTestError.timeout("production iOS send completion")
     }
 #endif
 }

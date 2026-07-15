@@ -205,6 +205,34 @@ final class EnvoixMacOSHostedTests: XCTestCase {
     func testReceiveIosToMacOSAppRoom() async throws {
         try requireCrossDeviceTesting()
 #if ENVOIX_CROSS_DEVICE_TESTING
+        try await receiveSingleFile(
+            fileName: Self.expectedFileName,
+            payload: Self.payload,
+            expectedBytes: Self.expectedBytes,
+            evidenceLabel: "receiver"
+        )
+#endif
+    }
+
+    func testReceiveIosPhotoDraftToMacOSAppRoom() async throws {
+        try requireCrossDeviceTesting()
+#if ENVOIX_CROSS_DEVICE_TESTING
+        try await receiveSingleFile(
+            fileName: Self.photoFileName,
+            payload: Self.photoPayload,
+            expectedBytes: UInt64(Self.photoPayload.count),
+            evidenceLabel: "photo-receiver"
+        )
+#endif
+    }
+
+#if ENVOIX_CROSS_DEVICE_TESTING
+    private func receiveSingleFile(
+        fileName: String,
+        payload: Data,
+        expectedBytes: UInt64,
+        evidenceLabel: String
+    ) async throws {
         let outputDirectory = outputDirectory()
         let model = AppModel.shared
         let existingActivityIDs = Set(model.activities.map(\.activityId))
@@ -222,7 +250,7 @@ final class EnvoixMacOSHostedTests: XCTestCase {
             at: outputDirectory,
             withIntermediateDirectories: true
         )
-        let finalURL = outputDirectory.appendingPathComponent(Self.expectedFileName)
+        let finalURL = outputDirectory.appendingPathComponent(fileName)
         try? FileManager.default.removeItem(at: finalURL)
 
         model.receive.startReceivingWithRoom(
@@ -235,30 +263,37 @@ final class EnvoixMacOSHostedTests: XCTestCase {
             in: model,
             excluding: existingActivityIDs
         )
-        emitEvidence("receiver-ready activity=\(activityID) room=\(Self.roomCode)")
+        emitEvidence("\(evidenceLabel)-ready activity=\(activityID) room=\(Self.roomCode)")
         let record = try await waitForCompletion(activityID: activityID, in: model)
 
-        XCTAssertEqual(record.fileName, Self.expectedFileName)
-        XCTAssertEqual(record.bytesTransferred, Self.expectedBytes)
-        XCTAssertEqual(record.totalBytes, Self.expectedBytes)
+        XCTAssertEqual(record.fileName, fileName)
+        XCTAssertEqual(record.bytesTransferred, expectedBytes)
+        XCTAssertEqual(record.totalBytes, expectedBytes)
         XCTAssertNotEqual(record.dataPathKind, .none)
-        XCTAssertEqual(URL(fileURLWithPath: record.completedFilePath), finalURL)
+        let resolvedURL = model.manifestActivities[activityID]
+            .flatMap(availableCompletedManifestURL)
+            ?? availableCompletedFileURL(
+                path: record.completedFilePath,
+                expectedBytes: expectedBytes
+            )
+        XCTAssertEqual(resolvedURL, finalURL)
         XCTAssertTrue(FileManager.default.fileExists(atPath: finalURL.path))
-        XCTAssertEqual(try Self.fileSize(finalURL), Self.expectedBytes)
+        XCTAssertEqual(try Self.fileSize(finalURL), expectedBytes)
 
         let actualHash = try Self.fileSHA256(finalURL)
         let expectedHash = Self.repeatedPayloadSHA256(
-            Self.payload,
-            expectedBytes: Self.expectedBytes
+            payload,
+            expectedBytes: expectedBytes
         )
         XCTAssertEqual(actualHash, expectedHash)
         emitEvidence(
-            "completed activity=\(activityID) pathKind=\(record.dataPathKind) " +
-            "pathDetail=\(record.dataPathDetail) file=\(finalURL.path) " +
-            "size=\(Self.expectedBytes) sha256=\(actualHash.hexString)"
+            "\(evidenceLabel)-completed activity=\(activityID) pathKind=\(record.dataPathKind) " +
+            "pathDetail=\(record.dataPathDetail) corePath=\(record.completedFilePath) " +
+            "resolvedFile=\(finalURL.path) " +
+            "size=\(expectedBytes) sha256=\(actualHash.hexString)"
         )
-#endif
     }
+#endif
 
     func testReceiveIosToMacOSAppManifestRoom() async throws {
         try requireCrossDeviceTesting()
@@ -426,6 +461,10 @@ final class EnvoixMacOSHostedTests: XCTestCase {
     private static let runID = environment("ENVOIX_CROSS_DEVICE_RUN_ID") ?? "manual"
     private static let expectedFileName = "envoix-\(runID)-ios-to-macos.bin"
     private static let payload = Data("envoix cross-device ios to macos\n".utf8)
+    private static let photoFileName = "envoix-\(runID)-photo.png"
+    private static let photoPayload = Data(
+        base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )!
     private static let manifestAlbumName = "envoix-\(runID)-album"
     private static let manifestLooseName = "envoix-\(runID)-loose.txt"
     private static let manifestPhotoPayload = Data("envoix manifest photo \(runID)\n".utf8)
