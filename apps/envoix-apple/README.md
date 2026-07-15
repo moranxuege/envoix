@@ -309,6 +309,26 @@ exact payload bytes, aggregate root/file/directory counts, and both SHA-256
 values. Cross-device compilation or an explicit skip does not satisfy this
 gate; both result bundles must contain one executed passing test.
 
+The reverse compatible single-file gate starts
+`EnvoixIOSLoopbackTests.testCrossDeviceReceiveMacOSToIosAppInvite` on the
+physical iPhone first. Copy only the payload printed after
+`[cross-device] iOS App invite`, hand it to the hosted macOS app through the
+one-shot test key, and then run
+`EnvoixMacOSHostedTests.testSendMacOSToIosAppInvite` with the same explicit
+cross-device build flag:
+
+```bash
+defaults write com.envoix.app envoix.test.macOSToIosInvite -string '<INVITE>'
+```
+
+The macOS test consumes and immediately removes this key. On Personal Hotspot
+this gate deliberately requests Relay-only: Mac-to-iPhone mDNS discovery and
+the canonical Auto-to-Relay retry are not yet reliable in this topology. Both
+result bundles must contain one executed passing test, and acceptance requires
+the Relay path plus the exact final size, SHA-256, and Manifest-aware resolved
+destination on iOS. This is reverse compatible single-file evidence, not
+macOS-to-iPhone multi-root Manifest acceptance.
+
 ## UI iteration workflow
 
 For layout and visual work, use Xcode previews instead of repeatedly launching

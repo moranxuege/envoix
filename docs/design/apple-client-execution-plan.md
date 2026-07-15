@@ -1,6 +1,6 @@
 # Apple client execution plan
 
-Status: **In execution — Manifest and explicit iOS source entry green; remaining system-picker and payload acceptance pending**
+Status: **In execution — bidirectional Apple single-file production gates green; reverse Manifest and manual system-picker acceptance pending**
 
 Owner: Apple client workstream
 
@@ -66,7 +66,7 @@ branch is intentionally ahead of its remote while Manifest work is committed in
 reviewable local stages.
 
 - Branch: `feat/transfer-state-foundation`. The latest committed checkpoint is
-  `e64b7e8`; it and the preceding staged Manifest, cache, and paused-session
+  `a1d0dd5`; it and the preceding staged Manifest, cache, and paused-session
   commits remain local and have not been pushed as part of this execution stage.
 - Safety checkpoint `ceff278` (`feat: checkpoint canonical mobile transfer
   lifecycle`) contains the entire previously dirty tree and was pushed to
@@ -166,6 +166,16 @@ reviewable local stages.
   68 final bytes, and SHA-256 after a Direct transfer. This is stronger than the
   earlier CLI/core gate, but the final Photos UI → iOS App → macOS App → Finder
   manual acceptance is still pending.
+- The reverse compatible single-file gate is also green: the production macOS
+  `AppModel` sent 37 bytes through an Invite/Relay path to the production iPhone
+  `AppModel`, and both canonical Activities completed with the exact
+  `7168fd00a9cc516cb7502c53760d5740f38c0671edc338f32ab6ce606fb32165`
+  SHA-256 and the Manifest-aware final iOS destination. This run fixed two
+  production defects without changing the existing FFI surface: Manifest now
+  emits an immediate native snapshot when the transport advertises an invite,
+  and terminal cleanup touches receive-publication staging only when that
+  staging was actually registered. Personal Hotspot Mac→iPhone Room/mDNS
+  discovery and canonical Auto→Relay retry policy retention remain open.
 - `ManifestV1` is implemented through protocol, independent wire frames,
   sequential engine, authenticated direct/mDNS/Room session routing, durable
   client Activity, additive FFI, and Apple selection/publication UI. The
@@ -173,8 +183,10 @@ reviewable local stages.
   Activity cards now show aggregate inventory, current item, top-level roots,
   exceptional per-item results, and the correct completed destination. Generic
   iOS build/build-for-testing and macOS hosted tests are green. The
-  iPhone→macOS physical Manifest payload gate is also green; macOS→iPhone,
-  Share-provider payload, and Apple↔Android Manifest evidence remain pending.
+  iPhone→macOS physical Manifest payload gate is also green. A compatible
+  single-file macOS→iPhone Invite/Relay payload gate is green; reverse
+  Manifest/multi-root, Share-provider multi-item, and Apple↔Android Manifest
+  evidence remain pending.
 - Apple build and test jobs are not currently part of `.github/workflows/ci.yml`.
 - GitHub issues [#44](https://github.com/ECE4410J-NUUB/envoix/issues/44)
   and [#45](https://github.com/ECE4410J-NUUB/envoix/issues/45) remain the primary
@@ -198,7 +210,7 @@ automated and physical-device acceptance gates.
 | D6 | Wi-Fi Aware device matrix | iPhone↔supported Android is required; Android↔Android gets baseline evidence; macOS keeps LAN/relay until separately proven | **Confirmed** |
 | D7 | Nearby versus remote reachability | Wi-Fi Aware is nearby-only; trusted identity, presence, rendezvous, mailbox, and relay own remote reachability | **Confirmed** |
 | D8 | QR scan ownership | Send and receive choose opposite roles, but either device may show its role QR and the other may scan; the UI must not prescribe a fixed scanner | **Confirmed and implemented** |
-| D9 | Apple cross-device acceptance | Keep the macOS app in sync and use iPhone↔macOS as the default physical payload test; opening Send alone is entry evidence, not transfer acceptance | **Confirmed; generic and synthetic Photos-provider iPhone→macOS App-hosted payload gates passed, manual UI-to-UI acceptance pending** |
+| D9 | Apple cross-device acceptance | Keep the macOS app in sync and use iPhone↔macOS as the default physical payload test; opening Send alone is entry evidence, not transfer acceptance | **Confirmed; production AppModel single-file payload gates pass in both directions, while manual UI-to-UI acceptance remains pending** |
 
 For D3, a Photos item means an image or video representation supplied by the
 Photos share sheet. Multiple selected assets now use `ManifestV1`. Preserving a
@@ -543,8 +555,9 @@ Status: **protocol, wire codec, sequential engine, authenticated
 direct/mDNS/Room routing, durable Activity, additive FFI, Apple app
 selection/publication/Activity UI, and Share Extension multi-item source intake
 complete; physical iPhone→macOS Manifest engine/AppModel acceptance complete;
-Share Extension multi-item physical acceptance, macOS→iPhone, and
-Apple↔Android physical acceptance remain**.
+compatible single-file macOS→iPhone Invite/Relay acceptance complete; Share
+Extension multi-item physical acceptance, macOS→iPhone Manifest/multi-root,
+and Apple↔Android physical acceptance remain**.
 
 The contract now freezes the additive compatibility direction: existing
 `envoix/1` and all single-file APIs remain unchanged, while manifest transfers
@@ -582,7 +595,11 @@ First slices:
    tree, exact bytes, aggregate counts, and per-file SHA-256;
 8. **Completed in source and hosted tests:** enable multi-item Files/Photos
    Share Extension intake using the proven Manifest path; physical
-   Photos/Files multi-select acceptance remains.
+   Photos/Files multi-select acceptance remains;
+9. **Completed for the compatible single-file boundary:** send from the
+   production macOS `AppModel` to the production physical-iPhone `AppModel`
+   through Invite/Relay and verify the exact final file, size, SHA-256, selected
+   path, and canonical Activities. Reverse Manifest/multi-root remains.
 
 Acceptance follows `transfer-manifest-v1.md`: no default overwrite, identical
 files may be skipped by hash, differing files keep both, path traversal is
@@ -869,6 +886,7 @@ the command, source revision, destination, and result is insufficient.
 | 2026-07-15 | `e64b7e8` | Track S explicit source UI | physical iPhone 15 Pro Max | open Send in the default and Chinese/dark layouts; require Photos, Files, and Folder controls plus the fixed Send action to remain reachable | 2 passed, 0 failed | `/private/tmp/envoix-source-picker-ui-refactor-device-20260715.xcresult` |
 | 2026-07-15 | `e64b7e8` | Track S macOS compatibility | macOS arm64 | build the shared macOS app after isolating the iOS-only picker/importer | build passed | `/private/tmp/envoix-source-picker-macos` |
 | 2026-07-15 | `82e9cf7` | Track S Photos-provider production payload | physical iPhone 15 Pro Max / production macOS `AppModel` | stage a valid synthetic PNG from `NSItemProvider` through `PhotoDraftImporter`, send it with production `AppModel.send`, resolve the negotiated single-root Manifest through the same Activity UI helper, and verify final name, bytes, SHA-256, and data path | sender 1/1 and receiver 1/1 passed; Direct selected; `envoix-manual-photo.png`, 68/68 bytes, SHA-256 `431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460`; no personal Photos or pending App Group draft was read or replaced | `/private/tmp/envoix-photo-production-ios-photo20260715c.xcresult`; `/private/tmp/envoix-photo-production-macos-photo20260715c.xcresult` |
+| 2026-07-15 | `a1d0dd5` | D9 reverse Apple production payload | production macOS `AppModel` / physical iPhone 15 Pro Max on Personal Hotspot | start the iPhone production Manifest receiver, hand its Invite once to the macOS hosted sender, force Relay-only for this topology, and require canonical completion plus the exact final file, size, SHA-256, selected path, and Manifest-aware iOS resolver | sender 1/1 and receiver 1/1 passed; Relay selected through `https://envoix.chkxwlyh.us:8444/`; `envoix-manual-macos-to-ios.bin`, 37/37 bytes, SHA-256 `7168fd00a9cc516cb7502c53760d5740f38c0671edc338f32ab6ce606fb32165`; `envoix-ffi` 47/47 passed and no Simulator was launched | `/private/tmp/envoix-macos-to-ios-ios-invite-20260715g.xcresult`; `/private/tmp/envoix-macos-to-ios-macos-invite-20260715g.xcresult` |
 
 ## 11. Definition of done
 
@@ -1084,3 +1102,16 @@ The Apple milestone is complete only when all of the following are true:
   peers with exact bytes/hash over Direct. Manual selection from the real
   Photos/Files/Folder interfaces, manual Photos payload evidence, and
   Files/Folder payload evidence are still required.
+- 2026-07-15: The reverse production single-file gate now passes from the
+  macOS `AppModel` to the physical-iPhone `AppModel`. The first attempt exposed
+  unconditional cleanup of receive-publication staging on sessions that never
+  registered it; cleanup is now scoped to a real publication record. The QR
+  path then exposed that a Manifest transport `Advertised` event updated only
+  internal state, leaving Swift without the Invite; the existing native
+  observer now receives an immediate updated record without an FFI API change.
+  The final paired tests transferred 37/37 bytes over Relay and matched SHA-256
+  `7168fd00a9cc516cb7502c53760d5740f38c0671edc338f32ab6ce606fb32165`.
+  Failed Room/Auto probes on the same Personal Hotspot also established two
+  remaining core tasks: Mac→iPhone mDNS discovery is directionally unreliable,
+  and canonical Invite de-duplication currently loses the per-attempt
+  Auto→Relay path-policy override. Neither is claimed fixed.
