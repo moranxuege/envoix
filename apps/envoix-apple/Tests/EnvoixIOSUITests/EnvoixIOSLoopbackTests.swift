@@ -139,6 +139,45 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
         }
     }
 
+    func testPausedActivityReleasesPresentationSlot() {
+        let viewModel = TransferViewModel()
+        viewModel.bindPresentation(to: "parked-activity")
+
+        viewModel.handleTransferActivity(Self.activity(id: "parked-activity", state: .paused))
+
+        XCTAssertFalse(viewModel.isBusy)
+        XCTAssertTrue(viewModel.activeActivityID.isEmpty)
+        XCTAssertNil(viewModel.transferActivity)
+    }
+
+    func testActiveActivityKeepsPresentationSlot() {
+        let viewModel = TransferViewModel()
+        viewModel.bindPresentation(to: "active-activity")
+
+        viewModel.handleTransferActivity(Self.activity(id: "active-activity", state: .transferring))
+
+        XCTAssertTrue(viewModel.isBusy)
+        XCTAssertEqual(viewModel.activeActivityID, "active-activity")
+        XCTAssertEqual(viewModel.transferActivity?.state, .transferring)
+    }
+
+    func testResumeCapacityExcludesPausedActivitiesButCountsRunningOnes() {
+        var parked = Self.activity(id: "parked", state: .paused)
+        parked.limits.maxParallelTransfers = 1
+        let anotherPaused = Self.activity(id: "another-paused", state: .paused)
+        let running = Self.activity(id: "running", state: .transferring)
+
+        XCTAssertTrue(ActivityExecutionPolicy.canResume(parked, among: [parked, anotherPaused]))
+        XCTAssertFalse(ActivityExecutionPolicy.canResume(parked, among: [parked, running]))
+
+        parked.limits.maxParallelTransfers = 2
+        XCTAssertTrue(ActivityExecutionPolicy.canResume(parked, among: [parked, running]))
+        XCTAssertFalse(ActivityExecutionPolicy.canResume(
+            parked,
+            among: [parked, running, Self.activity(id: "publishing", state: .publishing)]
+        ))
+    }
+
     private static func activity(
         id: String = "activity-test",
         state: FfiTransferActivityState,

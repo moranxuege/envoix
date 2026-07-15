@@ -204,7 +204,9 @@ final class EnvoixIOSAppUITests: XCTestCase {
         XCTAssertFalse(app.buttons["activity_resume_ui-transferring"].exists)
         XCTAssertFalse(app.buttons["activity_delete_ui-transferring"].exists)
 
-        XCTAssertTrue(app.buttons["activity_resume_ui-paused"].exists)
+        let parkedResume = app.buttons["activity_resume_ui-paused"]
+        XCTAssertTrue(parkedResume.exists)
+        XCTAssertFalse(parkedResume.isEnabled)
         XCTAssertTrue(app.buttons["activity_cancel_ui-paused"].exists)
         XCTAssertFalse(app.buttons["activity_pause_ui-paused"].exists)
         XCTAssertFalse(app.buttons["activity_delete_ui-paused"].exists)
@@ -226,12 +228,13 @@ final class EnvoixIOSAppUITests: XCTestCase {
         let details = app.buttons["activity_details_ui-transferring"]
         XCTAssertTrue(details.isHittable)
         details.tap()
-        let developerDetails = app.staticTexts["Developer details"]
-        for _ in 0..<3 where !developerDetails.exists {
+        let developerDetails = app.descendants(matching: .any)["activity_developer_details_ui-transferring"]
+        let maximumDetailScrollAttempts = 6
+        for _ in 0..<maximumDetailScrollAttempts where !developerDetails.exists {
             app.swipeUp()
         }
         XCTAssertTrue(developerDetails.waitForExistence(timeout: 3))
-        XCTAssertTrue(app.staticTexts["Activity ID"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["activity_id_ui-transferring"].exists)
     }
 
     func testCancellingRecoversWhenStateAcknowledgementStalls() throws {

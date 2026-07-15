@@ -720,7 +720,9 @@ struct SendView: View {
     }
 
     private var concurrencyBlocked: Bool {
-        !concurrentTransfers && !viewModel.isBusy && model.receive.isBusy
+        !concurrentTransfers
+            && !viewModel.isBusy
+            && (model.receive.isBusy || model.hasExecutingActivity)
     }
 
     private var invalidSelectionMessage: String {

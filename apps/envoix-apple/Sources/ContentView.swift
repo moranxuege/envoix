@@ -336,6 +336,7 @@ struct ContentView: View {
                 onRemoteDiagnosticReport: model.remoteDiagnosticReport,
                 onAppDiagnosticReport: model.appDiagnosticReport,
                 onPause: model.pauseActivity,
+                onCanResume: model.canResumeActivity,
                 onResume: model.resumeActivity,
                 onCancel: model.cancelActivity,
                 onReplacePublicationTarget: model.replaceReceivePublicationTarget,
@@ -655,6 +656,7 @@ struct ContentView: View {
                 onRemoteDiagnosticReport: model.remoteDiagnosticReport,
                 onAppDiagnosticReport: model.appDiagnosticReport,
                 onPause: model.pauseActivity,
+                onCanResume: model.canResumeActivity,
                 onResume: model.resumeActivity,
                 onCancel: model.cancelActivity,
                 onReplacePublicationTarget: model.replaceReceivePublicationTarget,
@@ -930,6 +932,7 @@ private struct TransferStageView: View {
     let onRemoteDiagnosticReport: (FfiTransferActivityRecord) -> String
     let onAppDiagnosticReport: () -> String
     let onPause: (String) -> Bool
+    let onCanResume: (String) -> Bool
     let onResume: (String) -> Bool
     let onCancel: (String) -> Bool
     let onReplacePublicationTarget: (String, URL, Data?, AnyObject?) -> Bool
@@ -1200,17 +1203,30 @@ private struct TransferStageView: View {
                 }
                 .accessibilityIdentifier("activity_choose_folder_\(record.activityId)")
             } else if canResume(record) {
+                let resumeAvailable = onCanResume(record.activityId)
                 activityAction(
-                    record.state == .publishing || record.state == .failed
+                    !resumeAvailable
+                        ? AppText.value("Waiting", "等待", language: language)
+                        : record.state == .publishing || record.state == .failed
                         ? AppText.value("Retry", "重试", language: language)
                         : AppText.value("Resume", "继续", language: language),
-                    systemImage: record.state == .publishing || record.state == .failed
+                    systemImage: !resumeAvailable
+                        ? "hourglass"
+                        : record.state == .publishing || record.state == .failed
                         ? "arrow.clockwise"
                         : "play.fill",
                     tint: Theme.accentStrong
                 ) {
                     requestCommand(.resume, for: record.activityId)
                 }
+                .disabled(!resumeAvailable)
+                .accessibilityHint(resumeAvailable
+                    ? ""
+                    : AppText.value(
+                        "Resume becomes available when another transfer finishes or pauses.",
+                        "其他任务完成或暂停后即可继续。",
+                        language: language
+                    ))
                 .accessibilityIdentifier("activity_resume_\(record.activityId)")
             } else if canPause(record) {
                 activityAction(
@@ -1562,7 +1578,9 @@ private struct TransferStageView: View {
                     Text(AppText.value("Developer details", "开发者详情", language: language))
                         .font(.callout.weight(.semibold))
                         .foregroundStyle(Theme.text)
+                        .accessibilityIdentifier("activity_developer_details_\(record.activityId)")
                     detailRow("Activity ID", record.activityId)
+                        .accessibilityIdentifier("activity_id_\(record.activityId)")
                     if !record.attemptId.isEmpty {
                         detailRow("Attempt ID", record.attemptId)
                     }

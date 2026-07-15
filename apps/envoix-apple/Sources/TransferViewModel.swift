@@ -60,6 +60,29 @@ enum ActivityProjectionPolicy {
     }
 }
 
+enum ActivityExecutionPolicy {
+    static func occupiesExecutionSlot(_ state: FfiTransferActivityState) -> Bool {
+        switch state {
+        case .paused, .completed, .failed, .canceled:
+            return false
+        case .queued, .binding, .waitingForPeer, .pairing, .connecting, .transferring,
+                .verifying, .publishing, .unconfirmed, .unknown:
+            return true
+        }
+    }
+
+    static func canResume(
+        _ record: FfiTransferActivityRecord,
+        among records: [FfiTransferActivityRecord]
+    ) -> Bool {
+        let limit = max(1, Int(record.limits.maxParallelTransfers))
+        let occupied = records.lazy.filter {
+            $0.activityId != record.activityId && occupiesExecutionSlot($0.state)
+        }.count
+        return occupied < limit
+    }
+}
+
 private struct ReceivePublication {
     var destinationDirectory: URL
     var resourceAccess: AnyObject?
@@ -228,6 +251,7 @@ final class AppModel: ObservableObject {
 
     @discardableResult
     func resumeActivity(_ activityID: String) -> Bool {
+        guard canResumeActivity(activityID) else { return false }
         if retryReceivePublication(activityID) {
             return true
         }
@@ -238,6 +262,17 @@ final class AppModel: ObservableObject {
             return true
         }
         return false
+    }
+
+    func canResumeActivity(_ activityID: String) -> Bool {
+        guard let record = activities.first(where: { $0.activityId == activityID }) else {
+            return false
+        }
+        return ActivityExecutionPolicy.canResume(record, among: activities)
+    }
+
+    var hasExecutingActivity: Bool {
+        activities.contains { ActivityExecutionPolicy.occupiesExecutionSlot($0.state) }
     }
 
     @discardableResult
@@ -932,7 +967,7 @@ final class AppModel: ObservableObject {
         )
     }
 
-    private func snapshotDiagnostics(from viewModel: TransferViewModel, activityID: String) {
+    func snapshotDiagnostics(from viewModel: TransferViewModel, activityID: String) {
         guard !activityID.isEmpty else { return }
         transferLogByActivityID[activityID] = viewModel.eventLog
         transferEventLinesByActivityID[activityID] = viewModel.transferEvents.map(TransferDiagnostics.transferEventLine)
@@ -1533,7 +1568,7 @@ final class TransferViewModel: ObservableObject {
         reset()
         session = nil
         manifestSession = nil
-        currentActivityID = request.activityId
+        bindPresentation(to: request.activityId)
         displayLanguage = settings.language
         operationID = UUID()
         fallbackPhase = .waiting
@@ -1552,7 +1587,7 @@ final class TransferViewModel: ObservableObject {
         reset()
         session = nil
         manifestSession = nil
-        currentActivityID = request.activityId
+        bindPresentation(to: request.activityId)
         displayLanguage = settings.language
         operationID = UUID()
         let operationID = operationID
@@ -1720,6 +1755,7 @@ final class TransferViewModel: ObservableObject {
             suppressNextFailure = false
         }
         syncPhase(with: record)
+        releasePresentationSlotIfPaused(record)
     }
 
     func handleManifestActivity(_ record: FfiManifestActivityRecord) {
@@ -1847,6 +1883,19 @@ final class TransferViewModel: ObservableObject {
         currentActivityID = ""
         rate.reset()
         fallbackPhase = .idle
+    }
+
+    func bindPresentation(to activityID: String) {
+        currentActivityID = activityID
+    }
+
+    private func releasePresentationSlotIfPaused(_ record: FfiTransferActivityRecord) {
+        guard record.state == .paused, record.activityId == currentActivityID else { return }
+        appModel?.snapshotDiagnostics(from: self, activityID: record.activityId)
+        operationID = UUID()
+        session = nil
+        manifestSession = nil
+        reset()
     }
 
     private func syncPhase(with record: FfiTransferActivityRecord) {

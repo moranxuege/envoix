@@ -618,7 +618,9 @@ struct ReceiveView: View {
     }
 
     private var concurrencyBlocked: Bool {
-        !concurrentTransfers && !viewModel.isBusy && model.send.isBusy
+        !concurrentTransfers
+            && !viewModel.isBusy
+            && (model.send.isBusy || model.hasExecutingActivity)
     }
 
     private var canStartAnotherReceive: Bool {
@@ -628,12 +630,7 @@ struct ReceiveView: View {
     private var activeReceiveCount: Int {
         model.activities.filter { record in
             guard record.direction == .receive else { return false }
-            switch record.state {
-            case .completed, .failed, .canceled: return false
-            case .queued, .binding, .waitingForPeer, .pairing, .connecting,
-                    .transferring, .verifying, .publishing, .unconfirmed, .paused, .unknown:
-                return true
-            }
+            return ActivityExecutionPolicy.occupiesExecutionSlot(record.state)
         }.count
     }
 
