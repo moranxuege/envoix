@@ -345,6 +345,22 @@ Direct/Relay path. This proves the system picker and production app path for the
 fixture directory; arbitrary iCloud or third-party File Provider behavior still
 needs separate acceptance.
 
+The physical Files-picker payload gate uses the same receiver-first order.
+Start
+`EnvoixMacOSHostedTests.testReceiveIosFilePickerToMacOSAppManifestRoom`, wait
+for `file-picker-manifest-receiver-ready`, and then run
+`EnvoixIOSAppUITests.testFilePickerSendsTwoFilesToMacOSApp` on the physical
+iPhone with `ENVOIX_CROSS_DEVICE_TESTING` enabled. The iPhone creates two
+isolated regular files, opens the real system Files picker at the app's
+Documents directory, selects both files, taps **Open/打开**, enters the Room
+code through the production Send UI, and removes the fixture afterward. The
+macOS production `AppModel` verifies 2 roots, 2 files, 0 directories, both
+final names, aggregate bytes, both exact payloads and SHA-256 values, the final
+destination, and the selected Direct/Relay path. This proves the main-app Files
+picker and Manifest transfer path for app-owned local files; Share Extension
+multi-item host behavior and arbitrary iCloud or third-party File Providers
+remain separate gates.
+
 The physical Manifest gate uses the same two-peer order. Set the same run ID
 and Room code in both shells, start
 `EnvoixMacOSHostedTests.testReceiveIosToMacOSAppManifestRoom`, wait for its
