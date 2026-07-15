@@ -297,6 +297,24 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: sizeMismatchSource), payload)
     }
 
+    func testPublicationUsesCopyOnWriteOnSimulatorAPFS() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("envoix-clone-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: root) }
+        let source = root.appendingPathComponent("source.bin")
+        let destination = root.appendingPathComponent("destination.bin")
+        let payload = Data(repeating: 0x5a, count: 1_048_576)
+        try payload.write(to: source)
+
+        let materialization = try materializePublishedFile(from: source, to: destination)
+
+        XCTAssertEqual(materialization, .clone)
+        XCTAssertEqual(try Data(contentsOf: source), payload)
+        XCTAssertEqual(try Data(contentsOf: destination), payload)
+    }
+
     func testCrossDeviceReceiveAndroidToIosRoom() async throws {
         try requireCrossDeviceTesting()
 #if ENVOIX_CROSS_DEVICE_TESTING

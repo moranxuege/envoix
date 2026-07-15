@@ -1,4 +1,5 @@
 import SwiftUI
+import Darwin
 #if os(macOS)
 import AppKit
 #elseif os(iOS)
@@ -545,9 +546,36 @@ func availableCompletedManifestURL(record: FfiManifestActivityRecord) -> URL? {
     }
 }
 
+enum PublicationMaterialization: Equatable {
+    case clone
+    case copy
+}
+
+/// Uses same-volume copy-on-write when the destination supports it. A local
+/// APFS publication then allocates metadata instead of rewriting the full
+/// payload; FileProvider and cross-volume targets transparently fall back to a
+/// normal copy.
+@discardableResult
+func materializePublishedFile(
+    from source: URL,
+    to destination: URL,
+    fileManager: FileManager = .default
+) throws -> PublicationMaterialization {
+    let cloneResult = source.path.withCString { sourcePath in
+        destination.path.withCString { destinationPath in
+            clonefile(sourcePath, destinationPath, 0)
+        }
+    }
+    if cloneResult == 0 {
+        return .clone
+    }
+    try fileManager.copyItem(at: source, to: destination)
+    return .copy
+}
+
 /// Publishes one already-verified staging file into a user-selected Files
-/// directory. The destination becomes visible only after the full copy has
-/// completed and its size has been checked.
+/// directory. The destination becomes visible only after clone/copy completion
+/// and a size check. The verified source remains available for retries.
 func publishReceivedFile(
     from source: URL,
     to destinationDirectory: URL,
@@ -570,7 +598,7 @@ func publishReceivedFile(
         ".envoix-publish-\(UUID().uuidString).part"
     )
     defer { try? fileManager.removeItem(at: temporaryURL) }
-    try fileManager.copyItem(at: source, to: temporaryURL)
+    try materializePublishedFile(from: source, to: temporaryURL, fileManager: fileManager)
     guard availableCompletedFileURL(path: temporaryURL.path, expectedBytes: expectedBytes) != nil else {
         throw RuntimeSettingsError("The copied file did not match the verified size.")
     }
