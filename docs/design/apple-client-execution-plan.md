@@ -639,6 +639,12 @@ Publication and disk-I/O boundary:
   and FileProvider destinations fall back to a full copy;
 - top-level staged directories still use a recursive copy during publication.
 
+Known session boundary: preserving paused/resumable cache does not yet free the
+single active Send/Receive setup slot. `TransferViewModel.isBusy` deliberately
+still includes `Paused`; a separate queue/parking slice must let a user detach a
+paused Activity and start another transfer before the product can claim that a
+long-running resumable transfer never blocks a new same-direction transfer.
+
 #### Track W — Cross-platform Wi-Fi Aware vertical slice
 
 Status: **platform/provider contract drafted; capability, pairing, and QUIC
