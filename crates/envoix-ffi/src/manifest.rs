@@ -22,12 +22,12 @@ use tokio::sync::mpsc;
 use super::{
     EXTERNAL_RECORD_ID_KEY, EnvoixError, EnvoixRuntimeSettings, FfiNativePublicationTarget,
     FfiTransferActivityActions, FfiTransferActivityRecord, FfiTransferActivityState,
-    FfiTransferDirection, FfiTransferFailure, FfiTransferRequest, NATIVE_PROGRESS_INTERVAL_MS,
-    NATIVE_PUBLICATION_EXTRAS_KEY, PersistedNativePublication, apply_canonical_snapshot,
-    durable_runtime, ffi_direction, native_publication_metadata_from_extras, next_activity_id,
-    normalize_transfer_limits, now_ms, op_err, peer_sources_for_request, required_path,
-    required_value, stable_record_id, to_ffi_event, transfer_activity_actions,
-    transfer_options_for_request, validate_direction_mode,
+    FfiTransferDirection, FfiTransferEventKind, FfiTransferFailure, FfiTransferRequest,
+    NATIVE_PROGRESS_INTERVAL_MS, NATIVE_PUBLICATION_EXTRAS_KEY, PersistedNativePublication,
+    apply_canonical_snapshot, durable_runtime, ffi_direction,
+    native_publication_metadata_from_extras, next_activity_id, normalize_transfer_limits, now_ms,
+    op_err, peer_sources_for_request, required_path, required_value, stable_record_id,
+    to_ffi_event, transfer_activity_actions, transfer_options_for_request, validate_direction_mode,
 };
 
 /// Portable entry type in a prepared Manifest.
@@ -663,8 +663,8 @@ async fn drive_manifest_notices(
     while let Some(notice) = notices.recv().await {
         match notice {
             ManifestSessionNotice::Event(event) => {
-                if observe_manifest_transport_event(&activity, event) {
-                    observer.on_manifest_activity(activity.lock().unwrap().clone());
+                if let Some(record) = observe_manifest_transport_event(&activity, event) {
+                    observer.on_manifest_activity(record);
                 }
             }
             ManifestSessionNotice::Snapshot(snapshot) => {
@@ -701,15 +701,37 @@ async fn drive_manifest_notices(
     }
 }
 
+/// Projects a raw transport landmark for a native observer without changing
+/// the canonical durable Manifest state. The durable state intentionally
+/// compresses pairing and dialing into `Connecting`; the transient projection
+/// lets native diagnostics retain the boundary between them.
 fn observe_manifest_transport_event(
     activity: &Arc<Mutex<FfiManifestActivityRecord>>,
     event: StampedEvent,
-) -> bool {
+) -> Option<FfiManifestActivityRecord> {
     let mut activity = activity.lock().unwrap();
     let ffi_event = to_ffi_event(&event, &activity.activity.activity_id);
-    let invite_ready = !ffi_event.invite.is_empty();
     activity.activity.apply_observation(&ffi_event);
-    invite_ready
+    let is_transport_landmark = matches!(
+        ffi_event.kind,
+        FfiTransferEventKind::Binding
+            | FfiTransferEventKind::Advertised
+            | FfiTransferEventKind::Pairing
+            | FfiTransferEventKind::Connecting
+            | FfiTransferEventKind::Connected
+            | FfiTransferEventKind::PathChanged
+    );
+    if !is_transport_landmark {
+        return None;
+    }
+
+    let mut landmark = (*activity).clone();
+    landmark.activity.apply_event(&ffi_event);
+    if let envoix_client::api::TransferEvent::Pairing { step } = event.event {
+        landmark.activity.diagnostic_message =
+            format!("pairing: {}", super::pairing_step_label(step));
+    }
+    Some(landmark)
 }
 
 fn is_manifest_progress_only(previous: &ManifestActivity, current: &ManifestActivity) -> bool {
@@ -1100,8 +1122,55 @@ mod tests {
             },
         };
 
-        assert!(observe_manifest_transport_event(&activity, event));
+        let observed = observe_manifest_transport_event(&activity, event).unwrap();
         assert_eq!(activity.lock().unwrap().activity.invite, invite);
+        assert_eq!(
+            observed.activity.state,
+            FfiTransferActivityState::WaitingForPeer
+        );
+    }
+
+    #[test]
+    fn pairing_landmark_is_visible_without_rewriting_canonical_manifest_state() {
+        let mut request =
+            FfiTransferRequest::send("/tmp/photo.jpg".into(), super::super::FfiTransferMode::Room);
+        request.activity_id = "manifest-pairing".into();
+        let activity = Arc::new(Mutex::new(FfiManifestActivityRecord {
+            activity: FfiTransferActivityRecord::from_request(&request, 1),
+            manifest_id: String::new(),
+            root_count: 0,
+            file_count: 0,
+            directory_count: 0,
+            completed_files: 0,
+            entries: Vec::new(),
+            current_entry: None,
+            entry_results: Vec::new(),
+        }));
+        let event = StampedEvent {
+            ts_ms: 2,
+            event: envoix_client::api::TransferEvent::Pairing {
+                step: envoix_client::api::PairingStep::Matched,
+            },
+        };
+
+        let observed = observe_manifest_transport_event(&activity, event).unwrap();
+        assert_eq!(observed.activity.state, FfiTransferActivityState::Pairing);
+        assert_eq!(
+            observed.activity.diagnostic_message,
+            "pairing: peer matched"
+        );
+        assert_eq!(
+            activity.lock().unwrap().activity.state,
+            FfiTransferActivityState::Queued
+        );
+        assert!(
+            activity
+                .lock()
+                .unwrap()
+                .activity
+                .diagnostic_message
+                .is_empty()
+        );
     }
 
     #[test]

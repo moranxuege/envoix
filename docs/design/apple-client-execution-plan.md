@@ -225,9 +225,10 @@ kept in reviewable staged commits on the current feature branch.
   interval before `started_at`, followed by immediate payload completion. The
   report did not include Manifest phase history because that observer exposes
   aggregate Activity snapshots rather than ordinary transfer events. Apple
-  diagnostics now retain the canonical Activity timeline for that flow; a
-  fresh physical run must identify whether the wait is in pairing or connecting
-  before any transport-policy change is made.
+  diagnostics now retain both the canonical Activity timeline and ephemeral
+  `binding`/`pairing`/`connecting`/path landmarks without changing the durable
+  state or native observer interface; a fresh physical run must identify where
+  the wait occurs before any transport-policy change is made.
 - The reverse compatible single-file gate is also green: the production macOS
   `AppModel` sent 37 bytes through an Invite/Relay path to the production iPhone
   `AppModel`, and both canonical Activities completed with the exact

@@ -1093,7 +1093,7 @@ final class AppModel: ObservableObject {
         case .waitingForPeer:
             message = "waiting for peer"
         case .pairing:
-            message = "pairing"
+            message = record.diagnosticMessage.isEmpty ? "pairing" : record.diagnosticMessage
         case .connecting:
             message = record.dataPathKind == .none ? "connecting" : "connected · \(record.dataPathKind) \(record.dataPathDetail)"
         case .transferring:
