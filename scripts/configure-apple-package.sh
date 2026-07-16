@@ -9,7 +9,7 @@ if [[ ! -f "$package_file" ]]; then
   echo "error: generated Apple package not found at $package_file" >&2
   exit 2
 fi
-if rg -q 'linkedFramework\("SystemConfiguration"\)' "$package_file"; then
+if grep -Fq 'linkedFramework("SystemConfiguration")' "$package_file"; then
   exit 0
 fi
 
@@ -33,7 +33,7 @@ awk '
 ' "$package_file" > "$patched_file"
 mv "$patched_file" "$package_file"
 
-if ! rg -q 'linkedFramework\("SystemConfiguration"\)' "$package_file"; then
+if ! grep -Fq 'linkedFramework("SystemConfiguration")' "$package_file"; then
   echo "error: failed to configure Apple package linker settings" >&2
   exit 1
 fi
