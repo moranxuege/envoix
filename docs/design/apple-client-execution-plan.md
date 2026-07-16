@@ -1,6 +1,6 @@
 # Apple client execution plan
 
-Status: **In execution — bidirectional Apple Manifest, multi-Photos provider, real iOS Files/Folder/Direct Open In payload, Files and Photos Share hosts, and symmetric Room QR intake gates green; external-provider acceptance and macOS Receive UI publication remain pending**
+Status: **In execution — bidirectional Apple Manifest, multi-Photos provider, real iOS Files/Folder/Direct Open In payload, Files and Photos Share hosts, and symmetric Room QR intake gates green; external-provider acceptance, a manual Room-delay/host-lifetime diagnosis, and macOS Receive UI publication remain pending**
 
 Owner: Apple client workstream
 
@@ -13,6 +13,9 @@ client and its cross-platform dependencies. GitHub issues and local design
 drafts remain canonical for subject-specific contracts; this document owns
 their order, dependency gates, acceptance evidence, workstream ownership, and
 decision log.
+
+The current paused diagnostic state is captured in
+[`../handoffs/2026-07-16-apple-room-diagnostics.md`](../handoffs/2026-07-16-apple-room-diagnostics.md).
 
 Detailed specifications are routed as follows:
 
@@ -65,8 +68,9 @@ physical-device UI baseline is green. Wave 0 has stable commits; later work is
 kept in reviewable staged commits on the current feature branch.
 
 - Branch: `feat/transfer-state-foundation`. The latest committed checkpoint is
-  `4b7da35`; the build-cache guard, symmetric Room QR intake, pairing-code
-  validation, and Share payload test entry are retained as independent stages.
+  `4fa0efb` (`fix(ffi): expose manifest transport landmarks`); the build-cache
+  guard, symmetric Room QR intake, pairing-code validation, and Share payload
+  test entry are retained as independent stages.
 - Safety checkpoint `ceff278` (`feat: checkpoint canonical mobile transfer
   lifecycle`) contains the entire previously dirty tree and was pushed to
   `origin/feat/transfer-state-foundation` before any merge.
@@ -229,6 +233,13 @@ kept in reviewable staged commits on the current feature branch.
   `binding`/`pairing`/`connecting`/path landmarks without changing the durable
   state or native observer interface; a fresh physical run must identify where
   the wait occurs before any transport-policy change is made.
+- A later manual diagnostic run entered the same Room successfully and selected
+  a direct IPv6 path, but sent zero bytes before the iPhone reported
+  `connection lost`. The macOS XCTest receiver had exited first with an
+  unresolved `InvalidTransition ... removedFromContainer` test-host failure.
+  This does **not** yet prove a production Room conflict or justify changing
+  relay policy: the test host lifetime and its fixed-code environment boundary
+  must be repaired before the fresh transport landmarks can be interpreted.
 - The reverse compatible single-file gate is also green: the production macOS
   `AppModel` sent 37 bytes through an Invite/Relay path to the production iPhone
   `AppModel`, and both canonical Activities completed with the exact
