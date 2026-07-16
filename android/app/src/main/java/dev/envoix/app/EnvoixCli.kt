@@ -326,12 +326,22 @@ object UniffiTransferRunner {
     private fun activityId(id: Long): String = "android-$id"
 
     fun parseActivityId(activityId: String): Long? =
-        activityId.removePrefix("android-").takeIf { activityId.startsWith("android-") }?.toLongOrNull()
+        activityId
+            .removePrefix("android-")
+            .takeIf { activityId.startsWith("android-") }
+            ?.toLongOrNull()
 
     private fun validMailboxKey(key: String): Boolean = key.length in 1..128 && key.all { it in '0'..'9' || it in 'a'..'f' }
 
     private fun receiptEndpoint(server: String?): String? {
-        val candidate = server?.trim().orEmpty().ifEmpty { SettingsStore.settings.value.logServer.trim() }
+        val candidate =
+            server
+                ?.trim()
+                .orEmpty()
+                .ifEmpty {
+                    SettingsStore.settings.value.logServer
+                        .trim()
+                }
         val parsed = runCatching { URL(candidate) }.getOrNull() ?: return null
         if (parsed.protocol != "http" && parsed.protocol != "https") return null
         if (parsed.host.isNullOrBlank()) return null

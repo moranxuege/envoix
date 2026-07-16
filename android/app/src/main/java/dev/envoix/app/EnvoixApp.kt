@@ -19,7 +19,8 @@ class EnvoixApp : Application() {
 
         val nextId =
             runCatching {
-                UniffiTransferRunner.records()
+                UniffiTransferRunner
+                    .records()
                     .mapNotNull { UniffiTransferRunner.parseActivityId(it.activityId) }
                     .maxOrNull()
                     ?.plus(1)

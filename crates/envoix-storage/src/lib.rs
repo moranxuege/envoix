@@ -932,6 +932,7 @@ mod tests {
             next_chunk_index: 1,
             hash_bytes: 4,
             hash_checkpoint: None,
+            target_file_name: None,
         };
         let active = TransferResumeState {
             transfer_id: TransferId::new("active-transfer"),

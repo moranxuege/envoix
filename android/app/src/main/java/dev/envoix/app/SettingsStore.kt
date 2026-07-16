@@ -216,9 +216,7 @@ object SettingsStore {
             .absolutePath
     }
 
-    private fun tomlString(value: String): String =
-        "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+    private fun tomlString(value: String): String = "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
-    private fun tomlArray(values: List<String>): String =
-        values.joinToString(prefix = "[", postfix = "]") { tomlString(it) }
+    private fun tomlArray(values: List<String>): String = values.joinToString(prefix = "[", postfix = "]") { tomlString(it) }
 }

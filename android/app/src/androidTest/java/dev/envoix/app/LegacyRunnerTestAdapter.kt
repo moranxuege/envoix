@@ -94,6 +94,7 @@ fun UniffiTransferRunner.run(
                 internetAvailable = internetAvailable,
                 useRoom = useRoom,
                 useMdns = useMdns,
+                receiptServer = Endpoints.LOG_SERVER,
                 pathPolicy = pathPolicy,
                 publicationRequired = publicationRequired,
                 onUpdate = { update ->
