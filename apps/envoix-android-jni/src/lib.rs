@@ -995,6 +995,15 @@ struct AndroidPlatformExtras {
     qr: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     saved_uri: Option<String>,
+    /// The name a received file was actually published under (may be a
+    /// collision-bumped "name (1)"). Durable so it survives a restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    published_name: Option<String>,
+    /// The publication duty's last outcome, currently only `"failed"` — a
+    /// received file whose publish to public storage did not complete, so the
+    /// UI can surface it and a retry can re-drive. Absent = not-yet / done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    publish: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source_uri: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

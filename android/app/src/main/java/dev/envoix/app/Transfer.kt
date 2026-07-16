@@ -59,6 +59,11 @@ data class Transfer(
     /** The name the received file was actually published under — may differ from
      *  [fileName] (the transfer identity) after a collision bump, e.g. "photo (1).jpg". */
     val publishedName: String? = null,
+    /** A received file that finished transferring but could not be published to
+     *  public storage (a non-collision publish failure). The bytes are safe in
+     *  staging and a retry re-drives; surfaced so the user isn't left thinking it
+     *  silently vanished. */
+    val publishFailed: Boolean = false,
     /** For an initiated session, the invite payload to show as a QR while waiting
      *  for a peer to pair (null when we joined someone else's code). */
     val qrPayload: String? = null,

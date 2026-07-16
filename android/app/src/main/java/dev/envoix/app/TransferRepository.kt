@@ -47,6 +47,8 @@ object TransferRepository {
         room: String,
         qrPayload: String? = null,
         savedUri: String? = null,
+        publishedName: String? = null,
+        publishFailed: Boolean = false,
     ): Boolean {
         if (_transfers.value.any { it.id == id }) return false
         nextId = maxOf(nextId, id + 1)
@@ -57,6 +59,8 @@ object TransferRepository {
                 room = room,
                 qrPayload = qrPayload,
                 savedUri = savedUri,
+                publishedName = publishedName,
+                publishFailed = publishFailed,
             )
         return true
     }

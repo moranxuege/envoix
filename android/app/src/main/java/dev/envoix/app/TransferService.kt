@@ -95,6 +95,15 @@ class TransferService : Service() {
      *  survives). Parented to the service scope - teardown cancels all. */
     private val transferScopes = HashMap<Long, CoroutineScope>()
 
+    /** Ids with an in-flight publish-retry loop, so a re-rendered `completed`
+     *  snapshot doesn't spawn a second one. */
+    private val publishing = java.util.Collections.synchronizedSet(HashSet<Long>())
+
+    /** Backoff for re-attempting a stuck publish in-session (a non-collision
+     *  failure — collisions self-resolve in `commit`). After these, the card is
+     *  marked failed and the bytes wait in staging for a restart re-drive. */
+    private val publishRetryBackoffMs = longArrayOf(2_000, 5_000, 15_000)
+
     @Synchronized
     private fun transferScope(id: Long): CoroutineScope =
         transferScopes.getOrPut(id) {
@@ -434,6 +443,8 @@ class TransferService : Service() {
                     code,
                     qrPayload = c.optString("qr").ifEmpty { null },
                     savedUri = c.optString("saved_uri").ifEmpty { null },
+                    publishedName = c.optString("published_name").ifEmpty { null },
+                    publishFailed = c.optString("publish") == "failed",
                 )
             ) {
                 continue
@@ -672,7 +683,11 @@ class TransferService : Service() {
             else -> throttledNotification()
         }
         if (state == "completed" && spec.dir() == Direction.Receive) {
+            // Synchronous first attempt (before the foreground may detach), then a
+            // bounded async retry if anything didn't land — real forward progress
+            // instead of waiting for a restart.
             sweepStaging(spec.path, attributeTo = id)
+            scheduleRepublishIfNeeded(id, spec.path)
         }
         // Foreground reconciles against the whole card set: when nothing is
         // active, post the one final summary frame and detach - including for
@@ -791,6 +806,50 @@ class TransferService : Service() {
             File(outputDir)
                 .listFiles { f -> f.isFile && !f.name.startsWith(".") } ?: return
         for (src in finals) publishOne(src, attributeTo)
+    }
+
+    /** After the synchronous first sweep, if a completed receive still has staged
+     *  files (a non-collision publish failure — collisions self-resolve in
+     *  `commit`), retry with backoff so it doesn't wait for a restart; mark the
+     *  card failed after exhausting. One retry loop per id. */
+    private fun scheduleRepublishIfNeeded(
+        id: Long,
+        dir: String,
+    ) {
+        if (!hasUnpublished(dir)) return
+        if (!publishing.add(id)) return
+        transferScope(id).launch(Dispatchers.IO) {
+            try {
+                for (delayMs in publishRetryBackoffMs) {
+                    kotlinx.coroutines.delay(delayMs)
+                    sweepStaging(dir, attributeTo = id)
+                    if (!hasUnpublished(dir)) return@launch
+                }
+                markPublishFailed(id)
+            } finally {
+                publishing.remove(id)
+            }
+        }
+    }
+
+    private fun hasUnpublished(dir: String): Boolean =
+        File(dir).listFiles { f -> f.isFile && !f.name.startsWith(".") }?.isNotEmpty() ?: false
+
+    /** Terminal (for now) publish failure: durable, and surfaced on the card so the
+     *  user isn't left thinking the file silently vanished. A restart re-drives the
+     *  publish (the bytes stay in staging); a later success clears it. */
+    private fun markPublishFailed(id: Long) {
+        TransferRepository.update(id) {
+            if (it.publishFailed) {
+                it
+            } else {
+                it.copy(
+                    publishFailed = true,
+                    log = addLog(it.log, "couldn't save to Downloads — kept, will retry"),
+                )
+            }
+        }
+        syncExtras(id)
     }
 
     /** The publish sidecar journal for one staged file: `.envoix-publish.<name>.json`
@@ -938,6 +997,7 @@ class TransferService : Service() {
                     fileName = it.fileName ?: expectedSourceName,
                     savedUri = uri,
                     publishedName = publishedName,
+                    publishFailed = false,
                 )
             } else {
                 it
@@ -953,6 +1013,8 @@ class TransferService : Service() {
         val extras = org.json.JSONObject()
         t.qrPayload?.let { extras.put("qr", it) }
         t.savedUri?.let { extras.put("saved_uri", it) }
+        t.publishedName?.let { extras.put("published_name", it) }
+        if (t.publishFailed) extras.put("publish", "failed")
         val err = Native.setSessionExtras(id, extras.toString())
         if (err.isNotEmpty()) LogStore.append("app: $err (id=$id)")
     }
