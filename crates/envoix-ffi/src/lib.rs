@@ -4647,6 +4647,13 @@ mod tests {
     }
 
     #[test]
+    fn pairing_invite_rejects_non_envoix_qr_payloads() {
+        let err =
+            parse_pairing_invite("https://example.com/not-an-envoix-code".to_string()).unwrap_err();
+        assert!(err.to_string().contains("pairing code must have the form"));
+    }
+
+    #[test]
     fn native_progress_is_rate_limited_but_final_progress_is_delivered() {
         let mut last_progress_ms = 0;
         let mut progress = FfiTransferEvent::empty("activity-1", 1_000);

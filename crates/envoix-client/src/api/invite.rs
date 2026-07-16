@@ -15,6 +15,9 @@ use super::{PeerSource, TransferError};
 const SCHEME: &str = "envoix://pair/";
 /// Word count in a generated code (`<digits>-<word>-<word>`).
 const CODE_WORDS: usize = 2;
+/// Older clients used shorter numeric nameplates; current clients use six.
+const MIN_NAMEPLATE_DIGITS: usize = 1;
+const MAX_NAMEPLATE_DIGITS: usize = 6;
 
 /// The role the invite's creator will take; a peer that scans/opens it should
 /// take the [`opposite`](Role::opposite). A hint only - the transfer still runs
@@ -175,6 +178,11 @@ impl Invite {
         if code.is_empty() {
             return Err(TransferError::input("empty pairing code"));
         }
+        if !is_pairing_code(code) {
+            return Err(TransferError::input(
+                "pairing code must have the form <digits>-<word>-<word>",
+            ));
+        }
         Ok(Self {
             code: code.to_string(),
             broker: None,
@@ -182,6 +190,28 @@ impl Invite {
             role: None,
         })
     }
+}
+
+fn is_pairing_code(code: &str) -> bool {
+    let mut parts = code.split('-');
+    let Some(nameplate) = parts.next() else {
+        return false;
+    };
+    let Some(first_word) = parts.next() else {
+        return false;
+    };
+    let Some(second_word) = parts.next() else {
+        return false;
+    };
+    if parts.next().is_some() {
+        return false;
+    }
+
+    (MIN_NAMEPLATE_DIGITS..=MAX_NAMEPLATE_DIGITS).contains(&nameplate.len())
+        && nameplate.bytes().all(|byte| byte.is_ascii_digit())
+        && [first_word, second_word]
+            .into_iter()
+            .all(|word| !word.is_empty() && word.bytes().all(|byte| byte.is_ascii_alphabetic()))
 }
 
 /// Percent-encode a query-parameter value, keeping only RFC 3986 unreserved bytes.
@@ -287,6 +317,30 @@ mod tests {
     fn empty_code_is_rejected() {
         assert!(Invite::parse("").is_err());
         assert!(Invite::parse("envoix://pair/").is_err());
+    }
+
+    #[test]
+    fn malformed_bare_codes_are_rejected() {
+        for input in [
+            "https://example.com/not-a-code",
+            "amber-comet",
+            "room-amber-comet",
+            "123456-amber",
+            "123456-amber-comet-extra",
+            "123456-amber-comet!",
+            "1234567-amber-comet",
+        ] {
+            assert!(
+                Invite::parse(input).is_err(),
+                "accepted malformed code: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_and_current_nameplate_lengths_are_accepted() {
+        assert!(Invite::parse("1234-amber-comet").is_ok());
+        assert!(Invite::parse("123456-amber-comet").is_ok());
     }
 
     #[test]
