@@ -546,8 +546,8 @@ struct SendView: View {
                     .font(.title3.weight(.semibold))
                 Text(title)
                     .font(.subheadline.weight(.semibold))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .foregroundStyle(Theme.accentStrong)
             .frame(maxWidth: .infinity, minHeight: 72)

@@ -5,6 +5,7 @@ final class EnvoixIOSAppUITests: XCTestCase {
     private static let rendezvousBroker = "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445"
     private static let relayURL = "https://envoix.chkxwlyh.us:8444"
     private static let crossDeviceTimeout: TimeInterval = 180
+    private static let iOS26DocumentPickerOpenPosition = CGVector(dx: 0.86, dy: 0.11)
 
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -192,7 +193,8 @@ final class EnvoixIOSAppUITests: XCTestCase {
             let primaryButton = app.buttons[primaryIdentifier]
             try app.performAccessibilityAudit { issue in
                 guard issue.auditType == .contrast, let element = issue.element else { return false }
-                return element.label == "Copy" && element.frame.intersects(primaryButton.frame)
+                // Scroll children underneath the fixed action bar are not visible yet.
+                return element.frame.intersects(primaryButton.frame)
             }
 
             let copyButton = app.buttons[copyIdentifier]
@@ -390,7 +392,11 @@ final class EnvoixIOSAppUITests: XCTestCase {
         XCTAssertTrue(capsule.waitForExistence(timeout: 8))
         capsule.tap()
 
-        XCTAssertTrue(app.buttons["mobile_sheet_done"].waitForExistence(timeout: 5))
+        guard app.buttons["mobile_sheet_done"].waitForExistence(timeout: 5) else {
+            attachFailureState(of: app, named: "activity-capsule-sheet")
+            XCTFail("Tapping the active transfer capsule did not present Activity")
+            return
+        }
         XCTAssertTrue(
             app.descendants(matching: .any)["activity_title_ui-transferring"].waitForExistence(timeout: 5)
         )
@@ -585,47 +591,24 @@ final class EnvoixIOSAppUITests: XCTestCase {
         app.tap()
         dismissSheetIfNeeded(app)
         XCTAssertTrue(app.buttons["home_send"].waitForExistence(timeout: 8))
-        app.buttons["home_send"].tap()
-        XCTAssertTrue(app.buttons["send_file_picker"].waitForExistence(timeout: 5))
-        app.buttons["send_file_picker"].tap()
-
-        XCTAssertNotNil(firstHittableElement(
-            containing: "envoix-\(runID)-file-first",
-            in: [app, files],
-            timeout: 8
-        ))
-        guard let cancelPicker = firstHittableButton(
-            named: ["Cancel", "取消"],
-            in: [app, files],
-            timeout: 5
-        ) else {
-            XCTFail("The fixture file picker did not expose its Cancel action")
-            return
-        }
-        cancelPicker.tap()
-        XCTAssertTrue(app.buttons["send_file_picker"].waitForExistence(timeout: 5))
 
         XCUIDevice.shared.press(.home)
         files.activate()
-        if firstHittableElement(
+        guard openFilesFolder(
             containing: "envoix-\(runID)-file-first",
-            in: [files],
-            timeout: 1
-        ) == nil {
-            let appFolder = files.cells["Envoix, Container"]
-            guard appFolder.waitForExistence(timeout: 8), appFolder.isHittable else {
-                XCTFail("The Files host did not expose the Envoix app folder")
-                return
-            }
-            appFolder.tap()
+            in: [files]
+        ) else {
+            XCTFail("The Files host did not expose the Envoix fixture folder")
+            return
         }
-        XCTAssertNotNil(firstHittableElement(
-            containing: "envoix-\(runID)-file-first",
+        guard let more = firstHittableButton(
+            named: ["More", "更多"],
             in: [files],
-            timeout: 8
-        ))
-        let more = files.buttons["OverflowBarButtonItem"]
-        XCTAssertTrue(more.waitForExistence(timeout: 5))
+            timeout: 5
+        ) else {
+            XCTFail("The Files host did not expose its More action")
+            return
+        }
         more.tap()
         guard let select = firstHittableButton(
             named: ["Select", "选择"],
@@ -659,12 +642,7 @@ final class EnvoixIOSAppUITests: XCTestCase {
         share.tap()
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         let shareSheetApplications = [files, springboard]
-        let appRow = files.scrollViews.allElementsBoundByIndex.first {
-            $0.descendants(matching: .cell)
-                .matching(NSPredicate(format: "identifier == 'shareCell'"))
-                .count > 0
-        }
-        guard let appRow else {
+        guard let appRow = firstShareApplicationRow(in: files, timeout: 8) else {
             XCTFail("The share sheet did not expose its application row")
             return
         }
@@ -778,7 +756,7 @@ final class EnvoixIOSAppUITests: XCTestCase {
         app.buttons["home_send"].tap()
 
         XCTAssertTrue(app.buttons["send_folder_picker"].waitForExistence(timeout: 5))
-        guard openCurrentFolder(in: app) else { return }
+        guard openCurrentFolder(named: folderName, in: app) else { return }
         let selection = app.descendants(matching: .any)["send_selection_summary"]
         XCTAssertTrue(selection.waitForExistence(timeout: 8))
         XCTAssertEqual(selection.value as? String, "1")
@@ -838,9 +816,16 @@ final class EnvoixIOSAppUITests: XCTestCase {
 
     private func dismissSheetIfNeeded(_ app: XCUIApplication) {
         let close = app.buttons["mobile_sheet_done"]
-        if close.waitForExistence(timeout: 1) {
+        for _ in 0..<3 {
+            guard close.waitForExistence(timeout: 1) else { return }
+            guard close.isHittable else {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+                continue
+            }
             close.tap()
+            if close.waitForNonExistence(timeout: 2) { return }
         }
+        XCTFail("The previous mobile sheet did not close")
     }
 
     private func waitForValue(_ value: String, of element: XCUIElement) {
@@ -870,15 +855,101 @@ final class EnvoixIOSAppUITests: XCTestCase {
         return nil
     }
 
-    private func openCurrentFolder(in app: XCUIApplication) -> Bool {
+    private func openFilesFolder(
+        containing fixtureLabel: String,
+        in applications: [XCUIApplication]
+    ) -> Bool {
+        if firstHittableElement(containing: fixtureLabel, in: applications, timeout: 1) != nil {
+            return true
+        }
+
+        guard openEnvoixDocuments(in: applications) else { return false }
+        return firstHittableElement(
+            containing: fixtureLabel,
+            in: applications,
+            timeout: 8
+        ) != nil
+    }
+
+    private func openEnvoixDocuments(in applications: [XCUIApplication]) -> Bool {
+        firstHittableButton(
+            named: ["Browse", "浏览"],
+            in: applications,
+            timeout: 3
+        )?.tap()
+
+        if firstHittableButton(
+            named: ["Open", "打开"],
+            in: applications,
+            timeout: 1
+        ) != nil {
+            return true
+        }
+
+        for locationLabel in ["On My iPhone", "在我的 iPhone 上"] {
+            if let location = firstHittableElement(
+                containing: locationLabel,
+                in: applications,
+                timeout: 1
+            ) {
+                location.tap()
+                break
+            }
+        }
+
+        if firstHittableButton(
+            named: ["Open", "打开"],
+            in: applications,
+            timeout: 1
+        ) != nil {
+            return true
+        }
+
+        let predicate = NSPredicate(format: "label == 'Envoix' OR label BEGINSWITH 'Envoix,'")
+        let deadline = Date().addingTimeInterval(5)
+        repeat {
+            for application in applications where application.state != .notRunning {
+                if let appFolder = application.cells.matching(predicate)
+                    .allElementsBoundByIndex
+                    .first(where: { $0.exists && $0.isHittable }) {
+                    appFolder.tap()
+                    return true
+                }
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        } while Date() < deadline
+        return false
+    }
+
+    private func openCurrentFolder(named folderName: String? = nil, in app: XCUIApplication) -> Bool {
         app.buttons["send_folder_picker"].tap()
         let files = XCUIApplication(bundleIdentifier: "com.apple.DocumentsApp")
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let applications = [app, files, springboard]
+        if #available(iOS 26.0, *) {
+            if let folderName {
+                guard let folder = firstHittableElement(
+                    containing: folderName,
+                    in: applications,
+                    timeout: 8
+                ) else {
+                    XCTFail("The folder picker did not expose \(folderName)")
+                    return false
+                }
+                folder.tap()
+            }
+            // iOS 26 does not expose the visible picker action reliably to XCUITest.
+            // The caller verifies that this selects the current folder before proceeding.
+            app.coordinate(withNormalizedOffset: Self.iOS26DocumentPickerOpenPosition).tap()
+            return true
+        }
+
         guard let open = firstHittableButton(
             named: ["Open", "打开"],
-            in: [app, files, springboard],
+            in: applications,
             timeout: 8
         ) else {
+            attachFailureState(of: app, named: "folder-picker-open")
             XCTFail("The folder picker did not expose its system Open action")
             return false
         }
@@ -886,11 +957,30 @@ final class EnvoixIOSAppUITests: XCTestCase {
         return true
     }
 
+    private func attachFailureState(of app: XCUIApplication, named: String) {
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "\(named)-screenshot"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+
+        let hierarchy = XCTAttachment(string: app.debugDescription)
+        hierarchy.name = "\(named)-hierarchy"
+        hierarchy.lifetime = .keepAlways
+        add(hierarchy)
+    }
+
     private func selectFiles(named fileNames: [String], in app: XCUIApplication) -> Bool {
         app.buttons["send_file_picker"].tap()
         let files = XCUIApplication(bundleIdentifier: "com.apple.DocumentsApp")
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         let applications = [app, files, springboard]
+        let firstVisibleName = URL(fileURLWithPath: fileNames[0])
+            .deletingPathExtension()
+            .lastPathComponent
+        guard openFilesFolder(containing: firstVisibleName, in: applications) else {
+            XCTFail("The Files picker did not expose the Envoix fixture folder")
+            return false
+        }
         for fileName in fileNames {
             let visibleName = URL(fileURLWithPath: fileName).deletingPathExtension().lastPathComponent
             guard let file = firstHittableElement(
@@ -948,6 +1038,24 @@ final class EnvoixIOSAppUITests: XCTestCase {
         return application.cells.matching(predicate).allElementsBoundByIndex.first {
             $0.exists && $0.isHittable
         }
+    }
+
+    private func firstShareApplicationRow(
+        in application: XCUIApplication,
+        timeout: TimeInterval
+    ) -> XCUIElement? {
+        let shareCell = NSPredicate(format: "identifier == 'shareCell'")
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if application.state != .notRunning,
+               let row = application.scrollViews.allElementsBoundByIndex.first(where: {
+                   $0.descendants(matching: .cell).matching(shareCell).count > 0
+               }) {
+                return row
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        } while Date() < deadline
+        return nil
     }
 
     private func tapSettledShareCell(

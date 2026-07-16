@@ -200,6 +200,7 @@ struct ContentView: View {
         .onAppear {
             FolderPickerUITestFixture.cleanIfRequested()
             FilePickerUITestFixture.cleanIfRequested()
+            FilePickerUITestFixture.stageIfRequested()
             OpenInUITestFixture.cleanIfRequested()
             openInUITestFixtureURL = OpenInUITestFixture.stageIfRequested()
             guard ProcessInfo.processInfo.arguments.contains("--ui-testing") else { return }
@@ -2364,7 +2365,8 @@ private struct SettingsStageView: View {
                 }
                 .frame(maxWidth: .infinity, minHeight: 40)
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(.borderedProminent)
+            .tint(Theme.accentStrong)
             .disabled(model.isCleaningTransferCache)
             .accessibilityIdentifier("settings_clean_transfer_cache")
         }

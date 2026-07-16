@@ -128,7 +128,7 @@ enum FolderPickerUITestFixture {
             in: .userDomainMask
         ).first else { return nil }
         guard ProcessInfo.processInfo.arguments.contains(payloadArgument) else {
-            return documents
+            return compatibleInitialDirectory(documents)
         }
         guard let fixture = fixture(in: documents) else { return documents }
         do {
@@ -139,7 +139,7 @@ enum FolderPickerUITestFixture {
             if (try? Data(contentsOf: fixture.file)) != fixture.payload {
                 try fixture.payload.write(to: fixture.file, options: .atomic)
             }
-            return fixture.directory
+            return compatibleInitialDirectory(fixture.directory)
         } catch {
             assertionFailure("Could not prepare Folder picker UI fixture: \(error)")
             return documents
@@ -154,6 +154,13 @@ enum FolderPickerUITestFixture {
               ).first,
               let fixture = fixture(in: documents) else { return }
         try? FileManager.default.removeItem(at: fixture.directory)
+    }
+
+    private static func compatibleInitialDirectory(_ directory: URL) -> URL? {
+        if #available(iOS 26.0, *) {
+            return nil
+        }
+        return directory
     }
 
     private static func fixture(in documents: URL) -> (directory: URL, file: URL, payload: Data)? {
@@ -172,6 +179,19 @@ enum FilePickerUITestFixture {
     static let cleanupArgument = "--ui-testing-clean-file-payload"
 
     static func initialDirectoryURL() -> URL? {
+        let documents = prepareDocuments()
+        if #available(iOS 26.0, *) {
+            return nil
+        }
+        return documents
+    }
+
+    static func stageIfRequested() {
+        guard ProcessInfo.processInfo.arguments.contains(payloadArgument) else { return }
+        _ = prepareDocuments()
+    }
+
+    private static func prepareDocuments() -> URL? {
         guard let documents = FileManager.default.urls(
             for: .documentDirectory,
             in: .userDomainMask
