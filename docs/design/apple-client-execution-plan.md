@@ -1,10 +1,10 @@
 # Apple client execution plan
 
-Status: **In execution — bidirectional Apple Manifest, multi-Photos provider, and real iOS Files/Folder picker payload gates green; Share host, manual Photos, and external-provider acceptance pending**
+Status: **In execution — bidirectional Apple Manifest, multi-Photos provider, real iOS Files/Folder payload, and symmetric Room QR intake gates green; Share host, manual Photos, and external-provider acceptance pending**
 
 Owner: Apple client workstream
 
-Last updated: 2026-07-15
+Last updated: 2026-07-16
 
 Design reference: [`../../../Design.png`](../../../Design.png)
 
@@ -61,13 +61,12 @@ second endpoint is required.
 ## 2. Current baseline
 
 The source baseline is locked and the reproducible Apple build, simulator, and
-physical-device UI baseline is green. Wave 0 has stable commits; the current
-branch is intentionally ahead of its remote while Manifest work is committed in
-reviewable local stages.
+physical-device UI baseline is green. Wave 0 has stable commits; later work is
+kept in reviewable staged commits on the current feature branch.
 
 - Branch: `feat/transfer-state-foundation`. The latest committed checkpoint is
-  `4ec2a9b`; it and the preceding staged Manifest, cache, and paused-session
-  commits remain local and have not been pushed as part of this execution stage.
+  `4b7da35`; the build-cache guard, symmetric Room QR intake, pairing-code
+  validation, and Share payload test entry are retained as independent stages.
 - Safety checkpoint `ceff278` (`feat: checkpoint canonical mobile transfer
   lifecycle`) contains the entire previously dirty tree and was pushed to
   `origin/feat/transfer-state-foundation` before any merge.
@@ -184,6 +183,15 @@ reviewable local stages.
   item stages successfully and appears in Send with the correct name when the
   main app is manually reopened. Files Share Extension host and direct Open In
   acceptance remain.
+- Apple now exposes Room Code as the only manual pairing primitive in Send and
+  Receive. Either side may display its role QR while the opposite side scans;
+  role-less bare codes remain compatible with both flows, while scanning a QR
+  for the same local role is rejected. The obsolete Token/advanced pairing
+  selector is no longer visible. The shared parser now validates the existing
+  `<digits>-<word>-<word>` code shape instead of accepting every non-empty bare
+  string, so an ordinary web QR stays in the scanner with a recoverable error.
+  The three focused scanner UI regressions pass on one iPhone Simulator, which
+  returned to Shutdown immediately afterward.
 - A physical iPhone-to-macOS App hotspot gate now passes with the real macOS
   `AppModel`, canonical Activity projection, and destination publication path:
   33 bytes arrived over Direct IPv6 with an exact SHA-256 match. The receiver
@@ -246,7 +254,7 @@ automated and physical-device acceptance gates.
 | D5 | Multi-file and directory priority | Move `ManifestV1` into the first parallel product wave; do not ship an app-side zip detour | **Confirmed** |
 | D6 | Wi-Fi Aware device matrix | iPhone↔supported Android is required; Android↔Android gets baseline evidence; macOS keeps LAN/relay until separately proven | **Confirmed** |
 | D7 | Nearby versus remote reachability | Wi-Fi Aware is nearby-only; trusted identity, presence, rendezvous, mailbox, and relay own remote reachability | **Confirmed** |
-| D8 | QR scan ownership | Send and receive choose opposite roles, but either device may show its role QR and the other may scan; the UI must not prescribe a fixed scanner | **Confirmed and implemented** |
+| D8 | QR scan ownership | Send and receive choose opposite roles, but either device may show its role QR and the other may scan; the UI must not prescribe a fixed scanner | **Confirmed, implemented, and covered in both directions** |
 | D9 | Apple cross-device acceptance | Keep the macOS app in sync and use iPhone↔macOS as the default physical payload test; opening Send alone is entry evidence, not transfer acceptance | **Confirmed; production AppModel single-file and Manifest payload gates pass in both directions, while manual UI-to-UI acceptance remains pending** |
 
 For D3, a Photos item means an image or video representation supplied by the
@@ -944,6 +952,8 @@ the command, source revision, destination, and result is insufficient.
 | 2026-07-15 | `7387599` | Track S Files-picker system multi-selection | physical iPhone 15 Pro Max / real iOS Files picker | open Send, enter the dedicated Files picker at an isolated app-owned directory, select two regular files, tap Apple's system **Open/打开** action, and require the Send selection summary to report both items | 1 passed, 0 failed, 0 skipped; both system-visible files were selected and returned through the production picker delegate; no Simulator was launched | `/private/tmp/envoix-file-picker-selection-20260715d.xcresult` |
 | 2026-07-15 | `4ec2a9b` | Track S Files-picker production payload | physical iPhone 15 Pro Max / production macOS `AppModel` on Personal Hotspot | select two isolated regular files through the real Files picker, enter the Room code through the production Send UI, require Manifest selection and both Activity completions, then verify final names, counts, exact bytes, both hashes, destination, and selected data path | sender 1/1 and receiver 1/1 passed with 0 failures/skips; Direct `172.20.10.1:57115` selected; 2 roots, 2/2 files, 0 directories, 81/81 bytes; SHA-256 `7ddd6832a64a5f1b7612cc58ef96f855539c4a9391e41f32f32c2066bf42305f` and `b059309e001627222aada44fd13e85b6ae347bb954bab646a1a38630ca66ff03` matched; fixtures were cleaned and no Simulator was launched | `/private/tmp/envoix-file-picker-ios-20260715a.xcresult`; `/private/tmp/envoix-file-picker-macos-20260715a.xcresult` |
 | 2026-07-15 | cache-guard working tree | Local build-cache recovery | development Mac, APFS | stop cross-machine validation; inspect filesystem and active build processes; clean only repository Cargo output and Envoix build/test artifacts; exercise syntax/status, marked allowlist and unsafe-directory preservation, hard-minimum refusal, healthy-range stable-cache retention, emergency-only stable/target deletion, stale/recent heartbeat handling, shared readers, writer exclusion, and reader-mutation rejection | available space increased from 5.1 GiB to about 93.5 GiB (about 88 GiB physically reclaimed); `cargo clean` reported 57.0 GiB/185,701 files and temporary Envoix artifacts accounted for about 116 GiB logically before APFS accounting; the final 64/96 GiB guard and build lease passed the bounded no-build checks without launching Simulator or rebuilding Core | terminal output; `scripts/build-cache-guard.sh`; `scripts/with-build-cache-guard.sh` |
+| 2026-07-16 | `633ce0b` | Room Code parser boundary | Rust host / native FFI | reject ordinary URLs and malformed bare strings while retaining legacy four-digit and current six-digit Room Code compatibility; preserve the existing QR URL and FFI interfaces | focused `envoix-client` 9/9 and `envoix-ffi` pairing 4/4 passed; strict `clippy -D warnings` passed for both crates | terminal output |
+| 2026-07-16 | `eb5799a`–`4b7da35` | Symmetric Room QR intake | iPhone 16 Pro simulator, iOS 18.3.1 / generic iOS / macOS arm64 | scan Receive QR into Send, scan Send QR into Receive, keep an ordinary web QR in the scanner with a visible error, remove the obsolete Token selector, and compile the conditional Files Share Extension payload pair on both Apple endpoints | focused App UI 3/3 passed; ordinary and cross-device-conditional iOS build-for-testing passed; ordinary and cross-device-conditional macOS builds passed; Share payload execution remains a separate physical gate; the single Simulator returned to Shutdown | `/var/folders/dn/xmztcp9551z4m0kqfbr74m_m0000gn/T/envoix-apple-cache/ios-simulator-debug/Logs/Test/Test-Envoix-iOS-AppUI-2026.07.16_09-56-40-+0800.xcresult`; terminal output |
 
 ## 11. Definition of done
 
@@ -1214,3 +1224,17 @@ The Apple milestone is complete only when all of the following are true:
   Each result bundle contains one executed pass with no failure or skip; the
   fixtures were cleaned and no Simulator was launched. This does not claim
   Share Extension multi-item host or arbitrary external File Provider coverage.
+- 2026-07-16: Bare pairing input now has a real protocol boundary. The shared
+  parser accepts the existing legacy/current Room Code nameplate envelope and
+  rejects URLs, missing components, extra components, non-numeric nameplates,
+  non-alphabetic words, and overlong nameplates before they reach native UI.
+  Focused client/FFI tests and strict Clippy pass without changing the public
+  Invite or UniFFI interfaces.
+- 2026-07-16: Apple Send and Receive now expose one Room Code pairing model
+  instead of a separate Token/advanced selector. Either role can scan the
+  opposite role QR, a role-less Room Code remains usable by either flow, and an
+  invalid QR reports an error without dismissing the scanner. All three focused
+  UI cases pass on the current generated Core. The Files Share Extension sender
+  and macOS Manifest receiver also compile under the cross-device condition;
+  this is test-gate readiness only, and physical Share-host payload acceptance
+  remains open.
