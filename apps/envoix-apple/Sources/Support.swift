@@ -65,7 +65,7 @@ func friendlyToken() -> String {
 enum PairingMode: Hashable {
     case room    // Android-compatible QR/code, broker-assisted pairing
     case invite  // legacy direct invite link, kept for compatibility
-    case token   // advanced same-LAN shared token, mDNS auto-discovery
+    case token   // compatibility-only shared token; no longer exposed in Apple UI
 }
 
 extension String {
@@ -249,6 +249,7 @@ struct RoomCodeField: View {
     var showsCopyAction = true
     var pasteAction: (() -> Void)?
     var helper: String
+    var accessibilityIdentifier = ""
 
     var body: some View {
         #if os(iOS)
@@ -269,6 +270,7 @@ struct RoomCodeField: View {
                     .font(.body.monospaced())
                     .foregroundStyle(Theme.text)
                     .disabled(disabled)
+                    .accessibilityIdentifier(accessibilityIdentifier)
                 if canGenerate {
                     Button {
                         code = newRoomCode()
@@ -322,6 +324,7 @@ struct RoomCodeField: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .disabled(disabled)
+                    .accessibilityIdentifier(accessibilityIdentifier)
 
                 if let pasteAction {
                     Button(action: pasteAction) {

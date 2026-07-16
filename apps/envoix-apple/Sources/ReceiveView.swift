@@ -113,8 +113,6 @@ struct ReceiveView: View {
                 connectionSection
                 outputSection
                 #endif
-                modeSelector
-
                 #if os(macOS)
                 if !viewModel.peerAddress.isEmpty {
                     addressReveal
@@ -127,6 +125,7 @@ struct ReceiveView: View {
             }
             .padding(.vertical, 12)
         }
+        .accessibilityIdentifier("receive_content_scroll")
         .onAppear { refreshPairingInviteIfNeeded() }
         .onChange(of: mode) { newMode in
             if newMode == .room {
@@ -194,10 +193,6 @@ struct ReceiveView: View {
         }
     }
     #endif
-
-    private var modeSelector: some View {
-        PairingModeSelector(selection: $mode, role: .receive, disabled: viewModel.isBusy)
-    }
 
     private var outputSection: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -464,11 +459,12 @@ struct ReceiveView: View {
             RoomCodeField(
                 code: joinRoomCodeBinding,
                 disabled: viewModel.isBusy,
-                title: AppText.value("Or enter a code", "或输入短码", language: uiLanguage),
-                placeholder: AppText.value("Enter code", "输入短码", language: uiLanguage),
+                title: AppText.value("Or enter a Room code", "或输入配对码", language: uiLanguage),
+                placeholder: AppText.value("Enter Room code", "输入配对码", language: uiLanguage),
                 showsCopyAction: false,
                 pasteAction: pastePairingInput,
-                helper: ""
+                helper: "",
+                accessibilityIdentifier: "receive_join_room_code_input"
             )
         }
         .card(raised: true, padding: 18)
@@ -481,7 +477,7 @@ struct ReceiveView: View {
                 Text(AppText.value("Share this QR or code", "分享二维码或接收码", language: uiLanguage))
                     .font(.title2.weight(.semibold))
                     .foregroundStyle(Theme.text)
-                Text(AppText.value("The sender can scan the QR or enter the same short code.", "发送方可以扫码，或输入同一个短码。", language: uiLanguage))
+                Text(AppText.value("The sender can scan the QR or enter the same Room code.", "发送方可以扫码，或输入同一个配对码。", language: uiLanguage))
                     .font(.body)
                     .foregroundStyle(Theme.muted)
                     .multilineTextAlignment(.center)
@@ -522,8 +518,9 @@ struct ReceiveView: View {
                 code: joinRoomCodeBinding,
                 disabled: viewModel.isBusy,
                 title: AppText.value("Join sender instead", "改为加入发送端", language: uiLanguage),
-                placeholder: AppText.value("Scan QR or enter sender code", "扫码或输入发送端短码", language: uiLanguage),
-                helper: ""
+                placeholder: AppText.value("Scan QR or enter sender Room code", "扫码或输入发送端配对码", language: uiLanguage),
+                helper: "",
+                accessibilityIdentifier: "receive_join_room_code_input"
             )
 
             HStack(spacing: 8) {
@@ -677,10 +674,7 @@ struct ReceiveView: View {
 
     private func roomCodeFromJoinInput(_ input: String) throws -> String {
         let lowercasedInput = input.lowercased()
-        guard lowercasedInput.hasPrefix("envoix:") else {
-            return input
-        }
-        guard lowercasedInput.hasPrefix("envoix://pair/") else {
+        if lowercasedInput.hasPrefix("envoix:") && !lowercasedInput.hasPrefix("envoix://pair/") {
             throw RuntimeSettingsError(AppText.value(
                 "Legacy invite links are for senders. Use Room pairing for this receive flow.",
                 "旧版邀请链接供发送端使用。当前接收流程请使用 Room 配对。",
@@ -688,7 +682,7 @@ struct ReceiveView: View {
             ))
         }
         let parsed = try parsePairingInvite(input: input)
-        guard parsed.role == .send else {
+        guard parsed.role != .receive else {
             throw RuntimeSettingsError(AppText.value(
                 "Scan a sender code or share your receive code.",
                 "请扫描发送端的码，或分享你的接收码。",
@@ -700,7 +694,7 @@ struct ReceiveView: View {
         return parsed.code
     }
 
-    private func handleScannedInvite(_ value: String) {
+    private func handleScannedInvite(_ value: String) -> String? {
         applyPairingInput(value, source: .scan)
     }
 
@@ -714,18 +708,12 @@ struct ReceiveView: View {
             ToastCenter.shared.show(AppText.value("Clipboard is empty", "剪贴板为空", language: uiLanguage))
             return
         }
-        applyPairingInput(value, source: .paste)
+        _ = applyPairingInput(value, source: .paste)
     }
 
-    private func applyPairingInput(_ value: String, source: PairingInputSource) {
+    @discardableResult
+    private func applyPairingInput(_ value: String, source: PairingInputSource) -> String? {
         let input = value.trimmed
-        let lowercasedInput = input.lowercased()
-        guard lowercasedInput.hasPrefix("envoix:") else {
-            joinRoomCode = input
-            pairingPanel = .show
-            ToastCenter.shared.show(AppText.value("Pairing code pasted", "配对码已粘贴", language: uiLanguage))
-            return
-        }
         do {
             let code = try roomCodeFromJoinInput(input)
             joinRoomCode = code
@@ -735,8 +723,19 @@ struct ReceiveView: View {
                 ? AppText.value("QR scanned", "二维码已扫描", language: uiLanguage)
                 : AppText.value("Pairing code pasted", "配对码已粘贴", language: uiLanguage)
             ToastCenter.shared.show(message)
+            return nil
         } catch {
-            ToastCenter.shared.show(error.localizedDescription)
+            let message = if error is RuntimeSettingsError {
+                error.localizedDescription
+            } else {
+                AppText.value(
+                    "This is not a valid Envoix pairing code.",
+                    "这不是有效的 Envoix 配对码。",
+                    language: uiLanguage
+                )
+            }
+            ToastCenter.shared.show(message)
+            return message
         }
     }
 

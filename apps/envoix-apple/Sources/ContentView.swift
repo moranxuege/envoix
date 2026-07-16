@@ -1980,7 +1980,7 @@ private struct TransferStageView: View {
         case .openSettings:
             return AppText.value("Check local network or Files permission in system settings.", "请在系统设置中检查本地网络或文件权限。", language: language)
         case .rePair:
-            return AppText.value("Generate a new code or scan the QR code again.", "请重新生成短码，或重新扫描二维码。", language: language)
+            return AppText.value("Generate a new Room code or scan the QR code again.", "请重新生成配对码，或重新扫描二维码。", language: language)
         case .updateApp:
             return AppText.value("Update both apps before trying this transfer mode again.", "请更新两端应用后再尝试此传输模式。", language: language)
         case .switchPairingMethod:
@@ -2156,7 +2156,7 @@ private struct SettingsStageView: View {
 
                 #if os(macOS)
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(AppText.value("Default role for a new code", "新建短码的默认角色", language: language))
+                    Text(AppText.value("Default role for a new Room code", "新建配对码的默认角色", language: language))
                         .font(.title3.weight(.semibold))
                         .foregroundStyle(Theme.muted)
                     Picker("Default role", selection: $defaultRole) {
