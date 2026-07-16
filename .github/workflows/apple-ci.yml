@@ -1,0 +1,189 @@
+name: apple-ci
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apple-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
+  RUST_VERSION: 1.96.0
+  CARGO_SWIFT_VERSION: 0.11.1
+  XCODEGEN_VERSION: 2.45.4
+  XCODEGEN_SHA256: 090ec29491aad50aec10631bf6e62253fed733c50f3aab0f5ffc86bc170bdbef
+  ENVOIX_APPLE_CORE_PROFILE: release
+  ENVOIX_BUILD_CACHE_MIN_FREE_GIB: '1'
+  ENVOIX_BUILD_CACHE_TARGET_FREE_GIB: '2'
+
+jobs:
+  macos:
+    name: macOS arm64 build
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      ENVOIX_APPLE_CORE_TARGET: aarch64-apple-darwin
+      ENVOIX_APPLE_CACHE_ROOT: ${{ runner.temp }}/envoix-apple-cache
+      CARGO_INSTALL_ROOT: ${{ runner.temp }}/cargo-tools
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pinned Apple tools
+        run: |
+          test -d "$DEVELOPER_DIR"
+          xcodebuild -version
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+          rustup target add --toolchain "$RUST_VERSION" "$ENVOIX_APPLE_CORE_TARGET"
+          cargo install cargo-swift --version "$CARGO_SWIFT_VERSION" --locked --force
+
+          curl -L --fail --silent --show-error \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip" \
+            -o "$RUNNER_TEMP/xcodegen.zip"
+          printf '%s  %s\n' "$XCODEGEN_SHA256" "$RUNNER_TEMP/xcodegen.zip" \
+            | shasum -a 256 -c -
+          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP"
+          printf '%s\n' "$RUNNER_TEMP/xcodegen/bin" >> "$GITHUB_PATH"
+          printf '%s\n' "$CARGO_INSTALL_ROOT/bin" >> "$GITHUB_PATH"
+          export PATH="$RUNNER_TEMP/xcodegen/bin:$CARGO_INSTALL_ROOT/bin:$PATH"
+
+          rustc --version
+          cargo swift --version
+          xcodegen --version
+          df -h .
+
+      - name: Build macOS app from generated core
+        run: |
+          scripts/apple-dev.sh macos-build
+          test -x \
+            "$ENVOIX_APPLE_CACHE_ROOT/macos-debug/Build/Products/Debug/Envoix.app/Contents/MacOS/Envoix"
+
+      - name: Report macOS cache size
+        if: always()
+        run: |
+          scripts/apple-dev.sh cache-size
+          df -h .
+
+      - name: Upload macOS build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apple-macos-logs
+          path: ${{ runner.temp }}/envoix-apple-cache/macos-debug/Logs
+          if-no-files-found: warn
+          retention-days: 14
+
+  ios:
+    name: iOS Simulator hosted and UI tests
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      ENVOIX_APPLE_CORE_TARGET: aarch64-apple-ios-sim
+      ENVOIX_APPLE_CACHE_ROOT: ${{ runner.temp }}/envoix-apple-cache
+      ENVOIX_IOS_SIM_DESTINATION: platform=iOS Simulator,OS=26.5,name=iPhone 17 Pro
+      CARGO_INSTALL_ROOT: ${{ runner.temp }}/cargo-tools
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pinned Apple tools
+        run: |
+          test -d "$DEVELOPER_DIR"
+          xcodebuild -version
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+          rustup target add --toolchain "$RUST_VERSION" "$ENVOIX_APPLE_CORE_TARGET"
+          cargo install cargo-swift --version "$CARGO_SWIFT_VERSION" --locked --force
+
+          curl -L --fail --silent --show-error \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip" \
+            -o "$RUNNER_TEMP/xcodegen.zip"
+          printf '%s  %s\n' "$XCODEGEN_SHA256" "$RUNNER_TEMP/xcodegen.zip" \
+            | shasum -a 256 -c -
+          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP"
+          printf '%s\n' "$RUNNER_TEMP/xcodegen/bin" >> "$GITHUB_PATH"
+          printf '%s\n' "$CARGO_INSTALL_ROOT/bin" >> "$GITHUB_PATH"
+          export PATH="$RUNNER_TEMP/xcodegen/bin:$CARGO_INSTALL_ROOT/bin:$PATH"
+
+          rustc --version
+          cargo swift --version
+          xcodegen --version
+          xcrun simctl list devices available
+          df -h .
+
+      - name: Build both iOS test targets once
+        run: scripts/apple-dev.sh ios-test-build all
+
+      - name: Run hosted tests without rebuilding
+        id: hosted_tests
+        env:
+          ENVOIX_XCRESULT_PATH: ${{ runner.temp }}/envoix-ios-hosted.xcresult
+        run: scripts/apple-dev.sh ios-test-rerun hosted
+
+      - name: Audit hosted test execution
+        if: always() && steps.hosted_tests.outcome != 'skipped'
+        run: >-
+          scripts/check-apple-test-results.py
+          "${{ runner.temp }}/envoix-ios-hosted.xcresult"
+          --label hosted
+          --minimum-total 46
+          --minimum-executed 35
+          --maximum-skipped 11
+
+      - name: Run UI tests without rebuilding (rerun once on simulator failure)
+        id: ui_tests
+        shell: bash
+        run: |
+          set +e
+          first_result="$RUNNER_TEMP/envoix-ios-ui-first.xcresult"
+          ENVOIX_XCRESULT_PATH="$first_result" scripts/apple-dev.sh ios-test-rerun ui
+          first_status=$?
+          if [[ "$first_status" -eq 0 ]]; then
+            echo "result=$first_result" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "::warning::UI test run failed; rerunning once without rebuilding."
+          rerun_result="$RUNNER_TEMP/envoix-ios-ui-rerun.xcresult"
+          ENVOIX_XCRESULT_PATH="$rerun_result" scripts/apple-dev.sh ios-test-rerun ui
+          rerun_status=$?
+          echo "result=$rerun_result" >> "$GITHUB_OUTPUT"
+          exit "$rerun_status"
+
+      - name: Audit UI test execution
+        if: always() && steps.ui_tests.outcome != 'skipped'
+        run: >-
+          scripts/check-apple-test-results.py
+          "${{ steps.ui_tests.outputs.result }}"
+          --label ui
+          --minimum-total 20
+          --minimum-executed 17
+          --maximum-skipped 3
+
+      - name: Shut down Simulator
+        if: always()
+        run: xcrun simctl shutdown all
+
+      - name: Report iOS cache size
+        if: always()
+        run: |
+          scripts/apple-dev.sh cache-size
+          df -h .
+
+      - name: Upload iOS test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apple-ios-test-evidence
+          path: |
+            ${{ runner.temp }}/envoix-ios-hosted.xcresult
+            ${{ runner.temp }}/envoix-ios-ui-*.xcresult
+            ${{ runner.temp }}/envoix-apple-cache/ios-simulator-debug/Logs
+          if-no-files-found: warn
+          retention-days: 14
