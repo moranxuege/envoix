@@ -556,6 +556,17 @@ final class EnvoixIOSAppUITests: XCTestCase {
             in: [app, files],
             timeout: 8
         ))
+        guard let cancelPicker = firstHittableButton(
+            named: ["Cancel", "取消"],
+            in: [app, files],
+            timeout: 5
+        ) else {
+            XCTFail("The fixture file picker did not expose its Cancel action")
+            return
+        }
+        cancelPicker.tap()
+        XCTAssertTrue(app.buttons["send_file_picker"].waitForExistence(timeout: 5))
+
         XCUIDevice.shared.press(.home)
         files.activate()
         if firstHittableElement(
@@ -1030,28 +1041,52 @@ final class EnvoixIOSAppUITests: XCTestCase {
         let codeField = app.textFields["send_room_code_input"]
         let scrollView = app.scrollViews["send_content_scroll"]
         XCTAssertTrue(scrollView.waitForExistence(timeout: 5))
-        if reveal(codeField, byScrolling: scrollView) {
-            codeField.tap()
-        } else {
-            let visibleFrame = codeField.frame.intersection(scrollView.frame)
-            XCTAssertGreaterThanOrEqual(
-                visibleFrame.height,
-                codeField.frame.height / 2,
-                "Room code field remained outside the Send scroll viewport; " +
+        guard revealRoomCodeField(codeField, in: scrollView) else {
+            XCTFail(
+                "Room code field is not reachable in the Send scroll viewport; " +
                     "field=\(codeField.frame) scroll=\(scrollView.frame) app=\(app.frame)"
             )
-            let visibleCenter = CGVector(
-                dx: (visibleFrame.midX - scrollView.frame.minX) / scrollView.frame.width,
-                dy: (visibleFrame.midY - scrollView.frame.minY) / scrollView.frame.height
-            )
-            scrollView.coordinate(withNormalizedOffset: visibleCenter).tap()
+            return
         }
-        app.typeText(code)
+        codeField.tap()
+        codeField.typeText(code)
 
         let send = app.buttons["send_start_button"]
         XCTAssertTrue(send.isEnabled)
         XCTAssertTrue(send.isHittable)
         send.tap()
+    }
+
+    private func revealRoomCodeField(
+        _ field: XCUIElement,
+        in scrollView: XCUIElement
+    ) -> Bool {
+        let maximumAttempts = 8
+
+        for _ in 0..<maximumAttempts {
+            if isFullyVisible(field, in: scrollView) {
+                return true
+            }
+            if field.frame.midY < scrollView.frame.midY {
+                scrollView.swipeDown()
+            } else {
+                scrollView.swipeUp()
+            }
+        }
+        return isFullyVisible(field, in: scrollView)
+    }
+
+    private func isFullyVisible(
+        _ element: XCUIElement,
+        in container: XCUIElement
+    ) -> Bool {
+        guard element.exists, element.isHittable else { return false }
+        let elementFrame = element.frame
+        let visibleFrame = elementFrame.intersection(container.frame)
+        let tolerance: CGFloat = 1
+        return !visibleFrame.isNull
+            && visibleFrame.width >= elementFrame.width - tolerance
+            && visibleFrame.height >= elementFrame.height - tolerance
     }
 
     private func reveal(
@@ -1071,16 +1106,11 @@ final class EnvoixIOSAppUITests: XCTestCase {
     }
 
     private func openActivity(in app: XCUIApplication) {
-        let capsule = app.buttons["active_transfer_capsule"]
-        if capsule.waitForExistence(timeout: 20) {
-            capsule.tap()
-        }
         let close = app.buttons["mobile_sheet_done"]
-        if !close.waitForExistence(timeout: 2) {
-            let activity = app.buttons["open_activity"]
-            XCTAssertTrue(activity.waitForExistence(timeout: 5))
-            activity.tap()
-        }
+        if close.exists { return }
+        let activity = app.buttons["open_activity"]
+        XCTAssertTrue(activity.waitForExistence(timeout: 20))
+        activity.tap()
         XCTAssertTrue(close.waitForExistence(timeout: 8))
     }
 

@@ -89,6 +89,46 @@ final class ShareDraftStoreTests: XCTestCase {
         }
     }
 
+    func testProviderSelectionLoadsFileURLsAsReferences() throws {
+        let source = root.appendingPathComponent("shared.txt")
+        let provider = NSItemProvider(
+            item: source as NSURL,
+            typeIdentifier: UTType.fileURL.identifier
+        )
+
+        let selection = try shareProviderSelection(for: provider)
+
+        XCTAssertEqual(selection.typeIdentifier, UTType.fileURL.identifier)
+        XCTAssertEqual(selection.mediaKind, .file)
+        XCTAssertTrue(selection.loadsFileURL)
+        XCTAssertEqual(sharedFileURL(fromProviderItem: source as NSURL), source)
+    }
+
+    func testSharedFileURLDecodesFilesHostPropertyList() throws {
+        let source = root.appendingPathComponent("shared.txt")
+        let payload: [Any] = [source.absoluteString, "", [String: String]()]
+        let data = try PropertyListSerialization.data(
+            fromPropertyList: payload,
+            format: .binary,
+            options: 0
+        )
+
+        XCTAssertEqual(sharedFileURL(fromProviderItem: data as NSData), source)
+    }
+
+    func testSharedFileURLRejectsNonFileURLsAndMalformedPropertyLists() throws {
+        let webURL = try XCTUnwrap(URL(string: "https://example.com/shared.txt"))
+        let webPayload = try PropertyListSerialization.data(
+            fromPropertyList: [webURL.absoluteString],
+            format: .binary,
+            options: 0
+        )
+
+        XCTAssertNil(sharedFileURL(fromProviderItem: webURL as NSURL))
+        XCTAssertNil(sharedFileURL(fromProviderItem: webPayload as NSData))
+        XCTAssertNil(sharedFileURL(fromProviderItem: Data("not a plist".utf8) as NSData))
+    }
+
     func testPhotoDraftImporterCopiesProviderRepresentationIntoDraft() throws {
         let source = root.appendingPathComponent("provider-photo.jpg")
         let payload = Data("photo provider payload".utf8)

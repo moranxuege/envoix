@@ -192,50 +192,113 @@ final class ShareViewController: UIViewController {
                 "正在将第 \(index + 1)/\(imports.count) 个项目安全暂存到 Envoix…"
             )
         )
+        if providerImport.selection.loadsFileURL {
+            loadProgress = nil
+            providerImport.provider.loadItem(
+                forTypeIdentifier: providerImport.selection.typeIdentifier,
+                options: nil
+            ) { [weak self] item, error in
+                guard let self else { return }
+                guard !isFinishing else {
+                    stagingSession.cancel()
+                    return
+                }
+                if let error {
+                    failProviderLoad(error, stagingSession: stagingSession)
+                    return
+                }
+                guard let sourceURL = sharedFileURL(fromProviderItem: item) else {
+                    failProviderLoad(ImportError.unsupportedItem, stagingSession: stagingSession)
+                    return
+                }
+                let didAccess = sourceURL.startAccessingSecurityScopedResource()
+                defer {
+                    if didAccess {
+                        sourceURL.stopAccessingSecurityScopedResource()
+                    }
+                }
+                stageProviderSource(
+                    imports,
+                    at: index,
+                    sourceURL: sourceURL,
+                    contentTypeIdentifier: contentTypeIdentifier(for: sourceURL),
+                    preferredFileName: sourceURL.lastPathComponent,
+                    stagingSession: stagingSession
+                )
+            }
+            return
+        }
+
         loadProgress = providerImport.provider.loadFileRepresentation(
             forTypeIdentifier: providerImport.selection.typeIdentifier
         ) { [weak self] temporaryURL, error in
             guard let self else { return }
             if let error {
-                stagingSession.cancel()
-                DispatchQueue.main.async { self.finishImport(.failure(error)) }
+                failProviderLoad(error, stagingSession: stagingSession)
                 return
             }
             guard let temporaryURL else {
-                stagingSession.cancel()
-                DispatchQueue.main.async {
-                    self.finishImport(.failure(ImportError.unsupportedItem))
-                }
+                failProviderLoad(ImportError.unsupportedItem, stagingSession: stagingSession)
                 return
             }
 
-            do {
-                try stagingSession.append(ShareDraftStagingItem(
-                    sourceURL: temporaryURL,
-                    contentTypeIdentifier: providerImport.selection.typeIdentifier,
-                    mediaKind: providerImport.selection.mediaKind,
-                    preferredFileName: preferredFileName(
-                        providerName: providerImport.provider.suggestedName,
-                        temporaryURL: temporaryURL
-                    )
-                ))
-                if imports.indices.contains(index + 1) {
-                    DispatchQueue.main.async {
-                        self.loadProvider(
-                            imports,
-                            at: index + 1,
-                            stagingSession: stagingSession
-                        )
-                    }
-                } else {
-                    let result = self.finalize(stagingSession)
-                    DispatchQueue.main.async { self.finishImport(result) }
-                }
-            } catch {
-                stagingSession.cancel()
-                DispatchQueue.main.async { self.finishImport(.failure(error)) }
-            }
+            stageProviderSource(
+                imports,
+                at: index,
+                sourceURL: temporaryURL,
+                contentTypeIdentifier: providerImport.selection.typeIdentifier,
+                preferredFileName: preferredFileName(
+                    providerName: providerImport.provider.suggestedName,
+                    temporaryURL: temporaryURL
+                ),
+                stagingSession: stagingSession
+            )
         }
+    }
+
+    private func stageProviderSource(
+        _ imports: [ProviderImport],
+        at index: Int,
+        sourceURL: URL,
+        contentTypeIdentifier: String,
+        preferredFileName: String,
+        stagingSession: ShareDraftStagingSession
+    ) {
+        do {
+            try stagingSession.append(ShareDraftStagingItem(
+                sourceURL: sourceURL,
+                contentTypeIdentifier: contentTypeIdentifier,
+                mediaKind: imports[index].selection.mediaKind,
+                preferredFileName: preferredFileName
+            ))
+            if imports.indices.contains(index + 1) {
+                DispatchQueue.main.async {
+                    self.loadProvider(
+                        imports,
+                        at: index + 1,
+                        stagingSession: stagingSession
+                    )
+                }
+            } else {
+                let result = finalize(stagingSession)
+                DispatchQueue.main.async { self.finishImport(result) }
+            }
+        } catch {
+            failProviderLoad(error, stagingSession: stagingSession)
+        }
+    }
+
+    private func failProviderLoad(
+        _ error: Error,
+        stagingSession: ShareDraftStagingSession
+    ) {
+        stagingSession.cancel()
+        DispatchQueue.main.async { self.finishImport(.failure(error)) }
+    }
+
+    private func contentTypeIdentifier(for fileURL: URL) -> String {
+        guard !fileURL.pathExtension.isEmpty else { return UTType.data.identifier }
+        return UTType(filenameExtension: fileURL.pathExtension)?.identifier ?? UTType.data.identifier
     }
 
     private func finalize(

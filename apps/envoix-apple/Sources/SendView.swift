@@ -20,6 +20,10 @@ func sendSelectionRequiresManifest(_ urls: [URL]) -> Bool {
 }
 
 struct SendView: View {
+    #if os(iOS)
+    private static let mobileScrollBottomClearance: CGFloat = 32
+    #endif
+
     @Environment(\.appLanguage) private var uiLanguage
     @EnvironmentObject private var model: AppModel
     @ObservedObject var viewModel: TransferViewModel
@@ -140,7 +144,7 @@ struct SendView: View {
             }
             .padding(.vertical, 12)
             #if os(iOS)
-            .padding(.bottom, 16)
+            .padding(.bottom, Self.mobileScrollBottomClearance)
             #endif
         }
         .accessibilityIdentifier("send_content_scroll")

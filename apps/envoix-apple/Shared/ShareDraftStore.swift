@@ -156,6 +156,10 @@ struct ShareDraftStagingItem {
 struct ShareProviderSelection: Equatable {
     let typeIdentifier: String
     let mediaKind: ShareDraftDescriptor.MediaKind
+
+    var loadsFileURL: Bool {
+        UTType(typeIdentifier)?.conforms(to: .fileURL) == true
+    }
 }
 
 enum ShareProviderSelectionError: Error, Equatable {
@@ -181,11 +185,40 @@ func shareProviderSelection(for provider: NSItemProvider) throws -> ShareProvide
         return ShareProviderSelection(typeIdentifier: image.0, mediaKind: .image)
     }
     if let file = types.first(where: {
-        $0.1.conforms(to: .data) && !$0.1.conforms(to: .text)
-    }) ?? types.first(where: { $0.1.conforms(to: .item) && $0.1 != .url }) {
+        $0.1.conforms(to: .data)
+            && !$0.1.conforms(to: .text)
+            && !$0.1.conforms(to: .url)
+    }) ?? types.first(where: {
+        $0.1.conforms(to: .item) && !$0.1.conforms(to: .url)
+    }) {
         return ShareProviderSelection(typeIdentifier: file.0, mediaKind: .file)
     }
+    if let fileURL = types.first(where: { $0.1.conforms(to: .fileURL) }) {
+        return ShareProviderSelection(typeIdentifier: fileURL.0, mediaKind: .file)
+    }
     throw ShareProviderSelectionError.unsupportedItem
+}
+
+func sharedFileURL(fromProviderItem item: NSSecureCoding?) -> URL? {
+    if let url = item as? URL, url.isFileURL {
+        return url
+    }
+    if let string = item as? String,
+       let url = URL(string: string),
+       url.isFileURL {
+        return url
+    }
+    guard let data = item as? Data,
+          let propertyList = try? PropertyListSerialization.propertyList(
+              from: data,
+              options: [],
+              format: nil
+          ),
+          let values = propertyList as? [Any],
+          let string = values.first as? String,
+          let url = URL(string: string),
+          url.isFileURL else { return nil }
+    return url
 }
 
 struct ShareDraft: Equatable {
