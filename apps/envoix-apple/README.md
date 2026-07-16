@@ -446,6 +446,21 @@ setup must be cancelled before activating Files; otherwise it remains a modal
 layer over the main app. The Room field must also be fully inside
 `send_content_scroll` before XCTest types into it.
 
+The physical Direct Open In gate validates the separate system document route.
+Start
+`EnvoixMacOSHostedTests.testReceiveIosOpenInToMacOSAppRoom`, wait for its
+`open-in-receiver-ready` marker, and then run
+`EnvoixIOSAppUITests.testSystemOpenedFileSendsToMacOSApp` on the physical
+iPhone with `ENVOIX_CROSS_DEVICE_TESTING` enabled. The iPhone stages one
+isolated regular file in the target app's Documents container, terminates the
+app, asks the system to open that URL in Envoix, and requires a cold launch,
+the correct Send selection, Room transfer, and completed Activity. The macOS
+receiver verifies the final name, exact payload, size, SHA-256, destination,
+and selected Direct/Relay path. This automated gate proves the document-open
+lifecycle and payload path without depending on another app's container;
+security-scoped URLs from iCloud or third-party File Providers remain a
+separate manual acceptance gate.
+
 For this hosted pair, exporting the run ID in the caller shell is insufficient:
 Xcode does not automatically pass it into the app-hosted test process. Inject
 the same `ENVOIX_CROSS_DEVICE_RUN_ID` and `ENVOIX_IOS_TO_MACOS_CODE` into both

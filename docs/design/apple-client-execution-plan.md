@@ -1,6 +1,6 @@
 # Apple client execution plan
 
-Status: **In execution — bidirectional Apple Manifest, multi-Photos provider, real iOS Files/Folder payload, and symmetric Room QR intake gates green; Share host, manual Photos, and external-provider acceptance pending**
+Status: **In execution — bidirectional Apple Manifest, multi-Photos provider, real iOS Files/Folder/Direct Open In payload, Files Share host, and symmetric Room QR intake gates green; manual Photos, multi-Photos host, and external-provider acceptance pending**
 
 Owner: Apple client workstream
 
@@ -166,9 +166,11 @@ kept in reviewable staged commits on the current feature branch.
   files and delivered both exact payloads through the production Manifest path
   over Direct. The real Files share sheet now also stages two files through the
   Envoix Share Extension and delivers their exact payloads to the production
-  macOS App over Direct. Manual Photos payload acceptance, arbitrary File
-  Provider coverage, multi-Photos share-sheet acceptance, and direct Open In
-  remain pending.
+  macOS App over Direct. The system Direct Open In route now cold-launches the
+  physical iPhone app with an app-owned regular-file URL, presents the correct
+  Send selection, and delivers the exact payload to the production macOS App
+  over Direct. Manual Photos payload acceptance, arbitrary File Provider
+  coverage, and multi-Photos share-sheet acceptance remain pending.
 - The Share Extension accepts multiple Files or Photos representations. It
   stages each provider directly into App Group `group.com.envoix.app.shared`,
   uses a validated versioned draft descriptor, checks actual available storage
@@ -186,8 +188,10 @@ kept in reviewable staged commits on the current feature branch.
   item stages successfully and appears in Send with the correct name when the
   main app is manually reopened. A physical Files-host run now proves two real
   file URLs are resolved, staged, adopted, sent, and byte/hash verified by the
-  macOS App. Direct Open In and arbitrary third-party File Provider acceptance
-  remain.
+  macOS App. A physical Direct Open In run now proves system cold launch,
+  selection import, Room send, and byte/hash verification for an app-owned
+  regular-file URL. Arbitrary iCloud and third-party File Provider acceptance
+  remains.
 - Apple now exposes Room Code as the only manual pairing primitive in Send and
   Receive. Either side may display its role QR while the opposite side scans;
   role-less bare codes remain compatible with both flows, while scanning a QR
@@ -254,7 +258,7 @@ automated and physical-device acceptance gates.
 |---|---|---|---|
 | D1 | Supported devices and orientations | iPhone + macOS; iPhone portrait; no iPad or landscape promise in this milestone | **Confirmed** |
 | D2 | iOS navigation interaction | One iPhone home screen; Send, Receive, Activity, and Settings open as sheets; no permanent bottom stage bar or global stage swipe | **Confirmed and implemented** |
-| D3 | First system entry | “Open in Envoix” directly handles one regular document; Share Extension stages one or more Files/Photos items for import when the main app next becomes active; in-app Send separately exposes Photos, Files, and Folder; multiple items/folders use Manifest | **Implemented in source; single-Photos Share Extension entry/adoption, two-file Files-host Share Extension→macOS payload, explicit-source physical UI/provider staging, synthetic single-/multi-Photos provider→macOS payload, and real Files-/Folder-picker→macOS payload acceptance pass; Open In, arbitrary File Provider, multi-Photos share-sheet, and manual Photos payload acceptance pending** |
+| D3 | First system entry | “Open in Envoix” directly handles one regular document; Share Extension stages one or more Files/Photos items for import when the main app next becomes active; in-app Send separately exposes Photos, Files, and Folder; multiple items/folders use Manifest | **Implemented in source; single-Photos Share Extension entry/adoption, two-file Files-host Share Extension→macOS payload, explicit-source physical UI/provider staging, synthetic single-/multi-Photos provider→macOS payload, real Files-/Folder-picker→macOS payload, and app-owned Direct Open In→macOS payload acceptance pass; arbitrary File Provider, multi-Photos share-sheet, and manual Photos payload acceptance pending** |
 | D4 | Baseline and shared-core authority | Full-tree checkpoint, latest dev merge, Android App compile compatibility at shared boundaries, additive Apple Rust/UniFFI evolution | **Confirmed and executed** |
 | D5 | Multi-file and directory priority | Move `ManifestV1` into the first parallel product wave; do not ship an app-side zip detour | **Confirmed** |
 | D6 | Wi-Fi Aware device matrix | iPhone↔supported Android is required; Android↔Android gets baseline evidence; macOS keeps LAN/relay until separately proven | **Confirmed** |
@@ -669,9 +673,10 @@ physical install, launch, and single-Photos entry/adoption acceptance complete;
 synthetic single- and multi-Photos provider→production iOS Send→macOS App
 payload acceptance complete; the real Files and Folder pickers→production
 Send→macOS App payload gates are complete; the real Files host→Share Extension
-two-item→production Send→macOS App payload gate is complete; multi-Photos
-share-sheet acceptance, manual Photos payload acceptance, arbitrary File
-Provider behavior, and direct Open In provider acceptance remain**.
+two-item→production Send→macOS App payload gate is complete; the app-owned
+Direct Open In→production Send→macOS App payload gate is complete; multi-Photos
+share-sheet acceptance, manual Photos payload acceptance, and arbitrary File
+Provider behavior remain**.
 
 First slice:
 
@@ -728,6 +733,11 @@ Implemented contract for the first slice:
   Extension resolves their `public.file-url` property-list representations to
   the underlying files, and the production macOS App verifies the two final
   names, 97 aggregate bytes, both payloads, both SHA-256 values, and Direct path;
+- the physical Direct Open In gate asks iOS to cold-launch Envoix with an
+  app-owned regular-file URL, then verifies the visible selection, completed
+  Room transfer, final 39-byte payload, SHA-256, and Direct path in the
+  production macOS App; external security-scoped File Providers remain a
+  separate acceptance boundary;
 - App Group: `group.com.envoix.app.shared`;
 - one or more regular file, image, or video representations per draft; folders,
   symlinks, special files, and paired Live Photos are rejected explicitly;
@@ -965,6 +975,7 @@ the command, source revision, destination, and result is insufficient.
 | 2026-07-16 | `633ce0b` | Room Code parser boundary | Rust host / native FFI | reject ordinary URLs and malformed bare strings while retaining legacy four-digit and current six-digit Room Code compatibility; preserve the existing QR URL and FFI interfaces | focused `envoix-client` 9/9 and `envoix-ffi` pairing 4/4 passed; strict `clippy -D warnings` passed for both crates | terminal output |
 | 2026-07-16 | `eb5799a`–`4b7da35` | Symmetric Room QR intake | iPhone 16 Pro simulator, iOS 18.3.1 / generic iOS / macOS arm64 | scan Receive QR into Send, scan Send QR into Receive, keep an ordinary web QR in the scanner with a visible error, remove the obsolete Token selector, and compile the conditional Files Share Extension payload pair on both Apple endpoints | focused App UI 3/3 passed; ordinary and cross-device-conditional iOS build-for-testing passed; ordinary and cross-device-conditional macOS builds passed; Share payload execution remains a separate physical gate; the single Simulator returned to Shutdown | `/var/folders/dn/xmztcp9551z4m0kqfbr74m_m0000gn/T/envoix-apple-cache/ios-simulator-debug/Logs/Test/Test-Envoix-iOS-AppUI-2026.07.16_09-56-40-+0800.xcresult`; terminal output |
 | 2026-07-16 | `8a9a5e2` | Track S Files Share Extension production payload | physical iPhone 15 Pro Max / real Files share sheet / production macOS `AppModel` on Personal Hotspot | select two isolated files in Files, invoke the Envoix Share Extension, resolve Files-host `public.file-url` property lists to the real security-scoped URLs, finish the extension, adopt the draft in the main app, enter the Room Code through the fully visible Send field, and verify both production Activities plus final payloads | sender 1/1 and receiver 1/1 passed; Direct `172.20.10.1:53304` selected; 2 roots, 2/2 files, 0 directories, 97/97 bytes; SHA-256 `10a3424372e0389307c9bafb51e92d43d095693e218697ea5df3e756605aa975` and `057ee6ebeedb3e66b94e6accb30bb49a3ef9fc8d250d549e26990836912b9e92` matched; provider validation passed 25/25; the test cancels its setup picker instead of leaving a modal page, injects the run ID into both `.xctestrun` environments, and finishes with no Simulator running | `/private/tmp/envoix-share-host-ios-20260716h.xcresult`; `/private/tmp/envoix-share-host-macos-20260716h.xcresult`; guarded hosted-test output |
+| 2026-07-16 | `ca4c6dc` | Track S Direct Open In production payload | physical iPhone 15 Pro Max / production macOS `AppModel` on Personal Hotspot | stage one isolated regular file in the target app container, terminate Envoix, ask iOS to open the file URL, require cold-launch Send adoption and Room completion, then verify the production macOS Activity and final payload | system-open UI 1/1, sender 1/1, and receiver 1/1 passed; Direct `172.20.10.1:62799` selected; `envoix-openin20260716b-open-in.txt`, 39/39 bytes, SHA-256 `94d59c5fc0257250ac3e0c4effa9c9c9d9b00c293ae84195a5057bf1cf6ea4fe` matched; this target-container gate does not claim arbitrary external File Provider behavior; no Simulator was launched | `/private/tmp/envoix-open-in-ios-target-container-20260716f.xcresult`; `/private/tmp/envoix-open-in-ios-20260716g.xcresult`; `/private/tmp/envoix-open-in-macos-20260716g.xcresult` |
 
 ## 11. Definition of done
 
@@ -1258,3 +1269,13 @@ The Apple milestone is complete only when all of the following are true:
   over Direct `172.20.10.1:53304`, matched both SHA-256 values, and launched no
   Simulator. Multi-Photos share-sheet, arbitrary File Provider, and direct Open
   In payload acceptance remain open.
+- 2026-07-16: The physical Direct Open In gate now passes end to end. The first
+  automation attempt placed its fixture in the UI test runner's private
+  container, so Envoix correctly received the cold-launch URL but could not
+  read it. The corrected gate stages the fixture inside the target app's own
+  Documents container, then proves system cold launch, Send adoption, Room
+  completion, and exact production-macOS publication over Direct
+  `172.20.10.1:62799`. The receiver matched 39 bytes and SHA-256
+  `94d59c5fc0257250ac3e0c4effa9c9c9d9b00c293ae84195a5057bf1cf6ea4fe`.
+  This closes the app-owned document-route payload gate without claiming iCloud
+  or arbitrary third-party File Provider behavior; no Simulator was launched.
