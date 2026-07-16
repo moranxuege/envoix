@@ -367,6 +367,92 @@ final class EnvoixMacOSHostedTests: XCTestCase {
 #endif
     }
 
+    func testReceiveIosManualPhotosShareToMacOSAppManifestRoom() async throws {
+        try requireCrossDeviceTesting()
+#if ENVOIX_CROSS_DEVICE_TESTING
+        let outputDirectory = outputDirectory()
+        let model = AppModel.shared
+        let existingActivityIDs = Set(model.activities.map(\.activityId))
+        try? FileManager.default.removeItem(at: outputDirectory)
+        try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+
+        model.receive.startReceivingWithRoom(
+            outputDir: outputDirectory.path,
+            code: Self.roomCode,
+            settings: Self.runtimeSettings
+        )
+        let activityID = try await waitForNewReceiveActivity(
+            in: model,
+            excluding: existingActivityIDs,
+            timeout: Self.manualPhotosTimeout
+        )
+        defer { model.removeActivity(activityID) }
+        emitEvidence(
+            "manual-photos-share-manifest-receiver-ready activity=\(activityID) room=\(Self.roomCode)"
+        )
+
+        let manifest = try await waitForManifestCompletion(
+            activityID: activityID,
+            in: model,
+            timeout: Self.manualPhotosTimeout
+        )
+        let activity = manifest.activity
+        let files = manifest.entries.filter { $0.kind == .file }
+        XCTAssertEqual(activity.direction, .receive)
+        XCTAssertEqual(activity.state, .completed)
+        XCTAssertNotEqual(activity.dataPathKind, .none)
+        XCTAssertEqual(URL(fileURLWithPath: activity.completedFilePath), outputDirectory)
+        XCTAssertEqual(manifest.rootCount, 2)
+        XCTAssertEqual(manifest.fileCount, 2)
+        XCTAssertEqual(manifest.directoryCount, 0)
+        XCTAssertEqual(manifest.completedFiles, 2)
+        XCTAssertEqual(files.count, 2)
+        XCTAssertEqual(activity.bytesTransferred, files.reduce(UInt64(0)) { $0 + $1.size })
+        XCTAssertEqual(activity.totalBytes, activity.bytesTransferred)
+
+        let rootPath = outputDirectory.standardizedFileURL.path + "/"
+        let receivedFiles = try files.map { entry -> (FfiPreparedManifestEntry, URL) in
+            guard let result = manifest.entryResults.first(where: { $0.entryId == entry.entryId }),
+                  result.status == .completed
+                    || result.status == .skippedIdentical
+                    || result.status == .renamed else {
+                throw HostedTestError.transferFailed("manual Photos entry did not complete")
+            }
+            let finalURL = outputDirectory
+                .appendingPathComponent(result.finalRelativePath)
+                .standardizedFileURL
+            guard finalURL.path.hasPrefix(rootPath) else {
+                throw HostedTestError.transferFailed("manual Photos entry resolved outside its output directory")
+            }
+            XCTAssertTrue(FileManager.default.fileExists(atPath: finalURL.path))
+            XCTAssertEqual(try Self.fileSize(finalURL), entry.size)
+            return (entry, finalURL)
+        }
+
+        let prepared = try await prepareManifestSend(
+            activityId: "manual-photos-receive-\(UUID().uuidString)",
+            selectedPaths: receivedFiles.map { $0.1.path }
+        )
+        XCTAssertEqual(prepared.rootCount, 2)
+        XCTAssertEqual(prepared.fileCount, 2)
+        XCTAssertEqual(prepared.directoryCount, 0)
+        let receivedHashesByPath = Dictionary(
+            uniqueKeysWithValues: receivedFiles.map { ($0.1.path, $0.0.hash) }
+        )
+        let preparedHashesByPath = Dictionary(
+            uniqueKeysWithValues: prepared.entries.map { ($0.sourcePath, $0.hash) }
+        )
+        XCTAssertEqual(preparedHashesByPath, receivedHashesByPath)
+        emitEvidence(
+            "manual-photos-share-manifest-completed activity=\(activityID) " +
+            "pathKind=\(activity.dataPathKind) pathDetail=\(activity.dataPathDetail) " +
+            "root=\(outputDirectory.path) roots=\(manifest.rootCount) " +
+            "files=\(manifest.completedFiles)/\(manifest.fileCount) bytes=\(activity.bytesTransferred) " +
+            "contentHashesVerified=\(receivedFiles.count)"
+        )
+#endif
+    }
+
 #if ENVOIX_CROSS_DEVICE_TESTING
     private func receiveIosFileSelectionManifest(
         runID: String,
@@ -816,6 +902,12 @@ final class EnvoixMacOSHostedTests: XCTestCase {
         .flatMap(UInt64.init) ?? UInt64(payload.count)
     private static let timeout = environment("ENVOIX_CROSS_DEVICE_TIMEOUT_SECONDS")
         .flatMap(TimeInterval.init) ?? 180
+    private static let defaultManualPhotosTimeout: TimeInterval = 300
+    private static let manualPhotosTimeout = max(
+        environment("ENVOIX_CROSS_DEVICE_TIMEOUT_SECONDS")
+            .flatMap(TimeInterval.init) ?? defaultManualPhotosTimeout,
+        defaultManualPhotosTimeout
+    )
     private static let useRoomDefaultsKey = "envoix.useRoom"
     private static let useMdnsDefaultsKey = "envoix.useMdns"
     private static let macOSToIosInviteDefaultsKey = "envoix.test.macOSToIosInvite"
@@ -843,9 +935,10 @@ final class EnvoixMacOSHostedTests: XCTestCase {
 
     private func waitForNewReceiveActivity(
         in model: AppModel,
-        excluding existingActivityIDs: Set<String>
+        excluding existingActivityIDs: Set<String>,
+        timeout: TimeInterval? = nil
     ) async throws -> String {
-        let deadline = Date().addingTimeInterval(Self.timeout)
+        let deadline = Date().addingTimeInterval(timeout ?? Self.timeout)
         while Date() < deadline {
             if let record = model.activities.first(where: {
                 $0.direction == .receive && !existingActivityIDs.contains($0.activityId)
@@ -885,9 +978,10 @@ final class EnvoixMacOSHostedTests: XCTestCase {
 
     private func waitForManifestCompletion(
         activityID: String,
-        in model: AppModel
+        in model: AppModel,
+        timeout: TimeInterval? = nil
     ) async throws -> FfiManifestActivityRecord {
-        let deadline = Date().addingTimeInterval(Self.timeout)
+        let deadline = Date().addingTimeInterval(timeout ?? Self.timeout)
         while Date() < deadline {
             if let record = model.manifestActivities[activityID] {
                 switch record.activity.state {

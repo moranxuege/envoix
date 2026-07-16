@@ -461,6 +461,28 @@ setup must be cancelled before activating Files; otherwise it remains a modal
 layer over the main app. The Room field must also be fully inside
 `send_content_scroll` before XCTest types into it.
 
+The corresponding **manual Photos Share Extension** gate deliberately does not
+write fixtures into a user's Photos library. First build the macOS hosted test
+with `ENVOIX_CROSS_DEVICE_TESTING` as shown above, then run this receiver:
+
+```bash
+export ENVOIX_IOS_TO_MACOS_CODE=741205-silver-forest
+export ENVOIX_CROSS_DEVICE_TIMEOUT_SECONDS=300
+export ENVOIX_XCRESULT_PATH=/private/tmp/envoix-manual-photos-share-macos.xcresult
+
+scripts/apple-dev.sh macos-test-rerun \
+  -only-testing:Envoix-macOSTests/EnvoixMacOSHostedTests/testReceiveIosManualPhotosShareToMacOSAppManifestRoom
+```
+
+After the `manual-photos-share-manifest-receiver-ready` marker appears, choose
+exactly two non-sensitive still images in **Photos → Share → Envoix**, wait for
+**Ready in Envoix**, tap **Done**, return to Envoix, enter the Room Code above,
+and send. The receiver requires two top-level files and checks their count,
+sizes, final paths, and completion state. It also re-prepares the received
+files into a Manifest and requires those BLAKE3 hashes to equal the sender
+Manifest hashes. This validates the actual Photos host without
+adding, reading, or deleting any unrelated Photos-library item.
+
 The physical Direct Open In gate validates the separate system document route.
 Start
 `EnvoixMacOSHostedTests.testReceiveIosOpenInToMacOSAppRoom`, wait for its

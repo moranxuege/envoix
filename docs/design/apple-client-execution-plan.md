@@ -1,6 +1,6 @@
 # Apple client execution plan
 
-Status: **In execution — bidirectional Apple Manifest, multi-Photos provider, real iOS Files/Folder/Direct Open In payload, Files Share host, and symmetric Room QR intake gates green; manual Photos, multi-Photos host, and external-provider acceptance pending**
+Status: **In execution — bidirectional Apple Manifest, multi-Photos provider, real iOS Files/Folder/Direct Open In payload, Files and Photos Share hosts, and symmetric Room QR intake gates green; external-provider acceptance and macOS Receive UI publication remain pending**
 
 Owner: Apple client workstream
 
@@ -169,8 +169,12 @@ kept in reviewable staged commits on the current feature branch.
   macOS App over Direct. The system Direct Open In route now cold-launches the
   physical iPhone app with an app-owned regular-file URL, presents the correct
   Send selection, and delivers the exact payload to the production macOS App
-  over Direct. Manual Photos payload acceptance, arbitrary File Provider
-  coverage, and multi-Photos share-sheet acceptance remain pending.
+  over Direct. On 2026-07-16, the physical Photos share sheet staged exactly
+  two still images through the Share Extension; the production iOS Send flow
+  delivered both through a Room to the macOS receiver over Direct, which
+  verified two roots/files, 1,071,694 bytes, final-file sizes, and a freshly
+  recomputed Manifest BLAKE3 hash for each item. Arbitrary File Provider
+  coverage remains pending.
 - The Share Extension accepts multiple Files or Photos representations. It
   stages each provider directly into App Group `group.com.envoix.app.shared`,
   uses a validated versioned draft descriptor, checks actual available storage
@@ -190,8 +194,10 @@ kept in reviewable staged commits on the current feature branch.
   file URLs are resolved, staged, adopted, sent, and byte/hash verified by the
   macOS App. A physical Direct Open In run now proves system cold launch,
   selection import, Room send, and byte/hash verification for an app-owned
-  regular-file URL. Arbitrary iCloud and third-party File Provider acceptance
-  remains.
+  regular-file URL. A physical two-item Photos share-sheet run now also proves
+  Share Extension staging, main-app adoption, Room send, and final Manifest
+  byte/hash verification at the macOS receiver. Arbitrary iCloud and
+  third-party File Provider acceptance remains.
 - Apple now exposes Room Code as the only manual pairing primitive in Send and
   Receive. Either side may display its role QR while the opposite side scans;
   role-less bare codes remain compatible with both flows, while scanning a QR
@@ -210,9 +216,11 @@ kept in reviewable staged commits on the current feature branch.
   68 final bytes, and SHA-256 after a Direct transfer. A paired follow-up stages
   two named PNG providers, selects the production Manifest path, and verifies 2
   roots, 2 files, 136 bytes, and both hashes over Direct IPv6. These are stronger
-  than the earlier CLI/core gate, but the final Photos UI → iOS App → macOS App
-  → Finder manual acceptance and multi-Photos Share Extension host acceptance
-  are still pending.
+  than the earlier CLI/core gate. A physical two-image Photos share-sheet run
+  now additionally verifies the full Photos UI → iOS App → macOS receiver
+  Manifest path. The receiver is intentionally test-isolated in a temporary
+  directory, so macOS Receive UI → Downloads/Finder publication remains a
+  separate pending acceptance boundary.
 - The reverse compatible single-file gate is also green: the production macOS
   `AppModel` sent 37 bytes through an Invite/Relay path to the production iPhone
   `AppModel`, and both canonical Activities completed with the exact
@@ -258,13 +266,13 @@ automated and physical-device acceptance gates.
 |---|---|---|---|
 | D1 | Supported devices and orientations | iPhone + macOS; iPhone portrait; no iPad or landscape promise in this milestone | **Confirmed** |
 | D2 | iOS navigation interaction | One iPhone home screen; Send, Receive, Activity, and Settings open as sheets; no permanent bottom stage bar or global stage swipe | **Confirmed and implemented** |
-| D3 | First system entry | “Open in Envoix” directly handles one regular document; Share Extension stages one or more Files/Photos items for import when the main app next becomes active; in-app Send separately exposes Photos, Files, and Folder; multiple items/folders use Manifest | **Implemented in source; single-Photos Share Extension entry/adoption, two-file Files-host Share Extension→macOS payload, explicit-source physical UI/provider staging, synthetic single-/multi-Photos provider→macOS payload, real Files-/Folder-picker→macOS payload, and app-owned Direct Open In→macOS payload acceptance pass; arbitrary File Provider, multi-Photos share-sheet, and manual Photos payload acceptance pending** |
+| D3 | First system entry | “Open in Envoix” directly handles one regular document; Share Extension stages one or more Files/Photos items for import when the main app next becomes active; in-app Send separately exposes Photos, Files, and Folder; multiple items/folders use Manifest | **Implemented in source; single- and two-Photos Share Extension→production iOS Send→macOS payload, two-file Files-host Share Extension→macOS payload, explicit-source physical UI/provider staging, real Files-/Folder-picker→macOS payload, and app-owned Direct Open In→macOS payload acceptance pass; arbitrary File Provider acceptance remains pending** |
 | D4 | Baseline and shared-core authority | Full-tree checkpoint, latest dev merge, Android App compile compatibility at shared boundaries, additive Apple Rust/UniFFI evolution | **Confirmed and executed** |
 | D5 | Multi-file and directory priority | Move `ManifestV1` into the first parallel product wave; do not ship an app-side zip detour | **Confirmed** |
 | D6 | Wi-Fi Aware device matrix | iPhone↔supported Android is required; Android↔Android gets baseline evidence; macOS keeps LAN/relay until separately proven | **Confirmed** |
 | D7 | Nearby versus remote reachability | Wi-Fi Aware is nearby-only; trusted identity, presence, rendezvous, mailbox, and relay own remote reachability | **Confirmed** |
 | D8 | QR scan ownership | Send and receive choose opposite roles, but either device may show its role QR and the other may scan; the UI must not prescribe a fixed scanner | **Confirmed, implemented, and covered in both directions** |
-| D9 | Apple cross-device acceptance | Keep the macOS app in sync and use iPhone↔macOS as the default physical payload test; opening Send alone is entry evidence, not transfer acceptance | **Confirmed; production AppModel single-file and Manifest payload gates pass in both directions, while manual UI-to-UI acceptance remains pending** |
+| D9 | Apple cross-device acceptance | Keep the macOS app in sync and use iPhone↔macOS as the default physical payload test; opening Send alone is entry evidence, not transfer acceptance | **Confirmed; production AppModel single-file and Manifest payload gates pass in both directions, including a real iPhone Photos share-sheet→iOS Send→macOS receiver Manifest run; macOS Receive UI publication remains pending** |
 
 For D3, a Photos item means an image or video representation supplied by the
 Photos share sheet. Multiple selected assets now use `ManifestV1`. Preserving a
@@ -674,9 +682,10 @@ synthetic single- and multi-Photos provider→production iOS Send→macOS App
 payload acceptance complete; the real Files and Folder pickers→production
 Send→macOS App payload gates are complete; the real Files host→Share Extension
 two-item→production Send→macOS App payload gate is complete; the app-owned
-Direct Open In→production Send→macOS App payload gate is complete; multi-Photos
-share-sheet acceptance, manual Photos payload acceptance, and arbitrary File
-Provider behavior remain**.
+Direct Open In→production Send→macOS App payload gate is complete; the physical
+two-image Photos share sheet→Share Extension→production Send→macOS receiver
+Manifest gate is complete; arbitrary File Provider behavior and macOS Receive
+UI publication remain**.
 
 First slice:
 
