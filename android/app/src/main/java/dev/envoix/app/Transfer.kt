@@ -56,6 +56,9 @@ data class Transfer(
     val error: String? = null,
     /** Where a received file ended up (a `content://` in Downloads), for opening. */
     val savedUri: String? = null,
+    /** The name the received file was actually published under — may differ from
+     *  [fileName] (the transfer identity) after a collision bump, e.g. "photo (1).jpg". */
+    val publishedName: String? = null,
     /** For an initiated session, the invite payload to show as a QR while waiting
      *  for a peer to pair (null when we joined someone else's code). */
     val qrPayload: String? = null,

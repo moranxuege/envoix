@@ -2,6 +2,7 @@ package dev.envoix.app
 
 import android.content.ContentValues
 import android.content.Context
+import android.database.sqlite.SQLiteConstraintException
 import android.net.Uri
 import android.os.Environment
 import android.provider.MediaStore
@@ -26,6 +27,16 @@ object MediaStoreSaver {
         /** MediaStore rows are inserted IS_PENDING and must be committed to
          *  become visible; SAF documents are visible on creation. */
         val mediaStorePending: Boolean,
+        /** The name actually reserved — the SAF-uniquified name, or the requested
+         *  Downloads name (which [commit] may still bump on a collision). */
+        val displayName: String,
+    )
+
+    /** A successful publish: the URI, and the name it actually landed under (may
+     *  differ from the requested name after a collision bump). */
+    data class PublishOutcome(
+        val uri: Uri,
+        val displayName: String,
     )
 
     /**
@@ -58,24 +69,66 @@ object MediaStoreSaver {
             }
         }.map { }
 
-    /** Make a reserved target visible after a successful copy (MediaStore only).
-     *  Returns the failure cause instead of throwing: a colliding `_data` (a
-     *  same-named file already published) surfaces as UNIQUE(files._data) here,
-     *  and must not crash the app mid-publish. */
+    /**
+     * Make a reserved target visible after a successful copy, resolving a name
+     * collision by bumping the pending row's DISPLAY_NAME and retrying: the
+     * un-pend is where MediaStore finalizes `_data`, so a colliding name throws
+     * UNIQUE(files._data) here. Uniqueness is proven by a *successful* commit,
+     * never assumed — a pre-query can't see pending/orphaned rows.
+     *
+     * Only a UNIQUE violation is retried. Any other error (IO, provider dead), or
+     * an update that affected 0 rows (the row vanished), fails immediately so the
+     * caller keeps staging instead of deleting bytes it never published. SAF
+     * targets are already visible → returned as-is.
+     *
+     * Returns the URI and the name it actually landed under.
+     */
     fun commit(
         context: Context,
         target: Reserved,
-    ): Result<Unit> =
-        runCatching {
-            if (target.mediaStorePending) {
-                context.contentResolver.update(
-                    target.uri,
-                    ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) },
-                    null,
-                    null,
-                )
+    ): Result<PublishOutcome> {
+        if (!target.mediaStorePending) {
+            return Result.success(PublishOutcome(target.uri, target.displayName))
+        }
+        val resolver = context.contentResolver
+        for ((attempt, candidate) in nameSequence(target.displayName).take(NAME_ATTEMPTS).withIndex()) {
+            // The reserved row already carries the first candidate; later ones
+            // need a rename (still pending, no `_data` yet) before the un-pend.
+            if (attempt > 0) {
+                val renamed =
+                    runCatching {
+                        resolver.update(
+                            target.uri,
+                            ContentValues().apply { put(MediaStore.Downloads.DISPLAY_NAME, candidate) },
+                            null,
+                            null,
+                        )
+                    }
+                when {
+                    renamed.isFailure && isUniqueViolation(renamed.exceptionOrNull()) -> continue
+                    renamed.isFailure -> return Result.failure(renamed.exceptionOrNull()!!)
+                    renamed.getOrThrow() != 1 -> return Result.failure(rowVanished("rename", renamed.getOrThrow()))
+                }
             }
-        }.map { }
+            val unpended =
+                runCatching {
+                    resolver.update(
+                        target.uri,
+                        ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) },
+                        null,
+                        null,
+                    )
+                }
+            when {
+                unpended.isSuccess && unpended.getOrThrow() == 1 ->
+                    return Result.success(PublishOutcome(target.uri, candidate))
+                unpended.isSuccess -> return Result.failure(rowVanished("un-pend", unpended.getOrThrow()))
+                isUniqueViolation(unpended.exceptionOrNull()) -> continue
+                else -> return Result.failure(unpended.exceptionOrNull()!!)
+            }
+        }
+        return Result.failure(IllegalStateException("publish exhausted $NAME_ATTEMPTS candidate names"))
+    }
 
     /** Delete a target by URI (recovery: drop a half-written candidate). */
     fun delete(
@@ -121,9 +174,10 @@ object MediaStoreSaver {
     ): Reserved? {
         val tree = DocumentFile.fromTreeUri(context, treeUri)?.takeIf { it.canWrite() } ?: return null
         // Never delete a same-named file (it may be the user's, or an earlier
-        // receive): uniquify like the Downloads/MediaStore path does.
+        // receive): uniquify like the Downloads path does. The created document's
+        // real name is what the record must show.
         val doc = tree.createFile("application/octet-stream", uniqueName(tree, displayName)) ?: return null
-        return Reserved(doc.uri, mediaStorePending = false)
+        return Reserved(doc.uri, mediaStorePending = false, displayName = doc.name ?: displayName)
     }
 
     private fun reserveInDownloads(
@@ -132,49 +186,56 @@ object MediaStoreSaver {
         folder: String,
     ): Reserved? {
         val sub = folder.trim().ifBlank { "Envoix" }
-        // MediaStore stores RELATIVE_PATH with a trailing slash; match it so the
-        // collision query lines up with already-committed rows.
-        val relPath = "${Environment.DIRECTORY_DOWNLOADS}/$sub/"
+        // Insert the raw requested name; `commit` resolves any collision at the
+        // un-pend (the ground-truth collision point) by bumping + retrying.
         val pending =
             ContentValues().apply {
-                put(MediaStore.Downloads.DISPLAY_NAME, uniqueDownloadName(context, displayName, relPath))
+                put(MediaStore.Downloads.DISPLAY_NAME, displayName)
                 put(MediaStore.Downloads.MIME_TYPE, "application/octet-stream")
-                put(MediaStore.Downloads.RELATIVE_PATH, relPath)
+                put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/$sub/")
                 put(MediaStore.Downloads.IS_PENDING, 1)
             }
         val uri =
             context.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, pending)
                 ?: return null
-        return Reserved(uri, mediaStorePending = true)
+        return Reserved(uri, mediaStorePending = true, displayName = displayName)
     }
 
-    /** [name] if free under [relPath] in Downloads, else "name (1)", "name (2)",
-     *  …. A pending MediaStore insert is NOT auto-uniquified when un-pended, so
-     *  committing a colliding name throws UNIQUE(files._data); uniquify up front,
-     *  mirroring the SAF path. [relPath] is MediaStore's stored form (trailing slash). */
-    private fun uniqueDownloadName(
-        context: Context,
-        name: String,
-        relPath: String,
-    ): String {
-        fun taken(candidate: String): Boolean =
-            context.contentResolver
-                .query(
-                    MediaStore.Downloads.EXTERNAL_CONTENT_URI,
-                    arrayOf(MediaStore.Downloads._ID),
-                    "${MediaStore.Downloads.RELATIVE_PATH} = ? AND ${MediaStore.Downloads.DISPLAY_NAME} = ?",
-                    arrayOf(relPath, candidate),
-                    null,
-                )?.use { it.count > 0 } ?: false
-        if (!taken(name)) return name
-        val dot = name.lastIndexOf('.')
-        val (base, ext) = if (dot > 0) name.substring(0, dot) to name.substring(dot) else name to ""
-        for (i in 1..99) {
-            val candidate = "$base ($i)$ext"
-            if (!taken(candidate)) return candidate
+    /** [name], then "name (1)"…"name (99)", then random-suffixed candidates — an
+     *  endless sequence consumed one-per-collision by [commit] (bounded there by
+     *  [NAME_ATTEMPTS]). `internal` so the deterministic prefix is unit-testable. */
+    internal fun nameSequence(name: String): Sequence<String> =
+        sequence {
+            val dot = name.lastIndexOf('.')
+            val base = if (dot > 0) name.substring(0, dot) else name
+            val ext = if (dot > 0) name.substring(dot) else ""
+            yield(name)
+            for (i in 1..99) yield("$base ($i)$ext")
+            while (true) yield("$base (${randomSuffix()})$ext")
         }
-        return "$base (${System.currentTimeMillis()})$ext"
+
+    /** True if [t]'s cause chain holds a SQLite UNIQUE-constraint violation. The
+     *  provider/Binder can wrap it, so walk `.cause`; match the UNIQUE wording so
+     *  a different constraint (NOT NULL, …) is never mistaken for a name clash. */
+    internal fun isUniqueViolation(t: Throwable?): Boolean {
+        var e = t
+        while (e != null) {
+            if (e is SQLiteConstraintException &&
+                e.message?.contains("UNIQUE", ignoreCase = true) == true
+            ) {
+                return true
+            }
+            e = e.cause
+        }
+        return false
     }
+
+    private fun randomSuffix(): String = (1..8).map { ALNUM[kotlin.random.Random.nextInt(ALNUM.length)] }.joinToString("")
+
+    private fun rowVanished(
+        step: String,
+        rows: Int,
+    ) = IllegalStateException("publish $step affected $rows rows (expected 1); target row vanished")
 
     /** [name] if free in [tree], else "name (1)", "name (2)", … before the extension. */
     private fun uniqueName(
@@ -190,4 +251,7 @@ object MediaStoreSaver {
         }
         return "$base (${System.currentTimeMillis()})$ext"
     }
+
+    private const val NAME_ATTEMPTS = 200
+    private const val ALNUM = "abcdefghijklmnopqrstuvwxyz0123456789"
 }

@@ -825,11 +825,13 @@ class TransferService : Service() {
             val committed = prior.optString("committed_uri").ifEmpty { null }
             if (committed != null && MediaStoreSaver.resolves(this, Uri.parse(committed))) {
                 // Commit had landed; the crash was before staging was cleared.
-                adopt(attributeTo, src.name, committed)
+                // Adopt under the name it was actually published as (may be bumped).
+                val publishedName = prior.optString("published_name").ifEmpty { src.name }
+                adopt(attributeTo, expectedSourceName = src.name, publishedName = publishedName, uri = committed)
                 src.delete()
                 journal.delete()
                 tl("adopt", fields = mapOf("uri" to TransferTimeline.redactUri(committed)))
-                LogStore.append("app: adopted already-published ${src.name}")
+                LogStore.append("app: adopted already-published $publishedName")
                 return
             }
             // Reserved but never committed (or the user deleted it): drop the
@@ -848,7 +850,7 @@ class TransferService : Service() {
         }
         tl("reserve", fields = mapOf("uri" to TransferTimeline.redactUri(target.uri.toString())))
         // Record the reservation BEFORE any byte is copied.
-        writePublishJournal(journal, target.uri.toString(), target.mediaStorePending, committed = null)
+        writePublishJournal(journal, target.uri.toString(), target.mediaStorePending, committed = null, publishedName = null)
         val copy = MediaStoreSaver.copyInto(this, src, target)
         if (copy.isFailure) {
             MediaStoreSaver.delete(this, target.uri)
@@ -876,15 +878,30 @@ class TransferService : Service() {
             )
             return
         }
-        // Record the commit BEFORE clearing staging, so a crash here recovers
-        // by adopting (never re-publishing = duplicate).
-        writePublishJournal(journal, target.uri.toString(), target.mediaStorePending, committed = target.uri.toString())
-        tl("commit", fields = mapOf("uri" to TransferTimeline.redactUri(target.uri.toString())))
-        adopt(attributeTo, src.name, target.uri.toString())
+        val outcome = committed.getOrThrow()
+        // Record the commit (with the name it actually landed under) BEFORE clearing
+        // staging, so a crash here recovers by adopting (never re-publishing =
+        // duplicate). The write is best-effort: surface a failure rather than
+        // swallow it, but still adopt + clear in-line so no duplicate is created —
+        // the crash-in-this-window gap is the separate publication barrier.
+        val journaled =
+            writePublishJournal(
+                journal,
+                target.uri.toString(),
+                target.mediaStorePending,
+                committed = outcome.uri.toString(),
+                publishedName = outcome.displayName,
+            )
+        if (!journaled) {
+            tl("failed", outcome = "journal")
+            LogStore.append("app: publish journal write failed (published as ${outcome.displayName})")
+        }
+        tl("commit", fields = mapOf("uri" to TransferTimeline.redactUri(outcome.uri.toString())))
+        adopt(attributeTo, expectedSourceName = src.name, publishedName = outcome.displayName, uri = outcome.uri.toString())
         src.delete()
         journal.delete()
         tl("staging_deleted")
-        LogStore.append("app: saved ${src.name} to Downloads")
+        LogStore.append("app: saved ${outcome.displayName} to Downloads")
     }
 
     private fun writePublishJournal(
@@ -892,26 +909,36 @@ class TransferService : Service() {
         target: String,
         pending: Boolean,
         committed: String?,
-    ) {
+        publishedName: String?,
+    ): Boolean {
         val obj =
             org.json
                 .JSONObject()
                 .put("target", target)
                 .put("pending", pending)
         committed?.let { obj.put("committed_uri", it) }
-        runCatching { journal.writeText(obj.toString()) }
+        publishedName?.let { obj.put("published_name", it) }
+        return runCatching { journal.writeText(obj.toString()) }.isSuccess
     }
 
-    /** Attribute a published URI to its card (savedUri), and durable extras. */
+    /** Attribute a published URI to its card. [expectedSourceName] is the transfer
+     *  identity (matched against `fileName`, never overwritten by the published
+     *  name); [publishedName] is the platform display name it actually landed
+     *  under, which may be a collision-bumped "name (1)". */
     private fun adopt(
         attributeTo: Long?,
-        name: String,
+        expectedSourceName: String,
+        publishedName: String,
         uri: String,
     ) {
         if (attributeTo == null) return
         TransferRepository.update(attributeTo) {
-            if (it.fileName == null || it.fileName == name) {
-                it.copy(fileName = it.fileName ?: name, savedUri = uri)
+            if (it.fileName == null || it.fileName == expectedSourceName) {
+                it.copy(
+                    fileName = it.fileName ?: expectedSourceName,
+                    savedUri = uri,
+                    publishedName = publishedName,
+                )
             } else {
                 it
             }
