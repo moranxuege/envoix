@@ -7,6 +7,8 @@ ffi_dir="$repo_root/crates/envoix-ffi"
 package_dir="$ffi_dir/EnvoixCore"
 input_stamp="$package_dir/.envoix-inputs.sha256"
 backup_dir=""
+core_target="${ENVOIX_APPLE_CORE_TARGET:-}"
+core_profile="${ENVOIX_APPLE_CORE_PROFILE:-debug}"
 generated_bindings=(
   "generated/envoix_ffi.swift"
   "generated/envoix_ffiFFI.h"
@@ -15,6 +17,21 @@ generated_bindings=(
   "generated/headers/module.modulemap"
   "generated/sources/envoix_ffi.swift"
 )
+
+case "$core_target" in
+  ""|aarch64-apple-darwin|aarch64-apple-ios-sim) ;;
+  *)
+    echo "error: ENVOIX_APPLE_CORE_TARGET must be empty, aarch64-apple-darwin, or aarch64-apple-ios-sim" >&2
+    exit 2
+    ;;
+esac
+case "$core_profile" in
+  debug|release) ;;
+  *)
+    echo "error: ENVOIX_APPLE_CORE_PROFILE must be debug or release" >&2
+    exit 2
+    ;;
+esac
 
 if [[ "${ENVOIX_BUILD_LEASE_HELD:-0}" == "1" \
       && "${ENVOIX_BUILD_LEASE_MODE:-writer}" == "reader" ]]; then
@@ -35,6 +52,8 @@ apple_core_is_current() {
 
 apple_core_input_digest() {
   {
+    printf 'target=%s\n' "${core_target:-all}"
+    printf 'profile=%s\n' "$core_profile"
     local input
     for input in \
       "$repo_root/Cargo.toml" \
@@ -100,6 +119,22 @@ done
 generate_apple_package() {
   (
     cd "$ffi_dir"
+    local -a package_args=(
+      package
+      --platforms macos@13 ios@16
+      --name EnvoixCore
+      --lib-type static
+      --swift-tools-version 5.7
+      --accept-all
+    )
+    if [[ -n "$core_target" ]]; then
+      package_args+=(--target "$core_target")
+    else
+      package_args+=(--exclude-arch x86_64-apple-ios)
+    fi
+    if [[ "$core_profile" == "release" ]]; then
+      package_args+=(--release)
+    fi
     env \
       MACOSX_DEPLOYMENT_TARGET=13.0 \
       IPHONEOS_DEPLOYMENT_TARGET=16.0 \
@@ -107,13 +142,7 @@ generate_apple_package() {
       CFLAGS_x86_64_apple_darwin="-mmacosx-version-min=13.0" \
       CFLAGS_aarch64_apple_ios="-miphoneos-version-min=16.0" \
       CFLAGS_aarch64_apple_ios_sim="-mios-simulator-version-min=16.0" \
-      cargo swift package \
-        --platforms macos@13 ios@16 \
-        --name EnvoixCore \
-        --lib-type static \
-        --exclude-arch x86_64-apple-ios \
-        --swift-tools-version 5.7 \
-        --accept-all
+      cargo swift "${package_args[@]}"
   )
 }
 
@@ -146,6 +175,14 @@ validate_library_minimum_versions() {
 }
 
 validate_apple_package_minimum_versions() {
+  if [[ "$core_target" == "aarch64-apple-darwin" ]]; then
+    validate_single_apple_library 13.0
+    return
+  fi
+  if [[ "$core_target" == "aarch64-apple-ios-sim" ]]; then
+    validate_single_apple_library 16.0
+    return
+  fi
   validate_library_minimum_versions \
     "$package_dir/envoix_ffiFFI.xcframework/macos-arm64_x86_64/libenvoix_ffi.a" \
     13.0 || return 1
@@ -157,7 +194,24 @@ validate_apple_package_minimum_versions() {
     16.0 || return 1
 }
 
+validate_single_apple_library() {
+  local maximum="$1"
+  local -a libraries=()
+  while IFS= read -r library; do
+    libraries+=("$library")
+  done < <(find "$package_dir/envoix_ffiFFI.xcframework" -type f -name 'libenvoix_ffi.a' -print)
+  if [[ "${#libraries[@]}" -ne 1 ]]; then
+    echo "error: expected one Apple core library for $core_target, found ${#libraries[@]}" >&2
+    return 1
+  fi
+  validate_library_minimum_versions "${libraries[0]}" "$maximum"
+}
+
 clean_blake3_apple_targets() {
+  if [[ -n "$core_target" ]]; then
+    cargo clean -p blake3 --target "$core_target"
+    return
+  fi
   local target
   for target in \
     aarch64-apple-darwin \
