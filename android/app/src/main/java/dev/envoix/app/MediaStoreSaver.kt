@@ -130,14 +130,22 @@ object MediaStoreSaver {
         return Result.failure(IllegalStateException("publish exhausted $NAME_ATTEMPTS candidate names"))
     }
 
-    /** Delete a target by URI (recovery: drop a half-written candidate). */
+    /** Delete a target by URI (recovery: drop a half-written candidate). A
+     *  MediaStore `content://media/...` row is NOT a document URI, so
+     *  `DocumentFile.delete()` (DocumentsContract) fails on it — and because
+     *  `fromSingleUri` is non-null for any URI, an Elvis fallback would never
+     *  run. Branch on the URI kind so pending MediaStore rows are actually
+     *  removed via `ContentResolver.delete`. */
     fun delete(
         context: Context,
         uri: Uri,
     ): Boolean =
         runCatching {
-            DocumentFile.fromSingleUri(context, uri)?.delete()
-                ?: (context.contentResolver.delete(uri, null, null) > 0)
+            if (DocumentFile.isDocumentUri(context, uri)) {
+                DocumentFile.fromSingleUri(context, uri)?.delete() ?: false
+            } else {
+                context.contentResolver.delete(uri, null, null) > 0
+            }
         }.getOrDefault(false)
 
     /** Does [uri] still resolve to an openable document? (User may have deleted it.) */
@@ -146,8 +154,10 @@ object MediaStoreSaver {
         uri: Uri,
     ): Boolean =
         runCatching {
-            context.contentResolver.openFileDescriptor(uri, "r")?.use {}
-            true
+            // openFileDescriptor is nullable; a null means the target isn't
+            // openable, so return the real result — never an unconditional true
+            // (recovery adopts on true and would then delete staging).
+            context.contentResolver.openFileDescriptor(uri, "r")?.use { true } ?: false
         }.getOrDefault(false)
 
     /** Reserve + copy + commit in one shot — the non-journaled convenience path. */
