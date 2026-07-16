@@ -30,10 +30,13 @@ jobs:
     timeout-minutes: 45
     env:
       ENVOIX_APPLE_CORE_TARGET: aarch64-apple-darwin
-      ENVOIX_APPLE_CACHE_ROOT: ${{ runner.temp }}/envoix-apple-cache
-      CARGO_INSTALL_ROOT: ${{ runner.temp }}/cargo-tools
     steps:
       - uses: actions/checkout@v4
+
+      - name: Prepare temporary build paths
+        run: |
+          printf 'ENVOIX_APPLE_CACHE_ROOT=%s\n' "$RUNNER_TEMP/envoix-apple-cache" >> "$GITHUB_ENV"
+          printf 'CARGO_INSTALL_ROOT=%s\n' "$RUNNER_TEMP/cargo-tools" >> "$GITHUB_ENV"
 
       - name: Set up pinned Apple tools
         run: |
@@ -86,11 +89,14 @@ jobs:
     timeout-minutes: 90
     env:
       ENVOIX_APPLE_CORE_TARGET: aarch64-apple-ios-sim
-      ENVOIX_APPLE_CACHE_ROOT: ${{ runner.temp }}/envoix-apple-cache
       ENVOIX_IOS_SIM_DESTINATION: platform=iOS Simulator,OS=26.5,name=iPhone 17 Pro
-      CARGO_INSTALL_ROOT: ${{ runner.temp }}/cargo-tools
     steps:
       - uses: actions/checkout@v4
+
+      - name: Prepare temporary build paths
+        run: |
+          printf 'ENVOIX_APPLE_CACHE_ROOT=%s\n' "$RUNNER_TEMP/envoix-apple-cache" >> "$GITHUB_ENV"
+          printf 'CARGO_INSTALL_ROOT=%s\n' "$RUNNER_TEMP/cargo-tools" >> "$GITHUB_ENV"
 
       - name: Set up pinned Apple tools
         run: |
