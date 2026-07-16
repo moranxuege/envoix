@@ -259,6 +259,21 @@ unchanged Core plus Xcode project check 1.02 s, cold macOS hosted build/test
 27.36 s, warm build/test 6.00 s, and `test-without-building` 2.23 s. Treat these
 as a comparison on one machine, not a CI performance guarantee.
 
+### GitHub Actions test scopes
+
+`apple-ci` keeps push and pull-request feedback bounded: it builds both Apple
+targets, runs the complete hosted suite, and runs three deterministic App UI
+smoke tests for Home, QR pairing, and Activity lifecycle. The pinned
+`cargo-swift` executable is cached independently from generated products, so a
+cache hit avoids recompiling that tool without retaining large Xcode output.
+
+Use **Actions → apple-ci → Run workflow** and select `ui_scope: full` to run the
+complete App UI suite. Full coverage includes system Files, folder selection,
+and Share Extension flows; it is intentionally manual because those system-App
+interactions are slower and more simulator-sensitive. Both scopes retain their
+xcresult evidence, perform the same result audit, and allow one no-rebuild UI
+retry.
+
 Cross-device methods report `XCTSkip` in the default suite. They execute only
 with the explicit `ENVOIX_CROSS_DEVICE_TESTING` configuration and a live peer;
 skipped output must not be reported as cross-device success. In addition to the
