@@ -338,6 +338,28 @@ final class EnvoixMacOSHostedTests: XCTestCase {
     func testReceiveIosFilePickerToMacOSAppManifestRoom() async throws {
         try requireCrossDeviceTesting()
 #if ENVOIX_CROSS_DEVICE_TESTING
+        try await receiveIosFileSelectionManifest(
+            runID: Self.runID,
+            evidenceLabel: "file-picker-manifest"
+        )
+#endif
+    }
+
+    func testReceiveIosShareExtensionFilesToMacOSAppManifestRoom() async throws {
+        try requireCrossDeviceTesting()
+#if ENVOIX_CROSS_DEVICE_TESTING
+        try await receiveIosFileSelectionManifest(
+            runID: Self.runID,
+            evidenceLabel: "share-extension-files-manifest"
+        )
+#endif
+    }
+
+#if ENVOIX_CROSS_DEVICE_TESTING
+    private func receiveIosFileSelectionManifest(
+        runID: String,
+        evidenceLabel: String
+    ) async throws {
         let outputDirectory = outputDirectory()
         let model = AppModel.shared
         let existingActivityIDs = Set(model.activities.map(\.activityId))
@@ -355,16 +377,16 @@ final class EnvoixMacOSHostedTests: XCTestCase {
         )
         defer { model.removeActivity(activityID) }
         emitEvidence(
-            "file-picker-manifest-receiver-ready activity=\(activityID) room=\(Self.roomCode)"
+            "\(evidenceLabel)-receiver-ready activity=\(activityID) room=\(Self.roomCode)"
         )
 
         let manifest = try await waitForManifestCompletion(activityID: activityID, in: model)
         let activity = manifest.activity
-        let expectedBytes = UInt64(
-            Self.filePickerFirstPayload.count + Self.filePickerSecondPayload.count
-        )
-        let first = outputDirectory.appendingPathComponent(Self.filePickerFirstName)
-        let second = outputDirectory.appendingPathComponent(Self.filePickerSecondName)
+        let firstPayload = Data("envoix file picker payload first \(runID)\n".utf8)
+        let secondPayload = Data("envoix file picker payload second \(runID)\n".utf8)
+        let expectedBytes = UInt64(firstPayload.count + secondPayload.count)
+        let first = outputDirectory.appendingPathComponent("envoix-\(runID)-file-first.txt")
+        let second = outputDirectory.appendingPathComponent("envoix-\(runID)-file-second.txt")
         XCTAssertEqual(activity.direction, .receive)
         XCTAssertEqual(activity.state, .completed)
         XCTAssertEqual(activity.bytesTransferred, expectedBytes)
@@ -378,21 +400,21 @@ final class EnvoixMacOSHostedTests: XCTestCase {
         XCTAssertTrue(manifest.entryResults.allSatisfy {
             $0.status == .completed || $0.status == .skippedIdentical || $0.status == .renamed
         })
-        XCTAssertEqual(try Data(contentsOf: first), Self.filePickerFirstPayload)
-        XCTAssertEqual(try Data(contentsOf: second), Self.filePickerSecondPayload)
+        XCTAssertEqual(try Data(contentsOf: first), firstPayload)
+        XCTAssertEqual(try Data(contentsOf: second), secondPayload)
         let firstHash = try Self.fileSHA256(first)
         let secondHash = try Self.fileSHA256(second)
-        XCTAssertEqual(firstHash, Data(SHA256.hash(data: Self.filePickerFirstPayload)))
-        XCTAssertEqual(secondHash, Data(SHA256.hash(data: Self.filePickerSecondPayload)))
+        XCTAssertEqual(firstHash, Data(SHA256.hash(data: firstPayload)))
+        XCTAssertEqual(secondHash, Data(SHA256.hash(data: secondPayload)))
         emitEvidence(
-            "file-picker-manifest-completed activity=\(activityID) " +
+            "\(evidenceLabel)-completed activity=\(activityID) " +
             "pathKind=\(activity.dataPathKind) pathDetail=\(activity.dataPathDetail) " +
             "root=\(outputDirectory.path) roots=\(manifest.rootCount) " +
             "files=\(manifest.completedFiles)/\(manifest.fileCount) bytes=\(activity.bytesTransferred) " +
             "firstSha256=\(firstHash.hexString) secondSha256=\(secondHash.hexString)"
         )
-#endif
     }
+#endif
 
     func testSendMacOSToIosAppInvite() async throws {
         try requireCrossDeviceTesting()
@@ -759,14 +781,6 @@ final class EnvoixMacOSHostedTests: XCTestCase {
     private static let folderPickerFolderName = "envoix-\(runID)-folder"
     private static let folderPickerFileName = "payload.txt"
     private static let folderPickerPayload = Data("envoix folder picker payload \(runID)\n".utf8)
-    private static let filePickerFirstName = "envoix-\(runID)-file-first.txt"
-    private static let filePickerSecondName = "envoix-\(runID)-file-second.txt"
-    private static let filePickerFirstPayload = Data(
-        "envoix file picker payload first \(runID)\n".utf8
-    )
-    private static let filePickerSecondPayload = Data(
-        "envoix file picker payload second \(runID)\n".utf8
-    )
     private static let photoPayload = Data(
         base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
     )!

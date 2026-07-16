@@ -64,6 +64,64 @@ final class EnvoixIOSAppUITests: XCTestCase {
         XCTAssertTrue(app.buttons["receive_start_button"].isHittable)
     }
 
+    func testScannerAppliesReceiverQRToSendRoomCode() throws {
+        let roomCode = "741205-silver-forest"
+        let app = makeScannerTestApp(payload: pairingPayload(code: roomCode, role: "receive"))
+
+        app.launch()
+        dismissSheetIfNeeded(app)
+        openInjectedScanner(
+            homeButton: "home_send",
+            scrollView: "send_content_scroll",
+            scannerButton: "send_scan_receiver_qr",
+            in: app
+        )
+        app.buttons["qr_scanner_test_payload"].tap()
+
+        let roomCodeField = app.textFields["send_room_code_input"]
+        XCTAssertTrue(roomCodeField.waitForExistence(timeout: 5))
+        XCTAssertEqual(roomCodeField.value as? String, roomCode)
+        XCTAssertFalse(app.staticTexts["Advanced pairing"].exists)
+        XCTAssertFalse(app.buttons["Token"].exists)
+    }
+
+    func testScannerAppliesSenderQRToReceiveRoomCode() throws {
+        let roomCode = "741205-silver-forest"
+        let app = makeScannerTestApp(payload: pairingPayload(code: roomCode, role: "send"))
+
+        app.launch()
+        dismissSheetIfNeeded(app)
+        openInjectedScanner(
+            homeButton: "home_receive",
+            scrollView: "receive_content_scroll",
+            scannerButton: "receive_scan_sender_qr",
+            in: app
+        )
+        app.buttons["qr_scanner_test_payload"].tap()
+
+        let roomCodeField = app.textFields["receive_join_room_code_input"]
+        XCTAssertTrue(roomCodeField.waitForExistence(timeout: 5))
+        XCTAssertEqual(roomCodeField.value as? String, roomCode)
+    }
+
+    func testScannerKeepsInvalidQRVisible() throws {
+        let app = makeScannerTestApp(payload: "https://example.com/not-an-envoix-code")
+
+        app.launch()
+        dismissSheetIfNeeded(app)
+        openInjectedScanner(
+            homeButton: "home_send",
+            scrollView: "send_content_scroll",
+            scannerButton: "send_scan_receiver_qr",
+            in: app
+        )
+        let testPayload = app.buttons["qr_scanner_test_payload"]
+        testPayload.tap()
+
+        XCTAssertTrue(app.descendants(matching: .any)["qr_scanner_error"].waitForExistence(timeout: 5))
+        XCTAssertTrue(testPayload.exists)
+    }
+
     func testChineseDarkLayoutKeepsPrimaryActionsReachable() throws {
         let app = XCUIApplication()
         app.launchArguments += [
@@ -450,11 +508,29 @@ final class EnvoixIOSAppUITests: XCTestCase {
     }
 
     func testShareExtensionStagesTwoFilesFromFilesHost() throws {
+        #if ENVOIX_CROSS_DEVICE_TESTING
+        let runID = ProcessInfo.processInfo.environment["ENVOIX_CROSS_DEVICE_RUN_ID"]
+            ?? "sharehost"
+        #else
         let runID = "sharehost"
+        #endif
+        #if ENVOIX_CROSS_DEVICE_TESTING
+        let roomCode = ProcessInfo.processInfo.environment["ENVOIX_IOS_TO_MACOS_CODE"]
+            ?? Self.folderPickerRoomCode
+        #endif
         let fileNames = [
             "envoix-\(runID)-file-first.txt",
             "envoix-\(runID)-file-second.txt",
         ]
+        #if ENVOIX_CROSS_DEVICE_TESTING
+        let app = makeCrossDeviceSenderApp(
+            runID: runID,
+            pickerArguments: [
+                "--ui-testing-file-picker",
+                "--ui-testing-file-payload",
+            ]
+        )
+        #else
         let app = XCUIApplication()
         app.launchArguments += [
             "--ui-testing",
@@ -462,6 +538,7 @@ final class EnvoixIOSAppUITests: XCTestCase {
             "--ui-testing-file-payload",
         ]
         app.launchEnvironment["ENVOIX_CROSS_DEVICE_RUN_ID"] = runID
+        #endif
         defer { cleanFilePayloadFixture(app: app, runID: runID) }
         let files = XCUIApplication(bundleIdentifier: "com.apple.DocumentsApp")
         files.terminate()
@@ -612,10 +689,20 @@ final class EnvoixIOSAppUITests: XCTestCase {
         XCTAssertTrue(selection.waitForExistence(timeout: 10))
         XCTAssertEqual(selection.value as? String, "2")
 
+        #if ENVOIX_CROSS_DEVICE_TESTING
+        startRoomSend(code: roomCode, in: app)
+        openActivity(in: app)
+        waitForLatestActivityCompletion(
+            description: "Files Share Extension transfer",
+            in: app,
+            timeout: Self.crossDeviceTimeout
+        )
+        #else
         let close = app.buttons["mobile_sheet_done"]
         XCTAssertTrue(close.waitForExistence(timeout: 5))
         close.tap()
         XCTAssertTrue(app.buttons["home_send"].waitForExistence(timeout: 5))
+        #endif
     }
 
     func testFolderPickerSendsCurrentDirectoryToMacOSApp() throws {
@@ -721,6 +808,7 @@ final class EnvoixIOSAppUITests: XCTestCase {
         let deadline = Date().addingTimeInterval(timeout)
         repeat {
             for application in applications {
+                guard application.state != .notRunning else { continue }
                 for label in labels {
                     let button = application.buttons[label]
                     if button.exists, button.isHittable {
@@ -787,6 +875,7 @@ final class EnvoixIOSAppUITests: XCTestCase {
         let deadline = Date().addingTimeInterval(timeout)
         repeat {
             for application in applications {
+                guard application.state != .notRunning else { continue }
                 let elements = application.descendants(matching: .any)
                     .matching(predicate)
                     .allElementsBoundByIndex
@@ -856,6 +945,7 @@ final class EnvoixIOSAppUITests: XCTestCase {
         let deadline = Date().addingTimeInterval(timeout)
         repeat {
             for application in applications {
+                guard application.state != .notRunning else { continue }
                 let element = application.descendants(matching: .any)[identifier]
                 if element.exists, element.isHittable {
                     return element
@@ -864,6 +954,59 @@ final class EnvoixIOSAppUITests: XCTestCase {
             RunLoop.current.run(until: Date().addingTimeInterval(0.1))
         } while Date() < deadline
         return nil
+    }
+
+    private func pairingPayload(code: String, role: String) -> String {
+        "envoix://pair/\(code)?" +
+            "broker=e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff" +
+            "%4067.230.187.238%3A8445&" +
+            "relay=https%3A%2F%2Fenvoix.chkxwlyh.us%3A8444&role=\(role)"
+    }
+
+    private func makeScannerTestApp(payload: String) -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "--ui-testing",
+            "--ui-testing-scanner",
+            "-envoix.language", "en",
+            "-envoix.developerMode", "YES",
+        ]
+        app.launchEnvironment["ENVOIX_UI_TEST_SCAN_PAYLOAD"] = payload
+        return app
+    }
+
+    private func openInjectedScanner(
+        homeButton: String,
+        scrollView: String,
+        scannerButton: String,
+        in app: XCUIApplication
+    ) {
+        let homeEntry = app.buttons[homeButton]
+        guard homeEntry.waitForExistence(timeout: 8) else {
+            XCTFail("Missing transfer entry: \(homeButton)")
+            return
+        }
+        homeEntry.tap()
+
+        let scroll = app.scrollViews[scrollView]
+        guard scroll.waitForExistence(timeout: 5) else {
+            XCTFail("Missing transfer scroll view: \(scrollView)")
+            return
+        }
+        let scanChoice = app.buttons["Scan a QR"]
+        guard reveal(scanChoice, byScrolling: scroll) else {
+            XCTFail("Scan choice is not reachable")
+            return
+        }
+        scanChoice.tap()
+
+        let openScanner = app.buttons[scannerButton]
+        guard openScanner.waitForExistence(timeout: 5) else {
+            XCTFail("Missing scanner button: \(scannerButton)")
+            return
+        }
+        openScanner.tap()
+        XCTAssertTrue(app.buttons["qr_scanner_test_payload"].waitForExistence(timeout: 5))
     }
 
     private func makeCrossDeviceSenderApp(
@@ -884,19 +1027,47 @@ final class EnvoixIOSAppUITests: XCTestCase {
     }
 
     private func startRoomSend(code: String, in app: XCUIApplication) {
-        let codeField = app.textFields.firstMatch
-        let scrollView = app.scrollViews.firstMatch
-        for _ in 0..<4 where codeField.frame.maxY > app.frame.height - 180 {
-            scrollView.swipeUp()
+        let codeField = app.textFields["send_room_code_input"]
+        let scrollView = app.scrollViews["send_content_scroll"]
+        XCTAssertTrue(scrollView.waitForExistence(timeout: 5))
+        if reveal(codeField, byScrolling: scrollView) {
+            codeField.tap()
+        } else {
+            let visibleFrame = codeField.frame.intersection(scrollView.frame)
+            XCTAssertGreaterThanOrEqual(
+                visibleFrame.height,
+                codeField.frame.height / 2,
+                "Room code field remained outside the Send scroll viewport; " +
+                    "field=\(codeField.frame) scroll=\(scrollView.frame) app=\(app.frame)"
+            )
+            let visibleCenter = CGVector(
+                dx: (visibleFrame.midX - scrollView.frame.minX) / scrollView.frame.width,
+                dy: (visibleFrame.midY - scrollView.frame.minY) / scrollView.frame.height
+            )
+            scrollView.coordinate(withNormalizedOffset: visibleCenter).tap()
         }
-        XCTAssertTrue(codeField.isHittable)
-        codeField.tap()
-        codeField.typeText(code)
+        app.typeText(code)
 
         let send = app.buttons["send_start_button"]
         XCTAssertTrue(send.isEnabled)
         XCTAssertTrue(send.isHittable)
         send.tap()
+    }
+
+    private func reveal(
+        _ element: XCUIElement,
+        byScrolling scrollView: XCUIElement
+    ) -> Bool {
+        let maximumAttempts = 8
+        let dragStart = scrollView.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8))
+        let dragEnd = scrollView.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
+        for _ in 0..<maximumAttempts {
+            if element.isHittable {
+                return true
+            }
+            dragStart.press(forDuration: 0.05, thenDragTo: dragEnd)
+        }
+        return element.isHittable
     }
 
     private func openActivity(in app: XCUIApplication) {
