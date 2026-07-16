@@ -43,6 +43,23 @@ final class EnvoixMacOSHostedTests: XCTestCase {
         )
     }
 
+    func testMergedActivityDiagnosticLogKeepsManifestTimelineWithoutObserverEvents() {
+        XCTAssertEqual(
+            mergedActivityDiagnosticLog(
+                activityTimeline: ["[10:44:15] pairing", "[10:44:45] completed"],
+                observerLog: []
+            ),
+            ["[10:44:15] pairing", "[10:44:45] completed"]
+        )
+        XCTAssertEqual(
+            mergedActivityDiagnosticLog(
+                activityTimeline: ["[10:44:15] pairing"],
+                observerLog: ["[10:44:16] status · connecting"]
+            ),
+            ["[10:44:15] pairing", "[10:44:16] status · connecting"]
+        )
+    }
+
     func testManifestPublicationCopiesFilesDirectoriesAndSupportsRetry() throws {
         let fileManager = FileManager.default
         let root = fileManager.temporaryDirectory

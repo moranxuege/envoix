@@ -17,6 +17,13 @@ struct ActivityMetrics {
     fileprivate var lastLogKey: String = ""
 }
 
+func mergedActivityDiagnosticLog(
+    activityTimeline: [String],
+    observerLog: [String]
+) -> [String] {
+    activityTimeline + observerLog
+}
+
 enum ActivityProjectionPolicy {
     static func shouldAccept(
         _ incoming: FfiTransferActivityRecord,
@@ -962,14 +969,30 @@ final class AppModel: ObservableObject {
     }
 
     private func diagnosticsSnapshot(for activityID: String) -> (log: [String], events: [String]) {
+        let activityTimeline = activityMetrics[activityID]?.log ?? []
         if receive.ownsActivity(activityID) {
-            return (receive.eventLog, receive.transferEvents.map(TransferDiagnostics.transferEventLine))
+            return (
+                mergedActivityDiagnosticLog(
+                    activityTimeline: activityTimeline,
+                    observerLog: receive.eventLog
+                ),
+                receive.transferEvents.map(TransferDiagnostics.transferEventLine)
+            )
         }
         if send.ownsActivity(activityID) {
-            return (send.eventLog, send.transferEvents.map(TransferDiagnostics.transferEventLine))
+            return (
+                mergedActivityDiagnosticLog(
+                    activityTimeline: activityTimeline,
+                    observerLog: send.eventLog
+                ),
+                send.transferEvents.map(TransferDiagnostics.transferEventLine)
+            )
         }
         return (
-            transferLogByActivityID[activityID] ?? [],
+            mergedActivityDiagnosticLog(
+                activityTimeline: activityTimeline,
+                observerLog: transferLogByActivityID[activityID] ?? []
+            ),
             transferEventLinesByActivityID[activityID] ?? []
         )
     }

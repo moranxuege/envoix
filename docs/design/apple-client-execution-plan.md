@@ -221,6 +221,13 @@ kept in reviewable staged commits on the current feature branch.
   Manifest path. The receiver is intentionally test-isolated in a temporary
   directory, so macOS Receive UI → Downloads/Finder publication remains a
   separate pending acceptance boundary.
+- The 2026-07-16 physical two-Photos Room report showed an exact 30-second
+  interval before `started_at`, followed by immediate payload completion. The
+  report did not include Manifest phase history because that observer exposes
+  aggregate Activity snapshots rather than ordinary transfer events. Apple
+  diagnostics now retain the canonical Activity timeline for that flow; a
+  fresh physical run must identify whether the wait is in pairing or connecting
+  before any transport-policy change is made.
 - The reverse compatible single-file gate is also green: the production macOS
   `AppModel` sent 37 bytes through an Invite/Relay path to the production iPhone
   `AppModel`, and both canonical Activities completed with the exact
