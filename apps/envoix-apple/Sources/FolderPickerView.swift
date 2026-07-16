@@ -215,6 +215,43 @@ enum FilePickerUITestFixture {
         ]
     }
 }
+
+enum OpenInUITestFixture {
+    static let payloadArgument = "--ui-testing-open-in-payload"
+    static let cleanupArgument = "--ui-testing-clean-open-in-payload"
+
+    static func stageIfRequested() -> URL? {
+        guard ProcessInfo.processInfo.arguments.contains(payloadArgument),
+              let fixture = fixture() else { return nil }
+        do {
+            if (try? Data(contentsOf: fixture.url)) != fixture.payload {
+                try fixture.payload.write(to: fixture.url, options: .atomic)
+            }
+            return fixture.url
+        } catch {
+            assertionFailure("Could not prepare Open In UI fixture: \(error)")
+            return nil
+        }
+    }
+
+    static func cleanIfRequested() {
+        guard ProcessInfo.processInfo.arguments.contains(cleanupArgument),
+              let fixture = fixture() else { return }
+        try? FileManager.default.removeItem(at: fixture.url)
+    }
+
+    private static func fixture() -> (url: URL, payload: Data)? {
+        guard let runID = PickerUITestFixtureRunID.current(),
+              let documents = FileManager.default.urls(
+                for: .documentDirectory,
+                in: .userDomainMask
+              ).first else { return nil }
+        return (
+            documents.appendingPathComponent("envoix-\(runID)-open-in.txt"),
+            Data("envoix Open In payload \(runID)\n".utf8)
+        )
+    }
+}
 #endif
 
 final class SecurityScopedResourceAccess {

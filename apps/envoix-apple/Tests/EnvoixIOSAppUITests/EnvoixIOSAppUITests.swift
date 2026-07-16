@@ -423,25 +423,63 @@ final class EnvoixIOSAppUITests: XCTestCase {
             throw XCTSkip("Opening a document through XCUITest requires iOS 16.4 or newer")
         }
 
-        let sourceURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("open-in-envoix.txt")
-        try Data("system document-open fixture".utf8).write(to: sourceURL, options: .atomic)
-        defer { try? FileManager.default.removeItem(at: sourceURL) }
-
+        let runID = "openinui"
+        let fileName = "envoix-\(runID)-open-in.txt"
         let app = XCUIApplication()
-        app.launchArguments.append("--ui-testing")
+        app.launchArguments += ["--ui-testing", "--ui-testing-open-in-payload"]
+        app.launchEnvironment["ENVOIX_CROSS_DEVICE_RUN_ID"] = runID
+        defer { cleanOpenInPayloadFixture(app: app, runID: runID) }
+        guard let sourceURL = stageOpenInPayloadFixture(app: app) else { return }
+
         app.open(sourceURL)
 
         XCTAssertTrue(app.buttons["mobile_sheet_done"].waitForExistence(timeout: 8))
         let selection = app.descendants(matching: .any)["send_selection_summary"]
         XCTAssertTrue(selection.waitForExistence(timeout: 5))
-        let selectedFile = NSPredicate(format: "label CONTAINS %@", "open-in-envoix.txt")
+        let selectedFile = NSPredicate(format: "label CONTAINS %@", fileName)
         let selectionExpectation = XCTNSPredicateExpectation(predicate: selectedFile, object: selection)
         XCTAssertEqual(
             XCTWaiter.wait(for: [selectionExpectation], timeout: 3),
             .completed,
             "Unexpected selection label: \(selection.label)"
         )
+    }
+
+    func testSystemOpenedFileSendsToMacOSApp() throws {
+#if !ENVOIX_CROSS_DEVICE_TESTING
+        throw XCTSkip("Requires the explicit cross-device build and a macOS production App receiver")
+#else
+        guard #available(iOS 16.4, *) else {
+            throw XCTSkip("Opening a document through XCUITest requires iOS 16.4 or newer")
+        }
+
+        let runID = ProcessInfo.processInfo.environment["ENVOIX_CROSS_DEVICE_RUN_ID"] ?? "manual"
+        let roomCode = ProcessInfo.processInfo.environment["ENVOIX_IOS_TO_MACOS_CODE"]
+            ?? Self.folderPickerRoomCode
+        let fileName = "envoix-\(runID)-open-in.txt"
+        let app = makeCrossDeviceSenderApp(
+            runID: runID,
+            pickerArguments: ["--ui-testing-open-in-payload"]
+        )
+        defer { cleanOpenInPayloadFixture(app: app, runID: runID) }
+        guard let sourceURL = stageOpenInPayloadFixture(app: app) else { return }
+
+        app.open(sourceURL)
+
+        XCTAssertTrue(app.buttons["mobile_sheet_done"].waitForExistence(timeout: 8))
+        let selection = app.descendants(matching: .any)["send_selection_summary"]
+        XCTAssertTrue(selection.waitForExistence(timeout: 5))
+        XCTAssertEqual(selection.value as? String, "1")
+        XCTAssertTrue(selection.label.contains(fileName), selection.label)
+
+        startRoomSend(code: roomCode, in: app)
+        openActivity(in: app)
+        waitForLatestActivityCompletion(
+            description: "Open In transfer",
+            in: app,
+            timeout: Self.crossDeviceTimeout
+        )
+#endif
     }
 
     func testFolderPickerOpenSelectsCurrentDirectory() throws {
@@ -1149,6 +1187,28 @@ final class EnvoixIOSAppUITests: XCTestCase {
     private func cleanFilePayloadFixture(app: XCUIApplication, runID: String) {
         app.terminate()
         app.launchArguments = ["--ui-testing", "--ui-testing-clean-file-payload"]
+        app.launchEnvironment = ["ENVOIX_CROSS_DEVICE_RUN_ID": runID]
+        app.launch()
+        _ = app.buttons["home_send"].waitForExistence(timeout: 5)
+        app.terminate()
+    }
+
+    private func stageOpenInPayloadFixture(app: XCUIApplication) -> URL? {
+        app.launch()
+        let fixtureURL = app.staticTexts["open_in_fixture_url"]
+        guard fixtureURL.waitForExistence(timeout: 8),
+              let url = URL(string: fixtureURL.label),
+              url.isFileURL else {
+            XCTFail("Open In fixture was not staged inside the target App container")
+            return nil
+        }
+        app.terminate()
+        return url
+    }
+
+    private func cleanOpenInPayloadFixture(app: XCUIApplication, runID: String) {
+        app.terminate()
+        app.launchArguments = ["--ui-testing", "--ui-testing-clean-open-in-payload"]
         app.launchEnvironment = ["ENVOIX_CROSS_DEVICE_RUN_ID": runID]
         app.launch()
         _ = app.buttons["home_send"].waitForExistence(timeout: 5)

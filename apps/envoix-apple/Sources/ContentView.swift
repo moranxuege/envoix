@@ -72,6 +72,7 @@ struct ContentView: View {
     }()
     #if DEBUG
     @State private var didStageBackgroundShareFixture = false
+    @State private var openInUITestFixtureURL: URL?
     #endif
 
     private let primaryStages: [AppStage] = [.transfer, .activity]
@@ -199,6 +200,8 @@ struct ContentView: View {
         .onAppear {
             FolderPickerUITestFixture.cleanIfRequested()
             FilePickerUITestFixture.cleanIfRequested()
+            OpenInUITestFixture.cleanIfRequested()
+            openInUITestFixtureURL = OpenInUITestFixture.stageIfRequested()
             guard ProcessInfo.processInfo.arguments.contains("--ui-testing") else { return }
             let initialSheet: MobileSheet? = ProcessInfo.processInfo.arguments.contains("--ui-testing-start-activity")
                 ? .activity
@@ -264,6 +267,14 @@ struct ContentView: View {
                     .fixedSize(horizontal: false, vertical: true)
                 }
                 .card(padding: 14)
+
+                #if DEBUG
+                if let openInUITestFixtureURL {
+                    Text(openInUITestFixtureURL.absoluteString)
+                        .font(.caption2)
+                        .accessibilityIdentifier("open_in_fixture_url")
+                }
+                #endif
             }
             .padding(.vertical, 16)
         }

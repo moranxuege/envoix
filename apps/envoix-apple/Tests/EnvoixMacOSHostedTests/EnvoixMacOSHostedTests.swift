@@ -226,6 +226,18 @@ final class EnvoixMacOSHostedTests: XCTestCase {
 #endif
     }
 
+    func testReceiveIosOpenInToMacOSAppRoom() async throws {
+        try requireCrossDeviceTesting()
+#if ENVOIX_CROSS_DEVICE_TESTING
+        try await receiveSingleFile(
+            fileName: Self.openInFileName,
+            payload: Self.openInPayload,
+            expectedBytes: UInt64(Self.openInPayload.count),
+            evidenceLabel: "open-in-receiver"
+        )
+#endif
+    }
+
     func testReceiveIosMultiPhotoDraftToMacOSAppManifestRoom() async throws {
         try requireCrossDeviceTesting()
 #if ENVOIX_CROSS_DEVICE_TESTING
@@ -776,6 +788,8 @@ final class EnvoixMacOSHostedTests: XCTestCase {
     private static let expectedFileName = "envoix-\(runID)-ios-to-macos.bin"
     private static let payload = Data("envoix cross-device ios to macos\n".utf8)
     private static let photoFileName = "envoix-\(runID)-photo.png"
+    private static let openInFileName = "envoix-\(runID)-open-in.txt"
+    private static let openInPayload = Data("envoix Open In payload \(runID)\n".utf8)
     private static let multiPhotoFirstName = "envoix-\(runID)-photo-first.png"
     private static let multiPhotoSecondName = "envoix-\(runID)-photo-second.png"
     private static let folderPickerFolderName = "envoix-\(runID)-folder"
