@@ -434,6 +434,26 @@ picker and Manifest transfer path for app-owned local files; Share Extension
 multi-item host behavior and arbitrary iCloud or third-party File Providers
 remain separate gates.
 
+The physical Files Share Extension host gate goes one layer further. It opens
+the real Files app, selects two app-owned files, invokes Envoix from the system
+share sheet, finishes the extension, returns to the main app, and sends the
+staged selection to the production macOS receiver. Run
+`EnvoixIOSAppUITests.testShareExtensionStagesTwoFilesFromFilesHost` against
+`EnvoixMacOSHostedTests.testReceiveIosShareExtensionFilesToMacOSAppManifestRoom`.
+Acceptance requires two roots, two exact files, aggregate bytes, both SHA-256
+values, and a selected Direct/Relay path. The fixture picker opened during
+setup must be cancelled before activating Files; otherwise it remains a modal
+layer over the main app. The Room field must also be fully inside
+`send_content_scroll` before XCTest types into it.
+
+For this hosted pair, exporting the run ID in the caller shell is insufficient:
+Xcode does not automatically pass it into the app-hosted test process. Inject
+the same `ENVOIX_CROSS_DEVICE_RUN_ID` and `ENVOIX_IOS_TO_MACOS_CODE` into both
+`EnvironmentVariables` and `TestingEnvironmentVariables` in each generated
+`.xctestrun`, then use `test-without-building -xctestrun ...` for both peers.
+This prevents the receiver from falling back to the `manual` fixture name and
+reporting a false byte/hash mismatch after a successful transfer.
+
 The physical Manifest gate uses the same two-peer order. Set the same run ID
 and Room code in both shells, start
 `EnvoixMacOSHostedTests.testReceiveIosToMacOSAppManifestRoom`, wait for its
@@ -503,13 +523,14 @@ The iPhone client has one home screen. **Send** and **Receive** open as sheets;
 **Activity** and **Settings** are toolbar sheets instead of permanent bottom
 tabs. An active transfer appears as a compact home-screen activity capsule.
 Both roles can show an Android-compatible `envoix://pair/<code>` QR plus the
-same short code, and the opposite role can scan the QR or enter the code. The
+same Room Code, and the opposite role can scan the QR or enter that code. The
 rendezvous broker only pairs devices, and the file still moves over the
 encrypted transfer path.
 
-Developer mode exposes **Shared Token** for same-LAN mDNS discovery without the
-broker. The legacy `envoix:…` direct invite path remains as a compatibility
-fallback but is no longer part of the normal UI.
+Developer mode exposes transport diagnostics and network-path settings. The old
+Shared Token pairing mode remains compatibility-only and is no longer exposed
+in the Apple UI. The legacy `envoix:…` direct invite path also remains as a
+compatibility fallback rather than part of the normal UI.
 
 On macOS, the receive folder defaults to `~/Downloads` until you pick another.
 On iOS, Envoix defaults to its Files-visible Documents/Downloads folder and
