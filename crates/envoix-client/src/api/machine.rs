@@ -835,7 +835,10 @@ mod tests {
         let effects = s.reduce(Input::Resume); // source not ready -> re-stage
         assert_eq!(s.state, State::Preparing);
         assert_eq!(s.attempt, 2, "retry bumped the generation");
-        assert!(effects.is_empty(), "no StartAttempt until the source is ready");
+        assert!(
+            effects.is_empty(),
+            "no StartAttempt until the source is ready"
+        );
 
         // The dead generation's callbacks are dropped structurally.
         assert!(s.reduce(Input::StageComplete { generation: 1 }).is_empty());
@@ -847,7 +850,11 @@ mod tests {
             })
             .is_empty()
         );
-        assert_eq!(s.state, State::Preparing, "stale StageFailed cannot fail gen 2");
+        assert_eq!(
+            s.state,
+            State::Preparing,
+            "stale StageFailed cannot fail gen 2"
+        );
 
         // The current generation's StageComplete DOES launch the attempt.
         let effects = s.reduce(Input::StageComplete { generation: 2 });
@@ -865,7 +872,11 @@ mod tests {
         });
         assert_eq!(s.state, State::Failed);
         let effects = s.reduce(Input::Resume);
-        assert_eq!(s.state, State::Preparing, "not ready -> re-stage, not the wire");
+        assert_eq!(
+            s.state,
+            State::Preparing,
+            "not ready -> re-stage, not the wire"
+        );
         assert_eq!(s.attempt, 2);
         assert!(
             effects.is_empty(),
@@ -1361,7 +1372,10 @@ mod serde_tests {
     #[test]
     fn kind_labels_name_variants_and_fold_events() {
         assert_eq!(Input::Cancel.kind(), "Cancel");
-        assert_eq!(Input::StageComplete { generation: 1 }.kind(), "StageComplete");
+        assert_eq!(
+            Input::StageComplete { generation: 1 }.kind(),
+            "StageComplete"
+        );
         assert_eq!(Input::ReceiptPosted.kind(), "ReceiptPosted");
         // a core event folds to its AttemptEvent name — the input reads as the
         // fact it carries, not the generic "Event".

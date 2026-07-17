@@ -402,7 +402,10 @@ mod tests {
             !migrated(State::Cancelled, staged()),
             "cancelled staged -> re-stage",
         );
-        assert!(migrated(State::Cancelled, None), "cancelled direct -> ready");
+        assert!(
+            migrated(State::Cancelled, None),
+            "cancelled direct -> ready"
+        );
     }
 
     #[test]
