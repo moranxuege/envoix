@@ -87,18 +87,25 @@ object Native {
         callback: EventCallback,
     )
 
-    /** A Preparing send: staging copied [bytes] so far — moves the bar. */
+    /** A Preparing send: staging copied [bytes] so far — moves the bar.
+     *  [generation] is the `attempt` the staging worker was authorized by; the
+     *  reducer drops a stale worker's callback. */
     external fun stageProgress(
         id: Long,
+        generation: Int,
         bytes: Long,
     )
 
     /** A Preparing send: staging finished — launch the first attempt. */
-    external fun stageComplete(id: Long)
+    external fun stageComplete(
+        id: Long,
+        generation: Int,
+    )
 
     /** A Preparing send: staging failed — fail the transfer with [reason]. */
     external fun stageFailed(
         id: Long,
+        generation: Int,
         reason: String,
     )
 
