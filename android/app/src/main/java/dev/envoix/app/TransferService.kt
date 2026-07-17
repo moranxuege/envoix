@@ -908,8 +908,15 @@ class TransferService : Service() {
             return
         }
         tl("reserve", fields = mapOf("uri" to TransferTimeline.redactUri(target.uri.toString())))
-        // Record the reservation BEFORE any byte is copied.
-        writePublishJournal(journal, target.uri.toString(), target.mediaStorePending, committed = null, publishedName = null)
+        // Record the reservation BEFORE any byte is copied, and GATE the copy on
+        // it: if we can't durably record the target, don't copy bytes into a
+        // user-visible destination we could never recover or clean up.
+        if (!writePublishJournal(journal, target.uri.toString(), target.mediaStorePending, committed = null, publishedName = null)) {
+            MediaStoreSaver.delete(this, target.uri)
+            tl("failed", outcome = "journal_reserve")
+            LogStore.append("app: could not record publish reservation for ${src.name}; not copying")
+            return
+        }
         val copy = MediaStoreSaver.copyInto(this, src, target)
         if (copy.isFailure) {
             MediaStoreSaver.delete(this, target.uri)
@@ -977,7 +984,17 @@ class TransferService : Service() {
                 .put("pending", pending)
         committed?.let { obj.put("committed_uri", it) }
         publishedName?.let { obj.put("published_name", it) }
-        return runCatching { journal.writeText(obj.toString()) }.isSuccess
+        // Atomic: write a temp then rename over the journal, so recovery always
+        // reads a COMPLETE journal (the old one or the new one) — never a
+        // half-written, unparsable document it can neither act on nor clean.
+        return runCatching {
+            val tmp = File(journal.parentFile, "${journal.name}.tmp")
+            tmp.writeText(obj.toString())
+            if (!tmp.renameTo(journal)) {
+                tmp.delete()
+                error("journal rename failed")
+            }
+        }.isSuccess
     }
 
     /** Attribute a published URI to its card. [expectedSourceName] is the transfer
