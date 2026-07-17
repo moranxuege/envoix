@@ -169,12 +169,14 @@ enum Cmd {
     ServeReverify,
     /// Replace the frontend-owned card context persisted with the record.
     SetExtras(serde_json::Value),
-    /// A Preparing send: staging copied more bytes (snapshot-only).
-    StageProgress(u64),
+    /// A Preparing send: staging copied more bytes (snapshot-only). Carries the
+    /// staging generation (the `attempt` it was authorized by) so a stale
+    /// worker's callback is dropped by the reducer.
+    StageProgress(u32, u64),
     /// A Preparing send: staging finished, launch the first attempt.
-    StageComplete,
+    StageComplete(u32),
     /// A Preparing send: staging failed, fail the transfer with this reason.
-    StageFailed(String),
+    StageFailed(u32, String),
 }
 
 /// Handle to a running transfer session (one card).
@@ -228,6 +230,9 @@ impl TransferSession {
         let direction = context.params.direction;
         let mut session = Session::new(direction);
         session.state = super::machine::State::Preparing;
+        // The source is not yet in hand — staging copies it first. A retry
+        // consults this to re-stage rather than launch a partial file.
+        session.facts.source_ready = false;
         Ok(Self::spawn(client, context, session, record, extras, false))
     }
 
@@ -397,19 +402,19 @@ impl TransferSession {
 
     /// A Preparing send: report staging copy progress (moves the bar only,
     /// never persisted).
-    pub fn stage_progress(&self, bytes: u64) {
-        let _ = self.cmds.send(Cmd::StageProgress(bytes));
+    pub fn stage_progress(&self, generation: u32, bytes: u64) {
+        let _ = self.cmds.send(Cmd::StageProgress(generation, bytes));
     }
 
     /// A Preparing send: the source is staged at the transfer's path; launch
     /// the first attempt (Preparing -> Connecting).
-    pub fn stage_complete(&self) {
-        let _ = self.cmds.send(Cmd::StageComplete);
+    pub fn stage_complete(&self, generation: u32) {
+        let _ = self.cmds.send(Cmd::StageComplete(generation));
     }
 
     /// A Preparing send: staging failed; fail the transfer with `reason`.
-    pub fn stage_failed(&self, reason: String) {
-        let _ = self.cmds.send(Cmd::StageFailed(reason));
+    pub fn stage_failed(&self, generation: u32, reason: String) {
+        let _ = self.cmds.send(Cmd::StageFailed(generation, reason));
     }
 }
 
@@ -698,9 +703,13 @@ impl Actor {
                 self.platform_extras = Some(extras);
                 self.try_commit().await;
             }
-            Cmd::StageProgress(bytes) => self.apply(Input::StageProgress { bytes }).await,
-            Cmd::StageComplete => self.apply(Input::StageComplete).await,
-            Cmd::StageFailed(reason) => self.apply(Input::StageFailed { reason }).await,
+            Cmd::StageProgress(generation, bytes) => {
+                self.apply(Input::StageProgress { generation, bytes }).await
+            }
+            Cmd::StageComplete(generation) => self.apply(Input::StageComplete { generation }).await,
+            Cmd::StageFailed(generation, reason) => {
+                self.apply(Input::StageFailed { generation, reason }).await
+            }
             Cmd::Discard => {
                 // Stop the attempt BEFORE deleting anything: the engine
                 // checkpoints resume state even on its cancel path, so a live
@@ -1376,7 +1385,7 @@ mod tests {
         .unwrap();
         wait_for_state(&mut notices, State::Preparing).await;
 
-        session.stage_progress(200);
+        session.stage_progress(1, 200);
         // The snapshot shows the staging bar move...
         let snapshot = loop {
             match notices.recv().await.expect("stream open") {
@@ -1400,7 +1409,7 @@ mod tests {
             TransferSession::start_staging(failing_context(TransferDirection::Send), None, None)
                 .unwrap();
         wait_for_state(&mut notices, State::Preparing).await;
-        session.stage_complete();
+        session.stage_complete(1);
         // The attempt launches (and fails, via the failing context) - the
         // point is it LEFT Preparing rather than staying stuck.
         wait_for_state(&mut notices, State::Failed).await;
@@ -1412,7 +1421,7 @@ mod tests {
             TransferSession::start_staging(failing_context(TransferDirection::Send), None, None)
                 .unwrap();
         wait_for_state(&mut notices, State::Preparing).await;
-        session.stage_failed("source could not be read".into());
+        session.stage_failed(1, "source could not be read".into());
         let snapshot = wait_for_state(&mut notices, State::Failed).await;
         assert_eq!(
             snapshot.session.reason.as_deref(),

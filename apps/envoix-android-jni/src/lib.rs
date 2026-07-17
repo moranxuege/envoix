@@ -19,7 +19,7 @@ use envoix_client::api::{Invite, PeerSource, Role, TransferOptions};
 use jni::JNIEnv;
 use jni::JavaVM;
 use jni::objects::{GlobalRef, JClass, JObject, JString, JValue};
-use jni::sys::{jboolean, jlong};
+use jni::sys::{jboolean, jint, jlong};
 
 static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
@@ -1451,13 +1451,14 @@ pub extern "system" fn Java_dev_envoix_app_Native_stageProgress(
     _env: JNIEnv,
     _class: JClass,
     id: jlong,
+    generation: jint,
     bytes: jlong,
 ) {
     let Ok(map) = sessions().lock() else {
         return;
     };
     if let Some(session) = map.get(&id) {
-        session.stage_progress(bytes.max(0) as u64);
+        session.stage_progress(generation.max(0) as u32, bytes.max(0) as u64);
     }
 }
 
@@ -1467,12 +1468,13 @@ pub extern "system" fn Java_dev_envoix_app_Native_stageComplete(
     _env: JNIEnv,
     _class: JClass,
     id: jlong,
+    generation: jint,
 ) {
     let Ok(map) = sessions().lock() else {
         return;
     };
     match map.get(&id) {
-        Some(session) => session.stage_complete(),
+        Some(session) => session.stage_complete(generation.max(0) as u32),
         None => tracing::debug!(id, "stageComplete: session not live"),
     }
 }
@@ -1483,6 +1485,7 @@ pub extern "system" fn Java_dev_envoix_app_Native_stageFailed(
     mut env: JNIEnv,
     _class: JClass,
     id: jlong,
+    generation: jint,
     reason: JString,
 ) {
     let reason = jstr(&mut env, &reason);
@@ -1490,7 +1493,7 @@ pub extern "system" fn Java_dev_envoix_app_Native_stageFailed(
         return;
     };
     match map.get(&id) {
-        Some(session) => session.stage_failed(reason),
+        Some(session) => session.stage_failed(generation.max(0) as u32, reason),
         None => tracing::debug!(id, "stageFailed: session not live"),
     }
 }
