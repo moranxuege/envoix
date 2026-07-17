@@ -2495,6 +2495,7 @@ private struct SettingsStageView: View {
     @AppStorage("envoix.verboseLog") private var verboseLog = false
     @AppStorage("envoix.logServer") private var logServer = defaultLogServer
     @State private var showAdvanced = false
+    @State private var wifiAwareCapability: WifiAwareCapabilitySnapshot?
     private let coreInfo = envoixCoreInfo()
 
     var body: some View {
@@ -2621,6 +2622,12 @@ private struct SettingsStageView: View {
                             ),
                             isOn: $verboseLog
                         )
+                        Divider().overlay(Theme.line.opacity(0.5))
+                        Text("Wi-Fi Aware · \(wifiAwareCapability?.diagnosticSummary ?? "checking")")
+                            .font(.caption.monospaced())
+                            .foregroundStyle(Theme.muted)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("settings_wifi_aware_capability")
                         #if DEBUG
                         Divider().overlay(Theme.line.opacity(0.5))
                         VStack(alignment: .leading, spacing: 8) {
@@ -2657,6 +2664,13 @@ private struct SettingsStageView: View {
         .onAppear {
             migrateLogServerIfNeeded()
             model.refreshTransferCache()
+        }
+        .task(id: developerMode) {
+            if developerMode {
+                wifiAwareCapability = await AppleWifiAwareCapabilityProbe.read()
+            } else {
+                wifiAwareCapability = nil
+            }
         }
     }
 

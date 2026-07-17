@@ -47,7 +47,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.envoix.app.AndroidWifiAwareCapabilityProbe
 import dev.envoix.app.SettingsStore
+import dev.envoix.app.WifiAwareCapabilitySnapshot
 
 @Composable
 fun SettingsScreen(onBack: () -> Unit) {
@@ -68,6 +70,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     var denyText by remember { mutableStateOf(settings.candidatesDeny.joinToString("\n")) }
     var logServer by remember { mutableStateOf(settings.logServer) }
     var showAdvanced by remember { mutableStateOf(false) }
+    var wifiAwareCapability by remember { mutableStateOf<WifiAwareCapabilitySnapshot?>(null) }
 
     // Reflect external edits to the candidate lists (e.g. the Avoid-Tailscale
     // toggle mutating `deny`) back into the raw editors, without clobbering
@@ -81,6 +84,10 @@ fun SettingsScreen(onBack: () -> Unit) {
         if (cidrLines(allowText) != settings.candidatesAllow) {
             allowText = settings.candidatesAllow.joinToString("\n")
         }
+    }
+    LaunchedEffect(settings.devMode) {
+        wifiAwareCapability =
+            if (settings.devMode) AndroidWifiAwareCapabilityProbe.read(context) else null
     }
 
     Column(
@@ -204,6 +211,13 @@ fun SettingsScreen(onBack: () -> Unit) {
                     SettingsStore.update { s -> s.copy(traceIroh = it) }
                     SettingsStore.applyLogLevel()
                 }
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    "Wi-Fi Aware · ${wifiAwareCapability?.diagnosticSummary ?: "checking"}",
+                    color = colors.muted,
+                    fontSize = 12.sp,
+                    fontFamily = FontFamily.Monospace,
+                )
             }
         }
     }
