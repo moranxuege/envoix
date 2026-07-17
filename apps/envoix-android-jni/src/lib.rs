@@ -113,13 +113,29 @@ fn register_session(id: i64, session: envoix_client::api::driver::TransferSessio
 static LOG_VM: OnceLock<JavaVM> = OnceLock::new();
 static LOG_SINK: OnceLock<GlobalRef> = OnceLock::new();
 
-/// The always-on baseline: envoix internals + iroh's connection story.
-const DEFAULT_LOG: &str = "envoix=debug,iroh=info,warn";
+/// The always-on baseline: envoix internals + iroh's connection story. The
+/// `envoix::timeline=off` directive keeps the structured timeline tier OUT of
+/// the raw fmt trace (it has its own unfiltered layer) — no duplication.
+const DEFAULT_LOG: &str = "envoix=debug,envoix::timeline=off,iroh=info,warn";
+/// Appended to every runtime -vv spec so a reload can't re-admit timeline
+/// events into the raw tier.
+const TIMELINE_OFF: &str = ",envoix::timeline=off";
+
+/// The tracing target that classifies structured authority events (the
+/// transfer timeline, docs/design/diagnostics.md v2). A dedicated always-on
+/// layer serializes these into the delimited envelope and routes them by
+/// `session_id`, independent of the reloadable raw-trace filter (P7). Kept in
+/// sync with `envoix_client`'s emitter const by value.
+const TIMELINE_TARGET: &str = "envoix::timeline";
+/// Envelope schema version — leads the line so a parser version-dispatches.
+const TIMELINE_SCHEMA: u32 = 1;
 
 /// Handle to the reloadable log filter, so the app can raise/lower verbosity at
 /// runtime (the `-vv` dev toggle) without restarting.
-type LogReload =
-    tracing_subscriber::reload::Handle<tracing_subscriber::EnvFilter, tracing_subscriber::Registry>;
+type LogReload = tracing_subscriber::reload::Handle<
+    tracing_subscriber::EnvFilter,
+    tracing_subscriber::layer::Layered<RoomTag, tracing_subscriber::Registry>,
+>;
 static LOG_RELOAD: OnceLock<LogReload> = OnceLock::new();
 
 fn runtime() -> &'static tokio::runtime::Runtime {
@@ -306,18 +322,26 @@ pub extern "system" fn Java_dev_envoix_app_Native_initLogging(
     let spec = std::env::var("ENVOIX_LOG").unwrap_or_else(|_| DEFAULT_LOG.to_string());
     let filter = tracing_subscriber::EnvFilter::try_new(&spec)
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(DEFAULT_LOG));
-    let (filter, handle) = tracing_subscriber::reload::Layer::new(filter);
+    let (raw_filter, handle) = tracing_subscriber::reload::Layer::new(filter);
+    use tracing_subscriber::Layer as _;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
+    // Two tiers. The RAW trace passes the reloadable EnvFilter (the -vv knob);
+    // the `envoix::timeline=off` directive in the spec keeps timeline events out
+    // of it (so they aren't duplicated in the appendix). The TIMELINE tier is
+    // UNFILTERED — it must see every span to read `session_id`, and it is
+    // always-on regardless of the -vv knob (P7); an in-code target guard in
+    // `TimelineLayer::on_event` restricts it to authority events. RoomTag stays
+    // unfiltered so it stashes room + session_id into span extensions.
+    let raw = tracing_subscriber::fmt::layer()
+        .with_writer(JniLogWriter)
+        .with_ansi(false)
+        .with_target(false)
+        .with_filter(raw_filter);
     let installed = tracing_subscriber::registry()
-        .with(filter)
-        .with(RoomTag) // must precede fmt: it hands the room to the writer
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_writer(JniLogWriter)
-                .with_ansi(false)
-                .with_target(false),
-        )
+        .with(RoomTag)
+        .with(raw)
+        .with(TimelineLayer)
         .try_init()
         .is_ok();
     if installed {
@@ -347,7 +371,7 @@ pub extern "system" fn Java_dev_envoix_app_Native_setLogLevel(
         tracing::warn!("setLogLevel: failed to read log filter string");
         return;
     };
-    let spec: String = spec.into();
+    let spec = format!("{}{}", String::from(spec), TIMELINE_OFF);
     if let (Some(handle), Ok(filter)) = (
         LOG_RELOAD.get(),
         tracing_subscriber::EnvFilter::try_new(&spec),
@@ -397,17 +421,26 @@ struct RoomField(String);
 /// nearest enclosing room.
 struct RoomTag;
 
-struct RoomVisitor(Option<String>);
+#[derive(Default)]
+struct RoomVisitor {
+    room: Option<String>,
+    session_id: Option<u64>,
+}
 
 impl tracing::field::Visit for RoomVisitor {
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
         if field.name() == "room" {
-            self.0 = Some(value.trim_matches('"').to_string());
+            self.room = Some(value.trim_matches('"').to_string());
+        }
+    }
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        if field.name() == "session_id" {
+            self.session_id = Some(value);
         }
     }
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
         if field.name() == "room" {
-            self.0 = Some(format!("{value:?}").trim_matches('"').to_string());
+            self.room = Some(format!("{value:?}").trim_matches('"').to_string());
         }
     }
 }
@@ -422,10 +455,15 @@ where
         id: &tracing::span::Id,
         ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
-        let mut visitor = RoomVisitor(None);
+        let mut visitor = RoomVisitor::default();
         attrs.record(&mut visitor);
-        if let (Some(room), Some(span)) = (visitor.0, ctx.span(id)) {
-            span.extensions_mut().replace(RoomField(room));
+        if let Some(span) = ctx.span(id) {
+            if let Some(room) = visitor.room {
+                span.extensions_mut().replace(RoomField(room));
+            }
+            if let Some(sid) = visitor.session_id {
+                span.extensions_mut().replace(SessionField(sid));
+            }
         }
     }
 
@@ -435,10 +473,15 @@ where
         values: &tracing::span::Record<'_>,
         ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
-        let mut visitor = RoomVisitor(None);
+        let mut visitor = RoomVisitor::default();
         values.record(&mut visitor);
-        if let (Some(room), Some(span)) = (visitor.0, ctx.span(id)) {
-            span.extensions_mut().replace(RoomField(room));
+        if let Some(span) = ctx.span(id) {
+            if let Some(room) = visitor.room {
+                span.extensions_mut().replace(RoomField(room));
+            }
+            if let Some(sid) = visitor.session_id {
+                span.extensions_mut().replace(SessionField(sid));
+            }
         }
     }
 
@@ -450,6 +493,327 @@ where
                 .next()
         });
         CURRENT_ROOM.with(|r| *r.borrow_mut() = room);
+    }
+}
+
+// ─────────────────────── transfer timeline (v2) ───────────────────────
+//
+// A second, always-on tier: structured authority events at `TIMELINE_TARGET`.
+// Routed by `session_id` (the durable card id, carried on the session span) —
+// NOT by room, so two live cards sharing a room stay in distinct files. The
+// Kotlin writer stamps `source_seq`; Rust never assigns it.
+
+/// The durable card id (`session_id`) recorded on the session span, stashed in
+/// span extensions so a timeline event can find the nearest one.
+struct SessionField(u64);
+
+/// Percent-encode ONLY the three octets that would break the TAB-delimited
+/// grammar: `%`, TAB, LF. URIs, spaces, `=`, `:` pass through literally — the
+/// line stays greppable (docs/design/diagnostics.md, "Escaping grammar").
+fn tl_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '%' => out.push_str("%25"),
+            '\t' => out.push_str("%09"),
+            '\n' => out.push_str("%0A"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Collects a timeline event's fields: the fixed columns are pulled out by name,
+/// everything else becomes the ordered `k=v` tail.
+#[derive(Default)]
+struct TimelineVisitor {
+    attempt: String,
+    side: String,
+    layer: String,
+    event: String,
+    outcome: String,
+    tail: Vec<(String, String)>,
+}
+
+impl TimelineVisitor {
+    fn put(&mut self, name: &str, value: String) {
+        match name {
+            "attempt" => self.attempt = value,
+            "side" => self.side = value,
+            "layer" => self.layer = value,
+            "event" => self.event = value,
+            "outcome" => self.outcome = value,
+            // room / session_id ride on the span, not the event
+            "room" | "session_id" => {}
+            other => self.tail.push((other.to_string(), value)),
+        }
+    }
+}
+
+impl tracing::field::Visit for TimelineVisitor {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.put(field.name(), value.to_string());
+    }
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        self.put(field.name(), value.to_string());
+    }
+    fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+        self.put(field.name(), value.to_string());
+    }
+    fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+        self.put(field.name(), value.to_string());
+    }
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.put(
+            field.name(),
+            format!("{value:?}").trim_matches('"').to_string(),
+        );
+    }
+}
+
+/// Build the delimited envelope MINUS `source_seq` (the Kotlin writer prepends
+/// that). Fixed leading columns are safe by construction (digits / controlled
+/// enums); tail values are escaped.
+fn build_timeline_line(
+    schema: u32,
+    epoch_ms: u64,
+    run_id: u32,
+    session_id: Option<u64>,
+    v: &TimelineVisitor,
+) -> String {
+    let sid = session_id.map(|s| s.to_string()).unwrap_or_default();
+    let mut line = format!(
+        "{schema}\t{epoch_ms}\t{run_id}\t{sid}\t{}\t{}\t{}\t{}\t{}",
+        v.attempt, v.side, v.layer, v.event, v.outcome,
+    );
+    for (k, val) in &v.tail {
+        line.push('\t');
+        line.push_str(k);
+        line.push('=');
+        line.push_str(&tl_escape(val));
+    }
+    line
+}
+
+/// The always-on timeline layer: on each `TIMELINE_TARGET` event, find the
+/// nearest `session_id`, build the envelope, and hand `(session_id, line)` to
+/// the Kotlin sink. Only `on_event` is filtered — the span that carries
+/// `session_id` has a normal target, so `SessionField` is stashed by the
+/// unfiltered [`RoomTag`] layer and read here from the span scope.
+struct TimelineLayer;
+
+impl<S> tracing_subscriber::layer::Layer<S> for TimelineLayer
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    fn on_event(&self, event: &tracing::Event<'_>, ctx: tracing_subscriber::layer::Context<'_, S>) {
+        // In-code target guard, NOT a per-layer `.with_filter()`: a per-layer
+        // filter would restrict this layer's SPAN visibility too, hiding the
+        // `session` span (whose target is the driver module) so `SessionField`
+        // could never be read (session_id came out empty on-device — see the
+        // `perlayer_filter_hides_session_span` test). Unfiltered + guarded, the
+        // layer sees every span but only ACTS on timeline events.
+        if event.metadata().target() != TIMELINE_TARGET {
+            return;
+        }
+        let session_id = ctx.event_scope(event).and_then(|scope| {
+            scope
+                .filter_map(|span| span.extensions().get::<SessionField>().map(|s| s.0))
+                .next()
+        });
+        let mut v = TimelineVisitor::default();
+        event.record(&mut v);
+        let line = build_timeline_line(
+            TIMELINE_SCHEMA,
+            epoch_ms(),
+            std::process::id(),
+            session_id,
+            &v,
+        );
+        timeline_line(session_id.unwrap_or(0), &line);
+    }
+}
+
+/// Forward one built timeline line to `sink.timeline(sessionId, line)`.
+fn timeline_line(session_id: u64, line: &str) {
+    let (Some(vm), Some(sink)) = (LOG_VM.get(), LOG_SINK.get()) else {
+        return;
+    };
+    let Ok(mut env) = vm.attach_current_thread() else {
+        return;
+    };
+    if let Ok(js) = env.new_string(line) {
+        let _ = env.call_method(
+            sink,
+            "timeline",
+            "(JLjava/lang/String;)V",
+            &[JValue::Long(session_id as i64), JValue::Object(&js)],
+        );
+    }
+}
+
+#[cfg(test)]
+mod timeline_tests {
+    use super::*;
+
+    #[test]
+    fn escape_touches_only_delimiter_octets() {
+        // URIs, spaces, and `=` survive; only %, TAB, LF are encoded.
+        assert_eq!(
+            tl_escape("content://media/Download/x.bin?take=1"),
+            "content://media/Download/x.bin?take=1"
+        );
+        assert_eq!(tl_escape("a\tb\nc%d"), "a%09b%0Ac%25d");
+        // decode is unambiguous: %25 must come from a literal % only
+        assert_eq!(tl_escape("100%"), "100%25");
+    }
+
+    #[test]
+    fn envelope_columns_are_positional_then_tail() {
+        let mut v = TimelineVisitor::default();
+        v.put("layer", "session".into());
+        v.put("event", "created".into());
+        v.put("attempt", "0".into());
+        v.put("cause", "disk full = bad".into()); // tail value with = and space
+        let line = build_timeline_line(1, 1_720_000_000_000, 42, Some(7), &v);
+        let cols: Vec<&str> = line.split('\t').collect();
+        assert_eq!(cols[0], "1"); // schema
+        assert_eq!(cols[1], "1720000000000"); // epoch_ms
+        assert_eq!(cols[2], "42"); // run_id
+        assert_eq!(cols[3], "7"); // session_id
+        assert_eq!(cols[4], "0"); // attempt
+        assert_eq!(cols[5], ""); // side (absent)
+        assert_eq!(cols[6], "session"); // layer
+        assert_eq!(cols[7], "created"); // event
+        assert_eq!(cols[8], ""); // outcome (absent)
+        assert_eq!(cols[9], "cause=disk full = bad"); // tail, first = splits k/v
+    }
+
+    /// The exact envelope a fixed input produces — the cross-language golden.
+    /// `TransferTimeline.buildLine` (Kotlin) asserts byte-identical output for
+    /// the same inputs (`TimelineEnvelopeTest`), pinning column order + escaping
+    /// across the boundary. Change one side and one of the two tests fails.
+    #[test]
+    fn golden_line_matches_the_kotlin_builder() {
+        let mut v = TimelineVisitor::default();
+        v.put("attempt", "1".into());
+        v.put("side", "sender".into());
+        v.put("layer", "machine".into());
+        v.put("event", "transition".into());
+        v.put("outcome", "ok".into());
+        v.put("cause", "a%b\tc\nd".into()); // exercises all three escaped octets
+        let line = build_timeline_line(1, 1_720_000_000_000, 42, Some(7), &v);
+        assert_eq!(
+            line,
+            "1\t1720000000000\t42\t7\t1\tsender\tmachine\ttransition\tok\tcause=a%25b%09c%0Ad"
+        );
+    }
+
+    #[test]
+    fn absent_session_id_is_empty_not_zero() {
+        let v = TimelineVisitor::default();
+        let line = build_timeline_line(1, 0, 1, None, &v);
+        assert_eq!(line.split('\t').nth(3), Some("")); // session_id column blank
+    }
+
+    use std::sync::{Arc, Mutex};
+
+    // Captured (session_id, target) pairs — a named type keeps the Arc<Mutex<…>>
+    // below out of clippy::type_complexity.
+    type Captured = Vec<(Option<u64>, String)>;
+
+    // A capturing stand-in for TimelineLayer: same session_id lookup + target
+    // guard, but records to a Vec instead of the JNI sink.
+    struct Cap {
+        guard: bool,
+        out: Arc<Mutex<Captured>>,
+    }
+    impl<S> tracing_subscriber::layer::Layer<S> for Cap
+    where
+        S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if self.guard && event.metadata().target() != TIMELINE_TARGET {
+                return;
+            }
+            let sid = ctx.event_scope(event).and_then(|scope| {
+                scope
+                    .filter_map(|s| s.extensions().get::<SessionField>().map(|f| f.0))
+                    .next()
+            });
+            self.out
+                .lock()
+                .unwrap()
+                .push((sid, event.metadata().target().to_string()));
+        }
+    }
+
+    fn run_capture(guard: bool, filtered: bool) -> Captured {
+        use tracing_subscriber::Layer as _;
+        use tracing_subscriber::layer::SubscriberExt;
+        let out = Arc::new(Mutex::new(Vec::new()));
+        let cap = Cap {
+            guard,
+            out: out.clone(),
+        };
+        let sub = if filtered {
+            tracing_subscriber::registry().with(RoomTag).with(
+                cap.with_filter(tracing_subscriber::filter::filter_fn(|m| {
+                    m.target() == TIMELINE_TARGET
+                }))
+                .boxed(),
+            )
+        } else {
+            tracing_subscriber::registry()
+                .with(RoomTag)
+                .with(cap.boxed())
+        };
+        tracing::subscriber::with_default(sub, || {
+            let span = tracing::info_span!("session", room = "r", session_id = 7u64);
+            span.in_scope(|| {
+                tracing::info!(target: "envoix::timeline", layer = "session", event = "created");
+                tracing::info!(target: "iroh_relay", "noise that must NOT reach the timeline");
+            });
+        });
+        out.lock().unwrap().clone()
+    }
+
+    // WHY TimelineLayer must NOT use a per-layer filter (the a1 bug): a
+    // per-layer `target` filter restricts the layer's SPAN visibility, so the
+    // session span (targeted at the driver module, not the timeline target) is
+    // hidden and `session_id` can never be read.
+    #[test]
+    fn perlayer_filter_hides_session_span() {
+        let got = run_capture(false, true);
+        assert_eq!(
+            got[0].0, None,
+            "the per-layer filter hides the session span → session_id lost"
+        );
+    }
+
+    // The FIX: no per-layer filter (so the session span is visible → session_id
+    // resolves), an explicit target guard (so non-timeline events are dropped).
+    #[test]
+    fn guard_without_filter_resolves_session_id_and_drops_noise() {
+        let got = run_capture(true, false);
+        assert_eq!(got.len(), 1, "only the timeline event survives the guard");
+        assert_eq!(
+            got[0].0,
+            Some(7),
+            "session_id resolves from the visible span"
+        );
+        assert_eq!(got[0].1, TIMELINE_TARGET);
     }
 }
 
@@ -550,21 +914,19 @@ fn notice_json(notice: envoix_client::api::driver::SessionNotice, generation: u6
     use envoix_client::api::driver::SessionNotice as N;
     match notice {
         N::Snapshot(snapshot) => {
-            let path = snapshot.session.path.as_ref().map(|p| p.to_string());
             let mut value = serde_json::to_value(&snapshot).unwrap_or_default();
             if let Some(map) = value.as_object_mut() {
                 map.insert("notice".into(), "snapshot".into());
                 map.insert("gen".into(), generation.into());
-                // The frontend wants a display string, not the enum encoding.
-                map.insert(
-                    "path".into(),
-                    path.map(Into::into).unwrap_or(serde_json::Value::Null),
-                );
+                // `path` stays the TYPED DataPath encoding ({type, addr|url|
+                // description}); the frontend reads those fields directly, never
+                // a Display string it then has to re-parse (which lost the type
+                // for DataPath::Other and truncated relay URLs with spaces).
             }
             value.to_string()
         }
         N::Event(event) => {
-            let mut value = serde_json::to_value(event).unwrap_or_default();
+            let mut value = serde_json::to_value(&event).unwrap_or_default();
             if let Some(map) = value.as_object_mut() {
                 map.insert("notice".into(), "event".into());
                 map.insert("gen".into(), generation.into());
@@ -605,57 +967,315 @@ pub extern "system" fn Java_dev_envoix_app_Native_createSession(
         return;
     };
 
-    let v: serde_json::Value = match serde_json::from_str(&json) {
-        Ok(v) => v,
-        Err(e) => return emit_failed_snapshot(&vm, &cb, "invalid session params JSON", e),
+    let (context, extras) = match parse_create_params(&json, CreateMode::Normal) {
+        Ok(parsed) => parsed,
+        Err(e) => return emit_failed_snapshot(&vm, &cb, "invalid session params", e),
     };
-    let get = |k: &str| v[k].as_str().unwrap_or("").to_string();
-    let allow = split_csv(&get("candidates_allow"));
-    let deny = split_csv(&get("candidates_deny"));
-    let chunk = get("chunk_size");
-    let chunk = (!chunk.is_empty()).then_some(chunk);
-    let receipt_server = get("receipt_server");
-    let client_context = ClientContext {
-        chunk_size: chunk,
-        candidates_allow: allow,
-        candidates_deny: deny,
-        receipt_server: (!receipt_server.is_empty()).then_some(receipt_server),
-        identity_file: None,
-    };
-
-    let code = get("code");
-    let mut sources: Vec<PeerSource> = Vec::new();
-    if v["use_room"].as_bool().unwrap_or(false) {
-        sources.push(PeerSource::Room {
-            code: code.clone(),
-            broker: get("broker"),
-        });
-    }
-    if v["use_mdns"].as_bool().unwrap_or(false) {
-        sources.push(PeerSource::Mdns { token: Some(code) });
-    }
-    let mut options = TransferOptions::default();
-    let relay = get("relay");
-    options.relay = (!relay.is_empty()).then_some(relay); // empty = default, like the CLI
-    options.resume = v["resume"].as_bool().unwrap_or(false);
-    let direction = match get("direction").as_str() {
-        "send" => TransferDirection::Send,
-        _ => TransferDirection::Receive,
-    };
-    let context = SessionContext {
-        client: client_context,
-        params: SessionParams {
-            direction,
-            path: std::path::PathBuf::from(get("path")),
-            sources,
-            options,
-            publication_required: false,
-        },
-    };
-
-    let extras = v.get("platform_extras").filter(|e| e.is_object()).cloned();
     let _guard = runtime().enter();
     let (session, notices) = match TransferSession::start(context, record_for(id), extras) {
+        Ok(session) => session,
+        Err(error) => return emit_failed_snapshot(&vm, &cb, "invalid session context", error),
+    };
+    if !register_session(id, session) {
+        return emit_failed_snapshot(&vm, &cb, "session already live or registry unavailable", id);
+    }
+    spawn_pump(vm, cb, notices);
+}
+
+/// Direction as the frontend sends it (lowercase). A typed enum so a typo like
+/// `"recieve"` is a loud deserialize error, not a silent fall-through to
+/// Receive. JNI-local, so the wire-adjacent `TransferDirection` serde repr
+/// (PascalCase, read by the snapshot) stays untouched.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CreateDirection {
+    Send,
+    Receive,
+}
+
+impl From<CreateDirection> for TransferDirection {
+    fn from(d: CreateDirection) -> Self {
+        match d {
+            CreateDirection::Send => TransferDirection::Send,
+            CreateDirection::Receive => TransferDirection::Receive,
+        }
+    }
+}
+
+/// Android platform extras. The JNI adapter knows these keys; the core keeps
+/// them opaque (they round-trip back to an untyped `Value`). Typed here with
+/// `deny_unknown_fields` only so a misspelled extras key fails loudly at the
+/// boundary instead of silently vanishing.
+#[derive(Default, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct AndroidPlatformExtras {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    qr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    saved_uri: Option<String>,
+    /// The name a received file was actually published under (may be a
+    /// collision-bumped "name (1)"). Durable so it survives a restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    published_name: Option<String>,
+    /// The publication duty's last outcome, currently only `"failed"` — a
+    /// received file whose publish to public storage did not complete, so the
+    /// UI can surface it and a retry can re-drive. Absent = not-yet / done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    publish: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_uri: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_recoverable: Option<bool>,
+}
+
+/// Which create entry point is parsing — staging additionally requires a source.
+#[derive(Clone, Copy)]
+enum CreateMode {
+    Normal,
+    Staging,
+}
+
+/// The frontend's flat session-params JSON — the UI-shaped boundary DTO. Every
+/// top-level field is REQUIRED: Kotlin's `paramsJson` always emits all of them
+/// (an empty string means "use the core default"), so a *missing* field means
+/// the two sides drifted and must fail loudly, not default silently.
+/// `deny_unknown_fields` catches a renamed / typo'd / extra key the same way.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateParams {
+    direction: CreateDirection,
+    path: String,
+    code: String,
+    broker: String,
+    relay: String,
+    chunk_size: String,
+    data_stream_window: String,
+    candidates_allow: String,
+    candidates_deny: String,
+    receipt_server: String,
+    use_room: bool,
+    use_mdns: bool,
+    resume: bool,
+    /// Optional: Kotlin omits it when there are no extras (`if length > 0`).
+    #[serde(default)]
+    platform_extras: Option<AndroidPlatformExtras>,
+}
+
+impl CreateParams {
+    fn into_context(
+        self,
+        mode: CreateMode,
+    ) -> Result<(SessionContext, Option<serde_json::Value>), String> {
+        if self.path.trim().is_empty() {
+            return Err("path must not be empty".into());
+        }
+        if let Some(x) = &self.platform_extras {
+            // Kotlin writes the two together; reject a half-pair.
+            if x.source_uri.is_some() != x.source_recoverable.is_some() {
+                return Err("source_uri and source_recoverable must be set together".into());
+            }
+        }
+        if matches!(mode, CreateMode::Staging) {
+            let has_source = self
+                .platform_extras
+                .as_ref()
+                .and_then(|x| x.source_uri.as_deref())
+                .is_some_and(|s| !s.is_empty());
+            if !has_source {
+                return Err("staging session requires a source_uri in platform_extras".into());
+            }
+        }
+
+        let opt = |s: String| (!s.is_empty()).then_some(s);
+        let client = ClientContext {
+            chunk_size: opt(self.chunk_size),
+            data_stream_window: opt(self.data_stream_window),
+            candidates_allow: split_csv(&self.candidates_allow),
+            candidates_deny: split_csv(&self.candidates_deny),
+            receipt_server: opt(self.receipt_server),
+            identity_file: None,
+        };
+
+        let mut sources: Vec<PeerSource> = Vec::new();
+        if self.use_room {
+            sources.push(PeerSource::Room {
+                code: self.code.clone(),
+                broker: self.broker,
+            });
+        }
+        if self.use_mdns {
+            sources.push(PeerSource::Mdns {
+                token: Some(self.code),
+            });
+        }
+
+        let mut options = TransferOptions::default();
+        options.relay = opt(self.relay); // empty = default, like the CLI
+        options.resume = self.resume;
+
+        let context = SessionContext {
+            client,
+            params: SessionParams {
+                direction: self.direction.into(),
+                path: std::path::PathBuf::from(self.path),
+                sources,
+                options,
+                publication_required: false,
+            },
+        };
+
+        // Hand the extras to the core as an opaque object (it never interprets
+        // them); the typing above is purely boundary key-validation.
+        let extras = match self.platform_extras {
+            Some(x) => Some(serde_json::to_value(&x).map_err(|e| format!("platform_extras: {e}"))?),
+            None => None,
+        };
+        Ok((context, extras))
+    }
+}
+
+/// Parse + validate the frontend's create-session params (shared by the normal
+/// and staging entry points), producing the durable [`SessionContext`] plus the
+/// opaque platform extras. A single implementation of parse, conversion, and
+/// mode validation.
+fn parse_create_params(
+    json: &str,
+    mode: CreateMode,
+) -> Result<(SessionContext, Option<serde_json::Value>), String> {
+    let params: CreateParams =
+        serde_json::from_str(json).map_err(|e| format!("params JSON: {e}"))?;
+    params.into_context(mode)
+}
+
+#[cfg(test)]
+mod create_params_tests {
+    use super::*;
+
+    /// A complete, valid params object (a joined room receive). Tests mutate a
+    /// clone to exercise each rejection path.
+    fn valid() -> serde_json::Value {
+        serde_json::json!({
+            "direction": "receive",
+            "path": "/tmp/out",
+            "code": "123456-cobalt-flint",
+            "broker": "id@1.2.3.4:5",
+            "relay": "",
+            "chunk_size": "",
+            "data_stream_window": "",
+            "candidates_allow": "",
+            "candidates_deny": "",
+            "receipt_server": "",
+            "use_room": true,
+            "use_mdns": false,
+            "resume": false
+        })
+    }
+
+    fn parse(
+        v: &serde_json::Value,
+        mode: CreateMode,
+    ) -> Result<(SessionContext, Option<serde_json::Value>), String> {
+        parse_create_params(&v.to_string(), mode)
+    }
+
+    #[test]
+    fn valid_params_build_a_context() {
+        let (ctx, extras) = parse(&valid(), CreateMode::Normal).unwrap();
+        assert!(matches!(ctx.params.direction, TransferDirection::Receive));
+        assert_eq!(ctx.params.sources.len(), 1); // room only (use_mdns false)
+        assert!(extras.is_none());
+    }
+
+    #[test]
+    fn a_missing_field_is_rejected_not_defaulted() {
+        // The whole point: deleting a `put(...)` on the Kotlin side must error,
+        // not silently become "".
+        let mut v = valid();
+        v.as_object_mut().unwrap().remove("data_stream_window");
+        assert!(parse(&v, CreateMode::Normal).is_err());
+    }
+
+    #[test]
+    fn an_unknown_or_renamed_field_is_rejected() {
+        let mut v = valid();
+        v["chunkSize"] = serde_json::json!("64KB"); // camelCase typo of chunk_size
+        assert!(parse(&v, CreateMode::Normal).is_err());
+    }
+
+    #[test]
+    fn a_typo_direction_is_rejected() {
+        let mut v = valid();
+        v["direction"] = serde_json::json!("recieve");
+        assert!(parse(&v, CreateMode::Normal).is_err());
+    }
+
+    #[test]
+    fn an_empty_path_is_rejected() {
+        let mut v = valid();
+        v["path"] = serde_json::json!("");
+        assert!(parse(&v, CreateMode::Normal).is_err());
+    }
+
+    #[test]
+    fn staging_requires_a_source_but_normal_does_not() {
+        assert!(parse(&valid(), CreateMode::Staging).is_err());
+        assert!(parse(&valid(), CreateMode::Normal).is_ok());
+    }
+
+    #[test]
+    fn staging_with_a_source_round_trips_extras() {
+        let mut v = valid();
+        v["direction"] = serde_json::json!("send");
+        v["path"] = serde_json::json!("/tmp/staged");
+        v["platform_extras"] = serde_json::json!({
+            "source_uri": "content://x",
+            "source_recoverable": true
+        });
+        let (_, extras) = parse(&v, CreateMode::Staging).unwrap();
+        let extras = extras.unwrap();
+        assert_eq!(extras["source_uri"], "content://x");
+        assert_eq!(extras["source_recoverable"], true);
+    }
+
+    #[test]
+    fn a_half_pair_of_source_fields_is_rejected() {
+        let mut v = valid();
+        v["platform_extras"] = serde_json::json!({ "source_uri": "content://x" });
+        assert!(parse(&v, CreateMode::Normal).is_err());
+    }
+
+    #[test]
+    fn an_unknown_extras_key_is_rejected() {
+        let mut v = valid();
+        v["platform_extras"] = serde_json::json!({ "qrr": "x" }); // typo of qr
+        assert!(parse(&v, CreateMode::Normal).is_err());
+    }
+}
+
+/// Create a SEND session that stages its `content://` source first: the
+/// session starts in Preparing and the record is committed before Kotlin
+/// copies a byte. Notices flow like `createSession`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_createStagingSession(
+    mut env: JNIEnv,
+    _class: JClass,
+    id: jlong,
+    params_json: JString,
+    callback: JObject,
+) {
+    let json = jstr(&mut env, &params_json);
+    let Some(vm) = java_vm_or_log(&env, "createStagingSession") else {
+        return;
+    };
+    let Some(cb) = callback_or_log(&env, &callback, "createStagingSession") else {
+        return;
+    };
+    let (context, extras) = match parse_create_params(&json, CreateMode::Staging) {
+        Ok(parsed) => parsed,
+        Err(e) => return emit_failed_snapshot(&vm, &cb, "invalid session params", e),
+    };
+    let _guard = runtime().enter();
+    let (session, notices) = match TransferSession::start_staging(context, record_for(id), extras) {
         Ok(session) => session,
         Err(error) => return emit_failed_snapshot(&vm, &cb, "invalid session context", error),
     };
@@ -696,17 +1316,42 @@ pub extern "system" fn Java_dev_envoix_app_Native_initRecords(
 
 /// All persisted transfer records as a JSON array (for restoring cards).
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_envoix_app_Native_listRecords<'a>(
+pub extern "system" fn Java_dev_envoix_app_Native_listRestoreContexts<'a>(
     mut env: JNIEnv<'a>,
     _class: JClass,
 ) -> jni::sys::jstring {
     let json = match RECORDS.get() {
         Some(store) => {
             let records = runtime().block_on(store.load_all());
-            match serde_json::to_string(&records) {
+            let dtos: Vec<serde_json::Value> = records
+                .iter()
+                .map(|record| {
+                    let mut value = serde_json::to_value(record.restore_context())
+                        .unwrap_or(serde_json::Value::Null);
+                    // Android-specific card context lives in the opaque
+                    // platform_extras (the core does not interpret it); the
+                    // JNI glue, which knows the Android keys, flattens the two
+                    // the frontend needs onto the DTO.
+                    if let (Some(object), Some(extras)) =
+                        (value.as_object_mut(), record.platform_extras.as_ref())
+                    {
+                        for key in ["qr", "saved_uri", "source_uri"] {
+                            if let Some(text) = extras.get(key).and_then(|v| v.as_str()) {
+                                object.insert(key.into(), text.into());
+                            }
+                        }
+                        if let Some(ok) = extras.get("source_recoverable").and_then(|v| v.as_bool())
+                        {
+                            object.insert("source_recoverable".into(), ok.into());
+                        }
+                    }
+                    value
+                })
+                .collect();
+            match serde_json::to_string(&dtos) {
                 Ok(json) => json,
                 Err(error) => {
-                    return error_jstring(&mut env, "failed to serialize transfer records", error);
+                    return error_jstring(&mut env, "failed to serialize restore contexts", error);
                 }
             }
         }
@@ -820,6 +1465,56 @@ pub extern "system" fn Java_dev_envoix_app_Native_receiptResponse(
     session.receipt_response(key, blob);
 }
 
+/// A Preparing send: report staging copy progress (moves the bar only).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_stageProgress(
+    _env: JNIEnv,
+    _class: JClass,
+    id: jlong,
+    bytes: jlong,
+) {
+    let Ok(map) = sessions().lock() else {
+        return;
+    };
+    if let Some(session) = map.get(&id) {
+        session.stage_progress(bytes.max(0) as u64);
+    }
+}
+
+/// A Preparing send: staging finished, launch the first attempt.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_stageComplete(
+    _env: JNIEnv,
+    _class: JClass,
+    id: jlong,
+) {
+    let Ok(map) = sessions().lock() else {
+        return;
+    };
+    match map.get(&id) {
+        Some(session) => session.stage_complete(),
+        None => tracing::debug!(id, "stageComplete: session not live"),
+    }
+}
+
+/// A Preparing send: staging failed, fail the transfer with `reason`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_stageFailed(
+    mut env: JNIEnv,
+    _class: JClass,
+    id: jlong,
+    reason: JString,
+) {
+    let reason = jstr(&mut env, &reason);
+    let Ok(map) = sessions().lock() else {
+        return;
+    };
+    match map.get(&id) {
+        Some(session) => session.stage_failed(reason),
+        None => tracing::debug!(id, "stageFailed: session not live"),
+    }
+}
+
 /// Replace the frontend-owned card context (QR payload, saved URI, ...)
 /// persisted with the transfer's record. Opaque to the core.
 #[unsafe(no_mangle)]
@@ -828,20 +1523,32 @@ pub extern "system" fn Java_dev_envoix_app_Native_setSessionExtras(
     _class: JClass,
     id: jlong,
     extras_json: JString,
-) {
+) -> jni::sys::jstring {
     let raw = jstr(&mut env, &extras_json);
-    let Ok(extras) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        tracing::warn!(id, "setSessionExtras: invalid JSON");
-        return;
+    // Typed at the boundary (deny_unknown_fields): a misspelled/mistyped extras
+    // key is a loud error, not a silently-stored one. Re-serialized to an opaque
+    // object for the core (which never interprets it). Returns "" on success, an
+    // error message otherwise, so the caller can surface a real boundary drift.
+    let extras = match serde_json::from_str::<AndroidPlatformExtras>(&raw)
+        .and_then(|x| serde_json::to_value(&x))
+    {
+        Ok(v) => v,
+        Err(e) => {
+            let msg = format!("setSessionExtras: invalid extras: {e}");
+            tracing::warn!(id, %msg);
+            return to_jstring(&mut env, &msg);
+        }
     };
     let Ok(map) = sessions().lock() else {
-        return;
+        return to_jstring(&mut env, "");
     };
     let Some(session) = map.get(&id) else {
+        // A benign race (Kotlin syncs after teardown), not a drift — no error.
         tracing::debug!(id, "setSessionExtras: session not live");
-        return;
+        return to_jstring(&mut env, "");
     };
     session.set_extras(extras);
+    to_jstring(&mut env, "")
 }
 
 /// Tear a session down. With `discard` (D2, Remove): delete the partial,

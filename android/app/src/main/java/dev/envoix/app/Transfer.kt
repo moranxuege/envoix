@@ -2,25 +2,39 @@ package dev.envoix.app
 
 enum class Direction { Send, Receive }
 
-enum class Status {
-    Waiting,
-    Connecting,
-    Verifying,
-    Transferring,
-    Confirming,
-    Publishing,
-    Paused,
-    Completed,
-    Unconfirmed,
-    Failed,
-    Cancelled,
+/**
+ * Card status. Each variant carries the exact `wire` string the Rust `State`
+ * enum serializes to (serde snake_case, `envoix-client/src/api/machine.rs`) —
+ * the wire string is the single source, so [fromWire] can't silently drift from
+ * the enum. A Rust rename breaks the Rust serialization test; an unmapped state
+ * is surfaced by [fromWire] returning null (never a silent card freeze).
+ */
+enum class Status(
+    val wire: String,
+) {
+    Preparing("preparing"),
+    Waiting("waiting"),
+    Connecting("connecting"),
+    Verifying("verifying"),
+    Transferring("transferring"),
+    Confirming("confirming"),
+    Paused("paused"),
+    Completed("completed"),
+    Unconfirmed("unconfirmed"),
+    Failed("failed"),
+    Cancelled("cancelled"),
+    ;
+
+    companion object {
+        /** The core `State` wire string → Status, or null if this build has no
+         *  mapping for it (the Rust enum gained a state we don't know). */
+        fun fromWire(wire: String): Status? = entries.firstOrNull { it.wire == wire }
+    }
 }
 
 /** One transfer's observable state, shown as a card. */
 data class Transfer(
     val id: Long,
-    /** Monotonic canonical snapshot sequence; older callbacks are discarded. */
-    val sequence: Long = 0,
     val direction: Direction,
     val room: String,
     val fileName: String? = null,
@@ -39,11 +53,17 @@ data class Transfer(
     /** True average throughput (total bytes / elapsed), matching the CLI's avg_bps. */
     val avgBps: Double = 0.0,
     val status: Status = Status.Connecting,
-    /** Canonical core verdict: retry is meaningful for the current failure. */
-    val retryable: Boolean = false,
     val error: String? = null,
     /** Where a received file ended up (a `content://` in Downloads), for opening. */
     val savedUri: String? = null,
+    /** The name the received file was actually published under — may differ from
+     *  [fileName] (the transfer identity) after a collision bump, e.g. "photo (1).jpg". */
+    val publishedName: String? = null,
+    /** A received file that finished transferring but could not be published to
+     *  public storage (a non-collision publish failure). The bytes are safe in
+     *  staging and a retry re-drives; surfaced so the user isn't left thinking it
+     *  silently vanished. */
+    val publishFailed: Boolean = false,
     /** For an initiated session, the invite payload to show as a QR while waiting
      *  for a peer to pair (null when we joined someone else's code). */
     val qrPayload: String? = null,
@@ -54,43 +74,23 @@ data class Transfer(
 )
 
 val Status.isTerminal: Boolean
+    // Exhaustive (no `else`) so a new Status must be classified here too.
     get() =
-        this == Status.Completed ||
-            this == Status.Failed ||
-            this == Status.Cancelled
-
-enum class TransferAction { Pause, Resume, Retry, Cancel, Delete, Open }
-
-/** Canonical action policy consumed by Activity; every rendered button must
- * correspond to an operation accepted for the current snapshot. */
-fun availableTransferActions(transfer: Transfer): List<TransferAction> =
-    when (transfer.status) {
-        Status.Waiting,
-        Status.Connecting,
-        Status.Verifying,
-        Status.Transferring,
-        -> listOf(TransferAction.Pause, TransferAction.Cancel)
-        Status.Paused -> listOf(TransferAction.Resume, TransferAction.Cancel)
-        Status.Unconfirmed -> listOf(TransferAction.Retry, TransferAction.Cancel)
-        Status.Publishing ->
-            if (transfer.error != null) {
-                listOf(TransferAction.Retry, TransferAction.Cancel)
-            } else {
-                emptyList()
-            }
-        Status.Completed ->
-            buildList {
-                if (transfer.savedUri != null) add(TransferAction.Open)
-                add(TransferAction.Delete)
-            }
-        Status.Failed ->
-            buildList {
-                if (transfer.retryable) add(TransferAction.Retry)
-                add(TransferAction.Delete)
-            }
-        Status.Cancelled -> listOf(TransferAction.Delete)
-        Status.Confirming -> emptyList()
-    }
+        when (this) {
+            Status.Completed,
+            Status.Unconfirmed,
+            Status.Failed,
+            Status.Cancelled,
+            -> true
+            Status.Preparing,
+            Status.Waiting,
+            Status.Connecting,
+            Status.Verifying,
+            Status.Transferring,
+            Status.Confirming,
+            Status.Paused,
+            -> false
+        }
 
 /** Human-readable byte count (the ONE implementation - was duplicated). */
 fun humanBytes(n: Long): String =

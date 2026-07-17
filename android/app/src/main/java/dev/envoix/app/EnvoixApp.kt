@@ -2,7 +2,7 @@ package dev.envoix.app
 
 import android.app.Application
 
-/** Initializes logging, Android context, and the durable UniFFI runner once. */
+/** Initializes logging + the native Android context once, before any transfer. */
 class EnvoixApp : Application() {
     override fun onCreate() {
         super.onCreate()
@@ -11,25 +11,25 @@ class EnvoixApp : Application() {
         OpLog.init(filesDir)
         TransferLogs.init(filesDir)
         Diagnostics.init(filesDir)
-
-        NativeBootstrap.initLogging(LogSink)
-        SettingsStore.applyLogLevel()
-        NativeBootstrap.initContext(this)
-        UniffiTransferRunner.initialize(this)
-
-        val nextId =
-            runCatching {
-                UniffiTransferRunner
-                    .records()
-                    .mapNotNull { UniffiTransferRunner.parseActivityId(it.activityId) }
-                    .maxOrNull()
-                    ?.plus(1)
-                    ?: 1L
-            }.getOrDefault(1L)
-        TransferRepository.seedNextId(nextId)
+        Native.initRecords(java.io.File(filesDir, "records").absolutePath)
+        // Ids must clear the persisted records BEFORE any card is created;
+        // relying on restore to bump the counter loses the race when the user
+        // starts a transfer before the service restores (id collision =
+        // silent record overwrite).
+        runCatching {
+            val records = org.json.JSONArray(Native.listRestoreContexts())
+            var maxId = 0L
+            for (i in 0 until records.length()) {
+                maxId = maxOf(maxId, records.optJSONObject(i)?.optLong("id", 0L) ?: 0L)
+            }
+            TransferRepository.seedNextId(maxId + 1)
+        }
         LogStore.append("envoix-android v${BuildConfig.VERSION_NAME} (${BuildConfig.GIT_COMMIT})")
-        TransferService.restore(this)
+        Native.initLogging(LogSink) // before initContext, so init logs are captured
+        SettingsStore.applyLogLevel() // restore the saved (dev) verbosity
+        Native.initContext(this)
 
+        // Capture uncaught exceptions into the log (foundation for crash reporting).
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, error ->
             OpLog.add("CRASH ${error.javaClass.simpleName}: ${error.message}")

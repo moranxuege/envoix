@@ -8,48 +8,257 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.Uri
 import android.os.IBinder
+import android.provider.OpenableColumns
 import androidx.core.app.NotificationCompat
-import dev.envoix.app.ffi.FfiDataPathKind
-import dev.envoix.app.ffi.FfiTransferActivityRecord
-import dev.envoix.app.ffi.FfiTransferActivityState
-import dev.envoix.app.ffi.FfiTransferDirection
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import java.util.concurrent.ConcurrentHashMap
 
-/** Foreground owner for canonical durable transfers and native file publication. */
+/** Params needed to (re)create a transfer session (also carries UI extras). */
+private data class Spec(
+    val direction: String,
+    val room: String,
+    val path: String,
+    val broker: String,
+    val relay: String,
+    val chunkSize: String,
+    val dataStreamWindow: String,
+    val candidatesAllow: String,
+    val candidatesDeny: String,
+    /** Invite payload to advertise as a QR while waiting (initiated sessions only). */
+    val qrPayload: String?,
+    /** Rendezvous modes to attempt, in order Room → mDNS. */
+    val useRoom: Boolean,
+    val useMdns: Boolean,
+    /** Receipt-mailbox endpoint frozen at creation; persisted in the record's
+     *  context so confirmation survives later edits to the setting. */
+    val receiptServer: String = "",
+    /** Staging send only: the content:// source to copy into [path], and
+     *  whether a durable read grant was taken (so restore knows if it can
+     *  re-stage). Both ride platform_extras, so they survive restarts. */
+    val sourceUri: String? = null,
+    val sourceRecoverable: Boolean = false,
+) {
+    fun dir(): Direction = if (direction == "send") Direction.Send else Direction.Receive
+
+    /** The session params JSON for [Native.createSession]. `resume` false for a
+     *  user-initiated NEW transfer (fresh semantics); true when re-creating a
+     *  session that should honor partials/receipts. */
+    fun paramsJson(resume: Boolean): String =
+        JSONObject()
+            .apply {
+                put("direction", direction)
+                put("code", room)
+                put("broker", broker)
+                put("relay", relay)
+                put("path", path)
+                put("chunk_size", chunkSize)
+                put("data_stream_window", dataStreamWindow)
+                put("candidates_allow", candidatesAllow)
+                put("candidates_deny", candidatesDeny)
+                put("use_room", useRoom)
+                put("use_mdns", useMdns)
+                put("resume", resume)
+                put("receipt_server", receiptServer)
+                val extras = org.json.JSONObject()
+                qrPayload?.let { extras.put("qr", it) }
+                sourceUri?.let {
+                    extras.put("source_uri", it)
+                    extras.put("source_recoverable", sourceRecoverable)
+                }
+                if (extras.length() > 0) put("platform_extras", extras)
+            }.toString()
+}
+
+/**
+ * Foreground service that owns transfer sessions. Since the state machine
+ * moved into the Rust core (envoix-client machine + driver), this service no
+ * longer interprets events: it forwards user intents to the session, renders
+ * the snapshot stream into [TransferRepository], acts as the mailbox courier
+ * (dumb HTTP GET/POST — the driver seals, verifies, and decides), and keeps
+ * the Android-only side effects: notifications, MediaStore publish, multicast.
+ */
 class TransferService : Service() {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private val activeIds = ConcurrentHashMap.newKeySet<Long>()
-    private val publishingIds = ConcurrentHashMap.newKeySet<Long>()
-    private val multicastHolders = ConcurrentHashMap.newKeySet<Long>()
-    private val observedIds = ConcurrentHashMap.newKeySet<Long>()
-    private val specs = ConcurrentHashMap<Long, TransferSpec>()
-    private val logTime = SimpleDateFormat("HH:mm:ss", Locale.US)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
+    /** One scope per card: staging copy, session collector, and courier calls
+     *  all run inside it, so Remove fences a card's ENTIRE async surface with
+     *  a single cancel (no hidden session can start after, no receipt retry
+     *  survives). Parented to the service scope - teardown cancels all. */
+    private val transferScopes = HashMap<Long, CoroutineScope>()
+
+    /** Ids with an in-flight publish-retry loop, so a re-rendered `completed`
+     *  snapshot doesn't spawn a second one. */
+    private val publishing = java.util.Collections.synchronizedSet(HashSet<Long>())
+
+    /** Backoff for re-attempting a stuck publish in-session (a non-collision
+     *  failure — collisions self-resolve in `commit`). After these, the card is
+     *  marked failed and the bytes wait in staging for a restart re-drive. */
+    private val publishRetryBackoffMs = longArrayOf(2_000, 5_000, 15_000)
+
+    @Synchronized
+    private fun transferScope(id: Long): CoroutineScope =
+        transferScopes.getOrPut(id) {
+            CoroutineScope(scope.coroutineContext + SupervisorJob(scope.coroutineContext[Job]))
+        }
+
+    @Synchronized
+    private fun cancelTransferScope(id: Long) {
+        transferScopes.remove(id)?.cancel()
+    }
+
+    /** Collector jobs per transfer id (live Rust session ⇔ live job). */
+    private val jobs = java.util.concurrent.ConcurrentHashMap<Long, Job>()
+
+    /** Last applied snapshot seq per id: out-of-order snapshots are dropped. */
+    private val lastSeq = java.util.concurrent.ConcurrentHashMap<Long, Long>()
+
+    /** Pump generation currently owning each card (stamped into every JNI
+     *  notice). The active collector claims it on its first notice; anything
+     *  else is a stale pump from a torn-down session for the same id and is
+     *  dropped - the fence is explicit, not an artifact of flow mechanics. */
+    private val generations = HashMap<Long, Long>()
+
+    /** Ids whose staging copy has been launched, so the Preparing snapshot
+     *  triggers it exactly once. */
+    private val stagingStarted = HashSet<Long>()
+
+    /** True when [notice] belongs to the card's current pump (claiming it if
+     *  the card is unclaimed). */
+    @Synchronized
+    private fun ownsCard(
+        id: Long,
+        notice: JSONObject,
+    ): Boolean {
+        val gen = notice.optLong("gen", 0L)
+        if (gen <= 0L) return true // pre-generation core: let it through
+        val current = generations[id]
+        if (current == null) {
+            generations[id] = gen
+            return true
+        }
+        return gen == current
+    }
+
+    /** Foreground is platform STATE, reconciled against the snapshot stream -
+     *  not a history edge. (The old active->resting latch never fired for a
+     *  card born terminal, e.g. a sync launch failure: the service stayed
+     *  foreground with a stale ongoing notification.) */
+    private var isForeground = false
+
+    /** Cards currently holding a multicast ref (the lock is ref-counted). */
+    private val multicastHolders = HashSet<Long>()
+
+    /** The multicast lock derives from the OBSERVED state, not the launch
+     *  path: held exactly while an mDNS-capable card is active (it disables
+     *  radio multicast filtering - battery). Restore reconciles automatically:
+     *  the first restored snapshot flows through here like any other. */
+    @Synchronized
+    private fun renderMulticast(
+        id: Long,
+        spec: Spec,
+        status: Status,
+    ) {
+        val want = spec.useMdns && isActive(status)
+        val holds = id in multicastHolders
+        if (want && !holds) {
+            runCatching { multicastLock.acquire() }
+            multicastHolders.add(id)
+        } else if (!want && holds) {
+            multicastHolders.remove(id)
+            runCatching { multicastLock.release() }
+        }
+    }
+
+    /** Safety release when a collector dies without a resting snapshot. */
+    @Synchronized
+    private fun releaseMulticast(id: Long) {
+        if (multicastHolders.remove(id)) runCatching { multicastLock.release() }
+    }
+
+    /** Held while an mDNS-enabled session runs; Android gates multicast behind it. */
     private val multicastLock by lazy {
         (getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager)
             .createMulticastLock("envoix-mdns")
             .apply { setReferenceCounted(true) }
     }
 
+    /** True when the active network actually reaches the internet (not just a
+     *  captive portal). Room pairing needs the broker, so skip it when this is
+     *  false — otherwise Room just retries an unreachable broker forever, and the
+     *  mDNS fallback never gets a turn. */
+    private fun hasInternet(): Boolean {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+        val caps = cm.activeNetwork?.let { cm.getNetworkCapabilities(it) } ?: return false
+        return caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+            caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
-        UniffiTransferRunner.initialize(this)
-        getSystemService(NotificationManager::class.java).createNotificationChannel(
+        val mgr = getSystemService(NotificationManager::class.java)
+        mgr.createNotificationChannel(
             NotificationChannel(CHANNEL, "Transfers", NotificationManager.IMPORTANCE_LOW),
         )
+        gcStaging()
+    }
+
+    /** The per-card receive staging dir (Phase 4): `filesDir/incoming/<id>/`. */
+    private fun receiveStagingDir(id: Long) = File(File(filesDir, "incoming"), id.toString())
+
+    /**
+     * Reconcile staging with the record store at service start, before any
+     * action can run (onCreate precedes onStartCommand, so no session exists
+     * yet and nothing races the deletes):
+     * - per-id staging dirs with no record are crash residue - delete;
+     * - files directly in the incoming root are pre-Phase-4 shared-staging
+     *   leftovers: publish finals (the old pre-receive sweep's recovery
+     *   duty, one last time), drop sidecars. Runs async - new transfers
+     *   never touch the root anymore.
+     */
+    private fun gcStaging() {
+        var recordIds = emptySet<Long>()
+        var legacyRootInUse = false
+        val incoming = File(filesDir, "incoming")
+        runCatching {
+            val ctxs = org.json.JSONArray(Native.listRestoreContexts())
+            recordIds =
+                (0 until ctxs.length())
+                    .mapNotNull { ctxs.optJSONObject(it)?.optLong("id", -1L)?.takeIf { id -> id >= 0 } }
+                    .toSet()
+            // Pre-Phase-4 records point straight at the shared root; their
+            // artifacts live there and are NOT garbage while the record does.
+            legacyRootInUse =
+                (0 until ctxs.length()).any {
+                    ctxs.optJSONObject(it)?.optString("path") == incoming.absolutePath
+                }
+        }
+        incoming.listFiles { f -> f.isDirectory }?.forEach { dir ->
+            if (dir.name.toLongOrNull() !in recordIds) {
+                dir.deleteRecursively()
+                OpLog.add("gc: dropped orphan staging ${dir.name}")
+            }
+        }
+        val send = File(cacheDir, "send")
+        send.listFiles { f -> f.isDirectory }?.forEach { dir ->
+            if (dir.name.toLongOrNull() !in recordIds) dir.deleteRecursively()
+        }
+        if (!legacyRootInUse) {
+            scope.launch(Dispatchers.IO) {
+                sweepStaging(incoming.absolutePath, attributeTo = null)
+                incoming.listFiles { f -> f.isFile }?.forEach { it.delete() }
+            }
+        }
     }
 
     override fun onStartCommand(
@@ -58,348 +267,801 @@ class TransferService : Service() {
         startId: Int,
     ): Int {
         when (intent?.action) {
-            ACTION_RESTORE -> {
+            ACTION_START -> {
+                val direction = intent.getStringExtra(EXTRA_DIRECTION)
+                val room = intent.getStringExtra(EXTRA_ROOM)
+                val path = intent.getStringExtra(EXTRA_PATH)
+                if (direction == null || room == null || path == null) return START_NOT_STICKY
+                val spec0 =
+                    Spec(
+                        direction,
+                        room,
+                        path,
+                        intent.getStringExtra(EXTRA_BROKER) ?: Endpoints.BROKER,
+                        intent.getStringExtra(EXTRA_RELAY) ?: Endpoints.RELAY,
+                        intent.getStringExtra(EXTRA_CHUNK_SIZE) ?: "",
+                        intent.getStringExtra(EXTRA_DATA_WINDOW) ?: "",
+                        intent.getStringExtra(EXTRA_CAND_ALLOW) ?: "",
+                        intent.getStringExtra(EXTRA_CAND_DENY) ?: "",
+                        intent.getStringExtra(EXTRA_QR),
+                        SettingsStore.settings.value.useRoom && hasInternet(),
+                        SettingsStore.settings.value.useMdns,
+                        SettingsStore.settings.value.logServer,
+                    )
                 enterForeground()
-                restoreSessions()
+                val id = TransferRepository.create(spec0.dir(), room)
+                // Receive staging is keyed by card id (Phase 4): a fresh dir
+                // is empty by construction, so the core's existing-final path
+                // cannot fire on another card's residue, and resume/receipt
+                // artifacts flow only through the card that owns them.
+                val spec =
+                    if (spec0.dir() == Direction.Receive) {
+                        spec0.copy(path = receiveStagingDir(id).absolutePath)
+                    } else {
+                        spec0
+                    }
+                TransferRepository.update(id) {
+                    it.copy(
+                        qrPayload = spec.qrPayload,
+                        // Show the outgoing file name right away; receives learn it on Started.
+                        fileName =
+                            if (spec.dir() == Direction.Send && spec.path.isNotEmpty()) {
+                                File(spec.path).name
+                            } else {
+                                it.fileName
+                            },
+                    )
+                }
+                specs[id] = spec
+                OpLog.add("start $direction room=${room.substringBefore('-')} id=$id")
+                val sourceUri = intent.getStringExtra(EXTRA_SOURCE_URI)
+                if (spec.dir() == Direction.Send && !sourceUri.isNullOrEmpty()) {
+                    val uri = Uri.parse(sourceUri)
+                    // The provider's DISPLAY_NAME is untrusted (can contain path
+                    // separators): keep only the leaf, never a dot name.
+                    val name =
+                        (displayName(uri) ?: "upload.bin")
+                            .let { File(it).name }
+                            .takeUnless { it.isEmpty() || it == "." || it == ".." }
+                            ?: "upload.bin"
+                    // A durable read grant lets a restart re-stage the source.
+                    val recoverable =
+                        runCatching {
+                            contentResolver.takePersistableUriPermission(
+                                uri,
+                                Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                            )
+                        }.isSuccess
+                    // Staging is keyed by card id so two same-named sends never
+                    // share a source path (the sender hashes as it reads).
+                    val stagingPath =
+                        File(File(File(cacheDir, "send"), id.toString()), name).absolutePath
+                    TransferRepository.update(id) {
+                        it.copy(
+                            fileName = name,
+                            total = querySize(uri),
+                            log = addLog(it.log, "preparing · staging $name…"),
+                        )
+                    }
+                    val stagingSpec =
+                        spec.copy(path = stagingPath, sourceUri = sourceUri, sourceRecoverable = recoverable)
+                    specs[id] = stagingSpec
+                    // Record commits in Preparing FIRST; the copy launches from
+                    // the Preparing snapshot (durable intent before a byte moves).
+                    startSession(id, stagingSpec, resume = false, staging = true)
+                } else {
+                    startSession(id, spec, resume = false)
+                }
             }
-            ACTION_START -> startNew(intent)
-            ACTION_RESUME -> resume(intent.getLongExtra(EXTRA_ID, -1L))
-            ACTION_PAUSE -> pause(intent.getLongExtra(EXTRA_ID, -1L))
-            ACTION_CANCEL -> cancel(intent.getLongExtra(EXTRA_ID, -1L))
-            ACTION_REMOVE -> remove(intent.getLongExtra(EXTRA_ID, -1L))
+            ACTION_RESUME -> {
+                val id = intent.getLongExtra(EXTRA_ID, -1L)
+                enterForeground()
+                OpLog.add("resume transfer id=$id", id)
+                // Restore-then-intent: rehydrate any dead sessions from their
+                // records FIRST, then let the machine's legality table decide.
+                // Never reconstruct from a shadow copy (the Q3 bypass bug).
+                if (!jobs.containsKey(id)) restoreAllRecords()
+                Native.sessionIntent(id, "resume")
+            }
+            ACTION_PAUSE -> {
+                val id = intent.getLongExtra(EXTRA_ID, -1L)
+                OpLog.add("pause transfer id=$id", id)
+                Native.sessionIntent(id, "pause")
+            }
+            ACTION_CANCEL -> {
+                val id = intent.getLongExtra(EXTRA_ID, -1L)
+                OpLog.add("cancel transfer id=$id", id)
+                Native.sessionIntent(id, "cancel")
+            }
+            ACTION_RESTORE_ALL -> restoreAllRecords()
+            ACTION_REVERIFY -> {
+                val id = intent.getLongExtra(EXTRA_ID, -1L)
+                OpLog.add("serve re-verify id=$id", id)
+                if (!jobs.containsKey(id)) restoreAllRecords()
+                Native.sessionIntent(id, "reverify")
+            }
+            ACTION_REMOVE -> {
+                val id = intent.getLongExtra(EXTRA_ID, -1L)
+                OpLog.add("remove transfer id=$id", id)
+                // Fence the card's async surface FIRST: staging copy, session
+                // collector, courier retries all die here, so nothing can
+                // start a hidden session or re-create files during cleanup.
+                // (A blocking copy may outlive the signal briefly; its dir is
+                // orphaned then and the startup GC reaps it.)
+                cancelTransferScope(id)
+                // D2, the one true abandon: discard partial + resume state +
+                // receipt, then tear the session and card down. Both staging
+                // dirs are keyed by card id, so they go too without consulting
+                // the (possibly already gone) spec.
+                File(File(cacheDir, "send"), id.toString()).deleteRecursively()
+                receiveStagingDir(id).deleteRecursively()
+                Native.destroySession(id, true)
+                TransferLogs.delete(id)
+                jobs.remove(id)
+                specs.remove(id)
+                lastSeq.remove(id)
+                generations.remove(id)
+                synchronized(stagingStarted) { stagingStarted.remove(id) }
+                TransferRepository.remove(id)
+                stopIfIdle()
+            }
         }
         return START_NOT_STICKY
     }
 
-    private fun startNew(intent: Intent) {
-        val direction = intent.getStringExtra(EXTRA_DIRECTION) ?: return
-        val room = intent.getStringExtra(EXTRA_ROOM) ?: return
-        val requestedPath = intent.getStringExtra(EXTRA_PATH) ?: return
-        enterForeground()
-        val id = TransferRepository.create(direction.toDirection(), room)
-        val path =
-            if (direction == "receive") {
-                File(requestedPath, "android-$id").apply { mkdirs() }.absolutePath
-            } else {
-                requestedPath
-            }
-        val settings = SettingsStore.settings.value
-        val internetAvailable = hasInternet()
-        val spec =
-            TransferSpec(
-                direction = direction,
-                room = room,
-                path = path,
-                broker = intent.getStringExtra(EXTRA_BROKER) ?: Endpoints.BROKER,
-                relay = intent.getStringExtra(EXTRA_RELAY) ?: Endpoints.RELAY,
-                config = intent.getStringExtra(EXTRA_CONFIG) ?: "",
-                qrPayload = intent.getStringExtra(EXTRA_QR),
-                transferInvite = intent.getStringExtra(EXTRA_TRANSFER_INVITE),
-                internetAvailable = internetAvailable,
-                useRoom = settings.useRoom && internetAvailable,
-                useMdns = settings.useMdns,
-                receiptServer = settings.logServer,
-                saveTreeUri = settings.saveTreeUri,
-                saveFolder = settings.saveFolder,
-            )
-        specs[id] = spec
-        TransferSpecStore.save(this, id, spec)
-        TransferRepository.update(id) {
-            it.copy(
-                qrPayload = spec.qrPayload,
-                fileName = if (spec.dir() == Direction.Send) File(spec.path).name else null,
-            )
-        }
-        observe(id)
-        markActive(id, spec)
-        val started =
-            UniffiTransferRunner.start(
-                id = id,
-                direction = spec.direction,
-                code = spec.room,
-                broker = spec.broker,
-                relay = spec.relay,
-                path = spec.path,
-                configPath = spec.config,
-                transferInvite = spec.transferInvite,
-                internetAvailable = spec.internetAvailable,
-                useRoom = spec.useRoom,
-                useMdns = spec.useMdns,
-                receiptServer = spec.receiptServer,
-                onUpdate = updateCallback(id),
-            )
-        if (!started) {
-            activeIds.remove(id)
-            releaseMulticast(id)
-            TransferRepository.update(id) {
-                it.copy(status = Status.Failed, error = "Could not start the durable transfer session")
-            }
-            stopIfIdle()
-        }
-    }
-
-    private fun restoreSessions() {
-        val records =
-            runCatching { UniffiTransferRunner.records() }.getOrElse {
-                LogStore.append("app: durable restore scan failed: ${it.message}")
-                stopIfIdle()
-                return
-            }
-        records.forEach { record ->
-            val id = UniffiTransferRunner.parseActivityId(record.activityId) ?: return@forEach
-            TransferSpecStore.load(this, id)?.also {
-                specs[id] = it
-            }
-            applyActivity(id, record)
-            observe(id)
-            if (UniffiTransferRunner.hasSession(id)) {
-                UniffiTransferRunner.attach(id, updateCallback(id))
-                UniffiTransferRunner.activity(id)?.let { applyActivity(id, it) }
-            } else {
-                if (UniffiTransferRunner.restore(id, updateCallback(id))) {
-                    UniffiTransferRunner.activity(id)?.let { applyActivity(id, it) }
-                }
-            }
-        }
-        stopIfIdle()
-    }
-
-    private fun observe(id: Long) {
-        observedIds.add(id)
-        UniffiTransferRunner.attach(id, updateCallback(id))
-    }
-
-    private fun updateCallback(id: Long): (DurableUpdate) -> Unit =
-        { update ->
-            scope.launch { handleUpdate(id, update) }
-        }
-
-    private fun handleUpdate(
-        id: Long,
-        update: DurableUpdate,
-    ) {
-        when (update) {
-            is DurableUpdate.Activity -> applyActivity(id, update.record)
-            is DurableUpdate.InviteReady ->
-                TransferRepository.update(id) {
-                    it.copy(qrPayload = update.invite, log = addLog(it.log, "invite ready"))
-                }
-            is DurableUpdate.Event ->
-                TransferRepository.update(id) {
-                    val event = update.event
-                    val detail = event.diagnosticMessage.ifBlank { event.kind.name.lowercase() }
-                    it.copy(log = addLog(it.log, "core · $detail"))
-                }
-            is DurableUpdate.Status -> {
-                LogStore.append("core: ${update.message}")
-                TransferRepository.update(id) {
-                    it.copy(log = addLog(it.log, "core · ${update.message}"))
-                }
-            }
-        }
-    }
-
-    private fun applyActivity(
-        id: Long,
-        record: FfiTransferActivityRecord,
-    ) {
-        val current = TransferRepository.transfers.value.firstOrNull { it.id == id }
-        val sequence = record.sequence.toLongSaturated()
-        if (current != null && current.sequence > sequence) return
-        val spec = specs[id] ?: TransferSpecStore.load(this, id)?.also { specs[id] = it }
-        val status = record.toStatus()
-        val room = current?.room ?: spec?.room ?: record.token.ifBlank { "restored" }
-        val direction =
-            when (record.direction) {
-                FfiTransferDirection.SEND -> Direction.Send
-                FfiTransferDirection.RECEIVE -> Direction.Receive
-                FfiTransferDirection.UNKNOWN -> current?.direction ?: spec?.dir() ?: Direction.Receive
-            }
-        val speed = if (status == Status.Transferring) record.speedBps.toLongSaturated().toDouble() else 0.0
-        val previousHistory = current?.speedHistory.orEmpty()
-        val history = if (speed > 0) (previousHistory + speed).takeLast(90) else previousHistory
-        val stateChanged = current?.status != status
-        val error =
-            if (status == Status.Failed || status == Status.Unconfirmed || status == Status.Publishing) {
-                record.diagnosticMessage.takeIf { it.isNotBlank() } ?: current?.error
-            } else {
-                null
-            }
-        val savedUri =
-            record.completedFilePath.takeIf { status == Status.Completed && it.startsWith("content://") }
-                ?: current?.savedUri
-        val log =
-            if (stateChanged) {
-                addLog(current?.log.orEmpty(), "state · ${status.name.lowercase()}")
-            } else {
-                current?.log.orEmpty()
-            }
-        TransferRepository.upsert(
-            Transfer(
-                id = id,
-                sequence = sequence,
-                direction = direction,
-                room = room,
-                fileName = record.fileName.takeIf { it.isNotBlank() } ?: current?.fileName,
-                attempt = record.attemptId.substringAfterLast('-').toIntOrNull() ?: current?.attempt ?: 1,
-                proofDelivered = direction == Direction.Receive && status == Status.Completed,
-                transferId = record.transferId.takeIf { it.isNotBlank() } ?: current?.transferId,
-                pathType = record.dataPathKind.displayName(),
-                pathAddr = record.dataPathDetail,
-                bytes = record.bytesTransferred.toLongSaturated(),
-                total = record.totalBytes.toLongSaturated(),
-                speedBps = speed,
-                avgBps = record.averageSpeedBps.toLongSaturated().toDouble(),
-                status = status,
-                retryable = record.retryable,
-                error = error,
-                savedUri = savedUri,
-                qrPayload = record.invite.takeIf { it.isNotBlank() } ?: current?.qrPayload ?: spec?.qrPayload,
-                speedHistory = history,
-                log = log,
-            ),
-        )
-
-        if (status.needsForeground()) {
-            spec?.let { markActive(id, it) }
-        } else {
-            activeIds.remove(id)
-            releaseMulticast(id)
-        }
-        when (status) {
-            Status.Publishing -> publishReceived(id, record)
-            Status.Completed, Status.Cancelled -> cleanupCompletedNativeFiles(id, spec)
-            else -> Unit
-        }
-        updateNotification()
-        stopIfIdle()
-    }
-
-    private fun resume(id: Long) {
-        if (id < 0) return
-        val spec = specs[id] ?: TransferSpecStore.load(this, id)?.also { specs[id] = it } ?: return
-        enterForeground()
-        observe(id)
-        val status =
-            TransferRepository.transfers.value
-                .firstOrNull { it.id == id }
-                ?.status
-        if (status == Status.Publishing) {
-            UniffiTransferRunner.activity(id)?.let { publishReceived(id, it) }
-        } else if (UniffiTransferRunner.resume(id)) {
-            markActive(id, spec)
-        }
-    }
-
-    private fun pause(id: Long) {
-        if (id < 0) return
-        observe(id)
-        UniffiTransferRunner.pause(id)
-    }
-
-    private fun cancel(id: Long) {
-        if (id < 0) return
-        observe(id)
-        UniffiTransferRunner.cancel(id)
-    }
-
-    private fun remove(id: Long) {
-        val transfer = TransferRepository.transfers.value.firstOrNull { it.id == id } ?: return
-        if (!transfer.status.isTerminal) return
-        val spec = specs.remove(id) ?: TransferSpecStore.load(this, id)
-        if (UniffiTransferRunner.remove(id)) {
-            cleanupRemovedNativeFiles(spec)
-            TransferSpecStore.remove(this, id)
-            TransferRepository.remove(id)
-            observedIds.remove(id)
-        }
-        stopIfIdle()
-    }
-
-    private fun publishReceived(
-        id: Long,
-        record: FfiTransferActivityRecord,
-    ) {
-        if (!publishingIds.add(id)) return
-        val spec = specs[id] ?: TransferSpecStore.load(this, id)
-        val source = File(record.completedFilePath)
-        val name = record.fileName
-        scope.launch {
-            val uri =
-                if (spec == null || name.isBlank() || !source.isFile) {
-                    null
-                } else {
-                    withContext(Dispatchers.IO) {
-                        MediaStoreSaver.saveReceived(
-                            context = this@TransferService,
-                            source = source,
-                            displayName = name,
-                            treeUri = spec.saveTreeUri,
-                            folder = spec.saveFolder,
-                        )
-                    }
-                }
-            publishingIds.remove(id)
-            if (uri != null && UniffiTransferRunner.publicationSucceeded(id, uri.toString())) {
-                withContext(Dispatchers.IO) {
-                    source.delete()
-                    source.parentFile?.delete()
-                }
-                LogStore.append("app: published $name to $uri")
-            } else {
-                TransferRepository.update(id) {
-                    it.copy(
-                        status = Status.Publishing,
-                        error = "Failed to publish the verified file; private staging was retained",
-                        log = addLog(it.log, "publish failed · staging retained"),
-                    )
-                }
-                LogStore.append("app: publish failed id=$id; staging retained")
-            }
-        }
-    }
-
-    private fun cleanupCompletedNativeFiles(
-        id: Long,
-        spec: TransferSpec?,
-    ) {
-        if (spec == null) return
-        if (spec.dir() == Direction.Receive) {
-            File(spec.path).deleteRecursively()
-        } else {
-            cleanupCachedSend(spec.path)
-        }
-        specs.remove(id)
-        TransferSpecStore.remove(this, id)
-    }
-
-    private fun cleanupRemovedNativeFiles(spec: TransferSpec?) {
-        if (spec == null) return
-        if (spec.dir() == Direction.Receive) File(spec.path).deleteRecursively() else cleanupCachedSend(spec.path)
-    }
-
-    private fun cleanupCachedSend(path: String) {
-        val source = File(path)
-        val sendCache = File(cacheDir, "send")
-        val isCacheCopy =
-            runCatching { source.canonicalFile.toPath().startsWith(sendCache.canonicalFile.toPath()) }
-                .getOrDefault(false)
-        if (isCacheCopy) source.delete()
-    }
-
-    private fun markActive(
-        id: Long,
-        spec: TransferSpec,
-    ) {
-        activeIds.add(id)
-        acquireMulticast(id, spec)
-        updateNotification()
-    }
-
     private fun enterForeground() {
         startForeground(NOTIF_ID, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        isForeground = true
     }
 
+    private val logTime = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
+
+    /** Append a timestamped line to a transfer's log, keeping the last 60. */
+    private fun addLog(
+        cur: List<String>,
+        line: String,
+    ): List<String> = (cur + "${logTime.format(java.util.Date())}  $line").takeLast(TransferRepository.LOG_CAP)
+
+    /**
+     * Restore persisted transfer records (roadmap #5): recreate each card with
+     * its durable id and rehydrate its Rust session — the session's initial
+     * snapshot repopulates the card through the normal rendering path. Resting
+     * cards idle; a restored Unconfirmed resumes its mailbox poll in Rust.
+     */
+    private fun restoreAllRecords() {
+        val ctxs = runCatching { org.json.JSONArray(Native.listRestoreContexts()) }.getOrNull() ?: return
+        for (i in 0 until ctxs.length()) {
+            val c = ctxs.optJSONObject(i) ?: continue
+            val id = c.optLong("id", -1L)
+            if (id < 0 || jobs.containsKey(id)) continue
+            val direction = c.optString("direction")
+            val code = c.optString("code")
+            if (code.isEmpty()) continue
+            if (!TransferRepository.restoreCard(
+                    id,
+                    if (direction == "send") Direction.Send else Direction.Receive,
+                    code,
+                    qrPayload = c.optString("qr").ifEmpty { null },
+                    savedUri = c.optString("saved_uri").ifEmpty { null },
+                    publishedName = c.optString("published_name").ifEmpty { null },
+                    publishFailed = c.optString("publish") == "failed",
+                )
+            ) {
+                continue
+            }
+            // Transport config (broker/relay/chunk/candidates) is unused for a
+            // restored session - the core relaunches from the durable record's
+            // own context - so the display Spec carries only what the card and
+            // platform effects need.
+            // A restored Preparing send re-stages only if its source grant was
+            // durable; otherwise the copy path fails it with "needs re-picking".
+            val recoverable = c.optBoolean("source_recoverable", false)
+            val spec =
+                Spec(
+                    direction,
+                    code,
+                    c.optString("path"),
+                    Endpoints.BROKER,
+                    Endpoints.RELAY,
+                    "",
+                    "",
+                    "",
+                    "",
+                    null,
+                    c.optBoolean("use_room"),
+                    c.optBoolean("use_mdns"),
+                    sourceUri = if (recoverable) c.optString("source_uri").ifEmpty { null } else null,
+                    sourceRecoverable = recoverable,
+                )
+            specs[id] = spec
+            lastSeq[id] = 0L
+            generations.remove(id)
+            val job =
+                transferScope(id).launch {
+                    try {
+                        NativeSession.restore(id).collect { notice ->
+                            if (!ownsCard(id, notice)) return@collect
+                            when (notice.optString("notice")) {
+                                "snapshot" -> onSnapshot(id, spec, notice)
+                                "fetch_receipt" ->
+                                    onFetchReceipt(id, notice.optString("key"), notice.optString("server"))
+                                "post_receipt" -> onPostReceipt(id, notice)
+                            }
+                        }
+                    } finally {
+                        releaseMulticast(id)
+                    }
+                }
+            jobs[id] = job
+            OpLog.add("restored transfer id=$id")
+        }
+    }
+
+    /** Copy a Preparing send's content:// source into its staging path, then
+     *  report to the core (stage_complete / stage_failed). Launched from the
+     *  Preparing snapshot, so the record is already durable. */
+    private fun launchStaging(
+        id: Long,
+        spec: Spec,
+    ) {
+        transferScope(id).launch(Dispatchers.IO) {
+            val uri = spec.sourceUri?.let { Uri.parse(it) }
+            if (uri == null) {
+                // A restored Preparing whose source cannot be reopened.
+                TransferTimeline.event(id, "platform.stage", "failed", outcome = "no_source")
+                Native.stageFailed(id, "source needs re-picking")
+                return@launch
+            }
+            val out = File(spec.path)
+            out.parentFile?.mkdirs()
+            TransferTimeline.event(id, "platform.stage", "start", fields = mapOf("name" to out.name))
+            val result =
+                runCatching {
+                    contentResolver.openInputStream(uri)!!.use { input ->
+                        out.outputStream().use { o ->
+                            val buf = ByteArray(1 shl 20)
+                            var copied = 0L
+                            var last = 0L
+                            while (true) {
+                                val n = input.read(buf)
+                                if (n < 0) break
+                                o.write(buf, 0, n)
+                                copied += n
+                                val now = System.currentTimeMillis()
+                                if (now - last > 150) {
+                                    last = now
+                                    Native.stageProgress(id, copied)
+                                }
+                            }
+                        }
+                    }
+                }
+            if (result.isSuccess) {
+                TransferTimeline.event(id, "platform.stage", "complete")
+                Native.stageComplete(id)
+            } else {
+                out.delete()
+                TransferTimeline.event(
+                    id,
+                    "platform.stage",
+                    "failed",
+                    outcome = "copy",
+                    // The exception TYPE, never .message — the message from
+                    // openInputStream(sourceUri) embeds the full content:// URI /
+                    // path, which would ship to the (public) log endpoint.
+                    fields = mapOf("cause" to (result.exceptionOrNull()?.javaClass?.simpleName ?: "unknown")),
+                )
+                Native.stageFailed(id, "couldn't read the picked file")
+            }
+        }
+    }
+
+    private fun displayName(uri: Uri): String? =
+        contentResolver
+            .query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+            ?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+
+    private fun querySize(uri: Uri): Long =
+        contentResolver
+            .query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)
+            ?.use { c -> if (c.moveToFirst()) c.getLong(0) else 0L } ?: 0L
+
+    /** Create the Rust session and render its notice stream. */
+    private fun startSession(
+        id: Long,
+        spec: Spec,
+        resume: Boolean,
+        staging: Boolean = false,
+    ) {
+        lastSeq[id] = 0L
+        generations.remove(id)
+        val notices =
+            if (staging) {
+                NativeSession.startStaging(id, spec.paramsJson(resume = false))
+            } else {
+                NativeSession.start(id, spec.paramsJson(resume))
+            }
+        val job =
+            transferScope(id).launch {
+                try {
+                    notices.collect { notice ->
+                        if (!ownsCard(id, notice)) return@collect
+                        when (notice.optString("notice")) {
+                            "snapshot" -> onSnapshot(id, spec, notice)
+                            "fetch_receipt" ->
+                                onFetchReceipt(id, notice.optString("key"), notice.optString("server"))
+                            "post_receipt" -> onPostReceipt(id, notice)
+                        }
+                    }
+                } finally {
+                    releaseMulticast(id)
+                }
+            }
+        jobs[id] = job
+        updateNotification()
+    }
+
+    /** Map one machine snapshot onto the card. The machine is authoritative:
+     *  no interpretation, no guards — just rendering. */
+    private fun onSnapshot(
+        id: Long,
+        spec: Spec,
+        s: JSONObject,
+    ) {
+        val seq = s.optLong("seq")
+        val prev = lastSeq[id] ?: 0L
+        if (seq <= prev) return
+        lastSeq[id] = seq
+
+        val state = s.optString("state")
+        val status =
+            Status.fromWire(state) ?: run {
+                // Never silent: an unmapped core State would otherwise drop the
+                // whole snapshot and freeze the card with no trace. Surface it
+                // (the Kotlin Status enum is out of sync with the Rust State).
+                LogStore.append("app: unmapped session state '$state' (id=$id) — Status enum out of sync with core; snapshot dropped")
+                OpLog.add("unmapped state '$state' id=$id")
+                return
+            }
+        val reason = s.optString("reason").ifEmpty { null }
+        val bytes = s.optLong("bytes")
+        val total = s.optLong("total")
+        val speed = s.optDouble("speed_bps", 0.0)
+        val avg = s.optDouble("avg_bps", 0.0)
+        // Typed DataPath object ({type, addr|url|description}) — read the fields,
+        // don't re-parse a Display string.
+        val path = s.optJSONObject("path")
+        var entered: String? = null
+
+        TransferRepository.update(id) { t ->
+            entered = if (t.status != status) stateLogLine(state, s, bytes) else null
+            t.copy(
+                status = status,
+                attempt = s.optInt("attempt", t.attempt),
+                proofDelivered =
+                    s.optJSONObject("facts")?.optBoolean("proof_delivered")
+                        ?: t.proofDelivered,
+                transferId = s.optString("transfer_id").ifEmpty { t.transferId },
+                fileName = s.optString("file_name").ifEmpty { t.fileName },
+                bytes = bytes,
+                total = if (total > 0) total else t.total,
+                speedBps = if (status == Status.Transferring) speed else 0.0,
+                avgBps = avg,
+                speedHistory =
+                    if (status == Status.Transferring && speed > 0) {
+                        (t.speedHistory + speed).takeLast(90)
+                    } else {
+                        t.speedHistory
+                    },
+                pathType = path?.optString("type")?.ifEmpty { null } ?: t.pathType,
+                pathAddr =
+                    path?.let { p ->
+                        p
+                            .optString("addr")
+                            .ifEmpty { p.optString("url") }
+                            .ifEmpty { p.optString("description") }
+                            .ifEmpty { null }
+                    } ?: t.pathAddr,
+                error = if (status == Status.Failed || status == Status.Unconfirmed) reason else null,
+                log = entered?.let { addLog(t.log, it) } ?: t.log,
+            )
+        }
+
+        // Platform effects derive from the observed snapshot (design rule):
+        // the same code path serves fresh starts, restores, and cards born
+        // terminal - there is no launch-path special case to fall out of sync.
+        renderMulticast(id, spec, status)
+        // The record is now committed (this snapshot proves it), so the copy
+        // never runs ahead of the durable intent. Guarded to fire once.
+        if (status == Status.Preparing && spec.dir() == Direction.Send) {
+            synchronized(stagingStarted) {
+                if (stagingStarted.add(id)) launchStaging(id, spec)
+            }
+        }
+        when {
+            entered != null -> updateNotification()
+            else -> throttledNotification()
+        }
+        if (state == "completed" && spec.dir() == Direction.Receive) {
+            // Synchronous first attempt (before the foreground may detach), then a
+            // bounded async retry if anything didn't land — real forward progress
+            // instead of waiting for a restart.
+            sweepStaging(spec.path, attributeTo = id)
+            scheduleRepublishIfNeeded(id, spec.path)
+        }
+        // Foreground reconciles against the whole card set: when nothing is
+        // active, post the one final summary frame and detach - including for
+        // a card whose FIRST snapshot is already terminal.
+        val nowActive = TransferRepository.transfers.value.any { isActive(it.status) }
+        if (isForeground && !nowActive) {
+            updateNotification()
+            stopForeground(STOP_FOREGROUND_DETACH)
+            isForeground = false
+        }
+    }
+
+    /** Human line for a state transition, for the card's log drawer. */
+    private fun stateLogLine(
+        state: String,
+        s: JSONObject,
+        bytes: Long,
+    ): String =
+        when (state) {
+            "preparing" -> "preparing · staging the source…"
+            "waiting" -> "waiting for peer…"
+            "connecting" -> "pairing in room…"
+            "verifying" -> "verifying…"
+            "transferring" -> "started · ${s.optString("file_name")}"
+            "confirming" -> "confirming delivery…"
+            "paused" ->
+                when (s.optString("origin")) {
+                    "peer" -> "paused by peer (resumable)"
+                    "lost" -> "paused · interrupted, $bytes B kept (resumable)"
+                    else -> "paused"
+                }
+            "unconfirmed" -> "sent · unconfirmed — awaiting proof (mailbox)"
+            "completed" -> "complete"
+            "failed" -> "failed · ${s.optString("reason")}"
+            "cancelled" -> "cancelled"
+            else -> state
+        }
+
+    /** Courier: GET the mailbox slot and hand the blob back to the driver. */
+    private fun onFetchReceipt(
+        id: Long,
+        key: String,
+        durableServer: String,
+    ) {
+        if (key.isEmpty()) return
+        // The driver's notice carries the endpoint the transfer was created
+        // with; the mutable setting is only the fallback for pre-field records.
+        val server =
+            durableServer
+                .ifEmpty { SettingsStore.settings.value.logServer }
+                .trimEnd('/')
+        if (server.isEmpty()) return
+        transferScope(id).launch {
+            val blob = LogUpload.getBytes("$server/receipts/$key")
+            val b64 =
+                blob?.let {
+                    java.util.Base64
+                        .getEncoder()
+                        .encodeToString(it)
+                } ?: ""
+            Native.receiptResponse(id, key, b64)
+        }
+    }
+
+    /** Courier: POST the sealed receipt blob (with backoff — the whole point
+     *  of the mailbox is that this can retry long after the ack could not). */
+    private fun onPostReceipt(
+        id: Long,
+        notice: JSONObject,
+    ) {
+        val key = notice.optString("key")
+        val b64 = notice.optString("blob")
+        if (key.isEmpty() || b64.isEmpty()) return
+        val server =
+            notice
+                .optString("server")
+                .ifEmpty { SettingsStore.settings.value.logServer }
+                .trimEnd('/')
+        if (server.isEmpty()) return
+        val bytes =
+            runCatching {
+                java.util.Base64
+                    .getDecoder()
+                    .decode(b64)
+            }.getOrNull() ?: return
+        transferScope(id).launch {
+            for (backoff in listOf(0L, 5_000L, 30_000L)) {
+                if (backoff > 0) delay(backoff)
+                if (LogUpload.postBytes("$server/receipts/$key", bytes)) {
+                    OpLog.add("receipt posted id=$id", id)
+                    Native.sessionIntent(id, "receipt_posted")
+                    return@launch
+                }
+            }
+            // Every backoff exhausted — the mailbox rescue could not be armed.
+            // (Success is the core's platform.courier.posted; this is the gap
+            // the driver can't see — the HTTP POST itself failing.)
+            TransferTimeline.event(id, "platform.courier", "post_failed")
+            OpLog.add("receipt post failed id=$id")
+        }
+    }
+
+    /**
+     * Publish every finalized file in one staging dir to Downloads, deleting
+     * the staging copy on success (receipt sidecars stay - they re-confirm a
+     * lost CompleteAck after the file is published away). With per-card
+     * staging (Phase 4) the dir holds only [attributeTo]'s own artifacts; the
+     * unattributed call in [gcStaging] is the one legacy exception, draining
+     * pre-Phase-4 shared-staging residue.
+     */
+    private fun sweepStaging(
+        outputDir: String,
+        attributeTo: Long?,
+    ) {
+        val finals =
+            File(outputDir)
+                .listFiles { f -> f.isFile && !f.name.startsWith(".") } ?: return
+        for (src in finals) publishOne(src, attributeTo)
+    }
+
+    /** After the synchronous first sweep, if a completed receive still has staged
+     *  files (a non-collision publish failure — collisions self-resolve in
+     *  `commit`), retry with backoff so it doesn't wait for a restart; mark the
+     *  card failed after exhausting. One retry loop per id. */
+    private fun scheduleRepublishIfNeeded(
+        id: Long,
+        dir: String,
+    ) {
+        if (!hasUnpublished(dir)) return
+        if (!publishing.add(id)) return
+        transferScope(id).launch(Dispatchers.IO) {
+            try {
+                for (delayMs in publishRetryBackoffMs) {
+                    kotlinx.coroutines.delay(delayMs)
+                    sweepStaging(dir, attributeTo = id)
+                    if (!hasUnpublished(dir)) return@launch
+                }
+                markPublishFailed(id)
+            } finally {
+                publishing.remove(id)
+            }
+        }
+    }
+
+    private fun hasUnpublished(dir: String): Boolean =
+        File(dir).listFiles { f -> f.isFile && !f.name.startsWith(".") }?.isNotEmpty() ?: false
+
+    /** Terminal (for now) publish failure: durable, and surfaced on the card so the
+     *  user isn't left thinking the file silently vanished. A restart re-drives the
+     *  publish (the bytes stay in staging); a later success clears it. */
+    private fun markPublishFailed(id: Long) {
+        TransferRepository.update(id) {
+            if (it.publishFailed) {
+                it
+            } else {
+                it.copy(
+                    publishFailed = true,
+                    log = addLog(it.log, "couldn't save to Downloads — kept, will retry"),
+                )
+            }
+        }
+        syncExtras(id)
+    }
+
+    /** The publish sidecar journal for one staged file: `.envoix-publish.<name>.json`
+     *  beside it, holding the reserved target URI (written before the copy) and
+     *  the committed URI (written after). Lets a crash mid-publish recover:
+     *  drop a half-written candidate, or adopt an already-committed one. */
+    private fun publishJournal(src: File) = File(src.parentFile, ".envoix-publish.${src.name}.json")
+
+    /**
+     * Publish one finalized staging file, journaled. Recovery first: a surviving
+     * journal means a prior publish was interrupted — adopt its committed target
+     * (if it still resolves) or delete the half-written candidate — then a fresh
+     * reserve → copy → commit → delete-staging, recording each step first.
+     */
+    private fun publishOne(
+        src: File,
+        attributeTo: Long?,
+    ) {
+        // Per-transfer timeline events, only when this file is attributed to a
+        // card (the unattributed gcStaging drain has no session to route to).
+        fun tl(
+            event: String,
+            outcome: String = "",
+            fields: Map<String, String> = emptyMap(),
+        ) = attributeTo?.let {
+            TransferTimeline.event(it, "platform.publish", event, outcome = outcome, fields = fields)
+        }
+
+        val journal = publishJournal(src)
+        // --- recovery: a journal survived a crash mid-publish ---
+        runCatching { org.json.JSONObject(journal.readText()) }.getOrNull()?.let { prior ->
+            val committed = prior.optString("committed_uri").ifEmpty { null }
+            if (committed != null && MediaStoreSaver.resolves(this, Uri.parse(committed))) {
+                // Commit had landed; the crash was before staging was cleared.
+                // Adopt under the name it was actually published as (may be bumped).
+                val publishedName = prior.optString("published_name").ifEmpty { src.name }
+                adopt(attributeTo, expectedSourceName = src.name, publishedName = publishedName, uri = committed)
+                src.delete()
+                journal.delete()
+                tl("adopt", fields = mapOf("uri" to TransferTimeline.redactUri(committed)))
+                LogStore.append("app: adopted already-published $publishedName")
+                return
+            }
+            // Reserved but never committed (or the user deleted it): drop the
+            // half-written candidate so we do not leave a truncated file, then
+            // fall through to a fresh publish.
+            prior.optString("target").ifEmpty { null }?.let { MediaStoreSaver.delete(this, Uri.parse(it)) }
+            journal.delete()
+        }
+
+        // --- fresh publish ---
+        val s = SettingsStore.settings.value
+        val target = MediaStoreSaver.reserve(this, src.name, s.saveTreeUri, s.saveFolder)
+        if (target == null) {
+            tl("failed", outcome = "reserve", fields = mapOf("name" to src.name))
+            return
+        }
+        tl("reserve", fields = mapOf("uri" to TransferTimeline.redactUri(target.uri.toString())))
+        // Record the reservation BEFORE any byte is copied.
+        writePublishJournal(journal, target.uri.toString(), target.mediaStorePending, committed = null, publishedName = null)
+        val copy = MediaStoreSaver.copyInto(this, src, target)
+        if (copy.isFailure) {
+            MediaStoreSaver.delete(this, target.uri)
+            journal.delete()
+            tl(
+                "failed",
+                outcome = "copy",
+                // Type only — a copy IOException's .message can carry the
+                // destination URI/path (same leak class as the staging cause).
+                fields = mapOf("cause" to (copy.exceptionOrNull()?.javaClass?.simpleName ?: "unknown")),
+            )
+            return
+        }
+        val committed = MediaStoreSaver.commit(this, target)
+        if (committed.isFailure) {
+            // A colliding _data (same-named file already published) or other
+            // publish error must not crash the service: drop the pending target
+            // and leave the file in staging for a later retry.
+            MediaStoreSaver.delete(this, target.uri)
+            journal.delete()
+            tl(
+                "failed",
+                outcome = "commit",
+                fields = mapOf("cause" to (committed.exceptionOrNull()?.javaClass?.simpleName ?: "unknown")),
+            )
+            return
+        }
+        val outcome = committed.getOrThrow()
+        // Record the commit (with the name it actually landed under) BEFORE clearing
+        // staging, so a crash here recovers by adopting (never re-publishing =
+        // duplicate). The write is best-effort: surface a failure rather than
+        // swallow it, but still adopt + clear in-line so no duplicate is created —
+        // the crash-in-this-window gap is the separate publication barrier.
+        val journaled =
+            writePublishJournal(
+                journal,
+                target.uri.toString(),
+                target.mediaStorePending,
+                committed = outcome.uri.toString(),
+                publishedName = outcome.displayName,
+            )
+        if (!journaled) {
+            tl("failed", outcome = "journal")
+            LogStore.append("app: publish journal write failed (published as ${outcome.displayName})")
+        }
+        tl("commit", fields = mapOf("uri" to TransferTimeline.redactUri(outcome.uri.toString())))
+        adopt(attributeTo, expectedSourceName = src.name, publishedName = outcome.displayName, uri = outcome.uri.toString())
+        src.delete()
+        journal.delete()
+        tl("staging_deleted")
+        LogStore.append("app: saved ${outcome.displayName} to Downloads")
+    }
+
+    private fun writePublishJournal(
+        journal: File,
+        target: String,
+        pending: Boolean,
+        committed: String?,
+        publishedName: String?,
+    ): Boolean {
+        val obj =
+            org.json
+                .JSONObject()
+                .put("target", target)
+                .put("pending", pending)
+        committed?.let { obj.put("committed_uri", it) }
+        publishedName?.let { obj.put("published_name", it) }
+        return runCatching { journal.writeText(obj.toString()) }.isSuccess
+    }
+
+    /** Attribute a published URI to its card. [expectedSourceName] is the transfer
+     *  identity (matched against `fileName`, never overwritten by the published
+     *  name); [publishedName] is the platform display name it actually landed
+     *  under, which may be a collision-bumped "name (1)". */
+    private fun adopt(
+        attributeTo: Long?,
+        expectedSourceName: String,
+        publishedName: String,
+        uri: String,
+    ) {
+        if (attributeTo == null) return
+        TransferRepository.update(attributeTo) {
+            if (it.fileName == null || it.fileName == expectedSourceName) {
+                it.copy(
+                    fileName = it.fileName ?: expectedSourceName,
+                    savedUri = uri,
+                    publishedName = publishedName,
+                    publishFailed = false,
+                )
+            } else {
+                it
+            }
+        }
+        syncExtras(attributeTo)
+    }
+
+    /** Push the card's platform context (QR payload, saved URI) into the
+     *  transfer's durable record, so it survives restarts. */
+    private fun syncExtras(id: Long) {
+        val t = TransferRepository.transfers.value.firstOrNull { it.id == id } ?: return
+        val extras = org.json.JSONObject()
+        t.qrPayload?.let { extras.put("qr", it) }
+        t.savedUri?.let { extras.put("saved_uri", it) }
+        t.publishedName?.let { extras.put("published_name", it) }
+        if (t.publishFailed) extras.put("publish", "failed")
+        val err = Native.setSessionExtras(id, extras.toString())
+        if (err.isNotEmpty()) LogStore.append("app: $err (id=$id)")
+    }
+
+    /** Active states pin the tray; everything else rests. Exhaustive (no `else`)
+     *  so a new Status is a compile error until classified — this predicate
+     *  deliberately differs from the machine's is_active (Preparing pins here). */
+    private fun isActive(st: Status) =
+        when (st) {
+            Status.Preparing,
+            Status.Waiting,
+            Status.Connecting,
+            Status.Verifying,
+            Status.Transferring,
+            Status.Confirming,
+            -> true
+            Status.Paused,
+            Status.Unconfirmed,
+            Status.Completed,
+            Status.Failed,
+            Status.Cancelled,
+            -> false
+        }
+
+    private fun arrow(t: Transfer) = if (t.direction == Direction.Send) "↑" else "↓"
+
+    private fun trayWord(t: Transfer): String =
+        when (t.status) {
+            Status.Preparing -> "Preparing…"
+            Status.Waiting -> "Waiting for peer"
+            Status.Connecting -> "Pairing…"
+            Status.Verifying -> "Verifying"
+            Status.Confirming -> "Confirming"
+            Status.Transferring ->
+                if (t.total > 0) "${((t.bytes * 100) / t.total).toInt().coerceIn(0, 100)}%" else "…"
+            Status.Paused -> "Paused"
+            Status.Unconfirmed -> "Unconfirmed"
+            Status.Completed -> "Done"
+            Status.Failed -> "Failed"
+            Status.Cancelled -> "Cancelled"
+        }
+
+    /**
+     * The tray is a THIRD renderer of the repository cards (after the list and
+     * the log): everything derived, zero tray-side state — so it can never
+     * disagree with the cards (the old tray said "transferring" forever).
+     */
     private fun notification(): Notification {
         val open =
             PendingIntent.getActivity(
@@ -408,108 +1070,147 @@ class TransferService : Service() {
                 Intent(this, MainActivity::class.java),
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
-        val active = TransferRepository.transfers.value.filter { it.status.needsForeground() }
-        val builder =
+        val cards = TransferRepository.transfers.value
+        val active = cards.filter { isActive(it.status) }
+        // Direction-specific status-bar icon: up-only for sends, down-only for
+        // receives, both arrows only when genuinely sending AND receiving, a
+        // checkmark once everything is done.
+        val icon =
+            when {
+                active.isEmpty() -> R.drawable.ic_stat_done
+                active.any { it.direction == Direction.Send } &&
+                    active.any { it.direction == Direction.Receive } -> R.drawable.ic_stat_transfer
+                active.first().direction == Direction.Send -> R.drawable.ic_stat_upload
+                else -> R.drawable.ic_stat_download
+            }
+        val b =
             NotificationCompat
                 .Builder(this, CHANNEL)
-                .setSmallIcon(android.R.drawable.stat_sys_upload)
+                .setSmallIcon(icon)
                 .setOngoing(active.isNotEmpty())
                 .setOnlyAlertOnce(true)
                 .setContentIntent(open)
-        val transfer = active.singleOrNull()
         when {
-            active.isEmpty() -> builder.setContentTitle("Envoix").setContentText("No active transfers")
-            transfer == null -> builder.setContentTitle("Envoix").setContentText("${active.size} transfers in progress")
-            else -> {
-                val verb = if (transfer.direction == Direction.Send) "Sending" else "Receiving"
-                builder.setContentTitle("$verb ${transfer.fileName ?: "…"}")
-                if (transfer.status == Status.Transferring && transfer.total > 0) {
-                    val percent = ((transfer.bytes * 100) / transfer.total).toInt().coerceIn(0, 100)
-                    builder.setContentText("$percent% · ${humanBytes(transfer.bytes)} / ${humanBytes(transfer.total)}")
-                    builder.setProgress(100, percent, false)
+            active.isEmpty() -> {
+                // Final summary: outcomes, never a stale "transferring".
+                val done = cards.count { it.status == Status.Completed }
+                val paused = cards.count { it.status == Status.Paused || it.status == Status.Unconfirmed }
+                val failed = cards.count { it.status == Status.Failed }
+                val parts =
+                    buildList {
+                        if (done > 0) add("$done done")
+                        if (paused > 0) add("$paused paused")
+                        if (failed > 0) add("$failed failed")
+                    }
+                b.setContentTitle("Envoix").setContentText(
+                    if (parts.isEmpty()) {
+                        "No transfers"
+                    } else {
+                        "All transfers finished · ${parts.joinToString(", ")}"
+                    },
+                )
+            }
+            active.size == 1 -> {
+                val t = active.single()
+                val speed =
+                    if (t.status == Status.Transferring && t.speedBps > 0) {
+                        " · ${humanBytes(t.speedBps.toLong())}/s"
+                    } else {
+                        ""
+                    }
+                b.setContentTitle("${arrow(t)} ${t.fileName ?: "…"}")
+                b.setContentText(trayWord(t) + speed)
+                if (t.status == Status.Transferring && t.total > 0) {
+                    b.setProgress(100, ((t.bytes * 100) / t.total).toInt().coerceIn(0, 100), false)
                 } else {
-                    builder.setContentText(
-                        transfer.status.name
-                            .lowercase()
-                            .replaceFirstChar { it.uppercase() },
-                    )
-                    builder.setProgress(0, 0, true)
+                    b.setProgress(0, 0, true)
                 }
             }
+            else -> {
+                val up = active.count { it.direction == Direction.Send }
+                b.setContentTitle("${active.size} transfers · $up↑ ${active.size - up}↓")
+                val style = NotificationCompat.InboxStyle()
+                for (t in active.take(5)) {
+                    val speed =
+                        if (t.status == Status.Transferring && t.speedBps > 0) {
+                            " · ${humanBytes(t.speedBps.toLong())}/s"
+                        } else {
+                            ""
+                        }
+                    style.addLine("${arrow(t)} ${t.fileName ?: "…"} · ${trayWord(t)}$speed")
+                }
+                b.setStyle(style)
+            }
         }
-        return builder.build()
+        return b.build()
+    }
+
+    private var lastNotif = 0L
+
+    private fun throttledNotification() {
+        val now = System.currentTimeMillis()
+        if (now - lastNotif > 700) {
+            lastNotif = now
+            updateNotification()
+        }
     }
 
     private fun updateNotification() {
-        if (activeIds.isNotEmpty()) {
-            getSystemService(NotificationManager::class.java).notify(NOTIF_ID, notification())
-        }
+        getSystemService(NotificationManager::class.java).notify(NOTIF_ID, notification())
     }
 
-    private fun acquireMulticast(
-        id: Long,
-        spec: TransferSpec,
-    ) {
-        if (spec.useMdns && multicastHolders.add(id)) {
-            runCatching { multicastLock.acquire() }.onFailure { multicastHolders.remove(id) }
-        }
-    }
-
-    private fun releaseMulticast(id: Long) {
-        if (multicastHolders.remove(id)) runCatching { multicastLock.release() }
+    /** All cards at rest: drop the foreground state (notification dismissible)
+     *  but keep the service — sessions idle cheaply and stay resumable. */
+    private fun stopForegroundKeepCards() {
+        stopForeground(STOP_FOREGROUND_DETACH)
+        isForeground = false
+        updateNotification()
     }
 
     private fun stopIfIdle(): Int {
-        if (activeIds.isEmpty() && publishingIds.isEmpty()) {
+        if (TransferRepository.transfers.value.isEmpty()) {
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
         }
         return START_NOT_STICKY
     }
 
-    private fun hasInternet(): Boolean {
-        val manager = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
-        val capabilities = manager.activeNetwork?.let { manager.getNetworkCapabilities(it) } ?: return false
-        return capabilities.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
-    }
-
-    private fun addLog(
-        current: List<String>,
-        line: String,
-    ): List<String> = (current + "${logTime.format(Date())}  $line").takeLast(TransferRepository.LOG_CAP)
-
     override fun onDestroy() {
-        observedIds.forEach(UniffiTransferRunner::detach)
-        scope.cancel()
-        multicastHolders.toList().forEach(::releaseMulticast)
+        scope.cancel() // collectors' awaitClose destroys the Rust sessions
         super.onDestroy()
     }
 
     companion object {
         private const val CHANNEL = "transfers"
         private const val NOTIF_ID = 1
-        private const val ACTION_RESTORE = "dev.envoix.app.RESTORE"
         private const val ACTION_START = "dev.envoix.app.START"
         private const val ACTION_CANCEL = "dev.envoix.app.CANCEL"
         private const val ACTION_PAUSE = "dev.envoix.app.PAUSE"
         private const val ACTION_RESUME = "dev.envoix.app.RESUME"
         private const val ACTION_REMOVE = "dev.envoix.app.REMOVE"
+        private const val ACTION_RESTORE_ALL = "dev.envoix.app.RESTORE_ALL"
+        private const val ACTION_REVERIFY = "dev.envoix.app.REVERIFY"
+
+        /** Launch specs by id, so a session can be re-created after the service
+         *  (or process) restarted. */
+        private val specs = java.util.concurrent.ConcurrentHashMap<Long, Spec>()
         private const val EXTRA_DIRECTION = "direction"
         private const val EXTRA_ROOM = "room"
         private const val EXTRA_PATH = "path"
         private const val EXTRA_BROKER = "broker"
         private const val EXTRA_RELAY = "relay"
-        private const val EXTRA_CONFIG = "config"
+        private const val EXTRA_CHUNK_SIZE = "chunk_size"
+        private const val EXTRA_DATA_WINDOW = "data_stream_window"
+        private const val EXTRA_CAND_ALLOW = "candidates_allow"
+        private const val EXTRA_CAND_DENY = "candidates_deny"
         private const val EXTRA_QR = "qr"
-        private const val EXTRA_TRANSFER_INVITE = "transfer_invite"
+        private const val EXTRA_SOURCE_URI = "source_uri"
         private const val EXTRA_ID = "id"
 
-        fun restore(context: Context) {
-            context.startForegroundService(
-                Intent(context, TransferService::class.java).apply { action = ACTION_RESTORE },
-            )
-        }
-
+        /** `direction` is "send"/"receive"; `path` is the file to send or the
+         *  output directory to receive into; the config fields carry chunk_size +
+         *  the candidate CIDR allow/deny lists (comma-joined, "" when unset);
+         *  `qrPayload` is the invite to show while waiting (null when joining). */
         fun start(
             context: Context,
             direction: String,
@@ -517,9 +1218,12 @@ class TransferService : Service() {
             path: String,
             broker: String,
             relay: String,
-            config: String,
+            chunkSize: String,
+            dataStreamWindow: String,
+            candidatesAllow: String,
+            candidatesDeny: String,
             qrPayload: String?,
-            transferInvite: String?,
+            sourceUri: String? = null,
         ) {
             context.startForegroundService(
                 Intent(context, TransferService::class.java).apply {
@@ -529,9 +1233,12 @@ class TransferService : Service() {
                     putExtra(EXTRA_PATH, path)
                     putExtra(EXTRA_BROKER, broker)
                     putExtra(EXTRA_RELAY, relay)
-                    putExtra(EXTRA_CONFIG, config)
+                    putExtra(EXTRA_CHUNK_SIZE, chunkSize)
+                    putExtra(EXTRA_DATA_WINDOW, dataStreamWindow)
+                    putExtra(EXTRA_CAND_ALLOW, candidatesAllow)
+                    putExtra(EXTRA_CAND_DENY, candidatesDeny)
                     putExtra(EXTRA_QR, qrPayload)
-                    putExtra(EXTRA_TRANSFER_INVITE, transferInvite)
+                    putExtra(EXTRA_SOURCE_URI, sourceUri)
                 },
             )
         }
@@ -539,78 +1246,73 @@ class TransferService : Service() {
         fun cancel(
             context: Context,
             id: Long,
-        ) = command(context, ACTION_CANCEL, id, foreground = false)
+        ) {
+            context.startService(
+                Intent(context, TransferService::class.java).apply {
+                    action = ACTION_CANCEL
+                    putExtra(EXTRA_ID, id)
+                },
+            )
+        }
 
+        /** Stop a transfer but keep its partial + spec, so it can be resumed. */
         fun pause(
             context: Context,
             id: Long,
-        ) = command(context, ACTION_PAUSE, id, foreground = false)
+        ) {
+            context.startService(
+                Intent(context, TransferService::class.java).apply {
+                    action = ACTION_PAUSE
+                    putExtra(EXTRA_ID, id)
+                },
+            )
+        }
 
+        /** Resume/retry: a live session bumps its attempt; a dead one is
+         *  re-created from its spec with resume semantics. */
         fun resume(
             context: Context,
             id: Long,
-        ) = command(context, ACTION_RESUME, id, foreground = true)
+        ) {
+            context.startForegroundService(
+                Intent(context, TransferService::class.java).apply {
+                    action = ACTION_RESUME
+                    putExtra(EXTRA_ID, id)
+                },
+            )
+        }
 
+        /** Serve a peer's re-verify from a Completed card (service, not resume). */
+        fun reverify(
+            context: Context,
+            id: Long,
+        ) {
+            context.startService(
+                Intent(context, TransferService::class.java).apply {
+                    action = ACTION_REVERIFY
+                    putExtra(EXTRA_ID, id)
+                },
+            )
+        }
+
+        /** Restore persisted transfer records into cards + idle sessions. */
+        fun restoreAll(context: Context) {
+            context.startService(
+                Intent(context, TransferService::class.java).apply { action = ACTION_RESTORE_ALL },
+            )
+        }
+
+        /** Remove the card AND its on-disk leftovers (D2: the one true abandon). */
         fun remove(
             context: Context,
             id: Long,
-        ) = command(context, ACTION_REMOVE, id, foreground = false)
-
-        private fun command(
-            context: Context,
-            actionValue: String,
-            id: Long,
-            foreground: Boolean,
         ) {
-            val intent =
+            context.startService(
                 Intent(context, TransferService::class.java).apply {
-                    action = actionValue
+                    action = ACTION_REMOVE
                     putExtra(EXTRA_ID, id)
-                }
-            if (foreground) context.startForegroundService(intent) else context.startService(intent)
+                },
+            )
         }
     }
 }
-
-private fun String.toDirection(): Direction = if (this == "send") Direction.Send else Direction.Receive
-
-private fun FfiTransferActivityRecord.toStatus(): Status =
-    when (state) {
-        FfiTransferActivityState.QUEUED,
-        FfiTransferActivityState.BINDING,
-        FfiTransferActivityState.WAITING_FOR_PEER,
-        -> Status.Waiting
-        FfiTransferActivityState.PAIRING,
-        FfiTransferActivityState.CONNECTING,
-        -> Status.Connecting
-        FfiTransferActivityState.TRANSFERRING -> Status.Transferring
-        FfiTransferActivityState.VERIFYING ->
-            if (diagnosticMessage == "confirming") Status.Confirming else Status.Verifying
-        FfiTransferActivityState.UNCONFIRMED -> Status.Unconfirmed
-        FfiTransferActivityState.PUBLISHING -> Status.Publishing
-        FfiTransferActivityState.COMPLETED -> Status.Completed
-        FfiTransferActivityState.FAILED,
-        FfiTransferActivityState.UNKNOWN,
-        -> Status.Failed
-        FfiTransferActivityState.PAUSED -> Status.Paused
-        FfiTransferActivityState.CANCELED -> Status.Cancelled
-    }
-
-private fun FfiDataPathKind.displayName(): String? =
-    when (this) {
-        FfiDataPathKind.DIRECT -> "direct"
-        FfiDataPathKind.RELAY -> "relay"
-        FfiDataPathKind.OTHER -> "other"
-        FfiDataPathKind.NONE -> null
-    }
-
-private fun Status.needsForeground(): Boolean =
-    this == Status.Waiting ||
-        this == Status.Connecting ||
-        this == Status.Verifying ||
-        this == Status.Transferring ||
-        this == Status.Confirming ||
-        this == Status.Publishing ||
-        this == Status.Unconfirmed
-
-private fun ULong.toLongSaturated(): Long = if (this > Long.MAX_VALUE.toULong()) Long.MAX_VALUE else toLong()

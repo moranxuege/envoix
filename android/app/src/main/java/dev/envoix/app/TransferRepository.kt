@@ -47,6 +47,8 @@ object TransferRepository {
         room: String,
         qrPayload: String? = null,
         savedUri: String? = null,
+        publishedName: String? = null,
+        publishFailed: Boolean = false,
     ): Boolean {
         if (_transfers.value.any { it.id == id }) return false
         nextId = maxOf(nextId, id + 1)
@@ -57,6 +59,8 @@ object TransferRepository {
                 room = room,
                 qrPayload = qrPayload,
                 savedUri = savedUri,
+                publishedName = publishedName,
+                publishFailed = publishFailed,
             )
         return true
     }
@@ -67,20 +71,6 @@ object TransferRepository {
         transform: (Transfer) -> Transfer,
     ) {
         _transfers.value = _transfers.value.map { if (it.id == id) transform(it) else it }
-    }
-
-    /** Insert a restored canonical card or replace it with a newer snapshot. */
-    @Synchronized
-    fun upsert(transfer: Transfer) {
-        nextId = maxOf(nextId, transfer.id + 1)
-        val current = _transfers.value.firstOrNull { it.id == transfer.id }
-        if (current != null && current.sequence > transfer.sequence) return
-        _transfers.value =
-            if (current == null) {
-                _transfers.value + transfer
-            } else {
-                _transfers.value.map { if (it.id == transfer.id) transfer else it }
-            }
     }
 
     /** Append an (already compacted) native-core log line to the newest transfer
@@ -123,8 +113,4 @@ object Endpoints {
 
     /** Pre-TLS default; migrated to [LOG_SERVER] on settings load. */
     const val LOG_SERVER_LEGACY = "http://67.230.187.238:8460"
-
-    /** Compatibility alias retained for existing Android callers and tests. */
-    @Deprecated("Use LOG_SERVER_LEGACY")
-    const val DEPRECATED_LOG_SERVER = LOG_SERVER_LEGACY
 }

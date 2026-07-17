@@ -115,6 +115,66 @@ impl RecordId {
     }
 }
 
+/// The narrow, frontend-facing summary of a persisted record: everything a
+/// frontend needs to rehydrate a card and its platform effects, and nothing
+/// else. Built from the TYPED record, so the frontend never hand-parses record
+/// JSON (nor re-implements its schema migrations) - it reads flat fields.
+/// Platform-specific extras (e.g. Android's QR / saved URI) are added by the
+/// platform glue, which knows those keys; the core does not.
+#[derive(Clone, Debug, Serialize)]
+pub struct RestoreContext {
+    pub id: u64,
+    /// "send" | "receive".
+    pub direction: &'static str,
+    /// The room code, or the mDNS token; the frontend's card label.
+    pub code: String,
+    /// The transfer's output/staging path.
+    pub path: String,
+    pub use_room: bool,
+    pub use_mdns: bool,
+}
+
+impl TransferRecord {
+    /// The typed restore summary (see [`RestoreContext`]). Reads the already-
+    /// migrated typed record, so there is no legacy `context`/`params` fallback
+    /// to duplicate on the frontend.
+    pub fn restore_context(&self) -> RestoreContext {
+        use envoix_session::TransferDirection;
+        let params = &self.context.params;
+        let mut code = String::new();
+        let mut use_room = false;
+        let mut use_mdns = false;
+        for source in &params.sources {
+            match source {
+                super::PeerSource::Room { code: c, .. } => {
+                    use_room = true;
+                    code = c.clone();
+                }
+                super::PeerSource::Mdns { token } => {
+                    use_mdns = true;
+                    if let Some(token) = token
+                        && code.is_empty()
+                    {
+                        code = token.clone();
+                    }
+                }
+                _ => {}
+            }
+        }
+        RestoreContext {
+            id: self.id,
+            direction: match params.direction {
+                TransferDirection::Send => "send",
+                TransferDirection::Receive => "receive",
+            },
+            code,
+            path: params.path.to_string_lossy().into_owned(),
+            use_room,
+            use_mdns,
+        }
+    }
+}
+
 /// Stable adapter for frontends whose public card identifiers are strings.
 /// Decimal identifiers retain their historic numeric value; other strings use
 /// deterministic FNV-1a so the mapping survives process and app restarts.
@@ -368,6 +428,36 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(store.load_all().await.len(), 1);
+    }
+
+    #[test]
+    fn restore_context_summarizes_the_typed_record() {
+        let mut r = record(5); // a Room receive by default
+        r.context.params.path = "/out/dir".into();
+        let ctx = r.restore_context();
+        assert_eq!(ctx.id, 5);
+        assert_eq!(ctx.direction, "receive");
+        assert_eq!(ctx.code, "123456-kelp-coral");
+        assert_eq!(ctx.path, "/out/dir");
+        assert!(ctx.use_room);
+        assert!(!ctx.use_mdns);
+    }
+
+    #[test]
+    fn restore_context_needs_no_frontend_migration_for_legacy_records() {
+        // A pre-context record (params at the top level) deserializes via the
+        // typed migration, so restore_context reads it with no fallback - the
+        // whole reason the frontend can drop its `context ?: params` dance.
+        let mut value = serde_json::to_value(record(9)).unwrap();
+        let object = value.as_object_mut().unwrap();
+        let context = object.remove("context").unwrap();
+        object.insert("params".into(), context["params"].clone());
+        let loaded: TransferRecord = serde_json::from_value(value).unwrap();
+
+        let ctx = loaded.restore_context();
+        assert_eq!(ctx.id, 9);
+        assert_eq!(ctx.code, "123456-kelp-coral");
+        assert!(ctx.use_room);
     }
 
     #[tokio::test]

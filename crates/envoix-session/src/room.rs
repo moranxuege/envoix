@@ -159,6 +159,7 @@ pub async fn receive_file_via_room(
         &config.data_relay(),
         config.relay_only,
         &config.candidates,
+        config.data_stream_window,
     )
     .await?;
     let auth = pair_room_receiver(&bound, broker, code, &config, events.as_ref(), &cancel).await?;
@@ -182,6 +183,7 @@ pub async fn receive_transfer_via_room(
         &config.data_relay(),
         config.relay_only,
         &config.candidates,
+        config.data_stream_window,
     )
     .await?;
     let auth = pair_room_receiver(&bound, broker, code, &config, events.as_ref(), &cancel).await?;

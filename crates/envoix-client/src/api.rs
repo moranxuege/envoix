@@ -46,12 +46,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use envoix_qr::{QrInvitePayload, generate_token};
 use envoix_session::{
-    BindAddrs, DEFAULT_CHUNK_SIZE, EndpointAddr, SessionConfig, TransferCancelToken,
-    TransferDirection, TransferSummary, parse_broker_addr, receive_file_enable_mdns,
-    receive_file_via_room, receive_file_with_bound_peer, receive_transfer_enable_mdns,
-    receive_transfer_via_room, receive_transfer_with_bound_peer, send_file_enable_mdns,
-    send_file_manual, send_file_to_endpoint_addr, send_file_via_room, send_manifest_enable_mdns,
-    send_manifest_manual, send_manifest_to_endpoint_addr, send_manifest_via_room,
+    BindAddrs, DEFAULT_CHUNK_SIZE, DEFAULT_DATA_STREAM_WINDOW, EndpointAddr, SessionConfig,
+    TransferCancelToken, TransferDirection, TransferSummary, parse_broker_addr,
+    receive_file_enable_mdns, receive_file_via_room, receive_file_with_bound_peer,
+    receive_transfer_enable_mdns, receive_transfer_via_room, receive_transfer_with_bound_peer,
+    send_file_enable_mdns, send_file_manual, send_file_to_endpoint_addr, send_file_via_room,
+    send_manifest_enable_mdns, send_manifest_manual, send_manifest_to_endpoint_addr,
+    send_manifest_via_room,
 };
 use tracing::Instrument;
 
@@ -78,6 +79,7 @@ fn transfer_span(direction: TransferDirection, mode: TransferMode) -> tracing::S
         ?mode,
         room = tracing::field::Empty,
         transfer_id = tracing::field::Empty,
+        session_id = tracing::field::Empty,
     )
 }
 
@@ -201,6 +203,8 @@ pub struct Client {
     pub identity: IdentityConfig,
     /// CIDR filter over the candidate addresses advertised to a peer.
     pub candidates: CandidateFilter,
+    /// Per-stream QUIC flow-control window (bytes) for the data endpoints.
+    pub data_stream_window: u32,
 }
 
 impl Default for Client {
@@ -209,6 +213,7 @@ impl Default for Client {
             chunk_size: DEFAULT_CHUNK_SIZE,
             identity: IdentityConfig::Ephemeral,
             candidates: CandidateFilter::default(),
+            data_stream_window: DEFAULT_DATA_STREAM_WINDOW,
         }
     }
 }
@@ -262,6 +267,7 @@ impl Client {
             config.chunk_size.as_deref(),
             &candidates.allow,
             &candidates.deny,
+            config.data_stream_window.as_deref(),
         )
     }
 
@@ -273,6 +279,7 @@ impl Client {
         chunk_size: Option<&str>,
         candidates_allow: &[String],
         candidates_deny: &[String],
+        data_stream_window: Option<&str>,
     ) -> Result<Self, TransferError> {
         let mut client = Self::new();
         if let Some(chunk_size) = chunk_size {
@@ -281,6 +288,9 @@ impl Client {
         if !candidates_allow.is_empty() || !candidates_deny.is_empty() {
             client.candidates = CandidateFilter::from_lists(candidates_allow, candidates_deny)
                 .map_err(setup_error)?;
+        }
+        if let Some(window) = data_stream_window {
+            client.data_stream_window = crate::parse_window(window).map_err(setup_error)?;
         }
         if let Some(value) = std::env::var_os(crate::ENVOIX_CHUNK_SIZE) {
             let value = value.into_string().map_err(|_| {
@@ -461,6 +471,9 @@ impl Client {
         let resume = options.resume;
         let mode = to.mode();
         let span = transfer_span(TransferDirection::Send, mode);
+        if let Some(sid) = options.session_id {
+            span.record("session_id", sid);
+        }
 
         let fut: TransferFuture = match to {
             PeerSource::Manual { peer, token } => {
@@ -711,6 +724,9 @@ impl Client {
             .unwrap_or_else(|| BindAddrs::dual_stack(0));
         let mode = from.mode();
         let span = transfer_span(TransferDirection::Receive, mode);
+        if let Some(sid) = options.session_id {
+            span.record("session_id", sid);
+        }
 
         let fut: TransferFuture = match from {
             PeerSource::ShowManual { token } => {
@@ -1081,6 +1097,7 @@ impl Client {
             relay_only: options.path == PathPolicy::RelayOnly,
             direct_only: options.path == PathPolicy::DirectOnly,
             candidates: self.candidates.clone(),
+            data_stream_window: self.data_stream_window,
         }
     }
 }
@@ -1383,7 +1400,7 @@ mod tests {
         // The FFI path passes discrete fields (no file) and must assemble the
         // same client as the equivalent config.toml above.
         let deny = vec!["10.0.0.0/8".to_string(), "fe80::/10".to_string()];
-        let client = Client::from_config_fields(Some("1M"), &[], &deny).unwrap();
+        let client = Client::from_config_fields(Some("1M"), &[], &deny, None).unwrap();
 
         assert_eq!(client.chunk_size, 1024 * 1024);
         let kept = client
@@ -1394,7 +1411,7 @@ mod tests {
 
     #[test]
     fn config_fields_reject_invalid_candidate_cidr() {
-        assert!(Client::from_config_fields(None, &[], &["not-a-cidr".to_string()]).is_err());
+        assert!(Client::from_config_fields(None, &[], &["not-a-cidr".to_string()], None).is_err());
     }
 
     #[test]

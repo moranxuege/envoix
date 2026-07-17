@@ -5,12 +5,11 @@ import android.content.SharedPreferences
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import java.io.File
 
 /**
  * Two layers, one flat holder:
  *  - core config — mirrors the CLI's `config.toml` schema (chunk_size, candidates)
- *    plus the connection defaults (broker/relay). Rendered by [SettingsStore.renderConfig].
+ *    plus the connection defaults (broker/relay). Rendered by [SettingsStore.paramsJson (TransferService.Spec)].
  *  - native prefs — platform-only defaults that seed a transfer request (save
  *    folder, default role); never sent to the core.
  */
@@ -20,6 +19,8 @@ data class Settings(
     val relay: String = Endpoints.RELAY,
     // core config.toml (RuntimeConfig)
     val chunkSize: String = "",
+    /** Per-stream QUIC flow-control window (e.g. `32MB`); empty = transport default (16MB). */
+    val dataStreamWindow: String = "",
     val candidatesAllow: List<String> = emptyList(),
     val candidatesDeny: List<String> = emptyList(),
     // native app prefs (seed per-transfer choices)
@@ -55,6 +56,7 @@ object SettingsStore {
                 broker = prefs.getString("broker", Endpoints.BROKER)!!,
                 relay = prefs.getString("relay", Endpoints.RELAY)!!,
                 chunkSize = prefs.getString("chunkSize", "")!!,
+                dataStreamWindow = prefs.getString("dataStreamWindow", "")!!,
                 candidatesAllow = readList("candidatesAllow"),
                 candidatesDeny = readList("candidatesDeny"),
                 saveFolder = prefs.getString("saveFolder", "Envoix")!!,
@@ -89,6 +91,7 @@ object SettingsStore {
             .putString("broker", s.broker)
             .putString("relay", s.relay)
             .putString("chunkSize", s.chunkSize)
+            .putString("dataStreamWindow", s.dataStreamWindow)
             .putString("candidatesAllow", s.candidatesAllow.joinToString("\n"))
             .putString("candidatesDeny", s.candidatesDeny.joinToString("\n"))
             .putString("saveFolder", s.saveFolder)
@@ -111,7 +114,7 @@ object SettingsStore {
     /** Push the current verbosity down to the native reloadable filter. -vvv (trace
      *  iroh internals) wins over -vv (verbose) wins over the baseline. */
     fun applyLogLevel() =
-        NativeBootstrap.setLogLevel(
+        Native.setLogLevel(
             when {
                 _settings.value.traceIroh -> LOG_TRACE_IROH
                 _settings.value.verboseLog -> LOG_VERBOSE
@@ -190,33 +193,4 @@ object SettingsStore {
                 }
             s.copy(candidatesDeny = deny)
         }
-
-    /**
-     * Render the config-tier fields into the shared core's RuntimeConfig TOML.
-     * Returns null when no override is configured.
-     */
-    fun renderConfig(context: Context): String? {
-        val settings = _settings.value
-        val lines = mutableListOf<String>()
-        if (settings.chunkSize.isNotBlank()) {
-            lines += "chunk_size = ${tomlString(settings.chunkSize.trim())}"
-        }
-        if (settings.candidatesAllow.isNotEmpty() || settings.candidatesDeny.isNotEmpty()) {
-            lines += "[candidates]"
-            if (settings.candidatesAllow.isNotEmpty()) {
-                lines += "allow = ${tomlArray(settings.candidatesAllow)}"
-            }
-            if (settings.candidatesDeny.isNotEmpty()) {
-                lines += "deny = ${tomlArray(settings.candidatesDeny)}"
-            }
-        }
-        if (lines.isEmpty()) return null
-        return File(context.filesDir, "config.toml")
-            .apply { writeText(lines.joinToString("\n") + "\n") }
-            .absolutePath
-    }
-
-    private fun tomlString(value: String): String = "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
-
-    private fun tomlArray(values: List<String>): String = values.joinToString(prefix = "[", postfix = "]") { tomlString(it) }
 }

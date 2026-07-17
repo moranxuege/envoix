@@ -10,11 +10,11 @@ use envoix_protocol::{
     TransferProtocol,
 };
 use envoix_session::{
-    BindAddrs, DEFAULT_CHUNK_SIZE, IdentityConfig, MANIFEST_UNSUPPORTED_PEER_CODE,
-    ManifestSendRequest, NoopEventSink, NoopSessionEventSink, PairingConfig, SessionConfig,
-    SessionTransferSummary, TransferCancelToken, receive_file_with_bound_peer,
-    receive_transfer_enable_mdns, receive_transfer_with_bound_peer, send_file_enable_mdns,
-    send_file_manual, send_manifest_enable_mdns, send_manifest_manual,
+    BindAddrs, DEFAULT_CHUNK_SIZE, DEFAULT_DATA_STREAM_WINDOW, IdentityConfig,
+    MANIFEST_UNSUPPORTED_PEER_CODE, ManifestSendRequest, NoopEventSink, NoopSessionEventSink,
+    PairingConfig, SessionConfig, SessionTransferSummary, TransferCancelToken,
+    receive_file_with_bound_peer, receive_transfer_enable_mdns, receive_transfer_with_bound_peer,
+    send_file_enable_mdns, send_file_manual, send_manifest_enable_mdns, send_manifest_manual,
 };
 use tempfile::tempdir;
 use tokio::sync::oneshot;
@@ -32,6 +32,7 @@ fn config() -> SessionConfig {
         relay_only: false,
         direct_only: false,
         candidates: Default::default(),
+        data_stream_window: DEFAULT_DATA_STREAM_WINDOW,
     }
 }
 

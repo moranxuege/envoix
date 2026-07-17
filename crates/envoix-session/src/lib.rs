@@ -32,7 +32,10 @@ use n0_future::StreamExt;
 
 pub use candidates::CandidateFilter;
 use connection::IrohFrameConnection;
-pub use endpoint::{BindAddrs, BoundEndpoint, parse_broker_addr};
+pub use endpoint::{
+    BindAddrs, BoundEndpoint, DEFAULT_DATA_STREAM_WINDOW, MAX_DATA_STREAM_WINDOW,
+    MIN_DATA_STREAM_WINDOW, parse_broker_addr,
+};
 use endpoint::{
     build_accept_endpoint, build_advertising_accept_endpoint, build_dial_endpoint,
     build_transfer_accept_endpoint, build_transfer_advertising_accept_endpoint,
@@ -123,6 +126,10 @@ pub struct SessionConfig {
     pub direct_only: bool,
     /// CIDR filter over the candidate addresses we advertise to a peer.
     pub candidates: CandidateFilter,
+    /// Per-stream QUIC flow-control window (bytes) for this session's *data*
+    /// endpoints. Frozen at session creation; a transport tuning only, so it
+    /// never touches the wire header, resume state, or any hash.
+    pub data_stream_window: u32,
 }
 
 impl SessionConfig {
@@ -148,6 +155,7 @@ pub(crate) async fn bind_iroh_endpoint_with_relay(
     relay: &Option<String>,
     relay_only: bool,
     candidates: &CandidateFilter,
+    window: u32,
 ) -> Result<BoundEndpoint, SessionError> {
     Ok(BoundEndpoint {
         local_endpoint: build_accept_endpoint(
@@ -156,6 +164,7 @@ pub(crate) async fn bind_iroh_endpoint_with_relay(
             relay,
             relay_only,
             candidates,
+            window,
         )
         .await?,
         candidates: candidates.clone(),
@@ -171,6 +180,7 @@ pub(crate) async fn bind_iroh_transfer_endpoint_with_relay(
     relay: &Option<String>,
     relay_only: bool,
     candidates: &CandidateFilter,
+    window: u32,
 ) -> Result<BoundEndpoint, SessionError> {
     Ok(BoundEndpoint {
         local_endpoint: build_transfer_accept_endpoint(
@@ -179,6 +189,7 @@ pub(crate) async fn bind_iroh_transfer_endpoint_with_relay(
             relay,
             relay_only,
             candidates,
+            window,
         )
         .await?,
         candidates: candidates.clone(),
@@ -190,6 +201,7 @@ pub async fn bind_iroh_endpoint_enable_mdns(
     listen_addrs: impl Into<BindAddrs>,
     identity: &IdentityConfig,
     candidates: &CandidateFilter,
+    window: u32,
 ) -> Result<BoundEndpoint, SessionError> {
     Ok(BoundEndpoint {
         local_endpoint: build_advertising_accept_endpoint(
@@ -198,6 +210,7 @@ pub async fn bind_iroh_endpoint_enable_mdns(
             &None,
             false,
             candidates,
+            window,
         )
         .await?,
         candidates: candidates.clone(),
@@ -210,6 +223,7 @@ pub async fn bind_iroh_transfer_endpoint_enable_mdns(
     listen_addrs: impl Into<BindAddrs>,
     identity: &IdentityConfig,
     candidates: &CandidateFilter,
+    window: u32,
 ) -> Result<BoundEndpoint, SessionError> {
     Ok(BoundEndpoint {
         local_endpoint: build_transfer_advertising_accept_endpoint(
@@ -218,6 +232,7 @@ pub async fn bind_iroh_transfer_endpoint_enable_mdns(
             &None,
             false,
             candidates,
+            window,
         )
         .await?,
         candidates: candidates.clone(),
@@ -239,6 +254,7 @@ pub async fn send_file_manual(
         &config.data_relay(),
         config.relay_only,
         &config.candidates,
+        config.data_stream_window,
     )
     .await?;
     let events: Arc<dyn EventSink> = Arc::from(events);
@@ -285,6 +301,7 @@ pub async fn send_file_to_endpoint_addr(
         &config.data_relay(),
         config.relay_only,
         &config.candidates,
+        config.data_stream_window,
     )
     .await?;
     let events: Arc<dyn EventSink> = Arc::from(events);
@@ -355,6 +372,7 @@ async fn send_manifest_to_address(
         &config.data_relay(),
         config.relay_only,
         &config.candidates,
+        config.data_stream_window,
     )
     .await?;
     let events: Arc<dyn SessionEventSink> = Arc::from(events);
@@ -390,6 +408,7 @@ pub async fn send_file_enable_mdns(
         &config.data_relay(),
         config.relay_only,
         &config.candidates,
+        config.data_stream_window,
     )
     .await?;
     let send_endpoint = local_endpoint.clone();
@@ -442,6 +461,7 @@ pub async fn send_manifest_enable_mdns(
         &config.data_relay(),
         config.relay_only,
         &config.candidates,
+        config.data_stream_window,
     )
     .await?;
     let send_endpoint = local_endpoint.clone();
@@ -575,6 +595,7 @@ where
         &config.data_relay(),
         config.relay_only,
         &config.candidates,
+        config.data_stream_window,
     )
     .await?;
     let endpoint_addr = bound_endpoint
@@ -613,6 +634,7 @@ where
         &config.data_relay(),
         config.relay_only,
         &config.candidates,
+        config.data_stream_window,
     )
     .await?;
     let endpoint_addr = bound_endpoint
@@ -645,8 +667,13 @@ pub async fn receive_file_enable_mdns<F>(
 where
     F: FnOnce(PeerDescriptor, Vec<String>) + Send,
 {
-    let bound_endpoint =
-        bind_iroh_endpoint_enable_mdns(listen_addrs, &config.identity, &config.candidates).await?;
+    let bound_endpoint = bind_iroh_endpoint_enable_mdns(
+        listen_addrs,
+        &config.identity,
+        &config.candidates,
+        config.data_stream_window,
+    )
+    .await?;
     let peer = bound_endpoint.peer_descriptor()?;
     on_bound_peer(peer, Vec::new());
     receive_with_auth_retries(bound_endpoint, output_dir, config, pairing, events, cancel).await
@@ -667,9 +694,13 @@ pub async fn receive_transfer_enable_mdns<F>(
 where
     F: FnOnce(PeerDescriptor, Vec<String>) + Send,
 {
-    let bound_endpoint =
-        bind_iroh_transfer_endpoint_enable_mdns(listen_addrs, &config.identity, &config.candidates)
-            .await?;
+    let bound_endpoint = bind_iroh_transfer_endpoint_enable_mdns(
+        listen_addrs,
+        &config.identity,
+        &config.candidates,
+        config.data_stream_window,
+    )
+    .await?;
     let peer = bound_endpoint.peer_descriptor()?;
     on_bound_peer(peer, Vec::new());
     receive_transfer_with_auth_retries(bound_endpoint, output_dir, config, pairing, events, cancel)

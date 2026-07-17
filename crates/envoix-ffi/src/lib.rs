@@ -2854,6 +2854,7 @@ fn apply_canonical_snapshot(
         }
     }
     activity.state = match session.state {
+        CanonicalState::Preparing => FfiTransferActivityState::Queued,
         CanonicalState::Waiting => FfiTransferActivityState::WaitingForPeer,
         CanonicalState::Connecting => FfiTransferActivityState::Connecting,
         CanonicalState::Verifying => FfiTransferActivityState::Verifying,

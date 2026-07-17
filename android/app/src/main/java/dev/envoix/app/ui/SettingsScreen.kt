@@ -47,15 +47,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import dev.envoix.app.BuildConfig
-import dev.envoix.app.DebugBuild
 import dev.envoix.app.SettingsStore
 
 @Composable
-fun SettingsScreen(
-    onBack: () -> Unit,
-    showBack: Boolean = true,
-) {
+fun SettingsScreen(onBack: () -> Unit) {
     val colors = Envoix.colors
     val settings by SettingsStore.settings.collectAsState()
 
@@ -63,6 +58,7 @@ fun SettingsScreen(
     var broker by remember { mutableStateOf(settings.broker) }
     var relay by remember { mutableStateOf(settings.relay) }
     var chunkSize by remember { mutableStateOf(settings.chunkSize) }
+    var dataStreamWindow by remember { mutableStateOf(settings.dataStreamWindow) }
     val context = LocalContext.current
     val folderPicker =
         rememberLauncherForActivityResult(
@@ -99,15 +95,13 @@ fun SettingsScreen(
             Modifier.fillMaxWidth().padding(top = 20.dp, bottom = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            if (showBack) {
-                Icon(
-                    Icons.AutoMirrored.Filled.ArrowBack,
-                    contentDescription = "Back",
-                    tint = colors.accent,
-                    modifier = Modifier.clip(CircleShape).clickable(onClick = onBack).padding(6.dp),
-                )
-                Spacer(Modifier.width(8.dp))
-            }
+            Icon(
+                Icons.AutoMirrored.Filled.ArrowBack,
+                contentDescription = "Back",
+                tint = colors.accent,
+                modifier = Modifier.clip(CircleShape).clickable(onClick = onBack).padding(6.dp),
+            )
+            Spacer(Modifier.width(8.dp))
             Text("Settings", color = colors.text, fontSize = 26.sp, fontWeight = FontWeight.ExtraBold)
         }
 
@@ -156,11 +150,22 @@ fun SettingsScreen(
                 relay = it
                 SettingsStore.update { s -> s.copy(relay = it) }
             }
+            Spacer(Modifier.height(12.dp))
+            Field("Log server · diagnostics", logServer) {
+                logServer = it
+                SettingsStore.update { s -> s.copy(logServer = it) }
+            }
+
             Spacer(Modifier.height(22.dp))
             SectionLabel("CONFIG.TOML")
-            Field("Chunk size · e.g. 16MB", chunkSize) {
+            Field("Chunk size · e.g. 64KB (16KB–16MB)", chunkSize) {
                 chunkSize = it
                 SettingsStore.update { s -> s.copy(chunkSize = it) }
+            }
+            Spacer(Modifier.height(12.dp))
+            Field("Data stream window · e.g. 32MB (default 16MB)", dataStreamWindow) {
+                dataStreamWindow = it
+                SettingsStore.update { s -> s.copy(dataStreamWindow = it) }
             }
             Spacer(Modifier.height(12.dp))
             MultilineField("Candidate allow · one CIDR per line", allowText) {
@@ -172,48 +177,35 @@ fun SettingsScreen(
                 denyText = it
                 SettingsStore.update { s -> s.copy(candidatesDeny = cidrLines(it)) }
             }
-        }
 
-        Spacer(Modifier.height(26.dp))
-        SectionLabel("DEVELOPER")
-        ToggleRow(
-            title = "Developer mode",
-            subtitle = "Reveal transfer IDs, path selection, failure details, live logs, and diagnostic reports.",
-            checked = settings.devMode,
-        ) { SettingsStore.update { s -> s.copy(devMode = it) } }
-        if (settings.devMode) {
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(22.dp))
+            SectionLabel("DEVELOPER")
             ToggleRow(
-                title = "Verbose logging (-vv)",
-                subtitle = "Also capture iroh internals: path selection and hole-punching. High volume.",
-                checked = settings.verboseLog,
-            ) {
-                SettingsStore.update { s -> s.copy(verboseLog = it) }
-                SettingsStore.applyLogLevel()
-            }
-            if (BuildConfig.DEBUG) {
+                title = "Developer mode",
+                subtitle = "Reveal diagnostics — verbose logging (and, later, log upload).",
+                checked = settings.devMode,
+            ) { SettingsStore.update { s -> s.copy(devMode = it) } }
+            if (settings.devMode) {
                 Spacer(Modifier.height(16.dp))
-                Field("Remote log server", logServer) {
-                    logServer = it
-                    SettingsStore.update { s -> s.copy(logServer = it) }
+                ToggleRow(
+                    title = "Verbose logging (-vv)",
+                    subtitle = "Also capture iroh internals: path selection, hole-punching. High volume.",
+                    checked = settings.verboseLog,
+                ) {
+                    SettingsStore.update { s -> s.copy(verboseLog = it) }
+                    SettingsStore.applyLogLevel()
                 }
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    "Redacted reports only. HTTPS is tried before the development HTTP fallback.",
-                    color = colors.muted,
-                    fontSize = 12.sp,
-                )
+                Spacer(Modifier.height(12.dp))
+                ToggleRow(
+                    title = "Trace iroh internals (-vvv)",
+                    subtitle = "Deepest: iroh path/QUIC state machine at trace. Very high volume — for chasing a crash.",
+                    checked = settings.traceIroh,
+                ) {
+                    SettingsStore.update { s -> s.copy(traceIroh = it) }
+                    SettingsStore.applyLogLevel()
+                }
             }
         }
-
-        Spacer(Modifier.height(28.dp))
-        Text(
-            DebugBuild.LABEL,
-            color = colors.muted,
-            fontSize = 11.sp,
-            fontFamily = FontFamily.Monospace,
-            modifier = Modifier.align(Alignment.CenterHorizontally),
-        )
     }
 }
 

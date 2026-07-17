@@ -40,6 +40,12 @@ pub struct TransferOptions {
     /// earlier attempt, so expiry no longer blocks this transfer's resume.
     #[serde(skip)]
     pub(crate) continuation: bool,
+    /// Diagnostic only: the durable card id, recorded on the transfer span so
+    /// engine timeline events (e.g. `protocol.complete_ack`) route by card id
+    /// (docs/design/diagnostics.md v2, P4). Transient — the driver sets it fresh
+    /// per attempt; never persisted (`serde(skip)`).
+    #[serde(skip)]
+    pub session_id: Option<u64>,
 }
 
 impl Default for TransferOptions {
@@ -50,6 +56,7 @@ impl Default for TransferOptions {
             resume: true,
             listen_addrs: None,
             continuation: false,
+            session_id: None,
         }
     }
 }

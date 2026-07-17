@@ -1,12 +1,12 @@
 package dev.envoix.app.ui
 
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,33 +22,35 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.List
-import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.ExpandLess
-import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -59,7 +61,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -69,195 +70,126 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.envoix.app.Diagnostics
 import dev.envoix.app.Direction
-import dev.envoix.app.InviteCodec
 import dev.envoix.app.LogUpload
+import dev.envoix.app.Room
 import dev.envoix.app.SettingsStore
 import dev.envoix.app.Status
 import dev.envoix.app.Transfer
-import dev.envoix.app.TransferAction
-import dev.envoix.app.availableTransferActions
-import dev.envoix.app.isTerminal
+import dev.envoix.app.humanBytes
+import dev.envoix.app.smoothedBps
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
-
-private enum class HomeTab { Transfer, Activity, Settings }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
     transfers: List<Transfer>,
     onReceive: (code: String, broker: String, relay: String, qrPayload: String?) -> Unit,
-    onSend: (code: String, broker: String, relay: String, file: android.net.Uri, qrPayload: String?, transferInvite: String?) -> Unit,
+    onSend: (code: String, broker: String, relay: String, file: android.net.Uri, qrPayload: String?) -> Unit,
     onPauseResume: (Long) -> Unit,
     onCancel: (Long) -> Unit,
     onRemove: (Long) -> Unit,
     onOpenLogs: () -> Unit,
+    onOpenSettings: () -> Unit,
     onOpen: (Transfer) -> Unit,
 ) {
     val colors = Envoix.colors
-    var tab by remember { mutableStateOf(HomeTab.Transfer) }
+    var sheetOpen by remember { mutableStateOf(false) }
     val expanded = remember { mutableStateListOf<Long>() }
+    val listState = rememberLazyListState()
+    // A just-created transfer lands at the top (newest-first sort); bring it
+    // into view instead of leaving it above the fold.
+    val newestId = transfers.maxOfOrNull { it.id } ?: -1L
+    LaunchedEffect(newestId) {
+        if (newestId >= 0) listState.animateScrollToItem(0)
+    }
     val active =
         transfers.count {
-            !it.status.isTerminal && it.status != Status.Paused
+            it.status == Status.Preparing ||
+                it.status == Status.Connecting ||
+                it.status == Status.Transferring
         }
 
     Scaffold(
         containerColor = colors.bg,
-        bottomBar = {
-            BottomTabs(
-                selected = tab,
-                active = active,
-                onSelect = { tab = it },
-            )
+        floatingActionButton = {
+            ExtendedFloatingActionButton(
+                onClick = { sheetOpen = true },
+                containerColor = colors.accent,
+                contentColor = androidx.compose.ui.graphics.Color.White,
+            ) {
+                Icon(Icons.Default.Add, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("New transfer", fontWeight = FontWeight.SemiBold)
+            }
         },
     ) { inner ->
         Column(
             Modifier
                 .fillMaxSize()
-                .testTag(EnvoixTestTags.HOME_ROOT)
-                .padding(inner),
+                .padding(inner)
+                .padding(horizontal = 20.dp),
         ) {
-            when (tab) {
-                HomeTab.Transfer ->
-                    TransferPane(
-                        transfers = transfers,
-                        active = active,
-                        onShowActivity = { tab = HomeTab.Activity },
-                        onReceive = onReceive,
-                        onSend = onSend,
-                    )
-                HomeTab.Activity ->
-                    ActivityPane(
-                        transfers = transfers,
-                        active = active,
-                        expanded = expanded,
-                        onOpenLogs = onOpenLogs,
-                        onPauseResume = onPauseResume,
-                        onCancel = onCancel,
-                        onRemove = onRemove,
-                        onOpen = onOpen,
-                    )
-                HomeTab.Settings -> SettingsScreen(onBack = { tab = HomeTab.Transfer }, showBack = false)
+            Header(active, onOpenLogs, onOpenSettings)
+            Spacer(Modifier.height(12.dp))
+            if (transfers.isEmpty()) {
+                EmptyState()
+            } else {
+                LazyColumn(
+                    state = listState,
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    contentPadding = PaddingValues(top = 4.dp, bottom = 96.dp),
+                ) {
+                    items(transfers.sortedByDescending { it.id }, key = { it.id }) { t ->
+                        TransferCard(
+                            t = t,
+                            expanded = t.id in expanded,
+                            onToggleDetail = { if (it in expanded) expanded.remove(it) else expanded.add(it) },
+                            onPauseResume = onPauseResume,
+                            onCancel = onCancel,
+                            onRemove = onRemove,
+                            onOpen = onOpen,
+                        )
+                    }
+                }
             }
+        }
+    }
+
+    if (sheetOpen) {
+        ModalBottomSheet(
+            onDismissRequest = { sheetOpen = false },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            containerColor = colors.surface,
+        ) {
+            NewTransferSheet(
+                onReceive = { c, b, r, qr ->
+                    sheetOpen = false
+                    onReceive(c, b, r, qr)
+                },
+                onSend = { c, b, r, uri, qr ->
+                    sheetOpen = false
+                    onSend(c, b, r, uri, qr)
+                },
+            )
         }
     }
 }
 
 @Composable
-private fun BottomTabs(
-    selected: HomeTab,
+private fun Header(
     active: Int,
-    onSelect: (HomeTab) -> Unit,
+    onOpenLogs: () -> Unit,
+    onOpenSettings: () -> Unit,
 ) {
-    val colors = Envoix.colors
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 8.dp)
-            .shadow(12.dp, RoundedCornerShape(26.dp))
-            .clip(RoundedCornerShape(26.dp))
-            .background(colors.surface.copy(alpha = 0.96f))
-            .border(1.dp, colors.line.copy(alpha = 0.9f), RoundedCornerShape(26.dp))
-            .padding(5.dp),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        BottomTab(
-            label = "Transfer",
-            icon = Icons.Default.SwapHoriz,
-            selected = selected == HomeTab.Transfer,
-            modifier = Modifier.weight(1f).testTag(EnvoixTestTags.TRANSFER_TAB),
-        ) { onSelect(HomeTab.Transfer) }
-        BottomTab(
-            label = if (active > 0) "Activity $active" else "Activity",
-            icon = Icons.AutoMirrored.Filled.List,
-            selected = selected == HomeTab.Activity,
-            modifier = Modifier.weight(1f).testTag(EnvoixTestTags.ACTIVITY_TAB),
-        ) { onSelect(HomeTab.Activity) }
-        BottomTab(
-            label = "Settings",
-            icon = Icons.Default.Settings,
-            selected = selected == HomeTab.Settings,
-            modifier = Modifier.weight(1f).testTag(EnvoixTestTags.SETTINGS_TAB),
-        ) { onSelect(HomeTab.Settings) }
-    }
-}
-
-@Composable
-private fun BottomTab(
-    label: String,
-    icon: ImageVector,
-    selected: Boolean,
-    modifier: Modifier = Modifier,
-    onClick: () -> Unit,
-) {
-    val colors = Envoix.colors
-    val background by animateColorAsState(
-        if (selected) colors.accentSoft else Color.Transparent,
-        label = "bottom-tab-background",
-    )
-    val foreground by animateColorAsState(
-        if (selected) colors.accentStrong else colors.muted,
-        label = "bottom-tab-foreground",
-    )
-    Column(
-        modifier
-            .heightIn(min = 58.dp)
-            .clip(RoundedCornerShape(21.dp))
-            .background(background)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 4.dp, vertical = 7.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
-    ) {
-        Icon(icon, contentDescription = label, tint = foreground, modifier = Modifier.size(22.dp))
-        Spacer(Modifier.height(2.dp))
-        Text(
-            label,
-            color = foreground,
-            fontSize = 11.sp,
-            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-            maxLines = 1,
-        )
-    }
-}
-
-@Composable
-private fun TransferPane(
-    transfers: List<Transfer>,
-    active: Int,
-    onShowActivity: () -> Unit,
-    onReceive: (code: String, broker: String, relay: String, qrPayload: String?) -> Unit,
-    onSend: (code: String, broker: String, relay: String, file: android.net.Uri, qrPayload: String?, transferInvite: String?) -> Unit,
-) {
-    Column(Modifier.fillMaxSize().padding(horizontal = EnvoixDimens.ScreenPadding)) {
-        TransferHeader(active = active)
-        Spacer(Modifier.height(12.dp))
-        NewTransferSheet(
-            modifier = Modifier.weight(1f),
-            onReceive = { c, b, r, qr ->
-                onReceive(c, b, r, qr)
-                onShowActivity()
-            },
-            onSend = { c, b, r, uri, qr, invite ->
-                onSend(c, b, r, uri, qr, invite)
-                onShowActivity()
-            },
-        )
-    }
-}
-
-@Composable
-private fun TransferHeader(active: Int) {
     val colors = Envoix.colors
     Row(
         Modifier
@@ -266,69 +198,7 @@ private fun TransferHeader(active: Int) {
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column {
-            Text("ENVOIX", color = colors.accentStrong, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
-            Text("Transfer", color = colors.text, fontSize = 30.sp, fontWeight = FontWeight.ExtraBold)
-        }
-        if (active > 0) {
-            Pill(text = "$active active", fg = colors.success, bg = colors.successSoft)
-        }
-    }
-}
-
-@Composable
-private fun ActivityPane(
-    transfers: List<Transfer>,
-    active: Int,
-    expanded: MutableList<Long>,
-    onOpenLogs: () -> Unit,
-    onPauseResume: (Long) -> Unit,
-    onCancel: (Long) -> Unit,
-    onRemove: (Long) -> Unit,
-    onOpen: (Transfer) -> Unit,
-) {
-    Column(Modifier.fillMaxSize().padding(horizontal = EnvoixDimens.ScreenPadding)) {
-        ActivityHeader(active, onOpenLogs)
-        Spacer(Modifier.height(12.dp))
-        if (transfers.isEmpty()) {
-            EmptyState()
-        } else {
-            LazyColumn(
-                modifier = Modifier.testTag(EnvoixTestTags.ACTIVITY_LIST),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-                contentPadding = PaddingValues(top = 4.dp, bottom = 20.dp),
-            ) {
-                items(transfers.sortedByDescending { it.id }, key = { it.id }) { t ->
-                    TransferCard(
-                        t = t,
-                        expanded = t.id in expanded,
-                        onToggleDetail = { if (it in expanded) expanded.remove(it) else expanded.add(it) },
-                        onPauseResume = onPauseResume,
-                        onCancel = onCancel,
-                        onRemove = onRemove,
-                        onOpen = onOpen,
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ActivityHeader(
-    active: Int,
-    onOpenLogs: () -> Unit,
-) {
-    val colors = Envoix.colors
-    Row(
-        Modifier.fillMaxWidth().padding(top = 16.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column {
-            Text("ENVOIX", color = colors.accentStrong, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
-            Text("Activity", color = colors.text, fontSize = 30.sp, fontWeight = FontWeight.ExtraBold)
-        }
+        Text("Envoix", color = colors.text, fontSize = 32.sp, fontWeight = FontWeight.ExtraBold)
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (active > 0) {
                 Pill(text = "$active active", fg = colors.success, bg = colors.successSoft)
@@ -342,10 +212,19 @@ private fun ActivityHeader(
                 modifier =
                     Modifier
                         .clip(RoundedCornerShape(10.dp))
-                        .testTag(EnvoixTestTags.LOGS_BUTTON)
                         .clickable(onClick = onOpenLogs)
-                        .background(colors.accentSoft)
-                        .padding(horizontal = 14.dp, vertical = 11.dp),
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+            )
+            Icon(
+                Icons.Default.Settings,
+                contentDescription = "Settings",
+                tint = colors.accent,
+                modifier =
+                    Modifier
+                        .clip(CircleShape)
+                        .clickable(onClick = onOpenSettings)
+                        .padding(6.dp)
+                        .size(22.dp),
             )
         }
     }
@@ -356,7 +235,7 @@ private fun EmptyState() {
     val colors = Envoix.colors
     Box(Modifier.fillMaxWidth().padding(top = 80.dp), contentAlignment = Alignment.Center) {
         Text(
-            "No transfers yet.\nStart a send or receive from the Transfer tab.",
+            "No transfers yet.\nTap “New transfer” to send or receive.",
             color = colors.muted,
             fontSize = 15.sp,
         )
@@ -377,13 +256,12 @@ private fun TransferCard(
     val colors = Envoix.colors
     val failed = t.status == Status.Failed
     val cancelled = t.status == Status.Cancelled
-    val terminal = t.status.isTerminal
     val dismissState =
         rememberSwipeToDismissBoxState(
             confirmValueChange = {
                 if (it == SwipeToDismissBoxValue.EndToStart) {
-                    if (terminal) onRemove(t.id) else onCancel(t.id)
-                    terminal
+                    onRemove(t.id)
+                    true
                 } else {
                     false
                 }
@@ -397,107 +275,94 @@ private fun TransferCard(
             Row(
                 Modifier
                     .fillMaxSize()
-                    .clip(RoundedCornerShape(EnvoixDimens.CardRadius))
+                    .clip(RoundedCornerShape(16.dp))
                     .background(colors.danger)
                     .padding(horizontal = 22.dp),
                 horizontalArrangement = Arrangement.End,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(
-                    if (terminal) Icons.Default.Delete else Icons.Default.Close,
-                    null,
-                    tint = Color.White,
-                    modifier = Modifier.size(18.dp),
-                )
+                Icon(Icons.Default.Delete, null, tint = Color.White, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
-                Text(
-                    if (terminal) "Delete" else "Cancel",
-                    color = Color.White,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 14.sp,
-                )
+                Text("Remove", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
             }
         },
     ) {
         Column(
             Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(EnvoixDimens.CardRadius))
+                .clip(RoundedCornerShape(16.dp))
                 .background(if (cancelled) colors.line else colors.surface)
-                .border(1.dp, colors.line, RoundedCornerShape(EnvoixDimens.CardRadius))
+                .border(1.dp, colors.line, RoundedCornerShape(16.dp))
                 .combinedClickable(
-                    onClick = {
-                        if (t.status == Status.Completed && t.savedUri != null) {
-                            onOpen(t)
-                        } else {
-                            onToggleDetail(t.id)
-                        }
-                    },
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null, // the drawer expanding is feedback enough; the
+                    // default ripple fills the whole card, which looks heavy
+                    onClick = { if (t.status == Status.Completed && t.savedUri != null) onOpen(t) },
                     onLongClick = { onToggleDetail(t.id) },
                 ),
         ) {
             if ((t.status == Status.Waiting || t.status == Status.Connecting) && t.qrPayload != null) {
                 WaitingBody(t, onCancel)
             } else {
-                Column(Modifier.fillMaxWidth().padding(16.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                title(t),
+                                color = if (cancelled) colors.muted else colors.text,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false),
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            PathBadge(t)
+                        }
                         Text(
-                            title(t),
-                            color = if (cancelled) colors.muted else colors.text,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier =
-                                Modifier
-                                    .weight(1f)
-                                    .testTag(EnvoixTestTags.activityTitle(t.id)),
-                        )
-                        Spacer(Modifier.width(10.dp))
-                        PathBadge(t)
-                    }
-                    subtitle(t)?.let { subtitle ->
-                        Text(
-                            subtitle,
+                            subtitle(t),
                             color = colors.muted,
                             fontSize = 13.sp,
+                            fontFamily = FontFamily.Monospace,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
+                        Spacer(Modifier.height(10.dp))
+                        LinearProgressIndicator(
+                            progress = { fraction(t) },
+                            modifier = Modifier.fillMaxWidth().height(8.dp).clip(CircleShape),
+                            color =
+                                when {
+                                    failed -> colors.danger
+                                    t.status == Status.Paused || t.status == Status.Unconfirmed -> colors.warning
+                                    cancelled -> colors.muted
+                                    else -> colors.accent
+                                },
+                            trackColor = colors.line.copy(alpha = 0.6f),
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Stat(speedText(t))
+                            Stat(etaText(t))
+                            Stat(sizeText(t))
+                        }
+                        if (failed && t.error != null) {
+                            Spacer(Modifier.height(6.dp))
+                            Text(t.error, color = colors.danger, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        }
+                        if (t.status == Status.Unconfirmed) {
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                "All bytes sent — peer didn't confirm receipt. It likely arrived; tap ↻ to re-confirm.",
+                                color = colors.warning,
+                                fontSize = 12.sp,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
                     }
-                    Spacer(Modifier.height(12.dp))
-                    LinearProgressIndicator(
-                        progress = { fraction(t) },
-                        modifier = Modifier.fillMaxWidth().height(8.dp).clip(CircleShape),
-                        color =
-                            when {
-                                failed -> colors.danger
-                                t.status == Status.Paused -> colors.warning
-                                cancelled -> colors.muted
-                                else -> colors.accent
-                            },
-                        trackColor = colors.line.copy(alpha = 0.6f),
-                    )
-                    Spacer(Modifier.height(10.dp))
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Stat(speedText(t))
-                        Stat(etaText(t))
-                        Stat(sizeText(t))
-                    }
-                    if (t.error != null && (failed || t.status == Status.Publishing || t.status == Status.Unconfirmed)) {
-                        Spacer(Modifier.height(8.dp))
-                        Text(t.error, color = colors.danger, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    }
-                    Spacer(Modifier.height(14.dp))
-                    CardActions(
-                        t = t,
-                        expanded = expanded,
-                        onToggleDetail = { onToggleDetail(t.id) },
-                        onPauseResume = { onPauseResume(t.id) },
-                        onCancel = { onCancel(t.id) },
-                        onRemove = { onRemove(t.id) },
-                        onOpen = { onOpen(t) },
-                    )
+                    Spacer(Modifier.width(10.dp))
+                    CardControls(t, onPauseResume, onCancel, onOpen)
                 }
             }
             if (expanded) DetailDrawer(t)
@@ -506,105 +371,65 @@ private fun TransferCard(
 }
 
 @Composable
-private fun CardActions(
+private fun CardControls(
     t: Transfer,
-    expanded: Boolean,
-    onToggleDetail: () -> Unit,
-    onPauseResume: () -> Unit,
-    onCancel: () -> Unit,
-    onRemove: () -> Unit,
-    onOpen: () -> Unit,
+    onPauseResume: (Long) -> Unit,
+    onCancel: (Long) -> Unit,
+    onOpen: (Transfer) -> Unit,
 ) {
-    Row(
-        Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        availableTransferActions(t).forEach { action ->
-            val (label, icon) =
-                when (action) {
-                    TransferAction.Pause -> "Pause" to Icons.Default.Pause
-                    TransferAction.Resume -> "Resume" to Icons.Default.PlayArrow
-                    TransferAction.Retry -> "Retry" to Icons.Default.Refresh
-                    TransferAction.Cancel -> "Cancel" to Icons.Default.Close
-                    TransferAction.Delete -> "Delete" to Icons.Default.Delete
-                    TransferAction.Open -> "Open" to Icons.AutoMirrored.Filled.OpenInNew
+        when (t.status) {
+            Status.Preparing ->
+                CircleBtn(Icons.Default.Close, filled = false) { onCancel(t.id) }
+            Status.Waiting, Status.Connecting, Status.Verifying,
+            Status.Transferring, Status.Confirming,
+            -> {
+                CircleBtn(Icons.Default.Pause, filled = true) { onPauseResume(t.id) }
+                CircleBtn(Icons.Default.Close, filled = false) { onCancel(t.id) }
+            }
+            Status.Paused -> {
+                CircleBtn(Icons.Default.PlayArrow, filled = true) { onPauseResume(t.id) }
+                CircleBtn(Icons.Default.Close, filled = false) { onCancel(t.id) }
+            }
+            Status.Failed, Status.Unconfirmed, Status.Cancelled ->
+                CircleBtn(Icons.Default.Refresh, filled = true) { onPauseResume(t.id) }
+            Status.Completed -> {
+                if (t.savedUri != null) CircleBtn(Icons.Default.OpenInNew, filled = false) { onOpen(t) }
+                // RECEIVER, and ONLY while the confirmation duty is open (the
+                // receipt has not reached the rdz): the manual fallback for
+                // serving the peer's re-verify. Once delivered - retired, no ↻.
+                if (t.direction == Direction.Receive && !t.proofDelivered) {
+                    CircleBtn(Icons.Default.Refresh, filled = false) { onPauseResume(t.id) }
                 }
-            val primary =
-                when (action) {
-                    TransferAction.Pause,
-                    TransferAction.Resume,
-                    TransferAction.Retry,
-                    TransferAction.Open,
-                    -> true
-                    TransferAction.Cancel,
-                    TransferAction.Delete,
-                    -> false
-                }
-            ActionButton(
-                label = label,
-                icon = icon,
-                modifier =
-                    Modifier
-                        .weight(1f)
-                        .testTag(EnvoixTestTags.activityAction(t.id, action.name)),
-                primary = primary,
-                danger = action == TransferAction.Cancel || action == TransferAction.Delete,
-                onClick = {
-                    when (action) {
-                        TransferAction.Pause, TransferAction.Resume, TransferAction.Retry -> onPauseResume()
-                        TransferAction.Cancel -> onCancel()
-                        TransferAction.Delete -> onRemove()
-                        TransferAction.Open -> onOpen()
-                    }
-                },
-            )
+            }
         }
-        ActionButton(
-            if (expanded) "Less" else "Details",
-            if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-            Modifier
-                .weight(1f)
-                .testTag(EnvoixTestTags.activityAction(t.id, "details")),
-            onClick = onToggleDetail,
-        )
     }
 }
 
 @Composable
-private fun ActionButton(
-    label: String,
+private fun CircleBtn(
     icon: ImageVector,
-    modifier: Modifier = Modifier,
-    primary: Boolean = false,
-    danger: Boolean = false,
+    filled: Boolean,
     onClick: () -> Unit,
 ) {
     val colors = Envoix.colors
-    val background =
-        when {
-            primary -> colors.accent
-            danger -> colors.danger.copy(alpha = 0.1f)
-            else -> colors.surfaceRaised
-        }
-    val foreground =
-        when {
-            primary -> Color.White
-            danger -> colors.danger
-            else -> colors.text
-        }
-    Row(
-        modifier
-            .heightIn(min = 46.dp)
-            .clip(RoundedCornerShape(13.dp))
-            .background(background)
-            .then(if (primary || danger) Modifier else Modifier.border(1.dp, colors.line, RoundedCornerShape(13.dp)))
-            .clickable(onClick = onClick),
-        horizontalArrangement = Arrangement.Center,
-        verticalAlignment = Alignment.CenterVertically,
+    Box(
+        Modifier
+            .size(38.dp)
+            .clip(CircleShape)
+            .then(
+                if (filled) {
+                    Modifier.background(colors.accent)
+                } else {
+                    Modifier.border(1.5.dp, colors.line, CircleShape)
+                },
+            ).clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
     ) {
-        Icon(icon, contentDescription = label, tint = foreground, modifier = Modifier.size(18.dp))
-        Spacer(Modifier.width(5.dp))
-        Text(label, color = foreground, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+        Icon(icon, null, tint = if (filled) Color.White else colors.muted, modifier = Modifier.size(18.dp))
     }
 }
 
@@ -617,9 +442,7 @@ private fun WaitingBody(
     onCancel: (Long) -> Unit,
 ) {
     val colors = Envoix.colors
-    val context = LocalContext.current
-    val directInvite = InviteCodec.isTransferInvite(t.qrPayload.orEmpty())
-    val copiedText = if (directInvite) t.qrPayload.orEmpty() else t.room
+    val settings by SettingsStore.settings.collectAsState()
     Column(Modifier.fillMaxWidth().padding(16.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
             Column(Modifier.weight(1f)) {
@@ -633,7 +456,7 @@ private fun WaitingBody(
                     if (t.direction == Direction.Send) {
                         "Sending ${t.fileName ?: "a file"}"
                     } else {
-                        "Saving to ${SettingsStore.saveLabel(context)}"
+                        "Saving to Downloads/${settings.saveFolder}"
                     },
                     color = colors.muted,
                     fontSize = 13.sp,
@@ -641,7 +464,7 @@ private fun WaitingBody(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            ActionButton("Cancel", Icons.Default.Close, danger = true) { onCancel(t.id) }
+            CircleBtn(Icons.Default.Close, filled = false) { onCancel(t.id) }
         }
         Spacer(Modifier.height(14.dp))
         Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
@@ -655,7 +478,7 @@ private fun WaitingBody(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                if (directInvite) "Invite link" else t.room,
+                t.room,
                 color = colors.text,
                 fontSize = 15.sp,
                 fontWeight = FontWeight.SemiBold,
@@ -669,14 +492,14 @@ private fun WaitingBody(
                 modifier =
                     Modifier
                         .clip(CircleShape)
-                        .clickable { clip.setText(AnnotatedString(copiedText)) }
+                        .clickable { clip.setText(AnnotatedString(t.room)) }
                         .padding(6.dp)
                         .size(18.dp),
             )
         }
         Spacer(Modifier.height(2.dp))
         Text(
-            if (directInvite) "Scan this invite" else "Scan or enter this code",
+            "Scan or enter this code",
             color = colors.muted,
             fontSize = 12.sp,
             modifier = Modifier.fillMaxWidth(),
@@ -742,16 +565,23 @@ private fun DetailDrawer(t: Transfer) {
                                 val ok =
                                     LogUpload.upload(
                                         settings.logServer,
-                                        t.room.substringBefore('-'),
+                                        Room(t.room).id,
                                         if (t.direction == Direction.Send) "send" else "receive",
-                                        t.log.joinToString("\n"),
+                                        Diagnostics.build(Diagnostics.Kind.Transfer, t.id),
                                     )
                                 upload = if (ok) "Uploaded ✓" else "Failed"
                             }
                         }
                     }
                     PillButton(if (copied) "Copied ✓" else "Copy") {
-                        clip.setText(AnnotatedString(t.log.joinToString("\n")))
+                        // The full durable log via the one assembler (clip-capped).
+                        runCatching {
+                            clip.setText(
+                                AnnotatedString(
+                                    Diagnostics.build(Diagnostics.Kind.Transfer, t.id, Diagnostics.CLIP_MAX),
+                                ),
+                            )
+                        }
                         copied = true
                     }
                 }
@@ -885,14 +715,19 @@ private fun PathBadge(t: Transfer) {
     val (label, fg, bg) =
         when {
             t.status == Status.Completed -> Triple("Done", colors.success, colors.successSoft)
+            t.status == Status.Unconfirmed ->
+                Triple("Sent · unconfirmed", colors.warning, colors.warning.copy(alpha = 0.14f))
             t.status == Status.Failed -> Triple("Failed", colors.danger, colors.danger.copy(alpha = 0.12f))
             t.status == Status.Cancelled -> Triple("Cancelled", colors.muted, colors.line.copy(alpha = 0.5f))
             t.status == Status.Paused -> Triple("Paused", colors.warning, colors.warning.copy(alpha = 0.14f))
-            t.status == Status.Publishing -> Triple("Saving", colors.warning, colors.warning.copy(alpha = 0.14f))
-            t.status == Status.Unconfirmed -> Triple("Confirming", colors.warning, colors.warning.copy(alpha = 0.14f))
+            t.status == Status.Preparing -> Triple("Preparing", colors.accent, colors.accentSoft)
+            t.status == Status.Waiting -> Triple("Waiting", colors.accent, colors.accentSoft)
+            t.status == Status.Verifying -> Triple("Verifying", colors.accent, colors.accentSoft)
+            t.status == Status.Confirming -> Triple("Confirming", colors.accent, colors.accentSoft)
             t.pathType == "relay" -> Triple("Relay", colors.accent, colors.accentSoft)
             t.pathType == "direct" -> Triple("Direct", colors.accent, colors.accentSoft)
-            else -> Triple("…", colors.muted, colors.line.copy(alpha = 0.5f))
+            // pre-connection, path unknown: say what is HAPPENING, never "…"
+            else -> Triple("Pairing", colors.accent, colors.accentSoft)
         }
     Pill(label, fg, bg)
 }
@@ -924,17 +759,16 @@ private fun Stat(text: String) {
 // ---- formatting helpers ----
 
 private fun title(t: Transfer): String {
-    val verb = if (t.direction == Direction.Send) "Upload" else "Download"
+    val arrow = if (t.direction == Direction.Send) "↑" else "↓"
     val name = t.fileName ?: if (t.direction == Direction.Send) "file" else "incoming"
-    return "$verb · $name"
+    return "$arrow $name"
 }
 
-private fun subtitle(t: Transfer): String? =
+private fun subtitle(t: Transfer): String =
     when {
         t.status == Status.Completed && t.savedUri != null -> "Saved to Downloads · tap to open"
-        t.status == Status.Waiting -> "Waiting for another device"
-        t.status == Status.Connecting -> "Connecting to another device"
-        else -> null
+        t.pathAddr != null -> t.pathAddr
+        else -> "room ${t.room}"
     }
 
 private fun fraction(t: Transfer): Float {
@@ -946,30 +780,33 @@ private fun fraction(t: Transfer): Float {
 private fun speedText(t: Transfer): String {
     if (t.status != Status.Transferring || t.speedBps <= 0) {
         return when (t.status) {
+            Status.Preparing -> "preparing"
+            Status.Waiting -> "waiting for peer"
             Status.Connecting -> "connecting"
-            Status.Waiting -> "waiting"
             Status.Verifying -> "verifying"
-            Status.Confirming, Status.Unconfirmed -> "confirming"
-            Status.Publishing -> "saving"
+            Status.Confirming -> "confirming"
             Status.Completed -> "complete"
             Status.Paused -> "paused"
             Status.Failed -> "failed"
+            Status.Unconfirmed -> "unconfirmed"
             Status.Cancelled -> "cancelled"
             else -> "—"
         }
     }
-    val mbps = t.speedBps / 1_000_000.0
+    val bps = smoothedBps(t)
+    val mbps = bps / 1_000_000.0
     return if (mbps >= 1) {
         "${(mbps * 10).roundToInt() / 10.0} MB/s"
     } else {
-        "${(t.speedBps / 1000).roundToInt()} KB/s"
+        "${(bps / 1000).roundToInt()} KB/s"
     }
 }
 
 private fun etaText(t: Transfer): String {
-    if (t.status != Status.Transferring || t.speedBps <= 0 || t.total <= 0) return "—"
+    val bps = smoothedBps(t)
+    if (t.status != Status.Transferring || bps <= 0 || t.total <= 0) return "—"
     val remain = (t.total - t.bytes).coerceAtLeast(0)
-    val secs = (remain / t.speedBps).roundToInt()
+    val secs = (remain / bps).roundToInt()
     val m = secs / 60
     val s = secs % 60
     return "%02d:%02d ETA".format(m, s)
