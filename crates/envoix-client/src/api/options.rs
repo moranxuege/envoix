@@ -2,7 +2,12 @@
 
 use envoix_session::BindAddrs;
 
-/// Constraint on which data paths a transfer may use.
+use super::transport::TransportPreference;
+
+/// Constraint on which iroh data paths a transfer may use.
+///
+/// Provider selection is configured independently through
+/// [`TransferOptions::transport`].
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum PathPolicy {
     /// Try direct (hole-punched) first, fall back to the relay when set.
@@ -27,6 +32,10 @@ pub enum PathPolicy {
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[non_exhaustive]
 pub struct TransferOptions {
+    /// Which provider should establish the data channel. This is independent
+    /// of [`Self::path`], which applies only after iroh is selected.
+    #[serde(default)]
+    pub transport: TransportPreference,
     /// Relay URL for WAN/NAT reachability, e.g. `https://relay.example.com:8444`.
     pub relay: Option<String>,
     /// Which data paths the transfer may use.
@@ -51,6 +60,7 @@ pub struct TransferOptions {
 impl Default for TransferOptions {
     fn default() -> Self {
         Self {
+            transport: TransportPreference::Automatic,
             relay: None,
             path: PathPolicy::Auto,
             resume: true,
@@ -69,8 +79,22 @@ mod tests {
     fn defaults_resume_on_auto_path_no_relay() {
         let options = TransferOptions::default();
         assert!(options.resume);
+        assert_eq!(options.transport, TransportPreference::Automatic);
         assert_eq!(options.path, PathPolicy::Auto);
         assert_eq!(options.relay, None);
         assert_eq!(options.listen_addrs, None);
+    }
+
+    #[test]
+    fn deserializes_records_written_before_transport_preference_existed() {
+        let mut value = serde_json::to_value(TransferOptions::default()).unwrap();
+        value
+            .as_object_mut()
+            .expect("TransferOptions serializes as an object")
+            .remove("transport");
+
+        let options: TransferOptions = serde_json::from_value(value).unwrap();
+
+        assert_eq!(options.transport, TransportPreference::Automatic);
     }
 }

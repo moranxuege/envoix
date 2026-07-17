@@ -20,6 +20,7 @@ pub mod receipt;
 pub mod record;
 mod source;
 mod transfer;
+mod transport;
 
 pub use envoix_protocol::{
     ManifestEntryKind, ManifestEntryResultStatus, ManifestEntryV1, ManifestHashAlgorithm,
@@ -38,6 +39,12 @@ pub use invite::{Invite, Role};
 pub use options::{PathPolicy, TransferOptions};
 pub use source::{PeerSource, TransferMode};
 pub use transfer::{Transfer, TransferSet, TransferStats};
+pub use transport::{
+    TransportAvailability, TransportCandidate, TransportPreference, TransportProvider,
+    TransportSelection, TransportSelectionError, TransportSelectionReason, TransportSelector,
+};
+
+use transport::BUILT_IN_TRANSPORT_CANDIDATES;
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -371,6 +378,25 @@ impl Client {
         events: &EventSender,
         cancel: &TransferCancelToken,
     ) -> Result<(TransferSetFuture, tracing::Span), TransferError> {
+        match self.select_transport(options)?.provider {
+            TransportProvider::Iroh => {
+                self.build_iroh_manifest_send(to, request, options, events, cancel)
+            }
+            provider => Err(unregistered_transport_error(provider)),
+        }
+    }
+
+    /// Existing iroh Manifest adapter. Provider selection happens in
+    /// [`Self::build_manifest_send`], while iroh direct/relay policy remains
+    /// inside the [`SessionConfig`] assembled below.
+    fn build_iroh_manifest_send(
+        &self,
+        to: PeerSource,
+        request: ManifestSendRequest,
+        options: &TransferOptions,
+        events: &EventSender,
+        cancel: &TransferCancelToken,
+    ) -> Result<(TransferSetFuture, tracing::Span), TransferError> {
         let sink = Box::new(SessionEventAdapter(events.clone()));
         let resume = options.resume;
         let mode = to.mode();
@@ -460,6 +486,21 @@ impl Client {
     /// [`Self::send`] (a single source) and [`Self::run`] (fallback across
     /// sources on one channel), so all attempts stream to the same caller.
     fn build_send(
+        &self,
+        to: PeerSource,
+        file: PathBuf,
+        options: &TransferOptions,
+        events: &EventSender,
+        cancel: &TransferCancelToken,
+    ) -> Result<(TransferFuture, tracing::Span), TransferError> {
+        match self.select_transport(options)?.provider {
+            TransportProvider::Iroh => self.build_iroh_send(to, file, options, events, cancel),
+            provider => Err(unregistered_transport_error(provider)),
+        }
+    }
+
+    /// Existing iroh single-file send adapter.
+    fn build_iroh_send(
         &self,
         to: PeerSource,
         file: PathBuf,
@@ -614,6 +655,23 @@ impl Client {
         events: &EventSender,
         cancel: &TransferCancelToken,
     ) -> Result<(TransferSetFuture, tracing::Span), TransferError> {
+        match self.select_transport(options)?.provider {
+            TransportProvider::Iroh => {
+                self.build_iroh_receive_transfer(from, into, options, events, cancel)
+            }
+            provider => Err(unregistered_transport_error(provider)),
+        }
+    }
+
+    /// Existing iroh negotiated receive adapter.
+    fn build_iroh_receive_transfer(
+        &self,
+        from: PeerSource,
+        into: PathBuf,
+        options: &TransferOptions,
+        events: &EventSender,
+        cancel: &TransferCancelToken,
+    ) -> Result<(TransferSetFuture, tracing::Span), TransferError> {
         let sink = Box::new(SessionEventAdapter(events.clone()));
         let listen = options
             .listen_addrs
@@ -710,6 +768,21 @@ impl Client {
     /// given event channel. The receive-side counterpart to [`Self::build_send`],
     /// shared by [`Self::receive`] and [`Self::run`].
     fn build_receive(
+        &self,
+        from: PeerSource,
+        into: PathBuf,
+        options: &TransferOptions,
+        events: &EventSender,
+        cancel: &TransferCancelToken,
+    ) -> Result<(TransferFuture, tracing::Span), TransferError> {
+        match self.select_transport(options)?.provider {
+            TransportProvider::Iroh => self.build_iroh_receive(from, into, options, events, cancel),
+            provider => Err(unregistered_transport_error(provider)),
+        }
+    }
+
+    /// Existing iroh single-file receive adapter.
+    fn build_iroh_receive(
         &self,
         from: PeerSource,
         into: PathBuf,
@@ -1089,6 +1162,22 @@ impl Client {
         ))
     }
 
+    fn select_transport(
+        &self,
+        options: &TransferOptions,
+    ) -> Result<TransportSelection, TransferError> {
+        let selection =
+            TransportSelector::select(options.transport, &BUILT_IN_TRANSPORT_CANDIDATES)
+                .map_err(|error| setup_error(PublicError::Transport(error.to_string())))?;
+        tracing::debug!(
+            provider = %selection.provider,
+            selection_reason = %selection.reason,
+            iroh_path_policy = ?options.path,
+            "transport provider selected"
+        );
+        Ok(selection)
+    }
+
     fn session_config(&self, options: &TransferOptions) -> SessionConfig {
         SessionConfig {
             chunk_size: self.chunk_size,
@@ -1100,6 +1189,12 @@ impl Client {
             data_stream_window: self.data_stream_window,
         }
     }
+}
+
+fn unregistered_transport_error(provider: TransportProvider) -> TransferError {
+    setup_error(PublicError::Transport(format!(
+        "transport provider {provider} has no registered adapter"
+    )))
 }
 
 fn preconnect_timeout_for_source(
@@ -1263,6 +1358,49 @@ mod tests {
 
     fn client() -> Client {
         Client::new()
+    }
+
+    #[test]
+    fn current_client_delegates_automatic_transport_to_iroh() {
+        let selection = client()
+            .select_transport(&TransferOptions::default())
+            .unwrap();
+
+        assert_eq!(selection.provider, TransportProvider::Iroh);
+        assert_eq!(selection.reason, TransportSelectionReason::Automatic);
+    }
+
+    #[test]
+    fn required_pending_provider_fails_during_setup_before_network_activity() {
+        let options = TransferOptions {
+            transport: TransportPreference::Require(TransportProvider::WifiAware),
+            ..Default::default()
+        };
+
+        let error = client().select_transport(&options).unwrap_err();
+
+        assert_eq!(error.phase, Phase::Setup);
+        assert_eq!(error.kind, ErrorKind::Transport);
+        assert!(error.message.contains("implementation_pending"));
+    }
+
+    #[test]
+    fn preferred_pending_provider_falls_back_to_iroh() {
+        let options = TransferOptions {
+            transport: TransportPreference::Prefer(TransportProvider::WifiAware),
+            ..Default::default()
+        };
+
+        let selection = client().select_transport(&options).unwrap();
+
+        assert_eq!(selection.provider, TransportProvider::Iroh);
+        assert_eq!(
+            selection.reason,
+            TransportSelectionReason::Fallback {
+                preferred: TransportProvider::WifiAware,
+                preferred_availability: Some(TransportAvailability::ImplementationPending),
+            }
+        );
     }
 
     #[test]

@@ -89,6 +89,11 @@ path exists, never by a display name, `PeerHandle`, or pairing alias.
 
 ## 4. Architecture decision
 
+Provider selection follows the separate contract in
+[`transport-selector.md`](transport-selector.md). Wi-Fi Aware is a peer-level
+transport provider alongside iroh and a future wired provider; iroh's
+direct/relay `PathPolicy` remains an internal iroh decision.
+
 ```text
 Apple DeviceDiscoveryUI / Android NAN pairing
                     ↓
@@ -267,6 +272,9 @@ logged.
 
 - Add the versioned foreign async transport interface and
   `NativeFrameConnection` with memory/fault-injection tests.
+- Replace the Wi-Fi Aware provider's `implementation_pending` registration
+  only after that adapter can create the required authenticated byte channel;
+  use the existing provider selector rather than extending `PathPolicy`.
 - Keep all existing public transfer entry points and iroh paths unchanged.
 - Add new start/restore functions or request fields additively.
 
