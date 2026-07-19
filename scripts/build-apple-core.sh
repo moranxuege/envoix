@@ -8,7 +8,7 @@ package_dir="$ffi_dir/EnvoixCore"
 input_stamp="$package_dir/.envoix-inputs.sha256"
 backup_dir=""
 core_target="${ENVOIX_APPLE_CORE_TARGET:-}"
-core_profile="${ENVOIX_APPLE_CORE_PROFILE:-debug}"
+core_profile="${ENVOIX_APPLE_CORE_PROFILE:-release}"
 reviewed_bindings=(
   "generated/envoix_ffi.swift"
   "generated/envoix_ffiFFI.h"
@@ -87,7 +87,7 @@ apple_core_input_digest() {
 }
 
 if [[ "${ENVOIX_APPLE_FORCE_CORE_REBUILD:-0}" != "1" ]] && apple_core_is_current; then
-  echo "Apple core inputs unchanged; reusing $package_dir"
+  echo "Apple core inputs unchanged; reusing $package_dir (profile=$core_profile, target=${core_target:-all})"
   exit 0
 fi
 
@@ -233,6 +233,7 @@ clean_blake3_apple_targets() {
   done
 }
 
+echo "Generating Apple core package (profile=$core_profile, target=${core_target:-all})"
 generate_apple_package
 
 # BLAKE3 compiles platform-specific C/NEON objects. Reuse the Cargo cache on

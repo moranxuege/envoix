@@ -386,7 +386,6 @@ impl ManifestTransferEngine {
         cancel: &TransferCancelToken,
     ) -> Result<ManifestTransferSummary, ManifestTransferError> {
         validate_chunk_size(self.chunk_size)?;
-        preflight_sources(&request, self.chunk_size, events, cancel).await?;
         check_cancelled(
             connection,
             cancel,
@@ -411,6 +410,7 @@ impl ManifestTransferEngine {
             .await?,
             PeerRole::Receiver,
         )?;
+        preflight_sources(&request, events, cancel).await?;
         connection
             .send_manifest_frame(ManifestFrame::Offer(ManifestOfferV1 {
                 manifest: request.manifest.clone(),
@@ -1034,7 +1034,6 @@ struct PreparedManifestReceive {
 
 async fn preflight_sources(
     request: &ManifestSendRequest,
-    buffer_size: usize,
     events: &dyn ManifestEventSink,
     cancel: &TransferCancelToken,
 ) -> Result<(), ManifestTransferError> {
@@ -1069,10 +1068,11 @@ async fn preflight_sources(
                 metadata.len()
             )));
         }
-        let (actual_size, actual_hash) = hash_path(path, buffer_size, cancel).await?;
-        if actual_size != entry.size || entry.hash != Some(actual_hash) {
+        if entry.modified_at_unix_ms.is_some()
+            && modified_at_unix_ms(&metadata) != entry.modified_at_unix_ms
+        {
             return Err(CoreError::InvalidInput(format!(
-                "manifest source hash changed for {}",
+                "manifest source modification time changed for {}",
                 entry.relative_path
             )));
         }
@@ -2406,6 +2406,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sender_starts_handshake_before_source_metadata_validation() {
+        let missing_source = PathBuf::from("/envoix-test-source-does-not-exist");
+        let manifest = test_manifest(
+            "handshake-before-source-validation",
+            vec![file_entry(0, "missing.bin", b"missing")],
+        );
+        let request = ManifestSendRequest::new(manifest, [(0, missing_source)]).unwrap();
+        let mut connection = HandshakeOnlyManifestConnection::default();
+
+        let result = ManifestTransferEngine::new(MIN_CHUNK_SIZE)
+            .send_manifest(&mut connection, request, true, &ManifestNoopEventSink)
+            .await;
+
+        assert!(result.is_err());
+        assert!(matches!(
+            connection.sent.as_slice(),
+            [ManifestFrame::Hello(ManifestHelloV1 {
+                role: PeerRole::Sender,
+                ..
+            })]
+        ));
+    }
+
+    #[tokio::test]
+    async fn streamed_hash_rejects_same_size_source_changes() {
+        let source = tempdir().unwrap();
+        let output = tempdir().unwrap();
+        let original = b"original";
+        let changed = b"modified";
+        let source_path = source.path().join("mutable.bin");
+        fs::write(&source_path, changed).await.unwrap();
+        let request = ManifestSendRequest::new(
+            test_manifest(
+                "streamed-source-change",
+                vec![file_entry(0, "mutable.bin", original)],
+            ),
+            [(0, source_path)],
+        )
+        .unwrap();
+        let (mut sender, mut receiver, chunks) = memory_manifest_connection_pair();
+        let engine = ManifestTransferEngine::new(MIN_CHUNK_SIZE);
+
+        let (sent, received) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(
+                engine.send_manifest(&mut sender, request, true, &ManifestNoopEventSink),
+                engine.receive_manifest(
+                    &mut receiver,
+                    output.path().to_path_buf(),
+                    &ManifestNoopEventSink
+                )
+            )
+        })
+        .await
+        .expect("source-change rejection must not leave either peer waiting");
+
+        assert!(sent.is_err());
+        assert!(received.is_err());
+        assert!(chunks.load(Ordering::SeqCst) > 0);
+        assert!(
+            !fs::try_exists(output.path().join("mutable.bin"))
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
     async fn transfers_tree_and_renames_colliding_roots_without_merging() {
         let source = tempdir().unwrap();
         let output = tempdir().unwrap();
@@ -2833,6 +2899,47 @@ mod tests {
         tx: mpsc::Sender<ManifestFrame>,
         rx: mpsc::Receiver<ManifestFrame>,
         chunks: Arc<AtomicUsize>,
+    }
+
+    #[derive(Default)]
+    struct HandshakeOnlyManifestConnection {
+        sent: Vec<ManifestFrame>,
+        returned_hello: bool,
+    }
+
+    #[async_trait]
+    impl ManifestFrameConnection for HandshakeOnlyManifestConnection {
+        async fn send_manifest_frame(&mut self, frame: ManifestFrame) -> Result<(), CoreError> {
+            self.sent.push(frame);
+            Ok(())
+        }
+
+        async fn send_manifest_chunk(
+            &mut self,
+            _manifest_id: &ManifestId,
+            _entry_id: u32,
+            _transfer_id: &TransferId,
+            _index: u64,
+            _offset: u64,
+            _bytes: &[u8],
+        ) -> Result<(), CoreError> {
+            Err(CoreError::Protocol(
+                "handshake-only connection cannot send chunks".into(),
+            ))
+        }
+
+        async fn recv_manifest_frame(&mut self) -> Result<ManifestFrame, CoreError> {
+            if self.returned_hello {
+                return Err(CoreError::Protocol(
+                    "handshake-only connection has no further frames".into(),
+                ));
+            }
+            self.returned_hello = true;
+            Ok(ManifestFrame::Hello(ManifestHelloV1 {
+                protocol_version: MANIFEST_V1_PROTOCOL_VERSION,
+                role: PeerRole::Receiver,
+            }))
+        }
     }
 
     fn memory_manifest_connection_pair() -> (

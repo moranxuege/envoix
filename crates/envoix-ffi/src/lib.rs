@@ -58,7 +58,7 @@ const ROOM_SEND_FALLBACK_TIMEOUT: Duration = Duration::from_secs(60);
 /// prevents large transfers from flooding the Swift/Kotlin main thread.
 const NATIVE_PROGRESS_INTERVAL_MS: u64 = 500;
 /// Version of the additive native API contract exposed by this crate.
-const ENVOIX_FFI_API_VERSION: u32 = 2;
+const ENVOIX_FFI_API_VERSION: u32 = 3;
 const NATIVE_PUBLICATION_EXTRAS_KEY: &str = "native_publication";
 /// Runtime settings supplied by native UIs.
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
@@ -160,6 +160,7 @@ pub fn envoix_core_info() -> FfiCoreInfo {
             "per_session_receipt_endpoint_v1".to_string(),
             "manifest_activity_v1".to_string(),
             "manifest_selection_builder_v1".to_string(),
+            "manifest_diagnostic_events_v1".to_string(),
         ],
     }
 }
@@ -2814,10 +2815,16 @@ fn apply_canonical_snapshot(
         activity.data_path_kind = kind;
         activity.data_path_detail = detail;
     }
-    if matches!(
-        session.state,
-        CanonicalState::Transferring | CanonicalState::Confirming
-    ) && activity.started_at_ms == 0
+    if activity.started_at_ms == 0
+        && session.transfer_id.is_some()
+        && matches!(
+            session.state,
+            CanonicalState::Verifying
+                | CanonicalState::Transferring
+                | CanonicalState::Confirming
+                | CanonicalState::AwaitingPublication
+                | CanonicalState::Completed
+        )
     {
         activity.started_at_ms = ts_ms;
     }
@@ -3996,6 +4003,9 @@ fn to_ffi_event(event: &StampedEvent, activity_id: &str) -> FfiTransferEvent {
             ffi.file_name = file_name.clone();
             ffi.bytes_transferred = *bytes_hashed;
             ffi.total_bytes = *bytes_hashed;
+            if *direction == TransferDirection::Receive {
+                ffi.bytes_resumed = *bytes_hashed;
+            }
         }
         TransferEvent::Confirming { transfer_id, .. } => {
             ffi.kind = FfiTransferEventKind::Verifying;
@@ -4013,6 +4023,112 @@ fn to_ffi_event(event: &StampedEvent, activity_id: &str) -> FfiTransferEvent {
             ffi.bytes_transferred = *bytes_transferred;
             ffi.total_bytes = *bytes_transferred;
         }
+        TransferEvent::ManifestPreparingEntry {
+            manifest_id,
+            entry_id,
+            relative_path,
+            size,
+        } => {
+            ffi.transfer_id = manifest_id.to_string();
+            ffi.file_name = relative_path.clone();
+            ffi.total_bytes = *size;
+            ffi.diagnostic_message = format!("manifest source check entry_id={entry_id}");
+        }
+        TransferEvent::ManifestPlanned {
+            direction,
+            manifest,
+        } => {
+            ffi.direction = ffi_direction(Some(*direction));
+            ffi.transfer_id = manifest.manifest_id.to_string();
+            ffi.total_bytes = manifest.total_bytes;
+            ffi.diagnostic_message = format!(
+                "manifest planned files={} directories={} roots={}",
+                manifest.file_count, manifest.directory_count, manifest.root_count
+            );
+        }
+        TransferEvent::ManifestStarted {
+            manifest_id,
+            direction,
+            file_count,
+            directory_count,
+            total_bytes,
+        } => {
+            ffi.kind = FfiTransferEventKind::Started;
+            ffi.direction = ffi_direction(Some(*direction));
+            ffi.transfer_id = manifest_id.to_string();
+            ffi.file_name = manifest_id.to_string();
+            ffi.total_bytes = *total_bytes;
+            ffi.diagnostic_message =
+                format!("manifest files={file_count} directories={directory_count}");
+        }
+        TransferEvent::ManifestEntryStarted {
+            manifest_id,
+            entry_id,
+            transfer_id,
+            relative_path,
+            total_bytes,
+            bytes_resumed,
+        } => {
+            ffi.kind = FfiTransferEventKind::Started;
+            ffi.transfer_id = transfer_id.to_string();
+            ffi.file_name = relative_path.clone();
+            ffi.total_bytes = *total_bytes;
+            ffi.bytes_resumed = *bytes_resumed;
+            ffi.diagnostic_message = format!("manifest_id={manifest_id} entry_id={entry_id}");
+        }
+        TransferEvent::ManifestProgress {
+            manifest_id,
+            entry_id,
+            entry_bytes,
+            entry_total_bytes,
+            completed_bytes,
+            total_bytes,
+        } => {
+            ffi.kind = FfiTransferEventKind::Progress;
+            ffi.transfer_id = manifest_id.to_string();
+            ffi.bytes_transferred = *completed_bytes;
+            ffi.total_bytes = *total_bytes;
+            ffi.diagnostic_message =
+                format!("entry_id={entry_id} entry_bytes={entry_bytes}/{entry_total_bytes}");
+        }
+        TransferEvent::ManifestEntryCompleted {
+            manifest_id,
+            result,
+        } => {
+            ffi.kind = if matches!(
+                result.status,
+                envoix_client::api::ManifestEntryResultStatus::Failed
+                    | envoix_client::api::ManifestEntryResultStatus::Cancelled
+            ) {
+                FfiTransferEventKind::Failed
+            } else {
+                FfiTransferEventKind::Completed
+            };
+            ffi.transfer_id = manifest_id.to_string();
+            ffi.file_name = result.offered_relative_path.clone();
+            ffi.diagnostic_message = format!(
+                "entry_id={} status={} final={} failure={}",
+                result.entry_id,
+                manifest_result_status_label(result.status),
+                result.final_relative_path.as_deref().unwrap_or(""),
+                result.failure_code.as_deref().unwrap_or("")
+            );
+        }
+        TransferEvent::ManifestCompleted {
+            manifest_id,
+            file_count,
+            directory_count,
+            total_bytes,
+            ..
+        } => {
+            ffi.kind = FfiTransferEventKind::Completed;
+            ffi.transfer_id = manifest_id.to_string();
+            ffi.file_name = manifest_id.to_string();
+            ffi.bytes_transferred = *total_bytes;
+            ffi.total_bytes = *total_bytes;
+            ffi.diagnostic_message =
+                format!("manifest files={file_count} directories={directory_count}");
+        }
         TransferEvent::Failed {
             direction, reason, ..
         } => {
@@ -4023,6 +4139,18 @@ fn to_ffi_event(event: &StampedEvent, activity_id: &str) -> FfiTransferEvent {
         _ => {}
     }
     ffi
+}
+
+fn manifest_result_status_label(
+    status: envoix_client::api::ManifestEntryResultStatus,
+) -> &'static str {
+    match status {
+        envoix_client::api::ManifestEntryResultStatus::Completed => "completed",
+        envoix_client::api::ManifestEntryResultStatus::SkippedIdentical => "skipped_identical",
+        envoix_client::api::ManifestEntryResultStatus::Renamed => "renamed",
+        envoix_client::api::ManifestEntryResultStatus::Failed => "failed",
+        envoix_client::api::ManifestEntryResultStatus::Cancelled => "cancelled",
+    }
 }
 
 impl FfiTransferEvent {
@@ -4223,6 +4351,11 @@ mod tests {
         Activity(FfiTransferActivityRecord),
     }
 
+    enum ManifestMsg {
+        Event(Box<FfiTransferEvent>),
+        Activity(Box<FfiManifestActivityRecord>),
+    }
+
     async fn ready_addr(ep: &Endpoint) -> EndpointAddr {
         for _ in 0..100 {
             if ep.addr().ip_addrs().next().is_some() {
@@ -4257,12 +4390,39 @@ mod tests {
         fn on_status(&self, _message: String) {}
     }
 
+    struct TestManifestObserver(Sender<ManifestMsg>);
+
+    impl ManifestTransferObserverV2 for TestManifestObserver {
+        fn on_manifest_event(&self, event: FfiTransferEvent) {
+            let _ = self.0.send(ManifestMsg::Event(Box::new(event)));
+        }
+
+        fn on_manifest_activity(&self, record: FfiManifestActivityRecord) {
+            let _ = self.0.send(ManifestMsg::Activity(Box::new(record)));
+        }
+    }
+
     struct NoopMailbox;
 
     impl MailboxObserver for NoopMailbox {
         fn on_fetch_receipt(&self, _activity_id: String, _key: String) {}
 
         fn on_post_receipt(&self, _activity_id: String, _key: String, _blob: Vec<u8>) {}
+    }
+
+    struct NoopMailboxV2;
+
+    impl MailboxObserverV2 for NoopMailboxV2 {
+        fn on_fetch_receipt(&self, _activity_id: String, _key: String, _server: Option<String>) {}
+
+        fn on_post_receipt(
+            &self,
+            _activity_id: String,
+            _key: String,
+            _blob: Vec<u8>,
+            _server: Option<String>,
+        ) {
+        }
     }
 
     enum MailboxMsg {
@@ -4492,6 +4652,44 @@ mod tests {
         }
     }
 
+    fn recv_manifest_invite(
+        rx: &std::sync::mpsc::Receiver<ManifestMsg>,
+        timeout: Duration,
+    ) -> String {
+        loop {
+            match rx.recv_timeout(timeout).unwrap() {
+                ManifestMsg::Event(_) => {}
+                ManifestMsg::Activity(record) => {
+                    if record.activity.state == FfiTransferActivityState::Failed {
+                        panic!("transfer failed: {}", record.activity.diagnostic_message);
+                    }
+                    if !record.activity.invite.is_empty() {
+                        return record.activity.invite;
+                    }
+                }
+            }
+        }
+    }
+
+    fn recv_completed_manifest_activity(
+        rx: &std::sync::mpsc::Receiver<ManifestMsg>,
+        timeout: Duration,
+    ) -> (Vec<FfiTransferEvent>, FfiManifestActivityRecord) {
+        let mut events = Vec::new();
+        loop {
+            match rx.recv_timeout(timeout).unwrap() {
+                ManifestMsg::Event(event) => events.push(*event),
+                ManifestMsg::Activity(record) => match record.activity.state {
+                    FfiTransferActivityState::Completed => return (events, *record),
+                    FfiTransferActivityState::Failed | FfiTransferActivityState::Canceled => {
+                        panic!("transfer failed: {}", record.activity.diagnostic_message)
+                    }
+                    _ => {}
+                },
+            }
+        }
+    }
+
     fn recv_activity(
         rx: &std::sync::mpsc::Receiver<Msg>,
         activity_id: &str,
@@ -4680,6 +4878,61 @@ mod tests {
     }
 
     #[test]
+    fn manifest_progress_maps_to_a_structured_native_event() {
+        let event = StampedEvent {
+            ts_ms: 1_234,
+            event: TransferEvent::ManifestProgress {
+                manifest_id: envoix_client::ManifestId::new("manifest-1"),
+                entry_id: 7,
+                entry_bytes: 20,
+                entry_total_bytes: 40,
+                completed_bytes: 120,
+                total_bytes: 200,
+            },
+        };
+
+        let projected = to_ffi_event(&event, "activity-1");
+
+        assert_eq!(projected.kind, FfiTransferEventKind::Progress);
+        assert_eq!(projected.activity_id, "activity-1");
+        assert_eq!(projected.transfer_id, "manifest-1");
+        assert_eq!(projected.bytes_transferred, 120);
+        assert_eq!(projected.total_bytes, 200);
+        assert!(projected.diagnostic_message.contains("entry_id=7"));
+        assert!(projected.diagnostic_message.contains("entry_bytes=20/40"));
+    }
+
+    #[test]
+    fn receive_verification_projects_existing_bytes_as_resumed() {
+        let receive = StampedEvent {
+            ts_ms: 1_234,
+            event: TransferEvent::Verified {
+                transfer_id: TransferId::new("transfer-existing"),
+                direction: TransferDirection::Receive,
+                file_name: "existing.bin".to_string(),
+                bytes_hashed: 353_224,
+            },
+        };
+        let receive = to_ffi_event(&receive, "activity-receive");
+        assert_eq!(receive.kind, FfiTransferEventKind::Verified);
+        assert_eq!(receive.bytes_transferred, 353_224);
+        assert_eq!(receive.total_bytes, 353_224);
+        assert_eq!(receive.bytes_resumed, 353_224);
+
+        let send = StampedEvent {
+            ts_ms: 1_235,
+            event: TransferEvent::Verified {
+                transfer_id: TransferId::new("transfer-send-hash"),
+                direction: TransferDirection::Send,
+                file_name: "source.bin".to_string(),
+                bytes_hashed: 353_224,
+            },
+        };
+        let send = to_ffi_event(&send, "activity-send");
+        assert_eq!(send.bytes_resumed, 0);
+    }
+
+    #[test]
     fn activity_record_folds_transfer_events() {
         let request = FfiTransferRequest {
             activity_id: "activity-1".to_string(),
@@ -4735,6 +4988,7 @@ mod tests {
                 bytes_transferred: 100,
                 transfer_id: TransferId::new("tx1"),
                 file_name: "report.pdf".to_string(),
+                file_hash: blake3::hash(b"report").to_hex().to_string(),
             },
             21,
             "/tmp/report.pdf".to_string(),
@@ -5836,6 +6090,205 @@ mod tests {
 
         drop(sender);
         drop(receiver);
+    }
+
+    #[test]
+    fn durable_ffi_room_existing_file_completion_preserves_resumed_bytes() {
+        let _loopback_guard = lock_loopback_tests();
+        let broker = start_test_broker();
+        let dir = tempfile::tempdir().unwrap();
+        let output_dir = dir.path().join("received");
+        let receive_records = dir.path().join("receive-records");
+        let send_records = dir.path().join("send-records");
+        std::fs::create_dir_all(&output_dir).unwrap();
+        let source = dir.path().join("existing.txt");
+        let text = b"durable existing-file accounting";
+        std::fs::write(&source, text).unwrap();
+        let settings = EnvoixRuntimeSettings {
+            server_url: broker,
+            relay_url: String::new(),
+            ..EnvoixRuntimeSettings::default()
+        };
+
+        let (rtx, rrx) = channel();
+        let mut receive_request = FfiTransferRequest::receive(
+            output_dir.to_string_lossy().into_owned(),
+            FfiTransferMode::Room,
+        );
+        receive_request.activity_id = "existing-receive-seed".to_string();
+        receive_request.code = "existing-file-room-seed".to_string();
+        let receiver = start_durable_transfer_v2(
+            settings.clone(),
+            receive_request,
+            receive_records.to_string_lossy().into_owned(),
+            "https://receipt.example.test".to_string(),
+            Arc::new(TestObserver(rtx)),
+            Arc::new(NoopMailboxV2),
+        )
+        .unwrap();
+        thread::sleep(Duration::from_millis(200));
+
+        let (stx, srx) = channel();
+        let mut send_request =
+            FfiTransferRequest::send(source.to_string_lossy().into_owned(), FfiTransferMode::Room);
+        send_request.activity_id = "existing-send-seed".to_string();
+        send_request.code = "existing-file-room-seed".to_string();
+        let sender = start_durable_transfer_v2(
+            settings.clone(),
+            send_request,
+            send_records.to_string_lossy().into_owned(),
+            "https://receipt.example.test".to_string(),
+            Arc::new(TestObserver(stx)),
+            Arc::new(NoopMailboxV2),
+        )
+        .unwrap();
+        recv_completed(&srx, Duration::from_secs(20));
+        recv_completed_activity(&rrx, Duration::from_secs(20));
+        drop(sender);
+        drop(receiver);
+
+        let (rtx, rrx) = channel();
+        let mut receive_request = FfiTransferRequest::receive(
+            output_dir.to_string_lossy().into_owned(),
+            FfiTransferMode::Room,
+        );
+        receive_request.activity_id = "existing-receive-repeat".to_string();
+        receive_request.code = "existing-file-room-repeat".to_string();
+        let receiver = start_durable_transfer_v2(
+            settings.clone(),
+            receive_request,
+            receive_records.to_string_lossy().into_owned(),
+            "https://receipt.example.test".to_string(),
+            Arc::new(TestObserver(rtx)),
+            Arc::new(NoopMailboxV2),
+        )
+        .unwrap();
+        thread::sleep(Duration::from_millis(200));
+
+        let (stx, srx) = channel();
+        let mut send_request =
+            FfiTransferRequest::send(source.to_string_lossy().into_owned(), FfiTransferMode::Room);
+        send_request.activity_id = "existing-send-repeat".to_string();
+        send_request.code = "existing-file-room-repeat".to_string();
+        let sender = start_durable_transfer_v2(
+            settings,
+            send_request,
+            send_records.to_string_lossy().into_owned(),
+            "https://receipt.example.test".to_string(),
+            Arc::new(TestObserver(stx)),
+            Arc::new(NoopMailboxV2),
+        )
+        .unwrap();
+
+        let (_, sender_events) = recv_completed(&srx, Duration::from_secs(20));
+        let (_, receiver_events, receiver_activity) =
+            recv_completed_activity(&rrx, Duration::from_secs(20));
+        assert_eq!(receiver_activity.bytes_resumed, text.len() as u64);
+        assert!(receiver_events.iter().any(|event| {
+            event.kind == FfiTransferEventKind::Verified && event.bytes_resumed == text.len() as u64
+        }));
+        assert!(!receiver_events.iter().any(|event| {
+            matches!(
+                event.kind,
+                FfiTransferEventKind::Started | FfiTransferEventKind::Progress
+            )
+        }));
+        assert!(sender_events.iter().any(|event| {
+            event.kind == FfiTransferEventKind::Started && event.bytes_resumed == text.len() as u64
+        }));
+
+        let receive_history =
+            list_durable_transfer_records(receive_records.to_string_lossy().into_owned()).unwrap();
+        let repeated = receive_history
+            .iter()
+            .find(|activity| activity.activity_id == "existing-receive-repeat")
+            .expect("repeated receive activity should be persisted");
+        assert_eq!(repeated.bytes_resumed, text.len() as u64);
+
+        drop(sender);
+        drop(receiver);
+    }
+
+    #[test]
+    fn durable_manifest_receiver_existing_single_file_preserves_resumed_bytes() {
+        let _loopback_guard = lock_loopback_tests();
+        let dir = tempfile::tempdir().unwrap();
+        let output_dir = dir.path().join("received");
+        let receive_records = dir.path().join("receive-records");
+        let send_records = dir.path().join("send-records");
+        std::fs::create_dir_all(&output_dir).unwrap();
+        std::fs::create_dir_all(&receive_records).unwrap();
+        std::fs::create_dir_all(&send_records).unwrap();
+        let source = dir.path().join("existing.txt");
+        let text = b"Manifest receiver existing-file accounting";
+        std::fs::write(&source, text).unwrap();
+
+        for suffix in ["seed", "repeat"] {
+            let (rtx, rrx) = channel();
+            let mut receive_request = FfiTransferRequest::receive(
+                output_dir.to_string_lossy().into_owned(),
+                FfiTransferMode::ShowInvite,
+            );
+            receive_request.activity_id = format!("manifest-existing-receive-{suffix}");
+            let receiver = start_durable_manifest_receive_v2(
+                EnvoixRuntimeSettings::default(),
+                receive_request,
+                receive_records.to_string_lossy().into_owned(),
+                Arc::new(TestManifestObserver(rtx)),
+            )
+            .unwrap();
+            let invite = loopback_invite(&recv_manifest_invite(&rrx, Duration::from_secs(10)));
+            thread::sleep(Duration::from_millis(300));
+
+            let (stx, srx) = channel();
+            let mut send_request = FfiTransferRequest::send(
+                source.to_string_lossy().into_owned(),
+                FfiTransferMode::Invite,
+            );
+            send_request.activity_id = format!("manifest-existing-send-{suffix}");
+            send_request.invite = invite;
+            let sender = start_durable_transfer_v2(
+                EnvoixRuntimeSettings::default(),
+                send_request,
+                send_records.to_string_lossy().into_owned(),
+                "https://receipt.example.test".to_string(),
+                Arc::new(TestObserver(stx)),
+                Arc::new(NoopMailboxV2),
+            )
+            .unwrap();
+
+            let (_, sender_events) = recv_completed(&srx, Duration::from_secs(20));
+            let (receiver_events, receiver_activity) =
+                recv_completed_manifest_activity(&rrx, Duration::from_secs(20));
+            if suffix == "repeat" {
+                assert_eq!(receiver_activity.activity.bytes_resumed, text.len() as u64);
+                assert!(receiver_events.iter().any(|event| {
+                    event.kind == FfiTransferEventKind::Verified
+                        && event.bytes_resumed == text.len() as u64
+                }));
+                assert!(!receiver_events.iter().any(|event| {
+                    matches!(
+                        event.kind,
+                        FfiTransferEventKind::Started | FfiTransferEventKind::Progress
+                    )
+                }));
+                assert!(sender_events.iter().any(|event| {
+                    event.kind == FfiTransferEventKind::Started
+                        && event.bytes_resumed == text.len() as u64
+                }));
+            }
+
+            drop(sender);
+            drop(receiver);
+        }
+
+        let history =
+            list_durable_manifest_records(receive_records.to_string_lossy().into_owned()).unwrap();
+        let repeated = history
+            .iter()
+            .find(|record| record.activity.activity_id == "manifest-existing-receive-repeat")
+            .expect("repeated Manifest receive activity should be persisted");
+        assert_eq!(repeated.activity.bytes_resumed, text.len() as u64);
     }
 
     #[test]

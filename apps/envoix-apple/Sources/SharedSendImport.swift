@@ -18,8 +18,9 @@ final class ShareDraftLease {
         try store.bindClaim(id: id, activityID: activityID)
     }
 
-    deinit {
-        try? store.discard(id: id)
+    // SwiftUI may release and recreate views while the draft must remain recoverable.
+    func discard() throws {
+        try store.discard(id: id)
     }
 }
 

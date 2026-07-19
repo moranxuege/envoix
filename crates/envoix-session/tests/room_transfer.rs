@@ -122,6 +122,63 @@ async fn file_transfers_through_the_rendezvous() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn room_reconfirms_an_existing_single_file() {
+    let _guard = IROH_TEST_LOCK.lock().await;
+    let broker = start_broker(Arc::new(RoomRegistry::new())).await;
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("repeat.txt");
+    let contents = b"repeat through room without retransmitting";
+    std::fs::write(&src, contents).unwrap();
+    let out = dir.path().join("received");
+    std::fs::create_dir(&out).unwrap();
+    let listen: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+
+    for (code, resume) in [
+        ("2468-room-repeat-fresh", false),
+        ("2468-room-repeat-resume", true),
+    ] {
+        let receiver_broker = broker.clone();
+        let receiver_output = out.clone();
+        let recv = tokio::spawn(async move {
+            receive_transfer_via_room(
+                receiver_broker,
+                code,
+                listen,
+                receiver_output,
+                config(),
+                Box::new(NoopSessionEventSink),
+                TransferCancelToken::new(),
+            )
+            .await
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let sent = send_file_via_room(
+            broker.clone(),
+            code,
+            src.clone(),
+            resume,
+            config(),
+            Box::new(NoopEventSink),
+            TransferCancelToken::new(),
+        );
+
+        tokio::time::timeout(Duration::from_secs(30), sent)
+            .await
+            .expect("room sender timed out")
+            .expect("room sender failed");
+        let received = tokio::time::timeout(Duration::from_secs(30), recv)
+            .await
+            .expect("room receiver timed out")
+            .expect("room receiver task panicked")
+            .expect("room receiver failed");
+        assert!(matches!(received, SessionTransferSummary::SingleFile(_)));
+    }
+
+    assert_eq!(std::fs::read(out.join("repeat.txt")).unwrap(), contents);
+    assert!(!out.join("repeat (1).txt").exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn manifest_transfers_through_the_existing_room_rendezvous() {
     let _guard = IROH_TEST_LOCK.lock().await;
     let broker = start_broker(Arc::new(RoomRegistry::new())).await;

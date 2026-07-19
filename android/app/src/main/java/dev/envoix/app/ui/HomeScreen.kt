@@ -32,6 +32,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -97,6 +98,7 @@ fun HomeScreen(
     onPauseResume: (Long) -> Unit,
     onCancel: (Long) -> Unit,
     onRemove: (Long) -> Unit,
+    onOpenDiscovery: () -> Unit,
     onOpenLogs: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpen: (Transfer) -> Unit,
@@ -138,7 +140,7 @@ fun HomeScreen(
                 .padding(inner)
                 .padding(horizontal = 20.dp),
         ) {
-            Header(active, onOpenLogs, onOpenSettings)
+            Header(active, onOpenDiscovery, onOpenLogs, onOpenSettings)
             Spacer(Modifier.height(12.dp))
             if (transfers.isEmpty()) {
                 EmptyState()
@@ -166,7 +168,9 @@ fun HomeScreen(
 
     if (sheetOpen) {
         ModalBottomSheet(
-            onDismissRequest = { sheetOpen = false },
+            onDismissRequest = {
+                sheetOpen = false
+            },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
             containerColor = colors.surface,
         ) {
@@ -187,6 +191,7 @@ fun HomeScreen(
 @Composable
 private fun Header(
     active: Int,
+    onOpenDiscovery: () -> Unit,
     onOpenLogs: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
@@ -204,6 +209,17 @@ private fun Header(
                 Pill(text = "$active active", fg = colors.success, bg = colors.successSoft)
                 Spacer(Modifier.width(8.dp))
             }
+            Icon(
+                Icons.Default.Devices,
+                contentDescription = "Nearby devices",
+                tint = colors.accent,
+                modifier =
+                    Modifier
+                        .clip(CircleShape)
+                        .clickable(onClick = onOpenDiscovery)
+                        .padding(6.dp)
+                        .size(22.dp),
+            )
             Text(
                 "Logs",
                 color = colors.accent,
@@ -350,6 +366,10 @@ private fun TransferCard(
                             Spacer(Modifier.height(6.dp))
                             Text(t.error, color = colors.danger, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
                         }
+                        if (t.publicationInvalid && t.error != null) {
+                            Spacer(Modifier.height(6.dp))
+                            Text(t.error, color = colors.danger, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        }
                         if (t.status == Status.Unconfirmed) {
                             Spacer(Modifier.height(6.dp))
                             Text(
@@ -401,7 +421,7 @@ private fun CardControls(
                 // RECEIVER, and ONLY while the confirmation duty is open (the
                 // receipt has not reached the rdz): the manual fallback for
                 // serving the peer's re-verify. Once delivered - retired, no ↻.
-                if (t.direction == Direction.Receive && !t.proofDelivered) {
+                if (t.direction == Direction.Receive && !t.proofDelivered && !t.publicationInvalid) {
                     CircleBtn(Icons.Default.Refresh, filled = false) { onPauseResume(t.id) }
                 }
             }
@@ -766,6 +786,7 @@ private fun title(t: Transfer): String {
 
 private fun subtitle(t: Transfer): String =
     when {
+        t.publicationInvalid -> "Saved file is missing or changed"
         t.status == Status.Completed && t.savedUri != null -> "Saved to Downloads · tap to open"
         t.pathAddr != null -> t.pathAddr
         else -> "room ${t.room}"

@@ -12,16 +12,15 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import dev.envoix.app.ui.DiscoveryScreen
 import dev.envoix.app.ui.EnvoixTheme
 import dev.envoix.app.ui.HomeScreen
 import dev.envoix.app.ui.LogScreen
 import dev.envoix.app.ui.SettingsScreen
 import kotlinx.coroutines.launch
 
-private enum class Screen { Home, Logs, Settings }
+private enum class Screen { Home, Discovery, Logs, Settings }
 
 class MainActivity : ComponentActivity() {
     private val vm: TransferViewModel by viewModels()
@@ -37,9 +36,23 @@ class MainActivity : ComponentActivity() {
         TransferService.restoreAll(this)
         setContent {
             EnvoixTheme {
-                var screen by remember { mutableStateOf(Screen.Home) }
+                var screen by androidx.compose.runtime.remember {
+                    androidx.compose.runtime.mutableStateOf(Screen.Home)
+                }
                 if (screen != Screen.Home) BackHandler { screen = Screen.Home }
                 when (screen) {
+                    Screen.Discovery ->
+                        DiscoveryScreen(
+                            onBack = { screen = Screen.Home },
+                            onReceive = { c, b, r, qr ->
+                                screen = Screen.Home
+                                vm.startReceive(c, b, r, qr)
+                            },
+                            onSend = { c, b, r, uri, qr ->
+                                screen = Screen.Home
+                                vm.startSend(c, uri.toString(), b, r, qr)
+                            },
+                        )
                     Screen.Logs -> LogScreen(onBack = { screen = Screen.Home })
                     Screen.Settings -> SettingsScreen(onBack = { screen = Screen.Home })
                     Screen.Home -> {
@@ -53,6 +66,7 @@ class MainActivity : ComponentActivity() {
                             onPauseResume = { vm.pauseResume(it) },
                             onCancel = { vm.cancel(it) },
                             onRemove = { vm.remove(it) },
+                            onOpenDiscovery = { screen = Screen.Discovery },
                             onOpenLogs = { screen = Screen.Logs },
                             onOpenSettings = { screen = Screen.Settings },
                             onOpen = { openReceived(it) },

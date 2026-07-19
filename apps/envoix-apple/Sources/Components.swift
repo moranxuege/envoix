@@ -114,17 +114,23 @@ struct ModePill: View {
 
 /// Slim, rounded progress track with an accent fill.
 struct ProgressBar: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var value: Double  // 0...1
+
+    private var clampedValue: Double {
+        max(0, min(1, value))
+    }
 
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .leading) {
                 Capsule().fill(Theme.line.opacity(0.65))
                 Capsule().fill(Theme.accent)
-                    .frame(width: max(0, min(1, value)) * geo.size.width)
+                    .frame(width: clampedValue * geo.size.width)
             }
         }
         .frame(height: 7)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.22), value: clampedValue)
     }
 }
 
@@ -350,7 +356,7 @@ extension View {
 
 /// Convenience: copy text and flash a toast.
 @MainActor
-func copyWithToast(_ text: String, _ message: String) {
-    copyToPasteboard(text)
-    ToastCenter.shared.show(message)
+func copyWithToast(_ text: String, _ message: String, language: String) {
+    let copied = copyToPasteboard(text)
+    ToastCenter.shared.show(copied ? message : AppText.value("Copy failed", "复制失败", language: language))
 }

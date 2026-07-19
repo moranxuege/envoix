@@ -19,6 +19,12 @@ func sendSelectionRequiresManifest(_ urls: [URL]) -> Bool {
     return values?.isDirectory == true
 }
 
+struct SendSelectionSnapshot {
+    var items: [URL] = []
+    var sourceAccess: AnyObject?
+    var pendingSelectionID: UUID?
+}
+
 struct SendView: View {
     #if os(iOS)
     private static let mobileScrollBottomClearance: CGFloat = 32
@@ -50,6 +56,10 @@ struct SendView: View {
     @State private var isQRScannerPresented = false
     @State private var selectedSourceAccess: AnyObject?
     @State private var selectedPendingSelectionID: UUID?
+    @State private var didApplyInitialPairingInput = false
+    private let initialPairingInput: String?
+    private let onInitialPairingInputConsumed: (() -> Void)?
+    private let onSwitchToReceive: ((String, SendSelectionSnapshot) -> Void)?
     #if os(iOS)
     @State private var isFolderPickerPresented = false
     @State private var isPhotoPickerPresented = false
@@ -63,9 +73,15 @@ struct SendView: View {
         initialMode: PairingMode = .room,
         initialFiles: [URL] = [],
         initialFileAccess: AnyObject? = nil,
-        initialPendingSelectionID: UUID? = nil
+        initialPendingSelectionID: UUID? = nil,
+        initialPairingInput: String? = nil,
+        onInitialPairingInputConsumed: (() -> Void)? = nil,
+        onSwitchToReceive: ((String, SendSelectionSnapshot) -> Void)? = nil
     ) {
         self.viewModel = viewModel
+        self.initialPairingInput = initialPairingInput
+        self.onInitialPairingInputConsumed = onInitialPairingInputConsumed
+        self.onSwitchToReceive = onSwitchToReceive
         _mode = State(initialValue: initialMode)
         _selectedItems = State(initialValue: initialFiles)
         _filePathInput = State(initialValue: initialFiles.count == 1 ? initialFiles[0].path : "")
@@ -114,6 +130,7 @@ struct SendView: View {
             )
         }
         .onAppear(perform: adoptSharedSelectionIfAvailable)
+        .onAppear(perform: applyInitialPairingInputIfNeeded)
         .onChange(of: model.pendingSendSelection?.id) { _ in
             adoptSharedSelectionIfAvailable()
         }
@@ -125,6 +142,7 @@ struct SendView: View {
             primaryButton
                 .padding(.top, 12)
         }
+        .onAppear(perform: applyInitialPairingInputIfNeeded)
         #endif
     }
 
@@ -236,7 +254,7 @@ struct SendView: View {
                             displaysFullText: true
                         ) {
                             Button {
-                                copyWithToast(pairingInvite?.code ?? "", AppText.value("Send code copied", "发送码已复制", language: uiLanguage))
+                                copyWithToast(pairingInvite?.code ?? "", AppText.value("Send code copied", "发送码已复制", language: uiLanguage), language: uiLanguage)
                             } label: {
                                 Label(AppText.value("Copy", "复制", language: uiLanguage), systemImage: "doc.on.doc")
                                     .frame(minHeight: 40)
@@ -291,7 +309,7 @@ struct SendView: View {
                 displaysFullText: true
             ) {
                 Button {
-                    copyWithToast(pairingInvite?.code ?? "", AppText.value("Send code copied", "发送码已复制", language: uiLanguage))
+                    copyWithToast(pairingInvite?.code ?? "", AppText.value("Send code copied", "发送码已复制", language: uiLanguage), language: uiLanguage)
                 } label: {
                     Label(AppText.value("Copy", "复制", language: uiLanguage), systemImage: "doc.on.doc")
                         .frame(minHeight: 34)
@@ -639,7 +657,8 @@ struct SendView: View {
                 let paths = selectedItems.map(\.path).joined(separator: "\n")
                 copyWithToast(
                     paths,
-                    AppText.value("Selected paths copied", "已复制所选路径", language: uiLanguage)
+                    AppText.value("Selected paths copied", "已复制所选路径", language: uiLanguage),
+                    language: uiLanguage
                 )
             } label: {
                 Label(AppText.value("Copy Selected Paths", "复制已选路径", language: uiLanguage), systemImage: "doc.on.doc")
@@ -759,6 +778,22 @@ struct SendView: View {
 
         do {
             let parsed = try parsePairingInvite(input: input)
+            if parsed.role == .send, let onSwitchToReceive {
+                onSwitchToReceive(
+                    input,
+                    SendSelectionSnapshot(
+                        items: selectedItems,
+                        sourceAccess: selectedSourceAccess,
+                        pendingSelectionID: selectedPendingSelectionID
+                    )
+                )
+                ToastCenter.shared.show(AppText.value(
+                    "Switching to Receive",
+                    "正在切换到接收",
+                    language: uiLanguage
+                ))
+                return nil
+            }
             guard parsed.role != .send else {
                 let message = AppText.value(
                     "Scan a receiver code or share your send code.",
@@ -792,6 +827,15 @@ struct SendView: View {
             ToastCenter.shared.show(message)
             return message
         }
+    }
+
+    private func applyInitialPairingInputIfNeeded() {
+        guard !didApplyInitialPairingInput,
+              let initialPairingInput,
+              !initialPairingInput.trimmed.isEmpty else { return }
+        didApplyInitialPairingInput = true
+        _ = applyPairingInput(initialPairingInput, source: .scan)
+        onInitialPairingInputConsumed?()
     }
 
     private func refreshPairingInviteIfNeeded() {
@@ -852,10 +896,7 @@ struct SendView: View {
             return AppText.value("Cancel Preparation", "取消准备", language: uiLanguage)
         }
         if viewModel.isBusy { return AppText.value("Managed in Activity", "请在活动中管理", language: uiLanguage) }
-        switch viewModel.phase {
-        case .completed, .canceled, .failed: return AppText.value("Send Again", "再次发送", language: uiLanguage)
-        default: return AppText.value("Send", "发送", language: uiLanguage)
-        }
+        return AppText.value("Send", "发送", language: uiLanguage)
     }
 
     private var isPhotoImporting: Bool {
@@ -1118,10 +1159,7 @@ struct SendView: View {
     }
     #endif
 
-    private func acknowledgedSourceAccess() -> AnyObject? {
-        #if os(iOS)
-        (selectedSourceAccess as? ShareDraftLease)?.acknowledge()
-        #endif
+    private func selectedSourceAccessForTransfer() -> AnyObject? {
         return selectedSourceAccess
     }
 
@@ -1216,7 +1254,7 @@ struct SendView: View {
     #endif
 
     private func startRoomSend(code: String, settings: EnvoixRuntimeSettings) {
-        let access = acknowledgedSourceAccess()
+        let access = selectedSourceAccessForTransfer()
         if sendSelectionRequiresManifest(selectedItems) {
             viewModel.startSendingManifestWithRoom(
                 selectedPaths: selectedItems.map(\.path),
@@ -1235,7 +1273,7 @@ struct SendView: View {
     }
 
     private func startInviteSend(invite: String, settings: EnvoixRuntimeSettings) {
-        let access = acknowledgedSourceAccess()
+        let access = selectedSourceAccessForTransfer()
         if sendSelectionRequiresManifest(selectedItems) {
             viewModel.startSendingManifestWithInvite(
                 selectedPaths: selectedItems.map(\.path),
@@ -1254,7 +1292,7 @@ struct SendView: View {
     }
 
     private func startTokenSend(token: String, settings: EnvoixRuntimeSettings) {
-        let access = acknowledgedSourceAccess()
+        let access = selectedSourceAccessForTransfer()
         if sendSelectionRequiresManifest(selectedItems) {
             viewModel.startSendingManifestWithToken(
                 selectedPaths: selectedItems.map(\.path),

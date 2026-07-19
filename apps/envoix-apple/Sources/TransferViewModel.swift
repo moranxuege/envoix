@@ -9,6 +9,7 @@ import EnvoixCore
 /// lets a view that observes only `AppModel` still update on transfer progress.
 struct ActivityMetrics {
     var speedBps: Double = 0
+    var etaSeconds: Double?
     var avgBps: Double = 0
     var peakBps: Double = 0
     var speedHistory: [Double] = []
@@ -25,6 +26,20 @@ func mergedActivityDiagnosticLog(
 }
 
 enum ActivityProjectionPolicy {
+    static func pendingCount(_ records: [FfiTransferActivityRecord]) -> Int {
+        records.lazy.filter { isPending($0.state) }.count
+    }
+
+    static func isPending(_ state: FfiTransferActivityState) -> Bool {
+        switch state {
+        case .queued, .binding, .waitingForPeer, .pairing, .connecting, .transferring,
+                .verifying, .publishing, .unconfirmed, .paused:
+            return true
+        case .completed, .failed, .canceled, .unknown:
+            return false
+        }
+    }
+
     static func shouldAccept(
         _ incoming: FfiTransferActivityRecord,
         replacing current: FfiTransferActivityRecord
@@ -100,14 +115,18 @@ private struct ReceivePublication {
 final class AppModel: ObservableObject {
     static let shared = AppModel()
     private static let commandSnapshotRefreshDelays: [TimeInterval] = [0.2, 1.0]
+    private static let activityRemovalPollInterval: TimeInterval = 0.1
+    private static let activityRemovalTimeout: TimeInterval = 5
     #if DEBUG
     private static let hostedTestRecordsDirectoryEnvironmentKey = "ENVOIX_APPLE_HOSTED_TEST_RECORDS_DIR"
+    private static let stalledActivityRemovalUITestArgument = "--ui-testing-stalled-activity-removal"
     private static let macOSHostedTestArgument = "--macos-hosted-testing"
     #endif
 
     let receive = TransferViewModel()
     let send = TransferViewModel()
     @Published private(set) var activities: [FfiTransferActivityRecord] = []
+    @Published private(set) var pendingActivityRemovalIDs = Set<String>()
     @Published private(set) var manifestActivities: [String: FfiManifestActivityRecord] = [:]
     @Published private(set) var activityMetrics: [String: ActivityMetrics] = [:]
     @Published private(set) var transferCacheSummary = TransferCacheSummary()
@@ -119,6 +138,9 @@ final class AppModel: ObservableObject {
     private var transferEventLinesByActivityID: [String: [String]] = [:]
     private var transferLogByActivityID: [String: [String]] = [:]
     private var activityResourceAccess: [String: AnyObject] = [:]
+    #if os(macOS)
+    private var appLifetimeDestinationAccess: [String: SecurityScopedResourceAccess] = [:]
+    #endif
     private var receivePublications: [String: ReceivePublication] = [:]
     private var durableSessions: [String: DurableEnvoixSession] = [:]
     private var durableManifestSessions: [String: DurableEnvoixManifestSession] = [:]
@@ -171,7 +193,11 @@ final class AppModel: ObservableObject {
                 .store(in: &cancellables)
         }
         #if DEBUG
-        if ProcessInfo.processInfo.arguments.contains("--ui-testing-activity-fixtures") {
+        if ProcessInfo.processInfo.arguments.contains("--ui-testing-received-folder-fixture") {
+            let fixture = PreviewFixtures.completedFolderReceiveFixture
+            activities = [fixture.activity]
+            manifestActivities = [fixture.activity.activityId: fixture.manifest]
+        } else if ProcessInfo.processInfo.arguments.contains("--ui-testing-activity-fixtures") {
             activities = PreviewFixtures.activityRecords
             activityMetrics = PreviewFixtures.activityMetrics
         } else {
@@ -299,12 +325,135 @@ final class AppModel: ObservableObject {
         return false
     }
 
-    func removeActivity(_ activityID: String) {
+    @discardableResult
+    func removeActivity(_ activityID: String) -> Bool {
+        guard activities.contains(where: { $0.activityId == activityID }),
+              !pendingActivityRemovalIDs.contains(activityID) else { return false }
+
+        pendingActivityRemovalIDs.insert(activityID)
         removedActivityIDs.insert(activityID)
-        _ = durableManifestSessions.removeValue(forKey: activityID)?.remove()
-        _ = durableSessions.removeValue(forKey: activityID)?.remove()
+        guard enqueueActivityRemoval(activityID) else {
+            pendingActivityRemovalIDs.remove(activityID)
+            removedActivityIDs.remove(activityID)
+            return false
+        }
+
+        verifyActivityRemoval(
+            activityID,
+            deadline: Date().addingTimeInterval(Self.activityRemovalTimeout)
+        )
+        return true
+    }
+
+    private func enqueueActivityRemoval(_ activityID: String) -> Bool {
+        if durableManifestSessions[activityID]?.remove() == true
+            || durableSessions[activityID]?.remove() == true {
+            return true
+        }
+
+        durableManifestSessions.removeValue(forKey: activityID)
+        durableSessions.removeValue(forKey: activityID)
+        do {
+            if try listDurableManifestRecords(recordsDir: recordsDirectory.path)
+                .contains(where: { $0.activity.activityId == activityID }) {
+                let observer = AppleManifestObserver(
+                    viewModel: nil,
+                    appModel: self,
+                    activityID: activityID
+                )
+                let session = try restoreDurableManifestTransferV2(
+                    activityId: activityID,
+                    recordsDir: recordsDirectory.path,
+                    observer: observer
+                )
+                durableManifestSessions[activityID] = session
+                return session.remove()
+            }
+
+            if try listDurableTransferRecords(recordsDir: recordsDirectory.path)
+                .contains(where: { $0.activityId == activityID }) {
+                let observer = Observer(
+                    nil,
+                    appModel: self,
+                    operationID: UUID(),
+                    activityID: activityID
+                )
+                let session = try restoreDurableTransferV2(
+                    activityId: activityID,
+                    recordsDir: recordsDirectory.path,
+                    observer: observer,
+                    mailbox: mailboxObserver
+                )
+                durableSessions[activityID] = session
+                return session.remove()
+            }
+
+            return true
+        } catch {
+            handleCoreStatus(
+                "Activity removal could not restore durable state: \(error.localizedDescription)",
+                activityID: activityID
+            )
+            return false
+        }
+    }
+
+    private func verifyActivityRemoval(_ activityID: String, deadline: Date) {
+        guard pendingActivityRemovalIDs.contains(activityID) else { return }
+        let isPersisted = persistedActivityPresence(activityID)
+        if isPersisted == false {
+            finishActivityRemoval(activityID)
+            return
+        }
+        if Date() < deadline {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.activityRemovalPollInterval) { [weak self] in
+                self?.verifyActivityRemoval(activityID, deadline: deadline)
+            }
+            return
+        }
+
+        pendingActivityRemovalIDs.remove(activityID)
+        removedActivityIDs.remove(activityID)
+        durableManifestSessions.removeValue(forKey: activityID)
+        durableSessions.removeValue(forKey: activityID)
+        syncActivitySnapshots()
+        Task { @MainActor in
+            ToastCenter.shared.show(AppText.value(
+                "Activity could not be removed. It was kept so you can try again.",
+                "活动未能删除，已保留以便重试。",
+                language: UserDefaults.standard.string(forKey: "envoix.language") ?? "en"
+            ))
+        }
+    }
+
+    private func persistedActivityPresence(_ activityID: String) -> Bool? {
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains(Self.stalledActivityRemovalUITestArgument) {
+            return true
+        }
+        #endif
+        do {
+            if try listDurableManifestRecords(recordsDir: recordsDirectory.path)
+                .contains(where: { $0.activity.activityId == activityID }) {
+                return true
+            }
+            return try listDurableTransferRecords(recordsDir: recordsDirectory.path)
+                .contains(where: { $0.activityId == activityID })
+        } catch {
+            handleCoreStatus(
+                "Activity removal verification failed: \(error.localizedDescription)",
+                activityID: activityID
+            )
+            return nil
+        }
+    }
+
+    private func finishActivityRemoval(_ activityID: String) {
+        discardActivityResourceAccess(for: activityID)
+        pendingActivityRemovalIDs.remove(activityID)
+        durableManifestSessions.removeValue(forKey: activityID)
+        durableSessions.removeValue(forKey: activityID)
         manifestActivities.removeValue(forKey: activityID)
-        activityResourceAccess.removeValue(forKey: activityID)
         let publication = receivePublications.removeValue(forKey: activityID)
         if let publication,
            let path = publication.completedRecord?.completedFilePath,
@@ -376,10 +525,10 @@ final class AppModel: ObservableObject {
         settings: EnvoixRuntimeSettings,
         request: FfiTransferRequest,
         prepared: FfiPreparedManifestSend,
-        observer: ManifestTransferObserver
+        observer: ManifestTransferObserverV2
     ) throws -> DurableEnvoixManifestSession {
         try FileManager.default.createDirectory(at: recordsDirectory, withIntermediateDirectories: true)
-        let session = try startDurableManifestSend(
+        let session = try startDurableManifestSendV2(
             settings: settings,
             request: request,
             prepared: prepared,
@@ -394,10 +543,10 @@ final class AppModel: ObservableObject {
     func startDurableManifestReceiveSession(
         settings: EnvoixRuntimeSettings,
         request: FfiTransferRequest,
-        observer: ManifestTransferObserver
+        observer: ManifestTransferObserverV2
     ) throws -> DurableEnvoixManifestSession {
         try FileManager.default.createDirectory(at: recordsDirectory, withIntermediateDirectories: true)
-        let session = try startDurableManifestReceive(
+        let session = try startDurableManifestReceiveV2(
             settings: settings,
             request: request,
             recordsDir: recordsDirectory.path,
@@ -468,7 +617,7 @@ final class AppModel: ObservableObject {
                     activityID: activityID
                 )
                 do {
-                    let session = try restoreDurableManifestTransfer(
+                    let session = try restoreDurableManifestTransferV2(
                         activityId: activityID,
                         recordsDir: recordsDirectory.path,
                         observer: observer
@@ -652,7 +801,7 @@ final class AppModel: ObservableObject {
         if ActivityProjectionPolicy.isTerminal(record.state) {
             let preservesResumeData = record.state == .failed && record.retryable
             if !preservesResumeData {
-                activityResourceAccess.removeValue(forKey: record.activityId)
+                discardActivityResourceAccess(for: record.activityId)
             }
             if record.direction == .receive,
                record.state == .completed
@@ -687,6 +836,7 @@ final class AppModel: ObservableObject {
         if let lease = access as? ShareDraftLease {
             do {
                 try lease.bind(to: activityID)
+                lease.acknowledge()
             } catch {
                 handleCoreStatus(
                     "Share source claim failed: \(error.localizedDescription)",
@@ -696,6 +846,28 @@ final class AppModel: ObservableObject {
         }
         #endif
         activityResourceAccess[activityID] = access
+    }
+
+    #if os(macOS)
+    func retainDestinationAccessForAppLifetime(_ access: SecurityScopedResourceAccess?) {
+        guard let access else { return }
+        appLifetimeDestinationAccess[access.url.standardizedFileURL.path] = access
+    }
+    #endif
+
+    private func discardActivityResourceAccess(for activityID: String) {
+        guard let access = activityResourceAccess.removeValue(forKey: activityID) else { return }
+        #if os(iOS)
+        guard let lease = access as? ShareDraftLease else { return }
+        do {
+            try lease.discard()
+        } catch {
+            handleCoreStatus(
+                "Share source cleanup failed: \(error.localizedDescription)",
+                activityID: activityID
+            )
+        }
+        #endif
     }
 
     func registerReceivePublication(
@@ -1039,6 +1211,12 @@ final class AppModel: ObservableObject {
         var metrics = activityMetrics[record.activityId] ?? ActivityMetrics()
         let liveSpeed = record.state == .transferring ? speedBps : 0
         metrics.speedBps = liveSpeed
+        metrics.etaSeconds = estimatedRemainingSeconds(
+            total: record.totalBytes,
+            transferred: record.bytesTransferred,
+            bytesPerSecond: liveSpeed,
+            isStable: liveSpeed > 0
+        )
         metrics.avgBps = averageBps(for: record)
         if liveSpeed > 0 {
             metrics.peakBps = max(metrics.peakBps, liveSpeed)
@@ -1061,6 +1239,10 @@ final class AppModel: ObservableObject {
     }
 
     private func averageBps(for record: FfiTransferActivityRecord) -> Double {
+        guard record.bytesResumed == 0,
+              manifestActivities[record.activityId]?.entryResults.contains(where: {
+                  $0.status == .skippedIdentical
+              }) != true else { return 0 }
         let endMs = record.completedAtMs > 0 ? record.completedAtMs : record.updatedAtMs
         guard record.startedAtMs > 0, endMs > record.startedAtMs, record.bytesTransferred > 0 else { return 0 }
         return Double(record.bytesTransferred) * 1000 / Double(endMs - record.startedAtMs)
@@ -1107,7 +1289,13 @@ final class AppModel: ObservableObject {
         case .unconfirmed:
             message = "delivery unconfirmed"
         case .completed:
-            message = "completed · \(byteString(record.bytesTransferred))"
+            if isFullyResumedCompletion(record) {
+                message = record.direction == .send
+                    ? "completed · already at receiver · \(byteString(record.totalBytes))"
+                    : "completed · already present · \(byteString(record.totalBytes))"
+            } else {
+                message = "completed · \(byteString(record.bytesTransferred))"
+            }
         case .failed:
             message = record.diagnosticMessage.isEmpty ? "failed" : "failed · \(record.diagnosticMessage)"
         case .paused:
@@ -1146,6 +1334,7 @@ final class TransferViewModel: ObservableObject {
     @Published var eventLog: [String] = []
     @Published var bytesPerSec: Double = 0    // rolling average, 0 until measurable
     @Published var completedFileURL: URL?     // receiver only: where the file landed
+    @Published var completedItemURLs: [URL] = []
     @Published private var fallbackFailure: FfiTransferFailure?
     @Published var transferEvents: [FfiTransferEvent] = []
     @Published var transferActivity: FfiTransferActivityRecord?
@@ -1235,10 +1424,14 @@ final class TransferViewModel: ObservableObject {
         total > 0 ? Double(transferred) / Double(total) : 0
     }
 
-    /// Seconds left at the current average rate, or nil if not yet estimable.
+    /// Seconds left after the rolling estimator has seen enough real byte deltas.
     var etaSeconds: Double? {
-        guard bytesPerSec > 0, total > transferred else { return nil }
-        return Double(total - transferred) / bytesPerSec
+        estimatedRemainingSeconds(
+            total: total,
+            transferred: transferred,
+            bytesPerSecond: bytesPerSec,
+            isStable: rate.isStable
+        )
     }
 
     var isBusy: Bool {
@@ -1778,6 +1971,15 @@ final class TransferViewModel: ObservableObject {
         }
     }
 
+    /// Manifest V2 reports aggregate progress through structured events rather
+    /// than the legacy `onProgress` callback. Feed only those byte counters into
+    /// the estimator; canonical phase/state still comes from Activity snapshots.
+    func handleManifestTransferEvent(_ event: FfiTransferEvent) {
+        handleTransferEvent(event)
+        guard event.kind == .progress, event.totalBytes > 0 else { return }
+        handleProgress(event.bytesTransferred, event.totalBytes)
+    }
+
     func handleTransferActivity(
         _ record: FfiTransferActivityRecord,
         manifest: FfiManifestActivityRecord? = nil
@@ -1786,11 +1988,15 @@ final class TransferViewModel: ObservableObject {
         if record.state == .completed,
            record.direction == .receive,
            !record.completedFilePath.isEmpty {
+            completedItemURLs = manifest.map(availableCompletedManifestItemURLs) ?? []
             completedFileURL = manifest.flatMap(availableCompletedManifestURL)
                 ?? availableCompletedFileURL(
                     path: record.completedFilePath,
                     expectedBytes: record.bytesTransferred
                 )
+            if completedItemURLs.isEmpty, manifest == nil, let completedFileURL {
+                completedItemURLs = [completedFileURL]
+            }
             if completedFileURL == nil {
                 statusText = AppText.value(
                     "Transfer confirmed, but the saved file is not currently available.",
@@ -1807,6 +2013,7 @@ final class TransferViewModel: ObservableObject {
         }
         syncPhase(with: record)
         releasePresentationSlotIfPaused(record)
+        releasePresentationSlotIfTerminal(record)
     }
 
     func handleManifestActivity(_ record: FfiManifestActivityRecord) {
@@ -1849,6 +2056,9 @@ final class TransferViewModel: ObservableObject {
                 path: URL(fileURLWithPath: dir).appendingPathComponent(fileName).path,
                 expectedBytes: bytes
             )
+            if let completedFileURL {
+                completedItemURLs = [completedFileURL]
+            }
         }
         resourceAccess = nil
         if transferActivity == nil {
@@ -1928,6 +2138,7 @@ final class TransferViewModel: ObservableObject {
         peerAddress = ""
         bytesPerSec = 0
         completedFileURL = nil
+        completedItemURLs = []
         fallbackFailure = nil
         transferActivity = nil
         isPreparingManifest = false
@@ -1945,6 +2156,16 @@ final class TransferViewModel: ObservableObject {
 
     private func releasePresentationSlotIfPaused(_ record: FfiTransferActivityRecord) {
         guard record.state == .paused, record.activityId == currentActivityID else { return }
+        appModel?.snapshotDiagnostics(from: self, activityID: record.activityId)
+        operationID = UUID()
+        session = nil
+        manifestSession = nil
+        reset()
+    }
+
+    private func releasePresentationSlotIfTerminal(_ record: FfiTransferActivityRecord) {
+        guard ActivityProjectionPolicy.isTerminal(record.state),
+              record.activityId == currentActivityID else { return }
         appModel?.snapshotDiagnostics(from: self, activityID: record.activityId)
         operationID = UUID()
         session = nil
@@ -1977,30 +2198,82 @@ final class TransferViewModel: ObservableObject {
             bytesPerSec = 0
         case .completed:
             bytesPerSec = 0
+            if isFullyResumedCompletion(record) {
+                statusText = record.direction == .send
+                    ? AppText.value("Receiver already has this file; no data was sent", "对方已有此文件，本次未发送数据", language: displayLanguage)
+                    : AppText.value("File already exists; no data was received", "文件已存在，本次未接收数据", language: displayLanguage)
+            }
         case .failed, .unknown:
             break
         }
     }
 }
 
-/// Rolling-window throughput estimate: average speed over roughly the last few
-/// seconds, which absorbs short bursts/stalls without lagging the whole transfer.
-private struct RateTracker {
+func estimatedRemainingSeconds(
+    total: UInt64,
+    transferred: UInt64,
+    bytesPerSecond: Double,
+    isStable: Bool
+) -> Double? {
+    guard isStable,
+          total > transferred,
+          bytesPerSecond.isFinite,
+          bytesPerSecond > 0 else { return nil }
+    let seconds = Double(total - transferred) / bytesPerSecond
+    guard seconds.isFinite, seconds >= 0, seconds <= 7 * 24 * 60 * 60 else { return nil }
+    return seconds
+}
+
+/// A short rolling window plus light smoothing. The first cumulative value is
+/// only a baseline, so resumed/skipped bytes are never reported as wire speed.
+struct RateTracker {
     private struct Sample { let time: TimeInterval; let bytes: UInt64 }
     private var samples: [Sample] = []
-    private let window: TimeInterval = 3
+    private var smoothedBytesPerSecond: Double = 0
+    private var positiveDeltaCount = 0
+    private let window: TimeInterval = 4
+    private let minimumObservationDuration: TimeInterval = 0.8
+    private let smoothingFactor = 0.35
+    private(set) var isStable = false
 
-    mutating func reset() { samples.removeAll() }
+    mutating func reset() {
+        samples.removeAll()
+        smoothedBytesPerSecond = 0
+        positiveDeltaCount = 0
+        isStable = false
+    }
 
     /// Records a cumulative byte count, returns the current bytes/sec estimate.
-    mutating func record(_ bytes: UInt64) -> Double {
-        let now = ProcessInfo.processInfo.systemUptime
+    mutating func record(
+        _ bytes: UInt64,
+        at now: TimeInterval = ProcessInfo.processInfo.systemUptime
+    ) -> Double {
+        guard now.isFinite else { return 0 }
+        if let last = samples.last {
+            guard now > last.time, bytes >= last.bytes else {
+                if bytes < last.bytes || now < last.time {
+                    reset()
+                    samples.append(Sample(time: now, bytes: bytes))
+                } else if bytes > last.bytes {
+                    samples[samples.count - 1] = Sample(time: last.time, bytes: bytes)
+                }
+                return 0
+            }
+            if bytes > last.bytes {
+                positiveDeltaCount += 1
+            }
+        }
         samples.append(Sample(time: now, bytes: bytes))
         samples.removeAll { now - $0.time > window }
         guard let first = samples.first, samples.count > 1 else { return 0 }
         let dt = now - first.time
-        guard dt > 0 else { return 0 }
-        return Double(bytes - first.bytes) / dt
+        guard dt >= minimumObservationDuration, bytes > first.bytes else { return 0 }
+        let raw = Double(bytes - first.bytes) / dt
+        smoothedBytesPerSecond = smoothedBytesPerSecond > 0
+            ? smoothingFactor * raw + (1 - smoothingFactor) * smoothedBytesPerSecond
+            : raw
+        isStable = positiveDeltaCount >= 2
+        return isStable ? smoothedBytesPerSecond : 0
     }
 }
 
@@ -2139,9 +2412,9 @@ final class Observer: TransferObserver, @unchecked Sendable {
     }
 }
 
-/// Manifest snapshots already contain the aggregate Activity and item-level
-/// progress, so one callback updates both the app-wide history and active sheet.
-final class AppleManifestObserver: ManifestTransferObserver, @unchecked Sendable {
+/// Manifest snapshots own canonical Activity state; structured events are
+/// retained separately for diagnostics and never form a second state machine.
+final class AppleManifestObserver: ManifestTransferObserverV2, @unchecked Sendable {
     private weak var viewModel: TransferViewModel?
     private weak var appModel: AppModel?
     private let activityID: String
@@ -2150,6 +2423,15 @@ final class AppleManifestObserver: ManifestTransferObserver, @unchecked Sendable
         self.viewModel = viewModel
         self.appModel = appModel
         self.activityID = activityID
+    }
+
+    func onManifestEvent(event: FfiTransferEvent) {
+        DispatchQueue.main.async { [weak viewModel, weak appModel, activityID] in
+            appModel?.handleCoreEvent(event, activityID: activityID)
+            if let viewModel, viewModel.activeActivityID == activityID {
+                viewModel.handleManifestTransferEvent(event)
+            }
+        }
     }
 
     func onManifestActivity(record: FfiManifestActivityRecord) {

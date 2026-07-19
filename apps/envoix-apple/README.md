@@ -31,7 +31,11 @@ This README only documents current build and use instructions.
    This writes `crates/envoix-ffi/EnvoixCore/` (xcframework + Swift bindings).
    It is git-ignored and must be regenerated locally. The script fixes the
    deployment targets at macOS 13 and iOS 16, preserves reviewed UniFFI binding
-   files, and configures the Apple framework linker settings.
+   files, and configures the Apple framework linker settings. It builds the
+   Rust core with the `release` profile by default so Debug Xcode app builds do
+   not benchmark an unoptimized transfer engine. For Rust-core debugging only,
+   override this explicitly with
+   `ENVOIX_APPLE_CORE_PROFILE=debug scripts/build-apple-core.sh`.
 
 2. Generate the Xcode project and run:
 
@@ -129,11 +133,12 @@ Envoix presents the normal Send sheet while retaining security-scoped access to
 one file or folder supplied by that route.
 
 For Photos and generic share sheets, choose one or more files, images, or videos
-and select the **Envoix** Share Extension. The extension copies each selected
-representation directly into the shared App Group. Tap **Done**, then open
-Envoix manually; when the app becomes active it imports the pending draft and
-presents the Send sheet. iOS does not allow a Share Extension to launch its
-containing app.
+and select the **Envoix** Share Extension. The extension materializes each
+selected representation directly into the shared App Group, using an APFS
+copy-on-write clone when available and a regular copy as the fallback. Tap
+**Done**, then open Envoix manually; when the app becomes active it imports the
+pending draft and presents the Send sheet. iOS does not allow a Share Extension
+to launch its containing app.
 
 One item uses the compatible single-file path; multiple items use `ManifestV1`.
 The 10,000-item boundary comes from the Manifest protocol and is not a practical
@@ -584,7 +589,9 @@ Shared Token pairing mode remains compatibility-only and is no longer exposed
 in the Apple UI. The legacy `envoix:…` direct invite path also remains as a
 compatibility fallback rather than part of the normal UI.
 
-On macOS, the receive folder defaults to `~/Downloads` until you pick another.
+On macOS, the receive UI suggests `~/Downloads`, then asks you to select the
+folder once before the first receive so macOS can persist access. You can pick
+another folder instead.
 On iOS, Envoix defaults to its Files-visible Documents/Downloads folder and
 remembers a custom Files folder only after you choose one. The first transfer
 may trigger a local-network access prompt; allow it or LAN discovery/transfer
@@ -617,8 +624,9 @@ Quality-of-life:
   drag-and-drop accepts multiple roots, while *Paste Path* imports one file or
   folder path from the clipboard.
 - During a transfer the status line shows live throughput and an ETA based on a
-  short rolling average; on macOS completion includes *Reveal in Finder* and a
-  copyable absolute path.
+  short rolling average. A completed multi-item receive reveals every item in
+  Finder on macOS; on iOS it opens a received-items list where folders can be
+  browsed recursively and each file can be previewed or shared individually.
 - A **menu-bar item** shows transfer status and an *Open Envoix* action; closing
   the main window keeps the app running there. The window is resizable and
   supports full screen.

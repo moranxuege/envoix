@@ -5,6 +5,9 @@ final class EnvoixIOSAppUITests: XCTestCase {
     private static let rendezvousBroker = "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445"
     private static let relayURL = "https://envoix.chkxwlyh.us:8444"
     private static let crossDeviceTimeout: TimeInterval = 180
+    private static let physicalNearbyTimeout: TimeInterval = 90
+    private static let defaultPhysicalNearbyHold: TimeInterval = 20
+    private static let maximumPhysicalNearbyHold: TimeInterval = 120
     private static let iOS26DocumentPickerOpenPosition = CGVector(dx: 0.86, dy: 0.11)
 
     override func setUpWithError() throws {
@@ -65,6 +68,126 @@ final class EnvoixIOSAppUITests: XCTestCase {
         XCTAssertTrue(app.buttons["receive_start_button"].isHittable)
     }
 
+    func testNearbyDiscoveryPageMergesFixtureSources() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["--ui-testing", "--ui-testing-discovery-fixtures"]
+        app.launch()
+        dismissSheetIfNeeded(app)
+
+        let nearbyEntry = app.buttons["home_nearby"]
+        XCTAssertTrue(nearbyEntry.waitForExistence(timeout: 8))
+        nearbyEntry.tap()
+
+        XCTAssertTrue(app.descendants(matching: .any)["nearby_screen"].waitForExistence(timeout: 5))
+        for identifier in ["nearby_provider_bluetooth", "nearby_provider_mdns", "nearby_provider_wifi_aware"] {
+            XCTAssertTrue(app.descendants(matching: .any)[identifier].exists, identifier)
+        }
+        XCTAssertTrue(app.descendants(matching: .any)["nearby_peer_card"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Nearby test device"].exists)
+        XCTAssertTrue(app.staticTexts["BLE"].exists)
+        XCTAssertTrue(app.staticTexts["mDNS"].exists)
+
+        app.buttons["nearby_peer_card"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["nearby_pairing_context"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.descendants(matching: .any)["nearby_pairing_security"].exists)
+        XCTAssertTrue(app.buttons["nearby_pairing_send"].exists)
+        XCTAssertTrue(app.buttons["nearby_pairing_receive"].exists)
+
+        app.buttons["nearby_pairing_receive"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["receive_pairing_guidance"].waitForExistence(timeout: 3))
+    }
+
+    func testPhysicalNearbyDiscoveryFindsAndroid() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["ENVOIX_PHYSICAL_NEARBY"] == "1" else {
+            throw XCTSkip("Requires an explicit physical Android/iPhone discovery run")
+        }
+
+        let expectedName = (environment["ENVOIX_PHYSICAL_NEARBY_ANDROID_NAME"] ?? "25060RK16C")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !expectedName.isEmpty else {
+            XCTFail("ENVOIX_PHYSICAL_NEARBY_ANDROID_NAME must be non-empty")
+            return
+        }
+        let rawHoldSeconds = environment["ENVOIX_PHYSICAL_NEARBY_HOLD_SECONDS"]
+            ?? String(Self.defaultPhysicalNearbyHold)
+        guard let holdSeconds = TimeInterval(rawHoldSeconds),
+              (0...Self.maximumPhysicalNearbyHold).contains(holdSeconds) else {
+            XCTFail("ENVOIX_PHYSICAL_NEARBY_HOLD_SECONDS must be between 0 and 120")
+            return
+        }
+        let app = XCUIApplication()
+        app.launchArguments += ["--ui-testing", "-envoix.language", "en"]
+
+        let permissionMonitor = addUIInterruptionMonitor(withDescription: "Nearby permissions") { alert in
+            for label in ["Allow", "允许", "OK", "好"] where alert.buttons[label].exists {
+                alert.buttons[label].tap()
+                return true
+            }
+            return false
+        }
+        defer { removeUIInterruptionMonitor(permissionMonitor) }
+
+        app.launch()
+        app.tap()
+        dismissSheetIfNeeded(app)
+
+        let nearbyEntry = app.buttons["home_nearby"]
+        XCTAssertTrue(nearbyEntry.waitForExistence(timeout: 8))
+        nearbyEntry.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["nearby_screen"].waitForExistence(timeout: 8))
+
+        let card = app.descendants(matching: .any)
+            .matching(identifier: "nearby_peer_card")
+            .containing(.staticText, identifier: expectedName)
+            .firstMatch
+        let permissionPump = app.staticTexts["NEARBY DEVICES"]
+        let deadline = Date().addingTimeInterval(Self.physicalNearbyTimeout)
+        var converged = false
+        repeat {
+            if permissionPump.exists {
+                permissionPump.tap()
+            }
+            let labels = card.staticTexts
+            if card.exists, labels["BLE"].exists, labels["mDNS"].exists {
+                converged = true
+                break
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+        } while Date() < deadline
+
+        guard converged else {
+            attachFailureState(of: app, named: "physical-nearby-discovery")
+            XCTFail(
+                "Android discovery card did not converge on BLE and mDNS; "
+                    + "ensure both devices share the same Wi-Fi"
+            )
+            return
+        }
+
+        let evidence = XCTAttachment(screenshot: app.screenshot())
+        evidence.name = "physical-nearby-android-ble-mdns"
+        evidence.lifetime = .keepAlways
+        add(evidence)
+        FileHandle.standardError.write(Data("ENVOIX_PHYSICAL_NEARBY_READY\n".utf8))
+        if environment["ENVOIX_PHYSICAL_NEARBY_EXPECT_INVITE"] == "1" {
+            let pairingContext = app.descendants(matching: .any)["nearby_pairing_context"]
+            XCTAssertTrue(
+                pairingContext.waitForExistence(timeout: holdSeconds),
+                "Android BLE invitation did not open the iPhone pairing confirmation"
+            )
+            XCTAssertTrue(app.buttons["nearby_pairing_send"].isEnabled)
+            XCTAssertFalse(app.buttons["nearby_pairing_receive"].isEnabled)
+            let inviteEvidence = XCTAttachment(screenshot: app.screenshot())
+            inviteEvidence.name = "physical-android-to-ios-ble-invite"
+            inviteEvidence.lifetime = .keepAlways
+            add(inviteEvidence)
+            FileHandle.standardError.write(Data("ENVOIX_PHYSICAL_BLE_INVITE_RECEIVED\n".utf8))
+        } else {
+            RunLoop.current.run(until: Date().addingTimeInterval(holdSeconds))
+        }
+    }
+
     func testScannerAppliesReceiverQRToSendRoomCode() throws {
         let roomCode = "741205-silver-forest"
         let app = makeScannerTestApp(payload: pairingPayload(code: roomCode, role: "receive"))
@@ -103,6 +226,46 @@ final class EnvoixIOSAppUITests: XCTestCase {
         let roomCodeField = app.textFields["receive_join_room_code_input"]
         XCTAssertTrue(roomCodeField.waitForExistence(timeout: 5))
         XCTAssertEqual(roomCodeField.value as? String, roomCode)
+    }
+
+    func testScannerSwitchesSendScreenToReceiveForSenderQR() throws {
+        let roomCode = "741205-silver-forest"
+        let app = makeScannerTestApp(payload: pairingPayload(code: roomCode, role: "send"))
+
+        app.launch()
+        dismissSheetIfNeeded(app)
+        openInjectedScanner(
+            homeButton: "home_send",
+            scrollView: "send_content_scroll",
+            scannerButton: "send_scan_receiver_qr",
+            in: app
+        )
+        app.buttons["qr_scanner_test_payload"].tap()
+
+        let receiveCodeField = app.textFields["receive_join_room_code_input"]
+        XCTAssertTrue(receiveCodeField.waitForExistence(timeout: 8))
+        XCTAssertEqual(receiveCodeField.value as? String, roomCode)
+        XCTAssertFalse(app.scrollViews["send_content_scroll"].exists)
+    }
+
+    func testScannerSwitchesReceiveScreenToSendForReceiverQR() throws {
+        let roomCode = "741205-silver-forest"
+        let app = makeScannerTestApp(payload: pairingPayload(code: roomCode, role: "receive"))
+
+        app.launch()
+        dismissSheetIfNeeded(app)
+        openInjectedScanner(
+            homeButton: "home_receive",
+            scrollView: "receive_content_scroll",
+            scannerButton: "receive_scan_sender_qr",
+            in: app
+        )
+        app.buttons["qr_scanner_test_payload"].tap()
+
+        let sendCodeField = app.textFields["send_room_code_input"]
+        XCTAssertTrue(sendCodeField.waitForExistence(timeout: 8))
+        XCTAssertEqual(sendCodeField.value as? String, roomCode)
+        XCTAssertFalse(app.scrollViews["receive_content_scroll"].exists)
     }
 
     func testScannerKeepsInvalidQRVisible() throws {
@@ -306,6 +469,71 @@ final class EnvoixIOSAppUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["activity_id_ui-transferring"].exists)
     }
 
+    func testCompletedReceiveOffersOpenFileAction() throws {
+        let app = XCUIApplication()
+        app.launchArguments += [
+            "--ui-testing",
+            "--ui-testing-activity-fixtures",
+            "--ui-testing-start-activity",
+        ]
+        app.launch()
+
+        let details = app.buttons["activity_details_ui-completed"]
+        for _ in 0..<6 where !details.isHittable {
+            app.swipeUp()
+        }
+        XCTAssertTrue(details.waitForExistence(timeout: 3))
+        details.tap()
+
+        let openFile = app.buttons["activity_open_received_ui-completed"]
+        for _ in 0..<6 where !openFile.isHittable {
+            app.swipeUp()
+        }
+        XCTAssertTrue(openFile.waitForExistence(timeout: 3))
+        XCTAssertTrue(openFile.isHittable)
+    }
+
+    func testCompletedFolderCanBeBrowsedRecursively() throws {
+        let app = XCUIApplication()
+        app.launchArguments += [
+            "--ui-testing",
+            "--ui-testing-received-folder-fixture",
+            "--ui-testing-start-activity",
+        ]
+        app.launch()
+
+        let details = app.buttons["activity_details_ui-completed-folder"]
+        for _ in 0..<6 where !details.isHittable {
+            app.swipeUp()
+        }
+        XCTAssertTrue(details.waitForExistence(timeout: 3))
+        details.tap()
+
+        let openItems = app.buttons["activity_open_received_ui-completed-folder"]
+        for _ in 0..<6 where !openItems.isHittable {
+            app.swipeUp()
+        }
+        XCTAssertTrue(openItems.waitForExistence(timeout: 3))
+        openItems.tap()
+
+        let album = app.buttons["received_folder_open_Album"]
+        XCTAssertTrue(album.waitForExistence(timeout: 3))
+        XCTAssertTrue(album.isHittable)
+        album.tap()
+        XCTAssertTrue(app.navigationBars["Album"].waitForExistence(timeout: 3))
+
+        let nested = app.buttons["received_folder_open_Nested"]
+        XCTAssertTrue(nested.waitForExistence(timeout: 3))
+        XCTAssertTrue(nested.isHittable)
+        nested.tap()
+        XCTAssertTrue(app.navigationBars["Nested"].waitForExistence(timeout: 3))
+
+        let note = app.buttons["received_item_open_note.txt"]
+        XCTAssertTrue(note.waitForExistence(timeout: 3))
+        XCTAssertTrue(note.isHittable)
+        XCTAssertEqual(note.label, "note.txt")
+    }
+
     func testCancellingRecoversWhenStateAcknowledgementStalls() throws {
         let app = XCUIApplication()
         app.launchArguments += [
@@ -325,6 +553,31 @@ final class EnvoixIOSAppUITests: XCTestCase {
         XCTAssertTrue(cancel.waitForExistence(timeout: 7))
         XCTAssertFalse(pending.exists)
         XCTAssertTrue(cancel.isHittable)
+    }
+
+    func testDeletionKeepsActivityVisibleWhenDurableAcknowledgementStalls() throws {
+        let app = XCUIApplication()
+        app.launchArguments += [
+            "--ui-testing",
+            "--ui-testing-activity-fixtures",
+            "--ui-testing-start-activity",
+            "--ui-testing-stalled-activity-removal",
+        ]
+        app.launch()
+
+        let title = app.descendants(matching: .any)["activity_title_ui-completed"]
+        let delete = app.buttons["activity_delete_ui-completed"]
+        XCTAssertTrue(title.waitForExistence(timeout: 8))
+        XCTAssertTrue(delete.waitForExistence(timeout: 3))
+        delete.tap()
+
+        let pending = app.descendants(matching: .any)["activity_removing_ui-completed"]
+        XCTAssertTrue(pending.waitForExistence(timeout: 2))
+        XCTAssertTrue(title.exists)
+        XCTAssertTrue(delete.waitForExistence(timeout: 7))
+        XCTAssertTrue(title.exists)
+        XCTAssertFalse(pending.exists)
+        XCTAssertTrue(delete.isHittable)
     }
 
     func testSingleHomeOpensActivitySheet() throws {
@@ -421,6 +674,28 @@ final class EnvoixIOSAppUITests: XCTestCase {
         XCTAssertTrue(app.buttons["mobile_sheet_done"].waitForExistence(timeout: 8))
         let selection = app.descendants(matching: .any)["send_selection_summary"]
         XCTAssertTrue(selection.waitForExistence(timeout: 5))
+        XCTAssertEqual(selection.value as? String, "2")
+    }
+
+    func testPendingMultiShareReplacesExistingActivitySheetAfterForeground() throws {
+        let app = XCUIApplication()
+        app.launchArguments += [
+            "--ui-testing",
+            "--ui-testing-stage-multi-share-on-background",
+        ]
+        app.launch()
+
+        dismissSheetIfNeeded(app)
+        XCTAssertTrue(app.buttons["open_activity"].waitForExistence(timeout: 8))
+        app.buttons["open_activity"].tap()
+        XCTAssertTrue(app.buttons["mobile_sheet_done"].waitForExistence(timeout: 5))
+
+        XCUIDevice.shared.press(.home)
+        Thread.sleep(forTimeInterval: 1)
+        app.activate()
+
+        let selection = app.descendants(matching: .any)["send_selection_summary"]
+        XCTAssertTrue(selection.waitForExistence(timeout: 8))
         XCTAssertEqual(selection.value as? String, "2")
     }
 

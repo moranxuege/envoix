@@ -59,6 +59,12 @@ data class Transfer(
     /** The name the received file was actually published under — may differ from
      *  [fileName] (the transfer identity) after a collision bump, e.g. "photo (1).jpg". */
     val publishedName: String? = null,
+    /** Public-artifact evidence captured while copying the verified staging file. */
+    val publishedSize: Long? = null,
+    val publishedSha256: String? = null,
+    /** The public artifact was deleted, changed, or cannot be proven to match.
+     *  Its private receipt must never be served while this is true. */
+    val publicationInvalid: Boolean = false,
     /** A received file that finished transferring but could not be published to
      *  public storage (a non-collision publish failure). The bytes are safe in
      *  staging and a retry re-drives; surfaced so the user isn't left thinking it

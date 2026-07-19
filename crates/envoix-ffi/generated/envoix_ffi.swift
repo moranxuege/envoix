@@ -2171,6 +2171,247 @@ public func FfiConverterTypeManifestTransferObserver_lower(_ value: ManifestTran
 
 
 /**
+ * Additive Manifest observer that also receives the structured diagnostic
+ * stream. The original observer remains available for existing native
+ * clients; new clients use the V2 start/restore functions.
+ */
+public protocol ManifestTransferObserverV2: AnyObject, Sendable {
+
+    func onManifestEvent(event: FfiTransferEvent)
+
+    func onManifestActivity(record: FfiManifestActivityRecord)
+
+}
+/**
+ * Additive Manifest observer that also receives the structured diagnostic
+ * stream. The original observer remains available for existing native
+ * clients; new clients use the V2 start/restore functions.
+ */
+open class ManifestTransferObserverV2Impl: ManifestTransferObserverV2, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_envoix_ffi_fn_clone_manifesttransferobserverv2(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_envoix_ffi_fn_free_manifesttransferobserverv2(handle, $0) }
+    }
+
+
+
+
+open func onManifestEvent(event: FfiTransferEvent)  {try! rustCall() {
+    uniffi_envoix_ffi_fn_method_manifesttransferobserverv2_on_manifest_event(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeFfiTransferEvent_lower(event),$0
+    )
+}
+}
+
+open func onManifestActivity(record: FfiManifestActivityRecord)  {try! rustCall() {
+    uniffi_envoix_ffi_fn_method_manifesttransferobserverv2_on_manifest_activity(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeFfiManifestActivityRecord_lower(record),$0
+    )
+}
+}
+
+
+
+}
+
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceManifestTransferObserverV2 {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceManifestTransferObserverV2 = UniffiVTableCallbackInterfaceManifestTransferObserverV2(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterTypeManifestTransferObserverV2.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface ManifestTransferObserverV2: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterTypeManifestTransferObserverV2.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface ManifestTransferObserverV2: handle missing in uniffiClone")
+            }
+        },
+        onManifestEvent: { (
+            uniffiHandle: UInt64,
+            event: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypeManifestTransferObserverV2.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onManifestEvent(
+                     event: try FfiConverterTypeFfiTransferEvent_lift(event)
+                )
+            }
+
+
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        onManifestActivity: { (
+            uniffiHandle: UInt64,
+            record: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypeManifestTransferObserverV2.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onManifestActivity(
+                     record: try FfiConverterTypeFfiManifestActivityRecord_lift(record)
+                )
+            }
+
+
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        }
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceManifestTransferObserverV2> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceManifestTransferObserverV2>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
+}
+
+private func uniffiCallbackInitManifestTransferObserverV2() {
+    uniffi_envoix_ffi_fn_init_callback_vtable_manifesttransferobserverv2(UniffiCallbackInterfaceManifestTransferObserverV2.vtablePtr)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeManifestTransferObserverV2: FfiConverter {
+    fileprivate static let handleMap = UniffiHandleMap<ManifestTransferObserverV2>()
+
+    typealias FfiType = UInt64
+    typealias SwiftType = ManifestTransferObserverV2
+
+    public static func lift(_ handle: UInt64) throws -> ManifestTransferObserverV2 {
+        if ((handle & 1) == 0) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return ManifestTransferObserverV2Impl(unsafeFromHandle: handle)
+        } else {
+            // Swift-generated handle, get the object from the handle map
+            return try handleMap.remove(handle: handle)
+        }
+    }
+
+    public static func lower(_ value: ManifestTransferObserverV2) -> UInt64 {
+         if let rustImpl = value as? ManifestTransferObserverV2Impl {
+             // Rust-implemented object.  Clone the handle and return it
+            return rustImpl.uniffiCloneHandle()
+         } else {
+            // Swift object, generate a new vtable handle and return that.
+            return handleMap.insert(obj: value)
+         }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ManifestTransferObserverV2 {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: ManifestTransferObserverV2, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeManifestTransferObserverV2_lift(_ handle: UInt64) throws -> ManifestTransferObserverV2 {
+    return try FfiConverterTypeManifestTransferObserverV2.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeManifestTransferObserverV2_lower(_ value: ManifestTransferObserverV2) -> UInt64 {
+    return FfiConverterTypeManifestTransferObserverV2.lower(value)
+}
+
+
+
+
+
+
+/**
  * Observer implemented by the native UI to receive transfer updates.
  *
  * Callbacks arrive on a Rust runtime thread; the UI must marshal to its main
@@ -6333,6 +6574,15 @@ public func restoreDurableManifestTransfer(activityId: String, recordsDir: Strin
     )
 })
 }
+public func restoreDurableManifestTransferV2(activityId: String, recordsDir: String, observer: ManifestTransferObserverV2)throws  -> DurableEnvoixManifestSession  {
+    return try  FfiConverterTypeDurableEnvoixManifestSession_lift(try rustCallWithError(FfiConverterTypeEnvoixError_lift) {
+    uniffi_envoix_ffi_fn_func_restore_durable_manifest_transfer_v2(
+        FfiConverterString.lower(activityId),
+        FfiConverterString.lower(recordsDir),
+        FfiConverterTypeManifestTransferObserverV2_lower(observer),$0
+    )
+})
+}
 public func startDurableManifestReceive(settings: EnvoixRuntimeSettings, request: FfiTransferRequest, recordsDir: String, observer: ManifestTransferObserver)throws  -> DurableEnvoixManifestSession  {
     return try  FfiConverterTypeDurableEnvoixManifestSession_lift(try rustCallWithError(FfiConverterTypeEnvoixError_lift) {
     uniffi_envoix_ffi_fn_func_start_durable_manifest_receive(
@@ -6340,6 +6590,16 @@ public func startDurableManifestReceive(settings: EnvoixRuntimeSettings, request
         FfiConverterTypeFfiTransferRequest_lower(request),
         FfiConverterString.lower(recordsDir),
         FfiConverterTypeManifestTransferObserver_lower(observer),$0
+    )
+})
+}
+public func startDurableManifestReceiveV2(settings: EnvoixRuntimeSettings, request: FfiTransferRequest, recordsDir: String, observer: ManifestTransferObserverV2)throws  -> DurableEnvoixManifestSession  {
+    return try  FfiConverterTypeDurableEnvoixManifestSession_lift(try rustCallWithError(FfiConverterTypeEnvoixError_lift) {
+    uniffi_envoix_ffi_fn_func_start_durable_manifest_receive_v2(
+        FfiConverterTypeEnvoixRuntimeSettings_lower(settings),
+        FfiConverterTypeFfiTransferRequest_lower(request),
+        FfiConverterString.lower(recordsDir),
+        FfiConverterTypeManifestTransferObserverV2_lower(observer),$0
     )
 })
 }
@@ -6351,6 +6611,17 @@ public func startDurableManifestSend(settings: EnvoixRuntimeSettings, request: F
         FfiConverterTypeFfiPreparedManifestSend_lower(prepared),
         FfiConverterString.lower(recordsDir),
         FfiConverterTypeManifestTransferObserver_lower(observer),$0
+    )
+})
+}
+public func startDurableManifestSendV2(settings: EnvoixRuntimeSettings, request: FfiTransferRequest, prepared: FfiPreparedManifestSend, recordsDir: String, observer: ManifestTransferObserverV2)throws  -> DurableEnvoixManifestSession  {
+    return try  FfiConverterTypeDurableEnvoixManifestSession_lift(try rustCallWithError(FfiConverterTypeEnvoixError_lift) {
+    uniffi_envoix_ffi_fn_func_start_durable_manifest_send_v2(
+        FfiConverterTypeEnvoixRuntimeSettings_lower(settings),
+        FfiConverterTypeFfiTransferRequest_lower(request),
+        FfiConverterTypeFfiPreparedManifestSend_lower(prepared),
+        FfiConverterString.lower(recordsDir),
+        FfiConverterTypeManifestTransferObserverV2_lower(observer),$0
     )
 })
 }
@@ -6415,10 +6686,19 @@ private let initializationResult: InitializationResult = {
     if (uniffi_envoix_ffi_checksum_func_restore_durable_manifest_transfer() != 15948) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_envoix_ffi_checksum_func_restore_durable_manifest_transfer_v2() != 14491) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_envoix_ffi_checksum_func_start_durable_manifest_receive() != 4731) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_envoix_ffi_checksum_func_start_durable_manifest_receive_v2() != 2097) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_envoix_ffi_checksum_func_start_durable_manifest_send() != 36625) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_envoix_ffi_checksum_func_start_durable_manifest_send_v2() != 50126) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_envoix_ffi_checksum_method_durableenvoixsession_activity() != 20671) {
@@ -6571,6 +6851,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_envoix_ffi_checksum_method_manifesttransferobserver_on_manifest_activity() != 48587) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_envoix_ffi_checksum_method_manifesttransferobserverv2_on_manifest_event() != 59459) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_envoix_ffi_checksum_method_manifesttransferobserverv2_on_manifest_activity() != 25808) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_envoix_ffi_checksum_constructor_envoixsession_new() != 45323) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6581,6 +6867,7 @@ private let initializationResult: InitializationResult = {
     uniffiCallbackInitMailboxObserver()
     uniffiCallbackInitMailboxObserverV2()
     uniffiCallbackInitManifestTransferObserver()
+    uniffiCallbackInitManifestTransferObserverV2()
     uniffiCallbackInitTransferObserver()
     return InitializationResult.ok
 }()

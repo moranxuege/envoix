@@ -9,6 +9,36 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
         continueAfterFailure = false
     }
 
+    func testDiagnosticsIdentifyIOSApp() {
+        let report = TransferDiagnostics.report(for: Self.activity(state: .completed))
+        let appReport = TransferDiagnostics.appReport(activities: [])
+
+        XCTAssertTrue(report.hasPrefix("[header]\napp=envoix-ios\n"))
+        XCTAssertTrue(appReport.hasPrefix("[header]\napp=envoix-ios\n"))
+        XCTAssertTrue(report.contains("core_ffi_api=\(expectedCoreFFIAPIVersion)"))
+        XCTAssertTrue(report.contains("executable_sha256="))
+        XCTAssertTrue(report.contains("runtime_code_file="))
+        XCTAssertTrue(report.contains("runtime_code_sha256="))
+        if let executableURL = Bundle.main.executableURL {
+            let debugDylibName = "\(executableURL.lastPathComponent).debug.dylib"
+            let debugDylibURL = executableURL
+                .deletingLastPathComponent()
+                .appendingPathComponent(debugDylibName)
+            if FileManager.default.isReadableFile(atPath: debugDylibURL.path) {
+                XCTAssertTrue(report.contains("runtime_code_file=\(debugDylibName)"))
+            }
+        }
+    }
+
+    func testInformationalDiagnosticDoesNotCreateFailureSection() {
+        let report = TransferDiagnostics.report(
+            for: Self.activity(state: .connecting, diagnostic: "accept stream opened")
+        )
+
+        XCTAssertFalse(report.contains("[failure]"))
+        XCTAssertTrue(report.contains("diagnostic_message=accept stream opened"))
+    }
+
     func testActivityActionPolicyMatchesCanonicalLifecycle() {
         for state in [
             FfiTransferActivityState.queued, .binding, .waitingForPeer, .pairing,
@@ -104,6 +134,17 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
         )
     }
 
+    func testActivityPendingCountDoesNotFallBackAfterLastRecordIsRemoved() {
+        let records = [
+            Self.activity(id: "active", state: .transferring),
+            Self.activity(id: "paused", state: .paused),
+            Self.activity(id: "completed", state: .completed),
+        ]
+
+        XCTAssertEqual(ActivityProjectionPolicy.pendingCount(records), 2)
+        XCTAssertEqual(ActivityProjectionPolicy.pendingCount([]), 0)
+    }
+
     func testTransferPhaseIsPureCanonicalPresentation() {
         for state in [
             FfiTransferActivityState.queued, .binding, .waitingForPeer, .pairing,
@@ -149,6 +190,26 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
         XCTAssertFalse(viewModel.isBusy)
         XCTAssertTrue(viewModel.activeActivityID.isEmpty)
         XCTAssertNil(viewModel.transferActivity)
+    }
+
+    func testTerminalActivityReleasesPresentationSlot() {
+        for state in [
+            FfiTransferActivityState.completed,
+            .failed,
+            .canceled,
+        ] {
+            let viewModel = TransferViewModel()
+            viewModel.bindPresentation(to: "terminal-activity")
+
+            viewModel.handleTransferActivity(
+                Self.activity(id: "terminal-activity", state: state)
+            )
+
+            XCTAssertFalse(viewModel.isBusy, "state=\(state)")
+            XCTAssertTrue(viewModel.activeActivityID.isEmpty, "state=\(state)")
+            XCTAssertNil(viewModel.transferActivity, "state=\(state)")
+            XCTAssertEqual(viewModel.phase, .idle, "state=\(state)")
+        }
     }
 
     func testActiveActivityKeepsPresentationSlot() {
@@ -753,7 +814,7 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
             invite: ""
         )
         let observer = ManifestEvidenceObserver(peerLabel: "macOS")
-        let session = try startDurableManifestSend(
+        let session = try startDurableManifestSendV2(
             settings: Self.crossDeviceSettings(),
             request: request,
             prepared: prepared,
@@ -990,8 +1051,9 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
     private static let crossDevicePathPolicy: FfiPathPolicy = {
         switch envString("ENVOIX_CROSS_DEVICE_PATH_POLICY")?.lowercased() {
         case nil, "", "auto": return .auto
+        case "relay", "relay-only": return .relayOnly
         case "direct", "direct-only": return .directOnly
-        default: fatalError("ENVOIX_CROSS_DEVICE_PATH_POLICY must be auto or direct-only")
+        default: fatalError("ENVOIX_CROSS_DEVICE_PATH_POLICY must be auto, relay-only, or direct-only")
         }
     }()
 
@@ -1362,11 +1424,19 @@ final class EnvoixIOSLoopbackTests: XCTestCase {
 #endif
 }
 
-private final class ManifestEvidenceObserver: ManifestTransferObserver, @unchecked Sendable {
+private final class ManifestEvidenceObserver: ManifestTransferObserverV2, @unchecked Sendable {
     private let peerLabel: String
 
     init(peerLabel: String) {
         self.peerLabel = peerLabel
+    }
+
+    func onManifestEvent(event: FfiTransferEvent) {
+        print(
+            "[cross-device] iOS to \(peerLabel) Manifest event=\(event.kind) " +
+            "file=\(event.fileName) bytes=\(event.bytesTransferred)/\(event.totalBytes) " +
+            "message=\(event.diagnosticMessage)"
+        )
     }
 
     func onManifestActivity(record: FfiManifestActivityRecord) {
@@ -1600,9 +1670,16 @@ private final class RecordingObserver: TransferObserver, @unchecked Sendable {
     func assertPathPolicy(_ policy: FfiPathPolicy) {
         let paths = locked { pathKinds }
         XCTAssertFalse(paths.isEmpty, "transfer did not report a selected data path")
-        guard policy == .directOnly else { return }
-        XCTAssertTrue(paths.contains(.direct), "direct-only transfer did not report a direct path: \(paths)")
-        XCTAssertFalse(paths.contains(.relay), "direct-only transfer reported a relay path: \(paths)")
+        switch policy {
+        case .auto:
+            break
+        case .relayOnly:
+            XCTAssertTrue(paths.contains(.relay), "relay-only transfer did not report a relay path: \(paths)")
+            XCTAssertFalse(paths.contains(.direct), "relay-only transfer reported a direct path: \(paths)")
+        case .directOnly:
+            XCTAssertTrue(paths.contains(.direct), "direct-only transfer did not report a direct path: \(paths)")
+            XCTAssertFalse(paths.contains(.relay), "direct-only transfer reported a relay path: \(paths)")
+        }
     }
 
     private func complete(bytes: UInt64?, failure: String?) {

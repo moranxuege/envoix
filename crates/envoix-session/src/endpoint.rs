@@ -14,7 +14,7 @@ use crate::connection::IrohFrameConnection;
 use crate::identity::{IdentityConfig, load_secret_key};
 use crate::{EventSink, SessionError, TransferEvent};
 
-const ENDPOINT_ADDR_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const ENDPOINT_ADDR_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 const ENDPOINT_ADDR_WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 #[cfg(any(target_os = "ios", target_os = "android"))]
 const PLATFORM_DNS_FALLBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);

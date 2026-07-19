@@ -1017,6 +1017,14 @@ struct AndroidPlatformExtras {
     /// collision-bumped "name (1)"). Durable so it survives a restart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     published_name: Option<String>,
+    /// Public-artifact evidence used before a private receipt may re-confirm
+    /// delivery. It is independent from the core's BLAKE3 transfer proof.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    published_size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    published_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    publication_invalid: Option<bool>,
     /// The publication duty's last outcome, currently only `"failed"` — a
     /// received file whose publish to public storage did not complete, so the
     /// UI can surface it and a retry can re-drive. Absent = not-yet / done.
@@ -1238,6 +1246,26 @@ mod create_params_tests {
     }
 
     #[test]
+    fn publication_evidence_round_trips_extras() {
+        let mut v = valid();
+        v["platform_extras"] = serde_json::json!({
+            "saved_uri": "content://downloads/1",
+            "published_name": "photo.jpg",
+            "published_size": 3,
+            "published_sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            "publication_invalid": false
+        });
+        let (_, extras) = parse(&v, CreateMode::Normal).unwrap();
+        let extras = extras.unwrap();
+        assert_eq!(extras["published_size"], 3);
+        assert_eq!(
+            extras["published_sha256"],
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(extras["publication_invalid"], false);
+    }
+
+    #[test]
     fn a_half_pair_of_source_fields_is_rejected() {
         let mut v = valid();
         v["platform_extras"] = serde_json::json!({ "source_uri": "content://x" });
@@ -1335,10 +1363,25 @@ pub extern "system" fn Java_dev_envoix_app_Native_listRestoreContexts<'a>(
                     if let (Some(object), Some(extras)) =
                         (value.as_object_mut(), record.platform_extras.as_ref())
                     {
-                        for key in ["qr", "saved_uri", "source_uri"] {
+                        for key in [
+                            "qr",
+                            "saved_uri",
+                            "published_name",
+                            "published_sha256",
+                            "publish",
+                            "source_uri",
+                        ] {
                             if let Some(text) = extras.get(key).and_then(|v| v.as_str()) {
                                 object.insert(key.into(), text.into());
                             }
+                        }
+                        if let Some(size) = extras.get("published_size").and_then(|v| v.as_u64()) {
+                            object.insert("published_size".into(), size.into());
+                        }
+                        if let Some(invalid) =
+                            extras.get("publication_invalid").and_then(|v| v.as_bool())
+                        {
+                            object.insert("publication_invalid".into(), invalid.into());
                         }
                         if let Some(ok) = extras.get("source_recoverable").and_then(|v| v.as_bool())
                         {

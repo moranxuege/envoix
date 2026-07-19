@@ -4,8 +4,10 @@ import Darwin
 import AppKit
 #elseif os(iOS)
 import UIKit
+import QuickLook
 #endif
 import CoreImage.CIFilterBuiltins
+import CryptoKit
 import EnvoixCore
 
 #if os(macOS)
@@ -45,7 +47,18 @@ func activityActionAvailability(for record: FfiTransferActivityRecord) -> Activi
         isFinalizing: actions.isFinalizing
     )
 }
-let expectedCoreFFIAPIVersion: UInt32 = 2
+
+/// True when this attempt completed entirely from bytes already present at
+/// the destination. `bytesTransferred` is the verified total, while
+/// `bytesResumed` identifies how much of that total crossed no wire this time.
+func isFullyResumedCompletion(_ record: FfiTransferActivityRecord) -> Bool {
+    record.state == .completed
+        && record.totalBytes > 0
+        && record.bytesTransferred >= record.totalBytes
+        && record.bytesResumed >= record.totalBytes
+}
+
+let expectedCoreFFIAPIVersion: UInt32 = 3
 let appDebugBuildLabel = "Debug build 2026.07.08.19"
 
 /// Generates a short, memorable, easy-to-type pairing token of the form
@@ -169,7 +182,7 @@ struct TokenField: View {
                         .contentShape(Rectangle())
                 }
                 Button {
-                    copyWithToast(token, AppText.value("Token copied", "口令已复制", language: language))
+                    copyWithToast(token, AppText.value("Token copied", "口令已复制", language: language), language: language)
                 } label: {
                     Label(AppText.value("Copy Token", "复制口令", language: language), systemImage: "doc.on.doc")
                         .frame(minHeight: 34)
@@ -223,7 +236,7 @@ struct TokenField: View {
                 .disabled(disabled)
 
                 Button {
-                    copyWithToast(token, AppText.value("Token copied", "口令已复制", language: language))
+                    copyWithToast(token, AppText.value("Token copied", "口令已复制", language: language), language: language)
                 } label: {
                     Label(AppText.value("Copy", "复制", language: language), systemImage: "doc.on.doc")
                         .frame(maxWidth: .infinity, minHeight: 36)
@@ -283,7 +296,7 @@ struct RoomCodeField: View {
                     .disabled(disabled)
                 }
                 Button {
-                    copyWithToast(code, AppText.value("Room code copied", "接收码已复制", language: language))
+                    copyWithToast(code, AppText.value("Room code copied", "接收码已复制", language: language), language: language)
                 } label: {
                     Label(copyLabel, systemImage: "doc.on.doc")
                         .frame(minHeight: 34)
@@ -370,7 +383,7 @@ struct RoomCodeField: View {
 
                     if showsCopyAction {
                         Button {
-                            copyWithToast(code, AppText.value("Room code copied", "接收码已复制", language: language))
+                            copyWithToast(code, AppText.value("Room code copied", "接收码已复制", language: language), language: language)
                         } label: {
                             Label(copyLabel == "Copy Code" ? AppText.value("Copy", "复制", language: language) : copyLabel, systemImage: "doc.on.doc")
                                 .frame(maxWidth: .infinity, minHeight: 36)
@@ -425,12 +438,15 @@ func chooseURL(directory: Bool) -> URL? {
     #endif
 }
 
-func copyToPasteboard(_ text: String) {
+@discardableResult
+func copyToPasteboard(_ text: String) -> Bool {
     #if os(macOS)
     NSPasteboard.general.clearContents()
-    NSPasteboard.general.setString(text, forType: .string)
+    guard NSPasteboard.general.setString(text, forType: .string) else { return false }
+    return NSPasteboard.general.string(forType: .string) == text
     #elseif os(iOS)
     UIPasteboard.general.string = text
+    return UIPasteboard.general.string == text
     #endif
 }
 
@@ -466,12 +482,19 @@ func pastedFileURL() -> URL? {
 }
 
 /// Selects the file in Finder (opening its enclosing folder).
+#if os(macOS)
 func revealInFinder(_ url: URL) {
-    #if os(macOS)
-    NSWorkspace.shared.activateFileViewerSelecting([url])
-    #elseif os(iOS)
-    UIApplication.shared.open(url)
-    #endif
+    revealInFinder([url])
+}
+
+func revealInFinder(_ urls: [URL]) {
+    guard !urls.isEmpty else { return }
+    NSWorkspace.shared.activateFileViewerSelecting(urls)
+}
+#endif
+
+func isRegularFileURL(_ url: URL) -> Bool {
+    (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
 }
 
 func platformRevealTitle(language: String) -> String {
@@ -481,6 +504,116 @@ func platformRevealTitle(language: String) -> String {
     return AppText.value("Open File", "打开文件", language: language)
     #endif
 }
+
+#if os(iOS)
+struct ReceivedItemsPresentation: Identifiable {
+    let id = UUID()
+    let urls: [URL]
+}
+
+private struct ReceivedItemsList: View {
+    @Environment(\.appLanguage) private var language
+    let urls: [URL]
+    @Binding var previewFileURL: URL?
+    let openDirectory: (URL) -> Void
+
+    var body: some View {
+        List(urls, id: \.self) { url in
+            let isDirectory = availableCompletedDirectoryURL(path: url.path) != nil
+            HStack(spacing: 12) {
+                if isDirectory {
+                    Button {
+                        openDirectory(url)
+                    } label: {
+                        receivedItemLabel(url, systemImage: "folder")
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("received_folder_open_\(url.lastPathComponent)")
+                } else {
+                    Button {
+                        previewFileURL = url
+                    } label: {
+                        receivedItemLabel(url, systemImage: "doc")
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("received_item_open_\(url.lastPathComponent)")
+                }
+
+                ShareLink(item: url) {
+                    Image(systemName: "square.and.arrow.up")
+                        .frame(width: 36, height: 36)
+                }
+                .accessibilityLabel(AppText.value("Share", "分享", language: language))
+                .accessibilityIdentifier("received_item_share_\(url.lastPathComponent)")
+            }
+        }
+    }
+
+    private func receivedItemLabel(_ url: URL, systemImage: String) -> some View {
+        Label(url.lastPathComponent, systemImage: systemImage)
+            .lineLimit(2)
+            .truncationMode(.middle)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+    }
+}
+
+struct ReceivedItemsSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.appLanguage) private var language
+    let urls: [URL]
+    @State private var previewFileURL: URL?
+    @State private var directoryPath: [URL] = []
+
+    var body: some View {
+        NavigationStack(path: $directoryPath) {
+            ReceivedItemsList(
+                urls: urls,
+                previewFileURL: $previewFileURL,
+                openDirectory: { directoryPath.append($0) }
+            )
+            .navigationTitle(AppText.value(
+                "Received Items",
+                "已接收项目",
+                language: language
+            ))
+            .navigationBarTitleDisplayMode(.inline)
+            .navigationDestination(for: URL.self) { directory in
+                let children = availableReceivedDirectoryItemURLs(directory: directory)
+                ReceivedItemsList(
+                    urls: children,
+                    previewFileURL: $previewFileURL,
+                    openDirectory: { directoryPath.append($0) }
+                )
+                    .navigationTitle(directory.lastPathComponent)
+                    .navigationBarTitleDisplayMode(.inline)
+                    .overlay {
+                        if children.isEmpty {
+                            Label(
+                                AppText.value(
+                                    "This folder is empty or unavailable.",
+                                    "此文件夹为空或当前无法访问。",
+                                    language: language
+                                ),
+                                systemImage: "folder"
+                            )
+                            .font(.callout)
+                            .foregroundStyle(Theme.muted)
+                            .padding()
+                        }
+                    }
+            }
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(AppText.value("Done", "完成", language: language)) { dismiss() }
+                }
+            }
+        }
+        .quickLookPreview($previewFileURL)
+        .presentationDetents([.medium, .large])
+    }
+}
+#endif
 
 /// Returns a completed receive only when the final path still names a regular
 /// file with the byte count reported by the transfer core. A completion receipt
@@ -514,44 +647,145 @@ func availableCompletedDirectoryURL(path: String) -> URL? {
     return url
 }
 
-/// Resolves the most useful completed location for a Manifest receive. A
-/// single root opens that item; a multi-root transfer opens its destination.
-func availableCompletedManifestURL(record: FfiManifestActivityRecord) -> URL? {
+/// Lists user-visible children without following symbolic links outside the
+/// received directory. Directories sort before files to match Files/Finder.
+func availableReceivedDirectoryItemURLs(
+    directory: URL,
+    fileManager: FileManager = .default
+) -> [URL] {
+    guard availableCompletedDirectoryURL(path: directory.path) != nil,
+          let contents = try? fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [
+                .isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey,
+            ],
+            options: [.skipsHiddenFiles]
+          ) else {
+        return []
+    }
+    let items = contents.compactMap { url -> (url: URL, isDirectory: Bool)? in
+        guard let values = try? url.resourceValues(forKeys: [
+            .isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey,
+        ]), values.isSymbolicLink != true else {
+            return nil
+        }
+        if values.isDirectory == true {
+            return (url, true)
+        }
+        if values.isRegularFile == true {
+            return (url, false)
+        }
+        return nil
+    }
+    return items.sorted { lhs, rhs in
+        if lhs.isDirectory != rhs.isDirectory {
+            return lhs.isDirectory
+        }
+        return lhs.url.lastPathComponent.localizedStandardCompare(
+            rhs.url.lastPathComponent
+        ) == .orderedAscending
+    }.map(\.url)
+}
+
+/// Resolves the top-level items that are still available after a completed
+/// Manifest receive. Result paths are authoritative because publication may
+/// rename a conflicting item.
+func availableCompletedManifestItemURLs(record: FfiManifestActivityRecord) -> [URL] {
     let activity = record.activity
     guard activity.direction == .receive,
           activity.state == .completed,
-          record.rootCount > 0 else { return nil }
+          record.rootCount > 0 else { return [] }
     let destination = URL(fileURLWithPath: activity.completedFilePath, isDirectory: true)
-    guard record.rootCount == 1 else {
-        return availableCompletedDirectoryURL(path: destination.path)
-    }
-
     let successfulStatuses: Set<FfiManifestEntryResultStatus> = [
         .completed, .skippedIdentical, .renamed,
     ]
-    let roots = record.entries.filter { isSafeManifestTopLevelName($0.relativePath) }
-    guard roots.count == 1,
-          let entry = roots.first,
-          let result = record.entryResults.first(where: { $0.entryId == entry.entryId }),
-          successfulStatuses.contains(result.status),
-          isSafeManifestTopLevelName(result.finalRelativePath) else {
-        return nil
-    }
-    let finalURL = destination.appendingPathComponent(
-        result.finalRelativePath,
-        isDirectory: entry.kind == .directory
+    let results = Dictionary(
+        record.entryResults.map { ($0.entryId, $0) },
+        uniquingKeysWith: { first, _ in first }
     )
-    switch entry.kind {
-    case .file:
-        return availableCompletedFileURL(path: finalURL.path, expectedBytes: entry.size)
-    case .directory:
-        return availableCompletedDirectoryURL(path: finalURL.path)
+    return record.entries.compactMap { entry in
+        guard isSafeManifestTopLevelName(entry.relativePath),
+              let result = results[entry.entryId],
+              successfulStatuses.contains(result.status),
+              isSafeManifestTopLevelName(result.finalRelativePath) else {
+            return nil
+        }
+        let finalURL = destination.appendingPathComponent(
+            result.finalRelativePath,
+            isDirectory: entry.kind == .directory
+        )
+        switch entry.kind {
+        case .file:
+            return availableCompletedFileURL(path: finalURL.path, expectedBytes: entry.size)
+        case .directory:
+            return availableCompletedDirectoryURL(path: finalURL.path)
+        }
     }
+}
+
+/// Resolves the most useful single completed location for compatibility with
+/// existing callers. A multi-root transfer continues to resolve to its
+/// destination directory; item-aware UI should use the array helper above.
+func availableCompletedManifestURL(record: FfiManifestActivityRecord) -> URL? {
+    guard record.activity.direction == .receive,
+          record.activity.state == .completed,
+          record.rootCount > 0 else { return nil }
+    guard record.rootCount == 1 else {
+        return availableCompletedDirectoryURL(path: record.activity.completedFilePath)
+    }
+    let items = availableCompletedManifestItemURLs(record: record)
+    return items.count == 1 ? items[0] : nil
 }
 
 enum PublicationMaterialization: Equatable {
     case clone
     case copy
+}
+
+private struct TransferReceiptReference: Decodable {
+    let fileName: String
+
+    private enum CodingKeys: String, CodingKey {
+        case fileName = "file_name"
+    }
+}
+
+/// Removes completion receipts whose directly received file no longer exists.
+/// A receipt is valid without its staging file only when native publication is
+/// in use; direct destinations must materialize the file again after deletion.
+func removeOrphanedDirectReceiveReceipts(
+    in directory: URL,
+    fileManager: FileManager = .default
+) throws {
+    let prefix = ".envoix-receipt."
+    let suffix = ".json"
+    let entries = try fileManager.contentsOfDirectory(
+        at: directory,
+        includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
+        options: []
+    )
+    for receiptURL in entries {
+        let receiptName = receiptURL.lastPathComponent
+        guard receiptName.hasPrefix(prefix), receiptName.hasSuffix(suffix) else { continue }
+        let values = try? receiptURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+        guard values?.isRegularFile == true, values?.isSymbolicLink != true,
+              let data = try? Data(contentsOf: receiptURL),
+              let receipt = try? JSONDecoder().decode(TransferReceiptReference.self, from: data),
+              isSafeDirectReceiveFileName(receipt.fileName),
+              receiptName == "\(prefix)\(receipt.fileName)\(suffix)" else { continue }
+        let receivedFile = directory.appendingPathComponent(receipt.fileName, isDirectory: false)
+        guard !fileManager.fileExists(atPath: receivedFile.path) else { continue }
+        try fileManager.removeItem(at: receiptURL)
+    }
+}
+
+private func isSafeDirectReceiveFileName(_ name: String) -> Bool {
+    !name.isEmpty
+        && name != "."
+        && name != ".."
+        && URL(fileURLWithPath: name).lastPathComponent == name
+        && !name.contains("\\")
+        && !name.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
 }
 
 /// Uses same-volume copy-on-write when the destination supports it. A local
@@ -869,6 +1103,11 @@ func etaString(_ seconds: Double) -> String {
 struct TransferDiagnostics {
     static let clipboardMaxBytes = 256 * 1024
     static let uploadMaxBytes = RemoteLogUpload.bodyMaxBytes
+    #if os(macOS)
+    static let appIdentifier = "envoix-macos"
+    #else
+    static let appIdentifier = "envoix-ios"
+    #endif
     private static let headerMaxBytes = 2048
     private static let failureMaxBytes = 48 * 1024
     private static let eventLinesMaxBytes = 80 * 1024
@@ -891,7 +1130,7 @@ struct TransferDiagnostics {
             remaining: &remaining
         )
 
-        if record.state == .failed || !record.diagnosticMessage.isEmpty || !record.userMessageKey.isEmpty {
+        if hasFailureMetadata(record) {
             append(
                 section: section("failure", failureText(for: record)),
                 cap: failureMaxBytes,
@@ -947,13 +1186,13 @@ struct TransferDiagnostics {
         var remaining = uploadMaxBytes
         var lines: [String] = []
         append(
-            section: section("header", [
-                "app=envoix-ios",
+            section: section("header", ([
+                "app=\(appIdentifier)",
                 "version=\(appVersion)",
                 "build=\(appBuild)",
                 "generated=\(isoDate())",
                 "activity_count=\(activities.count)",
-            ].joined(separator: "\n")),
+            ] + runtimeIdentityLines).joined(separator: "\n")),
             cap: headerMaxBytes,
             into: &lines,
             remaining: &remaining
@@ -961,7 +1200,7 @@ struct TransferDiagnostics {
 
         let activitySnapshots = activities.map { record in
             var sections = ["[activity \(record.activityId)]", activityText(for: record, includeSensitiveFields: false)]
-            if record.state == .failed || !record.diagnosticMessage.isEmpty || !record.userMessageKey.isEmpty {
+            if hasFailureMetadata(record) {
                 sections.append(failureText(for: record))
             }
             return sections.joined(separator: "\n")
@@ -995,6 +1234,9 @@ struct TransferDiagnostics {
         let file = event.fileName.isEmpty ? "unknown" : event.fileName
         parts.append("file=\(file)")
         parts.append("bytes=\(event.bytesTransferred)/\(event.totalBytes)")
+        if event.bytesResumed > 0 {
+            parts.append("resumed=\(event.bytesResumed)")
+        }
         if !event.dataPathDetail.isEmpty {
             parts.append("path=\(event.dataPathKind) \(event.dataPathDetail)")
         }
@@ -1027,14 +1269,14 @@ struct TransferDiagnostics {
     }
 
     private static func headerText(for record: FfiTransferActivityRecord) -> String {
-        [
-            "app=envoix-ios",
+        ([
+            "app=\(appIdentifier)",
             "version=\(appVersion)",
             "build=\(appBuild)",
             "record_id=\(record.activityId)",
             "attempt_id=\(record.attemptId)",
             "generated=\(isoDate())",
-        ].joined(separator: "\n")
+        ] + runtimeIdentityLines).joined(separator: "\n")
     }
 
     private static func failureText(for record: FfiTransferActivityRecord) -> String {
@@ -1074,7 +1316,17 @@ struct TransferDiagnostics {
             "data_path=\(record.dataPathKind) \(record.dataPathDetail)",
             "limits=\(record.limits)",
             "completed_file_path=\(sensitiveValue(record.completedFilePath, include: includeSensitiveFields))",
+            "diagnostic_message=\(record.diagnosticMessage)",
         ].joined(separator: "\n")
+    }
+
+    private static func hasFailureMetadata(_ record: FfiTransferActivityRecord) -> Bool {
+        record.state == .failed
+            || record.state == .unconfirmed
+            || record.failureCode != .unknown
+            || record.failureCategory != .unknown
+            || !record.userMessageKey.isEmpty
+            || record.recoveryAction != .none
     }
 
     private static func sensitiveValue(_ value: String, include: Bool) -> String {
@@ -1088,6 +1340,45 @@ struct TransferDiagnostics {
 
     private static var appBuild: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "dev"
+    }
+
+    private static var runtimeIdentityLines: [String] {
+        let core = envoixCoreInfo()
+        return [
+            "core_version=\(core.coreVersion)",
+            "core_ffi_api=\(core.ffiApiVersion)",
+            "core_capabilities=\(core.capabilities.sorted().joined(separator: ","))",
+            "executable_sha256=\(executableFingerprint)",
+            "runtime_code_file=\(runtimeCodeURL?.lastPathComponent ?? "unavailable")",
+            "runtime_code_sha256=\(fileFingerprint(runtimeCodeURL))",
+        ]
+    }
+
+    private static let executableFingerprint = fileFingerprint(Bundle.main.executableURL)
+
+    private static let runtimeCodeURL: URL? = {
+        guard let executableURL = Bundle.main.executableURL else { return nil }
+        let debugDylibURL = executableURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("\(executableURL.lastPathComponent).debug.dylib")
+        if FileManager.default.isReadableFile(atPath: debugDylibURL.path) {
+            return debugDylibURL
+        }
+        return executableURL
+    }()
+
+    private static func fileFingerprint(_ url: URL?) -> String {
+        guard let url, let handle = try? FileHandle(forReadingFrom: url) else {
+            return "unavailable"
+        }
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while true {
+            let data = handle.readData(ofLength: 1024 * 1024)
+            if data.isEmpty { break }
+            hasher.update(data: data)
+        }
+        return hasher.finalize().prefix(12).map { String(format: "%02x", $0) }.joined()
     }
 
     private static func formatTime(_ ms: UInt64) -> String {
@@ -1119,6 +1410,10 @@ struct TransferStatusView: View {
     @AppStorage("envoix.developerMode") private var developerMode = false
     @AppStorage("envoix.verboseLog") private var verboseLog = false
     @ObservedObject var viewModel: TransferViewModel
+    #if os(iOS)
+    @State private var previewFileURL: URL?
+    @State private var receivedItemsPresentation: ReceivedItemsPresentation?
+    #endif
 
     var body: some View {
         if showsStatus {
@@ -1180,8 +1475,10 @@ struct TransferStatusView: View {
                 Text(byteString(bytes))
                     .font(.body.monospacedDigit())
                     .foregroundStyle(Theme.muted)
-                if let url = viewModel.completedFileURL {
-                    completedFileControls(url)
+                if !viewModel.completedItemURLs.isEmpty {
+                    completedFileControls(viewModel.completedItemURLs)
+                } else if let url = viewModel.completedFileURL, isRegularFileURL(url) {
+                    completedFileControls([url])
                 }
             }
 
@@ -1206,6 +1503,12 @@ struct TransferStatusView: View {
                 .strokeBorder(tint.opacity(borderOpacity), lineWidth: 0.9)
         )
         .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
+        #if os(iOS)
+        .quickLookPreview($previewFileURL)
+        .sheet(item: $receivedItemsPresentation) { presentation in
+            ReceivedItemsSheet(urls: presentation.urls)
+        }
+        #endif
     }
 
     private var transferProgressLine: some View {
@@ -1267,8 +1570,11 @@ struct TransferStatusView: View {
                         .foregroundStyle(Theme.muted)
                 }
                 Button {
-                    copyToPasteboard(viewModel.eventLog.joined(separator: "\n"))
-                    ToastCenter.shared.show(AppText.value("Log copied", "日志已复制", language: language))
+                    copyWithToast(
+                        viewModel.eventLog.joined(separator: "\n"),
+                        AppText.value("Log copied", "日志已复制", language: language),
+                        language: language
+                    )
                 } label: {
                     Label(AppText.value("Copy", "复制", language: language), systemImage: "doc.on.doc")
                         .labelStyle(.iconOnly)
@@ -1434,47 +1740,89 @@ struct TransferStatusView: View {
 
     /// Reveal the received file. iOS hides the raw container path unless
     /// developer mode is enabled because it is not a user-facing location.
-    @ViewBuilder private func completedFileControls(_ url: URL) -> some View {
-        HStack {
-            Button(platformRevealTitle(language: language)) { revealInFinder(url) }
+    @ViewBuilder private func completedFileControls(_ urls: [URL]) -> some View {
+        if let firstURL = urls.first {
+            HStack {
             #if os(macOS)
-            copyPathButton(url)
-            #elseif os(iOS)
-            ShareLink(item: url) {
-                Label(AppText.value("Share", "分享", language: language), systemImage: "square.and.arrow.up")
+            Button(platformRevealTitle(language: language)) { revealInFinder(urls) }
+            if urls.count == 1 {
+                copyPathButton(firstURL)
             }
-            if developerMode {
-                copyPathButton(url)
+            #elseif os(iOS)
+            if urls.count == 1, isRegularFileURL(firstURL) {
+                Button(platformRevealTitle(language: language)) { previewFileURL = firstURL }
+                ShareLink(item: firstURL) {
+                    Label(AppText.value("Share", "分享", language: language), systemImage: "square.and.arrow.up")
+                }
+            } else {
+                Button {
+                    receivedItemsPresentation = ReceivedItemsPresentation(urls: urls)
+                } label: {
+                    Label(
+                        AppText.value(
+                            "View \(urls.count) Items",
+                            "查看 \(urls.count) 个项目",
+                            language: language
+                        ),
+                        systemImage: "square.stack"
+                    )
+                }
+            }
+            if developerMode, urls.count == 1 {
+                copyPathButton(firstURL)
             }
             #endif
         }
         #if os(macOS)
-        Text(url.path)
-            .font(.body.monospaced())
-            .foregroundStyle(Theme.muted)
-            .textSelection(.enabled)
-            .lineLimit(1)
-            .truncationMode(.middle)
-        #elseif os(iOS)
-        Text(AppText.value("Saved as \(url.lastPathComponent)", "已保存为 \(url.lastPathComponent)", language: language))
-            .font(.body)
-            .foregroundStyle(Theme.muted)
-            .lineLimit(1)
-            .truncationMode(.middle)
-        if developerMode {
-            Text(url.path)
+        if urls.count == 1 {
+            Text(firstURL.path)
                 .font(.body.monospaced())
                 .foregroundStyle(Theme.muted)
                 .textSelection(.enabled)
                 .lineLimit(1)
                 .truncationMode(.middle)
+        } else {
+            Text(AppText.value(
+                "\(urls.count) received items",
+                "已接收 \(urls.count) 个项目",
+                language: language
+            ))
+            .font(.body)
+            .foregroundStyle(Theme.muted)
         }
-        #endif
+        #elseif os(iOS)
+        Text(urls.count == 1
+             ? AppText.value(
+                "Saved as \(firstURL.lastPathComponent)",
+                "已保存为 \(firstURL.lastPathComponent)",
+                language: language
+             )
+             : AppText.value(
+                "Saved \(urls.count) items",
+                "已保存 \(urls.count) 个项目",
+                language: language
+             ))
+            .font(.body)
+            .foregroundStyle(Theme.muted)
+            .lineLimit(1)
+            .truncationMode(.middle)
+        if developerMode {
+            ForEach(urls, id: \.path) { url in
+                Text(url.path)
+                    .font(.body.monospaced())
+                    .foregroundStyle(Theme.muted)
+                    .textSelection(.enabled)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+            #endif
+        }
     }
 
     private func copyPathButton(_ url: URL) -> some View {
         Button(AppText.value("Copy Path", "复制路径", language: language)) {
-            copyWithToast(url.path, AppText.value("Path copied", "路径已复制", language: language))
+            copyWithToast(url.path, AppText.value("Path copied", "路径已复制", language: language), language: language)
         }
     }
 }

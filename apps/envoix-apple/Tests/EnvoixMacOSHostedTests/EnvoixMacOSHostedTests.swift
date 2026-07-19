@@ -9,6 +9,30 @@ final class EnvoixMacOSHostedTests: XCTestCase {
         continueAfterFailure = false
     }
 
+    func testDiagnosticsIdentifyMacOSApp() {
+        let record = Self.manifestRecord(
+            completedRoot: URL(fileURLWithPath: "/tmp/envoix-diagnostics"),
+            rootCount: 1,
+            entries: [Self.manifestEntry(id: 0, path: "diagnostics.txt")]
+        ).activity
+        let report = TransferDiagnostics.report(for: record)
+        let appReport = TransferDiagnostics.appReport(activities: [])
+
+        XCTAssertTrue(report.hasPrefix("[header]\napp=envoix-macos\n"))
+        XCTAssertTrue(appReport.hasPrefix("[header]\napp=envoix-macos\n"))
+        XCTAssertTrue(report.contains("executable_sha256="))
+        XCTAssertTrue(report.contains("runtime_code_sha256="))
+        if let executableURL = Bundle.main.executableURL {
+            let debugDylibName = "\(executableURL.lastPathComponent).debug.dylib"
+            let debugDylibURL = executableURL
+                .deletingLastPathComponent()
+                .appendingPathComponent(debugDylibName)
+            if FileManager.default.isReadableFile(atPath: debugDylibURL.path) {
+                XCTAssertTrue(report.contains("runtime_code_file=\(debugDylibName)"))
+            }
+        }
+    }
+
     func testSendSelectionUsesManifestOnlyForFoldersOrMultipleItems() throws {
         let fileManager = FileManager.default
         let root = fileManager.temporaryDirectory
@@ -24,6 +48,285 @@ final class EnvoixMacOSHostedTests: XCTestCase {
         XCTAssertFalse(sendSelectionRequiresManifest([first]))
         XCTAssertTrue(sendSelectionRequiresManifest([root]))
         XCTAssertTrue(sendSelectionRequiresManifest([first, second]))
+    }
+
+    func testWritableDirectoryProbeLeavesNoArtifacts() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("envoix-write-probe-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fileManager.removeItem(at: root) }
+
+        try validateWritableDirectoryAccess(root, fileManager: fileManager)
+
+        XCTAssertTrue(fileManager.fileExists(atPath: root.path))
+        XCTAssertEqual(try fileManager.contentsOfDirectory(atPath: root.path), [])
+    }
+
+    func testWritableDirectoryProbeRejectsFilePath() throws {
+        let fileManager = FileManager.default
+        let file = fileManager.temporaryDirectory
+            .appendingPathComponent("envoix-write-probe-file-\(UUID().uuidString)")
+        defer { try? fileManager.removeItem(at: file) }
+        try Data("not a directory".utf8).write(to: file)
+
+        XCTAssertThrowsError(try validateWritableDirectoryAccess(file, fileManager: fileManager))
+    }
+
+    func testInvalidDestinationBookmarkDoesNotFallBackToLegacyPath() {
+        let fallback = URL(fileURLWithPath: "/tmp/envoix-legacy-downloads", isDirectory: true)
+
+        XCTAssertNil(resolveRememberedOutputDirectory(
+            bookmarkData: Data([0x00, 0x01]),
+            legacyPath: fallback.path,
+            defaultURL: fallback
+        ))
+    }
+
+    func testDestinationBookmarkRoundTripsSelectedFolder() throws {
+        let fileManager = FileManager.default
+        let directory = fileManager.temporaryDirectory
+            .appendingPathComponent("envoix-bookmark-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fileManager.removeItem(at: directory) }
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        let bookmark = try makeSecurityScopedFolderBookmark(for: directory)
+        let resolved = try resolveSecurityScopedFolderBookmark(bookmark)
+
+        XCTAssertEqual(resolved.standardizedFileURL, directory.standardizedFileURL)
+    }
+
+    func testLegacyDestinationPathIsUsedOnlyWhenNoBookmarkExists() {
+        let legacy = URL(fileURLWithPath: "/tmp/envoix-legacy-downloads", isDirectory: true)
+        let defaultURL = URL(fileURLWithPath: "/tmp/envoix-default-downloads", isDirectory: true)
+
+        XCTAssertEqual(
+            resolveRememberedOutputDirectory(
+                bookmarkData: nil,
+                legacyPath: legacy.path,
+                defaultURL: defaultURL
+            )?.standardizedFileURL,
+            legacy.standardizedFileURL
+        )
+        XCTAssertEqual(
+            resolveRememberedOutputDirectory(
+                bookmarkData: nil,
+                legacyPath: "",
+                defaultURL: defaultURL
+            )?.standardizedFileURL,
+            defaultURL.standardizedFileURL
+        )
+    }
+
+    func testRateTrackerWaitsForRealByteDeltas() {
+        let mebibyte = UInt64(1024 * 1024)
+        var tracker = RateTracker()
+
+        XCTAssertEqual(tracker.record(142 * mebibyte, at: 10), 0)
+        XCTAssertEqual(tracker.record(152 * mebibyte, at: 10.4), 0)
+        XCTAssertEqual(tracker.record(162 * mebibyte, at: 11), Double(20 * mebibyte), accuracy: 1)
+        XCTAssertTrue(tracker.isStable)
+
+        XCTAssertEqual(tracker.record(5 * mebibyte, at: 12), 0)
+        XCTAssertFalse(tracker.isStable)
+    }
+
+    func testEstimatedRemainingTimeRequiresStableFiniteRate() {
+        XCTAssertNil(estimatedRemainingSeconds(
+            total: 1_000,
+            transferred: 400,
+            bytesPerSecond: 100,
+            isStable: false
+        ))
+        XCTAssertNil(estimatedRemainingSeconds(
+            total: 1_000,
+            transferred: 400,
+            bytesPerSecond: .infinity,
+            isStable: true
+        ))
+        XCTAssertEqual(estimatedRemainingSeconds(
+            total: 1_000,
+            transferred: 400,
+            bytesPerSecond: 100,
+            isStable: true
+        ), 6)
+    }
+
+    func testDirectReceiveRemovesReceiptWhenDestinationFileWasDeleted() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("envoix-direct-receipt-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fileManager.removeItem(at: root) }
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        let writeReceipt = { (fileName: String) throws -> URL in
+            let url = root.appendingPathComponent(".envoix-receipt.\(fileName).json")
+            let receipt = """
+            {
+              "transfer_id": "transfer-test",
+              "file_name": "\(fileName)",
+              "file_size": 7,
+              "file_hash": "test-hash"
+            }
+            """
+            try Data(receipt.utf8).write(to: url)
+            return url
+        }
+
+        let presentFile = root.appendingPathComponent("present.jpeg")
+        try Data("present".utf8).write(to: presentFile)
+        let presentReceipt = try writeReceipt("present.jpeg")
+        let missingReceipt = try writeReceipt("missing.jpeg")
+
+        try removeOrphanedDirectReceiveReceipts(in: root, fileManager: fileManager)
+
+        XCTAssertTrue(fileManager.fileExists(atPath: presentReceipt.path))
+        XCTAssertTrue(fileManager.fileExists(atPath: presentFile.path))
+        XCTAssertFalse(fileManager.fileExists(atPath: missingReceipt.path))
+    }
+
+    func testFullyResumedCompletionRequiresAllBytesAlreadyPresent() {
+        var record = Self.manifestRecord(
+            completedRoot: URL(fileURLWithPath: "/tmp/envoix-existing-file"),
+            rootCount: 1,
+            entries: [Self.manifestEntry(id: 0, path: "existing.bin")]
+        ).activity
+        record.totalBytes = 353_224
+        record.bytesTransferred = 353_224
+        record.bytesResumed = 353_224
+        record.state = .completed
+
+        XCTAssertTrue(isFullyResumedCompletion(record))
+
+        record.bytesResumed = 128_000
+        XCTAssertFalse(isFullyResumedCompletion(record))
+
+        record.bytesResumed = 353_224
+        record.state = .transferring
+        XCTAssertFalse(isFullyResumedCompletion(record))
+    }
+
+    func testDurableCoreReportsExistingFileAsFullyResumed() async throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("envoix-existing-core-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fileManager.removeItem(at: root) }
+        let outputDirectory = root.appendingPathComponent("received", isDirectory: true)
+        let receiveRecords = root.appendingPathComponent("receive-records", isDirectory: true)
+        let sendRecords = root.appendingPathComponent("send-records", isDirectory: true)
+        try fileManager.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+        let source = root.appendingPathComponent("existing.txt")
+        let payload = Data("durable Apple existing-file accounting".utf8)
+        try payload.write(to: source)
+
+        _ = try await Self.runDurableInviteTransfer(
+            activitySuffix: "seed",
+            source: source,
+            outputDirectory: outputDirectory,
+            receiveRecords: receiveRecords,
+            sendRecords: sendRecords
+        )
+        let repeated = try await Self.runDurableInviteTransfer(
+            activitySuffix: "repeat",
+            source: source,
+            outputDirectory: outputDirectory,
+            receiveRecords: receiveRecords,
+            sendRecords: sendRecords
+        )
+
+        XCTAssertEqual(repeated.state, .completed)
+        XCTAssertEqual(repeated.bytesTransferred, UInt64(payload.count))
+        XCTAssertEqual(repeated.bytesResumed, UInt64(payload.count))
+    }
+
+    private static func runDurableInviteTransfer(
+        activitySuffix: String,
+        source: URL,
+        outputDirectory: URL,
+        receiveRecords: URL,
+        sendRecords: URL
+    ) async throws -> FfiTransferActivityRecord {
+        let settings = EnvoixRuntimeSettings(
+            concurrentTransfers: true,
+            language: "en",
+            serverUrl: "",
+            relayUrl: "",
+            configPath: "",
+            speedLimitMbps: 0
+        )
+        let receiverObserver = HostedCoreLoopbackObserver()
+        let receiver = try startDurableManifestReceiveV2(
+            settings: settings,
+            request: loopbackRequest(
+                activityID: "existing-receive-\(activitySuffix)",
+                direction: .receive,
+                mode: .showInvite,
+                filePath: "",
+                outputDirectory: outputDirectory.path,
+                invite: ""
+            ),
+            recordsDir: receiveRecords.path,
+            observer: receiverObserver
+        )
+        let invite = try await receiverObserver.waitForInvite(timeout: 10)
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        let senderObserver = HostedCoreLoopbackObserver()
+        let sender = try startDurableTransferV2(
+            settings: settings,
+            request: loopbackRequest(
+                activityID: "existing-send-\(activitySuffix)",
+                direction: .send,
+                mode: .invite,
+                filePath: source.path,
+                outputDirectory: "",
+                invite: invite
+            ),
+            recordsDir: sendRecords.path,
+            receiptServer: "https://receipt.example.test",
+            observer: senderObserver,
+            mailbox: HostedCoreNoopMailbox()
+        )
+        _ = try await senderObserver.waitForCompletion(timeout: 20)
+        _ = try await receiverObserver.waitForCompletion(timeout: 20)
+        _ = sender
+        return receiver.activity().activity
+    }
+
+    private static func loopbackRequest(
+        activityID: String,
+        direction: FfiTransferDirection,
+        mode: FfiTransferMode,
+        filePath: String,
+        outputDirectory: String,
+        invite: String
+    ) -> FfiTransferRequest {
+        FfiTransferRequest(
+            activityId: activityID,
+            direction: direction,
+            mode: mode,
+            filePath: filePath,
+            outputDir: outputDirectory,
+            peerDescriptor: "",
+            invite: invite,
+            code: "",
+            token: "",
+            broker: "",
+            relay: "",
+            configPath: "",
+            pathPolicy: .directOnly,
+            resume: true,
+            publicationRequired: false,
+            limits: FfiTransferLimits(
+                maxParallelTransfers: 1,
+                maxParallelFiles: 1,
+                maxParallelChunksPerFile: 1,
+                speedLimitBps: 0
+            ),
+            rendezvous: FfiRendezvousPlan(
+                useRoom: false,
+                useMdns: false,
+                internetAvailable: true
+            )
+        )
     }
 
     func testManifestDisplayListsOnlyTopLevelSelectionRoots() {
@@ -217,6 +520,60 @@ final class EnvoixMacOSHostedTests: XCTestCase {
         record.activity.state = .completed
 
         XCTAssertEqual(availableCompletedManifestURL(record: record), root)
+        XCTAssertEqual(
+            availableCompletedManifestItemURLs(record: record),
+            [
+                root.appendingPathComponent("first.bin"),
+                root.appendingPathComponent("second.bin"),
+            ]
+        )
+    }
+
+    func testCompletedManifestItemURLsUsePublishedRenameAndIgnoreMissingItems() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("envoix-manifest-renamed-completed-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fileManager.removeItem(at: root) }
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        let payload = Data("renamed".utf8)
+        let renamed = root.appendingPathComponent("photo (1).jpeg")
+        try payload.write(to: renamed)
+        var record = Self.manifestRecord(
+            completedRoot: root,
+            rootCount: 2,
+            entries: [
+                Self.manifestEntry(id: 0, path: "photo.jpeg", size: UInt64(payload.count)),
+                Self.manifestEntry(id: 1, path: "missing.jpeg", size: 5),
+            ]
+        )
+        record.activity.state = .completed
+        record.entryResults[0].status = .renamed
+        record.entryResults[0].finalRelativePath = renamed.lastPathComponent
+
+        XCTAssertEqual(availableCompletedManifestItemURLs(record: record), [renamed])
+    }
+
+    func testReceivedDirectoryItemsSupportSafeFolderNavigation() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("envoix-received-folder-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fileManager.removeItem(at: root) }
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        let folder = root.appendingPathComponent("Folder", isDirectory: true)
+        let file = root.appendingPathComponent("photo.jpeg")
+        try fileManager.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data("photo".utf8).write(to: file)
+        try Data("metadata".utf8).write(to: root.appendingPathComponent(".envoix-receipt.json"))
+        try fileManager.createSymbolicLink(
+            at: root.appendingPathComponent("folder-link"),
+            withDestinationURL: folder
+        )
+
+        XCTAssertEqual(
+            availableReceivedDirectoryItemURLs(directory: root).map(\.lastPathComponent),
+            [folder, file].map(\.lastPathComponent)
+        )
+        XCTAssertEqual(availableReceivedDirectoryItemURLs(directory: file), [])
     }
 
     func testReceiveIosToMacOSAppRoom() async throws {
@@ -1065,6 +1422,141 @@ final class EnvoixMacOSHostedTests: XCTestCase {
         FileHandle.standardError.write(Data("[macos-app-cross-device] \(message)\n".utf8))
     }
 #endif
+}
+
+private enum HostedCoreLoopbackError: Error {
+    case timeout(String)
+    case failed(String)
+    case missing(String)
+}
+
+private final class HostedCoreNoopMailbox: MailboxObserverV2, @unchecked Sendable {
+    func onFetchReceipt(activityId: String, key: String, server: String?) {}
+
+    func onPostReceipt(activityId: String, key: String, blob: Data, server: String?) {}
+}
+
+private final class HostedCoreLoopbackObserver: TransferObserver, ManifestTransferObserverV2, @unchecked Sendable {
+    private let lock = NSLock()
+    private let inviteSemaphore = DispatchSemaphore(value: 0)
+    private let terminalSemaphore = DispatchSemaphore(value: 0)
+    private var invite: String?
+    private var completedBytes: UInt64?
+    private var failure: String?
+    private var terminalReported = false
+
+    func onInviteReady(invite: String) {
+        lock.lock()
+        let shouldSignal = self.invite == nil
+        self.invite = invite
+        lock.unlock()
+        if shouldSignal { inviteSemaphore.signal() }
+    }
+
+    func onStarted(fileName: String, totalBytes: UInt64) {}
+    func onProgress(transferred: UInt64, total: UInt64) {}
+
+    func onCompleted(bytes: UInt64) {
+        finish(bytes: bytes, failure: nil)
+    }
+
+    func onTransferFailed(failure: FfiTransferFailure) {
+        finish(
+            bytes: nil,
+            failure: failure.diagnosticMessage.isEmpty
+                ? failure.userMessageKey
+                : failure.diagnosticMessage
+        )
+    }
+
+    func onFailed(reason: String) {
+        finish(bytes: nil, failure: reason)
+    }
+
+    func onTransferEvent(event: FfiTransferEvent) {}
+    func onTransferActivity(record: FfiTransferActivityRecord) {
+        observe(record)
+    }
+    func onStatus(message: String) {}
+
+    func onManifestEvent(event: FfiTransferEvent) {}
+    func onManifestActivity(record: FfiManifestActivityRecord) {
+        observe(record.activity)
+    }
+
+    func waitForInvite(timeout: TimeInterval) async throws -> String {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async { [self] in
+                guard inviteSemaphore.wait(timeout: .now() + timeout) == .success else {
+                    continuation.resume(throwing: HostedCoreLoopbackError.timeout("invite"))
+                    return
+                }
+                lock.lock()
+                let invite = self.invite
+                lock.unlock()
+                guard let invite else {
+                    continuation.resume(throwing: HostedCoreLoopbackError.missing("invite"))
+                    return
+                }
+                continuation.resume(returning: invite)
+            }
+        }
+    }
+
+    func waitForCompletion(timeout: TimeInterval) async throws -> UInt64 {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async { [self] in
+                guard terminalSemaphore.wait(timeout: .now() + timeout) == .success else {
+                    continuation.resume(throwing: HostedCoreLoopbackError.timeout("completion"))
+                    return
+                }
+                lock.lock()
+                let completedBytes = self.completedBytes
+                let failure = self.failure
+                lock.unlock()
+                if let failure {
+                    continuation.resume(throwing: HostedCoreLoopbackError.failed(failure))
+                } else if let completedBytes {
+                    continuation.resume(returning: completedBytes)
+                } else {
+                    continuation.resume(throwing: HostedCoreLoopbackError.missing("completion"))
+                }
+            }
+        }
+    }
+
+    private func finish(bytes: UInt64?, failure: String?) {
+        lock.lock()
+        guard !terminalReported else {
+            lock.unlock()
+            return
+        }
+        terminalReported = true
+        completedBytes = bytes
+        self.failure = failure
+        lock.unlock()
+        terminalSemaphore.signal()
+    }
+
+    private func observe(_ record: FfiTransferActivityRecord) {
+        if !record.invite.isEmpty {
+            onInviteReady(invite: record.invite)
+        }
+        switch record.state {
+        case .completed:
+            finish(bytes: record.bytesTransferred, failure: nil)
+        case .failed, .canceled:
+            finish(
+                bytes: nil,
+                failure: record.diagnosticMessage.isEmpty
+                    ? "\(record.state)"
+                    : record.diagnosticMessage
+            )
+        case .queued, .binding, .waitingForPeer, .pairing, .connecting,
+                .transferring, .verifying, .publishing, .unconfirmed, .paused, .unknown:
+            break
+        }
+    }
 }
 
 private enum HostedTestError: LocalizedError {

@@ -27,22 +27,35 @@ struct ReceiveView: View {
     @State private var inviteQRCodePayload = ""
     @State private var pairingPanel: PairingPanelMode = .show
     @State private var revealAddress = false
+    @State private var didApplyInitialPairingInput = false
+    private let initialPairingInput: String?
+    private let onInitialPairingInputConsumed: (() -> Void)?
+    private let onSwitchToSend: ((String) -> Void)?
     #if os(iOS)
     @State private var isFolderPickerPresented = false
     @State private var isQRScannerPresented = false
     @State private var shouldStartAfterFolderPick = false
     #endif
 
-    init(viewModel: TransferViewModel, initialMode: PairingMode = .room) {
+    init(
+        viewModel: TransferViewModel,
+        initialMode: PairingMode = .room,
+        initialPairingInput: String? = nil,
+        onInitialPairingInputConsumed: (() -> Void)? = nil,
+        onSwitchToSend: ((String) -> Void)? = nil
+    ) {
         self.viewModel = viewModel
+        self.initialPairingInput = initialPairingInput
+        self.onInitialPairingInputConsumed = onInitialPairingInputConsumed
+        self.onSwitchToSend = onSwitchToSend
         _mode = State(initialValue: initialMode)
     }
 
     private let outputDirBookmarkKey = "envoix.outputDirBookmark"
 
-    /// Defaults to ~/Downloads on macOS and the app's Files-visible
-    /// Documents/Downloads folder on iOS. A user-selected Files folder is used
-    /// only when a persisted bookmark exists.
+    /// Suggests ~/Downloads on macOS, but requires one explicit system folder
+    /// selection before receiving so authorization can be persisted. iOS uses
+    /// the app's Files-visible Documents/Downloads folder by default.
     private var outputDir: URL? {
         #if os(iOS)
         if let data = UserDefaults.standard.data(forKey: outputDirBookmarkKey) {
@@ -50,9 +63,13 @@ struct ReceiveView: View {
         }
         return defaultIOSOutputDir
         #else
-        if !outputDirPath.isEmpty { return URL(fileURLWithPath: outputDirPath) }
-        return FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+        let defaultURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser
+        return resolveRememberedOutputDirectory(
+            bookmarkData: UserDefaults.standard.data(forKey: outputDirBookmarkKey),
+            legacyPath: outputDirPath,
+            defaultURL: defaultURL
+        )
         #endif
     }
 
@@ -93,6 +110,7 @@ struct ReceiveView: View {
                 handleScannedInvite(value)
             }
         }
+        .onAppear(perform: applyInitialPairingInputIfNeeded)
         #else
         VStack(spacing: 0) {
             scrollContent
@@ -100,6 +118,7 @@ struct ReceiveView: View {
             primaryButton
                 .padding(.top, 12)
         }
+        .onAppear(perform: applyInitialPairingInputIfNeeded)
         #endif
     }
 
@@ -250,9 +269,9 @@ struct ReceiveView: View {
             )
             .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
             #else
-            LinkRow(text: outputDir?.path ?? "") {
+            LinkRow(text: outputDirDisplayText) {
                 Button {
-                    if let url = chooseURL(directory: true) { outputDirPath = url.path }
+                    selectMacOutputFolder(startAfterSelection: false)
                 } label: {
                     Label(AppText.value("Select", "选择", language: uiLanguage), systemImage: "folder")
                         .frame(minHeight: 34)
@@ -278,7 +297,16 @@ struct ReceiveView: View {
         }
         return AppText.value("On My iPhone / Envoix / Downloads", "我的 iPhone / Envoix / Downloads", language: uiLanguage)
         #else
-        return outputDir?.path ?? ""
+        if UserDefaults.standard.data(forKey: outputDirBookmarkKey) != nil,
+           outputDir == nil {
+            return AppText.value(
+                "Selected folder unavailable — choose again",
+                "已选文件夹不可用——请重新选择",
+                language: uiLanguage
+            )
+        }
+        return outputDir?.path
+            ?? AppText.value("Choose a save folder", "请选择保存文件夹", language: uiLanguage)
         #endif
     }
 
@@ -312,10 +340,8 @@ struct ReceiveView: View {
         if viewModel.isBusy {
             return AppText.value("Managed in Activity", "请在活动中管理", language: uiLanguage)
         }
-        switch viewModel.phase {
-        case .completed, .canceled, .failed:
-            return AppText.value("Receive Again", "再次接收", language: uiLanguage)
-        case .idle where mode == .invite:
+        switch mode {
+        case .invite:
             return AppText.value("Create Link and Wait", "创建链接并等待", language: uiLanguage)
         default:
             return AppText.value("Start Receiving", "开始接收", language: uiLanguage)
@@ -344,7 +370,7 @@ struct ReceiveView: View {
             }
             LinkRow(text: viewModel.invite.isEmpty ? AppText.value("Invite link", "邀请链接", language: uiLanguage) : viewModel.invite) {
                 Button {
-                    copyWithToast(viewModel.invite, AppText.value("Invite copied", "邀请已复制", language: uiLanguage))
+                    copyWithToast(viewModel.invite, AppText.value("Invite copied", "邀请已复制", language: uiLanguage), language: uiLanguage)
                 } label: {
                     Label(AppText.value("Copy", "复制", language: uiLanguage), systemImage: "doc.on.doc")
                         .frame(minHeight: 34)
@@ -352,8 +378,7 @@ struct ReceiveView: View {
                 }
                 .disabled(viewModel.invite.isEmpty)
                 Button {
-                    startReceiveWithInvite()
-                    ToastCenter.shared.show(AppText.value("Invite created", "邀请已创建", language: uiLanguage))
+                    primaryAction()
                 } label: {
                     Label(viewModel.invite.isEmpty
                           ? AppText.value("Create and Wait", "创建并等待", language: uiLanguage)
@@ -443,7 +468,7 @@ struct ReceiveView: View {
                             displaysFullText: true
                         ) {
                             Button {
-                                copyWithToast(roomCode, AppText.value("Room code copied", "接收码已复制", language: uiLanguage))
+                                copyWithToast(roomCode, AppText.value("Room code copied", "接收码已复制", language: uiLanguage), language: uiLanguage)
                             } label: {
                                 Label(AppText.value("Copy", "复制", language: uiLanguage), systemImage: "doc.on.doc")
                                     .frame(minHeight: 40)
@@ -496,7 +521,7 @@ struct ReceiveView: View {
                 displaysFullText: true
             ) {
                 Button {
-                    copyWithToast(roomCode, AppText.value("Room code copied", "接收码已复制", language: uiLanguage))
+                    copyWithToast(roomCode, AppText.value("Room code copied", "接收码已复制", language: uiLanguage), language: uiLanguage)
                 } label: {
                     Label(AppText.value("Copy", "复制", language: uiLanguage), systemImage: "doc.on.doc")
                         .frame(minHeight: 34)
@@ -715,6 +740,21 @@ struct ReceiveView: View {
     private func applyPairingInput(_ value: String, source: PairingInputSource) -> String? {
         let input = value.trimmed
         do {
+            let lowercasedInput = input.lowercased()
+            if lowercasedInput.hasPrefix("envoix:")
+                && !lowercasedInput.hasPrefix("envoix://pair/") {
+                _ = try roomCodeFromJoinInput(input)
+            }
+            let parsed = try parsePairingInvite(input: input)
+            if parsed.role == .receive, let onSwitchToSend {
+                onSwitchToSend(input)
+                ToastCenter.shared.show(AppText.value(
+                    "Switching to Send",
+                    "正在切换到发送",
+                    language: uiLanguage
+                ))
+                return nil
+            }
             let code = try roomCodeFromJoinInput(input)
             joinRoomCode = code
             pairingPanel = .show
@@ -737,6 +777,15 @@ struct ReceiveView: View {
             ToastCenter.shared.show(message)
             return message
         }
+    }
+
+    private func applyInitialPairingInputIfNeeded() {
+        guard !didApplyInitialPairingInput,
+              let initialPairingInput,
+              !initialPairingInput.trimmed.isEmpty else { return }
+        didApplyInitialPairingInput = true
+        _ = applyPairingInput(initialPairingInput, source: .scan)
+        onInitialPairingInputConsumed?()
     }
 
     private func applyRuntimeSettings(from parsed: FfiPairingInvite) {
@@ -768,6 +817,8 @@ struct ReceiveView: View {
             isFolderPickerPresented = true
             return
         }
+        #elseif os(macOS)
+        guard ensureMacOutputDirectoryAuthorization() else { return }
         #endif
         startReceive()
     }
@@ -872,6 +923,65 @@ struct ReceiveView: View {
         }
     }
 
+    #if os(macOS)
+    /// A raw ~/Downloads path is not durable authorization. Require a valid
+    /// user-selected bookmark and prove write access before advertising or
+    /// joining, so a TCC denial cannot interrupt an active transfer.
+    private func ensureMacOutputDirectoryAuthorization() -> Bool {
+        guard let bookmark = UserDefaults.standard.data(forKey: outputDirBookmarkKey),
+              let url = try? resolveSecurityScopedFolderBookmark(bookmark) else {
+            selectMacOutputFolder(startAfterSelection: true)
+            return false
+        }
+
+        let access = SecurityScopedResourceAccess(url: url)
+        guard access.isActive || FileManager.default.isWritableFile(atPath: url.path) else {
+            selectMacOutputFolder(startAfterSelection: true)
+            return false
+        }
+        do {
+            try validateWritableDirectoryAccess(url)
+            model.retainDestinationAccessForAppLifetime(access)
+            return true
+        } catch {
+            selectMacOutputFolder(startAfterSelection: true)
+            return false
+        }
+    }
+
+    private func selectMacOutputFolder(startAfterSelection: Bool) {
+        guard let url = chooseURL(directory: true) else { return }
+        do {
+            let access = SecurityScopedResourceAccess(url: url)
+            guard access.isActive || FileManager.default.isWritableFile(atPath: url.path) else {
+                throw RuntimeSettingsError(AppText.value(
+                    "macOS did not grant access to the selected folder. Choose it again and confirm the system prompt.",
+                    "macOS 未授予所选文件夹访问权限。请重新选择并确认系统授权提示。",
+                    language: uiLanguage
+                ))
+            }
+            try validateWritableDirectoryAccess(url)
+            let bookmark = try makeSecurityScopedFolderBookmark(for: url)
+            UserDefaults.standard.set(bookmark, forKey: outputDirBookmarkKey)
+            outputDirPath = url.path
+            outputDirDisplayName = url.lastPathComponent.isEmpty ? url.path : url.lastPathComponent
+            model.retainDestinationAccessForAppLifetime(access)
+            ToastCenter.shared.show(AppText.value(
+                "Save folder authorized",
+                "保存文件夹已授权",
+                language: uiLanguage
+            ))
+            if startAfterSelection {
+                DispatchQueue.main.async {
+                    primaryAction()
+                }
+            }
+        } catch {
+            viewModel.handleFailed(error.localizedDescription)
+        }
+    }
+    #endif
+
     private func prepareOutputDir() throws -> (
         url: URL,
         access: AnyObject?,
@@ -905,12 +1015,40 @@ struct ReceiveView: View {
             access = nil
         }
         #else
-        let access: AnyObject? = nil
+        guard UserDefaults.standard.data(forKey: outputDirBookmarkKey) != nil else {
+            throw RuntimeSettingsError(AppText.value(
+                "Choose the save folder once to grant macOS access before receiving.",
+                "接收前请先选择一次保存文件夹，以授予 macOS 访问权限。",
+                language: uiLanguage
+            ))
+        }
+        let scopedAccess = SecurityScopedResourceAccess(url: url)
+        guard scopedAccess.isActive || FileManager.default.isWritableFile(atPath: url.path) else {
+            throw RuntimeSettingsError(AppText.value(
+                "The save-folder permission is unavailable. Choose the folder again.",
+                "保存文件夹权限不可用。请重新选择该文件夹。",
+                language: uiLanguage
+            ))
+        }
+        let access: AnyObject? = scopedAccess
         #endif
-        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        do {
+            try validateWritableDirectoryAccess(url)
+        } catch {
+            throw RuntimeSettingsError(AppText.value(
+                "Envoix cannot write to the selected save folder. Choose it again or check its permissions.",
+                "Envoix 无法写入所选保存文件夹。请重新选择或检查文件夹权限。",
+                language: uiLanguage
+            ))
+        }
         #if os(iOS)
+        if !hasCustomOutputDir {
+            try removeOrphanedDirectReceiveReceipts(in: url)
+        }
         return (url, access, hasCustomOutputDir ? url.path : nil)
         #else
+        model.retainDestinationAccessForAppLifetime(scopedAccess)
+        try removeOrphanedDirectReceiveReceipts(in: url)
         return (url, access, nil)
         #endif
     }

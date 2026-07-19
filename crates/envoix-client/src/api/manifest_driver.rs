@@ -8,11 +8,12 @@
 use std::time::Duration;
 
 use envoix_protocol::{
-    ManifestEntryKind, ManifestEntryResultStatus, ManifestEntryResultV1, ManifestId,
+    ManifestEntryKind, ManifestEntryResultStatus, ManifestEntryResultV1, ManifestEntryV1,
+    ManifestHashAlgorithm, ManifestId, ManifestV1,
 };
 use envoix_session::{
-    IdentityConfig, ManifestSendRequest, MemoryIdentity, SessionTransferSummary, TransferDirection,
-    TransferSummary, discard_manifest_resume_state,
+    IdentityConfig, MemoryIdentity, SessionTransferSummary, TransferDirection, TransferSummary,
+    discard_manifest_resume_state,
 };
 use serde::Serialize;
 use tokio::sync::mpsc;
@@ -568,8 +569,96 @@ impl Actor {
                 let completed_root = self.completed_root();
                 Ok((self.activity.completed(summary, completed_root)?, false))
             }
-            // Single-file lifecycle events are incompatible with a Manifest
-            // activity. The negotiated result is classified when the run ends.
+            TransferEvent::Started {
+                transfer_id,
+                direction,
+                file_name,
+                total_bytes,
+                bytes_resumed,
+            } if self.activity.manifest.is_none()
+                && self.context.params.direction() == TransferDirection::Receive =>
+            {
+                if direction != TransferDirection::Receive || bytes_resumed > total_bytes {
+                    return Err(protocol_event_error(
+                        "compatible single-file start contradicts the receive activity",
+                    ));
+                }
+                self.rate.reset();
+                let effects = self.activity.session.reduce(Input::Event {
+                    attempt: self.activity.session.attempt,
+                    event: AttemptEvent::Started {
+                        transfer_id: transfer_id.to_string(),
+                        file_name,
+                        total: total_bytes,
+                        bytes_resumed,
+                    },
+                });
+                Ok((effects, false))
+            }
+            TransferEvent::Progress {
+                transfer_id,
+                bytes_transferred,
+                total_bytes,
+            } if self.activity.manifest.is_none()
+                && self.context.params.direction() == TransferDirection::Receive =>
+            {
+                if self.activity.session.transfer_id.as_deref() != Some(transfer_id.0.as_str())
+                    || self.activity.session.total != total_bytes
+                    || bytes_transferred > total_bytes
+                {
+                    return Err(protocol_event_error(
+                        "compatible single-file progress contradicts its start",
+                    ));
+                }
+                self.rate.on_progress(bytes_transferred);
+                let effects = self.activity.session.reduce(Input::Event {
+                    attempt: self.activity.session.attempt,
+                    event: AttemptEvent::Progress {
+                        bytes: bytes_transferred,
+                    },
+                });
+                Ok((effects, true))
+            }
+            TransferEvent::Verifying {
+                transfer_id,
+                direction,
+                file_name,
+                ..
+            } if self.activity.manifest.is_none()
+                && self.context.params.direction() == TransferDirection::Receive =>
+            {
+                if direction != TransferDirection::Receive {
+                    return Err(protocol_event_error(
+                        "compatible single-file verification has the wrong direction",
+                    ));
+                }
+                let effects = self.activity.session.reduce(Input::Event {
+                    attempt: self.activity.session.attempt,
+                    event: AttemptEvent::Verifying {
+                        transfer_id: transfer_id.to_string(),
+                        file_name,
+                    },
+                });
+                Ok((effects, false))
+            }
+            TransferEvent::Verified { direction, .. }
+                if self.activity.manifest.is_none()
+                    && self.context.params.direction() == TransferDirection::Receive =>
+            {
+                if direction != TransferDirection::Receive {
+                    return Err(protocol_event_error(
+                        "compatible single-file verification has the wrong direction",
+                    ));
+                }
+                let effects = self.activity.session.reduce(Input::Event {
+                    attempt: self.activity.session.attempt,
+                    event: AttemptEvent::Verified,
+                });
+                Ok((effects, false))
+            }
+            // The negotiated result is classified when the run ends. Sender-
+            // only confirmation and the raw completion landmark do not own
+            // canonical lifecycle state here.
             TransferEvent::Failed { .. }
             | TransferEvent::Binding { .. }
             | TransferEvent::Diagnostic { .. }
@@ -679,49 +768,47 @@ impl Actor {
         &mut self,
         summary: TransferSummary,
     ) -> Result<Vec<Effect>, TransferError> {
-        let output_dir = self.context.params.operation.output_dir().ok_or_else(|| {
+        self.context.params.operation.output_dir().ok_or_else(|| {
             protocol_event_error("Manifest send unexpectedly negotiated single-file receive")
         })?;
-        let final_path = output_dir.join(&summary.file_name);
         let manifest_id = ManifestId::new(summary.transfer_id.to_string());
-        let request = ManifestSendRequest::from_paths(manifest_id, [final_path])
-            .await
-            .map_err(|error| TransferError::from_core(error, Phase::Transfer))?;
-        let manifest = request.manifest;
-        let entry = manifest.entries.first().ok_or_else(|| {
-            protocol_event_error("compatible single-file projection produced an empty Manifest")
+        let hash = blake3::Hash::from_hex(&summary.file_hash).map_err(|_| {
+            protocol_event_error("compatible single-file result has an invalid BLAKE3 hash")
         })?;
-        if manifest.entries.len() != 1
-            || manifest.file_count != 1
-            || manifest.directory_count != 0
-            || entry.size != summary.bytes_transferred
-        {
-            return Err(protocol_event_error(
-                "compatible single-file result contradicts the received file",
-            ));
-        }
+        let manifest = ManifestV1 {
+            manifest_id: manifest_id.clone(),
+            entries: vec![ManifestEntryV1 {
+                entry_id: 0,
+                relative_path: summary.file_name.clone(),
+                kind: ManifestEntryKind::RegularFile,
+                size: summary.bytes_transferred,
+                hash: Some(*hash.as_bytes()),
+                modified_at_unix_ms: None,
+            }],
+            file_count: 1,
+            directory_count: 0,
+            root_count: 1,
+            total_bytes: summary.bytes_transferred,
+            hash_algorithm: ManifestHashAlgorithm::Blake3_256,
+        };
+        manifest.validate_structure().map_err(|error| {
+            protocol_event_error(format!(
+                "compatible single-file result cannot form a Manifest: {error}"
+            ))
+        })?;
 
+        self.activity.session.file_name = Some(manifest_id.to_string());
         self.activity
             .accept_plan(TransferDirection::Receive, manifest.clone())?;
-        let mut effects = self.activity.started()?;
-        self.activity.entry_started(
-            entry.entry_id,
-            summary.transfer_id.to_string(),
-            entry.relative_path.clone(),
-            entry.size,
-            0,
-        )?;
-        self.activity
-            .progress(entry.entry_id, entry.size, manifest.total_bytes);
         let result = ManifestEntryResultV1 {
-            entry_id: entry.entry_id,
+            entry_id: 0,
             status: ManifestEntryResultStatus::Completed,
-            offered_relative_path: entry.relative_path.clone(),
-            final_relative_path: Some(entry.relative_path.clone()),
+            offered_relative_path: summary.file_name.clone(),
+            final_relative_path: Some(summary.file_name),
             failure_code: None,
         };
         self.activity.entry_completed(result.clone())?;
-        effects.extend(self.activity.completed(
+        let effects = self.activity.completed(
             envoix_session::ManifestTransferSummary {
                 manifest_id: manifest.manifest_id,
                 file_count: manifest.file_count,
@@ -730,7 +817,7 @@ impl Actor {
                 entries: vec![result],
             },
             self.completed_root(),
-        )?);
+        )?;
         Ok(effects)
     }
 
@@ -1169,9 +1256,9 @@ mod tests {
     #[tokio::test]
     async fn negotiated_single_file_becomes_one_entry_manifest_activity() {
         let temp = tempdir().unwrap();
-        tokio::fs::write(temp.path().join("legacy.txt"), b"legacy")
-            .await
-            .unwrap();
+        let bytes = b"legacy";
+        let final_path = temp.path().join("legacy.txt");
+        tokio::fs::write(&final_path, bytes).await.unwrap();
         let context = receive_context(temp.path());
         let activity = ManifestActivity::new(&context).unwrap();
         let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
@@ -1196,11 +1283,43 @@ mod tests {
             launch: false,
         };
 
+        let (effects, progress_only) = actor
+            .process_manifest_event(TransferEvent::Started {
+                transfer_id: TransferId::new("legacy-transfer"),
+                direction: TransferDirection::Receive,
+                file_name: "legacy.txt".into(),
+                total_bytes: bytes.len() as u64,
+                bytes_resumed: 0,
+            })
+            .unwrap();
+        assert!(effects.is_empty());
+        assert!(!progress_only);
+        assert_eq!(actor.activity.session.state, State::Transferring);
+        assert_eq!(
+            actor.activity.session.file_name.as_deref(),
+            Some("legacy.txt")
+        );
+
+        let (_, progress_only) = actor
+            .process_manifest_event(TransferEvent::Progress {
+                transfer_id: TransferId::new("legacy-transfer"),
+                bytes_transferred: bytes.len() as u64,
+                total_bytes: bytes.len() as u64,
+            })
+            .unwrap();
+        assert!(progress_only);
+        assert_eq!(actor.activity.session.bytes, bytes.len() as u64);
+
+        // The transfer engine already verified these bytes. Projection must
+        // consume that proof instead of reopening the completed file.
+        tokio::fs::remove_file(final_path).await.unwrap();
+
         let effects = actor
             .adopt_compatible_single_file(TransferSummary {
                 transfer_id: TransferId::new("legacy-transfer"),
                 file_name: "legacy.txt".into(),
-                bytes_transferred: 6,
+                bytes_transferred: bytes.len() as u64,
+                file_hash: blake3::hash(bytes).to_hex().to_string(),
             })
             .await
             .unwrap();
@@ -1217,13 +1336,77 @@ mod tests {
         assert_eq!(manifest.directory_count, 0);
         assert_eq!(manifest.total_bytes, 6);
         assert_eq!(manifest.entries[0].relative_path, "legacy.txt");
-        assert!(manifest.entries[0].hash.is_some());
+        assert_eq!(
+            manifest.entries[0].hash,
+            Some(*blake3::hash(bytes).as_bytes())
+        );
         assert_eq!(actor.activity.completed_files, 1);
         assert_eq!(actor.activity.entry_results.len(), 1);
         assert_eq!(
             actor.activity.entry_results[0].status,
             ManifestEntryResultStatus::Completed
         );
+        assert_eq!(actor.activity.session.bytes_resumed, 0);
+    }
+
+    #[tokio::test]
+    async fn negotiated_existing_single_file_preserves_resume_accounting() {
+        let temp = tempdir().unwrap();
+        let bytes = b"already present";
+        let context = receive_context(temp.path());
+        let activity = ManifestActivity::new(&context).unwrap();
+        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (notice_tx, _notice_rx) = mpsc::unbounded_channel();
+        let mut actor = Actor {
+            client: context.client.client().unwrap(),
+            context,
+            activity,
+            cmds: cmd_rx,
+            notices: notice_tx,
+            current: None,
+            pending_run_end: None,
+            seq: 0,
+            rate: RateTracker::default(),
+            last_progress_snapshot: None,
+            created_ms: 1,
+            record: None,
+            platform_extras: None,
+            staged: Vec::new(),
+            commit_failures: 0,
+            commit_retry_at: None,
+            launch: false,
+        };
+
+        actor
+            .process_manifest_event(TransferEvent::Verifying {
+                transfer_id: TransferId::new("existing-transfer"),
+                direction: TransferDirection::Receive,
+                file_name: "existing.txt".into(),
+                bytes_to_hash: bytes.len() as u64,
+            })
+            .unwrap();
+        actor
+            .process_manifest_event(TransferEvent::Verified {
+                transfer_id: TransferId::new("existing-transfer"),
+                direction: TransferDirection::Receive,
+                file_name: "existing.txt".into(),
+                bytes_hashed: bytes.len() as u64,
+            })
+            .unwrap();
+
+        actor
+            .adopt_compatible_single_file(TransferSummary {
+                transfer_id: TransferId::new("existing-transfer"),
+                file_name: "existing.txt".into(),
+                bytes_transferred: bytes.len() as u64,
+                file_hash: blake3::hash(bytes).to_hex().to_string(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(actor.activity.session.bytes, bytes.len() as u64);
+        assert_eq!(actor.activity.session.total, bytes.len() as u64);
+        assert_eq!(actor.activity.session.bytes_resumed, bytes.len() as u64);
     }
 
     #[test]

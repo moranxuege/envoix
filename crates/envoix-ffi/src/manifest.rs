@@ -22,12 +22,13 @@ use tokio::sync::mpsc;
 use super::{
     EXTERNAL_RECORD_ID_KEY, EnvoixError, EnvoixRuntimeSettings, FfiNativePublicationTarget,
     FfiTransferActivityActions, FfiTransferActivityRecord, FfiTransferActivityState,
-    FfiTransferDirection, FfiTransferEventKind, FfiTransferFailure, FfiTransferRequest,
-    NATIVE_PROGRESS_INTERVAL_MS, NATIVE_PUBLICATION_EXTRAS_KEY, PersistedNativePublication,
-    apply_canonical_snapshot, durable_runtime, ffi_direction,
+    FfiTransferDirection, FfiTransferEvent, FfiTransferEventKind, FfiTransferFailure,
+    FfiTransferRequest, NATIVE_PROGRESS_INTERVAL_MS, NATIVE_PUBLICATION_EXTRAS_KEY,
+    PersistedNativePublication, apply_canonical_snapshot, durable_runtime, ffi_direction,
     native_publication_metadata_from_extras, next_activity_id, normalize_transfer_limits, now_ms,
-    op_err, peer_sources_for_request, required_path, required_value, stable_record_id,
-    to_ffi_event, transfer_activity_actions, transfer_options_for_request, validate_direction_mode,
+    op_err, peer_sources_for_request, required_path, required_value, should_emit_native_event,
+    stable_record_id, to_ffi_event, transfer_activity_actions, transfer_options_for_request,
+    validate_direction_mode,
 };
 
 /// Portable entry type in a prepared Manifest.
@@ -254,6 +255,35 @@ pub trait ManifestTransferObserver: Send + Sync {
     fn on_manifest_activity(&self, record: FfiManifestActivityRecord);
 }
 
+/// Additive Manifest observer that also receives the structured diagnostic
+/// stream. The original observer remains available for existing native
+/// clients; new clients use the V2 start/restore functions.
+#[uniffi::export(with_foreign)]
+pub trait ManifestTransferObserverV2: Send + Sync {
+    fn on_manifest_event(&self, event: FfiTransferEvent);
+    fn on_manifest_activity(&self, record: FfiManifestActivityRecord);
+}
+
+enum NativeManifestObserver {
+    V1(Arc<dyn ManifestTransferObserver>),
+    V2(Arc<dyn ManifestTransferObserverV2>),
+}
+
+impl NativeManifestObserver {
+    fn on_event(&self, event: FfiTransferEvent) {
+        if let Self::V2(observer) = self {
+            observer.on_manifest_event(event);
+        }
+    }
+
+    fn on_activity(&self, record: FfiManifestActivityRecord) {
+        match self {
+            Self::V1(observer) => observer.on_manifest_activity(record),
+            Self::V2(observer) => observer.on_manifest_activity(record),
+        }
+    }
+}
+
 /// One durable Manifest transfer card.
 #[derive(uniffi::Object)]
 pub struct DurableEnvoixManifestSession {
@@ -397,7 +427,33 @@ pub fn start_durable_manifest_send(
     let operation = ManifestOperation::Send {
         request: prepared.to_core()?,
     };
-    start_durable_manifest(settings, request, operation, records_dir, observer)
+    start_durable_manifest(
+        settings,
+        request,
+        operation,
+        records_dir,
+        NativeManifestObserver::V1(observer),
+    )
+}
+
+#[uniffi::export]
+pub fn start_durable_manifest_send_v2(
+    settings: EnvoixRuntimeSettings,
+    request: FfiTransferRequest,
+    prepared: FfiPreparedManifestSend,
+    records_dir: String,
+    observer: Arc<dyn ManifestTransferObserverV2>,
+) -> Result<Arc<DurableEnvoixManifestSession>, EnvoixError> {
+    let operation = ManifestOperation::Send {
+        request: prepared.to_core()?,
+    };
+    start_durable_manifest(
+        settings,
+        request,
+        operation,
+        records_dir,
+        NativeManifestObserver::V2(observer),
+    )
 }
 
 #[uniffi::export]
@@ -415,7 +471,26 @@ pub fn start_durable_manifest_receive(
             output_dir: PathBuf::from(output_dir),
         },
         records_dir,
-        observer,
+        NativeManifestObserver::V1(observer),
+    )
+}
+
+#[uniffi::export]
+pub fn start_durable_manifest_receive_v2(
+    settings: EnvoixRuntimeSettings,
+    request: FfiTransferRequest,
+    records_dir: String,
+    observer: Arc<dyn ManifestTransferObserverV2>,
+) -> Result<Arc<DurableEnvoixManifestSession>, EnvoixError> {
+    let output_dir = required_path(&request.output_dir, "output_dir")?;
+    start_durable_manifest(
+        settings,
+        request,
+        ManifestOperation::Receive {
+            output_dir: PathBuf::from(output_dir),
+        },
+        records_dir,
+        NativeManifestObserver::V2(observer),
     )
 }
 
@@ -424,7 +499,7 @@ fn start_durable_manifest(
     mut request: FfiTransferRequest,
     operation: ManifestOperation,
     records_dir: String,
-    observer: Arc<dyn ManifestTransferObserver>,
+    observer: NativeManifestObserver,
 ) -> Result<Arc<DurableEnvoixManifestSession>, EnvoixError> {
     let expected_direction = ffi_direction(Some(operation.direction()));
     if request.activity_id.trim().is_empty() {
@@ -500,6 +575,31 @@ pub fn restore_durable_manifest_transfer(
     activity_id: String,
     records_dir: String,
     observer: Arc<dyn ManifestTransferObserver>,
+) -> Result<Arc<DurableEnvoixManifestSession>, EnvoixError> {
+    restore_durable_manifest(
+        activity_id,
+        records_dir,
+        NativeManifestObserver::V1(observer),
+    )
+}
+
+#[uniffi::export]
+pub fn restore_durable_manifest_transfer_v2(
+    activity_id: String,
+    records_dir: String,
+    observer: Arc<dyn ManifestTransferObserverV2>,
+) -> Result<Arc<DurableEnvoixManifestSession>, EnvoixError> {
+    restore_durable_manifest(
+        activity_id,
+        records_dir,
+        NativeManifestObserver::V2(observer),
+    )
+}
+
+fn restore_durable_manifest(
+    activity_id: String,
+    records_dir: String,
+    observer: NativeManifestObserver,
 ) -> Result<Arc<DurableEnvoixManifestSession>, EnvoixError> {
     let activity_id = required_value(&activity_id, "activity_id")?;
     let records_dir = required_value(&records_dir, "records_dir")?;
@@ -655,16 +755,21 @@ async fn drive_manifest_notices(
     context: ManifestSessionContext,
     mut notices: mpsc::UnboundedReceiver<ManifestSessionNotice>,
     activity: Arc<Mutex<FfiManifestActivityRecord>>,
-    observer: Arc<dyn ManifestTransferObserver>,
+    observer: NativeManifestObserver,
 ) {
     let projection = projection_context(&context);
     let mut previous_activity: Option<ManifestActivity> = None;
     let mut last_progress_activity_ms = 0_u64;
+    let mut last_native_progress_ms = 0_u64;
     while let Some(notice) = notices.recv().await {
         match notice {
             ManifestSessionNotice::Event(event) => {
-                if let Some(record) = observe_manifest_transport_event(&activity, event) {
-                    observer.on_manifest_activity(record);
+                let (ffi_event, record) = observe_manifest_transport_event(&activity, &event);
+                if should_emit_native_event(&ffi_event, &mut last_native_progress_ms) {
+                    observer.on_event(ffi_event);
+                }
+                if let Some(record) = record {
+                    observer.on_activity(record);
                 }
             }
             ManifestSessionNotice::Snapshot(snapshot) => {
@@ -693,7 +798,7 @@ async fn drive_manifest_notices(
                     if progress_only {
                         last_progress_activity_ms = timestamp;
                     }
-                    observer.on_manifest_activity(record);
+                    observer.on_activity(record);
                 }
                 previous_activity = Some(snapshot.activity);
             }
@@ -707,10 +812,10 @@ async fn drive_manifest_notices(
 /// lets native diagnostics retain the boundary between them.
 fn observe_manifest_transport_event(
     activity: &Arc<Mutex<FfiManifestActivityRecord>>,
-    event: StampedEvent,
-) -> Option<FfiManifestActivityRecord> {
+    event: &StampedEvent,
+) -> (FfiTransferEvent, Option<FfiManifestActivityRecord>) {
     let mut activity = activity.lock().unwrap();
-    let ffi_event = to_ffi_event(&event, &activity.activity.activity_id);
+    let ffi_event = to_ffi_event(event, &activity.activity.activity_id);
     activity.activity.apply_observation(&ffi_event);
     let is_transport_landmark = matches!(
         ffi_event.kind,
@@ -722,16 +827,16 @@ fn observe_manifest_transport_event(
             | FfiTransferEventKind::PathChanged
     );
     if !is_transport_landmark {
-        return None;
+        return (ffi_event, None);
     }
 
     let mut landmark = (*activity).clone();
     landmark.activity.apply_event(&ffi_event);
-    if let envoix_client::api::TransferEvent::Pairing { step } = event.event {
+    if let envoix_client::api::TransferEvent::Pairing { step } = &event.event {
         landmark.activity.diagnostic_message =
-            format!("pairing: {}", super::pairing_step_label(step));
+            format!("pairing: {}", super::pairing_step_label(*step));
     }
-    Some(landmark)
+    (ffi_event, Some(landmark))
 }
 
 fn is_manifest_progress_only(previous: &ManifestActivity, current: &ManifestActivity) -> bool {
@@ -1003,6 +1108,7 @@ impl DurableEnvoixManifestSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use envoix_client::api::machine::{AttemptEvent, Input};
     use std::sync::mpsc as sync_mpsc;
     use std::time::Duration;
 
@@ -1016,6 +1122,73 @@ mod tests {
         fn on_manifest_activity(&self, record: FfiManifestActivityRecord) {
             let _ = self.records.send(record);
         }
+    }
+
+    struct RecordingObserverV2 {
+        events: sync_mpsc::Sender<FfiTransferEvent>,
+    }
+
+    impl ManifestTransferObserverV2 for RecordingObserverV2 {
+        fn on_manifest_event(&self, event: FfiTransferEvent) {
+            let _ = self.events.send(event);
+        }
+
+        fn on_manifest_activity(&self, _record: FfiManifestActivityRecord) {}
+    }
+
+    #[tokio::test]
+    async fn v2_manifest_observer_receives_structured_events() {
+        let temp = tempdir().unwrap();
+        let mut request = FfiTransferRequest::receive(
+            temp.path().to_string_lossy().into_owned(),
+            super::super::FfiTransferMode::Room,
+        );
+        request.activity_id = "manifest-events".into();
+        request.code = "123456-test-code".into();
+        request.broker = "127.0.0.1:9000".into();
+        let context = canonical_manifest_context(
+            &EnvoixRuntimeSettings::default(),
+            &request,
+            ManifestOperation::Receive {
+                output_dir: temp.path().to_path_buf(),
+            },
+        )
+        .unwrap();
+        let canonical_activity = ManifestActivity::new(&context).unwrap();
+        let activity = Arc::new(Mutex::new(manifest_record_from_activity(
+            &request,
+            &context,
+            canonical_activity,
+            0,
+            1,
+            1,
+        )));
+        let (event_tx, event_rx) = sync_mpsc::channel();
+        let (notice_tx, notice_rx) = mpsc::unbounded_channel();
+        let driver = tokio::spawn(drive_manifest_notices(
+            context,
+            notice_rx,
+            activity,
+            NativeManifestObserver::V2(Arc::new(RecordingObserverV2 { events: event_tx })),
+        ));
+
+        notice_tx
+            .send(ManifestSessionNotice::Event(StampedEvent {
+                ts_ms: 2,
+                event: envoix_client::api::TransferEvent::Binding {
+                    direction: envoix_client::TransferDirection::Receive,
+                    mode: envoix_client::api::TransferMode::Room,
+                },
+            }))
+            .unwrap();
+        drop(notice_tx);
+        driver.await.unwrap();
+
+        let event = event_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(event.activity_id, "manifest-events");
+        assert_eq!(event.kind, FfiTransferEventKind::Binding);
+        assert_eq!(event.direction, FfiTransferDirection::Receive);
+        assert_eq!(event.mode, super::super::FfiTransferMode::Room);
     }
 
     #[tokio::test]
@@ -1091,6 +1264,44 @@ mod tests {
     }
 
     #[test]
+    fn compatible_single_file_verification_sets_started_timestamp() {
+        let temp = tempdir().unwrap();
+        let mut request = FfiTransferRequest::receive(
+            temp.path().to_string_lossy().into_owned(),
+            super::super::FfiTransferMode::Room,
+        );
+        request.activity_id = "compatible-single-file".into();
+        request.code = "123456-test-code".into();
+        request.broker = "127.0.0.1:9000".into();
+        let context = canonical_manifest_context(
+            &EnvoixRuntimeSettings::default(),
+            &request,
+            ManifestOperation::Receive {
+                output_dir: temp.path().to_path_buf(),
+            },
+        )
+        .unwrap();
+        let mut activity = ManifestActivity::new(&context).unwrap();
+        let attempt = activity.session.attempt;
+        activity.session.reduce(Input::Event {
+            attempt,
+            event: AttemptEvent::Verifying {
+                transfer_id: "legacy-transfer".into(),
+                file_name: "legacy.txt".into(),
+            },
+        });
+
+        let projected = manifest_record_from_activity(&request, &context, activity, 1, 10, 42);
+
+        assert_eq!(
+            projected.activity.state,
+            FfiTransferActivityState::Verifying
+        );
+        assert_eq!(projected.activity.transfer_id, "legacy-transfer");
+        assert_eq!(projected.activity.started_at_ms, 42);
+    }
+
+    #[test]
     fn invite_transport_event_requests_an_immediate_native_snapshot() {
         let mut request = FfiTransferRequest::receive(
             "/tmp/envoix".into(),
@@ -1122,7 +1333,8 @@ mod tests {
             },
         };
 
-        let observed = observe_manifest_transport_event(&activity, event).unwrap();
+        let (_, observed) = observe_manifest_transport_event(&activity, &event);
+        let observed = observed.unwrap();
         assert_eq!(activity.lock().unwrap().activity.invite, invite);
         assert_eq!(
             observed.activity.state,
@@ -1153,7 +1365,8 @@ mod tests {
             },
         };
 
-        let observed = observe_manifest_transport_event(&activity, event).unwrap();
+        let (_, observed) = observe_manifest_transport_event(&activity, &event);
+        let observed = observed.unwrap();
         assert_eq!(observed.activity.state, FfiTransferActivityState::Pairing);
         assert_eq!(
             observed.activity.diagnostic_message,

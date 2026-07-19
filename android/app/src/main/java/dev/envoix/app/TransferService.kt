@@ -99,6 +99,10 @@ class TransferService : Service() {
      *  snapshot doesn't spawn a second one. */
     private val publishing = java.util.Collections.synchronizedSet(HashSet<Long>())
 
+    /** Completed receive cards whose public artifact is being checked before
+     *  the private receipt may be served. */
+    private val publicationChecks = java.util.Collections.synchronizedSet(HashSet<Long>())
+
     /** Backoff for re-attempting a stuck publish in-session (a non-collision
      *  failure — collisions self-resolve in `commit`). After these, the card is
      *  marked failed and the bytes wait in staging for a restart re-drive. */
@@ -378,7 +382,7 @@ class TransferService : Service() {
                 val id = intent.getLongExtra(EXTRA_ID, -1L)
                 OpLog.add("serve re-verify id=$id", id)
                 if (!jobs.containsKey(id)) restoreAllRecords()
-                Native.sessionIntent(id, "reverify")
+                reverifyPublishedFile(id)
             }
             ACTION_REMOVE -> {
                 val id = intent.getLongExtra(EXTRA_ID, -1L)
@@ -444,6 +448,9 @@ class TransferService : Service() {
                     qrPayload = c.optString("qr").ifEmpty { null },
                     savedUri = c.optString("saved_uri").ifEmpty { null },
                     publishedName = c.optString("published_name").ifEmpty { null },
+                    publishedSize = c.takeIf { it.has("published_size") }?.optLong("published_size"),
+                    publishedSha256 = c.optString("published_sha256").ifEmpty { null },
+                    publicationInvalid = c.optBoolean("publication_invalid", false),
                     publishFailed = c.optString("publish") == "failed",
                 )
             ) {
@@ -495,6 +502,55 @@ class TransferService : Service() {
             jobs[id] = job
             OpLog.add("restored transfer id=$id")
         }
+    }
+
+    /** A durable receipt proves protocol completion, not continued ownership of
+     *  the user-visible copy. Check the public artifact before serving it. */
+    private fun reverifyPublishedFile(id: Long) {
+        val transfer = TransferRepository.transfers.value.firstOrNull { it.id == id } ?: return
+        if (transfer.direction != Direction.Receive || transfer.publicationInvalid) return
+        val uri = transfer.savedUri?.let(Uri::parse)
+        val size = transfer.publishedSize
+        val sha256 = transfer.publishedSha256
+        if (uri == null || size == null || sha256 == null) {
+            markPublicationInvalid(id, PUBLICATION_EVIDENCE_MISSING_MESSAGE, "evidence_missing")
+            return
+        }
+        if (!publicationChecks.add(id)) return
+        transferScope(id).launch(Dispatchers.IO) {
+            try {
+                val actual = MediaStoreSaver.inspect(this@TransferService, uri).getOrNull()
+                val expected = MediaStoreSaver.PublicationEvidence(size, sha256)
+                if (actual != null && expected.matches(actual)) {
+                    TransferTimeline.event(id, "platform.publication", "verify", outcome = "matched")
+                    Native.sessionIntent(id, "reverify")
+                } else {
+                    markPublicationInvalid(id, PUBLICATION_INVALID_MESSAGE, "missing_or_changed")
+                }
+            } finally {
+                publicationChecks.remove(id)
+            }
+        }
+    }
+
+    private fun markPublicationInvalid(
+        id: Long,
+        message: String,
+        outcome: String,
+    ) {
+        TransferRepository.update(id) {
+            it.copy(
+                savedUri = null,
+                publishedSize = null,
+                publishedSha256 = null,
+                publicationInvalid = true,
+                error = message,
+                log = addLog(it.log, message),
+            )
+        }
+        syncExtras(id)
+        TransferTimeline.event(id, "platform.publication", "verify", outcome = outcome)
+        OpLog.add("publication invalid id=$id outcome=$outcome", id)
     }
 
     /** Copy a Preparing send's content:// source into its staging path, then
@@ -882,11 +938,35 @@ class TransferService : Service() {
         // --- recovery: a journal survived a crash mid-publish ---
         runCatching { org.json.JSONObject(journal.readText()) }.getOrNull()?.let { prior ->
             val committed = prior.optString("committed_uri").ifEmpty { null }
-            if (committed != null && MediaStoreSaver.resolves(this, Uri.parse(committed))) {
+            val journalEvidence =
+                if (prior.has("published_size") && prior.has("published_sha256")) {
+                    MediaStoreSaver.PublicationEvidence(
+                        prior.optLong("published_size"),
+                        prior.optString("published_sha256"),
+                    )
+                } else {
+                    null
+                }
+            val expectedEvidence =
+                journalEvidence
+                    ?: runCatching { src.inputStream().use(MediaStoreSaver::hash) }.getOrNull()
+            val publicEvidence =
+                committed?.let { MediaStoreSaver.inspect(this, Uri.parse(it)).getOrNull() }
+            if (committed != null &&
+                expectedEvidence != null &&
+                publicEvidence != null &&
+                expectedEvidence.matches(publicEvidence)
+            ) {
                 // Commit had landed; the crash was before staging was cleared.
                 // Adopt under the name it was actually published as (may be bumped).
                 val publishedName = prior.optString("published_name").ifEmpty { src.name }
-                adopt(attributeTo, expectedSourceName = src.name, publishedName = publishedName, uri = committed)
+                adopt(
+                    attributeTo,
+                    expectedSourceName = src.name,
+                    publishedName = publishedName,
+                    uri = committed,
+                    evidence = expectedEvidence,
+                )
                 src.delete()
                 journal.delete()
                 tl("adopt", fields = mapOf("uri" to TransferTimeline.redactUri(committed)))
@@ -902,6 +982,31 @@ class TransferService : Service() {
 
         // --- fresh publish ---
         val s = SettingsStore.settings.value
+        val identical =
+            MediaStoreSaver
+                .findIdentical(this, src, src.name, s.saveTreeUri, s.saveFolder)
+                .onFailure {
+                    tl("deduplicate", outcome = "lookup_failed", fields = mapOf("cause" to it.javaClass.simpleName))
+                }.getOrNull()
+        if (identical != null) {
+            adopt(
+                attributeTo,
+                expectedSourceName = src.name,
+                publishedName = identical.displayName,
+                uri = identical.uri.toString(),
+                evidence = identical.evidence,
+            )
+            attributeTo?.let { id ->
+                TransferRepository.update(id) {
+                    it.copy(log = addLog(it.log, "already present in Downloads · identical content"))
+                }
+            }
+            src.delete()
+            journal.delete()
+            tl("deduplicate", outcome = "matched", fields = mapOf("uri" to TransferTimeline.redactUri(identical.uri.toString())))
+            LogStore.append("app: reused identical public file ${identical.displayName}")
+            return
+        }
         val target = MediaStoreSaver.reserve(this, src.name, s.saveTreeUri, s.saveFolder)
         if (target == null) {
             tl("failed", outcome = "reserve", fields = mapOf("name" to src.name))
@@ -923,6 +1028,7 @@ class TransferService : Service() {
             )
             return
         }
+        val evidence = copy.getOrThrow()
         val committed = MediaStoreSaver.commit(this, target)
         if (committed.isFailure) {
             // A colliding _data (same-named file already published) or other
@@ -950,13 +1056,21 @@ class TransferService : Service() {
                 target.mediaStorePending,
                 committed = outcome.uri.toString(),
                 publishedName = outcome.displayName,
+                publishedSize = evidence.size,
+                publishedSha256 = evidence.sha256,
             )
         if (!journaled) {
             tl("failed", outcome = "journal")
             LogStore.append("app: publish journal write failed (published as ${outcome.displayName})")
         }
         tl("commit", fields = mapOf("uri" to TransferTimeline.redactUri(outcome.uri.toString())))
-        adopt(attributeTo, expectedSourceName = src.name, publishedName = outcome.displayName, uri = outcome.uri.toString())
+        adopt(
+            attributeTo,
+            expectedSourceName = src.name,
+            publishedName = outcome.displayName,
+            uri = outcome.uri.toString(),
+            evidence = evidence,
+        )
         src.delete()
         journal.delete()
         tl("staging_deleted")
@@ -969,6 +1083,8 @@ class TransferService : Service() {
         pending: Boolean,
         committed: String?,
         publishedName: String?,
+        publishedSize: Long? = null,
+        publishedSha256: String? = null,
     ): Boolean {
         val obj =
             org.json
@@ -977,6 +1093,8 @@ class TransferService : Service() {
                 .put("pending", pending)
         committed?.let { obj.put("committed_uri", it) }
         publishedName?.let { obj.put("published_name", it) }
+        publishedSize?.let { obj.put("published_size", it) }
+        publishedSha256?.let { obj.put("published_sha256", it) }
         return runCatching { journal.writeText(obj.toString()) }.isSuccess
     }
 
@@ -989,6 +1107,7 @@ class TransferService : Service() {
         expectedSourceName: String,
         publishedName: String,
         uri: String,
+        evidence: MediaStoreSaver.PublicationEvidence,
     ) {
         if (attributeTo == null) return
         TransferRepository.update(attributeTo) {
@@ -997,6 +1116,9 @@ class TransferService : Service() {
                     fileName = it.fileName ?: expectedSourceName,
                     savedUri = uri,
                     publishedName = publishedName,
+                    publishedSize = evidence.size,
+                    publishedSha256 = evidence.sha256,
+                    publicationInvalid = false,
                     publishFailed = false,
                 )
             } else {
@@ -1014,6 +1136,9 @@ class TransferService : Service() {
         t.qrPayload?.let { extras.put("qr", it) }
         t.savedUri?.let { extras.put("saved_uri", it) }
         t.publishedName?.let { extras.put("published_name", it) }
+        t.publishedSize?.let { extras.put("published_size", it) }
+        t.publishedSha256?.let { extras.put("published_sha256", it) }
+        if (t.publicationInvalid) extras.put("publication_invalid", true)
         if (t.publishFailed) extras.put("publish", "failed")
         val err = Native.setSessionExtras(id, extras.toString())
         if (err.isNotEmpty()) LogStore.append("app: $err (id=$id)")
@@ -1190,6 +1315,10 @@ class TransferService : Service() {
         private const val ACTION_REMOVE = "dev.envoix.app.REMOVE"
         private const val ACTION_RESTORE_ALL = "dev.envoix.app.RESTORE_ALL"
         private const val ACTION_REVERIFY = "dev.envoix.app.REVERIFY"
+        private const val PUBLICATION_INVALID_MESSAGE =
+            "Saved file was deleted or changed. Receive it again."
+        private const val PUBLICATION_EVIDENCE_MISSING_MESSAGE =
+            "This older delivery cannot be verified safely. Receive it again."
 
         /** Launch specs by id, so a session can be re-created after the service
          *  (or process) restarted. */

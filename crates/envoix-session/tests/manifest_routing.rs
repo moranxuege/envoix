@@ -235,6 +235,51 @@ async fn dual_alpn_receiver_preserves_single_file_compatibility() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dual_alpn_receiver_reconfirms_an_existing_single_file() {
+    let _guard = IROH_TEST_LOCK.lock().await;
+    let temp = tempdir().unwrap();
+    let source = temp.path().join("repeat.txt");
+    let output_dir = temp.path().join("received");
+    let contents = b"repeat without retransmitting";
+    std::fs::write(&source, contents).unwrap();
+    std::fs::create_dir_all(&output_dir).unwrap();
+
+    for resume in [false, true] {
+        let (peer, receive) = bound_peer_receiver(output_dir.clone()).await;
+        let pairing = pairing();
+        let sent = tokio::time::timeout(
+            TEST_TIMEOUT,
+            send_file_manual(
+                peer,
+                source.clone(),
+                resume,
+                config(),
+                &pairing,
+                Box::new(NoopEventSink),
+                TransferCancelToken::new(),
+            ),
+        )
+        .await
+        .expect("single-file sender timed out")
+        .expect("single-file sender failed");
+        let received = tokio::time::timeout(TEST_TIMEOUT, receive)
+            .await
+            .expect("single-file receiver timed out")
+            .expect("single-file receiver task panicked")
+            .expect("single-file receiver failed");
+
+        assert_eq!(sent.file_hash, blake3::hash(contents).to_hex().to_string());
+        assert!(matches!(received, SessionTransferSummary::SingleFile(_)));
+    }
+
+    assert_eq!(
+        std::fs::read(output_dir.join("repeat.txt")).unwrap(),
+        contents
+    );
+    assert!(!output_dir.join("repeat (1).txt").exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn old_single_file_receiver_rejects_manifest_before_payload() {
     let _guard = IROH_TEST_LOCK.lock().await;
     let temp = tempdir().unwrap();

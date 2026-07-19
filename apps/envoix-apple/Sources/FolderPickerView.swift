@@ -1,3 +1,5 @@
+import Foundation
+
 #if os(iOS)
 import SwiftUI
 import UIKit
@@ -273,6 +275,7 @@ enum OpenInUITestFixture {
     }
 }
 #endif
+#endif
 
 final class SecurityScopedResourceAccess {
     let url: URL
@@ -299,10 +302,13 @@ func makeSecurityScopedFolderBookmark(for url: URL) throws -> Data {
             url.stopAccessingSecurityScopedResource()
         }
     }
-    // `.withSecurityScope` is macOS-only; iOS document-picker bookmarks use the
-    // default options and access is re-opened on the resolved URL.
+    #if os(macOS)
+    let options: URL.BookmarkCreationOptions = [.withSecurityScope]
+    #else
+    let options: URL.BookmarkCreationOptions = []
+    #endif
     return try url.bookmarkData(
-        options: [],
+        options: options,
         includingResourceValuesForKeys: nil,
         relativeTo: nil
     )
@@ -310,9 +316,14 @@ func makeSecurityScopedFolderBookmark(for url: URL) throws -> Data {
 
 func resolveSecurityScopedFolderBookmark(_ data: Data) throws -> URL {
     var isStale = false
+    #if os(macOS)
+    let options: URL.BookmarkResolutionOptions = [.withSecurityScope]
+    #else
+    let options: URL.BookmarkResolutionOptions = []
+    #endif
     let url = try URL(
         resolvingBookmarkData: data,
-        options: [],
+        options: options,
         relativeTo: nil,
         bookmarkDataIsStale: &isStale
     )
@@ -321,4 +332,46 @@ func resolveSecurityScopedFolderBookmark(_ data: Data) throws -> URL {
     }
     return url
 }
+
+#if os(macOS)
+/// Resolves the persisted destination without silently falling back when a
+/// bookmark exists but is no longer usable. A stale bookmark must be renewed
+/// through NSOpenPanel; otherwise a legacy path can bypass the user's current
+/// Files & Folders authorization and fail only after pairing has started.
+func resolveRememberedOutputDirectory(
+    bookmarkData: Data?,
+    legacyPath: String,
+    defaultURL: URL
+) -> URL? {
+    if let bookmarkData {
+        return try? resolveSecurityScopedFolderBookmark(bookmarkData)
+    }
+    if !legacyPath.isEmpty {
+        return URL(fileURLWithPath: legacyPath, isDirectory: true)
+    }
+    return defaultURL
+}
 #endif
+
+/// Performs a real create/write/remove cycle so folder authorization failures
+/// surface before pairing starts instead of after the peer begins sending.
+func validateWritableDirectoryAccess(
+    _ directory: URL,
+    fileManager: FileManager = .default
+) throws {
+    var isDirectory: ObjCBool = false
+    if fileManager.fileExists(atPath: directory.path, isDirectory: &isDirectory),
+       !isDirectory.boolValue {
+        throw RuntimeSettingsError("The selected save location is not a folder.")
+    }
+
+    do {
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let probe = directory.appendingPathComponent(".envoix-write-probe-\(UUID().uuidString)")
+        defer { try? fileManager.removeItem(at: probe) }
+        try Data("envoix".utf8).write(to: probe, options: .atomic)
+        try fileManager.removeItem(at: probe)
+    } catch {
+        throw RuntimeSettingsError("Envoix cannot write to the selected save folder: \(error.localizedDescription)")
+    }
+}

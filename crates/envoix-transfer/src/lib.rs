@@ -286,6 +286,8 @@ pub struct TransferSummary {
     pub file_name: String,
     /// Plaintext bytes transferred.
     pub bytes_transferred: u64,
+    /// BLAKE3 hash verified by both sides before completion.
+    pub file_hash: String,
 }
 
 /// Sequential single-file transfer engine.
@@ -468,7 +470,7 @@ impl TransferEngine {
             .map_err(peer_closed_error)?;
         events.on_event(TransferEvent::Confirming {
             transfer_id: transfer_id.clone(),
-            file_hash,
+            file_hash: file_hash.clone(),
         });
         // The whole file plus the Complete frame (which carries the file hash the
         // receiver verifies before finalizing) have been sent. Require the
@@ -491,6 +493,7 @@ impl TransferEngine {
             transfer_id,
             file_name,
             bytes_transferred: offset,
+            file_hash,
         })
     }
 
@@ -738,6 +741,7 @@ impl TransferEngine {
                         transfer_id: header.transfer_id,
                         file_name: target_name,
                         bytes_transferred: expected_offset,
+                        file_hash: complete.file_hash,
                     });
                 }
                 Frame::Error(error) => return Err(peer_error(error)),
@@ -1334,6 +1338,7 @@ async fn receive_existing_final(
         transfer_id: header.transfer_id,
         file_name,
         bytes_transferred: header.file_size,
+        file_hash: final_hash,
     })
 }
 
@@ -1413,6 +1418,7 @@ async fn receive_from_receipt(
         transfer_id: header.transfer_id,
         file_name: receipt.file_name,
         bytes_transferred: header.file_size,
+        file_hash: receipt.file_hash,
     })
 }
 

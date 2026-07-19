@@ -4,6 +4,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 
 /**
  * Pure-logic tests for the converging-publish helpers. The collision retry itself
@@ -15,11 +17,55 @@ import org.junit.Test
  */
 class MediaStoreSaverTest {
     @Test
+    fun copyAndHashReturnsEvidenceForExactlyTheCopiedBytes() {
+        val output = ByteArrayOutputStream()
+        val evidence =
+            MediaStoreSaver.copyAndHash(
+                ByteArrayInputStream("abc".toByteArray()),
+                output,
+            )
+
+        assertEquals("abc", output.toString(Charsets.UTF_8.name()))
+        assertEquals(3L, evidence.size)
+        assertEquals(
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            evidence.sha256,
+        )
+    }
+
+    @Test
+    fun publicationEvidenceRejectsSameSizeDifferentContentAndMalformedDigest() {
+        val expected = MediaStoreSaver.hash(ByteArrayInputStream("abc".toByteArray()))
+        val changed = MediaStoreSaver.hash(ByteArrayInputStream("xyz".toByteArray()))
+
+        assertFalse(expected.matches(changed))
+        assertFalse(expected.matches(expected.copy(sha256 = "not-a-digest")))
+        assertTrue(expected.matches(expected.copy()))
+    }
+
+    @Test
     fun nameSequenceStartsWithTheNameThenBumps() {
         assertEquals(
             listOf("photo.jpg", "photo (1).jpg", "photo (2).jpg"),
             MediaStoreSaver.nameSequence("photo.jpg").take(3).toList(),
         )
+    }
+
+    @Test
+    fun availableNameIgnoresProviderStyleSuffixAfterExtension() {
+        assertEquals(
+            "photo (1).jpg",
+            MediaStoreSaver.availableName(
+                "photo.jpg",
+                setOf("photo.jpg", "photo.jpg (1)", "photo.jpg (2)"),
+            ),
+        )
+    }
+
+    @Test
+    fun mimeTypeUsesTheRealExtension() {
+        assertEquals("image/jpeg", MediaStoreSaver.mimeTypeFor("photo (1).jpeg"))
+        assertEquals("application/octet-stream", MediaStoreSaver.mimeTypeFor("README"))
     }
 
     @Test

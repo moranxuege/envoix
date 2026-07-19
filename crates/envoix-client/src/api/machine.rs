@@ -593,6 +593,8 @@ impl Session {
                 S::Waiting | S::Connecting | S::Verifying | S::Transferring | S::Confirming
             ) =>
             {
+                let completed_without_started = self.direction == TransferDirection::Receive
+                    && matches!(self.state, S::Waiting | S::Connecting | S::Verifying);
                 let mut effects = self.exit_effects();
                 self.state =
                     if self.direction == TransferDirection::Receive && self.publication_required {
@@ -604,6 +606,14 @@ impl Session {
                 self.file_name = Some(file_name);
                 self.completed_file_path = completed_file_path;
                 self.bytes = bytes;
+                // Receive paths that complete without `Started` are the
+                // existing-final and durable-receipt short circuits: all
+                // bytes were already present before this attempt. Preserve
+                // that fact in the canonical snapshot instead of letting the
+                // raw verification event be overwritten with zero.
+                if completed_without_started {
+                    self.bytes_resumed = bytes;
+                }
                 if self.total == 0 {
                     self.total = bytes; // receipt/existing-final paths skip Started
                 }
@@ -1170,9 +1180,27 @@ mod tests {
         let mut s = Session::new(Receive);
         s.reduce(ev(1, completed(77)));
         assert_eq!(s.state, State::Completed);
-        assert_eq!((s.bytes, s.total), (77, 77));
+        assert_eq!((s.bytes, s.total, s.bytes_resumed), (77, 77, 77));
         assert_eq!(s.transfer_id.as_deref(), Some("transfer-t1"));
         assert_eq!(s.file_name.as_deref(), Some("a.zip"));
+    }
+
+    #[test]
+    fn completed_after_started_preserves_partial_resume_count() {
+        let mut s = Session::new(Receive);
+        s.reduce(ev(
+            1,
+            E::Started {
+                transfer_id: "transfer-t1".into(),
+                file_name: "a.zip".into(),
+                total: 100,
+                bytes_resumed: 40,
+            },
+        ));
+        s.reduce(ev(1, completed(100)));
+
+        assert_eq!(s.state, State::Completed);
+        assert_eq!((s.bytes, s.total, s.bytes_resumed), (100, 100, 40));
     }
 
     #[test]

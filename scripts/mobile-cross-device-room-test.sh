@@ -259,7 +259,11 @@ run_ios_test() {
     return 1
   fi
 
-  local patched_xctestrun="$log_dir/$method.xctestrun"
+  # __TESTROOT__ inside an xctestrun file resolves relative to that file. Keep
+  # the patched copy beside the generated file so test-without-building still
+  # points at the products under Build/Products.
+  local patched_xctestrun
+  patched_xctestrun="$(dirname "$xctestrun")/$method.$current_run_id.xctestrun"
   cp "$xctestrun" "$patched_xctestrun"
   if [[ -n "$transfer_invite" ]]; then
     set_xctestrun_env "$patched_xctestrun" ENVOIX_TRANSFER_INVITE "$transfer_invite"
@@ -426,7 +430,7 @@ run_ios_to_android() {
   echo "ios -> android: receiver starting on Android; logs in $log_dir"
   run_android_test receiveIosToAndroidRoom "$transfer_timeout_ms" >"$android_log" 2>&1 &
   local android_pid=$!
-  if ! wait_for_log "$android_logcat" "EnvoixCrossDevice:.*\\[cross-device\\] Android status pairing: joining" "Android receiver ready" "$ready_timeout"; then
+  if ! wait_for_log "$android_logcat" "EnvoixCrossDevice:.*\\[cross-device\\] Android room receiver ready" "Android receiver ready" "$ready_timeout"; then
     print_log_tail "Android receiver" "$android_log"
     print_log_tail "Android logcat" "$android_logcat"
     stop_android_under_test

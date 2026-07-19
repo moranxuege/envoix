@@ -1,5 +1,6 @@
 import Foundation
 import UniformTypeIdentifiers
+import Darwin
 
 struct ShareDraftDescriptor: Codable, Equatable, Identifiable {
     enum MediaKind: String, Codable {
@@ -151,6 +152,41 @@ struct ShareDraftStagingItem {
     let contentTypeIdentifier: String
     let mediaKind: ShareDraftDescriptor.MediaKind
     let preferredFileName: String?
+}
+
+enum ShareDraftFileMaterialization: Equatable {
+    case cloned
+    case copied
+}
+
+/// `COPYFILE_CLONE` asks APFS for a copy-on-write clone and performs a normal
+/// copy automatically when cloning is unavailable (for example, cross-volume).
+func materializeShareDraftFile(
+    at sourceURL: URL,
+    to destinationURL: URL
+) throws -> ShareDraftFileMaterialization {
+    guard let state = copyfile_state_alloc() else {
+        throw NSError(domain: NSPOSIXErrorDomain, code: Int(ENOMEM))
+    }
+    defer { copyfile_state_free(state) }
+
+    guard copyfile(
+        sourceURL.path,
+        destinationURL.path,
+        state,
+        copyfile_flags_t(COPYFILE_CLONE)
+    ) == 0 else {
+        let errorCode = errno
+        throw NSError(
+            domain: NSPOSIXErrorDomain,
+            code: Int(errorCode),
+            userInfo: [NSFilePathErrorKey: destinationURL.path]
+        )
+    }
+
+    var wasCloned = false
+    _ = copyfile_state_get(state, UInt32(COPYFILE_STATE_WAS_CLONED), &wasCloned)
+    return wasCloned ? .cloned : .copied
 }
 
 struct ShareProviderSelection: Equatable {
@@ -844,7 +880,7 @@ final class ShareDraftStagingSession {
             )
             let payloadURL = payloadDirectory.appendingPathComponent(fileName, isDirectory: false)
             do {
-                try fileManager.copyItem(at: item.sourceURL, to: payloadURL)
+                _ = try materializeShareDraftFile(at: item.sourceURL, to: payloadURL)
             } catch {
                 throw normalizedCopyError(error, requiredBytes: byteCount)
             }
@@ -1018,8 +1054,10 @@ final class ShareDraftStagingSession {
 
     private func normalizedCopyError(_ error: Error, requiredBytes: UInt64) -> Error {
         let nsError = error as NSError
-        if nsError.domain == NSCocoaErrorDomain,
-           nsError.code == CocoaError.fileWriteOutOfSpace.rawValue {
+        let isOutOfSpace = (nsError.domain == NSCocoaErrorDomain
+                && nsError.code == CocoaError.fileWriteOutOfSpace.rawValue)
+            || (nsError.domain == NSPOSIXErrorDomain && nsError.code == Int(ENOSPC))
+        if isOutOfSpace {
             let available = availableCapacity(payloadDirectory).flatMap { value in
                 value >= 0 ? UInt64(value) : nil
             }

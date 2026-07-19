@@ -45,6 +45,7 @@ Space commands:
 
 Environment:
   ENVOIX_APPLE_CACHE_ROOT        Stable cache root (default: $TMPDIR/envoix-apple-cache)
+  ENVOIX_APPLE_CORE_PROFILE      Rust core profile: release (default) or debug
   ENVOIX_IOS_SIM_DESTINATION    Simulator destination passed to xcodebuild
   ENVOIX_IOS_DEVICE_DESTINATION Required by ios-device-build
   ENVOIX_XCRESULT_PATH          Optional milestone-only .xcresult output path
@@ -298,7 +299,9 @@ case "$command_name" in
       -configuration Debug \
       -destination 'platform=macOS,arch=arm64' \
       -derivedDataPath "$macos_cache" \
-      CODE_SIGNING_ALLOWED=NO \
+      CODE_SIGNING_ALLOWED=YES \
+      CODE_SIGNING_REQUIRED=YES \
+      CODE_SIGN_IDENTITY=- \
       COMPILER_INDEX_STORE_ENABLE=NO \
       build \
       "$@"

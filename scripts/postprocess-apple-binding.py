@@ -4,7 +4,7 @@
 from pathlib import Path
 import sys
 
-EXPECTED_CALLBACK_VTABLES = 4
+EXPECTED_CALLBACK_VTABLES = 5
 
 
 def replace_once(text: str, old: str, new: str, label: str) -> str:

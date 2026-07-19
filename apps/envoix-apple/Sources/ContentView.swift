@@ -2,6 +2,7 @@ import SwiftUI
 import EnvoixCore
 #if os(iOS)
 import UniformTypeIdentifiers
+import QuickLook
 #endif
 
 private enum AppStage: String, CaseIterable {
@@ -51,12 +52,14 @@ private enum TransferRole: String, CaseIterable {
 }
 
 private enum MobileSheet: String, Identifiable {
-    case send, receive, activity, settings
+    case send, receive, nearbyPairing, activity, settings
 
     var id: String { rawValue }
 }
 
 struct ContentView: View {
+    private static let roleSwitchPresentationDelay: TimeInterval = 0.2
+
     @EnvironmentObject private var model: AppModel
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("envoix.appearance") private var appearance: Appearance = .system
@@ -70,6 +73,18 @@ struct ContentView: View {
         #endif
         return nil
     }()
+    @State private var preservedSendSelection = SendSelectionSnapshot()
+    @State private var pendingSendPairingInput: String?
+    @State private var pendingReceivePairingInput: String?
+    @State private var nearbyPairingSelection: NearbyPairingSelection?
+    #if os(iOS)
+    @AppStorage("envoix.serverURL") private var nearbyServerURL = ""
+    @AppStorage("envoix.relayURL") private var nearbyRelayURL = ""
+    @StateObject private var nearbyCoordinator = NearbyDiscoveryCoordinator()
+    @State private var nearbyInboundInvite: String?
+    @State private var nearbyPairingBusy = false
+    @State private var nearbyPairingError: String?
+    #endif
     #if DEBUG
     @State private var didStageBackgroundShareFixture = false
     @State private var openInUITestFixtureURL: URL?
@@ -156,7 +171,7 @@ struct ContentView: View {
                     .toolbar {
                         ToolbarItem(placement: .cancellationAction) {
                             Button {
-                                mobileSheet = nil
+                                dismissMobileSheet()
                             } label: {
                                 Image(systemName: "xmark")
                                     .font(.body.weight(.semibold))
@@ -174,17 +189,27 @@ struct ContentView: View {
         .onChange(of: model.send.isBusy) { isBusy in
             if isBusy, !model.send.isPreparingManifest, mobileSheet == .send {
                 mobileSheet = nil
+                nearbyPairingSelection = nil
             } else if !isBusy {
                 presentPendingSendSelection()
             }
         }
         .onChange(of: model.send.transferActivity?.activityId) { activityID in
+            if activityID != nil {
+                preservedSendSelection = SendSelectionSnapshot()
+            }
             if activityID != nil, mobileSheet == .send {
                 mobileSheet = nil
             }
         }
         .onChange(of: model.receive.isBusy) { isBusy in
-            if isBusy, mobileSheet == .receive { mobileSheet = nil }
+            if isBusy, mobileSheet == .receive {
+                mobileSheet = nil
+                nearbyPairingSelection = nil
+            }
+        }
+        .onChange(of: nearbyCoordinator.state.incomingRendezvousOffer?.id) { _ in
+            presentIncomingNearbyOfferIfNeeded()
         }
         .onAppear(perform: presentPendingSendSelection)
         .onChange(of: scenePhase) { phase in
@@ -230,6 +255,28 @@ struct ContentView: View {
                     .foregroundStyle(Theme.muted)
                     .fixedSize(horizontal: false, vertical: true)
                 }
+
+                NavigationLink {
+                    NearbyDiscoveryView(coordinator: nearbyCoordinator) { selection in
+                        nearbyPairingSelection = selection
+                        nearbyInboundInvite = nil
+                        nearbyPairingError = nil
+                        mobileSheet = .nearbyPairing
+                    }
+                } label: {
+                    mobileHomeActionLabel(
+                        systemImage: "dot.radiowaves.left.and.right",
+                        title: AppText.value("Find nearby devices", "发现附近设备", language: language),
+                        subtitle: AppText.value(
+                            "Discover Envoix devices over Bluetooth and the local network.",
+                            "通过蓝牙和局域网发现 Envoix 设备。",
+                            language: language
+                        ),
+                        chevron: "chevron.right"
+                    )
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("home_nearby")
 
                 mobileHomeAction(
                     sheet: .send,
@@ -292,40 +339,54 @@ struct ContentView: View {
         Button {
             mobileSheet = sheet
         } label: {
-            HStack(spacing: 14) {
-                Image(systemName: role.icon)
-                    .font(.title2.weight(.semibold))
-                    .foregroundStyle(Theme.accentStrong)
-                    .frame(width: 50, height: 50)
-                    .background(Theme.accentSoft, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(title)
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(Theme.text)
-                    Text(subtitle)
-                        .font(.subheadline)
-                        .foregroundStyle(Theme.muted)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                Spacer(minLength: 6)
-                Image(systemName: "chevron.up")
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(Theme.muted)
-            }
-            .padding(16)
-            .frame(maxWidth: .infinity, minHeight: 96, alignment: .leading)
-            .background(Theme.surfaceRaised)
-            .overlay(
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .strokeBorder(Theme.line.opacity(0.72), lineWidth: 0.8)
+            mobileHomeActionLabel(
+                systemImage: role.icon,
+                title: title,
+                subtitle: subtitle,
+                chevron: "chevron.up"
             )
-            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-            .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier(identifier)
+    }
+
+    private func mobileHomeActionLabel(
+        systemImage: String,
+        title: String,
+        subtitle: String,
+        chevron: String
+    ) -> some View {
+        HStack(spacing: 14) {
+            Image(systemName: systemImage)
+                .font(.title2.weight(.semibold))
+                .foregroundStyle(Theme.accentStrong)
+                .frame(width: 50, height: 50)
+                .background(Theme.accentSoft, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text(title)
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(Theme.text)
+                Text(subtitle)
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 6)
+            Image(systemName: chevron)
+                .font(.caption.weight(.bold))
+                .foregroundStyle(Theme.muted)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, minHeight: 96, alignment: .leading)
+        .background(Theme.surfaceRaised)
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .strokeBorder(Theme.line.opacity(0.72), lineWidth: 0.8)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 
     @ViewBuilder
@@ -334,15 +395,44 @@ struct ContentView: View {
         case .send:
             SendView(
                 viewModel: model.send,
-                initialFiles: model.pendingSendSelection?.fileURLs ?? [],
-                initialFileAccess: model.pendingSendSelection?.sourceAccess,
-                initialPendingSelectionID: model.pendingSendSelection?.id
+                initialFiles: preservedSendSelection.items.isEmpty
+                    ? model.pendingSendSelection?.fileURLs ?? []
+                    : preservedSendSelection.items,
+                initialFileAccess: preservedSendSelection.items.isEmpty
+                    ? model.pendingSendSelection?.sourceAccess
+                    : preservedSendSelection.sourceAccess,
+                initialPendingSelectionID: preservedSendSelection.items.isEmpty
+                    ? model.pendingSendSelection?.id
+                    : preservedSendSelection.pendingSelectionID,
+                initialPairingInput: pendingSendPairingInput,
+                onInitialPairingInputConsumed: { pendingSendPairingInput = nil },
+                onSwitchToReceive: switchMobileToReceive
             )
         case .receive:
-            ReceiveView(viewModel: model.receive)
+            ReceiveView(
+                viewModel: model.receive,
+                initialPairingInput: pendingReceivePairingInput,
+                onInitialPairingInputConsumed: { pendingReceivePairingInput = nil },
+                onSwitchToSend: switchMobileToSend
+            )
+        case .nearbyPairing:
+            if let nearbyPairingSelection {
+                NearbyPairingView(
+                    selection: nearbyPairingSelection,
+                    sendEnabled: nearbyAllowedRole != .receive,
+                    receiveEnabled: nearbyAllowedRole != .send,
+                    isBusy: nearbyPairingBusy,
+                    error: nearbyPairingError,
+                    onSend: { beginNearbyPairing(role: .send) },
+                    onReceive: { beginNearbyPairing(role: .receive) }
+                )
+            } else {
+                EmptyView()
+            }
         case .activity:
             TransferStageView(
                 records: model.activities,
+                pendingRemovalIDs: model.pendingActivityRemovalIDs,
                 manifestByActivityID: model.manifestActivities,
                 metricsByActivityID: model.activityMetrics,
                 onCopyDiagnostics: model.diagnosticReport,
@@ -365,8 +455,130 @@ struct ContentView: View {
         switch sheet {
         case .send: return AppText.value("Send", "发送", language: language)
         case .receive: return AppText.value("Receive", "接收", language: language)
+        case .nearbyPairing: return AppText.value("Experimental BLE pairing", "实验性蓝牙配对", language: language)
         case .activity: return AppText.value("Activity", "活动", language: language)
         case .settings: return AppText.value("Settings", "设置", language: language)
+        }
+    }
+
+    private func switchMobileToReceive(_ input: String, selection: SendSelectionSnapshot) {
+        preservedSendSelection = selection
+        pendingReceivePairingInput = input
+        replaceMobileSheet(with: .receive)
+    }
+
+    private func switchMobileToSend(_ input: String) {
+        pendingSendPairingInput = input
+        replaceMobileSheet(with: .send)
+    }
+
+    private func replaceMobileSheet(with sheet: MobileSheet) {
+        mobileSheet = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.roleSwitchPresentationDelay) {
+            mobileSheet = sheet
+        }
+    }
+
+    private func dismissMobileSheet() {
+        mobileSheet = nil
+        nearbyPairingSelection = nil
+        nearbyInboundInvite = nil
+        nearbyPairingBusy = false
+        nearbyPairingError = nil
+    }
+
+    private var nearbyAllowedRole: FfiInviteRole? {
+        guard let nearbyInboundInvite,
+              let invite = try? parsePairingInvite(input: nearbyInboundInvite) else {
+            return nil
+        }
+        switch invite.role {
+        case .send: return .receive
+        case .receive: return .send
+        case .unknown: return nil
+        }
+    }
+
+    private func presentIncomingNearbyOfferIfNeeded() {
+        guard let offer = nearbyCoordinator.state.incomingRendezvousOffer else { return }
+        defer { nearbyCoordinator.consumeRendezvousOffer(id: offer.id) }
+        guard (try? parsePairingInvite(input: offer.invite)) != nil else {
+            ToastCenter.shared.show(AppText.value(
+                "An invalid Bluetooth invitation was rejected.",
+                "已拒绝无效的蓝牙邀请。",
+                language: language
+            ))
+            return
+        }
+        nearbyPairingSelection = NearbyPairingSelection(
+            discoveryPeerKey: offer.senderPeerKey,
+            displayName: offer.senderDisplayName,
+            sources: [.bluetooth]
+        )
+        nearbyInboundInvite = offer.invite
+        nearbyPairingError = nil
+        mobileSheet = .nearbyPairing
+    }
+
+    private func beginNearbyPairing(role: FfiInviteRole) {
+        guard !nearbyPairingBusy, let selection = nearbyPairingSelection else { return }
+        if let inbound = nearbyInboundInvite {
+            guard nearbyAllowedRole == role else {
+                nearbyPairingError = AppText.value(
+                    "Choose the opposite role advertised by the other device.",
+                    "请选择与对方设备相反的角色。",
+                    language: language
+                )
+                return
+            }
+            nearbyInboundInvite = nil
+            nearbyCoordinator.stop()
+            if role == .send {
+                pendingSendPairingInput = inbound
+                replaceMobileSheet(with: .send)
+            } else {
+                pendingReceivePairingInput = inbound
+                replaceMobileSheet(with: .receive)
+            }
+            return
+        }
+
+        guard selection.sources.contains(.bluetooth) else {
+            nearbyPairingError = AppText.value(
+                "This device is no longer reachable over Bluetooth.",
+                "当前已无法通过蓝牙连接此设备。",
+                language: language
+            )
+            return
+        }
+        do {
+            let invite = try makePairingInvite(
+                role: role,
+                broker: nearbyServerURL,
+                relay: nearbyRelayURL
+            )
+            nearbyPairingBusy = true
+            nearbyPairingError = nil
+            nearbyCoordinator.offerInvite(
+                peerKey: selection.discoveryPeerKey,
+                invite: invite.payload
+            ) { error in
+                nearbyPairingBusy = false
+                if let error {
+                    nearbyPairingError = error
+                    return
+                }
+                nearbyCoordinator.stop()
+                if role == .send {
+                    pendingSendPairingInput = invite.code
+                    replaceMobileSheet(with: .send)
+                } else {
+                    pendingReceivePairingInput = invite.code
+                    replaceMobileSheet(with: .receive)
+                }
+            }
+        } catch {
+            nearbyPairingError = error.localizedDescription
         }
     }
 
@@ -527,7 +739,7 @@ struct ContentView: View {
     }
 
     private var featuredActivity: FfiTransferActivityRecord? {
-        model.activities.first(where: isPending)
+        model.activities.first { ActivityProjectionPolicy.isPending($0.state) }
     }
 
     private func mobileActivityTitle(_ record: FfiTransferActivityRecord) -> String {
@@ -584,7 +796,7 @@ struct ContentView: View {
                     title: item.title(language: language),
                     systemImage: item.icon,
                     isSelected: stage == item,
-                    badge: item == .transfer ? pendingTransferCount : 0
+                    badge: item == .activity ? pendingTransferCount : 0
                 ) {
                     stage = item
                 }
@@ -663,6 +875,7 @@ struct ContentView: View {
         case .activity:
             TransferStageView(
                 records: model.activities,
+                pendingRemovalIDs: model.pendingActivityRemovalIDs,
                 manifestByActivityID: model.manifestActivities,
                 metricsByActivityID: model.activityMetrics,
                 onCopyDiagnostics: model.diagnosticReport,
@@ -748,10 +961,7 @@ struct ContentView: View {
     }
 
     private var pendingTransferCount: Int {
-        if !model.activities.isEmpty {
-            return model.activities.filter { isPending($0) }.count
-        }
-        return pendingCount(for: model.receive) + pendingCount(for: model.send)
+        ActivityProjectionPolicy.pendingCount(model.activities)
     }
 
     private var hasFailedTransfer: Bool {
@@ -759,25 +969,6 @@ struct ContentView: View {
             return true
         }
         return isFailed(model.receive) || isFailed(model.send)
-    }
-
-    private func isPending(_ record: FfiTransferActivityRecord) -> Bool {
-        switch record.state {
-        case .queued, .binding, .waitingForPeer, .pairing, .connecting, .transferring,
-                .verifying, .publishing, .unconfirmed, .paused:
-            return true
-        case .completed, .failed, .canceled, .unknown:
-            return false
-        }
-    }
-
-    private func pendingCount(for viewModel: TransferViewModel) -> Int {
-        switch viewModel.phase {
-        case .waiting, .transferring, .paused:
-            return 1
-        case .idle, .completed, .canceled, .failed:
-            return 0
-        }
     }
 
     private func isFailed(_ viewModel: TransferViewModel) -> Bool {
@@ -791,6 +982,9 @@ private struct TransferSetupStageView: View {
     @AppStorage("envoix.defaultRole") private var defaultRole = "send"
     @State private var role: TransferRole = .send
     @State private var didApplyDefaultRole = false
+    @State private var preservedSendSelection = SendSelectionSnapshot()
+    @State private var pendingSendPairingInput: String?
+    @State private var pendingReceivePairingInput: String?
     @ObservedObject var send: TransferViewModel
     @ObservedObject var receive: TransferViewModel
     let onShowActivity: () -> Void
@@ -821,14 +1015,39 @@ private struct TransferSetupStageView: View {
             Group {
                 switch role {
                 case .send:
-                    SendView(viewModel: send)
+                    SendView(
+                        viewModel: send,
+                        initialFiles: preservedSendSelection.items,
+                        initialFileAccess: preservedSendSelection.sourceAccess,
+                        initialPendingSelectionID: preservedSendSelection.pendingSelectionID,
+                        initialPairingInput: pendingSendPairingInput,
+                        onInitialPairingInputConsumed: { pendingSendPairingInput = nil },
+                        onSwitchToReceive: { input, selection in
+                            preservedSendSelection = selection
+                            pendingReceivePairingInput = input
+                            role = .receive
+                        }
+                    )
                 case .receive:
-                    ReceiveView(viewModel: receive)
+                    ReceiveView(
+                        viewModel: receive,
+                        initialPairingInput: pendingReceivePairingInput,
+                        onInitialPairingInputConsumed: { pendingReceivePairingInput = nil },
+                        onSwitchToSend: { input in
+                            pendingSendPairingInput = input
+                            role = .send
+                        }
+                    )
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .onAppear(perform: applyDefaultRoleOnce)
+        .onChange(of: send.transferActivity?.activityId) { activityID in
+            if activityID != nil {
+                preservedSendSelection = SendSelectionSnapshot()
+            }
+        }
     }
     #endif
 
@@ -936,9 +1155,12 @@ private struct TransferStageView: View {
     #if os(iOS)
     @State private var publicationTargetActivityID: String?
     @State private var isPublicationFolderPickerPresented = false
+    @State private var previewFileURL: URL?
+    @State private var receivedItemsPresentation: ReceivedItemsPresentation?
     #endif
     private let commandAcknowledgementTimeout: TimeInterval = 5
     let records: [FfiTransferActivityRecord]
+    let pendingRemovalIDs: Set<String>
     let manifestByActivityID: [String: FfiManifestActivityRecord]
     let metricsByActivityID: [String: ActivityMetrics]
     let onCopyDiagnostics: (FfiTransferActivityRecord) -> String
@@ -950,7 +1172,7 @@ private struct TransferStageView: View {
     let onResume: (String) -> Bool
     let onCancel: (String) -> Bool
     let onReplacePublicationTarget: (String, URL, Data?, AnyObject?) -> Bool
-    let onDelete: (String) -> Void
+    let onDelete: (String) -> Bool
 
     var body: some View {
         ScrollView {
@@ -965,9 +1187,9 @@ private struct TransferStageView: View {
                         activityCard(record)
                             #if os(iOS)
                             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                                if canDelete(record) {
+                                if canDelete(record) && !pendingRemovalIDs.contains(record.activityId) {
                                     Button(role: .destructive) {
-                                        onDelete(record.activityId)
+                                        requestDeletion(record.activityId)
                                     } label: {
                                         Label(AppText.value("Delete", "删除", language: language), systemImage: "trash")
                                     }
@@ -989,6 +1211,7 @@ private struct TransferStageView: View {
             reconcilePendingCommands()
         }
         #if os(iOS)
+        .quickLookPreview($previewFileURL)
         .sheet(isPresented: $isPublicationFolderPickerPresented) {
             FolderPickerSheet(
                 onPick: replacePublicationTarget,
@@ -997,6 +1220,9 @@ private struct TransferStageView: View {
                     isPublicationFolderPickerPresented = false
                 }
             )
+        }
+        .sheet(item: $receivedItemsPresentation) { presentation in
+            ReceivedItemsSheet(urls: presentation.urls)
         }
         #endif
     }
@@ -1025,8 +1251,11 @@ private struct TransferStageView: View {
 
             HStack(spacing: 10) {
                 Button {
-                    copyToPasteboard(onAppDiagnosticReport())
-                    ToastCenter.shared.show(AppText.value("App diagnostics copied", "应用诊断已复制", language: language))
+                    copyWithToast(
+                        onAppDiagnosticReport(),
+                        AppText.value("App diagnostics copied", "应用诊断已复制", language: language),
+                        language: language
+                    )
                 } label: {
                     Label(AppText.value("Copy report", "复制报告", language: language), systemImage: "doc.on.doc")
                         .font(.subheadline.weight(.semibold))
@@ -1143,11 +1372,26 @@ private struct TransferStageView: View {
 
     private func activitySummary(_ record: FfiTransferActivityRecord, metrics: ActivityMetrics) -> some View {
         var parts = [directionText(record.direction)]
-        if record.totalBytes > 0 {
+        if isFullyResumedCompletion(record) {
+            switch record.direction {
+            case .send:
+                parts.append(AppText.value("No data sent", "未发送数据", language: language))
+                parts.append(AppText.value("Receiver already has this file", "对方已有此文件", language: language))
+            case .receive:
+                parts.append(AppText.value("No data received", "未接收数据", language: language))
+                parts.append(AppText.value("File already exists", "文件已存在", language: language))
+            case .unknown:
+                parts.append(AppText.value("No data transferred", "未传输数据", language: language))
+                parts.append(AppText.value("File already exists", "文件已存在", language: language))
+            }
+        } else if record.totalBytes > 0 {
             parts.append("\(byteString(record.bytesTransferred)) / \(byteString(record.totalBytes))")
         }
         if let speed = speedBps(for: record, metrics: metrics), speed > 0 {
             parts.append(rateString(speed))
+        }
+        if record.state == .transferring, let eta = metrics.etaSeconds {
+            parts.append(etaString(eta))
         }
         return Text(parts.joined(separator: " · "))
             .font(.subheadline.monospacedDigit())
@@ -1205,7 +1449,9 @@ private struct TransferStageView: View {
             ? AnyLayout(VStackLayout(spacing: 10))
             : AnyLayout(HStackLayout(spacing: 10))
         actionLayout {
-            if let command = pendingCommands[record.activityId] {
+            if pendingRemovalIDs.contains(record.activityId) {
+                activityRemovalIndicator(activityID: record.activityId)
+            } else if let command = pendingCommands[record.activityId] {
                 activityCommandIndicator(command, activityID: record.activityId)
             } else if shouldChoosePublicationFolder(record) {
                 activityAction(
@@ -1253,33 +1499,35 @@ private struct TransferStageView: View {
                 .accessibilityIdentifier("activity_pause_\(record.activityId)")
             }
 
-            activityAction(
-                expanded
-                    ? AppText.value("Hide details", "收起详情", language: language)
-                    : AppText.value("Details", "查看详情", language: language),
-                systemImage: expanded ? "chevron.up" : "chevron.down",
-                tint: Theme.accentStrong
-            ) {
-                toggleActivityDetail(record.activityId)
-            }
-            .accessibilityIdentifier("activity_details_\(record.activityId)")
+            if !pendingRemovalIDs.contains(record.activityId) {
+                activityAction(
+                    expanded
+                        ? AppText.value("Hide details", "收起详情", language: language)
+                        : AppText.value("Details", "查看详情", language: language),
+                    systemImage: expanded ? "chevron.up" : "chevron.down",
+                    tint: Theme.accentStrong
+                ) {
+                    toggleActivityDetail(record.activityId)
+                }
+                .accessibilityIdentifier("activity_details_\(record.activityId)")
 
-            if pendingCommands[record.activityId] == nil && canCancel(record) {
-                destructiveActivityAction(
-                    AppText.value("Cancel", "取消", language: language),
-                    systemImage: "xmark"
-                ) {
-                    requestCommand(.cancel, for: record.activityId)
+                if pendingCommands[record.activityId] == nil && canCancel(record) {
+                    destructiveActivityAction(
+                        AppText.value("Cancel", "取消", language: language),
+                        systemImage: "xmark"
+                    ) {
+                        requestCommand(.cancel, for: record.activityId)
+                    }
+                    .accessibilityIdentifier("activity_cancel_\(record.activityId)")
+                } else if pendingCommands[record.activityId] == nil && canDelete(record) {
+                    destructiveActivityAction(
+                        AppText.value("Delete", "删除", language: language),
+                        systemImage: "trash"
+                    ) {
+                        requestDeletion(record.activityId)
+                    }
+                    .accessibilityIdentifier("activity_delete_\(record.activityId)")
                 }
-                .accessibilityIdentifier("activity_cancel_\(record.activityId)")
-            } else if pendingCommands[record.activityId] == nil && canDelete(record) {
-                destructiveActivityAction(
-                    AppText.value("Delete", "删除", language: language),
-                    systemImage: "trash"
-                ) {
-                    onDelete(record.activityId)
-                }
-                .accessibilityIdentifier("activity_delete_\(record.activityId)")
             }
         }
     }
@@ -1296,6 +1544,31 @@ private struct TransferStageView: View {
         .frame(maxWidth: .infinity, minHeight: 44)
         .background(Theme.line.opacity(0.18), in: RoundedRectangle(cornerRadius: Theme.cardRadius))
         .accessibilityIdentifier("activity_command_\(activityID)")
+    }
+
+    private func activityRemovalIndicator(activityID: String) -> some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .controlSize(.small)
+            Text(AppText.value("Removing…", "正在删除…", language: language))
+                .font(.subheadline.weight(.semibold))
+                .lineLimit(1)
+        }
+        .foregroundStyle(Theme.muted)
+        .frame(maxWidth: .infinity, minHeight: 44)
+        .background(Theme.line.opacity(0.18), in: RoundedRectangle(cornerRadius: Theme.cardRadius))
+        .accessibilityIdentifier("activity_removing_\(activityID)")
+    }
+
+    private func requestDeletion(_ activityID: String) {
+        guard onDelete(activityID) else {
+            ToastCenter.shared.show(AppText.value(
+                "This Activity could not be removed. Try again.",
+                "无法删除此活动，请重试。",
+                language: language
+            ))
+            return
+        }
     }
 
     private func requestCommand(_ command: ActivityCommand, for activityID: String) {
@@ -1347,10 +1620,27 @@ private struct TransferStageView: View {
         isPublicationFolderPickerPresented = true
         #else
         guard let url = chooseURL(directory: true) else { return }
-        if !onReplacePublicationTarget(activityID, url, nil, nil) {
+        do {
+            let bookmark = try makeSecurityScopedFolderBookmark(for: url)
+            let access = SecurityScopedResourceAccess(url: url)
+            try validateWritableDirectoryAccess(url)
+            guard onReplacePublicationTarget(activityID, url, bookmark, access) else {
+                ToastCenter.shared.show(AppText.value(
+                    "This save target can no longer be changed.",
+                    "当前已无法更换保存位置。",
+                    language: language
+                ))
+                return
+            }
             ToastCenter.shared.show(AppText.value(
-                "This save target can no longer be changed.",
-                "当前已无法更换保存位置。",
+                "Saving to the new folder",
+                "正在保存到新文件夹",
+                language: language
+            ))
+        } catch {
+            ToastCenter.shared.show(AppText.value(
+                "Envoix cannot write to that folder. Choose another folder or check its permissions.",
+                "Envoix 无法写入该文件夹。请选择其他文件夹或检查权限。",
                 language: language
             ))
         }
@@ -1560,15 +1850,31 @@ private struct TransferStageView: View {
             }
 
             VStack(spacing: 6) {
-                detailRow(
-                    AppText.value("Transferred", "已传输", language: language),
-                    "\(byteString(record.bytesTransferred)) / \(byteString(record.totalBytes))"
-                )
+                if isFullyResumedCompletion(record) {
+                    detailRow(
+                        AppText.value("Transferred this attempt", "本次传输", language: language),
+                        "0 B"
+                    )
+                    detailRow(
+                        record.direction == .send
+                            ? AppText.value("Already at receiver", "对方已有", language: language)
+                            : AppText.value("Existing file", "已有文件", language: language),
+                        byteString(record.totalBytes)
+                    )
+                } else {
+                    detailRow(
+                        AppText.value("Transferred", "已传输", language: language),
+                        "\(byteString(record.bytesTransferred)) / \(byteString(record.totalBytes))"
+                    )
+                }
                 if metrics.avgBps > 0 {
                     detailRow(AppText.value("Average", "平均速度", language: language), rateString(metrics.avgBps))
                 }
                 if metrics.peakBps > 0 {
                     detailRow(AppText.value("Peak", "峰值速度", language: language), rateString(metrics.peakBps))
+                }
+                if record.state == .transferring, let eta = metrics.etaSeconds {
+                    detailRow(AppText.value("Remaining", "预计剩余", language: language), etaString(eta))
                 }
                 if record.dataPathKind != .none {
                     detailRow(AppText.value("Path", "链路", language: language), dataPathText(record))
@@ -1625,8 +1931,11 @@ private struct TransferStageView: View {
                             systemImage: "doc.on.doc",
                             tint: Theme.accentStrong
                         ) {
-                            copyToPasteboard(onCopyDiagnostics(record))
-                            ToastCenter.shared.show(AppText.value("Diagnostics copied", "诊断信息已复制", language: language))
+                            copyWithToast(
+                                onCopyDiagnostics(record),
+                                AppText.value("Diagnostics copied", "诊断信息已复制", language: language),
+                                language: language
+                            )
                         }
 
                         if
@@ -1670,8 +1979,11 @@ private struct TransferStageView: View {
                         .foregroundStyle(Theme.muted)
                     Spacer(minLength: 8)
                     Button {
-                        copyToPasteboard(metrics.log.joined(separator: "\n"))
-                        ToastCenter.shared.show(AppText.value("Activity log copied", "活动日志已复制", language: language))
+                        copyWithToast(
+                            metrics.log.joined(separator: "\n"),
+                            AppText.value("Activity log copied", "活动日志已复制", language: language),
+                            language: language
+                        )
                     } label: {
                         Image(systemName: "doc.on.doc")
                             .font(.caption.weight(.semibold))
@@ -1820,45 +2132,73 @@ private struct TransferStageView: View {
         manifest: FfiManifestActivityRecord?
     ) -> some View {
         Divider().overlay(Theme.line.opacity(0.6))
-        if record.state == .completed, let url = completedReceiveURL(record, manifest: manifest) {
-            let isMultiRootManifest = manifest.map { $0.rootCount > 1 } == true
+        let urls = completedReceiveURLs(record, manifest: manifest)
+        if record.state == .completed, let firstURL = urls.first {
+            let hasMultipleItems = urls.count > 1
+            let destinationURL = manifest == nil
+                ? firstURL.deletingLastPathComponent()
+                : URL(fileURLWithPath: record.completedFilePath, isDirectory: true)
             VStack(alignment: .leading, spacing: 8) {
                 Label(
-                    isMultiRootManifest
+                    hasMultipleItems
                         ? AppText.value("Saved items", "已保存项目", language: language)
                         : AppText.value("Saved item", "已保存项目", language: language),
                     systemImage: "checkmark.circle.fill"
                 )
                     .font(.callout.weight(.semibold))
                     .foregroundStyle(Theme.success)
-                Text(isMultiRootManifest
+                Text(hasMultipleItems
                      ? AppText.value(
-                        "\(manifest?.rootCount ?? 0) items",
-                        "\(manifest?.rootCount ?? 0) 个项目",
+                        "\(urls.count) items",
+                        "\(urls.count) 个项目",
                         language: language
                      )
-                     : url.lastPathComponent)
+                     : firstURL.lastPathComponent)
                     .font(.body.weight(.semibold))
                     .foregroundStyle(Theme.text)
                     .lineLimit(2)
                 Text(AppText.value(
-                    "Saved to \((isMultiRootManifest ? url : url.deletingLastPathComponent()).lastPathComponent)",
-                    "保存到 \((isMultiRootManifest ? url : url.deletingLastPathComponent()).lastPathComponent)",
+                    "Saved to \(destinationURL.lastPathComponent)",
+                    "保存到 \(destinationURL.lastPathComponent)",
                     language: language
                 ))
                 .font(.footnote)
                 .foregroundStyle(Theme.muted)
 
                 #if os(macOS)
-                Button(platformRevealTitle(language: language)) { revealInFinder(url) }
+                Button(platformRevealTitle(language: language)) { revealInFinder(urls) }
                     .buttonStyle(.bordered)
+                    .accessibilityIdentifier("activity_open_received_\(record.activityId)")
+                #elseif os(iOS)
+                if urls.count == 1, isRegularFileURL(firstURL) {
+                    Button(platformRevealTitle(language: language)) { previewFileURL = firstURL }
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("activity_open_received_\(record.activityId)")
+                } else {
+                    Button {
+                        receivedItemsPresentation = ReceivedItemsPresentation(urls: urls)
+                    } label: {
+                        Label(
+                            AppText.value(
+                                "View \(urls.count) Items",
+                                "查看 \(urls.count) 个项目",
+                                language: language
+                            ),
+                            systemImage: "square.stack"
+                        )
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("activity_open_received_\(record.activityId)")
+                }
                 #endif
 
                 if developerMode {
-                    Text(url.path)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(Theme.muted)
-                        .textSelection(.enabled)
+                    ForEach(urls, id: \.path) { url in
+                        Text(url.path)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(Theme.muted)
+                            .textSelection(.enabled)
+                    }
                 }
             }
         } else if record.state == .completed {
@@ -1900,15 +2240,18 @@ private struct TransferStageView: View {
         }
     }
 
-    private func completedReceiveURL(
+    private func completedReceiveURLs(
         _ record: FfiTransferActivityRecord,
         manifest: FfiManifestActivityRecord?
-    ) -> URL? {
-        manifest.flatMap(availableCompletedManifestURL)
-            ?? availableCompletedFileURL(
-                path: record.completedFilePath,
-                expectedBytes: record.bytesTransferred
-            )
+    ) -> [URL] {
+        if let manifest {
+            return availableCompletedManifestItemURLs(record: manifest)
+        }
+        guard let url = availableCompletedFileURL(
+            path: record.completedFilePath,
+            expectedBytes: record.bytesTransferred
+        ) else { return [] }
+        return [url]
     }
 
     private func uploadStatusText(_ status: UploadStatus) -> String {
@@ -2020,7 +2363,13 @@ private struct TransferStageView: View {
                 ? AppText.value("Save failed", "保存失败", language: language)
                 : AppText.value("Saving", "保存中", language: language)
         case .unconfirmed: return AppText.value("Confirming", "确认中", language: language)
-        case .completed: return AppText.value("Done", "完成", language: language)
+        case .completed:
+            if isFullyResumedCompletion(record) {
+                return record.direction == .send
+                    ? AppText.value("Already received", "对方已有", language: language)
+                    : AppText.value("Already present", "文件已存在", language: language)
+            }
+            return AppText.value("Done", "完成", language: language)
         case .failed: return AppText.value("Error", "错误", language: language)
         case .paused: return AppText.value("Paused", "已暂停", language: language)
         case .canceled: return AppText.value("Canceled", "取消", language: language)
