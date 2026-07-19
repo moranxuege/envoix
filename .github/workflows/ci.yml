@@ -56,7 +56,7 @@ jobs:
       - name: Lint
         working-directory: android
         run: ./gradlew :app:lintDebug --no-daemon --stacktrace
-      - name: Check Android JNI boundary
+      - name: Check Android JNI compatibility
         run: scripts/check-android-jni-transfer-surface.sh
       - name: Build app and instrumentation APKs
         working-directory: android
@@ -67,4 +67,4 @@ jobs:
       - name: Verify Android test artifacts
         run: |
           test -s android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
-          unzip -Z1 android/app/build/outputs/apk/debug/app-debug.apk | grep -Fx 'lib/arm64-v8a/libenvoix_ffi.so'
+          unzip -Z1 android/app/build/outputs/apk/debug/app-debug.apk | grep -Fx 'lib/arm64-v8a/libenvoix_jni.so'

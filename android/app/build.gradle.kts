@@ -22,6 +22,85 @@ val gitCommit: String =
         "unknown"
     }
 
+val envoixAndroidAbis =
+    (
+        providers.gradleProperty("envoix.android.abis").orNull
+            ?: providers.environmentVariable("ENVOIX_ANDROID_ABIS").orNull
+            ?: "arm64-v8a"
+    ).split(",")
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+
+val envoixRustTargets =
+    mapOf(
+        "arm64-v8a" to "aarch64-linux-android",
+        "x86_64" to "x86_64-linux-android",
+    )
+
+val envoixAndroidApiLevel = 26
+val generatedJniLibsDir = layout.buildDirectory.dir("generated/envoix/jniLibs")
+
+val buildEnvoixJniAndroid by tasks.registering {
+    group = "build"
+    description = "Builds and stages the hand-written Android JNI core."
+
+    inputs.files(
+        rootProject.layout.projectDirectory
+            .dir("../apps/envoix-android-jni")
+            .asFileTree,
+        rootProject.layout.projectDirectory
+            .dir("../crates")
+            .asFileTree,
+        rootProject.layout.projectDirectory.file("../Cargo.toml"),
+        rootProject.layout.projectDirectory.file("../Cargo.lock"),
+    )
+    inputs.property("androidAbis", envoixAndroidAbis)
+    outputs.dir(generatedJniLibsDir)
+
+    doLast {
+        val unsupported = envoixAndroidAbis.filterNot { it in envoixRustTargets }
+        require(unsupported.isEmpty()) { "Unsupported Android ABI(s): ${unsupported.joinToString()}" }
+
+        val cargoArgs = mutableListOf("ndk")
+        envoixAndroidAbis.forEach { abi ->
+            cargoArgs += listOf("-t", abi)
+        }
+        cargoArgs +=
+            listOf(
+                "--platform",
+                envoixAndroidApiLevel.toString(),
+                "build",
+                "--release",
+                "-p",
+                "envoix-android-jni",
+            )
+
+        exec {
+            workingDir =
+                rootProject.layout.projectDirectory
+                    .dir("..")
+                    .asFile
+            commandLine("cargo", *cargoArgs.toTypedArray())
+        }
+
+        delete(generatedJniLibsDir)
+        envoixAndroidAbis.forEach { abi ->
+            val rustTarget = envoixRustTargets.getValue(abi)
+            val sharedLibrary =
+                rootProject.layout.projectDirectory
+                    .file("../target/$rustTarget/release/libenvoix_jni.so")
+                    .asFile
+            require(sharedLibrary.isFile) {
+                "cargo-ndk did not produce ${sharedLibrary.absolutePath}"
+            }
+            copy {
+                from(sharedLibrary)
+                into(generatedJniLibsDir.map { it.dir(abi) })
+            }
+        }
+    }
+}
+
 android {
     namespace = "dev.envoix.app"
     compileSdk = 34
@@ -33,9 +112,10 @@ android {
         versionCode = 1
         versionName = "0.1.0"
         buildConfigField("String", "GIT_COMMIT", "\"$gitCommit\"")
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
-            // Ship the envoix binary only for the ABIs we cross-compile.
-            abiFilters += listOf("x86_64", "arm64-v8a")
+            // Ship only ABIs that the JNI build task produced.
+            abiFilters += envoixAndroidAbis
         }
     }
 
@@ -62,12 +142,21 @@ android {
         buildConfig = true // for BuildConfig.GIT_COMMIT / VERSION_NAME
     }
 
-    // The envoix CLI ships as libenvoix.so in jniLibs; legacy packaging extracts
-    // it to the app's native-lib dir, the one place Android lets us exec a file.
+    sourceSets.getByName("main") {
+        jniLibs.setSrcDirs(listOf(generatedJniLibsDir.get().asFile))
+    }
+
+    // Keep the generated JNI core as a regular packaged native library.
     packaging {
         jniLibs {
             useLegacyPackaging = true
         }
+    }
+}
+
+tasks.configureEach {
+    if (name.startsWith("merge") && name.endsWith("JniLibFolders")) {
+        dependsOn(buildEnvoixJniAndroid)
     }
 }
 
