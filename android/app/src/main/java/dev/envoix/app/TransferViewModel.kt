@@ -49,6 +49,7 @@ class TransferViewModel(
             broker,
             relay,
             cfg.chunkSize,
+            cfg.dataStreamWindow,
             cfg.candidatesAllow.joinToString(","),
             cfg.candidatesDeny.joinToString(","),
             qrPayload,

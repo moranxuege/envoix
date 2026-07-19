@@ -19,6 +19,8 @@ data class Settings(
     val relay: String = Endpoints.RELAY,
     // core config.toml (RuntimeConfig)
     val chunkSize: String = "",
+    /** Per-stream QUIC flow-control window (e.g. `32MB`); empty = transport default (16MB). */
+    val dataStreamWindow: String = "",
     val candidatesAllow: List<String> = emptyList(),
     val candidatesDeny: List<String> = emptyList(),
     // native app prefs (seed per-transfer choices)
@@ -54,6 +56,7 @@ object SettingsStore {
                 broker = prefs.getString("broker", Endpoints.BROKER)!!,
                 relay = prefs.getString("relay", Endpoints.RELAY)!!,
                 chunkSize = prefs.getString("chunkSize", "")!!,
+                dataStreamWindow = prefs.getString("dataStreamWindow", "")!!,
                 candidatesAllow = readList("candidatesAllow"),
                 candidatesDeny = readList("candidatesDeny"),
                 saveFolder = prefs.getString("saveFolder", "Envoix")!!,
@@ -88,6 +91,7 @@ object SettingsStore {
             .putString("broker", s.broker)
             .putString("relay", s.relay)
             .putString("chunkSize", s.chunkSize)
+            .putString("dataStreamWindow", s.dataStreamWindow)
             .putString("candidatesAllow", s.candidatesAllow.joinToString("\n"))
             .putString("candidatesDeny", s.candidatesDeny.joinToString("\n"))
             .putString("saveFolder", s.saveFolder)

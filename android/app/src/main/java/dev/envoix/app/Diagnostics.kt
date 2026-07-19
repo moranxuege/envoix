@@ -43,28 +43,43 @@ object Diagnostics {
         runCatching { ackFile().writeText(crashFile().lastModified().toString()) }
     }
 
-    /** Build one report, within [budget] bytes. */
+    /** Build one report, within [budget] bytes. In debug builds nothing is
+     *  trimmed (server space is not a concern pre-release, and a clipped
+     *  diagnostic is unusable); release keeps the caps. */
     fun build(
         kind: Kind,
         transferId: Long? = null,
-        budget: Int = UPLOAD_MAX,
+        budget: Int = if (BuildConfig.DEBUG) Int.MAX_VALUE else UPLOAD_MAX,
     ): String {
+        val full = BuildConfig.DEBUG && budget == Int.MAX_VALUE
+
+        fun cap(release: Int) = if (full) Int.MAX_VALUE else release
+        // Each section: (text, byte cap, keepHeadAndTail). The timeline is the
+        // authority — emitted FIRST and uncapped (it is bounded, tens of events),
+        // so under a tight release budget it survives intact and the verbose raw
+        // trace is what yields space. The raw trace keeps its HEAD and TAIL (the
+        // connection setup AND the failure), not tail-only (v2 P6).
         val sections =
             buildList {
-                add("── envoix-android v${BuildConfig.VERSION_NAME} (${BuildConfig.GIT_COMMIT}) · $kind ──" to 512)
-                if (kind == Kind.Crash) add(section("crash", runCatching { crashFile().readText() }.getOrDefault("")) to CRASH_MAX)
-                if (kind == Kind.Transfer && transferId != null) {
-                    add(section("transfer $transferId", TransferLogs.read(transferId)) to TRANSFER_MAX)
+                add(Triple("── envoix-android v${BuildConfig.VERSION_NAME} (${BuildConfig.GIT_COMMIT}) · $kind ──", 512, false))
+                if (kind == Kind.Crash) {
+                    add(Triple(section("crash", runCatching { crashFile().readText() }.getOrDefault("")), cap(CRASH_MAX), false))
                 }
-                add(section("operations", OpLog.report()) to OPS_MAX)
-                add(section("core trace (tail)", LogStore.dump()) to Int.MAX_VALUE)
+                if (kind == Kind.Transfer && transferId != null) {
+                    // Two separate files: the timeline (never budget-trimmed) and
+                    // the raw trace (head+tail under budget). No shared file, no
+                    // regex split — raw volume can't evict the timeline (v2 P6).
+                    add(Triple(section("timeline $transferId", TransferLogs.readTimeline(transferId)), Int.MAX_VALUE, false))
+                    add(Triple(section("transfer raw trace", TransferLogs.readRaw(transferId)), cap(TRANSFER_MAX), true))
+                }
+                add(Triple(section("operations", OpLog.report()), cap(OPS_MAX), false))
+                add(Triple(section("core trace (tail)", LogStore.dump()), Int.MAX_VALUE, false))
             }
-        // Fixed-cap sections first; core gets whatever budget remains.
         var remaining = budget
         val out = StringBuilder()
-        for ((text, cap) in sections) {
+        for ((text, cap, headAndTail) in sections) {
             val allowed = minOf(cap, remaining)
-            val piece = tail(text, allowed)
+            val piece = if (headAndTail) headAndTail(text, allowed) else tail(text, allowed)
             out.append(piece).append('\n')
             remaining -= piece.toByteArray().size + 1
             if (remaining <= 0) break
@@ -77,14 +92,31 @@ object Diagnostics {
         body: String,
     ) = "\n══════ $name ══════\n" + body.ifBlank { "(empty)" }
 
-    /** Last [maxBytes] UTF-8 bytes, marked when clipped — failures live at the tail. */
+    /** Last bytes, marked when clipped — failures live at the tail. The marker's
+     *  own bytes are RESERVED, so the result never exceeds [maxBytes]. */
     fun tail(
         text: String,
         maxBytes: Int,
     ): String {
         val bytes = text.toByteArray(Charsets.UTF_8)
         if (bytes.size <= maxBytes) return text
-        val note = "[… trimmed — last ${maxBytes / 1024} KB of ${bytes.size / 1024} KB]\n"
-        return note + String(bytes, bytes.size - maxBytes, maxBytes, Charsets.UTF_8)
+        val note = "[… trimmed — tail of ${bytes.size / 1024} KB]\n"
+        val room = (maxBytes - note.toByteArray(Charsets.UTF_8).size).coerceAtLeast(0)
+        return note + String(bytes, bytes.size - room, room, Charsets.UTF_8)
+    }
+
+    /** First AND last bytes, marked when clipped — for the raw trace, where the
+     *  connection setup (head) matters as much as the failure (tail). The marker
+     *  is reserved, so the result never exceeds [maxBytes]. */
+    fun headAndTail(
+        text: String,
+        maxBytes: Int,
+    ): String {
+        val bytes = text.toByteArray(Charsets.UTF_8)
+        if (bytes.size <= maxBytes) return text
+        val note = "\n[… middle trimmed — head & tail of ${bytes.size / 1024} KB …]\n"
+        val room = (maxBytes - note.toByteArray(Charsets.UTF_8).size).coerceAtLeast(0)
+        val half = room / 2
+        return String(bytes, 0, half, Charsets.UTF_8) + note + String(bytes, bytes.size - half, half, Charsets.UTF_8)
     }
 }

@@ -30,6 +30,7 @@ private data class Spec(
     val broker: String,
     val relay: String,
     val chunkSize: String,
+    val dataStreamWindow: String,
     val candidatesAllow: String,
     val candidatesDeny: String,
     /** Invite payload to advertise as a QR while waiting (initiated sessions only). */
@@ -40,6 +41,11 @@ private data class Spec(
     /** Receipt-mailbox endpoint frozen at creation; persisted in the record's
      *  context so confirmation survives later edits to the setting. */
     val receiptServer: String = "",
+    /** Staging send only: the content:// source to copy into [path], and
+     *  whether a durable read grant was taken (so restore knows if it can
+     *  re-stage). Both ride platform_extras, so they survive restarts. */
+    val sourceUri: String? = null,
+    val sourceRecoverable: Boolean = false,
 ) {
     fun dir(): Direction = if (direction == "send") Direction.Send else Direction.Receive
 
@@ -55,13 +61,20 @@ private data class Spec(
                 put("relay", relay)
                 put("path", path)
                 put("chunk_size", chunkSize)
+                put("data_stream_window", dataStreamWindow)
                 put("candidates_allow", candidatesAllow)
                 put("candidates_deny", candidatesDeny)
                 put("use_room", useRoom)
                 put("use_mdns", useMdns)
                 put("resume", resume)
                 put("receipt_server", receiptServer)
-                qrPayload?.let { put("platform_extras", org.json.JSONObject().put("qr", it)) }
+                val extras = org.json.JSONObject()
+                qrPayload?.let { extras.put("qr", it) }
+                sourceUri?.let {
+                    extras.put("source_uri", it)
+                    extras.put("source_recoverable", sourceRecoverable)
+                }
+                if (extras.length() > 0) put("platform_extras", extras)
             }.toString()
 }
 
@@ -81,6 +94,15 @@ class TransferService : Service() {
      *  a single cancel (no hidden session can start after, no receipt retry
      *  survives). Parented to the service scope - teardown cancels all. */
     private val transferScopes = HashMap<Long, CoroutineScope>()
+
+    /** Ids with an in-flight publish-retry loop, so a re-rendered `completed`
+     *  snapshot doesn't spawn a second one. */
+    private val publishing = java.util.Collections.synchronizedSet(HashSet<Long>())
+
+    /** Backoff for re-attempting a stuck publish in-session (a non-collision
+     *  failure — collisions self-resolve in `commit`). After these, the card is
+     *  marked failed and the bytes wait in staging for a restart re-drive. */
+    private val publishRetryBackoffMs = longArrayOf(2_000, 5_000, 15_000)
 
     @Synchronized
     private fun transferScope(id: Long): CoroutineScope =
@@ -104,6 +126,34 @@ class TransferService : Service() {
      *  else is a stale pump from a torn-down session for the same id and is
      *  dropped - the fence is explicit, not an artifact of flow mechanics. */
     private val generations = HashMap<Long, Long>()
+
+    /** The live staging worker per card. A committed `Preparing` snapshot of a
+     *  generation owns exactly one worker; a non-`Preparing` snapshot retires it.
+     *  Owner-checked so a retired worker never clobbers a newer one. */
+    private val stageWork = HashMap<Long, StageWork>()
+
+    /** One staging copy worker. Owns its open streams so a retire can CLOSE them
+     *  — which unblocks a stuck blocking read/write; cancelling the coroutine
+     *  alone cannot. `ensureActive()` in the loop is a secondary check, and the
+     *  reducer's generation stamp is the real correctness backstop. */
+    private class StageWork(
+        val generation: Int,
+    ) {
+        @Volatile var job: Job? = null
+
+        @Volatile var input: java.io.Closeable? = null
+
+        @Volatile var output: java.io.Closeable? = null
+
+        @Volatile var retired = false
+
+        fun retire() {
+            retired = true
+            runCatching { input?.close() }
+            runCatching { output?.close() }
+            job?.cancel()
+        }
+    }
 
     /** True when [notice] belongs to the card's current pump (claiming it if
      *  the card is unclaimed). */
@@ -205,18 +255,16 @@ class TransferService : Service() {
         var legacyRootInUse = false
         val incoming = File(filesDir, "incoming")
         runCatching {
-            val records = org.json.JSONArray(Native.listRecords())
+            val ctxs = org.json.JSONArray(Native.listRestoreContexts())
             recordIds =
-                (0 until records.length())
-                    .mapNotNull { records.optJSONObject(it)?.optLong("id", -1L)?.takeIf { id -> id >= 0 } }
+                (0 until ctxs.length())
+                    .mapNotNull { ctxs.optJSONObject(it)?.optLong("id", -1L)?.takeIf { id -> id >= 0 } }
                     .toSet()
             // Pre-Phase-4 records point straight at the shared root; their
             // artifacts live there and are NOT garbage while the record does.
             legacyRootInUse =
-                (0 until records.length()).any {
-                    val rec = records.optJSONObject(it) ?: return@any false
-                    val params = rec.optJSONObject("context")?.optJSONObject("params") ?: rec.optJSONObject("params")
-                    params?.optString("path") == incoming.absolutePath
+                (0 until ctxs.length()).any {
+                    ctxs.optJSONObject(it)?.optString("path") == incoming.absolutePath
                 }
         }
         incoming.listFiles { f -> f.isDirectory }?.forEach { dir ->
@@ -256,6 +304,7 @@ class TransferService : Service() {
                         intent.getStringExtra(EXTRA_BROKER) ?: Endpoints.BROKER,
                         intent.getStringExtra(EXTRA_RELAY) ?: Endpoints.RELAY,
                         intent.getStringExtra(EXTRA_CHUNK_SIZE) ?: "",
+                        intent.getStringExtra(EXTRA_DATA_WINDOW) ?: "",
                         intent.getStringExtra(EXTRA_CAND_ALLOW) ?: "",
                         intent.getStringExtra(EXTRA_CAND_DENY) ?: "",
                         intent.getStringExtra(EXTRA_QR),
@@ -291,7 +340,39 @@ class TransferService : Service() {
                 OpLog.add("start $direction room=${room.substringBefore('-')} id=$id")
                 val sourceUri = intent.getStringExtra(EXTRA_SOURCE_URI)
                 if (spec.dir() == Direction.Send && !sourceUri.isNullOrEmpty()) {
-                    stageAndStart(id, spec, Uri.parse(sourceUri))
+                    val uri = Uri.parse(sourceUri)
+                    // The provider's DISPLAY_NAME is untrusted (can contain path
+                    // separators): keep only the leaf, never a dot name.
+                    val name =
+                        (displayName(uri) ?: "upload.bin")
+                            .let { File(it).name }
+                            .takeUnless { it.isEmpty() || it == "." || it == ".." }
+                            ?: "upload.bin"
+                    // A durable read grant lets a restart re-stage the source.
+                    val recoverable =
+                        runCatching {
+                            contentResolver.takePersistableUriPermission(
+                                uri,
+                                Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                            )
+                        }.isSuccess
+                    // Staging is keyed by card id so two same-named sends never
+                    // share a source path (the sender hashes as it reads).
+                    val stagingPath =
+                        File(File(File(cacheDir, "send"), id.toString()), name).absolutePath
+                    TransferRepository.update(id) {
+                        it.copy(
+                            fileName = name,
+                            total = querySize(uri),
+                            log = addLog(it.log, "preparing · staging $name…"),
+                        )
+                    }
+                    val stagingSpec =
+                        spec.copy(path = stagingPath, sourceUri = sourceUri, sourceRecoverable = recoverable)
+                    specs[id] = stagingSpec
+                    // Record commits in Preparing FIRST; the copy launches from
+                    // the Preparing snapshot (durable intent before a byte moves).
+                    startSession(id, stagingSpec, resume = false, staging = true)
                 } else {
                     startSession(id, spec, resume = false)
                 }
@@ -344,6 +425,7 @@ class TransferService : Service() {
                 specs.remove(id)
                 lastSeq.remove(id)
                 generations.remove(id)
+                retireStaging(id)
                 TransferRepository.remove(id)
                 stopIfIdle()
             }
@@ -371,61 +453,49 @@ class TransferService : Service() {
      * cards idle; a restored Unconfirmed resumes its mailbox poll in Rust.
      */
     private fun restoreAllRecords() {
-        val records = runCatching { org.json.JSONArray(Native.listRecords()) }.getOrNull() ?: return
-        for (i in 0 until records.length()) {
-            val rec = records.optJSONObject(i) ?: continue
-            val id = rec.optLong("id", -1L)
+        val ctxs = runCatching { org.json.JSONArray(Native.listRestoreContexts()) }.getOrNull() ?: return
+        for (i in 0 until ctxs.length()) {
+            val c = ctxs.optJSONObject(i) ?: continue
+            val id = c.optLong("id", -1L)
             if (id < 0 || jobs.containsKey(id)) continue
-            val context = rec.optJSONObject("context") ?: rec
-            val params = context.optJSONObject("params") ?: rec.optJSONObject("params") ?: continue
-            val client = context.optJSONObject("client")
-            val direction = if (params.optString("direction") == "Send") "send" else "receive"
-            val sources = params.optJSONArray("sources")
-            var code = ""
-            var broker = ""
-            var useRoom = false
-            var useMdns = false
-            for (j in 0 until (sources?.length() ?: 0)) {
-                val src = sources!!.optJSONObject(j) ?: continue
-                src.optJSONObject("Room")?.let {
-                    useRoom = true
-                    code = it.optString("code")
-                    broker = it.optString("broker")
-                }
-                src.optJSONObject("Mdns")?.let {
-                    useMdns = true
-                    if (code.isEmpty()) code = it.optString("token")
-                }
-            }
+            val direction = c.optString("direction")
+            val code = c.optString("code")
             if (code.isEmpty()) continue
-            val extras = rec.optJSONObject("platform_extras")
             if (!TransferRepository.restoreCard(
                     id,
                     if (direction == "send") Direction.Send else Direction.Receive,
                     code,
-                    qrPayload = extras?.optString("qr")?.ifEmpty { null },
-                    savedUri = extras?.optString("saved_uri")?.ifEmpty { null },
+                    qrPayload = c.optString("qr").ifEmpty { null },
+                    savedUri = c.optString("saved_uri").ifEmpty { null },
+                    publishedName = c.optString("published_name").ifEmpty { null },
+                    publishFailed = c.optString("publish") == "failed",
                 )
             ) {
                 continue
             }
+            // Transport config (broker/relay/chunk/candidates) is unused for a
+            // restored session - the core relaunches from the durable record's
+            // own context - so the display Spec carries only what the card and
+            // platform effects need.
+            // A restored Preparing send re-stages only if its source grant was
+            // durable; otherwise the copy path fails it with "needs re-picking".
+            val recoverable = c.optBoolean("source_recoverable", false)
             val spec =
                 Spec(
                     direction,
                     code,
-                    params.optString("path"),
-                    broker.ifEmpty { Endpoints.BROKER },
-                    params
-                        .optJSONObject("options")
-                        ?.optString("relay")
-                        .orEmpty()
-                        .ifEmpty { Endpoints.RELAY },
-                    client?.optString("chunk_size").orEmpty(),
-                    jsonStringArrayCsv(client?.optJSONArray("candidates_allow")),
-                    jsonStringArrayCsv(client?.optJSONArray("candidates_deny")),
+                    c.optString("path"),
+                    Endpoints.BROKER,
+                    Endpoints.RELAY,
+                    "",
+                    "",
+                    "",
+                    "",
                     null,
-                    useRoom,
-                    useMdns,
+                    c.optBoolean("use_room"),
+                    c.optBoolean("use_mdns"),
+                    sourceUri = if (recoverable) c.optString("source_uri").ifEmpty { null } else null,
+                    sourceRecoverable = recoverable,
                 )
             specs[id] = spec
             lastSeq[id] = 0L
@@ -451,84 +521,111 @@ class TransferService : Service() {
         }
     }
 
-    private fun jsonStringArrayCsv(array: org.json.JSONArray?): String =
-        (0 until (array?.length() ?: 0))
-            .mapNotNull { array?.optString(it)?.takeIf(String::isNotEmpty) }
-            .joinToString(",")
-
-    /**
-     * Stage a picked content:// into a real path the core can (re)open across
-     * attempts, VISIBLY: the card exists from the moment of the tap, and the
-     * copy shows as "preparing" with a live bar (for a large file this phase
-     * is seconds - hiding it made Send look dead). Runs in the service scope,
-     * so a rotation mid-copy no longer kills the send.
-     */
-    private fun stageAndStart(
+    /** Ensure a staging worker of [generation] runs for [id], from a committed
+     *  Preparing snapshot. Idempotent for the same generation; a new generation
+     *  retires the old worker first. */
+    private fun ensureStaging(
         id: Long,
-        spec0: Spec,
-        uri: Uri,
+        spec: Spec,
+        generation: Int,
     ) {
-        transferScope(id).launch(Dispatchers.IO) {
-            // The provider's DISPLAY_NAME is untrusted input (it can contain
-            // path separators): keep only the leaf, never a dot name.
-            val name =
-                (displayName(uri) ?: "upload.bin")
-                    .let { File(it).name }
-                    .takeUnless { it.isEmpty() || it == "." || it == ".." }
-                    ?: "upload.bin"
-            val size = querySize(uri)
-            TransferRepository.update(id) {
-                it.copy(fileName = name, total = size, log = addLog(it.log, "preparing · staging $name…"))
+        val work = StageWork(generation)
+        val toRetire =
+            synchronized(stageWork) {
+                val cur = stageWork[id]
+                if (cur != null && cur.generation == generation && !cur.retired) {
+                    return // already staging this generation
+                }
+                stageWork[id] = work
+                cur
             }
-            // Staging is keyed by card id: two same-named sends must never
-            // share a source path (the sender hashes as it reads, so a
-            // mid-send overwrite can pass verification with mixed bytes).
-            val out = File(File(File(cacheDir, "send"), id.toString()).apply { mkdirs() }, name)
-            val ok =
-                runCatching {
-                    contentResolver.openInputStream(uri)!!.use { input ->
-                        out.outputStream().use { o ->
-                            val buf = ByteArray(1 shl 20)
-                            var copied = 0L
-                            var last = 0L
-                            while (true) {
-                                val n = input.read(buf)
-                                if (n < 0) break
-                                o.write(buf, 0, n)
-                                copied += n
-                                val now = System.currentTimeMillis()
-                                if (now - last > 150) {
-                                    last = now
-                                    TransferRepository.update(id) { it.copy(bytes = copied) }
-                                }
-                            }
+        toRetire?.retire()
+        work.job = transferScope(id).launch(Dispatchers.IO) { runStaging(id, spec, work) }
+    }
+
+    /** Retire [id]'s staging worker (a non-Preparing snapshot, or Remove): close
+     *  its streams and cancel it. The incomplete partial is dropped by the
+     *  worker's own finally. Owner-checked. */
+    private fun retireStaging(id: Long) {
+        synchronized(stageWork) { stageWork.remove(id) }?.retire()
+    }
+
+    /** The staging copy, generation-stamped. Stores its streams in [work] so a
+     *  retire can close them (unblocking a stuck read); a retire/failure drops
+     *  the incomplete partial and emits NO stage callback (the machine has
+     *  already left Preparing, and a stale one is dropped by the reducer anyway).
+     *  A complete copy is kept. */
+    private fun runStaging(
+        id: Long,
+        spec: Spec,
+        work: StageWork,
+    ) {
+        val gen = work.generation
+        val uri = spec.sourceUri?.let { Uri.parse(it) }
+        if (uri == null) {
+            // A restored Preparing whose source cannot be reopened.
+            TransferTimeline.event(id, "platform.stage", "failed", outcome = "no_source")
+            if (!work.retired) Native.stageFailed(id, gen, "source needs re-picking")
+            clearStageWork(id, work)
+            return
+        }
+        val out = File(spec.path)
+        out.parentFile?.mkdirs()
+        TransferTimeline.event(id, "platform.stage", "start", fields = mapOf("name" to out.name))
+        var completed = false
+        try {
+            contentResolver.openInputStream(uri)!!.also { work.input = it }.use { input ->
+                out.outputStream().also { work.output = it }.use { o ->
+                    val buf = ByteArray(1 shl 20)
+                    var copied = 0L
+                    var last = 0L
+                    while (true) {
+                        if (work.retired) return // secondary check; close() is the primary unblock
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        o.write(buf, 0, n)
+                        copied += n
+                        val now = System.currentTimeMillis()
+                        if (now - last > 150) {
+                            last = now
+                            Native.stageProgress(id, gen, copied)
                         }
                     }
-                }.isSuccess
-            if (!ok) {
-                out.delete()
-                TransferRepository.update(id) {
-                    it.copy(
-                        status = Status.Failed,
-                        error = "couldn't read the picked file",
-                        log = addLog(it.log, "failed · staging the picked file"),
-                    )
                 }
-                return@launch
             }
-            // Remove may have raced the staging copy: never start a session
-            // for a card that no longer exists (it would run invisibly and
-            // re-create the record Remove just deleted).
-            if (TransferRepository.transfers.value.none { it.id == id }) {
-                out.parentFile?.deleteRecursively()
-                return@launch
+            completed = true
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            throw c // retired via cancel; propagate, no callback
+        } catch (e: Throwable) {
+            if (!work.retired) {
+                TransferTimeline.event(
+                    id,
+                    "platform.stage",
+                    "failed",
+                    outcome = "copy",
+                    // The exception TYPE, never .message — an openInputStream
+                    // message embeds the full content:// URI, which would ship to
+                    // the (public) log endpoint.
+                    fields = mapOf("cause" to e.javaClass.simpleName),
+                )
+                Native.stageFailed(id, gen, "couldn't read the picked file")
             }
-            // Reset the bar for the real transfer; the machine owns it from here.
-            TransferRepository.update(id) { it.copy(bytes = 0) }
-            val spec = spec0.copy(path = out.absolutePath)
-            specs[id] = spec
-            startSession(id, spec, resume = false)
+        } finally {
+            if (!completed) out.delete() // drop the incomplete partial (retire/failure)
+            clearStageWork(id, work)
         }
+        if (completed) {
+            TransferTimeline.event(id, "platform.stage", "complete")
+            Native.stageComplete(id, gen)
+        }
+    }
+
+    /** Owner-checked removal: only clear the map entry if it still holds [work]. */
+    private fun clearStageWork(
+        id: Long,
+        work: StageWork,
+    ) {
+        synchronized(stageWork) { if (stageWork[id] === work) stageWork.remove(id) }
     }
 
     private fun displayName(uri: Uri): String? =
@@ -546,13 +643,20 @@ class TransferService : Service() {
         id: Long,
         spec: Spec,
         resume: Boolean,
+        staging: Boolean = false,
     ) {
         lastSeq[id] = 0L
         generations.remove(id)
+        val notices =
+            if (staging) {
+                NativeSession.startStaging(id, spec.paramsJson(resume = false))
+            } else {
+                NativeSession.start(id, spec.paramsJson(resume))
+            }
         val job =
             transferScope(id).launch {
                 try {
-                    NativeSession.start(id, spec.paramsJson(resume)).collect { notice ->
+                    notices.collect { notice ->
                         if (!ownsCard(id, notice)) return@collect
                         when (notice.optString("notice")) {
                             "snapshot" -> onSnapshot(id, spec, notice)
@@ -583,25 +687,22 @@ class TransferService : Service() {
 
         val state = s.optString("state")
         val status =
-            when (state) {
-                "waiting" -> Status.Waiting
-                "connecting" -> Status.Connecting
-                "verifying" -> Status.Verifying
-                "transferring" -> Status.Transferring
-                "confirming" -> Status.Confirming
-                "paused" -> Status.Paused
-                "unconfirmed" -> Status.Unconfirmed
-                "completed" -> Status.Completed
-                "failed" -> Status.Failed
-                "cancelled" -> Status.Cancelled
-                else -> return
+            Status.fromWire(state) ?: run {
+                // Never silent: an unmapped core State would otherwise drop the
+                // whole snapshot and freeze the card with no trace. Surface it
+                // (the Kotlin Status enum is out of sync with the Rust State).
+                LogStore.append("app: unmapped session state '$state' (id=$id) — Status enum out of sync with core; snapshot dropped")
+                OpLog.add("unmapped state '$state' id=$id")
+                return
             }
         val reason = s.optString("reason").ifEmpty { null }
         val bytes = s.optLong("bytes")
         val total = s.optLong("total")
         val speed = s.optDouble("speed_bps", 0.0)
         val avg = s.optDouble("avg_bps", 0.0)
-        val path = s.optString("path").ifEmpty { null }
+        // Typed DataPath object ({type, addr|url|description}) — read the fields,
+        // don't re-parse a Display string.
+        val path = s.optJSONObject("path")
         var entered: String? = null
 
         TransferRepository.update(id) { t ->
@@ -624,10 +725,15 @@ class TransferService : Service() {
                     } else {
                         t.speedHistory
                     },
-                pathType = path?.substringBefore(' ') ?: t.pathType,
+                pathType = path?.optString("type")?.ifEmpty { null } ?: t.pathType,
                 pathAddr =
-                    path?.substringAfter('(', "")?.removeSuffix(")")?.ifEmpty { null }
-                        ?: t.pathAddr,
+                    path?.let { p ->
+                        p
+                            .optString("addr")
+                            .ifEmpty { p.optString("url") }
+                            .ifEmpty { p.optString("description") }
+                            .ifEmpty { null }
+                    } ?: t.pathAddr,
                 error = if (status == Status.Failed || status == Status.Unconfirmed) reason else null,
                 log = entered?.let { addLog(t.log, it) } ?: t.log,
             )
@@ -637,12 +743,28 @@ class TransferService : Service() {
         // the same code path serves fresh starts, restores, and cards born
         // terminal - there is no launch-path special case to fall out of sync.
         renderMulticast(id, spec, status)
+        // Staging (SEND) is driven SOLELY by the committed snapshot: a Preparing
+        // snapshot of generation `attempt` is the sole authority for its worker
+        // (the record is committed, so the copy never runs ahead of the durable
+        // intent), and any non-Preparing snapshot retires it. A stale worker's
+        // callbacks are rejected by the reducer's generation check regardless.
+        if (spec.dir() == Direction.Send) {
+            if (status == Status.Preparing) {
+                ensureStaging(id, spec, s.optInt("attempt", 1))
+            } else {
+                retireStaging(id)
+            }
+        }
         when {
             entered != null -> updateNotification()
             else -> throttledNotification()
         }
         if (state == "completed" && spec.dir() == Direction.Receive) {
+            // Synchronous first attempt (before the foreground may detach), then a
+            // bounded async retry if anything didn't land — real forward progress
+            // instead of waiting for a restart.
             sweepStaging(spec.path, attributeTo = id)
+            scheduleRepublishIfNeeded(id, spec.path)
         }
         // Foreground reconciles against the whole card set: when nothing is
         // active, post the one final summary frame and detach - including for
@@ -662,6 +784,7 @@ class TransferService : Service() {
         bytes: Long,
     ): String =
         when (state) {
+            "preparing" -> "preparing · staging the source…"
             "waiting" -> "waiting for peer…"
             "connecting" -> "pairing in room…"
             "verifying" -> "verifying…"
@@ -736,6 +859,10 @@ class TransferService : Service() {
                     return@launch
                 }
             }
+            // Every backoff exhausted — the mailbox rescue could not be armed.
+            // (Success is the core's platform.courier.posted; this is the gap
+            // the driver can't see — the HTTP POST itself failing.)
+            TransferTimeline.event(id, "platform.courier", "post_failed")
             OpLog.add("receipt post failed id=$id")
         }
     }
@@ -755,24 +882,222 @@ class TransferService : Service() {
         val finals =
             File(outputDir)
                 .listFiles { f -> f.isFile && !f.name.startsWith(".") } ?: return
-        val s = SettingsStore.settings.value
-        for (src in finals) {
-            val uri =
-                MediaStoreSaver.saveReceived(this, src, src.name, s.saveTreeUri, s.saveFolder)
-                    ?: continue
-            src.delete()
-            if (attributeTo != null) {
-                TransferRepository.update(attributeTo) {
-                    if (it.fileName == null || it.fileName == src.name) {
-                        it.copy(fileName = it.fileName ?: src.name, savedUri = uri.toString())
-                    } else {
-                        it
-                    }
+        for (src in finals) publishOne(src, attributeTo)
+    }
+
+    /** After the synchronous first sweep, if a completed receive still has staged
+     *  files (a non-collision publish failure — collisions self-resolve in
+     *  `commit`), retry with backoff so it doesn't wait for a restart; mark the
+     *  card failed after exhausting. One retry loop per id. */
+    private fun scheduleRepublishIfNeeded(
+        id: Long,
+        dir: String,
+    ) {
+        if (!hasUnpublished(dir)) return
+        if (!publishing.add(id)) return
+        transferScope(id).launch(Dispatchers.IO) {
+            try {
+                for (delayMs in publishRetryBackoffMs) {
+                    kotlinx.coroutines.delay(delayMs)
+                    sweepStaging(dir, attributeTo = id)
+                    if (!hasUnpublished(dir)) return@launch
                 }
-                syncExtras(attributeTo)
+                markPublishFailed(id)
+            } finally {
+                publishing.remove(id)
             }
-            LogStore.append("app: saved ${src.name} to Downloads")
         }
+    }
+
+    private fun hasUnpublished(dir: String): Boolean =
+        File(dir).listFiles { f -> f.isFile && !f.name.startsWith(".") }?.isNotEmpty() ?: false
+
+    /** Terminal (for now) publish failure: durable, and surfaced on the card so the
+     *  user isn't left thinking the file silently vanished. A restart re-drives the
+     *  publish (the bytes stay in staging); a later success clears it. */
+    private fun markPublishFailed(id: Long) {
+        TransferRepository.update(id) {
+            if (it.publishFailed) {
+                it
+            } else {
+                it.copy(
+                    publishFailed = true,
+                    log = addLog(it.log, "couldn't save to Downloads — kept, will retry"),
+                )
+            }
+        }
+        syncExtras(id)
+    }
+
+    /** The publish sidecar journal for one staged file: `.envoix-publish.<name>.json`
+     *  beside it, holding the reserved target URI (written before the copy) and
+     *  the committed URI (written after). Lets a crash mid-publish recover:
+     *  drop a half-written candidate, or adopt an already-committed one. */
+    private fun publishJournal(src: File) = File(src.parentFile, ".envoix-publish.${src.name}.json")
+
+    /**
+     * Publish one finalized staging file, journaled. Recovery first: a surviving
+     * journal means a prior publish was interrupted — adopt its committed target
+     * (if it still resolves) or delete the half-written candidate — then a fresh
+     * reserve → copy → commit → delete-staging, recording each step first.
+     */
+    private fun publishOne(
+        src: File,
+        attributeTo: Long?,
+    ) {
+        // Per-transfer timeline events, only when this file is attributed to a
+        // card (the unattributed gcStaging drain has no session to route to).
+        fun tl(
+            event: String,
+            outcome: String = "",
+            fields: Map<String, String> = emptyMap(),
+        ) = attributeTo?.let {
+            TransferTimeline.event(it, "platform.publish", event, outcome = outcome, fields = fields)
+        }
+
+        val journal = publishJournal(src)
+        // --- recovery: a journal survived a crash mid-publish ---
+        runCatching { org.json.JSONObject(journal.readText()) }.getOrNull()?.let { prior ->
+            val committed = prior.optString("committed_uri").ifEmpty { null }
+            if (committed != null && MediaStoreSaver.resolves(this, Uri.parse(committed))) {
+                // Commit had landed; the crash was before staging was cleared.
+                // Adopt under the name it was actually published as (may be bumped).
+                val publishedName = prior.optString("published_name").ifEmpty { src.name }
+                adopt(attributeTo, expectedSourceName = src.name, publishedName = publishedName, uri = committed)
+                src.delete()
+                journal.delete()
+                tl("adopt", fields = mapOf("uri" to TransferTimeline.redactUri(committed)))
+                LogStore.append("app: adopted already-published $publishedName")
+                return
+            }
+            // Reserved but never committed (or the user deleted it): drop the
+            // half-written candidate so we do not leave a truncated file, then
+            // fall through to a fresh publish.
+            prior.optString("target").ifEmpty { null }?.let { MediaStoreSaver.delete(this, Uri.parse(it)) }
+            journal.delete()
+        }
+
+        // --- fresh publish ---
+        val s = SettingsStore.settings.value
+        val target = MediaStoreSaver.reserve(this, src.name, s.saveTreeUri, s.saveFolder)
+        if (target == null) {
+            tl("failed", outcome = "reserve", fields = mapOf("name" to src.name))
+            return
+        }
+        tl("reserve", fields = mapOf("uri" to TransferTimeline.redactUri(target.uri.toString())))
+        // Record the reservation BEFORE any byte is copied, and GATE the copy on
+        // it: if we can't durably record the target, don't copy bytes into a
+        // user-visible destination we could never recover or clean up.
+        if (!writePublishJournal(journal, target.uri.toString(), target.mediaStorePending, committed = null, publishedName = null)) {
+            MediaStoreSaver.delete(this, target.uri)
+            tl("failed", outcome = "journal_reserve")
+            LogStore.append("app: could not record publish reservation for ${src.name}; not copying")
+            return
+        }
+        val copy = MediaStoreSaver.copyInto(this, src, target)
+        if (copy.isFailure) {
+            MediaStoreSaver.delete(this, target.uri)
+            journal.delete()
+            tl(
+                "failed",
+                outcome = "copy",
+                // Type only — a copy IOException's .message can carry the
+                // destination URI/path (same leak class as the staging cause).
+                fields = mapOf("cause" to (copy.exceptionOrNull()?.javaClass?.simpleName ?: "unknown")),
+            )
+            return
+        }
+        val committed = MediaStoreSaver.commit(this, target)
+        if (committed.isFailure) {
+            // A colliding _data (same-named file already published) or other
+            // publish error must not crash the service: drop the pending target
+            // and leave the file in staging for a later retry.
+            MediaStoreSaver.delete(this, target.uri)
+            journal.delete()
+            tl(
+                "failed",
+                outcome = "commit",
+                fields = mapOf("cause" to (committed.exceptionOrNull()?.javaClass?.simpleName ?: "unknown")),
+            )
+            return
+        }
+        val outcome = committed.getOrThrow()
+        // Record the commit (with the name it actually landed under) BEFORE clearing
+        // staging, so a crash here recovers by adopting (never re-publishing =
+        // duplicate). The write is best-effort: surface a failure rather than
+        // swallow it, but still adopt + clear in-line so no duplicate is created —
+        // the crash-in-this-window gap is the separate publication barrier.
+        val journaled =
+            writePublishJournal(
+                journal,
+                target.uri.toString(),
+                target.mediaStorePending,
+                committed = outcome.uri.toString(),
+                publishedName = outcome.displayName,
+            )
+        if (!journaled) {
+            tl("failed", outcome = "journal")
+            LogStore.append("app: publish journal write failed (published as ${outcome.displayName})")
+        }
+        tl("commit", fields = mapOf("uri" to TransferTimeline.redactUri(outcome.uri.toString())))
+        adopt(attributeTo, expectedSourceName = src.name, publishedName = outcome.displayName, uri = outcome.uri.toString())
+        src.delete()
+        journal.delete()
+        tl("staging_deleted")
+        LogStore.append("app: saved ${outcome.displayName} to Downloads")
+    }
+
+    private fun writePublishJournal(
+        journal: File,
+        target: String,
+        pending: Boolean,
+        committed: String?,
+        publishedName: String?,
+    ): Boolean {
+        val obj =
+            org.json
+                .JSONObject()
+                .put("target", target)
+                .put("pending", pending)
+        committed?.let { obj.put("committed_uri", it) }
+        publishedName?.let { obj.put("published_name", it) }
+        // Atomic: write a temp then rename over the journal, so recovery always
+        // reads a COMPLETE journal (the old one or the new one) — never a
+        // half-written, unparsable document it can neither act on nor clean.
+        return runCatching {
+            val tmp = File(journal.parentFile, "${journal.name}.tmp")
+            tmp.writeText(obj.toString())
+            if (!tmp.renameTo(journal)) {
+                tmp.delete()
+                error("journal rename failed")
+            }
+        }.isSuccess
+    }
+
+    /** Attribute a published URI to its card. [expectedSourceName] is the transfer
+     *  identity (matched against `fileName`, never overwritten by the published
+     *  name); [publishedName] is the platform display name it actually landed
+     *  under, which may be a collision-bumped "name (1)". */
+    private fun adopt(
+        attributeTo: Long?,
+        expectedSourceName: String,
+        publishedName: String,
+        uri: String,
+    ) {
+        if (attributeTo == null) return
+        TransferRepository.update(attributeTo) {
+            if (it.fileName == null || it.fileName == expectedSourceName) {
+                it.copy(
+                    fileName = it.fileName ?: expectedSourceName,
+                    savedUri = uri,
+                    publishedName = publishedName,
+                    publishFailed = false,
+                )
+            } else {
+                it
+            }
+        }
+        syncExtras(attributeTo)
     }
 
     /** Push the card's platform context (QR payload, saved URI) into the
@@ -782,21 +1107,37 @@ class TransferService : Service() {
         val extras = org.json.JSONObject()
         t.qrPayload?.let { extras.put("qr", it) }
         t.savedUri?.let { extras.put("saved_uri", it) }
-        Native.setSessionExtras(id, extras.toString())
+        t.publishedName?.let { extras.put("published_name", it) }
+        if (t.publishFailed) extras.put("publish", "failed")
+        val err = Native.setSessionExtras(id, extras.toString())
+        if (err.isNotEmpty()) LogStore.append("app: $err (id=$id)")
     }
 
-    /** Active machine states pin the tray; everything else rests. */
+    /** Active states pin the tray; everything else rests. Exhaustive (no `else`)
+     *  so a new Status is a compile error until classified — this predicate
+     *  deliberately differs from the machine's is_active (Preparing pins here). */
     private fun isActive(st: Status) =
-        st == Status.Waiting ||
-            st == Status.Connecting ||
-            st == Status.Verifying ||
-            st == Status.Transferring ||
-            st == Status.Confirming
+        when (st) {
+            Status.Preparing,
+            Status.Waiting,
+            Status.Connecting,
+            Status.Verifying,
+            Status.Transferring,
+            Status.Confirming,
+            -> true
+            Status.Paused,
+            Status.Unconfirmed,
+            Status.Completed,
+            Status.Failed,
+            Status.Cancelled,
+            -> false
+        }
 
     private fun arrow(t: Transfer) = if (t.direction == Direction.Send) "↑" else "↓"
 
     private fun trayWord(t: Transfer): String =
         when (t.status) {
+            Status.Preparing -> "Preparing…"
             Status.Waiting -> "Waiting for peer"
             Status.Connecting -> "Pairing…"
             Status.Verifying -> "Verifying"
@@ -953,6 +1294,7 @@ class TransferService : Service() {
         private const val EXTRA_BROKER = "broker"
         private const val EXTRA_RELAY = "relay"
         private const val EXTRA_CHUNK_SIZE = "chunk_size"
+        private const val EXTRA_DATA_WINDOW = "data_stream_window"
         private const val EXTRA_CAND_ALLOW = "candidates_allow"
         private const val EXTRA_CAND_DENY = "candidates_deny"
         private const val EXTRA_QR = "qr"
@@ -971,6 +1313,7 @@ class TransferService : Service() {
             broker: String,
             relay: String,
             chunkSize: String,
+            dataStreamWindow: String,
             candidatesAllow: String,
             candidatesDeny: String,
             qrPayload: String?,
@@ -985,6 +1328,7 @@ class TransferService : Service() {
                     putExtra(EXTRA_BROKER, broker)
                     putExtra(EXTRA_RELAY, relay)
                     putExtra(EXTRA_CHUNK_SIZE, chunkSize)
+                    putExtra(EXTRA_DATA_WINDOW, dataStreamWindow)
                     putExtra(EXTRA_CAND_ALLOW, candidatesAllow)
                     putExtra(EXTRA_CAND_DENY, candidatesDeny)
                     putExtra(EXTRA_QR, qrPayload)

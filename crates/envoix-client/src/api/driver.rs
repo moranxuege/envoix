@@ -63,6 +63,11 @@ pub struct ClientContext {
     /// Human-readable chunk size as supplied by the frontend. `None` means default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chunk_size: Option<String>,
+    /// Human-readable data-stream flow-control window (e.g. `32MB`) as supplied
+    /// by the frontend, frozen at session creation. `None` uses the transport
+    /// default. A transport tuning only — never enters the wire, resume, or hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_stream_window: Option<String>,
     /// CIDR allow-list for candidate addresses.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub candidates_allow: Vec<String>,
@@ -84,6 +89,7 @@ impl ClientContext {
             self.chunk_size.as_deref(),
             &self.candidates_allow,
             &self.candidates_deny,
+            self.data_stream_window.as_deref(),
         )
     }
 }
@@ -163,11 +169,31 @@ enum Cmd {
     ServeReverify,
     /// Replace the frontend-owned card context persisted with the record.
     SetExtras(serde_json::Value),
+    /// A Preparing send: staging copied more bytes (snapshot-only). Carries the
+    /// staging generation (the `attempt` it was authorized by) so a stale
+    /// worker's callback is dropped by the reducer.
+    StageProgress(u32, u64),
+    /// A Preparing send: staging finished, launch the first attempt.
+    StageComplete(u32),
+    /// A Preparing send: staging failed, fail the transfer with this reason.
+    StageFailed(u32, String),
 }
 
 /// Handle to a running transfer session (one card).
 pub struct TransferSession {
     cmds: mpsc::UnboundedSender<Cmd>,
+}
+
+/// The rendezvous room id a session correlates by (the broker's view): the
+/// room code's numeric prefix, or the mDNS token. `None` for invite-only.
+fn session_room(sources: &[super::PeerSource]) -> Option<String> {
+    sources.iter().find_map(|source| match source {
+        super::PeerSource::Room { code, .. } => {
+            Some(envoix_session::split_code(code).0.to_string())
+        }
+        super::PeerSource::Mdns { token: Some(token) } => Some(token.clone()),
+        _ => None,
+    })
 }
 
 impl TransferSession {
@@ -189,6 +215,25 @@ impl TransferSession {
             extras,
             true,
         ))
+    }
+
+    /// Start a SEND that must stage a platform source first (e.g. an Android
+    /// `content://`). The session is created in Preparing and the record is
+    /// committed BEFORE the frontend copies a byte, so the staging survives
+    /// process death; no attempt launches until [`Self::stage_complete`].
+    pub fn start_staging(
+        context: SessionContext,
+        record: Option<(RecordStore, u64)>,
+        extras: Option<serde_json::Value>,
+    ) -> Result<(Self, mpsc::UnboundedReceiver<SessionNotice>), TransferError> {
+        let client = context.client.client()?;
+        let direction = context.params.direction;
+        let mut session = Session::new(direction);
+        session.state = super::machine::State::Preparing;
+        // The source is not yet in hand — staging copies it first. A retry
+        // consults this to re-stage rather than launch a partial file.
+        session.facts.source_ready = false;
+        Ok(Self::spawn(client, context, session, record, extras, false))
     }
 
     /// Rehydrate a persisted session WITHOUT launching an attempt. A record
@@ -223,6 +268,11 @@ impl TransferSession {
                 session.reason = Some("interrupted by an app restart".into());
             }
         }
+        // Preparing is deliberately NOT coerced: whether its source can be
+        // re-staged is a platform fact (the persistable grant), which the core
+        // must not read from the opaque extras. A restored Preparing session
+        // waits, and the frontend re-stages it (stage_complete) or fails it
+        // (stage_failed) per that grant.
         Ok(Self::spawn(
             client,
             record.context,
@@ -252,6 +302,11 @@ impl TransferSession {
         }
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (notice_tx, notice_rx) = mpsc::unbounded_channel();
+        let context_sources = context.params.sources.clone();
+        // The durable card id — the timeline's routing key (docs/design/
+        // diagnostics.md v2, P4). Copied out before `record` moves into Actor.
+        let session_id = record.as_ref().map(|(_, id)| *id);
+        let direction = session.direction;
         let actor = Actor {
             client,
             session,
@@ -261,6 +316,7 @@ impl TransferSession {
             current: None,
             pending: None,
             seq: 0,
+            apply_seq: 0,
             confirm_deadline: None,
             polls: Vec::new(),
             poll_key: None,
@@ -273,7 +329,30 @@ impl TransferSession {
             commit_retry_at: None,
             launch,
         };
-        tokio::spawn(actor.run());
+        // The actor runs OUTSIDE the per-attempt transfer span, so its own
+        // events (state transitions, receipt outcomes, commit barrier) had no
+        // room and never reached the per-transfer log. A session span carries
+        // the room for the actor's whole life so the machine is diagnosable.
+        use tracing::Instrument as _;
+        // `session_id` on the span is the timeline routing key; `room` still
+        // rides for raw-trace correlation (docs/design/diagnostics.md v2).
+        let span = match (session_room(&context_sources), session_id) {
+            (Some(room), Some(sid)) => {
+                tracing::info_span!("session", room = %room, session_id = sid)
+            }
+            (Some(room), None) => tracing::info_span!("session", room = %room),
+            (None, Some(sid)) => tracing::info_span!("session", session_id = sid),
+            (None, None) => tracing::info_span!("session"),
+        };
+        span.in_scope(|| {
+            tracing::info!(
+                target: "envoix::timeline",
+                layer = "session",
+                event = "created",
+                direction = ?direction,
+            );
+        });
+        tokio::spawn(actor.run().instrument(span));
         (Self { cmds: cmd_tx }, notice_rx)
     }
 
@@ -319,6 +398,23 @@ impl TransferSession {
     /// persisted with the record. Opaque to the core; survives restarts.
     pub fn set_extras(&self, extras: serde_json::Value) {
         let _ = self.cmds.send(Cmd::SetExtras(extras));
+    }
+
+    /// A Preparing send: report staging copy progress (moves the bar only,
+    /// never persisted).
+    pub fn stage_progress(&self, generation: u32, bytes: u64) {
+        let _ = self.cmds.send(Cmd::StageProgress(generation, bytes));
+    }
+
+    /// A Preparing send: the source is staged at the transfer's path; launch
+    /// the first attempt (Preparing -> Connecting).
+    pub fn stage_complete(&self, generation: u32) {
+        let _ = self.cmds.send(Cmd::StageComplete(generation));
+    }
+
+    /// A Preparing send: staging failed; fail the transfer with `reason`.
+    pub fn stage_failed(&self, generation: u32, reason: String) {
+        let _ = self.cmds.send(Cmd::StageFailed(generation, reason));
     }
 }
 
@@ -387,6 +483,9 @@ struct Actor {
     /// takes the same reduce->effects->persist path as every other input.
     pending: Option<Input>,
     seq: u64,
+    /// Monotonic per-`apply` id: groups a batch of `decided` edges to the one
+    /// `record.committed` that persists their final state (diagnostics v2, P8).
+    apply_seq: u64,
     /// (attempt, deadline) of the armed confirm timer.
     confirm_deadline: Option<(u32, Instant)>,
     /// Pending mailbox poll instants (drained front to back).
@@ -455,6 +554,12 @@ impl Actor {
                 _ = sleep_until(poll_at), if poll_at.is_some() => {
                     self.polls.remove(0);
                     if let Some(key) = self.poll_key.clone() {
+                        tracing::info!(
+                            target: "envoix::timeline",
+                            layer = "platform.courier",
+                            event = "poll_start",
+                            attempt = self.session.attempt,
+                        );
                         let _ = self.notices.send(SessionNotice::FetchReceipt {
                             key,
                             server: self.context.client.receipt_server.clone(),
@@ -484,6 +589,12 @@ impl Actor {
                 if self.poll_key.as_deref() != Some(&key) {
                     return; // a late answer for a superseded attempt's slot
                 }
+                tracing::info!(
+                    target: "envoix::timeline",
+                    layer = "platform.courier",
+                    event = "poll_hit",
+                    attempt = self.session.attempt,
+                );
                 let (Some(tid), Some(code)) = (self.session.transfer_id.clone(), self.code())
                 else {
                     return;
@@ -512,8 +623,21 @@ impl Actor {
                     }
                 };
                 match verified {
-                    Ok(_) => self.apply(Input::ReceiptVerified).await,
+                    Ok(_) => {
+                        tracing::info!(
+                            target: "envoix::timeline",
+                            layer = "platform.courier",
+                            event = "verified",
+                        );
+                        tracing::info!("mailbox receipt verified");
+                        self.apply(Input::ReceiptVerified).await
+                    }
                     Err(error) => {
+                        tracing::info!(
+                            target: "envoix::timeline",
+                            layer = "platform.courier",
+                            event = "mismatch",
+                        );
                         tracing::warn!(%error, "mailbox receipt failed verification");
                         // A machine fact, not a driver decision: recorded and
                         // persisted; polling continues (the receiver
@@ -522,8 +646,23 @@ impl Actor {
                     }
                 }
             }
-            Cmd::ReceiptPosted => self.apply(Input::ReceiptPosted).await,
-            Cmd::ReceiptResponse { blob: None, .. } => {} // empty slot; later polls may hit
+            Cmd::ReceiptPosted => {
+                tracing::info!(
+                    target: "envoix::timeline",
+                    layer = "platform.courier",
+                    event = "posted",
+                );
+                self.apply(Input::ReceiptPosted).await
+            }
+            Cmd::ReceiptResponse { blob: None, .. } => {
+                // empty slot; later polls may hit
+                tracing::info!(
+                    target: "envoix::timeline",
+                    layer = "platform.courier",
+                    event = "poll_empty",
+                    attempt = self.session.attempt,
+                );
+            }
             Cmd::ServeReverify => {
                 let mut options = self.context.params.options.clone();
                 options.resume = true;
@@ -535,19 +674,41 @@ impl Actor {
                 };
                 if let Ok(transfer) = self.client.run(request) {
                     tracing::info!("serving re-verify (courier tier; card untouched)");
-                    tokio::spawn(async move {
-                        // Bounded: one shot; outcome only logged.
-                        match tokio::time::timeout(Duration::from_secs(120), transfer.wait()).await
-                        {
-                            Ok(Ok(_)) => tracing::info!("re-verify served"),
-                            other => tracing::info!(?other, "re-verify ended without serving"),
+                    // Instrument with the session span so the re-verify outcome
+                    // carries session_id and lands in this transfer's timeline
+                    // (the detached spawn otherwise lost the span — v2 P7 note).
+                    use tracing::Instrument as _;
+                    tokio::spawn(
+                        async move {
+                            // Bounded: one shot; outcome only logged.
+                            match tokio::time::timeout(Duration::from_secs(120), transfer.wait())
+                                .await
+                            {
+                                Ok(Ok(_)) => {
+                                    tracing::info!(
+                                        target: "envoix::timeline",
+                                        layer = "platform.courier",
+                                        event = "reverify_served",
+                                    );
+                                    tracing::info!("re-verify served");
+                                }
+                                other => tracing::info!(?other, "re-verify ended without serving"),
+                            }
                         }
-                    });
+                        .instrument(tracing::Span::current()),
+                    );
                 }
             }
             Cmd::SetExtras(extras) => {
                 self.platform_extras = Some(extras);
                 self.try_commit().await;
+            }
+            Cmd::StageProgress(generation, bytes) => {
+                self.apply(Input::StageProgress { generation, bytes }).await
+            }
+            Cmd::StageComplete(generation) => self.apply(Input::StageComplete { generation }).await,
+            Cmd::StageFailed(generation, reason) => {
+                self.apply(Input::StageFailed { generation, reason }).await
             }
             Cmd::Discard => {
                 // Stop the attempt BEFORE deleting anything: the engine
@@ -651,19 +812,34 @@ impl Actor {
 
     /// Feed one input to the machine, execute its effects, emit a snapshot.
     async fn apply(&mut self, input: Input) {
+        self.apply_seq += 1;
         let before = self.session.clone();
         let mut progress_only = true;
         let mut next = Some(input);
         loop {
             while let Some(input) = next.take() {
-                progress_only &= matches!(
+                let is_progress = matches!(
                     input,
                     Input::Event {
                         event: AttemptEvent::Progress { .. },
                         ..
-                    }
+                    } | Input::StageProgress { .. }
                 );
-                for effect in self.session.reduce(input) {
+                progress_only &= is_progress;
+                // Observe THIS reduction (cheap Copy snapshot of state+facts).
+                // Progress is excluded: it would flood the timeline (v2 P6). For
+                // everything else, snapshot the FULL session so acceptance is
+                // read from the same authority `apply` uses below (`== before`),
+                // not guessed from the {state, facts} subset — which mislabels a
+                // legal edge touching another field (e.g. `Connected` sets only
+                // `path`) as "ignored".
+                let before_reduce = (!is_progress).then(|| self.session.clone());
+                let kind = input.kind();
+                let effects = self.session.reduce(input);
+                if let Some(before_reduce) = &before_reduce {
+                    self.observe_reduce(kind, before_reduce, &effects);
+                }
+                for effect in effects {
                     if is_post_commit(&effect) {
                         self.staged.push(effect);
                     } else {
@@ -699,6 +875,65 @@ impl Actor {
         }
     }
 
+    /// Emit the per-reduction timeline events (diagnostics v2): the input
+    /// (accepted/ignored), any state transition (as `decided` — the commit
+    /// outcome follows in [`Self::try_commit`], never marked committed here),
+    /// fact deltas, and the effects this edge produced. Non-progress only.
+    fn observe_reduce(&self, kind: &'static str, before: &Session, effects: &[Effect]) {
+        // Acceptance from the authority: a full-session compare (matching apply's
+        // own `self.session == before`), so any legal mutation — state, facts, or
+        // any other field like `path` — counts. Effects-without-change also count.
+        let accepted = *before != self.session || !effects.is_empty();
+        tracing::info!(
+            target: "envoix::timeline",
+            layer = "machine",
+            event = "input",
+            kind = kind,
+            attempt = self.session.attempt,
+            outcome = if accepted { "accepted" } else { "ignored" },
+        );
+        if before.state != self.session.state {
+            tracing::info!(
+                target: "envoix::timeline",
+                layer = "machine",
+                event = "transition",
+                attempt = self.session.attempt,
+                from = ?before.state,
+                to = ?self.session.state,
+                outcome = "decided",
+                batch = self.apply_seq,
+            );
+        }
+        if before.facts.proof_delivered != self.session.facts.proof_delivered {
+            tracing::info!(
+                target: "envoix::timeline",
+                layer = "machine",
+                event = "fact_changed",
+                fact = "proof_delivered",
+                old = before.facts.proof_delivered,
+                new = self.session.facts.proof_delivered,
+            );
+        }
+        if before.facts.receipt_mismatch != self.session.facts.receipt_mismatch {
+            tracing::info!(
+                target: "envoix::timeline",
+                layer = "machine",
+                event = "fact_changed",
+                fact = "receipt_mismatch",
+                old = before.facts.receipt_mismatch,
+                new = self.session.facts.receipt_mismatch,
+            );
+        }
+        for effect in effects {
+            tracing::info!(
+                target: "envoix::timeline",
+                layer = "effect",
+                event = "dispatched",
+                name = effect.kind(),
+            );
+        }
+    }
+
     /// Run the commit barrier: persist, then release the staged world-facing
     /// effects and the snapshot. On failure, withhold both and retry on a
     /// bounded backoff; when the store stays unwritable, escalate to a
@@ -708,6 +943,17 @@ impl Actor {
             Ok(()) => {
                 self.commit_failures = 0;
                 self.commit_retry_at = None;
+                // The batch's decided edges are now durable — the one committed
+                // marker for their final state (v2 P8). Emitted before the
+                // staged world-facing effects run.
+                tracing::info!(
+                    target: "envoix::timeline",
+                    layer = "record",
+                    event = "committed",
+                    attempt = self.session.attempt,
+                    batch = self.apply_seq,
+                    state = ?self.session.state,
+                );
                 for effect in std::mem::take(&mut self.staged) {
                     self.run_effect(effect).await;
                 }
@@ -723,8 +969,21 @@ impl Actor {
                         attempt = self.commit_failures,
                         "record commit failed; snapshot and effects withheld"
                     );
+                    tracing::info!(
+                        target: "envoix::timeline",
+                        layer = "record",
+                        event = "commit_retry",
+                        attempt = self.commit_failures,
+                        batch = self.apply_seq,
+                    );
                 } else {
                     tracing::error!(%error, "record store unwritable; failing the session");
+                    tracing::info!(
+                        target: "envoix::timeline",
+                        layer = "record",
+                        event = "commit_failed",
+                        batch = self.apply_seq,
+                    );
                     self.storage_failed().await;
                 }
             }
@@ -802,6 +1061,9 @@ impl Actor {
     fn launch_attempt(&mut self, resume: bool) {
         let mut options = self.context.params.options.clone();
         options.resume = resume;
+        // Carry the card id onto the transfer span so engine timeline events
+        // (protocol.complete_ack) route by session_id (diagnostics v2, P4).
+        options.session_id = self.record.as_ref().map(|(_, id)| *id);
         let request = TransferRequest {
             direction: self.context.params.direction,
             path: self.context.params.path.clone(),
@@ -971,6 +1233,7 @@ mod tests {
                 current: None,
                 pending: None,
                 seq: 0,
+                apply_seq: 0,
                 confirm_deadline: None,
                 polls: Vec::new(),
                 poll_key: None,
@@ -1085,6 +1348,96 @@ mod tests {
             "the failure names the store, not the transfer"
         );
         let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn start_staging_waits_in_preparing_and_persists_before_any_attempt() {
+        let dir = std::env::temp_dir().join(format!("envoix-staging-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let store = RecordStore::new(&dir);
+        let (_session, mut notices) = TransferSession::start_staging(
+            failing_context(TransferDirection::Send),
+            Some((store.clone(), 8)),
+            None,
+        )
+        .unwrap();
+
+        // The FIRST snapshot is Preparing - no attempt was launched (the
+        // failing context would otherwise drive it straight to Failed).
+        let snapshot = wait_for_state(&mut notices, State::Preparing).await;
+        assert_eq!(snapshot.session.state, State::Preparing);
+        // And the record committed as Preparing BEFORE the copy would start.
+        let persisted = store.load(8).await.expect("record persisted");
+        assert_eq!(persisted.session.state, State::Preparing);
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn stage_progress_moves_the_bar_but_is_not_persisted() {
+        let dir = std::env::temp_dir().join(format!("envoix-stageprog-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        let store = RecordStore::new(&dir);
+        let (session, mut notices) = TransferSession::start_staging(
+            failing_context(TransferDirection::Send),
+            Some((store.clone(), 12)),
+            None,
+        )
+        .unwrap();
+        wait_for_state(&mut notices, State::Preparing).await;
+
+        session.stage_progress(1, 200);
+        // The snapshot shows the staging bar move...
+        let snapshot = loop {
+            match notices.recv().await.expect("stream open") {
+                SessionNotice::Snapshot(s) if s.session.bytes == 200 => break s,
+                _ => continue,
+            }
+        };
+        assert_eq!(snapshot.session.bytes, 200);
+        // ...but the record is NOT rewritten for progress (would be churn).
+        let persisted = store.load(12).await.expect("record exists");
+        assert_eq!(
+            persisted.session.bytes, 0,
+            "staging progress is snapshot-only"
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn stage_complete_leaves_preparing_and_launches() {
+        let (session, mut notices) =
+            TransferSession::start_staging(failing_context(TransferDirection::Send), None, None)
+                .unwrap();
+        wait_for_state(&mut notices, State::Preparing).await;
+        session.stage_complete(1);
+        // The attempt launches (and fails, via the failing context) - the
+        // point is it LEFT Preparing rather than staying stuck.
+        wait_for_state(&mut notices, State::Failed).await;
+    }
+
+    #[tokio::test]
+    async fn stage_failed_fails_the_preparing_transfer() {
+        let (session, mut notices) =
+            TransferSession::start_staging(failing_context(TransferDirection::Send), None, None)
+                .unwrap();
+        wait_for_state(&mut notices, State::Preparing).await;
+        session.stage_failed(1, "source could not be read".into());
+        let snapshot = wait_for_state(&mut notices, State::Failed).await;
+        assert_eq!(
+            snapshot.session.reason.as_deref(),
+            Some("source could not be read")
+        );
+    }
+
+    #[tokio::test]
+    async fn restored_preparing_stays_preparing_for_the_platform() {
+        let mut session = Session::new(TransferDirection::Send);
+        session.state = State::Preparing;
+        let (_handle, mut notices) =
+            TransferSession::restore(record(TransferDirection::Send, session), None).unwrap();
+        // Not coerced to Paused(Lost): the platform decides re-stage vs fail.
+        let snapshot = wait_for_state(&mut notices, State::Preparing).await;
+        assert_eq!(snapshot.session.state, State::Preparing);
     }
 
     #[tokio::test]

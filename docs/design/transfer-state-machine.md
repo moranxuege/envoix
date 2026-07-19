@@ -333,6 +333,133 @@ Field bugs Q2/Q3 traced to two root causes, fixed structurally:
   the Failed state vanished on restart); it queues the input and the apply
   loop drains it through the one reduce→effects→persist→snapshot path.
 
+## Addendum (2026-07-11, designed with the user): `Preparing` — durable pre-attempt staging
+
+Problem: a send from a `content://` source stages into `cacheDir/send/<id>/`
+BEFORE the Rust record exists, so process death mid-copy loses the transfer
+intent entirely (the orphan bytes are GC'd, the card is gone). The record can
+only protect what it precedes — write-ahead applies to the first byte of side
+effect, not just to attempts.
+
+Rejected shapes:
+- **Kotlin-side pending store** — a second durable authority; the dual-store
+  disease this document exists to prevent.
+- **Record in `Waiting` with no attempt** — overloads attempt vocabulary.
+  `Waiting` means an endpoint is bound and a peer may arrive, and it restores
+  as `Paused(Lost)`. A staging session has no attempt, no peer, and must
+  restore by RE-STAGING. Different phase, different state.
+
+### The state
+
+`Preparing` — send-only, entered only when the session is created with a
+platform source that needs staging. The CLI and all receives never see it.
+
+Flow (each step commits before the next acts):
+1. Kotlin picks the deterministic staging path `cacheDir/send/<id>/<safe_name>`
+   and takes the persistable READ grant on the source URI.
+2. `createStagingSession` writes the record FIRST via `start_staging`
+   (`state = Preparing`, `attempt = 1`, `params.path = <staging path>`, extras
+   carrying `source_uri` and `source_recoverable` — whether the grant
+   succeeded). No side effect precedes the record.
+3. The copy is SNAPSHOT-TRIGGERED, not launched inline: Kotlin waits for the
+   first `preparing` snapshot — which is proof the record committed — then runs
+   the copy once (`launchStaging`, guarded by a per-id set). Implementation
+   note (deviates from an earlier "snapshot-derived renderer" phrasing): the
+   source URI rides the `Spec` (not a separate id→URI map), so fresh start and
+   restore share the trigger without extra hidden state. Launching the copy
+   inline after `createStagingSession` was rejected — the record commits
+   asynchronously in the driver's run loop, so an inline copy could begin in
+   the ~ms before the commit, reopening the very "intent lost mid-copy" hole
+   Preparing closes.
+4. Staging progress is Kotlin-owned: `launchStaging` updates the card's bytes
+   as it copies, and `onSnapshot` preserves the card's bytes while `Preparing`
+   (the machine has no transfer bytes yet). The machine owns staging STATE
+   only; extras carry only what the core cannot interpret.
+5. `Input::StageComplete` → `Connecting` + `Effect::StartAttempt { resume:
+   false }` (the deferred attempt 1). `Input::StageFailed(reason)` → `Failed`
+   with the message, persisted. On restore, a recoverable source re-stages
+   through the same path; a non-recoverable one fails with "source needs
+   re-picking".
+
+### Legality rows
+
+| State | Input | Result |
+| --- | --- | --- |
+| Preparing | StageComplete | Connecting + StartAttempt |
+| Preparing | StageFailed | Failed(reason) |
+| Preparing | Cancel | Cancelled — NO wire effect (no peer exists; the one purely-local cancel) |
+| Preparing | Pause | no-op (nothing pausable; kill+restore re-stages for free) |
+| Preparing | attempt events | none can arrive (attempt = 0) — dropped structurally |
+
+### Restore rule
+
+Restored `Preparing` is NOT coerced to `Paused(Lost)` (that is attempt
+vocabulary): with `source_recoverable` it stays `Preparing` and the renderer
+re-stages; without it, it becomes `Failed("source needs re-picking")`
+IMMEDIATELY at restore — never a silent retry of a URI we provably cannot
+reopen (same principle as the SAF save-tree fix: never persist a capability
+you do not hold).
+
+Remove targets the record id first, as everywhere; the staging job dies with
+the per-card scope and the staging dir is deleted by id.
+
+## Addendum (2026-07-11, three-way review): publish journal — reserve, copy, commit
+
+Publish (staging → MediaStore/SAF) is the last un-journaled store seam. It is
+a PLATFORM fact, not machine state — the reducer does not care where the
+bytes become user-visible, and `Completed` is already true — so the journal
+lives in `platform_extras` (contrast `Preparing`: staging gates the attempt
+launch, so staging is machine state; the line is "does the reducer care").
+
+Crash windows without a journal: SAF mid-copy leaves a truncated VISIBLE file
+in the user's folder; commit-to-delete gap re-publishes a duplicate; delete-
+to-extras gap loses savedUri.
+
+Design (reserve-then-commit; names are NOT identity — the journal records the
+reserved target's URI, never just a name, because a same-named file created
+by the user or another app must never be adopted):
+
+```
+platform_extras.publish_intent = { kind: mediastore|saf, name, target_uri }
+platform_extras.published_uri  = "content://..."
+```
+
+1. **Reserve**: choose a unique name; MediaStore: insert the IS_PENDING=1 row;
+   SAF: create the document. Persist `publish_intent` with the reserved URI
+   BEFORE the first copied byte.
+2. **Copy** into the reserved target.
+3. **Commit**: MediaStore clears IS_PENDING (SAF: copy completion is the
+   commit). Persist `published_uri`.
+4. **Delete staging last** (`staging_deleted` is not journaled — the
+   filesystem answers that itself; never journal what a store can report).
+
+Recovery (an idempotent renderer on the completed snapshot, fresh and
+restored alike):
+- `published_uri` present → verify it RESOLVES, adopt it, delete leftover
+  staging. Unresolvable (user deleted the file) → treat as no result and
+  fall through — never delete staging against a dangling URI (staging may be
+  the last copy of the received bytes).
+- `publish_intent` only → delete/inspect the reserved candidate BY ITS URI
+  (the truncated half-copy), then retry from Reserve. If the candidate
+  cannot be deleted, log and reserve under a NEW unique name — never
+  blind-recreate over it (recovery must not loop or duplicate).
+- Neither → fresh publish from Reserve.
+
+Implementation note: `MediaStoreSaver` splits into reserve/commit so the
+journal writes land between the steps. Rejected: a full outbox (overweight
+for one side-effect kind); name-only intent journal (adopt-by-name can adopt
+a foreign same-named file and then delete staging — data loss, not just
+duplication).
+
+Implementation deviation (2026-07-12, flagged): the journal is a SIDECAR file
+`.envoix-publish.<name>.json` beside the staged file, not `platform_extras`.
+Both are platform facts the reducer never sees, but the journal governs
+staging FILES, so it lives with them — like the existing `.envoix-receipt`
+sidecar (consistency), and self-contained: recovery re-sweeps the staging dir
+and finds the journal there, with no DTO exposure / card field / restore-order
+plumbing. `platform_extras` remains the right home for card identity facts
+(QR, saved URI, Preparing's `source_uri`); a filesystem-operation journal is
+not one.
 ## Addendum (2026-07-12, three-way review): Phase 0 — the durable commit boundary
 
 One invariant, surfacing at four boundaries (none of which gets a generic

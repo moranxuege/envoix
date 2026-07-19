@@ -11,6 +11,7 @@ readonly DEVICE_INPUT="/data/user/0/$PACKAGE/cache/mdns-test-input"
 readonly DEVICE_OUTPUT_DIR="/sdcard/Download/Envoix"
 readonly TRANSFER_RATE_KBITS=4194 # Approximately 512 KiB/s.
 readonly TRANSFER_QUEUE_BYTES=33554432 # 32 MiB.
+readonly DATA_STREAM_WINDOW=1MB # Minimum accepted window; keeps sender progress near delivery.
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/Android/Sdk}}"
@@ -35,6 +36,8 @@ mDNS remain available. Each received file is checked against the source SHA-256.
 
 Both AVDs must use x86_64 Google APIs images, not Google Play images.
 The sender's shared Wi-Fi bandwidth is limited to approximately 512 KiB/s.
+Each transfer uses a 1 MiB QUIC data-stream window so sender progress reflects
+the shaped link after at most the initial window has been queued.
 Live diagnostics are written to android/build/mdns-test.
 The APK defaults to:
   $apk
@@ -67,8 +70,11 @@ check_avd() {
     config="$(avd_config "$1")"
 
     [ -f "$config" ] || die "missing config.ini for AVD '$1'"
-    grep -Fqx 'abi.type=x86_64' "$config" || die "AVD '$1' is not x86_64"
-    ! grep -Fqx 'PlayStore.enabled=true' "$config" ||
+    # Tolerate both `key=value` and `key = value` config.ini spacing (Android
+    # Studio / avdmanager differ), so a compatible AVD isn't falsely rejected.
+    grep -Eq '^abi\.type[[:space:]]*=[[:space:]]*x86_64[[:space:]]*$' "$config" ||
+        die "AVD '$1' is not x86_64"
+    ! grep -Eq '^PlayStore\.enabled[[:space:]]*=[[:space:]]*true[[:space:]]*$' "$config" ||
         die "AVD '$1' uses a Google Play image; use a rootable Google APIs AVD"
 }
 
@@ -185,7 +191,8 @@ start_transfer() {
 
     "$adb" -s "$serial" shell am start-foreground-service \
         -n "$SERVICE" -a "$ACTION_START" \
-        --es direction "$direction" --es room "$room" --es path "$path" >/dev/null
+        --es direction "$direction" --es room "$room" --es path "$path" \
+        --es data_stream_window "$DATA_STREAM_WINDOW" >/dev/null
 }
 
 device_hashes() {

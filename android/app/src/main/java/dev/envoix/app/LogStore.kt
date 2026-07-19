@@ -157,4 +157,12 @@ object LogSink : LogCallback {
         val id = TransferRepository.appendCoreLog(room, compact) ?: return
         TransferLogs.append(id, compact)
     }
+
+    /** A structured timeline line, routed directly by durable card id. */
+    override fun timeline(
+        sessionId: Long,
+        line: String,
+    ) {
+        TransferLogs.appendTimeline(sessionId, line)
+    }
 }

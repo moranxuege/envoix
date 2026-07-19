@@ -37,6 +37,11 @@ pub enum PauseOrigin {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "state", content = "origin")]
 pub enum State {
+    /// SEND only: staging a platform source (e.g. an Android `content://`)
+    /// into the transfer's path before any attempt. No peer is contacted; the
+    /// record exists so the staging survives process death (see the
+    /// `Preparing` design addendum).
+    Preparing,
     /// Advertising an invite / parked in the room; no peer yet.
     Waiting,
     /// Pairing and connecting.
@@ -62,14 +67,23 @@ pub enum State {
 impl State {
     /// States with a live attempt underneath.
     fn is_active(self) -> bool {
-        matches!(
-            self,
+        // Exhaustive on purpose (no `_`): adding a State is a compile error until
+        // it is classified here. NB the frontend's isActive / isTerminal are
+        // deliberately DIFFERENT predicates (Preparing pins the tray there); each
+        // is independently exhaustive so a new state must be classified in all.
+        match self {
             State::Waiting
-                | State::Connecting
-                | State::Verifying
-                | State::Transferring
-                | State::Confirming
-        )
+            | State::Connecting
+            | State::Verifying
+            | State::Transferring
+            | State::Confirming => true,
+            State::Preparing
+            | State::Paused(_)
+            | State::Unconfirmed
+            | State::Completed
+            | State::Failed
+            | State::Cancelled => false,
+        }
     }
 }
 
@@ -125,10 +139,30 @@ pub enum Input {
     Cancel,
     /// User intent: resume/retry — launches a new attempt.
     Resume,
+    /// Staging finished: the source is at the transfer's path, launch attempt 1.
+    /// Staging copied more bytes into the durable path (snapshot-only, never
+    /// persisted). Keeps the machine the single source of bytes.
+    StageProgress {
+        generation: u32,
+        bytes: u64,
+    },
+    StageComplete {
+        generation: u32,
+    },
+    /// Staging failed (e.g. the source could not be read); the reason is kept.
+    StageFailed {
+        generation: u32,
+        reason: String,
+    },
     /// A core event from attempt `attempt`.
-    Event { attempt: u32, event: AttemptEvent },
+    Event {
+        attempt: u32,
+        event: AttemptEvent,
+    },
     /// The driver's confirm timer for attempt `attempt` expired.
-    ConfirmTimeout { attempt: u32 },
+    ConfirmTimeout {
+        attempt: u32,
+    },
     /// The mailbox receipt was fetched and VERIFIED against the local file.
     ReceiptVerified,
     /// The mailbox slot opened with this transfer's key but named different
@@ -179,6 +213,13 @@ pub struct Facts {
     /// continues; recorded for diagnostics and the UI.
     #[serde(default)]
     pub receipt_mismatch: bool,
+    /// SEND: the local source is complete and ready to send — true for a direct
+    /// send from creation, set true when a `StageComplete` of the current
+    /// generation is accepted, never cleared. A retry consults THIS (not
+    /// state/origin): `false` re-stages (back to `Preparing`), `true` launches
+    /// the network attempt. Monotone false→true.
+    #[serde(default)]
+    pub source_ready: bool,
 }
 
 /// One transfer session (one card): the machine state plus the observable
@@ -208,6 +249,65 @@ pub struct Session {
     pub facts: Facts,
 }
 
+impl AttemptEvent {
+    /// The variant name, for the diagnostic timeline (docs/design/diagnostics.md).
+    pub fn kind(&self) -> &'static str {
+        match self {
+            AttemptEvent::Advertised => "Advertised",
+            AttemptEvent::Pairing => "Pairing",
+            AttemptEvent::Connecting => "Connecting",
+            AttemptEvent::Connected(_) => "Connected",
+            AttemptEvent::PathChanged(_) => "PathChanged",
+            AttemptEvent::Started { .. } => "Started",
+            AttemptEvent::Progress { .. } => "Progress",
+            AttemptEvent::Verifying { .. } => "Verifying",
+            AttemptEvent::Verified => "Verified",
+            AttemptEvent::Confirming { .. } => "Confirming",
+            AttemptEvent::Completed { .. } => "Completed",
+            AttemptEvent::Failed { .. } => "Failed",
+            AttemptEvent::RunEnded { .. } => "RunEnded",
+        }
+    }
+}
+
+impl Input {
+    /// A short label for the timeline's `machine.input` event. Core events fold
+    /// to their [`AttemptEvent`] name so the input reads as the fact it carries.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Input::Pause => "Pause",
+            Input::Cancel => "Cancel",
+            Input::Resume => "Resume",
+            Input::StageProgress { .. } => "StageProgress",
+            Input::StageComplete { .. } => "StageComplete",
+            Input::StageFailed { .. } => "StageFailed",
+            Input::Event { event, .. } => event.kind(),
+            Input::ConfirmTimeout { .. } => "ConfirmTimeout",
+            Input::ReceiptVerified => "ReceiptVerified",
+            Input::ReceiptMismatch => "ReceiptMismatch",
+            Input::StorageFailed => "StorageFailed",
+            Input::ReceiptPosted => "ReceiptPosted",
+        }
+    }
+}
+
+impl Effect {
+    /// The variant name, for the timeline's `effect.dispatched` event.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Effect::StartAttempt { .. } => "StartAttempt",
+            Effect::PauseToken => "PauseToken",
+            Effect::CancelToken => "CancelToken",
+            Effect::StartConfirmTimer => "StartConfirmTimer",
+            Effect::StopConfirmTimer => "StopConfirmTimer",
+            Effect::StartMailboxPoll => "StartMailboxPoll",
+            Effect::StopMailboxPoll => "StopMailboxPoll",
+            Effect::PostReceipt => "PostReceipt",
+            Effect::DiscardPartial => "DiscardPartial",
+        }
+    }
+}
+
 impl Session {
     /// A new session; the driver launches attempt 1 at construction.
     pub fn new(direction: TransferDirection) -> Self {
@@ -224,7 +324,13 @@ impl Session {
             reason: None,
             reason_code: None,
             sent_hash: None,
-            facts: Facts::default(),
+            // A session born in Connecting has its source in hand (a direct send,
+            // or a receive with no send-source). `start_staging` overrides this
+            // to false before any byte is copied.
+            facts: Facts {
+                source_ready: true,
+                ..Facts::default()
+            },
         }
     }
 
@@ -254,6 +360,36 @@ impl Session {
                 self.facts.proof_delivered = true;
                 Vec::new()
             }
+            Input::StageProgress { generation, bytes }
+                if generation == self.attempt && self.state == State::Preparing =>
+            {
+                self.bytes = bytes;
+                Vec::new()
+            }
+            Input::StageProgress { .. } => Vec::new(), // stale generation, or not Preparing
+            Input::StageComplete { generation }
+                if generation == self.attempt && self.state == State::Preparing =>
+            {
+                // Staging produced the source; mark it ready and launch the
+                // attempt. `attempt` stays as-is — THIS is the attempt deferred
+                // past staging — and it is fresh. Staging bytes are cleared: the
+                // transfer owns the bar from here.
+                self.state = State::Connecting;
+                self.bytes = 0;
+                self.bytes_resumed = 0;
+                self.facts.source_ready = true;
+                vec![Effect::StartAttempt { resume: false }]
+            }
+            Input::StageComplete { .. } => Vec::new(), // stale generation, or not Preparing
+            Input::StageFailed { generation, reason }
+                if generation == self.attempt && self.state == State::Preparing =>
+            {
+                self.state = State::Failed;
+                self.reason = Some(reason);
+                self.reason_code = Some(FailureCode::Other);
+                Vec::new()
+            }
+            Input::StageFailed { .. } => Vec::new(), // stale generation, or not Preparing
             Input::StorageFailed
                 if !matches!(
                     self.state,
@@ -315,8 +451,9 @@ impl Session {
                 effects.push(Effect::CancelToken);
                 effects
             }
-            // A resting-but-unfinished card can still be abandoned.
-            State::Paused(_) | State::Unconfirmed => {
+            // A resting-but-unfinished card can still be abandoned. Preparing
+            // has no attempt/peer, so no CancelToken - just abandon.
+            State::Preparing | State::Paused(_) | State::Unconfirmed => {
                 let effects = self.exit_effects();
                 self.state = State::Cancelled;
                 effects
@@ -342,12 +479,26 @@ impl Session {
             // - so no state exists that can lose the completion fact.
             _ => return Vec::new(),
         };
-        let mut effects = self.exit_effects();
-        self.state = State::Connecting;
+        // A new generation for the retry, ALWAYS — including a retry back into
+        // Preparing — so a stale staging result from the previous generation is
+        // rejected by the reducer.
         self.attempt += 1;
         self.reason = None;
         self.reason_code = None;
-        effects.push(Effect::StartAttempt { resume });
+        let mut effects = self.exit_effects();
+        if self.facts.source_ready {
+            // The local source is complete: go straight to the wire.
+            self.state = State::Connecting;
+            effects.push(Effect::StartAttempt { resume });
+        } else {
+            // A staged send whose source is not yet ready (cancelled or failed
+            // before StageComplete): re-stage under the new generation. No
+            // StartAttempt until StageComplete{new}; the platform re-stages on
+            // observing Preparing.
+            self.state = State::Preparing;
+            self.bytes = 0;
+            self.bytes_resumed = 0;
+        }
         effects
     }
 
@@ -589,6 +740,167 @@ mod tests {
             State::Completed,
             "terminal states are not rewritten"
         );
+    }
+
+    fn preparing(direction: TransferDirection) -> Session {
+        let mut s = Session::new(direction);
+        s.state = State::Preparing;
+        s.facts.source_ready = false; // mirrors driver `start_staging`
+        s
+    }
+
+    #[test]
+    fn stage_complete_launches_the_first_attempt_fresh() {
+        let mut s = preparing(Send);
+        // Staging progress is owned by the machine (single source of truth).
+        s.reduce(Input::StageProgress {
+            generation: 1,
+            bytes: 200,
+        });
+        assert_eq!(s.bytes, 200);
+        let effects = s.reduce(Input::StageComplete { generation: 1 });
+        assert!(s.facts.source_ready, "StageComplete marks the source ready");
+        assert_eq!(s.state, State::Connecting);
+        assert_eq!(
+            s.attempt, 1,
+            "still the first attempt, deferred past staging"
+        );
+        assert_eq!(
+            s.bytes, 0,
+            "staging bytes cleared; the transfer owns the bar"
+        );
+        assert_eq!(effects, vec![Effect::StartAttempt { resume: false }]);
+    }
+
+    #[test]
+    fn stage_progress_only_moves_the_bar_in_preparing() {
+        let mut s = preparing(Send);
+        s.reduce(Input::StageProgress {
+            generation: 1,
+            bytes: 100,
+        });
+        assert_eq!(s.bytes, 100);
+        let mut t = transferring(Send);
+        t.reduce(ev(1, E::Progress { bytes: 50 }));
+        t.reduce(Input::StageProgress {
+            generation: 1,
+            bytes: 999,
+        });
+        assert_eq!(t.bytes, 50, "stage progress is ignored outside Preparing");
+    }
+
+    #[test]
+    fn stage_failed_fails_the_transfer_with_its_reason() {
+        let mut s = preparing(Send);
+        let effects = s.reduce(Input::StageFailed {
+            generation: 1,
+            reason: "source vanished".into(),
+        });
+        assert_eq!(s.state, State::Failed);
+        assert_eq!(s.reason.as_deref(), Some("source vanished"));
+        assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn cancel_during_preparing_abandons_without_a_wire_effect() {
+        let mut s = preparing(Send);
+        let effects = s.reduce(Input::Cancel);
+        assert_eq!(s.state, State::Cancelled);
+        assert!(
+            !effects.contains(&Effect::CancelToken),
+            "no attempt/peer exists, so nothing to signal"
+        );
+    }
+
+    #[test]
+    fn pause_during_preparing_is_a_noop() {
+        let mut s = preparing(Send);
+        assert!(s.reduce(Input::Pause).is_empty());
+        assert_eq!(s.state, State::Preparing, "nothing to pause");
+    }
+
+    #[test]
+    fn stage_inputs_off_preparing_are_dropped() {
+        let mut s = transferring(Send);
+        assert!(s.reduce(Input::StageComplete { generation: 1 }).is_empty());
+        assert_eq!(s.state, State::Transferring, "no legal edge");
+    }
+
+    #[test]
+    fn stale_generation_staging_inputs_are_rejected_after_retry() {
+        // A staged send cancelled during Preparing, then retried, is a NEW
+        // generation; the old worker's callbacks must not touch it.
+        let mut s = preparing(Send); // attempt 1, source_ready = false
+        s.reduce(Input::Cancel); // -> Cancelled
+        let effects = s.reduce(Input::Resume); // source not ready -> re-stage
+        assert_eq!(s.state, State::Preparing);
+        assert_eq!(s.attempt, 2, "retry bumped the generation");
+        assert!(
+            effects.is_empty(),
+            "no StartAttempt until the source is ready"
+        );
+
+        // The dead generation's callbacks are dropped structurally.
+        assert!(s.reduce(Input::StageComplete { generation: 1 }).is_empty());
+        assert_eq!(s.state, State::Preparing, "stale StageComplete ignored");
+        assert!(
+            s.reduce(Input::StageFailed {
+                generation: 1,
+                reason: "old".into(),
+            })
+            .is_empty()
+        );
+        assert_eq!(
+            s.state,
+            State::Preparing,
+            "stale StageFailed cannot fail gen 2"
+        );
+
+        // The current generation's StageComplete DOES launch the attempt.
+        let effects = s.reduce(Input::StageComplete { generation: 2 });
+        assert_eq!(s.state, State::Connecting);
+        assert!(s.facts.source_ready);
+        assert_eq!(effects, vec![Effect::StartAttempt { resume: false }]);
+    }
+
+    #[test]
+    fn resume_from_failed_staging_re_stages_not_the_wire() {
+        let mut s = preparing(Send); // source_ready = false
+        s.reduce(Input::StageFailed {
+            generation: 1,
+            reason: "unreadable".into(),
+        });
+        assert_eq!(s.state, State::Failed);
+        let effects = s.reduce(Input::Resume);
+        assert_eq!(
+            s.state,
+            State::Preparing,
+            "not ready -> re-stage, not the wire"
+        );
+        assert_eq!(s.attempt, 2);
+        assert!(
+            effects.is_empty(),
+            "no StartAttempt before the source is ready"
+        );
+    }
+
+    #[test]
+    fn resume_after_completed_staging_goes_to_the_wire() {
+        let mut s = preparing(Send);
+        s.reduce(Input::StageComplete { generation: 1 }); // -> Connecting, source_ready = true
+        assert!(s.facts.source_ready);
+        s.reduce(Input::Cancel); // -> Cancelled; a complete source is preserved
+        assert!(
+            s.facts.source_ready,
+            "an already-complete staged source is not discarded on cancel"
+        );
+        let effects = s.reduce(Input::Resume);
+        assert_eq!(
+            s.state,
+            State::Connecting,
+            "ready source -> straight to the wire, no re-copy"
+        );
+        assert_eq!(effects, vec![Effect::StartAttempt { resume: false }]);
     }
 
     #[test]
@@ -1030,5 +1342,54 @@ mod serde_tests {
         // wire-adjacent TransferDirection); the app reads direction from its own
         // Spec, not the snapshot.
         assert_eq!(v["direction"], "Send");
+    }
+
+    /// Pins every `State` to the exact wire string the Android `Status` enum
+    /// maps (`Status.fromWire`, `Transfer.kt`). A rename here breaks this test
+    /// instead of silently freezing a card on the unmapped string. Keep in sync
+    /// with the Kotlin `every_wire_string_maps_to_a_status` test.
+    #[test]
+    fn every_state_serializes_to_its_wire_string() {
+        let cases: &[(State, &str)] = &[
+            (State::Preparing, "preparing"),
+            (State::Waiting, "waiting"),
+            (State::Connecting, "connecting"),
+            (State::Verifying, "verifying"),
+            (State::Transferring, "transferring"),
+            (State::Confirming, "confirming"),
+            (State::Paused(PauseOrigin::Local), "paused"),
+            (State::Unconfirmed, "unconfirmed"),
+            (State::Completed, "completed"),
+            (State::Failed, "failed"),
+            (State::Cancelled, "cancelled"),
+        ];
+        for (state, expected) in cases {
+            let v = serde_json::to_value(state).unwrap();
+            assert_eq!(v["state"].as_str(), Some(*expected), "{state:?}");
+        }
+    }
+
+    #[test]
+    fn kind_labels_name_variants_and_fold_events() {
+        assert_eq!(Input::Cancel.kind(), "Cancel");
+        assert_eq!(
+            Input::StageComplete { generation: 1 }.kind(),
+            "StageComplete"
+        );
+        assert_eq!(Input::ReceiptPosted.kind(), "ReceiptPosted");
+        // a core event folds to its AttemptEvent name — the input reads as the
+        // fact it carries, not the generic "Event".
+        let verified = Input::Event {
+            attempt: 1,
+            event: AttemptEvent::Verified,
+        };
+        assert_eq!(verified.kind(), "Verified");
+        let progress = Input::Event {
+            attempt: 1,
+            event: AttemptEvent::Progress { bytes: 0 },
+        };
+        assert_eq!(progress.kind(), "Progress");
+        assert_eq!(Effect::PostReceipt.kind(), "PostReceipt");
+        assert_eq!(Effect::StartAttempt { resume: true }.kind(), "StartAttempt");
     }
 }

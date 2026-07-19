@@ -11,6 +11,16 @@ interface LogCallback {
         room: String?,
         line: String,
     )
+
+    /**
+     * A structured authority-event line for the transfer timeline (v2),
+     * pre-built by the core and routed by durable [sessionId] (the card id) —
+     * NOT by room. The writer stamps `source_seq`; the core does not.
+     */
+    fun timeline(
+        sessionId: Long,
+        line: String,
+    )
 }
 
 /** JNI bridge to the in-process Envoix core (libenvoix_jni.so). */
@@ -32,8 +42,10 @@ object Native {
     /** Set the durable transfer-record directory (once, at app start). */
     external fun initRecords(dir: String)
 
-    /** All persisted transfer records, as a JSON array. */
-    external fun listRecords(): String
+    /** The narrow restore summary of every persisted record (typed by the
+     *  core): a flat JSON array of {id, direction, code, path, use_room,
+     *  use_mdns, qr?, saved_uri?}. The frontend never parses raw record JSON. */
+    external fun listRestoreContexts(): String
 
     /** Rehydrate a persisted session (no attempt launched); notices flow to
      *  [callback] like [createSession]. */
@@ -66,12 +78,45 @@ object Native {
         blobB64: String,
     )
 
+    /** Create a SEND session that stages its content:// source first: the
+     *  session starts in Preparing and the record is committed before Kotlin
+     *  copies a byte. Notices flow to [callback] like [createSession]. */
+    external fun createStagingSession(
+        id: Long,
+        paramsJson: String,
+        callback: EventCallback,
+    )
+
+    /** A Preparing send: staging copied [bytes] so far — moves the bar.
+     *  [generation] is the `attempt` the staging worker was authorized by; the
+     *  reducer drops a stale worker's callback. */
+    external fun stageProgress(
+        id: Long,
+        generation: Int,
+        bytes: Long,
+    )
+
+    /** A Preparing send: staging finished — launch the first attempt. */
+    external fun stageComplete(
+        id: Long,
+        generation: Int,
+    )
+
+    /** A Preparing send: staging failed — fail the transfer with [reason]. */
+    external fun stageFailed(
+        id: Long,
+        generation: Int,
+        reason: String,
+    )
+
     /** Replace the card context (QR payload, saved URI) persisted with the
-     *  transfer's record; opaque to the core, returned by listRecords. */
+     *  transfer's record; opaque to the core, surfaced via listRestoreContexts.
+     *  Returns "" on success, or an error message if [extrasJson] failed the
+     *  boundary validation (an unknown/mistyped key). */
     external fun setSessionExtras(
         id: Long,
         extrasJson: String,
-    )
+    ): String
 
     /** Tear a session down; with [discard], delete partial/resume/receipt (D2). */
     external fun destroySession(

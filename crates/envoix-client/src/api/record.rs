@@ -17,8 +17,34 @@ use super::driver::{SessionContext, SessionParams};
 use super::machine::Session;
 
 /// Current record schema version, written on every save. Old records
-/// deserialize as 0 (fields were only ever added with serde defaults).
-pub const RECORD_VERSION: u32 = 1;
+/// deserialize as 0 (fields were only ever added with serde defaults); v2 adds
+/// `session.facts.source_ready`, which needs a state-derived migration rather
+/// than a bare default (see [`migrate_source_ready`]).
+pub const RECORD_VERSION: u32 = 2;
+
+/// Pre-v2 records lack `source_ready`; a bare serde default (`false`) would
+/// wrongly re-stage every past-staging record. Derive it from the persisted
+/// state instead: only a staged send rests in `Preparing` (source not yet
+/// complete); anything past staging — and every receive — has its source in
+/// hand. A `Cancelled` send is ambiguous (mid-staging vs after): classify by the
+/// staging marker (a `source_uri` in the platform extras) — a one-time migration
+/// read only — so a mid-staging cancel re-stages while a direct send stays ready.
+fn migrate_source_ready(session: &mut Session, extras: &Option<serde_json::Value>) {
+    use super::machine::State;
+    session.facts.source_ready = match session.state {
+        State::Preparing => false,
+        State::Cancelled => !has_staging_source(extras),
+        _ => true,
+    };
+}
+
+fn has_staging_source(extras: &Option<serde_json::Value>) -> bool {
+    extras
+        .as_ref()
+        .and_then(|v| v.get("source_uri"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|s| !s.is_empty())
+}
 
 /// One persisted transfer session.
 #[derive(Clone, Debug, Serialize)]
@@ -70,14 +96,78 @@ impl<'de> Deserialize<'de> for TransferRecord {
                 return Err(de::Error::missing_field("context"));
             }
         };
+        let mut session = wire.session;
+        if wire.version < RECORD_VERSION {
+            migrate_source_ready(&mut session, &wire.platform_extras);
+        }
         Ok(Self {
             version: wire.version,
             id: wire.id,
             updated_ms: wire.updated_ms,
             context,
-            session: wire.session,
+            session,
             platform_extras: wire.platform_extras,
         })
+    }
+}
+
+/// The narrow, frontend-facing summary of a persisted record: everything a
+/// frontend needs to rehydrate a card and its platform effects, and nothing
+/// else. Built from the TYPED record, so the frontend never hand-parses record
+/// JSON (nor re-implements its schema migrations) - it reads flat fields.
+/// Platform-specific extras (e.g. Android's QR / saved URI) are added by the
+/// platform glue, which knows those keys; the core does not.
+#[derive(Clone, Debug, Serialize)]
+pub struct RestoreContext {
+    pub id: u64,
+    /// "send" | "receive".
+    pub direction: &'static str,
+    /// The room code, or the mDNS token; the frontend's card label.
+    pub code: String,
+    /// The transfer's output/staging path.
+    pub path: String,
+    pub use_room: bool,
+    pub use_mdns: bool,
+}
+
+impl TransferRecord {
+    /// The typed restore summary (see [`RestoreContext`]). Reads the already-
+    /// migrated typed record, so there is no legacy `context`/`params` fallback
+    /// to duplicate on the frontend.
+    pub fn restore_context(&self) -> RestoreContext {
+        use envoix_session::TransferDirection;
+        let params = &self.context.params;
+        let mut code = String::new();
+        let mut use_room = false;
+        let mut use_mdns = false;
+        for source in &params.sources {
+            match source {
+                super::PeerSource::Room { code: c, .. } => {
+                    use_room = true;
+                    code = c.clone();
+                }
+                super::PeerSource::Mdns { token } => {
+                    use_mdns = true;
+                    if let Some(token) = token
+                        && code.is_empty()
+                    {
+                        code = token.clone();
+                    }
+                }
+                _ => {}
+            }
+        }
+        RestoreContext {
+            id: self.id,
+            direction: match params.direction {
+                TransferDirection::Send => "send",
+                TransferDirection::Receive => "receive",
+            },
+            code,
+            path: params.path.to_string_lossy().into_owned(),
+            use_room,
+            use_mdns,
+        }
     }
 }
 
@@ -269,6 +359,70 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(store.load_all().await.len(), 1);
+    }
+
+    #[test]
+    fn restore_context_summarizes_the_typed_record() {
+        let mut r = record(5); // a Room receive by default
+        r.context.params.path = "/out/dir".into();
+        let ctx = r.restore_context();
+        assert_eq!(ctx.id, 5);
+        assert_eq!(ctx.direction, "receive");
+        assert_eq!(ctx.code, "123456-kelp-coral");
+        assert_eq!(ctx.path, "/out/dir");
+        assert!(ctx.use_room);
+        assert!(!ctx.use_mdns);
+    }
+
+    #[test]
+    fn source_ready_migrates_from_state_for_legacy_records() {
+        // A pre-v2 record lacks source_ready; the migration derives it from
+        // state (a bare serde default of false would wrongly re-stage every
+        // past-staging record). Serialize a legacy record with a deliberately
+        // WRONG source_ready and confirm the migration overrides it.
+        let migrated = |state: State, extras: Option<serde_json::Value>| -> bool {
+            let mut r = record(1);
+            r.version = 0; // legacy
+            r.session = Session::new(TransferDirection::Send);
+            r.session.state = state;
+            r.session.facts.source_ready = true; // wrong on purpose
+            r.platform_extras = extras;
+            let json = serde_json::to_string(&r).unwrap();
+            serde_json::from_str::<TransferRecord>(&json)
+                .unwrap()
+                .session
+                .facts
+                .source_ready
+        };
+        let staged = || Some(serde_json::json!({ "source_uri": "content://x" }));
+        assert!(!migrated(State::Preparing, None), "Preparing -> not ready");
+        assert!(migrated(State::Connecting, None), "past staging -> ready");
+        assert!(migrated(State::Completed, None), "completed -> ready");
+        assert!(
+            !migrated(State::Cancelled, staged()),
+            "cancelled staged -> re-stage",
+        );
+        assert!(
+            migrated(State::Cancelled, None),
+            "cancelled direct -> ready"
+        );
+    }
+
+    #[test]
+    fn restore_context_needs_no_frontend_migration_for_legacy_records() {
+        // A pre-context record (params at the top level) deserializes via the
+        // typed migration, so restore_context reads it with no fallback - the
+        // whole reason the frontend can drop its `context ?: params` dance.
+        let mut value = serde_json::to_value(record(9)).unwrap();
+        let object = value.as_object_mut().unwrap();
+        let context = object.remove("context").unwrap();
+        object.insert("params".into(), context["params"].clone());
+        let loaded: TransferRecord = serde_json::from_value(value).unwrap();
+
+        let ctx = loaded.restore_context();
+        assert_eq!(ctx.id, 9);
+        assert_eq!(ctx.code, "123456-kelp-coral");
+        assert!(ctx.use_room);
     }
 
     #[tokio::test]

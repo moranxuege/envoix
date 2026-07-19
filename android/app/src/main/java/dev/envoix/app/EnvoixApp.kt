@@ -17,7 +17,7 @@ class EnvoixApp : Application() {
         // starts a transfer before the service restores (id collision =
         // silent record overwrite).
         runCatching {
-            val records = org.json.JSONArray(Native.listRecords())
+            val records = org.json.JSONArray(Native.listRestoreContexts())
             var maxId = 0L
             for (i in 0 until records.length()) {
                 maxId = maxOf(maxId, records.optJSONObject(i)?.optLong("id", 0L) ?: 0L)

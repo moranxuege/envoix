@@ -141,3 +141,36 @@ Our code *is* wormhole's shape (`246810-cobalt-fox` = channel-number + words):
   history, direct/relay badge refinements.
 
 Each phase is a reviewable step; we build one at a time.
+
+## 11. Process lifecycle & recovery policy (decided 2026-07-11)
+
+Recovery is **user-open driven, by decision** — not an oversight of where
+`restoreAll()` happens to be called. Triggers are exactly: app open
+(`MainActivity.onCreate`) and explicit user actions (Resume/Reverify). There
+is no background daemon and no sticky service.
+
+Why this is the correct boundary for this product, per recovery case:
+
+- **Resuming killed transfers**: resume is two-sided — it re-pairs through
+  the broker, so it succeeds only if the peer is also alive and rejoining.
+  When the OS killed the app, the connection (and usually the peer's
+  attention) died with it; a background resume parks in an empty room and
+  burns an attempt against nobody. Transfers here are attended, phone↔phone:
+  the humans returning IS the recovery trigger.
+- **Sender-side receipt polling (Unconfirmed)**: the mailbox is DESIGNED for
+  arbitrary delay — the receiver posts once, durably; the sender verifies
+  whenever it next runs. Background polling only moves the checkmark to a
+  moment nobody is watching.
+- **Platform headwind**: Android 14+ caps `dataSync` foreground services
+  (~6h), throttles sticky restarts, and a persistent notification for a
+  rarely-useful daemon is negative product value.
+
+The ONE sanctioned future extension — not yet implemented: the receiver's
+undischarged confirmation duty (`Completed` receive with
+`proof_delivered = false`, i.e. the rdz was unreachable exactly at
+completion) holds the SENDER's UX hostage until this app happens to reopen.
+If background machinery is ever added, it is a single expedited WorkManager
+one-shot with a network constraint, enqueued when a receipt POST fails:
+idempotent (re-reads the record and re-posts), persisted by WorkManager
+across process death, no notification, no daemon. Nothing else runs in the
+background.

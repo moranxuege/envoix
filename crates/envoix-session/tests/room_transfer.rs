@@ -7,8 +7,8 @@ use std::time::Duration;
 use envoix_rendezvous::RoomRegistry;
 use envoix_rendezvous_iroh::{build_endpoint, endpoint_addr, serve_endpoint};
 use envoix_session::{
-    DEFAULT_CHUNK_SIZE, IdentityConfig, NoopEventSink, SessionConfig, TransferCancelToken,
-    receive_file_via_room, send_file_via_room,
+    DEFAULT_CHUNK_SIZE, DEFAULT_DATA_STREAM_WINDOW, IdentityConfig, NoopEventSink, SessionConfig,
+    TransferCancelToken, receive_file_via_room, send_file_via_room,
 };
 use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 use tempfile::tempdir;
@@ -33,6 +33,7 @@ fn config() -> SessionConfig {
         relay_only: false,
         direct_only: false,
         candidates: Default::default(),
+        data_stream_window: DEFAULT_DATA_STREAM_WINDOW,
     }
 }
 
@@ -156,6 +157,7 @@ async fn candidate_filter_scopes_the_advertised_descriptor() {
         listen,
         &IdentityConfig::Ephemeral,
         &CandidateFilter::default(),
+        DEFAULT_DATA_STREAM_WINDOW,
     )
     .await
     .unwrap();
@@ -189,6 +191,7 @@ async fn candidate_filter_that_drops_everything_gives_a_pointed_error() {
         listen,
         &IdentityConfig::Ephemeral,
         &CandidateFilter::default(),
+        DEFAULT_DATA_STREAM_WINDOW,
     )
     .await
     .unwrap();

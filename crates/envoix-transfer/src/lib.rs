@@ -28,6 +28,19 @@ pub const MIN_CHUNK_SIZE: usize = 16 * 1024;
 /// Maximum accepted transfer chunk size.
 pub const MAX_CHUNK_SIZE: usize = 16 * 1024 * 1024;
 
+// A max-size Chunk frame is MAX_CHUNK_SIZE of payload plus the frame header and
+// the chunk's index/offset metadata; the codec rejects any frame longer than
+// `envoix_protocol::MAX_FRAME_SIZE` (protocol/src/lib.rs). That crate sits below
+// this one and hardcodes the literal, so the invariant is unenforced there —
+// pin it here (where both consts are visible) so raising MAX_CHUNK_SIZE without
+// raising MAX_FRAME_SIZE is a COMPILE error instead of silently rejecting valid
+// max-size chunks at runtime. 1 KiB comfortably covers the per-frame overhead.
+const _: () = assert!(
+    envoix_protocol::MAX_FRAME_SIZE >= MAX_CHUNK_SIZE + 1024,
+    "MAX_FRAME_SIZE must exceed MAX_CHUNK_SIZE by the chunk-frame overhead; \
+     raising MAX_CHUNK_SIZE requires raising envoix_protocol::MAX_FRAME_SIZE too",
+);
+
 /// Validate a chunk size against the transfer engine's constraints: it must fall
 /// within [`MIN_CHUNK_SIZE`]..=[`MAX_CHUNK_SIZE`] and be a power of two.
 pub fn validate_chunk_size(chunk_size: usize) -> Result<(), CoreError> {
@@ -681,11 +694,26 @@ impl TransferEngine {
                     // best-effort from here: if the path died, suppressing
                     // Completed would also suppress the mailbox receipt post,
                     // which exists precisely for the lost-ack case.
-                    if let Err(error) = send_complete_ack(connection, &header.transfer_id).await {
-                        tracing::warn!(
-                            %error,
-                            "complete ack undeliverable; sender will learn via mailbox"
-                        );
+                    match send_complete_ack(connection, &header.transfer_id).await {
+                        Ok(()) => tracing::info!(
+                            target: "envoix::timeline",
+                            layer = "protocol",
+                            event = "complete_ack",
+                            outcome = "sent",
+                        ),
+                        Err(error) => {
+                            tracing::info!(
+                                target: "envoix::timeline",
+                                layer = "protocol",
+                                event = "complete_ack",
+                                outcome = "failed",
+                                cause = %error,
+                            );
+                            tracing::warn!(
+                                %error,
+                                "complete ack undeliverable; sender will learn via mailbox"
+                            );
+                        }
                     }
                     events.on_event(TransferEvent::Completed {
                         transfer_id: header.transfer_id.clone(),
@@ -1262,8 +1290,23 @@ async fn receive_existing_final(
     // Possession is already durable; the ack is best-effort (see the
     // receive loop: suppressing Completed here would suppress the mailbox
     // receipt post the lost-ack design depends on).
-    if let Err(error) = send_complete_ack(connection, &header.transfer_id).await {
-        tracing::warn!(%error, "complete ack undeliverable; sender will learn via mailbox");
+    match send_complete_ack(connection, &header.transfer_id).await {
+        Ok(()) => tracing::info!(
+            target: "envoix::timeline",
+            layer = "protocol",
+            event = "complete_ack",
+            outcome = "sent",
+        ),
+        Err(error) => {
+            tracing::info!(
+                target: "envoix::timeline",
+                layer = "protocol",
+                event = "complete_ack",
+                outcome = "failed",
+                cause = %error,
+            );
+            tracing::warn!(%error, "complete ack undeliverable; sender will learn via mailbox");
+        }
     }
 
     events.on_event(TransferEvent::Completed {
@@ -1326,8 +1369,23 @@ async fn receive_from_receipt(
         }
     }
 
-    if let Err(error) = send_complete_ack(connection, &header.transfer_id).await {
-        tracing::warn!(%error, "complete ack undeliverable; sender will learn via mailbox");
+    match send_complete_ack(connection, &header.transfer_id).await {
+        Ok(()) => tracing::info!(
+            target: "envoix::timeline",
+            layer = "protocol",
+            event = "complete_ack",
+            outcome = "sent",
+        ),
+        Err(error) => {
+            tracing::info!(
+                target: "envoix::timeline",
+                layer = "protocol",
+                event = "complete_ack",
+                outcome = "failed",
+                cause = %error,
+            );
+            tracing::warn!(%error, "complete ack undeliverable; sender will learn via mailbox");
+        }
     }
 
     events.on_event(TransferEvent::Completed {
