@@ -14,9 +14,6 @@ drafts remain canonical for subject-specific contracts; this document owns
 their order, dependency gates, acceptance evidence, workstream ownership, and
 decision log.
 
-The current paused diagnostic state is captured in
-[`../handoffs/2026-07-16-apple-room-diagnostics.md`](../handoffs/2026-07-16-apple-room-diagnostics.md).
-
 Detailed specifications are routed as follows:
 
 | Subject | Canonical detail |

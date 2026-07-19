@@ -16,6 +16,9 @@ node_modules/
 
 # cargo-swift generated Swift package (binary xcframework)
 /crates/envoix-ffi/EnvoixCore/
+# cargo-swift duplicates the reviewed root bindings into package-layout paths.
+/crates/envoix-ffi/generated/headers/
+/crates/envoix-ffi/generated/sources/
 
 # android
 android/local.properties
