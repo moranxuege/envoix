@@ -18,10 +18,36 @@ use super::driver::{SessionContext, SessionParams};
 use super::machine::Session;
 
 /// Current record schema version, written on every save. Old records
-/// deserialize as 0 (fields were only ever added with serde defaults).
-pub const RECORD_VERSION: u32 = 1;
+/// deserialize as 0 (fields were only ever added with serde defaults); v2 adds
+/// `session.facts.source_ready`, which needs a state-derived migration rather
+/// than a bare default (see [`migrate_source_ready`]).
+pub const RECORD_VERSION: u32 = 2;
 /// Platform-extra key carrying a frontend's original string card identifier.
 pub const EXTERNAL_RECORD_ID_KEY: &str = "external_record_id";
+
+/// Pre-v2 records lack `source_ready`; a bare serde default (`false`) would
+/// wrongly re-stage every past-staging record. Derive it from the persisted
+/// state instead: only a staged send rests in `Preparing` (source not yet
+/// complete); anything past staging — and every receive — has its source in
+/// hand. A `Cancelled` send is ambiguous (mid-staging vs after): classify by the
+/// staging marker (a `source_uri` in the platform extras) — a one-time migration
+/// read only — so a mid-staging cancel re-stages while a direct send stays ready.
+fn migrate_source_ready(session: &mut Session, extras: &Option<serde_json::Value>) {
+    use super::machine::State;
+    session.facts.source_ready = match session.state {
+        State::Preparing => false,
+        State::Cancelled => !has_staging_source(extras),
+        _ => true,
+    };
+}
+
+fn has_staging_source(extras: &Option<serde_json::Value>) -> bool {
+    extras
+        .as_ref()
+        .and_then(|v| v.get("source_uri"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|s| !s.is_empty())
+}
 
 /// One persisted transfer session.
 #[derive(Clone, Debug, Serialize)]
@@ -87,13 +113,17 @@ impl<'de> Deserialize<'de> for TransferRecord {
                     .or_insert_with(|| external_id.into());
             }
         }
+        let mut session = wire.session;
+        if wire.version < RECORD_VERSION {
+            migrate_source_ready(&mut session, &platform_extras);
+        }
         Ok(Self {
             version: wire.version,
             id,
             created_ms: wire.created_ms.unwrap_or(wire.updated_ms),
             updated_ms: wire.updated_ms,
             context,
-            session: wire.session,
+            session,
             platform_extras,
         })
     }
@@ -441,6 +471,40 @@ mod tests {
         assert_eq!(ctx.path, "/out/dir");
         assert!(ctx.use_room);
         assert!(!ctx.use_mdns);
+    }
+
+    #[test]
+    fn source_ready_migrates_from_state_for_legacy_records() {
+        // A pre-v2 record lacks source_ready; the migration derives it from
+        // state (a bare serde default of false would wrongly re-stage every
+        // past-staging record). Serialize a legacy record with a deliberately
+        // WRONG source_ready and confirm the migration overrides it.
+        let migrated = |state: State, extras: Option<serde_json::Value>| -> bool {
+            let mut r = record(1);
+            r.version = 0; // legacy
+            r.session = Session::new(TransferDirection::Send);
+            r.session.state = state;
+            r.session.facts.source_ready = true; // wrong on purpose
+            r.platform_extras = extras;
+            let json = serde_json::to_string(&r).unwrap();
+            serde_json::from_str::<TransferRecord>(&json)
+                .unwrap()
+                .session
+                .facts
+                .source_ready
+        };
+        let staged = || Some(serde_json::json!({ "source_uri": "content://x" }));
+        assert!(!migrated(State::Preparing, None), "Preparing -> not ready");
+        assert!(migrated(State::Connecting, None), "past staging -> ready");
+        assert!(migrated(State::Completed, None), "completed -> ready");
+        assert!(
+            !migrated(State::Cancelled, staged()),
+            "cancelled staged -> re-stage",
+        );
+        assert!(
+            migrated(State::Cancelled, None),
+            "cancelled direct -> ready"
+        );
     }
 
     #[test]

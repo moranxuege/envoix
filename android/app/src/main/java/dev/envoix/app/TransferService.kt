@@ -131,9 +131,33 @@ class TransferService : Service() {
      *  dropped - the fence is explicit, not an artifact of flow mechanics. */
     private val generations = HashMap<Long, Long>()
 
-    /** Ids whose staging copy has been launched, so the Preparing snapshot
-     *  triggers it exactly once. */
-    private val stagingStarted = HashSet<Long>()
+    /** The live staging worker per card. A committed `Preparing` snapshot of a
+     *  generation owns exactly one worker; a non-`Preparing` snapshot retires it.
+     *  Owner-checked so a retired worker never clobbers a newer one. */
+    private val stageWork = HashMap<Long, StageWork>()
+
+    /** One staging copy worker. Owns its open streams so a retire can CLOSE them
+     *  — which unblocks a stuck blocking read/write; cancelling the coroutine
+     *  alone cannot. `ensureActive()` in the loop is a secondary check, and the
+     *  reducer's generation stamp is the real correctness backstop. */
+    private class StageWork(
+        val generation: Int,
+    ) {
+        @Volatile var job: Job? = null
+
+        @Volatile var input: java.io.Closeable? = null
+
+        @Volatile var output: java.io.Closeable? = null
+
+        @Volatile var retired = false
+
+        fun retire() {
+            retired = true
+            runCatching { input?.close() }
+            runCatching { output?.close() }
+            job?.cancel()
+        }
+    }
 
     /** True when [notice] belongs to the card's current pump (claiming it if
      *  the card is unclaimed). */
@@ -405,7 +429,7 @@ class TransferService : Service() {
                 specs.remove(id)
                 lastSeq.remove(id)
                 generations.remove(id)
-                synchronized(stagingStarted) { stagingStarted.remove(id) }
+                retireStaging(id)
                 TransferRepository.remove(id)
                 stopIfIdle()
             }
@@ -553,63 +577,111 @@ class TransferService : Service() {
         OpLog.add("publication invalid id=$id outcome=$outcome", id)
     }
 
-    /** Copy a Preparing send's content:// source into its staging path, then
-     *  report to the core (stage_complete / stage_failed). Launched from the
-     *  Preparing snapshot, so the record is already durable. */
-    private fun launchStaging(
+    /** Ensure a staging worker of [generation] runs for [id], from a committed
+     *  Preparing snapshot. Idempotent for the same generation; a new generation
+     *  retires the old worker first. */
+    private fun ensureStaging(
         id: Long,
         spec: Spec,
+        generation: Int,
     ) {
-        transferScope(id).launch(Dispatchers.IO) {
-            val uri = spec.sourceUri?.let { Uri.parse(it) }
-            if (uri == null) {
-                // A restored Preparing whose source cannot be reopened.
-                TransferTimeline.event(id, "platform.stage", "failed", outcome = "no_source")
-                Native.stageFailed(id, "source needs re-picking")
-                return@launch
+        val work = StageWork(generation)
+        val toRetire =
+            synchronized(stageWork) {
+                val cur = stageWork[id]
+                if (cur != null && cur.generation == generation && !cur.retired) {
+                    return // already staging this generation
+                }
+                stageWork[id] = work
+                cur
             }
-            val out = File(spec.path)
-            out.parentFile?.mkdirs()
-            TransferTimeline.event(id, "platform.stage", "start", fields = mapOf("name" to out.name))
-            val result =
-                runCatching {
-                    contentResolver.openInputStream(uri)!!.use { input ->
-                        out.outputStream().use { o ->
-                            val buf = ByteArray(1 shl 20)
-                            var copied = 0L
-                            var last = 0L
-                            while (true) {
-                                val n = input.read(buf)
-                                if (n < 0) break
-                                o.write(buf, 0, n)
-                                copied += n
-                                val now = System.currentTimeMillis()
-                                if (now - last > 150) {
-                                    last = now
-                                    Native.stageProgress(id, copied)
-                                }
-                            }
+        toRetire?.retire()
+        work.job = transferScope(id).launch(Dispatchers.IO) { runStaging(id, spec, work) }
+    }
+
+    /** Retire [id]'s staging worker (a non-Preparing snapshot, or Remove): close
+     *  its streams and cancel it. The incomplete partial is dropped by the
+     *  worker's own finally. Owner-checked. */
+    private fun retireStaging(id: Long) {
+        synchronized(stageWork) { stageWork.remove(id) }?.retire()
+    }
+
+    /** The staging copy, generation-stamped. Stores its streams in [work] so a
+     *  retire can close them (unblocking a stuck read); a retire/failure drops
+     *  the incomplete partial and emits NO stage callback (the machine has
+     *  already left Preparing, and a stale one is dropped by the reducer anyway).
+     *  A complete copy is kept. */
+    private fun runStaging(
+        id: Long,
+        spec: Spec,
+        work: StageWork,
+    ) {
+        val gen = work.generation
+        val uri = spec.sourceUri?.let { Uri.parse(it) }
+        if (uri == null) {
+            // A restored Preparing whose source cannot be reopened.
+            TransferTimeline.event(id, "platform.stage", "failed", outcome = "no_source")
+            if (!work.retired) Native.stageFailed(id, gen, "source needs re-picking")
+            clearStageWork(id, work)
+            return
+        }
+        val out = File(spec.path)
+        out.parentFile?.mkdirs()
+        TransferTimeline.event(id, "platform.stage", "start", fields = mapOf("name" to out.name))
+        var completed = false
+        try {
+            contentResolver.openInputStream(uri)!!.also { work.input = it }.use { input ->
+                out.outputStream().also { work.output = it }.use { o ->
+                    val buf = ByteArray(1 shl 20)
+                    var copied = 0L
+                    var last = 0L
+                    while (true) {
+                        if (work.retired) return // secondary check; close() is the primary unblock
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        o.write(buf, 0, n)
+                        copied += n
+                        val now = System.currentTimeMillis()
+                        if (now - last > 150) {
+                            last = now
+                            Native.stageProgress(id, gen, copied)
                         }
                     }
                 }
-            if (result.isSuccess) {
-                TransferTimeline.event(id, "platform.stage", "complete")
-                Native.stageComplete(id)
-            } else {
-                out.delete()
+            }
+            completed = true
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            throw c // retired via cancel; propagate, no callback
+        } catch (e: Throwable) {
+            if (!work.retired) {
                 TransferTimeline.event(
                     id,
                     "platform.stage",
                     "failed",
                     outcome = "copy",
-                    // The exception TYPE, never .message — the message from
-                    // openInputStream(sourceUri) embeds the full content:// URI /
-                    // path, which would ship to the (public) log endpoint.
-                    fields = mapOf("cause" to (result.exceptionOrNull()?.javaClass?.simpleName ?: "unknown")),
+                    // The exception TYPE, never .message — an openInputStream
+                    // message embeds the full content:// URI, which would ship to
+                    // the (public) log endpoint.
+                    fields = mapOf("cause" to e.javaClass.simpleName),
                 )
-                Native.stageFailed(id, "couldn't read the picked file")
+                Native.stageFailed(id, gen, "couldn't read the picked file")
             }
+        } finally {
+            if (!completed) out.delete() // drop the incomplete partial (retire/failure)
+            clearStageWork(id, work)
         }
+        if (completed) {
+            TransferTimeline.event(id, "platform.stage", "complete")
+            Native.stageComplete(id, gen)
+        }
+    }
+
+    /** Owner-checked removal: only clear the map entry if it still holds [work]. */
+    private fun clearStageWork(
+        id: Long,
+        work: StageWork,
+    ) {
+        synchronized(stageWork) { if (stageWork[id] === work) stageWork.remove(id) }
     }
 
     private fun displayName(uri: Uri): String? =
@@ -727,11 +799,16 @@ class TransferService : Service() {
         // the same code path serves fresh starts, restores, and cards born
         // terminal - there is no launch-path special case to fall out of sync.
         renderMulticast(id, spec, status)
-        // The record is now committed (this snapshot proves it), so the copy
-        // never runs ahead of the durable intent. Guarded to fire once.
-        if (status == Status.Preparing && spec.dir() == Direction.Send) {
-            synchronized(stagingStarted) {
-                if (stagingStarted.add(id)) launchStaging(id, spec)
+        // Staging (SEND) is driven SOLELY by the committed snapshot: a Preparing
+        // snapshot of generation `attempt` is the sole authority for its worker
+        // (the record is committed, so the copy never runs ahead of the durable
+        // intent), and any non-Preparing snapshot retires it. A stale worker's
+        // callbacks are rejected by the reducer's generation check regardless.
+        if (spec.dir() == Direction.Send) {
+            if (status == Status.Preparing) {
+                ensureStaging(id, spec, s.optInt("attempt", 1))
+            } else {
+                retireStaging(id)
             }
         }
         when {
@@ -1013,8 +1090,15 @@ class TransferService : Service() {
             return
         }
         tl("reserve", fields = mapOf("uri" to TransferTimeline.redactUri(target.uri.toString())))
-        // Record the reservation BEFORE any byte is copied.
-        writePublishJournal(journal, target.uri.toString(), target.mediaStorePending, committed = null, publishedName = null)
+        // Record the reservation BEFORE any byte is copied, and GATE the copy on
+        // it: if we can't durably record the target, don't copy bytes into a
+        // user-visible destination we could never recover or clean up.
+        if (!writePublishJournal(journal, target.uri.toString(), target.mediaStorePending, committed = null, publishedName = null)) {
+            MediaStoreSaver.delete(this, target.uri)
+            tl("failed", outcome = "journal_reserve")
+            LogStore.append("app: could not record publish reservation for ${src.name}; not copying")
+            return
+        }
         val copy = MediaStoreSaver.copyInto(this, src, target)
         if (copy.isFailure) {
             MediaStoreSaver.delete(this, target.uri)
@@ -1095,7 +1179,17 @@ class TransferService : Service() {
         publishedName?.let { obj.put("published_name", it) }
         publishedSize?.let { obj.put("published_size", it) }
         publishedSha256?.let { obj.put("published_sha256", it) }
-        return runCatching { journal.writeText(obj.toString()) }.isSuccess
+        // Atomic: write a temp then rename over the journal, so recovery always
+        // reads a COMPLETE journal (the old one or the new one) — never a
+        // half-written, unparsable document it can neither act on nor clean.
+        return runCatching {
+            val tmp = File(journal.parentFile, "${journal.name}.tmp")
+            tmp.writeText(obj.toString())
+            if (!tmp.renameTo(journal)) {
+                tmp.delete()
+                error("journal rename failed")
+            }
+        }.isSuccess
     }
 
     /** Attribute a published URI to its card. [expectedSourceName] is the transfer
