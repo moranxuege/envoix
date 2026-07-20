@@ -23,7 +23,7 @@ import org.json.JSONObject
 import java.io.File
 
 /** Params needed to (re)create a transfer session (also carries UI extras). */
-private data class Spec(
+internal data class Spec(
     val direction: String,
     val room: String,
     val path: String,
@@ -89,27 +89,19 @@ private data class Spec(
 class TransferService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
+    /** Publish journaling/recovery and the staging worker pool, extracted
+     *  whole; the service delegates, they call back into [transferScope]. */
+    private val publishJournal = PublishJournal(this)
+    private val stagingExecutor = StagingExecutor(this)
+
     /** One scope per card: staging copy, session collector, and courier calls
      *  all run inside it, so Remove fences a card's ENTIRE async surface with
      *  a single cancel (no hidden session can start after, no receipt retry
      *  survives). Parented to the service scope - teardown cancels all. */
     private val transferScopes = HashMap<Long, CoroutineScope>()
 
-    /** Ids with an in-flight publish-retry loop, so a re-rendered `completed`
-     *  snapshot doesn't spawn a second one. */
-    private val publishing = java.util.Collections.synchronizedSet(HashSet<Long>())
-
-    /** Completed receive cards whose public artifact is being checked before
-     *  the private receipt may be served. */
-    private val publicationChecks = java.util.Collections.synchronizedSet(HashSet<Long>())
-
-    /** Backoff for re-attempting a stuck publish in-session (a non-collision
-     *  failure — collisions self-resolve in `commit`). After these, the card is
-     *  marked failed and the bytes wait in staging for a restart re-drive. */
-    private val publishRetryBackoffMs = longArrayOf(2_000, 5_000, 15_000)
-
     @Synchronized
-    private fun transferScope(id: Long): CoroutineScope =
+    internal fun transferScope(id: Long): CoroutineScope =
         transferScopes.getOrPut(id) {
             CoroutineScope(scope.coroutineContext + SupervisorJob(scope.coroutineContext[Job]))
         }
@@ -130,34 +122,6 @@ class TransferService : Service() {
      *  else is a stale pump from a torn-down session for the same id and is
      *  dropped - the fence is explicit, not an artifact of flow mechanics. */
     private val generations = HashMap<Long, Long>()
-
-    /** The live staging worker per card. A committed `Preparing` snapshot of a
-     *  generation owns exactly one worker; a non-`Preparing` snapshot retires it.
-     *  Owner-checked so a retired worker never clobbers a newer one. */
-    private val stageWork = HashMap<Long, StageWork>()
-
-    /** One staging copy worker. Owns its open streams so a retire can CLOSE them
-     *  — which unblocks a stuck blocking read/write; cancelling the coroutine
-     *  alone cannot. `ensureActive()` in the loop is a secondary check, and the
-     *  reducer's generation stamp is the real correctness backstop. */
-    private class StageWork(
-        val generation: Int,
-    ) {
-        @Volatile var job: Job? = null
-
-        @Volatile var input: java.io.Closeable? = null
-
-        @Volatile var output: java.io.Closeable? = null
-
-        @Volatile var retired = false
-
-        fun retire() {
-            retired = true
-            runCatching { input?.close() }
-            runCatching { output?.close() }
-            job?.cancel()
-        }
-    }
 
     /** True when [notice] belongs to the card's current pump (claiming it if
      *  the card is unclaimed). */
@@ -283,7 +247,7 @@ class TransferService : Service() {
         }
         if (!legacyRootInUse) {
             scope.launch(Dispatchers.IO) {
-                sweepStaging(incoming.absolutePath, attributeTo = null)
+                publishJournal.sweepStaging(incoming.absolutePath, attributeTo = null)
                 incoming.listFiles { f -> f.isFile }?.forEach { it.delete() }
             }
         }
@@ -406,7 +370,7 @@ class TransferService : Service() {
                 val id = intent.getLongExtra(EXTRA_ID, -1L)
                 OpLog.add("serve re-verify id=$id", id)
                 if (!jobs.containsKey(id)) restoreAllRecords()
-                reverifyPublishedFile(id)
+                publishJournal.reverifyPublishedFile(id)
             }
             ACTION_REMOVE -> {
                 val id = intent.getLongExtra(EXTRA_ID, -1L)
@@ -429,7 +393,7 @@ class TransferService : Service() {
                 specs.remove(id)
                 lastSeq.remove(id)
                 generations.remove(id)
-                retireStaging(id)
+                stagingExecutor.retireStaging(id)
                 TransferRepository.remove(id)
                 stopIfIdle()
             }
@@ -445,7 +409,7 @@ class TransferService : Service() {
     private val logTime = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
 
     /** Append a timestamped line to a transfer's log, keeping the last 60. */
-    private fun addLog(
+    internal fun addLog(
         cur: List<String>,
         line: String,
     ): List<String> = (cur + "${logTime.format(java.util.Date())}  $line").takeLast(TransferRepository.LOG_CAP)
@@ -526,162 +490,6 @@ class TransferService : Service() {
             jobs[id] = job
             OpLog.add("restored transfer id=$id")
         }
-    }
-
-    /** A durable receipt proves protocol completion, not continued ownership of
-     *  the user-visible copy. Check the public artifact before serving it. */
-    private fun reverifyPublishedFile(id: Long) {
-        val transfer = TransferRepository.transfers.value.firstOrNull { it.id == id } ?: return
-        if (transfer.direction != Direction.Receive || transfer.publicationInvalid) return
-        val uri = transfer.savedUri?.let(Uri::parse)
-        val size = transfer.publishedSize
-        val sha256 = transfer.publishedSha256
-        if (uri == null || size == null || sha256 == null) {
-            markPublicationInvalid(id, PUBLICATION_EVIDENCE_MISSING_MESSAGE, "evidence_missing")
-            return
-        }
-        if (!publicationChecks.add(id)) return
-        transferScope(id).launch(Dispatchers.IO) {
-            try {
-                val actual = MediaStoreSaver.inspect(this@TransferService, uri).getOrNull()
-                val expected = MediaStoreSaver.PublicationEvidence(size, sha256)
-                if (actual != null && expected.matches(actual)) {
-                    TransferTimeline.event(id, "platform.publication", "verify", outcome = "matched")
-                    Native.sessionIntent(id, "reverify")
-                } else {
-                    markPublicationInvalid(id, PUBLICATION_INVALID_MESSAGE, "missing_or_changed")
-                }
-            } finally {
-                publicationChecks.remove(id)
-            }
-        }
-    }
-
-    private fun markPublicationInvalid(
-        id: Long,
-        message: String,
-        outcome: String,
-    ) {
-        TransferRepository.update(id) {
-            it.copy(
-                savedUri = null,
-                publishedSize = null,
-                publishedSha256 = null,
-                publicationInvalid = true,
-                error = message,
-                log = addLog(it.log, message),
-            )
-        }
-        syncExtras(id)
-        TransferTimeline.event(id, "platform.publication", "verify", outcome = outcome)
-        OpLog.add("publication invalid id=$id outcome=$outcome", id)
-    }
-
-    /** Ensure a staging worker of [generation] runs for [id], from a committed
-     *  Preparing snapshot. Idempotent for the same generation; a new generation
-     *  retires the old worker first. */
-    private fun ensureStaging(
-        id: Long,
-        spec: Spec,
-        generation: Int,
-    ) {
-        val work = StageWork(generation)
-        val toRetire =
-            synchronized(stageWork) {
-                val cur = stageWork[id]
-                if (cur != null && cur.generation == generation && !cur.retired) {
-                    return // already staging this generation
-                }
-                stageWork[id] = work
-                cur
-            }
-        toRetire?.retire()
-        work.job = transferScope(id).launch(Dispatchers.IO) { runStaging(id, spec, work) }
-    }
-
-    /** Retire [id]'s staging worker (a non-Preparing snapshot, or Remove): close
-     *  its streams and cancel it. The incomplete partial is dropped by the
-     *  worker's own finally. Owner-checked. */
-    private fun retireStaging(id: Long) {
-        synchronized(stageWork) { stageWork.remove(id) }?.retire()
-    }
-
-    /** The staging copy, generation-stamped. Stores its streams in [work] so a
-     *  retire can close them (unblocking a stuck read); a retire/failure drops
-     *  the incomplete partial and emits NO stage callback (the machine has
-     *  already left Preparing, and a stale one is dropped by the reducer anyway).
-     *  A complete copy is kept. */
-    private fun runStaging(
-        id: Long,
-        spec: Spec,
-        work: StageWork,
-    ) {
-        val gen = work.generation
-        val uri = spec.sourceUri?.let { Uri.parse(it) }
-        if (uri == null) {
-            // A restored Preparing whose source cannot be reopened.
-            TransferTimeline.event(id, "platform.stage", "failed", outcome = "no_source")
-            if (!work.retired) Native.stageFailed(id, gen, "source needs re-picking")
-            clearStageWork(id, work)
-            return
-        }
-        val out = File(spec.path)
-        out.parentFile?.mkdirs()
-        TransferTimeline.event(id, "platform.stage", "start", fields = mapOf("name" to out.name))
-        var completed = false
-        try {
-            contentResolver.openInputStream(uri)!!.also { work.input = it }.use { input ->
-                out.outputStream().also { work.output = it }.use { o ->
-                    val buf = ByteArray(1 shl 20)
-                    var copied = 0L
-                    var last = 0L
-                    while (true) {
-                        if (work.retired) return // secondary check; close() is the primary unblock
-                        val n = input.read(buf)
-                        if (n < 0) break
-                        o.write(buf, 0, n)
-                        copied += n
-                        val now = System.currentTimeMillis()
-                        if (now - last > 150) {
-                            last = now
-                            Native.stageProgress(id, gen, copied)
-                        }
-                    }
-                }
-            }
-            completed = true
-        } catch (c: kotlinx.coroutines.CancellationException) {
-            throw c // retired via cancel; propagate, no callback
-        } catch (e: Throwable) {
-            if (!work.retired) {
-                TransferTimeline.event(
-                    id,
-                    "platform.stage",
-                    "failed",
-                    outcome = "copy",
-                    // The exception TYPE, never .message — an openInputStream
-                    // message embeds the full content:// URI, which would ship to
-                    // the (public) log endpoint.
-                    fields = mapOf("cause" to e.javaClass.simpleName),
-                )
-                Native.stageFailed(id, gen, "couldn't read the picked file")
-            }
-        } finally {
-            if (!completed) out.delete() // drop the incomplete partial (retire/failure)
-            clearStageWork(id, work)
-        }
-        if (completed) {
-            TransferTimeline.event(id, "platform.stage", "complete")
-            Native.stageComplete(id, gen)
-        }
-    }
-
-    /** Owner-checked removal: only clear the map entry if it still holds [work]. */
-    private fun clearStageWork(
-        id: Long,
-        work: StageWork,
-    ) {
-        synchronized(stageWork) { if (stageWork[id] === work) stageWork.remove(id) }
     }
 
     private fun displayName(uri: Uri): String? =
@@ -806,9 +614,9 @@ class TransferService : Service() {
         // callbacks are rejected by the reducer's generation check regardless.
         if (spec.dir() == Direction.Send) {
             if (status == Status.Preparing) {
-                ensureStaging(id, spec, s.optInt("attempt", 1))
+                stagingExecutor.ensureStaging(id, spec, s.optInt("attempt", 1))
             } else {
-                retireStaging(id)
+                stagingExecutor.retireStaging(id)
             }
         }
         when {
@@ -819,8 +627,8 @@ class TransferService : Service() {
             // Synchronous first attempt (before the foreground may detach), then a
             // bounded async retry if anything didn't land — real forward progress
             // instead of waiting for a restart.
-            sweepStaging(spec.path, attributeTo = id)
-            scheduleRepublishIfNeeded(id, spec.path)
+            publishJournal.sweepStaging(spec.path, attributeTo = id)
+            publishJournal.scheduleRepublishIfNeeded(id, spec.path)
         }
         // Foreground reconciles against the whole card set: when nothing is
         // active, post the one final summary frame and detach - including for
@@ -921,321 +729,6 @@ class TransferService : Service() {
             TransferTimeline.event(id, "platform.courier", "post_failed")
             OpLog.add("receipt post failed id=$id")
         }
-    }
-
-    /**
-     * Publish every finalized file in one staging dir to Downloads, deleting
-     * the staging copy on success (receipt sidecars stay - they re-confirm a
-     * lost CompleteAck after the file is published away). With per-card
-     * staging (Phase 4) the dir holds only [attributeTo]'s own artifacts; the
-     * unattributed call in [gcStaging] is the one legacy exception, draining
-     * pre-Phase-4 shared-staging residue.
-     */
-    private fun sweepStaging(
-        outputDir: String,
-        attributeTo: Long?,
-    ) {
-        val finals =
-            File(outputDir)
-                .listFiles { f -> f.isFile && !f.name.startsWith(".") } ?: return
-        for (src in finals) publishOne(src, attributeTo)
-    }
-
-    /** After the synchronous first sweep, if a completed receive still has staged
-     *  files (a non-collision publish failure — collisions self-resolve in
-     *  `commit`), retry with backoff so it doesn't wait for a restart; mark the
-     *  card failed after exhausting. One retry loop per id. */
-    private fun scheduleRepublishIfNeeded(
-        id: Long,
-        dir: String,
-    ) {
-        if (!hasUnpublished(dir)) return
-        if (!publishing.add(id)) return
-        transferScope(id).launch(Dispatchers.IO) {
-            try {
-                for (delayMs in publishRetryBackoffMs) {
-                    kotlinx.coroutines.delay(delayMs)
-                    sweepStaging(dir, attributeTo = id)
-                    if (!hasUnpublished(dir)) return@launch
-                }
-                markPublishFailed(id)
-            } finally {
-                publishing.remove(id)
-            }
-        }
-    }
-
-    private fun hasUnpublished(dir: String): Boolean =
-        File(dir).listFiles { f -> f.isFile && !f.name.startsWith(".") }?.isNotEmpty() ?: false
-
-    /** Terminal (for now) publish failure: durable, and surfaced on the card so the
-     *  user isn't left thinking the file silently vanished. A restart re-drives the
-     *  publish (the bytes stay in staging); a later success clears it. */
-    private fun markPublishFailed(id: Long) {
-        TransferRepository.update(id) {
-            if (it.publishFailed) {
-                it
-            } else {
-                it.copy(
-                    publishFailed = true,
-                    log = addLog(it.log, "couldn't save to Downloads — kept, will retry"),
-                )
-            }
-        }
-        syncExtras(id)
-    }
-
-    /** The publish sidecar journal for one staged file: `.envoix-publish.<name>.json`
-     *  beside it, holding the reserved target URI (written before the copy) and
-     *  the committed URI (written after). Lets a crash mid-publish recover:
-     *  drop a half-written candidate, or adopt an already-committed one. */
-    private fun publishJournal(src: File) = File(src.parentFile, ".envoix-publish.${src.name}.json")
-
-    /**
-     * Publish one finalized staging file, journaled. Recovery first: a surviving
-     * journal means a prior publish was interrupted — adopt its committed target
-     * (if it still resolves) or delete the half-written candidate — then a fresh
-     * reserve → copy → commit → delete-staging, recording each step first.
-     */
-    private fun publishOne(
-        src: File,
-        attributeTo: Long?,
-    ) {
-        // Per-transfer timeline events, only when this file is attributed to a
-        // card (the unattributed gcStaging drain has no session to route to).
-        fun tl(
-            event: String,
-            outcome: String = "",
-            fields: Map<String, String> = emptyMap(),
-        ) = attributeTo?.let {
-            TransferTimeline.event(it, "platform.publish", event, outcome = outcome, fields = fields)
-        }
-
-        val journal = publishJournal(src)
-        // --- recovery: a journal survived a crash mid-publish ---
-        runCatching { org.json.JSONObject(journal.readText()) }.getOrNull()?.let { prior ->
-            val committed = prior.optString("committed_uri").ifEmpty { null }
-            val journalEvidence =
-                if (prior.has("published_size") && prior.has("published_sha256")) {
-                    MediaStoreSaver.PublicationEvidence(
-                        prior.optLong("published_size"),
-                        prior.optString("published_sha256"),
-                    )
-                } else {
-                    null
-                }
-            val expectedEvidence =
-                journalEvidence
-                    ?: runCatching { src.inputStream().use(MediaStoreSaver::hash) }.getOrNull()
-            val publicEvidence =
-                committed?.let { MediaStoreSaver.inspect(this, Uri.parse(it)).getOrNull() }
-            if (committed != null &&
-                expectedEvidence != null &&
-                publicEvidence != null &&
-                expectedEvidence.matches(publicEvidence)
-            ) {
-                // Commit had landed; the crash was before staging was cleared.
-                // Adopt under the name it was actually published as (may be bumped).
-                val publishedName = prior.optString("published_name").ifEmpty { src.name }
-                adopt(
-                    attributeTo,
-                    expectedSourceName = src.name,
-                    publishedName = publishedName,
-                    uri = committed,
-                    evidence = expectedEvidence,
-                )
-                src.delete()
-                journal.delete()
-                tl("adopt", fields = mapOf("uri" to TransferTimeline.redactUri(committed)))
-                LogStore.append("app: adopted already-published $publishedName")
-                return
-            }
-            // Reserved but never committed (or the user deleted it): drop the
-            // half-written candidate so we do not leave a truncated file, then
-            // fall through to a fresh publish.
-            prior.optString("target").ifEmpty { null }?.let { MediaStoreSaver.delete(this, Uri.parse(it)) }
-            journal.delete()
-        }
-
-        // --- fresh publish ---
-        val s = SettingsStore.settings.value
-        val identical =
-            MediaStoreSaver
-                .findIdentical(this, src, src.name, s.saveTreeUri, s.saveFolder)
-                .onFailure {
-                    tl("deduplicate", outcome = "lookup_failed", fields = mapOf("cause" to it.javaClass.simpleName))
-                }.getOrNull()
-        if (identical != null) {
-            adopt(
-                attributeTo,
-                expectedSourceName = src.name,
-                publishedName = identical.displayName,
-                uri = identical.uri.toString(),
-                evidence = identical.evidence,
-            )
-            attributeTo?.let { id ->
-                TransferRepository.update(id) {
-                    it.copy(log = addLog(it.log, "already present in Downloads · identical content"))
-                }
-            }
-            src.delete()
-            journal.delete()
-            tl("deduplicate", outcome = "matched", fields = mapOf("uri" to TransferTimeline.redactUri(identical.uri.toString())))
-            LogStore.append("app: reused identical public file ${identical.displayName}")
-            return
-        }
-        val target = MediaStoreSaver.reserve(this, src.name, s.saveTreeUri, s.saveFolder)
-        if (target == null) {
-            tl("failed", outcome = "reserve", fields = mapOf("name" to src.name))
-            return
-        }
-        tl("reserve", fields = mapOf("uri" to TransferTimeline.redactUri(target.uri.toString())))
-        // Record the reservation BEFORE any byte is copied, and GATE the copy on
-        // it: if we can't durably record the target, don't copy bytes into a
-        // user-visible destination we could never recover or clean up.
-        if (!writePublishJournal(journal, target.uri.toString(), target.mediaStorePending, committed = null, publishedName = null)) {
-            MediaStoreSaver.delete(this, target.uri)
-            tl("failed", outcome = "journal_reserve")
-            LogStore.append("app: could not record publish reservation for ${src.name}; not copying")
-            return
-        }
-        val copy = MediaStoreSaver.copyInto(this, src, target)
-        if (copy.isFailure) {
-            MediaStoreSaver.delete(this, target.uri)
-            journal.delete()
-            tl(
-                "failed",
-                outcome = "copy",
-                // Type only — a copy IOException's .message can carry the
-                // destination URI/path (same leak class as the staging cause).
-                fields = mapOf("cause" to (copy.exceptionOrNull()?.javaClass?.simpleName ?: "unknown")),
-            )
-            return
-        }
-        val evidence = copy.getOrThrow()
-        val committed = MediaStoreSaver.commit(this, target)
-        if (committed.isFailure) {
-            // A colliding _data (same-named file already published) or other
-            // publish error must not crash the service: drop the pending target
-            // and leave the file in staging for a later retry.
-            MediaStoreSaver.delete(this, target.uri)
-            journal.delete()
-            tl(
-                "failed",
-                outcome = "commit",
-                fields = mapOf("cause" to (committed.exceptionOrNull()?.javaClass?.simpleName ?: "unknown")),
-            )
-            return
-        }
-        val outcome = committed.getOrThrow()
-        // Record the commit (with the name it actually landed under) BEFORE clearing
-        // staging, so a crash here recovers by adopting (never re-publishing =
-        // duplicate). The write is best-effort: surface a failure rather than
-        // swallow it, but still adopt + clear in-line so no duplicate is created —
-        // the crash-in-this-window gap is the separate publication barrier.
-        val journaled =
-            writePublishJournal(
-                journal,
-                target.uri.toString(),
-                target.mediaStorePending,
-                committed = outcome.uri.toString(),
-                publishedName = outcome.displayName,
-                publishedSize = evidence.size,
-                publishedSha256 = evidence.sha256,
-            )
-        if (!journaled) {
-            tl("failed", outcome = "journal")
-            LogStore.append("app: publish journal write failed (published as ${outcome.displayName})")
-        }
-        tl("commit", fields = mapOf("uri" to TransferTimeline.redactUri(outcome.uri.toString())))
-        adopt(
-            attributeTo,
-            expectedSourceName = src.name,
-            publishedName = outcome.displayName,
-            uri = outcome.uri.toString(),
-            evidence = evidence,
-        )
-        src.delete()
-        journal.delete()
-        tl("staging_deleted")
-        LogStore.append("app: saved ${outcome.displayName} to Downloads")
-    }
-
-    private fun writePublishJournal(
-        journal: File,
-        target: String,
-        pending: Boolean,
-        committed: String?,
-        publishedName: String?,
-        publishedSize: Long? = null,
-        publishedSha256: String? = null,
-    ): Boolean {
-        val obj =
-            org.json
-                .JSONObject()
-                .put("target", target)
-                .put("pending", pending)
-        committed?.let { obj.put("committed_uri", it) }
-        publishedName?.let { obj.put("published_name", it) }
-        publishedSize?.let { obj.put("published_size", it) }
-        publishedSha256?.let { obj.put("published_sha256", it) }
-        // Atomic: write a temp then rename over the journal, so recovery always
-        // reads a COMPLETE journal (the old one or the new one) — never a
-        // half-written, unparsable document it can neither act on nor clean.
-        return runCatching {
-            val tmp = File(journal.parentFile, "${journal.name}.tmp")
-            tmp.writeText(obj.toString())
-            if (!tmp.renameTo(journal)) {
-                tmp.delete()
-                error("journal rename failed")
-            }
-        }.isSuccess
-    }
-
-    /** Attribute a published URI to its card. [expectedSourceName] is the transfer
-     *  identity (matched against `fileName`, never overwritten by the published
-     *  name); [publishedName] is the platform display name it actually landed
-     *  under, which may be a collision-bumped "name (1)". */
-    private fun adopt(
-        attributeTo: Long?,
-        expectedSourceName: String,
-        publishedName: String,
-        uri: String,
-        evidence: MediaStoreSaver.PublicationEvidence,
-    ) {
-        if (attributeTo == null) return
-        TransferRepository.update(attributeTo) {
-            if (it.fileName == null || it.fileName == expectedSourceName) {
-                it.copy(
-                    fileName = it.fileName ?: expectedSourceName,
-                    savedUri = uri,
-                    publishedName = publishedName,
-                    publishedSize = evidence.size,
-                    publishedSha256 = evidence.sha256,
-                    publicationInvalid = false,
-                    publishFailed = false,
-                )
-            } else {
-                it
-            }
-        }
-        syncExtras(attributeTo)
-    }
-
-    /** Push the card's platform context (QR payload, saved URI) into the
-     *  transfer's durable record, so it survives restarts. */
-    private fun syncExtras(id: Long) {
-        val t = TransferRepository.transfers.value.firstOrNull { it.id == id } ?: return
-        val extras = org.json.JSONObject()
-        t.qrPayload?.let { extras.put("qr", it) }
-        t.savedUri?.let { extras.put("saved_uri", it) }
-        t.publishedName?.let { extras.put("published_name", it) }
-        t.publishedSize?.let { extras.put("published_size", it) }
-        t.publishedSha256?.let { extras.put("published_sha256", it) }
-        if (t.publicationInvalid) extras.put("publication_invalid", true)
-        if (t.publishFailed) extras.put("publish", "failed")
-        val err = Native.setSessionExtras(id, extras.toString())
-        if (err.isNotEmpty()) LogStore.append("app: $err (id=$id)")
     }
 
     /** Active states pin the tray; everything else rests. Exhaustive (no `else`)
@@ -1409,10 +902,6 @@ class TransferService : Service() {
         private const val ACTION_REMOVE = "dev.envoix.app.REMOVE"
         private const val ACTION_RESTORE_ALL = "dev.envoix.app.RESTORE_ALL"
         private const val ACTION_REVERIFY = "dev.envoix.app.REVERIFY"
-        private const val PUBLICATION_INVALID_MESSAGE =
-            "Saved file was deleted or changed. Receive it again."
-        private const val PUBLICATION_EVIDENCE_MISSING_MESSAGE =
-            "This older delivery cannot be verified safely. Receive it again."
 
         /** Launch specs by id, so a session can be re-created after the service
          *  (or process) restarted. */
