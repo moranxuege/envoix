@@ -4,10 +4,8 @@ Native SwiftUI macOS and iOS client for envoix. The UI is a thin layer over the
 Rust core (`envoix-client`), reached through the `EnvoixCore` Swift package
 generated from `crates/envoix-ffi` (UniFFI).
 
-The canonical product sequence, accepted device matrix, feature dependencies,
-and verification gates live in
-[`docs/design/apple-client-execution-plan.md`](../../docs/design/apple-client-execution-plan.md).
-This README only documents current build and use instructions.
+This README documents current build and use instructions. Product planning and
+feature tracking live in the repository's GitHub issues.
 
 ## Prerequisites
 
