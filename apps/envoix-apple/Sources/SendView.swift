@@ -60,6 +60,7 @@ struct SendView: View {
     private let initialPairingInput: String?
     private let onInitialPairingInputConsumed: (() -> Void)?
     private let onSwitchToReceive: ((String, SendSelectionSnapshot) -> Void)?
+    private let onOpenNearbyDevices: ((SendSelectionSnapshot) -> Void)?
     #if os(iOS)
     @State private var isFolderPickerPresented = false
     @State private var isPhotoPickerPresented = false
@@ -76,12 +77,14 @@ struct SendView: View {
         initialPendingSelectionID: UUID? = nil,
         initialPairingInput: String? = nil,
         onInitialPairingInputConsumed: (() -> Void)? = nil,
-        onSwitchToReceive: ((String, SendSelectionSnapshot) -> Void)? = nil
+        onSwitchToReceive: ((String, SendSelectionSnapshot) -> Void)? = nil,
+        onOpenNearbyDevices: ((SendSelectionSnapshot) -> Void)? = nil
     ) {
         self.viewModel = viewModel
         self.initialPairingInput = initialPairingInput
         self.onInitialPairingInputConsumed = onInitialPairingInputConsumed
         self.onSwitchToReceive = onSwitchToReceive
+        self.onOpenNearbyDevices = onOpenNearbyDevices
         _mode = State(initialValue: initialMode)
         _selectedItems = State(initialValue: initialFiles)
         _filePathInput = State(initialValue: initialFiles.count == 1 ? initialFiles[0].path : "")
@@ -151,6 +154,9 @@ struct SendView: View {
             VStack(alignment: .leading, spacing: 16) {
                 #if os(iOS)
                 fileSection
+                if onOpenNearbyDevices != nil {
+                    nearbyDevicesAction
+                }
                 connectionSection
                 #else
                 connectionSection
@@ -175,6 +181,48 @@ struct SendView: View {
         .onChange(of: serverURL) { _ in refreshPairingInviteForSettingsChange() }
         .onChange(of: relayURL) { _ in refreshPairingInviteForSettingsChange() }
     }
+
+    #if os(iOS)
+    private var nearbyDevicesAction: some View {
+        Button {
+            onOpenNearbyDevices?(currentSelectionSnapshot)
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "dot.radiowaves.left.and.right")
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(Theme.accentStrong)
+                    .frame(width: 42, height: 42)
+                    .background(Theme.accentSoft, in: RoundedRectangle(cornerRadius: 13))
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(AppText.value("Nearby devices", "附近设备", language: uiLanguage))
+                        .font(.headline)
+                        .foregroundStyle(Theme.text)
+                    Text(AppText.value(
+                        "Manage Wi-Fi Aware pairing. Nearby transfer is not available yet.",
+                        "管理 Wi-Fi Aware 配对；附近传输目前尚不可用。",
+                        language: uiLanguage
+                    ))
+                    .font(.caption)
+                    .foregroundStyle(Theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(Theme.muted)
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.surfaceRaised)
+            .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
+        }
+        .buttonStyle(.plain)
+        .disabled(viewModel.isBusy || isPhotoImporting)
+        .accessibilityIdentifier("send_nearby_devices")
+    }
+    #endif
 
     @ViewBuilder private var connectionSection: some View {
         if mode == .invite {
@@ -781,11 +829,7 @@ struct SendView: View {
             if parsed.role == .send, let onSwitchToReceive {
                 onSwitchToReceive(
                     input,
-                    SendSelectionSnapshot(
-                        items: selectedItems,
-                        sourceAccess: selectedSourceAccess,
-                        pendingSelectionID: selectedPendingSelectionID
-                    )
+                    currentSelectionSnapshot
                 )
                 ToastCenter.shared.show(AppText.value(
                     "Switching to Receive",
@@ -827,6 +871,14 @@ struct SendView: View {
             ToastCenter.shared.show(message)
             return message
         }
+    }
+
+    private var currentSelectionSnapshot: SendSelectionSnapshot {
+        SendSelectionSnapshot(
+            items: selectedItems,
+            sourceAccess: selectedSourceAccess,
+            pendingSelectionID: selectedPendingSelectionID
+        )
     }
 
     private func applyInitialPairingInputIfNeeded() {

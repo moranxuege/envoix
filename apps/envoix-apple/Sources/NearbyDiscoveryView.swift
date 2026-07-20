@@ -22,6 +22,7 @@ struct NearbyDiscoveryView: View {
             VStack(alignment: .leading, spacing: 16) {
                 intro
                 providerPanel
+                wifiAwarePairingSection
 
                 if coordinator.state.statuses[.bluetooth]?.availability == .permissionRequired {
                     Button(action: openSettings) {
@@ -115,8 +116,8 @@ struct NearbyDiscoveryView: View {
             .foregroundStyle(Theme.text)
 
             Text(AppText.value(
-                "Bluetooth and the local network are checked only while this page is open.",
-                "仅在此页面打开时检查蓝牙和局域网。",
+                "Bluetooth, the local network, and Wi-Fi Aware pairing are checked only while this page is open.",
+                "仅在此页面打开时检查蓝牙、局域网和 Wi-Fi Aware 配对。",
                 language: language
             ))
             .font(.subheadline)
@@ -132,6 +133,59 @@ struct NearbyDiscoveryView: View {
             }
         }
         .card(padding: 14)
+    }
+
+    @ViewBuilder
+    private var wifiAwarePairingSection: some View {
+        #if canImport(DeviceDiscoveryUI) && canImport(WiFiAware)
+        if #available(iOS 26.0, *) {
+            let providerStatus = status(for: .wifiAware)
+            if providerStatus.availability != .unsupported,
+               providerStatus.availability != .error,
+               providerStatus.availability != .reserved {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(AppText.value(
+                        "PAIRED WI-FI AWARE DEVICES",
+                        "已配对的 WI-FI AWARE 设备",
+                        language: language
+                    ))
+                    .font(.caption.weight(.bold))
+                    .tracking(0.8)
+                    .foregroundStyle(Theme.muted)
+                    .accessibilityIdentifier("nearby_wifi_aware_pairing")
+
+                    if wifiAwarePairedDevices.isEmpty {
+                        Text(AppText.value(
+                            "No Wi-Fi Aware devices are paired yet.",
+                            "尚未配对 Wi-Fi Aware 设备。",
+                            language: language
+                        ))
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("nearby_wifi_aware_empty")
+                    } else {
+                        ForEach(wifiAwarePairedDevices) { device in
+                            pairedDeviceCard(device)
+                        }
+                    }
+
+                    AppleWifiAwarePairingControls(language: language)
+
+                    Text(AppText.value(
+                        "Pairing is managed and persisted by iOS; Envoix does not store a separate pairing. Transfer stays unavailable until Envoix authenticates a Wi-Fi Aware connection.",
+                        "配对由 iOS 管理并持久保存；Envoix 不会另存一份配对关系。在 Envoix 完成 Wi-Fi Aware 连接认证前，传输仍不可用。",
+                        language: language
+                    ))
+                    .font(.footnote)
+                    .foregroundStyle(Theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("nearby_wifi_aware_persistence")
+                }
+                .card(padding: 14)
+            }
+        }
+        #endif
     }
 
     private func providerRow(_ status: NearbyProviderStatus) -> some View {
@@ -153,6 +207,10 @@ struct NearbyDiscoveryView: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("nearby_provider_\(status.source.logName)")
+    }
+
+    private var wifiAwarePairedDevices: [NearbyPairedDevice] {
+        coordinator.state.pairedDevices.filter { $0.source == .wifiAware }
     }
 
     private var emptyState: some View {
@@ -195,6 +253,40 @@ struct NearbyDiscoveryView: View {
         .accessibilityElement(children: .contain)
     }
 
+    private func pairedDeviceCard(_ device: NearbyPairedDevice) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(device.displayName ?? AppText.value(
+                "Paired Apple device",
+                "已配对的 Apple 设备",
+                language: language
+            ))
+            .font(.headline)
+            .foregroundStyle(Theme.text)
+            .lineLimit(1)
+
+            if let model = device.model {
+                Text(model)
+                    .font(.caption)
+                    .foregroundStyle(Theme.muted)
+                    .lineLimit(2)
+            }
+
+            HStack(spacing: 7) {
+                ModePill(text: "Aware")
+                Text(AppText.value(
+                    "Paired · transfer pending",
+                    "已配对 · 传输待实现",
+                    language: language
+                ))
+                .font(.caption)
+                .foregroundStyle(Theme.muted)
+            }
+        }
+        .card(raised: true, padding: 13)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("nearby_wifi_aware_device")
+    }
+
     private func status(for source: NearbyDiscoverySource) -> NearbyProviderStatus {
         coordinator.state.statuses[source] ?? NearbyProviderStatus(
             source: source,
@@ -231,6 +323,8 @@ struct NearbyDiscoveryView: View {
         switch availability {
         case .stopped: return AppText.value("Stopped", "已停止", language: language)
         case .starting: return AppText.value("Starting", "启动中", language: language)
+        case .pairingRequired: return AppText.value("Pairing", "需配对", language: language)
+        case .paired: return AppText.value("Paired", "已配对", language: language)
         case .ready: return AppText.value("Ready", "就绪", language: language)
         case .degraded: return AppText.value("Degraded", "部分可用", language: language)
         case .permissionRequired: return AppText.value("Permission", "需授权", language: language)
@@ -246,7 +340,7 @@ struct NearbyDiscoveryView: View {
         switch availability {
         case .ready: return .success
         case .starting, .stopped, .reserved: return .neutral
-        case .degraded: return .warning
+        case .degraded, .pairingRequired, .paired: return .warning
         case .permissionRequired, .disabled, .unsupported, .temporarilyUnavailable, .error: return .error
         }
     }
@@ -287,6 +381,30 @@ struct NearbyDiscoveryView: View {
             )
         case .wifiAwareReserved:
             return AppText.value("Provider boundary reserved for a later phase", "已为后续阶段预留 Provider 接口", language: language)
+        case .startingWifiAware:
+            return AppText.value("Observing system-paired devices", "正在观察系统配对设备", language: language)
+        case .wifiAwareUnsupported:
+            return AppText.value("Wi-Fi Aware pairing is unsupported", "不支持 Wi-Fi Aware 配对", language: language)
+        case .wifiAwareServiceMissing:
+            return AppText.value("Wi-Fi Aware service is missing from this build", "此版本缺少 Wi-Fi Aware 服务声明", language: language)
+        case .wifiAwareEntitlementMissing:
+            return AppText.value("Wi-Fi Aware entitlement is missing", "缺少 Wi-Fi Aware entitlement", language: language)
+        case .wifiAwareTemporarilyUnavailable:
+            return AppText.value("Paired-device state is temporarily unavailable", "配对设备状态暂不可用", language: language)
+        case .wifiAwarePairingRequired:
+            return AppText.value("Add or allow a nearby device to continue", "添加或允许附近设备后继续", language: language)
+        case .wifiAwarePairedDevices(let count):
+            return AppText.value(
+                "\(count) system-paired device(s)",
+                "\(count) 台系统配对设备",
+                language: language
+            )
+        case .wifiAwarePairedDeviceLimitExceeded:
+            return AppText.value(
+                "The system paired-device snapshot exceeded the supported limit",
+                "系统配对设备快照超过支持上限",
+                language: language
+            )
         }
     }
 

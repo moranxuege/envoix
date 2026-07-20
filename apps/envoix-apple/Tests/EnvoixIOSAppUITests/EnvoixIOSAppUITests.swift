@@ -51,6 +51,7 @@ final class EnvoixIOSAppUITests: XCTestCase {
         for identifier in ["send_photo_picker", "send_file_picker", "send_folder_picker"] {
             XCTAssertTrue(app.buttons[identifier].isHittable, identifier)
         }
+        XCTAssertTrue(app.buttons["send_nearby_devices"].isHittable)
         XCTAssertTrue(app.descendants(matching: .any)["send_selection_limit"].exists)
         XCTAssertTrue(app.descendants(matching: .any)["send_pairing_guidance"].exists)
         XCTAssertTrue(app.descendants(matching: .any)["pairing_panel_selector"].exists)
@@ -95,6 +96,57 @@ final class EnvoixIOSAppUITests: XCTestCase {
 
         app.buttons["nearby_pairing_receive"].tap()
         XCTAssertTrue(app.descendants(matching: .any)["receive_pairing_guidance"].waitForExistence(timeout: 3))
+    }
+
+    func testPhysicalWifiAwarePairingSurvivesAppRelaunch() throws {
+        guard ProcessInfo.processInfo.environment["ENVOIX_PHYSICAL_WIFI_AWARE"] == "1" else {
+            throw XCTSkip("Requires an explicitly paired Wi-Fi Aware device")
+        }
+
+        let app = XCUIApplication()
+        app.launchArguments.append("--ui-testing")
+
+        for launchIndex in 0..<2 {
+            app.launch()
+            dismissSheetIfNeeded(app)
+
+            let nearbyEntry = app.buttons["home_nearby"]
+            XCTAssertTrue(nearbyEntry.waitForExistence(timeout: 8), "launch \(launchIndex + 1)")
+            nearbyEntry.tap()
+
+            XCTAssertTrue(
+                app.descendants(matching: .any)["nearby_wifi_aware_device"]
+                    .waitForExistence(timeout: 20),
+                "The system-paired Wi-Fi Aware device was missing after app launch \(launchIndex + 1)"
+            )
+            XCTAssertTrue(
+                app.descendants(matching: .any)["nearby_wifi_aware_persistence"].exists
+            )
+            app.terminate()
+        }
+    }
+
+    func testPhysicalWifiAwarePairingRemovalClearsSnapshot() throws {
+        guard ProcessInfo.processInfo.environment["ENVOIX_PHYSICAL_WIFI_AWARE_REMOVED"] == "1" else {
+            throw XCTSkip("Requires explicit removal of the Wi-Fi Aware pairing")
+        }
+
+        let app = XCUIApplication()
+        app.launchArguments.append("--ui-testing")
+        app.launch()
+        defer { app.terminate() }
+        dismissSheetIfNeeded(app)
+
+        let nearbyEntry = app.buttons["home_nearby"]
+        XCTAssertTrue(nearbyEntry.waitForExistence(timeout: 8))
+        nearbyEntry.tap()
+
+        XCTAssertTrue(
+            app.descendants(matching: .any)["nearby_wifi_aware_empty"]
+                .waitForExistence(timeout: 20),
+            "The removed Wi-Fi Aware pairing remained in the provider snapshot"
+        )
+        XCTAssertFalse(app.descendants(matching: .any)["nearby_wifi_aware_device"].exists)
     }
 
     func testPhysicalNearbyDiscoveryFindsAndroid() throws {
@@ -724,6 +776,42 @@ final class EnvoixIOSAppUITests: XCTestCase {
             .completed,
             "Unexpected selection label: \(selection.label)"
         )
+    }
+
+    func testNearbyDevicesFromSendPreservesOpenedFileSelection() throws {
+        guard #available(iOS 16.4, *) else {
+            throw XCTSkip("Opening a document through XCUITest requires iOS 16.4 or newer")
+        }
+
+        let runID = "nearby-draft"
+        let fileName = "envoix-\(runID)-open-in.txt"
+        let app = XCUIApplication()
+        app.launchArguments += [
+            "--ui-testing",
+            "--ui-testing-discovery-fixtures",
+            "--ui-testing-open-in-payload",
+        ]
+        app.launchEnvironment["ENVOIX_CROSS_DEVICE_RUN_ID"] = runID
+        defer { cleanOpenInPayloadFixture(app: app, runID: runID) }
+        guard let sourceURL = stageOpenInPayloadFixture(app: app) else { return }
+
+        app.open(sourceURL)
+
+        let initialSelection = app.descendants(matching: .any)["send_selection_summary"]
+        XCTAssertTrue(initialSelection.waitForExistence(timeout: 8))
+        XCTAssertTrue(initialSelection.label.contains(fileName), initialSelection.label)
+
+        let nearby = app.buttons["send_nearby_devices"]
+        XCTAssertTrue(nearby.waitForExistence(timeout: 5))
+        nearby.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["nearby_screen"].waitForExistence(timeout: 5))
+        app.buttons["mobile_sheet_done"].tap()
+
+        XCTAssertTrue(app.buttons["home_send"].waitForExistence(timeout: 5))
+        app.buttons["home_send"].tap()
+        let restoredSelection = app.descendants(matching: .any)["send_selection_summary"]
+        XCTAssertTrue(restoredSelection.waitForExistence(timeout: 5))
+        XCTAssertTrue(restoredSelection.label.contains(fileName), restoredSelection.label)
     }
 
     func testSystemOpenedFileSendsToMacOSApp() throws {

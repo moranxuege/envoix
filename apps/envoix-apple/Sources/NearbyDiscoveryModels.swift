@@ -17,6 +17,8 @@ enum NearbyDiscoverySource: String, CaseIterable, Hashable {
 enum NearbyProviderAvailability: String, Equatable {
     case stopped
     case starting
+    case pairingRequired
+    case paired
     case ready
     case degraded
     case permissionRequired
@@ -28,6 +30,7 @@ enum NearbyProviderAvailability: String, Equatable {
 
     var logName: String {
         switch self {
+        case .pairingRequired: return "pairing_required"
         case .permissionRequired: return "permission_required"
         case .temporarilyUnavailable: return "temporarily_unavailable"
         default: return rawValue
@@ -51,6 +54,14 @@ enum NearbyProviderDetail: Equatable {
     case localNetworkVisibleOnly
     case localNetworkPermissionOrUnavailable
     case wifiAwareReserved
+    case startingWifiAware
+    case wifiAwareUnsupported
+    case wifiAwareServiceMissing
+    case wifiAwareEntitlementMissing
+    case wifiAwareTemporarilyUnavailable
+    case wifiAwarePairingRequired
+    case wifiAwarePairedDevices(Int)
+    case wifiAwarePairedDeviceLimitExceeded
 }
 
 struct NearbyProviderStatus: Equatable {
@@ -95,6 +106,43 @@ struct NearbyDiscoveredPeer: Equatable, Identifiable {
     let endpoint: String?
 }
 
+/// A device paired by an operating-system discovery provider. The identifier
+/// is scoped to that provider and is never treated as an authenticated Envoix
+/// identity or a claim that the peer is currently reachable.
+struct NearbyPairedDevice: Equatable, Identifiable {
+    static let maximumSourceScopedIDLength = 64
+    static let maximumSnapshotCount = 256
+
+    var id: String { "\(source.logName):\(sourceScopedID)" }
+
+    let sourceScopedID: String
+    let source: NearbyDiscoverySource
+    let displayName: String?
+    let model: String?
+
+    init?(
+        sourceScopedID: String,
+        source: NearbyDiscoverySource,
+        displayName: String? = nil,
+        model: String? = nil
+    ) {
+        let normalizedID = sourceScopedID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedID.isEmpty,
+              normalizedID.count <= Self.maximumSourceScopedIDLength,
+              normalizedID.unicodeScalars.allSatisfy({
+                  !CharacterSet.whitespacesAndNewlines.contains($0) &&
+                      !CharacterSet.controlCharacters.contains($0)
+              })
+        else {
+            return nil
+        }
+        self.sourceScopedID = normalizedID
+        self.source = source
+        self.displayName = NearbyDiscoveryPeerRegistry.sanitizeDisplayName(displayName)
+        self.model = NearbyDiscoveryPeerRegistry.sanitizeDeviceDetail(model)
+    }
+}
+
 /// UI context carried from public discovery into the authenticated pairing
 /// flow. It intentionally excludes endpoint and credential material: selecting
 /// a discovery card never authorizes a connection by itself.
@@ -133,6 +181,7 @@ struct NearbyRendezvousOffer: Equatable, Identifiable {
 
 enum NearbyDiscoveryEvent {
     case observation(NearbyDiscoveryObservation)
+    case pairedDevices(source: NearbyDiscoverySource, devices: [NearbyPairedDevice])
     case status(NearbyProviderStatus)
     case rendezvousOffer(NearbyRendezvousOffer)
 }
@@ -173,6 +222,7 @@ final class NearbyDiscoveryPeerRegistry {
     static let defaultObservationTTLMilliseconds: Int64 = 20_000
     static let maximumDisplayNameLength = 48
     static let maximumEndpointLength = 96
+    static let maximumDeviceDetailLength = 96
     static let peerKeyHexLength = 16
 
     private let observationTTLMilliseconds: Int64
@@ -261,6 +311,10 @@ final class NearbyDiscoveryPeerRegistry {
 
     static func sanitizeDisplayName(_ value: String?) -> String? {
         sanitizeText(value, maximumLength: maximumDisplayNameLength)
+    }
+
+    static func sanitizeDeviceDetail(_ value: String?) -> String? {
+        sanitizeText(value, maximumLength: maximumDeviceDetailLength)
     }
 
     private static func sanitizeText(_ value: String?, maximumLength: Int) -> String? {

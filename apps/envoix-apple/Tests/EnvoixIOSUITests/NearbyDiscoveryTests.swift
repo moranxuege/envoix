@@ -361,6 +361,119 @@ final class NearbyDiscoveryTests: XCTestCase {
         XCTAssertEqual(coordinator.state.peers.map(\.peerKey), ["1111222233334444"])
     }
 
+    func testPairedDeviceValidatesScopedIdentityAndBoundsMetadata() throws {
+        let device = try XCTUnwrap(NearbyPairedDevice(
+            sourceScopedID: " 0000000000000042 ",
+            source: .wifiAware,
+            displayName: "  Test\n iPad  ",
+            model: String(repeating: "m", count: 120)
+        ))
+
+        XCTAssertEqual(device.id, "wifi_aware:0000000000000042")
+        XCTAssertEqual(device.displayName, "Test iPad")
+        XCTAssertEqual(device.model?.count, NearbyDiscoveryPeerRegistry.maximumDeviceDetailLength)
+        XCTAssertNil(NearbyPairedDevice(sourceScopedID: "bad id", source: .wifiAware))
+        XCTAssertNil(NearbyPairedDevice(sourceScopedID: "", source: .wifiAware))
+    }
+
+    func testCoordinatorReplacesAndDeduplicatesPairedDeviceSnapshot() throws {
+        let provider = CountingNearbyDiscoveryProvider(source: .wifiAware)
+        let coordinator = NearbyDiscoveryCoordinator(
+            identity: LocalNearbyDiscoveryIdentity(
+                peerKey: "0011223344556677",
+                displayName: "iPhone"
+            ),
+            providerFactory: { _ in [provider] }
+        )
+        let first = try XCTUnwrap(NearbyPairedDevice(
+            sourceScopedID: "0000000000000001",
+            source: .wifiAware,
+            displayName: "First"
+        ))
+        let second = try XCTUnwrap(NearbyPairedDevice(
+            sourceScopedID: "0000000000000002",
+            source: .wifiAware,
+            displayName: "Second"
+        ))
+        let duplicateFirst = try XCTUnwrap(NearbyPairedDevice(
+            sourceScopedID: "0000000000000001",
+            source: .wifiAware,
+            displayName: "Ignored duplicate"
+        ))
+
+        coordinator.start()
+        provider.emit(.pairedDevices(source: .wifiAware, devices: [second, first, duplicateFirst]))
+        XCTAssertEqual(coordinator.state.pairedDevices.map(\.sourceScopedID), [
+            "0000000000000001",
+            "0000000000000002",
+        ])
+        XCTAssertEqual(coordinator.state.pairedDevices.first?.displayName, "First")
+
+        provider.emit(.pairedDevices(source: .wifiAware, devices: [second]))
+        XCTAssertEqual(coordinator.state.pairedDevices, [second])
+
+        provider.emit(.pairedDevices(source: .wifiAware, devices: []))
+        XCTAssertTrue(coordinator.state.pairedDevices.isEmpty)
+    }
+
+    func testCoordinatorRejectsMismatchedAndStalePairedSnapshots() throws {
+        let staleProvider = CountingNearbyDiscoveryProvider(source: .wifiAware)
+        let activeProvider = CountingNearbyDiscoveryProvider(source: .wifiAware)
+        var providerIndex = 0
+        let coordinator = NearbyDiscoveryCoordinator(
+            identity: LocalNearbyDiscoveryIdentity(
+                peerKey: "0011223344556677",
+                displayName: "iPhone"
+            ),
+            providerFactory: { _ in
+                defer { providerIndex += 1 }
+                return [providerIndex == 0 ? staleProvider : activeProvider]
+            }
+        )
+        let activeDevice = try XCTUnwrap(NearbyPairedDevice(
+            sourceScopedID: "0000000000000001",
+            source: .wifiAware
+        ))
+        let mismatchedDevice = try XCTUnwrap(NearbyPairedDevice(
+            sourceScopedID: "0000000000000002",
+            source: .mdns
+        ))
+
+        coordinator.start()
+        coordinator.stop()
+        coordinator.start()
+        activeProvider.emit(.pairedDevices(source: .wifiAware, devices: [activeDevice]))
+        activeProvider.emit(.pairedDevices(source: .wifiAware, devices: [mismatchedDevice]))
+        staleProvider.emitAfterStop(.pairedDevices(source: .wifiAware, devices: []))
+
+        XCTAssertEqual(coordinator.state.pairedDevices, [activeDevice])
+    }
+
+    func testCoordinatorRejectsOversizedPairedSnapshotWithoutLosingCurrentState() throws {
+        let provider = CountingNearbyDiscoveryProvider(source: .wifiAware)
+        let coordinator = NearbyDiscoveryCoordinator(
+            identity: LocalNearbyDiscoveryIdentity(
+                peerKey: "0011223344556677",
+                displayName: "iPhone"
+            ),
+            providerFactory: { _ in [provider] }
+        )
+        let current = try XCTUnwrap(NearbyPairedDevice(
+            sourceScopedID: "current",
+            source: .wifiAware
+        ))
+        let oversized = (0...NearbyPairedDevice.maximumSnapshotCount).compactMap { index in
+            NearbyPairedDevice(sourceScopedID: "device-\(index)", source: .wifiAware)
+        }
+        XCTAssertEqual(oversized.count, NearbyPairedDevice.maximumSnapshotCount + 1)
+
+        coordinator.start()
+        provider.emit(.pairedDevices(source: .wifiAware, devices: [current]))
+        provider.emit(.pairedDevices(source: .wifiAware, devices: oversized))
+
+        XCTAssertEqual(coordinator.state.pairedDevices, [current])
+    }
+
     func testPairingSelectionCarriesOnlyUntrustedDisplayContext() {
         let selection = NearbyPairingSelection(peer: NearbyDiscoveredPeer(
             peerKey: "0011223344556677",

@@ -52,13 +52,13 @@ private enum TransferRole: String, CaseIterable {
 }
 
 private enum MobileSheet: String, Identifiable {
-    case send, receive, nearbyPairing, activity, settings
+    case send, receive, nearbyDevices, nearbyPairing, activity, settings
 
     var id: String { rawValue }
 }
 
 struct ContentView: View {
-    private static let roleSwitchPresentationDelay: TimeInterval = 0.2
+    private static let sheetReplacementDelay: TimeInterval = 0.2
 
     @EnvironmentObject private var model: AppModel
     @Environment(\.scenePhase) private var scenePhase
@@ -257,19 +257,17 @@ struct ContentView: View {
                 }
 
                 NavigationLink {
-                    NearbyDiscoveryView(coordinator: nearbyCoordinator) { selection in
-                        nearbyPairingSelection = selection
-                        nearbyInboundInvite = nil
-                        nearbyPairingError = nil
-                        mobileSheet = .nearbyPairing
-                    }
+                    NearbyDiscoveryView(
+                        coordinator: nearbyCoordinator,
+                        onSelectPeer: selectNearbyPeer
+                    )
                 } label: {
                     mobileHomeActionLabel(
                         systemImage: "dot.radiowaves.left.and.right",
                         title: AppText.value("Find nearby devices", "发现附近设备", language: language),
                         subtitle: AppText.value(
-                            "Discover Envoix devices over Bluetooth and the local network.",
-                            "通过蓝牙和局域网发现 Envoix 设备。",
+                            "Discover Envoix devices and manage Wi-Fi Aware pairing.",
+                            "发现 Envoix 设备并管理 Wi-Fi Aware 配对。",
                             language: language
                         ),
                         chevron: "chevron.right"
@@ -406,7 +404,8 @@ struct ContentView: View {
                     : preservedSendSelection.pendingSelectionID,
                 initialPairingInput: pendingSendPairingInput,
                 onInitialPairingInputConsumed: { pendingSendPairingInput = nil },
-                onSwitchToReceive: switchMobileToReceive
+                onSwitchToReceive: switchMobileToReceive,
+                onOpenNearbyDevices: openNearbyDevicesFromSend
             )
         case .receive:
             ReceiveView(
@@ -414,6 +413,11 @@ struct ContentView: View {
                 initialPairingInput: pendingReceivePairingInput,
                 onInitialPairingInputConsumed: { pendingReceivePairingInput = nil },
                 onSwitchToSend: switchMobileToSend
+            )
+        case .nearbyDevices:
+            NearbyDiscoveryView(
+                coordinator: nearbyCoordinator,
+                onSelectPeer: selectNearbyPeer
             )
         case .nearbyPairing:
             if let nearbyPairingSelection {
@@ -455,6 +459,7 @@ struct ContentView: View {
         switch sheet {
         case .send: return AppText.value("Send", "发送", language: language)
         case .receive: return AppText.value("Receive", "接收", language: language)
+        case .nearbyDevices: return AppText.value("Nearby devices", "附近设备", language: language)
         case .nearbyPairing: return AppText.value("Experimental BLE pairing", "实验性蓝牙配对", language: language)
         case .activity: return AppText.value("Activity", "活动", language: language)
         case .settings: return AppText.value("Settings", "设置", language: language)
@@ -467,6 +472,18 @@ struct ContentView: View {
         replaceMobileSheet(with: .receive)
     }
 
+    private func openNearbyDevicesFromSend(_ selection: SendSelectionSnapshot) {
+        preservedSendSelection = selection
+        replaceMobileSheet(with: .nearbyDevices)
+    }
+
+    private func selectNearbyPeer(_ selection: NearbyPairingSelection) {
+        nearbyPairingSelection = selection
+        nearbyInboundInvite = nil
+        nearbyPairingError = nil
+        replaceMobileSheet(with: .nearbyPairing)
+    }
+
     private func switchMobileToSend(_ input: String) {
         pendingSendPairingInput = input
         replaceMobileSheet(with: .send)
@@ -474,7 +491,7 @@ struct ContentView: View {
 
     private func replaceMobileSheet(with sheet: MobileSheet) {
         mobileSheet = nil
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.roleSwitchPresentationDelay) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.sheetReplacementDelay) {
             mobileSheet = sheet
         }
     }
