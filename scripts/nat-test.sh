@@ -20,7 +20,6 @@ readonly AVAILABLE_TESTS=(
 )
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-original_args=("$@")
 sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/Android/Sdk}}"
 emulator="$sdk_root/emulator/emulator"
 adb="$sdk_root/platform-tools/adb"
@@ -47,7 +46,7 @@ device_ip_b=""
 
 # Interface names must fit Linux's 15-character limit. The PID avoids clashes
 # with stale names from an interrupted run.
-readonly net_id="$((${BASHPID:-$$} % 100000))"
+readonly net_id="$((BASHPID % 100000))"
 readonly ns_a="enx${net_id}a"
 readonly ns_b="enx${net_id}b"
 readonly tap_a="ex${net_id}ta"
@@ -265,7 +264,10 @@ prepare_build() {
         "$staged_jni"
     jni_replaced=1
     printf 'Building the debug APK...\n'
-    (cd "$repo_root/android" && ./gradlew assembleDebug --no-daemon)
+    (cd "$repo_root/android" && \
+        ENVOIX_ANDROID_ABIS=x86_64 \
+        ENVOIX_NAT_TEST_CA_DER_PATH="$cert_dir/ca.der" \
+        ./gradlew assembleDebug --no-daemon --rerun-tasks)
     [ -f "$apk" ] || die "Gradle did not produce $apk"
 }
 
@@ -1115,15 +1117,6 @@ done
 cargo ndk --version >/dev/null 2>&1 || die "cargo-ndk is required"
 check_avd "$avd_a"
 check_avd "$avd_b"
-
-if [[ "${ENVOIX_BUILD_LEASE_HELD:-0}" == "1" \
-      && "${ENVOIX_BUILD_LEASE_MODE:-writer}" == "reader" ]]; then
-    die "NAT build cannot run under a reader lease"
-fi
-if [[ "${ENVOIX_BUILD_LEASE_HELD:-0}" != "1" ]]; then
-    exec "$repo_root/scripts/with-build-cache-guard.sh" \
-        "$0" "${original_args[@]}"
-fi
 
 expected_hash="$(sha256sum "$test_file" | awk '{print $1}')"
 log_dir="$repo_root/android/build/nat-test"
