@@ -33,9 +33,7 @@ fn record(direction: TransferDirection, session: Session) -> TransferRecord {
     }
 }
 
-fn actor_for_context(
-    context: SessionContext,
-) -> (Actor, mpsc::UnboundedReceiver<SessionNotice>) {
+fn actor_for_context(context: SessionContext) -> (Actor, mpsc::UnboundedReceiver<SessionNotice>) {
     let (cmds, cmd_rx) = mpsc::unbounded_channel();
     drop(cmds);
     let (notice_tx, notice_rx) = mpsc::unbounded_channel();
@@ -343,8 +341,7 @@ fn restore_validates_persisted_client_context() {
 
 #[tokio::test]
 async fn completed_without_started_still_posts_receipt() {
-    let dir =
-        std::env::temp_dir().join(format!("envoix-driver-receipt-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("envoix-driver-receipt-{}", std::process::id()));
     let _ = tokio::fs::remove_dir_all(&dir).await;
     LocalFileStorage::write_receipt(
         &dir,
@@ -431,8 +428,7 @@ async fn stale_receipt_responses_are_dropped_by_key() {
 #[tokio::test]
 async fn cancel_wins_over_the_attempt() {
     let (session, mut notices) =
-        TransferSession::start(failing_context(TransferDirection::Receive), None, None)
-            .unwrap();
+        TransferSession::start(failing_context(TransferDirection::Receive), None, None).unwrap();
     session.cancel();
     let snapshot = wait_for_state(&mut notices, State::Cancelled).await;
     // Whatever the racing attempt reported, the user's cancel is final.

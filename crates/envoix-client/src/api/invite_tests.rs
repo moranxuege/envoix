@@ -42,8 +42,7 @@ fn typed_code_and_full_url_converge_on_the_code() {
 
 #[test]
 fn unknown_params_are_ignored_for_forward_compat() {
-    let url =
-        "envoix://pair/1234-amber-comet?broker=id%40h%3A1&direct=9.9.9.9%3A1&mdns=envoix-x";
+    let url = "envoix://pair/1234-amber-comet?broker=id%40h%3A1&direct=9.9.9.9%3A1&mdns=envoix-x";
     let inv = Invite::parse(url).unwrap();
     assert_eq!(inv.code(), "1234-amber-comet");
     assert_eq!(inv.broker.as_deref(), Some("id@h:1"));

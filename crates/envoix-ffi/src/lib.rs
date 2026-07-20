@@ -827,9 +827,9 @@ impl NativeMailboxObserver {
 
 mod durable;
 pub use durable::*;
-pub(crate) use durable::{can_pause_durable_activity, durable_runtime};
 #[cfg(test)]
 use durable::{can_cancel_durable_activity, can_resume_durable_activity};
+pub(crate) use durable::{can_pause_durable_activity, durable_runtime};
 
 mod session;
 pub use session::EnvoixSession;

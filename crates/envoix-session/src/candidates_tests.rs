@@ -14,8 +14,7 @@ fn empty_filter_keeps_everything() {
 
 #[test]
 fn deny_removes_matching_cidrs() {
-    let f =
-        CandidateFilter::from_lists(&[], &["10.0.0.0/8".into(), "fe80::/10".into()]).unwrap();
+    let f = CandidateFilter::from_lists(&[], &["10.0.0.0/8".into(), "fe80::/10".into()]).unwrap();
     let kept = f.apply(addrs(&[
         "10.0.0.1:1",
         "1.2.3.4:2",

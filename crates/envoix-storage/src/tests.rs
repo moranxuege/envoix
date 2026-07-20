@@ -204,10 +204,9 @@ async fn opens_deterministic_resume_temp_for_append() {
     file.write_all(b"hello").await.unwrap();
     drop(file);
 
-    let (second_temp_path, mut file) =
-        LocalFileStorage::open_resumable_destination(&dir, &state)
-            .await
-            .unwrap();
+    let (second_temp_path, mut file) = LocalFileStorage::open_resumable_destination(&dir, &state)
+        .await
+        .unwrap();
     file.write_all(b" world").await.unwrap();
     file.flush().await.unwrap();
     drop(file);
@@ -354,8 +353,7 @@ async fn stale_cleanup_preserves_active_partial_and_receipt() {
         .await
         .unwrap();
     let stale_temp =
-        LocalFileStorage::resumable_temp_path(&dir, &stale.file_name, &stale.transfer_id)
-            .unwrap();
+        LocalFileStorage::resumable_temp_path(&dir, &stale.file_name, &stale.transfer_id).unwrap();
     let active_temp =
         LocalFileStorage::resumable_temp_path(&dir, &active.file_name, &active.transfer_id)
             .unwrap();
@@ -370,13 +368,10 @@ async fn stale_cleanup_preserves_active_partial_and_receipt() {
     LocalFileStorage::write_receipt(&dir, &receipt)
         .await
         .unwrap();
-    let _lease = LocalFileStorage::try_acquire_resume_lease(
-        &dir,
-        &active.file_name,
-        &active.transfer_id,
-    )
-    .unwrap()
-    .unwrap();
+    let _lease =
+        LocalFileStorage::try_acquire_resume_lease(&dir, &active.file_name, &active.transfer_id)
+            .unwrap()
+            .unwrap();
 
     let report = LocalFileStorage::cleanup_stale_resume_artifacts(&dir, Duration::ZERO)
         .await

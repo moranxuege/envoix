@@ -135,9 +135,8 @@ fn parses_receive_ipv4() {
 
 #[test]
 fn parses_receive_enable_mdns_command() {
-    let cli =
-        Cli::try_parse_from(["envoix", "receive", "--enable-mdns", "--output", "received"])
-            .unwrap();
+    let cli = Cli::try_parse_from(["envoix", "receive", "--enable-mdns", "--output", "received"])
+        .unwrap();
 
     assert!(matches!(
         cli.command,
@@ -152,8 +151,7 @@ fn parses_receive_enable_mdns_command() {
 
 #[test]
 fn parses_receive_auto_alias() {
-    let cli =
-        Cli::try_parse_from(["envoix", "receive", "--auto", "--output", "received"]).unwrap();
+    let cli = Cli::try_parse_from(["envoix", "receive", "--auto", "--output", "received"]).unwrap();
 
     assert!(matches!(
         cli.command,
@@ -279,8 +277,8 @@ fn parses_receive_ipv6() {
 
 #[test]
 fn parses_send_invite_command() {
-    let cli = Cli::try_parse_from(["envoix", "send", "--invite", "envoix:dGVzdA", "hello.txt"])
-        .unwrap();
+    let cli =
+        Cli::try_parse_from(["envoix", "send", "--invite", "envoix:dGVzdA", "hello.txt"]).unwrap();
 
     assert!(matches!(
         cli.command,
@@ -324,8 +322,7 @@ fn parses_explicit_config_path() {
 
 #[test]
 fn rejects_missing_token() {
-    let error =
-        Cli::try_parse_from(["envoix", "send", "--peer", PEER, "hello.txt"]).unwrap_err();
+    let error = Cli::try_parse_from(["envoix", "send", "--peer", PEER, "hello.txt"]).unwrap_err();
 
     assert_eq!(
         error.kind(),
@@ -352,8 +349,7 @@ fn receive_enable_mdns_with_token_is_valid() {
 #[test]
 fn receive_enable_mdns_without_token_is_valid() {
     assert!(
-        Cli::try_parse_from(["envoix", "receive", "--enable-mdns", "--output", "recv",])
-            .is_ok()
+        Cli::try_parse_from(["envoix", "receive", "--enable-mdns", "--output", "recv",]).is_ok()
     );
 }
 

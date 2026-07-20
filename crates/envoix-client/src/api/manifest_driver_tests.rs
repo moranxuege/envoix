@@ -13,8 +13,7 @@ fn send_context(source: &Path) -> ManifestSessionContext {
         client: ClientContext::default(),
         params: super::super::manifest_activity::ManifestSessionParams {
             operation: ManifestOperation::Send {
-                request: ManifestSendRequest::new(manifest, [(0, source.to_path_buf())])
-                    .unwrap(),
+                request: ManifestSendRequest::new(manifest, [(0, source.to_path_buf())]).unwrap(),
             },
             sources: vec![PeerSource::ShowManual {
                 token: Some("stable-test-token".into()),

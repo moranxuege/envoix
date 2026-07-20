@@ -778,8 +778,7 @@ async fn corrupted_temp_prefix_restarts_from_zero() {
         .await
         .unwrap();
     let temp_path =
-        LocalFileStorage::resumable_temp_path(&output_dir, "corrupt.txt", &transfer_id)
-            .unwrap();
+        LocalFileStorage::resumable_temp_path(&output_dir, "corrupt.txt", &transfer_id).unwrap();
     tokio::fs::write(&temp_path, b"xxxxx").await.unwrap();
 
     let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
@@ -890,8 +889,7 @@ async fn no_resume_ignores_compatible_sidecar() {
         .await
         .unwrap();
     let temp_path =
-        LocalFileStorage::resumable_temp_path(&output_dir, "fresh.txt", &old_transfer_id)
-            .unwrap();
+        LocalFileStorage::resumable_temp_path(&output_dir, "fresh.txt", &old_transfer_id).unwrap();
     tokio::fs::write(&temp_path, b"abcde").await.unwrap();
 
     let (mut sender_connection, mut receiver_connection) = memory_connection_pair();
@@ -1435,8 +1433,7 @@ async fn interrupted_fresh_offer_resumes_into_recorded_target() {
         .await
         .unwrap();
     let temp_path =
-        LocalFileStorage::resumable_temp_path(&output_dir, "data.bin", &old_transfer_id)
-            .unwrap();
+        LocalFileStorage::resumable_temp_path(&output_dir, "data.bin", &old_transfer_id).unwrap();
     tokio::fs::write(&temp_path, b"abcde").await.unwrap();
 
     let (mut sender_connection, mut receiver_connection) = memory_connection_pair();

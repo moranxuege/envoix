@@ -1,4 +1,3 @@
-
 use super::*;
 
 /// A complete, valid params object (a joined room receive). Tests mutate a

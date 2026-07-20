@@ -39,9 +39,7 @@ async fn matching_tokens_complete_auth() {
     let receiver_config = PairingConfig::spake2_shared_token(TOKEN).unwrap();
 
     let receiver_task =
-        tokio::spawn(
-            async move { authenticate_receiver(&mut receiver, &receiver_config).await },
-        );
+        tokio::spawn(async move { authenticate_receiver(&mut receiver, &receiver_config).await });
 
     authenticate_sender(&mut sender, &sender_config)
         .await
@@ -56,9 +54,7 @@ async fn mismatched_tokens_fail_confirmation() {
     let receiver_config = PairingConfig::spake2_shared_token("mnopqrstuvwx").unwrap();
 
     let receiver_task =
-        tokio::spawn(
-            async move { authenticate_receiver(&mut receiver, &receiver_config).await },
-        );
+        tokio::spawn(async move { authenticate_receiver(&mut receiver, &receiver_config).await });
 
     let sender_result = authenticate_sender(&mut sender, &sender_config).await;
     let receiver_result = receiver_task.await.unwrap();
@@ -73,9 +69,7 @@ async fn different_channel_bindings_fail_confirmation() {
     let receiver_config = PairingConfig::spake2_shared_token(TOKEN).unwrap();
 
     let receiver_task =
-        tokio::spawn(
-            async move { authenticate_receiver(&mut receiver, &receiver_config).await },
-        );
+        tokio::spawn(async move { authenticate_receiver(&mut receiver, &receiver_config).await });
 
     let sender_result = authenticate_sender(&mut sender, &sender_config).await;
     let receiver_result = receiver_task.await.unwrap();

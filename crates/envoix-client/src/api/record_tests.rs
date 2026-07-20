@@ -199,8 +199,7 @@ async fn platform_extras_survive_the_round_trip() {
     let _ = tokio::fs::remove_dir_all(&dir).await;
     let store = RecordStore::new(&dir);
     let mut r = record(11);
-    r.platform_extras =
-        Some(serde_json::json!({"qr": "envoix:abc", "saved_uri": "content://x"}));
+    r.platform_extras = Some(serde_json::json!({"qr": "envoix:abc", "saved_uri": "content://x"}));
     store.save(&r).await.unwrap();
 
     let loaded = store.load(11).await.unwrap();
