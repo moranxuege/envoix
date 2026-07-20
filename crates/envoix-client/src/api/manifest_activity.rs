@@ -211,6 +211,21 @@ impl ManifestActivity {
         self.manifest.as_ref().map_or(0, |value| value.total_bytes)
     }
 
+    /// A terminal-state activity must match its plan exactly: aggregate id and
+    /// totals, one result per entry, and no unsuccessful results.
+    fn is_fully_completed(&self, manifest_id: &str, manifest: &ManifestV1) -> bool {
+        self.session.transfer_id.as_deref() == Some(manifest_id)
+            && self.session.total == manifest.total_bytes
+            && self.session.bytes == manifest.total_bytes
+            && self.entry_results.len() == manifest.entries.len()
+            && self.entry_results.iter().all(|result| {
+                !matches!(
+                    result.status,
+                    ManifestEntryResultStatus::Failed | ManifestEntryResultStatus::Cancelled
+                )
+            })
+    }
+
     fn validate(&self) -> Result<(), TransferError> {
         if self.protocol != TransferProtocol::ManifestV1 {
             return Err(TransferError::input(
@@ -283,16 +298,7 @@ impl ManifestActivity {
         if matches!(
             self.session.state,
             State::Completed | State::AwaitingPublication
-        ) && (self.session.transfer_id.as_deref() != Some(&manifest_id)
-            || self.session.total != manifest.total_bytes
-            || self.session.bytes != manifest.total_bytes
-            || self.entry_results.len() != manifest.entries.len()
-            || self.entry_results.iter().any(|result| {
-                matches!(
-                    result.status,
-                    ManifestEntryResultStatus::Failed | ManifestEntryResultStatus::Cancelled
-                )
-            }))
+        ) && !self.is_fully_completed(&manifest_id, manifest)
         {
             return Err(TransferError::input(
                 "partial Manifest activity cannot be completed",

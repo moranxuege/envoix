@@ -15,8 +15,8 @@ use super::{PeerSource, TransferError};
 const SCHEME: &str = "envoix://pair/";
 /// Word count in a generated code (`<digits>-<word>-<word>`).
 const CODE_WORDS: usize = 2;
-/// Older clients used shorter numeric nameplates; current clients use six.
-const MIN_NAMEPLATE_DIGITS: usize = 1;
+/// Older clients used four-digit numeric nameplates; current clients use six.
+const MIN_NAMEPLATE_DIGITS: usize = 4;
 const MAX_NAMEPLATE_DIGITS: usize = 6;
 
 /// The role the invite's creator will take; a peer that scans/opens it should
@@ -328,6 +328,7 @@ mod tests {
             "123456-amber",
             "123456-amber-comet-extra",
             "123456-amber-comet!",
+            "123-amber-comet",
             "1234567-amber-comet",
         ] {
             assert!(
