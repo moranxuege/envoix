@@ -21,9 +21,9 @@ generated_package_copies=(
 )
 
 case "$core_target" in
-  ""|aarch64-apple-darwin|aarch64-apple-ios-sim) ;;
+  ""|aarch64-apple-darwin|aarch64-apple-ios|aarch64-apple-ios-sim) ;;
   *)
-    echo "error: ENVOIX_APPLE_CORE_TARGET must be empty, aarch64-apple-darwin, or aarch64-apple-ios-sim" >&2
+    echo "error: ENVOIX_APPLE_CORE_TARGET must be empty, aarch64-apple-darwin, aarch64-apple-ios, or aarch64-apple-ios-sim" >&2
     exit 2
     ;;
 esac
@@ -191,6 +191,10 @@ validate_apple_package_minimum_versions() {
     return
   fi
   if [[ "$core_target" == "aarch64-apple-ios-sim" ]]; then
+    validate_single_apple_library 16.0
+    return
+  fi
+  if [[ "$core_target" == "aarch64-apple-ios" ]]; then
     validate_single_apple_library 16.0
     return
   fi
