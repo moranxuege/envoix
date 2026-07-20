@@ -48,6 +48,31 @@ final class WifiAwareCapabilityTests: XCTestCase {
             ]
         )
         XCTAssertEqual(envoixWifiAwareService, "_envoix._udp")
+        XCTAssertEqual(envoixWifiAwareProbeService, "_envoix-probe._tcp")
+    }
+
+    func testProbeProtocolRoundTripAndRejectsCorruption() throws {
+        let nonce = Data(0 ..< UInt8(WifiAwareProbeProtocol.nonceLength))
+        let request = try WifiAwareProbeProtocol.makeRequest(nonce: nonce)
+        let response = try WifiAwareProbeProtocol.makeResponse(for: request)
+
+        XCTAssertEqual(request.count, WifiAwareProbeProtocol.frameLength)
+        XCTAssertNoThrow(try WifiAwareProbeProtocol.validateResponse(response, nonce: nonce))
+
+        var corrupted = response
+        corrupted[corrupted.index(before: corrupted.endIndex)] ^= 0xff
+        XCTAssertThrowsError(try WifiAwareProbeProtocol.validateResponse(corrupted, nonce: nonce)) {
+            XCTAssertEqual($0 as? WifiAwareProbeProtocolError, .nonceMismatch)
+        }
+    }
+
+    func testProbeProtocolRejectsInvalidFrameAndNonceLengths() {
+        XCTAssertThrowsError(try WifiAwareProbeProtocol.makeRequest(nonce: Data())) {
+            XCTAssertEqual($0 as? WifiAwareProbeProtocolError, .invalidNonceLength)
+        }
+        XCTAssertThrowsError(try WifiAwareProbeProtocol.makeResponse(for: Data())) {
+            XCTAssertEqual($0 as? WifiAwareProbeProtocolError, .invalidFrameLength)
+        }
     }
 
     func testPhysicalDeviceReportsWifiAwarePairingCapability() async throws {

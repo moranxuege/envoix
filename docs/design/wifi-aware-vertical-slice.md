@@ -215,12 +215,13 @@ users must not need to visit Settings to perform an ordinary transfer.
 Gate: deterministic unit tests for every structured availability state; current
 Apple and Android builds remain compatible.
 
-Physical-device evidence recorded on 2026-07-17:
+Physical-device evidence, initially recorded on 2026-07-17 and refreshed on
+2026-07-20:
 
 | Endpoint | System | Capability result | Gate consequence |
 | --- | --- | --- | --- |
 | Xiaomi `25060RK16C` | Android 15 / API 35 | `FEATURE_WIFI_AWARE=false`; no `wifiaware` system service; Envoix probe reports `unsupported_hardware` | This device cannot be the Android endpoint for W1–W5. A different Android device that reports both Wi-Fi Aware and API-34 pairing support is required. |
-| iPad Air (5th generation), `iPad13,16` | iPadOS 26.5.2 (upgraded from 18.7.8) | Hardware, OS, pairing with the Mac, Developer Mode, and developer-disk services pass; the signed probe is blocked before installation by personal-team provisioning | Sign with a paid Apple Developer Program team, regenerate a profile containing the Wi-Fi Aware entitlement and this iPad, then rerun the physical W0 gate. |
+| iPad Air (5th generation), `iPad13,16` | iPadOS 26.5.2 (upgraded from 18.7.8) | Paid-team signing, installation, and the hosted physical probe pass in iPhone compatibility mode; `availability=pairing_required`, `pairing_supported=true`, `paired_device_count=0` | The Apple physical W0 gate passes. W1 still requires a pairing-capable Android endpoint. |
 
 The Android result is independent of the observed `wifi_disabled` setting:
 `FEATURE_WIFI_AWARE` is a static package-manager capability, and the probe
@@ -242,7 +243,46 @@ not yet list Wi-Fi Aware. The membership evidence comes instead from the Xcode
 26.6 Apple Portal catalog (`WIFI_AWARE.validTeamTypes` contains only the Apple
 Developer Program and Enterprise Program) plus the live provisioning rejection.
 
-Repository-only Apple evidence is green but deliberately weaker: Xcode 26.6
+Update on 2026-07-20: Apple Developer Program enrollment is now active for the
+same Team ID `6638TTB2SF`. Xcode automatic signing created a development profile
+for `com.envoix.app.ios` that expires on 2027-07-20 and contains
+`com.apple.developer.wifi-aware = [Publish, Subscribe]`. A generic iOS device
+build completed with that profile, and the signed app retained the entitlement;
+its processed Info.plist retained both `_envoix._udp` and
+`_envoix-probe._tcp` as publishable and subscribable services. The focused
+hosted suite passed four deterministic capability/probe tests and skipped only
+the physical-hardware assertion on the simulator. This clears the membership,
+profile, compile, and signing portions of W0. The connected iPad Air 5 then
+installed and ran the focused hosted test successfully: one test passed with no
+failures or skips, and the recorded activity was
+`availability=pairing_required pairing_supported=true paired_device_count=0`.
+The signed application contained `Publish` and `Subscribe`, and CoreDevice
+confirmed `com.envoix.app.ios` was installed. This clears the Apple physical W0
+gate. The milestone result bundle is
+`/private/tmp/envoix-wifi-aware-w0-20260720.xcresult`; it is regenerable test
+evidence rather than durable project data.
+
+Testing-scope decision on 2026-07-20: keep the current iPhone-only
+`UIDeviceFamily = [1]` build and run it in iPhone compatibility mode on the iPad
+Air 5 for W0-W2. These gates measure host-device capability, system pairing,
+and the Wi-Fi Aware data path, not native iPad layout quality. The signed
+entitlement and declared services are unchanged by the compatibility UI mode,
+while `WACapabilities` and the DeviceDiscoveryUI fallback remain the runtime
+source of truth. If either framework rejects the compatibility-mode process,
+the physical result invalidates this assumption. Native universal
+`UIDeviceFamily = [1, 2]` support, iPad layout, multitasking, rotation,
+keyboard/pointer, and iPad UI/accessibility review are deferred to product work
+before W5/release acceptance.
+
+Development-host constraint: validation on the 8 GB / 512 GB M2 MacBook Air
+uses the repository's guarded stable caches, incremental builds, serialized
+endpoint prebuilds, and focused physical tests. Full clean or parallel platform
+matrices require a milestone-specific reason; compatibility-mode W0-W2 does
+not justify a separate iPad build product.
+
+The earlier repository-only Apple evidence is green but deliberately weaker:
+it is retained as deterministic regression coverage, while the physical result
+above is the W0 source of truth. Xcode 26.6
 compiled the app and hosted test bundle against the iOS 26.5 simulator SDK, and
 the two capability-policy tests passed. The entitlement array and
 `WiFiAwareServices` dictionary match Apple's peer-to-peer sample structure.

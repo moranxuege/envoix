@@ -50,6 +50,7 @@ class WifiAwareCapabilityTest {
             WifiAwareAvailability.entries.map { it.wireName },
         )
         assertEquals("_envoix._udp", ENVOIX_WIFI_AWARE_SERVICE)
+        assertEquals("_envoix-probe._tcp", ENVOIX_WIFI_AWARE_PROBE_SERVICE)
     }
 
     private fun readyFacts(

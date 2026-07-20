@@ -2652,6 +2652,15 @@ private struct SettingsStageView: View {
                 }
                 .card(padding: 14)
 
+                #if os(iOS) && canImport(DeviceDiscoveryUI) && canImport(WiFiAware)
+                if developerMode {
+                    if #available(iOS 26.0, *) {
+                        AppleWifiAwareDeveloperPanel(language: language)
+                            .card(padding: 14)
+                    }
+                }
+                #endif
+
                 Text(coreBuildLabel)
                     .font(.caption.monospaced())
                     .foregroundStyle(coreInfo.ffiApiVersion == expectedCoreFFIAPIVersion ? Theme.muted : Theme.danger)

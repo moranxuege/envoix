@@ -1,5 +1,7 @@
 package dev.envoix.app.ui
 
+import android.Manifest
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -24,12 +26,15 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -48,8 +53,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.envoix.app.AndroidWifiAwareCapabilityProbe
+import dev.envoix.app.AndroidWifiAwareDiagnosticController
 import dev.envoix.app.SettingsStore
+import dev.envoix.app.WifiAwareAvailability
 import dev.envoix.app.WifiAwareCapabilitySnapshot
+import dev.envoix.app.WifiAwareProbeRole
 
 @Composable
 fun SettingsScreen(onBack: () -> Unit) {
@@ -71,6 +79,18 @@ fun SettingsScreen(onBack: () -> Unit) {
     var logServer by remember { mutableStateOf(settings.logServer) }
     var showAdvanced by remember { mutableStateOf(false) }
     var wifiAwareCapability by remember { mutableStateOf<WifiAwareCapabilitySnapshot?>(null) }
+    var wifiAwareRefreshKey by remember { mutableStateOf(0) }
+    val wifiAwareController = remember(context) { AndroidWifiAwareDiagnosticController(context) }
+    val wifiAwareProbe by wifiAwareController.snapshot.collectAsState()
+    val wifiAwarePermissionLauncher =
+        rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+            wifiAwareRefreshKey += 1
+            wifiAwareController.refresh()
+        }
+
+    DisposableEffect(wifiAwareController) {
+        onDispose { wifiAwareController.close() }
+    }
 
     // Reflect external edits to the candidate lists (e.g. the Avoid-Tailscale
     // toggle mutating `deny`) back into the raw editors, without clobbering
@@ -85,9 +105,14 @@ fun SettingsScreen(onBack: () -> Unit) {
             allowText = settings.candidatesAllow.joinToString("\n")
         }
     }
-    LaunchedEffect(settings.devMode) {
+    LaunchedEffect(settings.devMode, wifiAwareRefreshKey) {
         wifiAwareCapability =
             if (settings.devMode) AndroidWifiAwareCapabilityProbe.read(context) else null
+        if (settings.devMode) {
+            wifiAwareController.refresh()
+        } else {
+            wifiAwareController.stop()
+        }
     }
 
     Column(
@@ -218,6 +243,52 @@ fun SettingsScreen(onBack: () -> Unit) {
                     fontSize = 12.sp,
                     fontFamily = FontFamily.Monospace,
                 )
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "Probe · ${wifiAwareProbe.diagnosticSummary}",
+                    color =
+                        if (wifiAwareProbe.phase == dev.envoix.app.WifiAwareProbePhase.FAILED) {
+                            colors.danger
+                        } else {
+                            colors.muted
+                        },
+                    fontSize = 12.sp,
+                    fontFamily = FontFamily.Monospace,
+                )
+                Spacer(Modifier.height(10.dp))
+                if (
+                    wifiAwareCapability?.availability == WifiAwareAvailability.PERMISSION_REQUIRED &&
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            wifiAwarePermissionLauncher.launch(Manifest.permission.NEARBY_WIFI_DEVICES)
+                        },
+                    ) {
+                        Text("Grant nearby Wi-Fi permission")
+                    }
+                    Spacer(Modifier.height(8.dp))
+                }
+                val probeEnabled =
+                    wifiAwareCapability?.availability == WifiAwareAvailability.READY ||
+                        wifiAwareCapability?.availability == WifiAwareAvailability.PAIRING_REQUIRED
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = { wifiAwareController.start(WifiAwareProbeRole.PUBLISHER) },
+                        enabled = probeEnabled,
+                    ) {
+                        Text("Receive probe")
+                    }
+                    OutlinedButton(
+                        onClick = { wifiAwareController.start(WifiAwareProbeRole.SUBSCRIBER) },
+                        enabled = probeEnabled,
+                    ) {
+                        Text("Send probe")
+                    }
+                    OutlinedButton(onClick = wifiAwareController::stop) {
+                        Text("Stop")
+                    }
+                }
             }
         }
     }
