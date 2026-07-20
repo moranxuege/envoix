@@ -1,8 +1,6 @@
 name: apple-ci
 
 on:
-  push:
-    branches: ['**']
   pull_request:
   workflow_dispatch:
     inputs:
