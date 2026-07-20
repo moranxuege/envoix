@@ -231,6 +231,55 @@ final class NearbyDiscoveryTests: XCTestCase {
         XCTAssertEqual(coordinator.state.localName, "second")
     }
 
+    func testCoordinatorRestartKeepsPresenceIdentityAndDoesNotAccumulateSelfGhosts() {
+        let firstIdentity = LocalNearbyDiscoveryIdentity(
+            peerKey: "0011223344556677",
+            displayName: "first"
+        )
+        var identities = [
+            firstIdentity,
+            LocalNearbyDiscoveryIdentity(peerKey: "8899aabbccddeeff", displayName: "second"),
+            LocalNearbyDiscoveryIdentity(peerKey: "1111222233334444", displayName: "third"),
+            LocalNearbyDiscoveryIdentity(peerKey: "aaaabbbbccccdddd", displayName: "fourth"),
+        ]
+        let initialProvider = CountingNearbyDiscoveryProvider(source: .mdns)
+        let firstRefreshProvider = CountingNearbyDiscoveryProvider(source: .mdns)
+        let secondRefreshProvider = CountingNearbyDiscoveryProvider(source: .mdns)
+        let resumedProvider = CountingNearbyDiscoveryProvider(source: .mdns)
+        var providers = [initialProvider, firstRefreshProvider, secondRefreshProvider, resumedProvider]
+        var advertisedPeerKeys: [String] = []
+        let now: Int64 = 100
+        let coordinator = NearbyDiscoveryCoordinator(
+            identityFactory: { identities.removeFirst() },
+            clock: { now },
+            providerFactory: { identity in
+                advertisedPeerKeys.append(identity.peerKey)
+                return [providers.removeFirst()]
+            }
+        )
+
+        coordinator.start()
+        coordinator.restart()
+        coordinator.restart()
+        secondRefreshProvider.emit(.observation(NearbyDiscoveryObservation(
+            peerKey: firstIdentity.peerKey,
+            source: .mdns,
+            seenAtMilliseconds: now,
+            displayName: firstIdentity.displayName
+        )))
+
+        XCTAssertEqual(advertisedPeerKeys, [
+            firstIdentity.peerKey,
+            firstIdentity.peerKey,
+            firstIdentity.peerKey,
+        ])
+        XCTAssertTrue(coordinator.state.peers.isEmpty)
+
+        coordinator.stop()
+        coordinator.start()
+        XCTAssertEqual(advertisedPeerKeys.last, "8899aabbccddeeff")
+    }
+
     func testRegistryKeepsPeerThroughSourceLossAndMergesReturningSource() throws {
         let registry = NearbyDiscoveryPeerRegistry(observationTTLMilliseconds: 1_000)
         registry.upsert(NearbyDiscoveryObservation(

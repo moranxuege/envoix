@@ -81,14 +81,17 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
     }
 
     func start() {
+        start(rotateIdentity: hasStarted)
+    }
+
+    private func start(rotateIdentity: Bool) {
         guard !started else { return }
         started = true
-        if hasStarted {
+        if rotateIdentity {
             identity = identityFactory()
             state.localName = identity.displayName
-        } else {
-            hasStarted = true
         }
+        hasStarted = true
         generation += 1
         let activeGeneration = generation
         registry.clear()
@@ -136,8 +139,12 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
     }
 
     func restart() {
+        guard started else {
+            start()
+            return
+        }
         stop()
-        start()
+        start(rotateIdentity: false)
     }
 
     func offerInvite(
