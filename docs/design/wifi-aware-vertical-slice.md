@@ -22,11 +22,12 @@ For a nearby, explicitly selected device, Envoix should be able to:
 4. fall back visibly to the existing QR/link/room/direct/relay flows when Wi-Fi
    Aware is unsupported, unavailable, or the peer is remote.
 
-The first accepted matrix is iPad Air 5↔Android in both transfer directions.
-Android↔Android remains useful follow-up evidence but is not a Go blocker until
-a second pairing-capable Android device is available. macOS is not included
-because Apple does not list it among devices that support the public Wi-Fi
-Aware framework.
+The active development matrix is iPhone 15 Pro Max↔iPad Air 5 in both
+directions. The release matrix adds Apple↔Android after pairing-capable Android
+hardware is available. Android implementation work is paused until then;
+existing Android probes remain in the branch but are not a current milestone
+dependency. macOS is not included because Apple does not list it among devices
+that support the public Wi-Fi Aware framework.
 
 ## 2. Verified platform boundary
 
@@ -154,10 +155,12 @@ candidate, but successful interoperability with the current iroh/quinn endpoint
 is not yet proven. Before transfer integration, a physical-device spike must
 prove all of the following:
 
-1. `_envoix._udp` pairing and data-path establishment works between the target
-   iPad Air 5 and Android hardware;
-2. Apple system QUIC and Android's network-bound quinn/iroh endpoint negotiate
-   the same ALPN and open one bidirectional stream;
+1. `_envoix._udp` pairing and data-path establishment works first between the
+   iPhone 15 Pro Max and iPad Air 5, then between Apple and supported Android
+   hardware;
+2. Apple Network.framework QUIC works in both Apple device roles; after Android
+   work resumes, Apple system QUIC and Android's network-bound quinn/iroh
+   endpoint negotiate the same ALPN and open one bidirectional stream;
 3. certificate/endpoint verification can bind the connection to the expected
    Envoix identity without disabling trust globally;
 4. both sides export identical connection-specific keying material for the
@@ -262,64 +265,196 @@ Deterministic capability-policy tests remain the regression gate, while the two
 physical results above are the W0 source of truth. Neither result advances W1:
 both devices still report zero paired devices.
 
-### W1 — Cross-platform pairing
+### Current execution policy
 
-- Apple DevicePicker/DevicePairingView and Android API-34 NAN pairing.
-- Pair, list, remove, restart, and verify the same physical devices.
-- Treat pre-pairing metadata as unauthenticated.
+- Develop and validate on iPhone↔iPad first. Do not add new Android code until
+  supported Android hardware is available.
+- Keep pairing, raw-path, Rust-bridge, transfer, and product-UX work in separate
+  reviewable commits. A later gate must not be used to hide a failure in an
+  earlier one.
+- Prebuild the two Apple endpoints serially with the stable guarded cache, then
+  run paired physical tests without rebuilding. Do not launch a Simulator for
+  W1 or W2.
+- Keep `TransportProvider::WifiAware` at `implementation_pending` until W3 can
+  return a peer-specific, authenticated `FrameConnection`. Hardware support or
+  a paired-device count alone is never `ready`.
+- Use generation tokens and explicit cancellation for pairing observation,
+  browsing, listening, connecting, and transfer callbacks. A stopped attempt
+  must not mutate a newer attempt.
 
-Development gate: pair the iPhone 15 Pro Max and iPad Air 5, then re-verify
-after both apps restart. Release gate: repeat with one pairing-capable Android
-endpoint; neither gate may depend on a router or the internet.
+### W1 — Apple pairing and paired-device state
 
-### W2 — Raw data path and QUIC spike
+Goal: establish and observe system-owned pairing only. W1 does not open a data
+connection and does not change transport selection.
 
-- Use the experimental `_envoix-probe._tcp` request/response to prove a native
-  Wi-Fi Aware path before attaching the Rust transfer stack.
-- Then create `_envoix._udp` publisher/subscriber sessions in `.bulk` mode.
-- Prove the QUIC, trust, exporter, duplex hash, cancellation, and path checks in
-  section 5 before changing Envoix transfer routing.
+Implementation:
 
-Gate: reproducible logs contain capability, pairing, data-path, negotiated ALPN,
-and sanitized path evidence; no secret, pairing credential, or payload is
-logged.
+1. Introduce an Apple pairing controller that continuously observes
+   `WAPairedDevice.allDevices` as an `AsyncSequence`, rather than refreshing only
+   one count after a picker callback.
+2. Project each `WAPairedDevice` into UI-only state containing its opaque app
+   scoped ID, optional display name, pairing information, and current presence.
+   Never treat this metadata as the canonical Envoix identity.
+3. Keep the two system roles explicit in the developer panel:
+   `DevicePairingView` makes the publisher discoverable and `DevicePicker`
+   selects it from the subscriber. Show the expected action on each endpoint
+   instead of two ambiguous “Add” buttons.
+4. Model `idle`, `advertisingForPairing`, `choosingDevice`, `paired`,
+   `cancelled`, and `failed` states. Redact pairing identifiers and system error
+   payloads from logs.
+5. Observe system-side removal through the paired-device sequence. The current
+   public SDK exposes paired-device snapshots but no app-owned removal method;
+   do not invent or persist a private removal mechanism.
 
-### W3 — Rust transport injection
+Physical script:
 
-- Add the versioned foreign async transport interface and
-  `NativeFrameConnection` with memory/fault-injection tests.
-- Replace the Wi-Fi Aware provider's `implementation_pending` registration
-  only after that adapter can create the required authenticated byte channel;
-  use the existing provider selector rather than extending `PathPolicy`.
-- Keep all existing public transfer entry points and iroh paths unchanged.
-- Add new start/restore functions or request fields additively.
+1. Install the same build on the iPhone and iPad and confirm both report
+   `pairing_required` with zero devices.
+2. On the intended receiver, open **Allow device**. On the sender, open
+   **Add device**, select the receiver, and complete the system prompts on both
+   devices.
+3. Require both apps to converge to one paired device without manual refresh.
+4. Force-quit and relaunch both apps, then reboot one endpoint and confirm the
+   pair is still observable.
+5. Remove access using the system-supported UI, confirm both snapshots update,
+   then pair again with the publisher/subscriber roles reversed.
 
-Gate: frame fragmentation, backpressure, EOF, concurrent send/receive,
-cancellation, exporter mismatch, and late callback tests pass; generated Swift
-and Kotlin bindings compile against the current apps.
+Gate: the iPhone and iPad pass pair, observe, restart, remove, and re-pair with
+no duplicate rows, stale callbacks, secret logs, router dependency, or internet
+dependency. Record device/OS/build identifiers and sanitized state transitions.
 
-### W4 — Envoix single-file transfer
+### W2 — Apple raw Wi-Fi Aware data path
 
-- Run the existing authenticated single-file lifecycle over Wi-Fi Aware.
-- Preserve pause/resume, cancel, receipt, publication, and Activity sequence.
-- Report `wifi_aware` as the selected data path without parsing log text.
+Goal: prove a real Wi-Fi Aware byte channel independently of Rust transfer
+semantics. The existing `_envoix-probe._tcp` protocol is diagnostic only.
 
-Gate: iPad→Android and Android→iPad each pass 8 MiB and 64 MiB hash-verified
-transfers, Pause→Resume with nonzero resumed bytes, explicit Cancel cleanup, and
-app restart recovery. Android→Android should pass the same 8 MiB baseline when a
-second supported physical Android device becomes available.
+Implementation:
 
-### W5 — Product picker and fallback
+1. Replace `allPairedDevices` plus “first endpoint wins” with an explicitly
+   selected `WAPairedDevice`. Feed `.selected(...)` or an equivalent precise
+   predicate into the listener/browser so a connection cannot silently target
+   the wrong paired device.
+2. Give the publisher listener, subscriber browser, and resulting
+   `NetworkConnection<TCP>` one owner and one attempt generation. Enforce one
+   publish and one subscribe operation per service, bounded timeouts, idempotent
+   Stop, and deterministic close ordering.
+3. Preserve `.bulk` performance mode. A successful exchange must additionally
+   obtain `connection.currentPath?.wifiAware`; a TCP echo without Wi-Fi Aware
+   path evidence is a failure.
+4. Extend the probe from the 40-byte nonce frame to bounded hash-verified 1 MiB
+   and 64 MiB streams in both directions. Record setup latency, byte count,
+   duration, throughput, signal strength when available, cancellation point,
+   and a redacted structured failure code.
+5. Add deterministic tests for frame fragmentation, truncated input, wrong
+   nonce, timeout, cancel-before-connect, cancel-during-I/O, late callbacks, and
+   repeat Start/Stop. Do not log payloads or pairing material.
+6. After the TCP path is stable, run the `_envoix._udp` Network.framework QUIC
+   spike from section 5. The TCP probe must not become the production transfer
+   transport merely because it connects first.
 
-- Add the nearby-device picker and recovery copy described above.
-- Verify permission denial/recovery, Wi-Fi disabled, peer departure, path loss,
-  and fallback without duplicate Activities.
+Physical matrix:
 
-Gate: physical UI/accessibility review on iPad Air 5 plus Android smoke;
-remote QR/room/relay tests remain green.
+- iPhone publisher → iPad subscriber;
+- iPad publisher → iPhone subscriber;
+- 20 repeated 40-byte handshakes per direction;
+- 1 MiB and 64 MiB hash-verified exchange per direction;
+- five cancel/retry cycles and one force-quit/relaunch cycle per role;
+- Wi-Fi radio remains enabled, but infrastructure Wi-Fi, cellular data, and
+  internet reachability are removed for the final path-evidence run.
 
-Manifest transfer over Wi-Fi Aware is a later composition gate. Neither feature
-may fork its own hashing, resume, or Activity model.
+Gate: every successful run reports `path=wifi_aware`, both roles complete the
+same transcript, cancellation leaves no active listener/browser/connection,
+and the existing LAN/QR/Room paths remain unchanged.
+
+### W3 — Authenticated native transport bridge
+
+Goal: adapt the proven Apple connection to the existing Rust protocol boundary
+without reimplementing Envoix transfer semantics in Swift.
+
+Implementation:
+
+1. Freeze the additive `NativeDuplexTransport` contract only after the W2 QUIC
+   spike decides the channel and exporter requirements. It must provide bounded
+   send/receive, EOF, close, cancellation, and connection-specific key export.
+2. Implement `NativeFrameConnection` in Rust with one read and one write in
+   flight, bounded buffering, incremental frame decoding, and the existing
+   full-duplex control-frame behavior.
+3. Implement the Apple adapter around the owned Network.framework connection.
+   Swift owns platform lifecycle and path metrics; Rust owns Hello,
+   authentication, frames, hashing, receipts, resume, and Activity state.
+4. Produce a peer-specific Wi-Fi Aware candidate only when the chosen paired
+   device, native adapter, and authenticated channel are usable. Register that
+   adapter with the existing `TransportSelector`; do not extend iroh
+   `PathPolicy`.
+5. Keep all current APIs source-compatible. New transport preference or native
+   channel parameters are additive, and old durable records continue to decode
+   as `Automatic`.
+
+Gate: Rust memory/fault tests pass fragmentation, backpressure, EOF, concurrent
+send/receive, cancellation, exporter mismatch, authentication failure, and late
+callbacks. Generated Swift bindings compile on the physical Apple target. Only
+then may Wi-Fi Aware move from `implementation_pending` to peer-specific
+`ready`.
+
+### W4 — Envoix single-file lifecycle over Wi-Fi Aware
+
+Goal: carry the existing authenticated single-file protocol over the W3
+connection while preserving one canonical Activity.
+
+Implementation:
+
+1. Create the Activity once, then attempt the selected provider. `Require`
+   returns a structured Wi-Fi Aware failure; `Prefer` may fall back to iroh
+   without creating a second Activity or losing the selected file.
+2. Preserve send/receive progress, pause, nonzero-byte resume, cancel, receipt,
+   publication, retry, and process-restart recovery exactly as on iroh.
+3. Store `selected_provider=wifi_aware` and structured fallback reason in the
+   Activity projection. UI and diagnostics must not infer the path from log
+   text.
+4. Keep discovery labels and pairing aliases untrusted until the existing
+   Envoix authentication binds the channel to the expected peer identity.
+
+Gate on iPhone↔iPad, both directions: hash-verified 8 MiB and 64 MiB transfers;
+Pause→Resume with nonzero resumed bytes; explicit Cancel cleanup; receiver
+publication; sender and receiver restart recovery; `Prefer` fallback and
+`Require` no-fallback behavior; no duplicate Activity.
+
+### W5 — Product picker, recovery, and Apple UX
+
+Goal: move the proven flow out of developer settings without exposing an
+unfinished provider.
+
+Implementation:
+
+1. Add **Nearby devices** to the normal send flow only when a peer-specific
+   candidate is usable. Already paired and currently reachable devices appear
+   first; **Add nearby device** invokes the system pairing UI.
+2. Present `Pairing`, `Connecting nearby`, `Transferring`, and structured
+   recovery states. Preserve the Activity and file selection across Retry or
+   fallback to QR/link/Room.
+3. Verify permission denial/recovery, Wi-Fi disabled, pairing revoked, peer
+   departure, listener/browser failure, path loss, background/foreground, and
+   repeated taps.
+4. Complete VoiceOver labels, Dynamic Type, localization, and the iPhone
+   compatibility-mode iPad review. If DeviceDiscoveryUI or the connection flow
+   fails in compatibility mode, promote native iPad support before accepting
+   W5 rather than adding a private workaround.
+
+Gate: physical UI/accessibility review on both Apple devices; existing
+LAN/QR/Room/direct/relay regression suites remain green; no duplicate peers,
+prompts, connections, or Activities.
+
+### W6 — Resume cross-platform validation when hardware exists
+
+Android development resumes only after a device reports Wi-Fi Aware support,
+API-34 pairing support, and the required runtime permission behavior. Re-run W0
+on that hardware, then repeat W1–W4 for Apple↔Android in both directions. The
+existing Android probe code is a starting point, not accepted evidence.
+
+Release gate: Apple↔Android passes pairing persistence, raw-path evidence,
+authenticated 8 MiB/64 MiB transfer, pause/resume, cancel, restart recovery,
+and fallback. Manifest transfer and Android↔Android remain later composition
+gates; neither may fork hashing, resume, or Activity semantics.
 
 ## 8. Release evidence
 
