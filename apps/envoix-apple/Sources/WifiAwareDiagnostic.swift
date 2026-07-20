@@ -10,6 +10,58 @@ enum WifiAwareProbeProtocolError: Error, Equatable {
     case nonceMismatch
 }
 
+struct WifiAwareProbeFrameAccumulator {
+    private var buffer = Data()
+
+    var bufferedByteCount: Int {
+        buffer.count
+    }
+
+    mutating func append(_ bytes: Data) throws -> Data? {
+        guard buffer.count + bytes.count <= WifiAwareProbeProtocol.frameLength else {
+            throw WifiAwareProbeProtocolError.invalidFrameLength
+        }
+        buffer.append(bytes)
+        return buffer.count == WifiAwareProbeProtocol.frameLength ? buffer : nil
+    }
+
+    func finish() throws -> Data {
+        guard buffer.count == WifiAwareProbeProtocol.frameLength else {
+            throw WifiAwareProbeProtocolError.invalidFrameLength
+        }
+        return buffer
+    }
+}
+
+struct WifiAwareProbeAttemptGate {
+    typealias Token = UInt64
+
+    private(set) var currentToken: Token = 0
+    private(set) var isActive = false
+
+    mutating func begin() -> Token {
+        currentToken &+= 1
+        isActive = true
+        return currentToken
+    }
+
+    mutating func cancel() {
+        guard isActive else { return }
+        isActive = false
+        currentToken &+= 1
+    }
+
+    func accepts(_ token: Token) -> Bool {
+        isActive && token == currentToken
+    }
+
+    mutating func complete(_ token: Token) -> Bool {
+        guard accepts(token) else { return false }
+        isActive = false
+        return true
+    }
+}
+
 enum WifiAwareProbeProtocol {
     static let nonceLength = 32
     static let frameLength = 40
@@ -88,34 +140,64 @@ struct WifiAwareProbeSnapshot: Equatable, Sendable {
 }
 
 @available(iOS 26.0, *)
-private enum AppleWifiAwareProbeError: Error {
+enum AppleWifiAwareProbeError: Error, Equatable {
     case serviceNotDeclared
+    case noSelectedDevice
     case timedOut
     case noEndpoint
     case noWifiAwarePath
 }
 
 @available(iOS 26.0, *)
+struct WifiAwareProbeDeviceChoice: Identifiable, Equatable, Sendable {
+    let id: WAPairedDevice.ID
+    let displayName: String
+}
+
+@available(iOS 26.0, *)
 @MainActor
 final class AppleWifiAwareDiagnosticController: ObservableObject {
     @Published private(set) var snapshot = WifiAwareProbeSnapshot.idle
+    @Published private(set) var pairedDevices: [WifiAwareProbeDeviceChoice] = []
+    @Published private(set) var selectedDeviceID: WAPairedDevice.ID?
 
     private static let logger = Logger(subsystem: "com.envoix.app.ios", category: "wifi-aware-probe")
     private static let operationTimeout: Duration = .seconds(30)
     private static let evidenceRetryDelay: Duration = .milliseconds(100)
     private static let evidenceRetryCount = 10
+    private static let maxDisplayNameLength = 128
+
+    private enum Role {
+        case publisher
+        case subscriber
+    }
+
+    private enum PublisherRunSignal: Error {
+        case probeCompleted
+    }
 
     private var operation: Task<Void, Never>?
+    private var attemptGate = WifiAwareProbeAttemptGate()
+    private var pairedDeviceSnapshot: WAPairedDevice.Devices = [:]
+    private var refreshGeneration: UInt64 = 0
 
     func refreshPairedDevices() {
+        refreshGeneration &+= 1
+        let activeGeneration = refreshGeneration
         Task { [weak self] in
             do {
                 let devices = try await WAPairedDevice.allDevices.current()
-                self?.updatePairedDeviceCount(devices?.count)
+                guard let self, self.refreshGeneration == activeGeneration else { return }
+                self.applyPairedDevices(devices ?? [:])
             } catch {
-                self?.recordFailure(error)
+                guard let self, self.refreshGeneration == activeGeneration else { return }
+                self.recordFailure(error)
             }
         }
+    }
+
+    func selectDevice(id: WAPairedDevice.ID?) {
+        selectedDeviceID = id.flatMap { pairedDeviceSnapshot[$0] == nil ? nil : $0 }
     }
 
     func pairingEndpointSelected() {
@@ -124,48 +206,65 @@ final class AppleWifiAwareDiagnosticController: ObservableObject {
     }
 
     func startPublisherProbe() {
-        stop()
-        update(phase: .publishing, detail: "starting")
-        operation = Task { [weak self] in
-            guard let self else { return }
-            do {
-                try await self.runPublisherProbe()
-            } catch is CancellationError {
-                return
-            } catch {
-                self.recordFailure(error)
-            }
-        }
+        startProbe(role: .publisher)
     }
 
     func startSubscriberProbe() {
+        startProbe(role: .subscriber)
+    }
+
+    func stop() {
+        attemptGate.cancel()
+        let activeOperation = operation
+        operation = nil
+        activeOperation?.cancel()
+        update(phase: .idle, detail: "stopped")
+    }
+
+    private func startProbe(role: Role) {
         stop()
-        update(phase: .browsing, detail: "starting")
+        guard let selectedDeviceID,
+              let device = pairedDeviceSnapshot[selectedDeviceID] else {
+            recordFailure(AppleWifiAwareProbeError.noSelectedDevice)
+            return
+        }
+
+        let token = attemptGate.begin()
+        switch role {
+        case .publisher:
+            update(phase: .publishing, detail: "starting", generation: token)
+        case .subscriber:
+            update(phase: .browsing, detail: "starting", generation: token)
+        }
+
         operation = Task { [weak self] in
             guard let self else { return }
             do {
-                try await self.runSubscriberProbe()
+                switch role {
+                case .publisher:
+                    try await self.runPublisherProbe(device: device, generation: token)
+                case .subscriber:
+                    try await self.runSubscriberProbe(device: device, generation: token)
+                }
             } catch is CancellationError {
-                return
+                self.finishAttempt(token)
             } catch {
-                self.recordFailure(error)
+                self.recordFailure(error, generation: token)
+                self.finishAttempt(token)
             }
         }
     }
 
-    func stop() {
-        operation?.cancel()
-        operation = nil
-        update(phase: .idle, detail: "stopped")
-    }
-
-    private func runPublisherProbe() async throws {
+    private func runPublisherProbe(
+        device: WAPairedDevice,
+        generation: WifiAwareProbeAttemptGate.Token
+    ) async throws {
         guard let service = WAPublishableService.allServices[envoixWifiAwareProbeService] else {
             throw AppleWifiAwareProbeError.serviceNotDeclared
         }
 
         let listener: NetworkListener<TCP> = try NetworkListener(
-            for: .wifiAware(.connecting(to: service, from: .allPairedDevices)),
+            for: .wifiAware(.connecting(to: service, from: .selected([device]))),
             using: .parameters {
                 TCP().noDelay(true)
             }
@@ -177,31 +276,46 @@ final class AppleWifiAwareDiagnosticController: ObservableObject {
             Self.logListenerState(state)
         }
 
-        update(phase: .publishing, detail: "waiting_for_connection")
-        try await listener.run { [weak self] connection in
-            guard let self else { return }
-            try await self.handleIncoming(connection)
+        update(phase: .publishing, detail: "waiting_for_connection", generation: generation)
+        do {
+            try await withProbeTimeout(Self.operationTimeout) { [weak self] in
+                guard let controller = self else {
+                    throw CancellationError()
+                }
+                try await listener.run { connection in
+                    guard await controller.attemptGate.accepts(generation) else {
+                        throw CancellationError()
+                    }
+                    try await controller.handleIncoming(connection, generation: generation)
+                    throw PublisherRunSignal.probeCompleted
+                }
+            }
+        } catch PublisherRunSignal.probeCompleted {
+            finishAttempt(generation)
         }
     }
 
-    private func runSubscriberProbe() async throws {
+    private func runSubscriberProbe(
+        device: WAPairedDevice,
+        generation: WifiAwareProbeAttemptGate.Token
+    ) async throws {
         guard let service = WASubscribableService.allServices[envoixWifiAwareProbeService] else {
             throw AppleWifiAwareProbeError.serviceNotDeclared
         }
 
         let browser = NetworkBrowser(
             for: WASubscriberBrowser.wifiAware(
-                .connecting(to: .allPairedDevices, from: service)
+                .connecting(to: .selected([device]), from: service)
             )
         )
         .onStateUpdate { _, state in
             Self.logBrowserState(state)
         }
 
-        update(phase: .browsing, detail: "waiting_for_endpoint")
+        update(phase: .browsing, detail: "waiting_for_endpoint", generation: generation)
         let endpoint: WAEndpoint = try await withProbeTimeout(Self.operationTimeout) {
             try await browser.run { endpoints -> NetworkBrowser<WASubscriberBrowser>.RunResult<WAEndpoint> in
-                guard let endpoint = endpoints.first else {
+                guard let endpoint = endpoints.first(where: { $0.device.id == device.id }) else {
                     return .continue
                 }
                 return .finish(endpoint)
@@ -220,41 +334,67 @@ final class AppleWifiAwareDiagnosticController: ObservableObject {
             Self.logConnectionState(state)
         }
 
-        update(phase: .connecting, detail: "endpoint_found")
+        update(phase: .connecting, detail: "endpoint_found", generation: generation)
         try await withProbeTimeout(Self.operationTimeout) { [weak self] in
             guard let self else { throw CancellationError() }
-            try await self.exchangeProbe(on: connection)
+            guard await self.attemptGate.accepts(generation) else {
+                throw CancellationError()
+            }
+            try await self.exchangeProbe(on: connection, generation: generation)
         }
+        finishAttempt(generation)
     }
 
-    private func handleIncoming(_ connection: NetworkConnection<TCP>) async throws {
+    private func handleIncoming(
+        _ connection: NetworkConnection<TCP>,
+        generation: WifiAwareProbeAttemptGate.Token
+    ) async throws {
         connection.onStateUpdate { _, state in
             Self.logConnectionState(state)
         }
-        update(phase: .exchanging, detail: "receiving_probe")
+        update(phase: .exchanging, detail: "receiving_probe", generation: generation)
 
-        let message = try await withProbeTimeout(Self.operationTimeout) {
-            try await connection.receive(exactly: WifiAwareProbeProtocol.frameLength)
-        }
-        let response = try WifiAwareProbeProtocol.makeResponse(for: message.content)
+        let request = try await receiveProbeFrame(on: connection)
+        let response = try WifiAwareProbeProtocol.makeResponse(for: request)
         try await connection.send(response, endOfStream: true)
         let evidence = try await pathEvidence(for: connection)
-        update(phase: .succeeded, detail: evidence)
+        update(phase: .succeeded, detail: evidence, generation: generation)
     }
 
-    private func exchangeProbe(on connection: NetworkConnection<TCP>) async throws {
-        update(phase: .exchanging, detail: "sending_probe")
+    private func exchangeProbe(
+        on connection: NetworkConnection<TCP>,
+        generation: WifiAwareProbeAttemptGate.Token
+    ) async throws {
+        update(phase: .exchanging, detail: "sending_probe", generation: generation)
         let nonce = Data((0 ..< WifiAwareProbeProtocol.nonceLength).map { _ in UInt8.random(in: .min ... .max) })
         let request = try WifiAwareProbeProtocol.makeRequest(nonce: nonce)
         try await connection.send(request)
-        let response = try await connection.receive(exactly: WifiAwareProbeProtocol.frameLength)
-        try WifiAwareProbeProtocol.validateResponse(response.content, nonce: nonce)
+        let response = try await receiveProbeFrame(on: connection)
+        try WifiAwareProbeProtocol.validateResponse(response, nonce: nonce)
         let evidence = try await pathEvidence(for: connection)
-        update(phase: .succeeded, detail: evidence)
+        update(phase: .succeeded, detail: evidence, generation: generation)
+    }
+
+    private func receiveProbeFrame(on connection: NetworkConnection<TCP>) async throws -> Data {
+        try await withProbeTimeout(Self.operationTimeout) {
+            var accumulator = WifiAwareProbeFrameAccumulator()
+            while accumulator.bufferedByteCount < WifiAwareProbeProtocol.frameLength {
+                let remaining = WifiAwareProbeProtocol.frameLength - accumulator.bufferedByteCount
+                let message = try await connection.receive(atMost: remaining)
+                if let frame = try accumulator.append(message.content) {
+                    return frame
+                }
+                if message.metadata.endOfStream {
+                    return try accumulator.finish()
+                }
+            }
+            return try accumulator.finish()
+        }
     }
 
     private func pathEvidence(for connection: NetworkConnection<TCP>) async throws -> String {
         for _ in 0 ..< Self.evidenceRetryCount {
+            try Task.checkCancellation()
             if let path = connection.currentPath,
                let awarePath = try await path.wifiAware {
                 let signal = awarePath.performance.signalStrength
@@ -266,7 +406,42 @@ final class AppleWifiAwareDiagnosticController: ObservableObject {
         throw AppleWifiAwareProbeError.noWifiAwarePath
     }
 
-    private func update(phase: WifiAwareProbePhase, detail: String) {
+    private func applyPairedDevices(_ devices: WAPairedDevice.Devices) {
+        pairedDeviceSnapshot = devices
+        pairedDevices = devices.values
+            .map {
+                WifiAwareProbeDeviceChoice(
+                    id: $0.id,
+                    displayName: Self.displayName(for: $0)
+                )
+            }
+            .sorted {
+                let comparison = $0.displayName.localizedCaseInsensitiveCompare($1.displayName)
+                return comparison == .orderedSame ? $0.id < $1.id : comparison == .orderedAscending
+            }
+
+        if let selectedDeviceID, devices[selectedDeviceID] != nil {
+            self.selectedDeviceID = selectedDeviceID
+        } else {
+            selectedDeviceID = pairedDevices.first?.id
+        }
+        updatePairedDeviceCount(devices.count)
+    }
+
+    private func finishAttempt(_ generation: WifiAwareProbeAttemptGate.Token) {
+        if attemptGate.complete(generation) {
+            operation = nil
+        }
+    }
+
+    private func update(
+        phase: WifiAwareProbePhase,
+        detail: String,
+        generation: WifiAwareProbeAttemptGate.Token? = nil
+    ) {
+        if let generation, !attemptGate.accepts(generation) {
+            return
+        }
         snapshot = WifiAwareProbeSnapshot(
             phase: phase,
             detail: detail,
@@ -286,15 +461,31 @@ final class AppleWifiAwareDiagnosticController: ObservableObject {
         Self.logger.info("paired_device_count=\(count ?? -1, privacy: .public)")
     }
 
-    private func recordFailure(_ error: Error) {
+    private func recordFailure(
+        _ error: Error,
+        generation: WifiAwareProbeAttemptGate.Token? = nil
+    ) {
         let detail = Self.redactedFailureDetail(error)
-        update(phase: .failed, detail: detail)
+        update(phase: .failed, detail: detail, generation: generation)
+    }
+
+    private static func displayName(for device: WAPairedDevice) -> String {
+        for candidate in [device.name, device.pairingInfo?.pairingName] {
+            let value = candidate?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !value.isEmpty,
+               value.count <= maxDisplayNameLength,
+               value.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) }) {
+                return value
+            }
+        }
+        return "Paired Apple device"
     }
 
     private static func redactedFailureDetail(_ error: Error) -> String {
         if let error = error as? AppleWifiAwareProbeError {
             switch error {
             case .serviceNotDeclared: return "service_not_declared"
+            case .noSelectedDevice: return "no_selected_device"
             case .timedOut: return "timeout"
             case .noEndpoint: return "no_endpoint"
             case .noWifiAwarePath: return "wrong_or_missing_path"
@@ -381,7 +572,7 @@ private extension WAError {
 }
 
 @available(iOS 26.0, *)
-private func withProbeTimeout<Value: Sendable>(
+func withProbeTimeout<Value: Sendable>(
     _ timeout: Duration,
     operation: @escaping @Sendable () async throws -> Value
 ) async throws -> Value {
@@ -417,6 +608,7 @@ struct AppleWifiAwareDeveloperPanel: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier("settings_wifi_aware_probe")
 
+            targetPicker
             pairingControls
 
             HStack(spacing: 8) {
@@ -424,11 +616,13 @@ struct AppleWifiAwareDeveloperPanel: View {
                     controller.startPublisherProbe()
                 }
                 .buttonStyle(.borderedProminent)
+                .disabled(controller.selectedDeviceID == nil)
 
                 Button(AppText.value("Send probe", "发送探针", language: language)) {
                     controller.startSubscriberProbe()
                 }
                 .buttonStyle(.bordered)
+                .disabled(controller.selectedDeviceID == nil)
 
                 Button(AppText.value("Stop", "停止", language: language)) {
                     controller.stop()
@@ -442,6 +636,33 @@ struct AppleWifiAwareDeveloperPanel: View {
         }
         .onDisappear {
             controller.stop()
+        }
+    }
+
+    @ViewBuilder
+    private var targetPicker: some View {
+        if controller.pairedDevices.isEmpty {
+            Text(AppText.value(
+                "Pair and select one device before starting a probe.",
+                "开始探针前，请先配对并选择一台设备。",
+                language: language
+            ))
+            .font(.footnote)
+            .foregroundStyle(Theme.muted)
+        } else {
+            Picker(
+                AppText.value("Probe target", "探针目标", language: language),
+                selection: Binding(
+                    get: { controller.selectedDeviceID },
+                    set: { controller.selectDevice(id: $0) }
+                )
+            ) {
+                ForEach(controller.pairedDevices) { device in
+                    Text(device.displayName).tag(Optional(device.id))
+                }
+            }
+            .pickerStyle(.menu)
+            .accessibilityIdentifier("settings_wifi_aware_probe_target")
         }
     }
 

@@ -75,6 +75,86 @@ final class WifiAwareCapabilityTests: XCTestCase {
         }
     }
 
+    func testProbeFrameAccumulatorHandlesFragmentedInput() throws {
+        let nonce = Data(0 ..< UInt8(WifiAwareProbeProtocol.nonceLength))
+        let frame = try WifiAwareProbeProtocol.makeRequest(nonce: nonce)
+        var accumulator = WifiAwareProbeFrameAccumulator()
+
+        XCTAssertNil(try accumulator.append(Data(frame.prefix(7))))
+        XCTAssertNil(try accumulator.append(Data(frame.dropFirst(7).prefix(11))))
+        XCTAssertEqual(
+            try accumulator.append(Data(frame.dropFirst(18))),
+            frame
+        )
+        XCTAssertEqual(try accumulator.finish(), frame)
+    }
+
+    func testProbeFrameAccumulatorRejectsTruncatedAndOversizedInput() throws {
+        var truncated = WifiAwareProbeFrameAccumulator()
+        XCTAssertNil(try truncated.append(Data(repeating: 0, count: WifiAwareProbeProtocol.frameLength - 1)))
+        XCTAssertThrowsError(try truncated.finish()) {
+            XCTAssertEqual($0 as? WifiAwareProbeProtocolError, .invalidFrameLength)
+        }
+
+        var oversized = WifiAwareProbeFrameAccumulator()
+        XCTAssertThrowsError(
+            try oversized.append(Data(repeating: 0, count: WifiAwareProbeProtocol.frameLength + 1))
+        ) {
+            XCTAssertEqual($0 as? WifiAwareProbeProtocolError, .invalidFrameLength)
+        }
+    }
+
+    func testProbeAttemptGateRejectsCancelledCompletedAndLateCallbacks() {
+        var gate = WifiAwareProbeAttemptGate()
+        let first = gate.begin()
+        XCTAssertTrue(gate.accepts(first))
+
+        gate.cancel()
+        let tokenAfterCancel = gate.currentToken
+        gate.cancel()
+        XCTAssertEqual(gate.currentToken, tokenAfterCancel, "Stop must be idempotent")
+        XCTAssertFalse(gate.accepts(first))
+
+        let second = gate.begin()
+        XCTAssertFalse(gate.accepts(first))
+        XCTAssertTrue(gate.accepts(second))
+        XCTAssertTrue(gate.complete(second))
+        XCTAssertFalse(gate.accepts(second))
+        XCTAssertFalse(gate.complete(second), "A late completion must be ignored")
+    }
+
+    func testProbeTimeoutAndCallerCancellation() async throws {
+        guard #available(iOS 26.0, *) else {
+            throw XCTSkip("The Network.framework probe requires iOS 26")
+        }
+
+        do {
+            _ = try await withProbeTimeout(.milliseconds(20)) {
+                try await Task<Never, Never>.sleep(for: .seconds(5))
+                return 1
+            }
+            XCTFail("The probe operation should time out")
+        } catch {
+            XCTAssertEqual(error as? AppleWifiAwareProbeError, .timedOut)
+        }
+
+        let operation = Task {
+            try await withProbeTimeout(.seconds(5)) {
+                try await Task<Never, Never>.sleep(for: .seconds(5))
+                return 1
+            }
+        }
+        operation.cancel()
+        do {
+            _ = try await operation.value
+            XCTFail("Caller cancellation should stop the probe")
+        } catch is CancellationError {
+            // Expected.
+        } catch {
+            XCTFail("Expected CancellationError, received \(type(of: error))")
+        }
+    }
+
     func testPhysicalDeviceReportsWifiAwarePairingCapability() async throws {
         #if targetEnvironment(simulator)
         throw XCTSkip("Wi-Fi Aware requires supported physical hardware")
