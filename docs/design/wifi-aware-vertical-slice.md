@@ -1,13 +1,15 @@
 # Cross-platform Wi-Fi Aware vertical slice
 
-Status: **research contract — not implemented or advertised as supported**
+Status: **W0 passed on Apple hardware; W1/W2 diagnostics are experimental and
+the product must not advertise Wi-Fi Aware transfer support yet**
 
-Last reviewed: 2026-07-17
+Last reviewed: 2026-07-20
 
 This document defines the smallest honest path to an Envoix Wi-Fi Aware data
-path between iPad Air 5 and Android. It does not replace the remote rendezvous,
-mailbox, or relay paths, and it does not claim that an Apple `WAEndpoint` can be
-passed directly to the existing Rust iroh endpoint.
+path. The first development pair is iPhone↔iPad; the release target remains a
+cross-platform Apple↔Android path. Wi-Fi Aware does not replace the remote
+rendezvous, mailbox, or relay paths, and an Apple `WAEndpoint` cannot be passed
+directly to the existing Rust iroh endpoint.
 
 ## 1. Product outcome
 
@@ -221,7 +223,8 @@ Physical-device evidence, initially recorded on 2026-07-17 and refreshed on
 | Endpoint | System | Capability result | Gate consequence |
 | --- | --- | --- | --- |
 | Xiaomi `25060RK16C` | Android 15 / API 35 | `FEATURE_WIFI_AWARE=false`; no `wifiaware` system service; Envoix probe reports `unsupported_hardware` | This device cannot be the Android endpoint for W1–W5. A different Android device that reports both Wi-Fi Aware and API-34 pairing support is required. |
-| iPad Air (5th generation), `iPad13,16` | iPadOS 26.5.2 (upgraded from 18.7.8) | Paid-team signing, installation, and the hosted physical probe pass in iPhone compatibility mode; `availability=pairing_required`, `pairing_supported=true`, `paired_device_count=0` | The Apple physical W0 gate passes. W1 still requires a pairing-capable Android endpoint. |
+| iPad Air (5th generation), `iPad13,16` | iPadOS 26.5.2 | Build `2026072001` passes the hosted physical probe in iPhone compatibility mode; `availability=pairing_required`, `pairing_supported=true`, `paired_device_count=0` | Apple W0 passes on iPad. It is available for the preliminary Apple↔Apple W1 gate. |
+| iPhone 15 Pro Max, `iPhone16,2` | iOS 26.5 | Build `2026072001` passes the hosted physical probe; `availability=pairing_required`, `pairing_supported=true`, `paired_device_count=0` | Apple W0 passes on iPhone. Pairing is the next gate. |
 
 The Android result is independent of the observed `wifi_disabled` setting:
 `FEATURE_WIFI_AWARE` is a static package-manager capability, and the probe
@@ -229,38 +232,13 @@ rejects the device before permission or availability checks. It is evidence
 against this target device, not evidence that cross-platform Wi-Fi Aware is
 generally infeasible.
 
-The development host also remains outside the Apple signing gate. After Xcode
-login, automatic signing successfully generated fresh personal-team profiles
-for the test runner and share extension, proving that account access works. A
-physical iPad build with Xcode 26.6 and `-allowProvisioningUpdates` then failed
-with Apple's explicit error that personal development teams do not support the
-Wi-Fi Aware capability. No new `com.envoix.app.ios` application profile was
-created; the old profile lacks both the Wi-Fi Aware entitlement and the target
-iPad. A paid Apple Developer Program team is therefore a hard W0 prerequisite,
-not a repository workaround. Apple's entitlement reference defines the key but
-does not state membership eligibility, and its public iOS capability table does
-not yet list Wi-Fi Aware. The membership evidence comes instead from the Xcode
-26.6 Apple Portal catalog (`WIFI_AWARE.validTeamTypes` contains only the Apple
-Developer Program and Enterprise Program) plus the live provisioning rejection.
-
-Update on 2026-07-20: Apple Developer Program enrollment is now active for the
-same Team ID `6638TTB2SF`. Xcode automatic signing created a development profile
-for `com.envoix.app.ios` that expires on 2027-07-20 and contains
-`com.apple.developer.wifi-aware = [Publish, Subscribe]`. A generic iOS device
-build completed with that profile, and the signed app retained the entitlement;
-its processed Info.plist retained both `_envoix._udp` and
-`_envoix-probe._tcp` as publishable and subscribable services. The focused
-hosted suite passed four deterministic capability/probe tests and skipped only
-the physical-hardware assertion on the simulator. This clears the membership,
-profile, compile, and signing portions of W0. The connected iPad Air 5 then
-installed and ran the focused hosted test successfully: one test passed with no
-failures or skips, and the recorded activity was
-`availability=pairing_required pairing_supported=true paired_device_count=0`.
-The signed application contained `Publish` and `Subscribe`, and CoreDevice
-confirmed `com.envoix.app.ios` was installed. This clears the Apple physical W0
-gate. The milestone result bundle is
-`/private/tmp/envoix-wifi-aware-w0-20260720.xcresult`; it is regenerable test
-evidence rather than durable project data.
+Apple Developer Program enrollment became active on 2026-07-20 for Team ID
+`6638TTB2SF`. Xcode automatic signing created a development profile for
+`com.envoix.app.ios` that expires on 2027-07-20 and contains
+`com.apple.developer.wifi-aware = [Publish, Subscribe]`. The signed build kept
+both entitlement values and declared `_envoix._udp`. The physical W0 probes on
+the iPad and iPhone passed without using a Simulator. Their `.xcresult` bundles
+are regenerable build evidence and are not durable repository data.
 
 Testing-scope decision on 2026-07-20: keep the current iPhone-only
 `UIDeviceFamily = [1]` build and run it in iPhone compatibility mode on the iPad
@@ -280,14 +258,9 @@ endpoint prebuilds, and focused physical tests. Full clean or parallel platform
 matrices require a milestone-specific reason; compatibility-mode W0-W2 does
 not justify a separate iPad build product.
 
-The earlier repository-only Apple evidence is green but deliberately weaker:
-it is retained as deterministic regression coverage, while the physical result
-above is the W0 source of truth. Xcode 26.6
-compiled the app and hosted test bundle against the iOS 26.5 simulator SDK, and
-the two capability-policy tests passed. The entitlement array and
-`WiFiAwareServices` dictionary match Apple's peer-to-peer sample structure.
-Apple's sample explicitly requires physical devices, so this compile/test result
-does not advance the physical capability or pairing gates.
+Deterministic capability-policy tests remain the regression gate, while the two
+physical results above are the W0 source of truth. Neither result advances W1:
+both devices still report zero paired devices.
 
 ### W1 — Cross-platform pairing
 
@@ -295,12 +268,15 @@ does not advance the physical capability or pairing gates.
 - Pair, list, remove, restart, and verify the same physical devices.
 - Treat pre-pairing metadata as unauthenticated.
 
-Gate: one iPad Air 5↔Android pair and re-verification after both apps restart; no
-router or internet is present.
+Development gate: pair the iPhone 15 Pro Max and iPad Air 5, then re-verify
+after both apps restart. Release gate: repeat with one pairing-capable Android
+endpoint; neither gate may depend on a router or the internet.
 
 ### W2 — Raw data path and QUIC spike
 
-- Create `_envoix._udp` publisher/subscriber sessions in `.bulk` mode.
+- Use the experimental `_envoix-probe._tcp` request/response to prove a native
+  Wi-Fi Aware path before attaching the Rust transfer stack.
+- Then create `_envoix._udp` publisher/subscriber sessions in `.bulk` mode.
 - Prove the QUIC, trust, exporter, duplex hash, cancellation, and path checks in
   section 5 before changing Envoix transfer routing.
 
