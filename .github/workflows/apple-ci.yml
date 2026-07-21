@@ -42,7 +42,7 @@ jobs:
 
       - name: Prepare temporary build paths
         run: |
-          printf 'ENVOIX_APPLE_CACHE_ROOT=%s\n' "$RUNNER_TEMP/envoix-apple-cache" >> "$GITHUB_ENV"
+          printf 'ENVOIX_APPLE_CACHE_ROOT=%s\n' "$RUNNER_TEMP/envoix-apple-cache/$GITHUB_RUN_ID" >> "$GITHUB_ENV"
           printf 'CARGO_INSTALL_ROOT=%s\n' "$RUNNER_TEMP/cargo-tools" >> "$GITHUB_ENV"
 
       - name: Restore cargo-swift
@@ -94,7 +94,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: apple-macos-logs
-          path: ${{ runner.temp }}/envoix-apple-cache/macos-debug/Logs
+          path: |
+            ${{ env.ENVOIX_APPLE_CACHE_ROOT }}/macos-debug/Logs
           if-no-files-found: warn
           retention-days: 14
 
@@ -110,7 +111,7 @@ jobs:
 
       - name: Prepare temporary build paths
         run: |
-          printf 'ENVOIX_APPLE_CACHE_ROOT=%s\n' "$RUNNER_TEMP/envoix-apple-cache" >> "$GITHUB_ENV"
+          printf 'ENVOIX_APPLE_CACHE_ROOT=%s\n' "$RUNNER_TEMP/envoix-apple-cache/$GITHUB_RUN_ID" >> "$GITHUB_ENV"
           printf 'CARGO_INSTALL_ROOT=%s\n' "$RUNNER_TEMP/cargo-tools" >> "$GITHUB_ENV"
 
       - name: Restore cargo-swift
@@ -249,6 +250,6 @@ jobs:
           path: |
             ${{ runner.temp }}/envoix-ios-hosted.xcresult
             ${{ runner.temp }}/envoix-ios-ui-*.xcresult
-            ${{ runner.temp }}/envoix-apple-cache/ios-simulator-debug/Logs
+            ${{ env.ENVOIX_APPLE_CACHE_ROOT }}/ios-simulator-debug/Logs
           if-no-files-found: warn
           retention-days: 14
