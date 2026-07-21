@@ -173,3 +173,4 @@ impl TransferQueueState {
             .max(1);
         self.active.len() < limit
     }
+}

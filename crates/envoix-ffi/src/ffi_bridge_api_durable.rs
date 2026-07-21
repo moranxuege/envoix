@@ -451,4 +451,13 @@ pub fn list_durable_transfer_records(
 }
 
 fn durable_runtime() -> Result<&'static Runtime, EnvoixError> {
-    DURABLE_RUNTIME
+    let runtime = DURABLE_RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| error.to_string())
+    });
+    runtime.as_ref().map_err(|error| EnvoixError::Operation {
+        reason: error.clone(),
+    })
+}

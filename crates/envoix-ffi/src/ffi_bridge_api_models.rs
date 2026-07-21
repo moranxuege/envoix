@@ -1,3 +1,4 @@
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
 pub enum FfiInviteRole {
     Send,
     Receive,
