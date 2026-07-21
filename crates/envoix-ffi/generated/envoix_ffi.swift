@@ -1024,9 +1024,6 @@ public func FfiConverterTypeDurableEnvoixSession_lower(_ value: DurableEnvoixSes
 
 
 
-/**
- * A send/receive session driving the envoix core off its own runtime.
- */
 public protocol EnvoixSessionProtocol: AnyObject, Sendable {
 
     /**
@@ -1129,9 +1126,6 @@ public protocol EnvoixSessionProtocol: AnyObject, Sendable {
     func startTransfer(request: FfiTransferRequest, observer: TransferObserver) throws
 
 }
-/**
- * A send/receive session driving the envoix core off its own runtime.
- */
 open class EnvoixSession: EnvoixSessionProtocol, @unchecked Sendable {
     fileprivate let handle: UInt64
 
