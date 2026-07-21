@@ -33,3 +33,7 @@ android/app/build/
 # native libs are built by cargo-ndk (see .github/workflows/release.yml); not tracked
 android/app/src/main/jniLibs/
 android/.kotlin/
+
+# local design docs
+/docs/design/wifi-aware-vertical-slice.md
+/docs/issues/issue-reconciliation-plan-2026-07-20.md
