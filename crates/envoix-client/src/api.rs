@@ -13,32 +13,46 @@ mod error;
 mod event;
 mod invite;
 pub mod machine;
+pub mod manifest_activity;
+pub mod manifest_driver;
 mod options;
 pub mod receipt;
 pub mod record;
 mod source;
 mod transfer;
 
-pub use envoix_session::CandidateFilter;
+pub use envoix_protocol::{
+    ManifestEntryKind, ManifestEntryResultStatus, ManifestEntryV1, ManifestHashAlgorithm,
+    ManifestId, ManifestV1,
+};
+pub use envoix_session::{
+    CandidateFilter, ManifestSendRequest, ManifestTransferSummary, SessionTransferSummary,
+};
 pub use envoix_types::{DataPath, PairingStep};
-pub use error::{ErrorKind, Phase, TransferError};
-pub use event::{FailureCode, StampedEvent, TransferEvent};
+pub use error::{
+    ErrorKind, FailureCategory, FailureCode, FailureOrigin, FailurePhase, Phase, RecoveryAction,
+    TransferError, TransferFailure,
+};
+pub use event::{SessionFailureCode, StampedEvent, TransferEvent};
 pub use invite::{Invite, Role};
 pub use options::{PathPolicy, TransferOptions};
 pub use source::{PeerSource, TransferMode};
-pub use transfer::{Transfer, TransferStats};
+pub use transfer::{Transfer, TransferSet, TransferStats};
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use envoix_qr::{QrInvitePayload, generate_token};
 use envoix_session::{
-    BindAddrs, DEFAULT_CHUNK_SIZE, DEFAULT_DATA_STREAM_WINDOW, SessionConfig, TransferCancelToken,
-    TransferDirection, TransferSummary, parse_broker_addr, receive_file_enable_mdns,
-    receive_file_via_room, receive_file_with_bound_peer, send_file_enable_mdns, send_file_manual,
-    send_file_via_room,
+    BindAddrs, DEFAULT_CHUNK_SIZE, DEFAULT_DATA_STREAM_WINDOW, EndpointAddr, SessionConfig,
+    TransferCancelToken, TransferDirection, TransferSummary, parse_broker_addr,
+    receive_file_enable_mdns, receive_file_via_room, receive_file_with_bound_peer,
+    receive_transfer_enable_mdns, receive_transfer_via_room, receive_transfer_with_bound_peer,
+    send_file_enable_mdns, send_file_manual, send_file_to_endpoint_addr, send_file_via_room,
+    send_manifest_enable_mdns, send_manifest_manual, send_manifest_to_endpoint_addr,
+    send_manifest_via_room,
 };
 use tracing::Instrument;
 
@@ -48,6 +62,11 @@ use transfer::{EventSender, SessionEventAdapter, StatsHandle};
 
 /// The transfer body each dispatch arm produces, run under the correlation span.
 type TransferFuture = Pin<Box<dyn Future<Output = Result<TransferSummary, PublicError>> + Send>>;
+
+/// An additive transfer body whose negotiated result may be one file or a
+/// Manifest set.
+type TransferSetFuture =
+    Pin<Box<dyn Future<Output = Result<SessionTransferSummary, PublicError>> + Send>>;
 
 /// The correlation span a transfer runs in: `room`/`transfer_id` are recorded
 /// once known (the room id up front for room transfers, the transfer id when
@@ -110,9 +129,65 @@ async fn with_summary(
     result
 }
 
+/// Run a negotiated transfer body and log its protocol-specific aggregate
+/// outcome without changing the compatible single-file summary surface.
+async fn with_transfer_set_summary(
+    fut: TransferSetFuture,
+    stats: StatsHandle,
+) -> Result<SessionTransferSummary, PublicError> {
+    let result = fut.await;
+    let stats = stats.snapshot();
+    let paths = stats
+        .paths
+        .iter()
+        .map(|path| path.to_string())
+        .collect::<Vec<_>>()
+        .join(" -> ");
+    match &result {
+        Ok(SessionTransferSummary::SingleFile(summary)) => tracing::info!(
+            protocol = "single_file_v1",
+            bytes = summary.bytes_transferred,
+            file = %summary.file_name,
+            avg_bps = stats.avg_bytes_per_sec,
+            peak_bps = stats.peak_bytes_per_sec,
+            connect_ms = stats.connect_latency_ms.unwrap_or_default(),
+            duration_ms = stats.duration_ms,
+            paths = %paths,
+            outcome = "completed",
+            "transfer set finished"
+        ),
+        Ok(SessionTransferSummary::Manifest(summary)) => tracing::info!(
+            protocol = "manifest_v1",
+            manifest_id = %summary.manifest_id,
+            files = summary.file_count,
+            directories = summary.directory_count,
+            bytes = summary.total_bytes,
+            avg_bps = stats.avg_bytes_per_sec,
+            peak_bps = stats.peak_bytes_per_sec,
+            connect_ms = stats.connect_latency_ms.unwrap_or_default(),
+            duration_ms = stats.duration_ms,
+            paths = %paths,
+            outcome = "completed",
+            "transfer set finished"
+        ),
+        Err(error) => tracing::warn!(
+            avg_bps = stats.avg_bytes_per_sec,
+            paths = %paths,
+            outcome = "failed",
+            %error,
+            "transfer set finished"
+        ),
+    }
+    result
+}
+
 /// Invite lifetime when the source does not specify one (mDNS listener with
 /// a generated token).
 const DEFAULT_INVITE_TTL_SECS: u64 = 300;
+/// A sender that found no Room peer must eventually try the next configured
+/// rendezvous source. Receivers intentionally have no deadline: waiting for a
+/// sender is their normal steady state.
+const ROOM_SEND_PRECONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The client: local policy (identity, chunk size) shared by transfers.
 ///
@@ -153,6 +228,20 @@ pub struct TransferRequest {
     /// The file to send, or the directory to receive into.
     pub path: PathBuf,
     /// Rendezvous sources to attempt in order (e.g. Room, then mDNS).
+    pub sources: Vec<PeerSource>,
+    /// Per-transfer options (relay, resume, bind addrs, path policy).
+    pub options: TransferOptions,
+}
+
+/// One Manifest send run with ordered rendezvous fallback.
+///
+/// This is additive to [`TransferRequest`], whose established fields and
+/// single-file behavior remain unchanged.
+#[derive(Clone, Debug)]
+pub struct ManifestTransferRequest {
+    /// Validated transfer-set description plus its local source mapping.
+    pub request: ManifestSendRequest,
+    /// Rendezvous sources to attempt in order.
     pub sources: Vec<PeerSource>,
     /// Per-transfer options (relay, resume, bind addrs, path policy).
     pub options: TransferOptions,
@@ -241,6 +330,131 @@ impl Client {
         ))
     }
 
+    /// Sends one validated Manifest transfer set to `to` without changing the
+    /// compatible single-file [`Self::send`] API.
+    ///
+    /// The receiving peer must listen through [`Self::receive_transfer`], which
+    /// negotiates either the existing single-file protocol or Manifest v1.
+    pub fn send_manifest(
+        &self,
+        request: ManifestSendRequest,
+        to: PeerSource,
+        options: TransferOptions,
+    ) -> Result<TransferSet, TransferError> {
+        crate::validate_chunk_size(self.chunk_size).map_err(setup_error)?;
+        validate_path_policy(&options)?;
+        request
+            .manifest
+            .validate_structure()
+            .map_err(|error| TransferError::input(error.to_string()))?;
+        let (events, event_receiver) = EventSender::channel();
+        let events_phase = events.phase_cell();
+        let events_stats = events.stats_handle();
+        let cancel = TransferCancelToken::new();
+        let (fut, span) = self.build_manifest_send(to, request, &options, &events, &cancel)?;
+        let task =
+            tokio::spawn(with_transfer_set_summary(fut, events_stats.clone()).instrument(span));
+        Ok(TransferSet::new(
+            event_receiver,
+            cancel,
+            events_phase,
+            events_stats,
+            task,
+        ))
+    }
+
+    fn build_manifest_send(
+        &self,
+        to: PeerSource,
+        request: ManifestSendRequest,
+        options: &TransferOptions,
+        events: &EventSender,
+        cancel: &TransferCancelToken,
+    ) -> Result<(TransferSetFuture, tracing::Span), TransferError> {
+        let sink = Box::new(SessionEventAdapter(events.clone()));
+        let resume = options.resume;
+        let mode = to.mode();
+        let span = transfer_span(TransferDirection::Send, mode);
+
+        let fut: TransferSetFuture = match to {
+            PeerSource::Manual { peer, token } => {
+                let pairing = shared_token(&token)?;
+                let config = self.session_config(options);
+                let cancel = cancel.clone();
+                let events = events.clone();
+                Box::pin(async move {
+                    events.emit(TransferEvent::Binding {
+                        direction: TransferDirection::Send,
+                        mode,
+                    });
+                    send_manifest_manual(peer, request, resume, config, &pairing, sink, cancel)
+                        .await
+                        .map(SessionTransferSummary::Manifest)
+                })
+            }
+            PeerSource::Invite { invite } => {
+                let (peer_addr, token) = resolve_invite(&invite, options.continuation)?;
+                let pairing = shared_token(&token)?;
+                let config = self.session_config(options);
+                let cancel = cancel.clone();
+                let events = events.clone();
+                Box::pin(async move {
+                    events.emit(TransferEvent::Binding {
+                        direction: TransferDirection::Send,
+                        mode,
+                    });
+                    send_manifest_to_endpoint_addr(
+                        peer_addr, request, resume, config, &pairing, sink, cancel,
+                    )
+                    .await
+                    .map(SessionTransferSummary::Manifest)
+                })
+            }
+            PeerSource::Mdns { token: Some(token) } => {
+                let pairing = shared_token(&token)?;
+                let config = self.session_config(options);
+                let cancel = cancel.clone();
+                let events = events.clone();
+                Box::pin(async move {
+                    events.emit(TransferEvent::Binding {
+                        direction: TransferDirection::Send,
+                        mode,
+                    });
+                    send_manifest_enable_mdns(request, resume, config, &pairing, sink, cancel)
+                        .await
+                        .map(SessionTransferSummary::Manifest)
+                })
+            }
+            PeerSource::Mdns { token: None } => {
+                return Err(TransferError::input("sending over mDNS requires a token"));
+            }
+            PeerSource::Room { code, broker } => {
+                span.record("room", room_id_of(&code));
+                let broker =
+                    parse_broker_addr(&broker, options.relay.as_deref()).map_err(setup_error)?;
+                let config = self.session_config(options);
+                let cancel = cancel.clone();
+                let events = events.clone();
+                Box::pin(async move {
+                    events.emit(TransferEvent::Binding {
+                        direction: TransferDirection::Send,
+                        mode,
+                    });
+                    send_manifest_via_room(broker, &code, request, resume, config, sink, cancel)
+                        .await
+                        .map(SessionTransferSummary::Manifest)
+                })
+            }
+            PeerSource::ShowManual { .. } | PeerSource::ShowInvite { .. } => {
+                return Err(TransferError::input(
+                    "this peer source listens for a dialer; sending toward it needs \
+                     protocol role negotiation and is not supported yet",
+                ));
+            }
+        };
+        Ok((fut, span))
+    }
+
     /// Builds one send attempt's future + tracing span, emitting through the
     /// given event channel and honoring the given cancel token. Shared by
     /// [`Self::send`] (a single source) and [`Self::run`] (fallback across
@@ -276,7 +490,7 @@ impl Client {
                 })
             }
             PeerSource::Invite { invite } => {
-                let (peer, token) = resolve_invite(&invite)?;
+                let (peer_addr, token) = resolve_invite(&invite, options.continuation)?;
                 let pairing = shared_token(&token)?;
                 let config = self.session_config(options);
                 let cancel = cancel.clone();
@@ -286,7 +500,10 @@ impl Client {
                         direction: TransferDirection::Send,
                         mode,
                     });
-                    send_file_manual(peer, file, resume, config, &pairing, sink, cancel).await
+                    send_file_to_endpoint_addr(
+                        peer_addr, file, resume, config, &pairing, sink, cancel,
+                    )
+                    .await
                 })
             }
             PeerSource::Mdns { token: Some(token) } => {
@@ -360,6 +577,135 @@ impl Client {
         ))
     }
 
+    /// Receives one authenticated transfer into `into`, negotiating either the
+    /// compatible single-file protocol or Manifest v1 after connection setup.
+    ///
+    /// The returned [`TransferSet`] reports the negotiated result without
+    /// changing [`Self::receive`] or [`Transfer::wait`].
+    pub fn receive_transfer(
+        &self,
+        into: PathBuf,
+        from: PeerSource,
+        options: TransferOptions,
+    ) -> Result<TransferSet, TransferError> {
+        crate::validate_chunk_size(self.chunk_size).map_err(setup_error)?;
+        validate_path_policy(&options)?;
+        let (events, event_receiver) = EventSender::channel();
+        let events_phase = events.phase_cell();
+        let events_stats = events.stats_handle();
+        let cancel = TransferCancelToken::new();
+        let (fut, span) = self.build_receive_transfer(from, into, &options, &events, &cancel)?;
+        let task =
+            tokio::spawn(with_transfer_set_summary(fut, events_stats.clone()).instrument(span));
+        Ok(TransferSet::new(
+            event_receiver,
+            cancel,
+            events_phase,
+            events_stats,
+            task,
+        ))
+    }
+
+    fn build_receive_transfer(
+        &self,
+        from: PeerSource,
+        into: PathBuf,
+        options: &TransferOptions,
+        events: &EventSender,
+        cancel: &TransferCancelToken,
+    ) -> Result<(TransferSetFuture, tracing::Span), TransferError> {
+        let sink = Box::new(SessionEventAdapter(events.clone()));
+        let listen = options
+            .listen_addrs
+            .clone()
+            .unwrap_or_else(|| BindAddrs::dual_stack(0));
+        let mode = from.mode();
+        let span = transfer_span(TransferDirection::Receive, mode);
+
+        let fut: TransferSetFuture = match from {
+            PeerSource::ShowManual { token } => {
+                let token = token.map_or_else(new_token, Ok)?;
+                let pairing = shared_token(&token)?;
+                let config = self.session_config(options);
+                let cancel = cancel.clone();
+                let on_bound = advertise(events.clone(), token, None);
+                let events = events.clone();
+                Box::pin(async move {
+                    events.emit(TransferEvent::Binding {
+                        direction: TransferDirection::Receive,
+                        mode,
+                    });
+                    receive_transfer_with_bound_peer(
+                        listen, into, config, &pairing, sink, on_bound, cancel,
+                    )
+                    .await
+                })
+            }
+            PeerSource::ShowInvite { ttl_secs, token } => {
+                let token = token.map_or_else(new_token, Ok)?;
+                let pairing = shared_token(&token)?;
+                let config = self.session_config(options);
+                let cancel = cancel.clone();
+                let on_bound = advertise(events.clone(), token, Some(ttl_secs));
+                let events = events.clone();
+                Box::pin(async move {
+                    events.emit(TransferEvent::Binding {
+                        direction: TransferDirection::Receive,
+                        mode,
+                    });
+                    receive_transfer_with_bound_peer(
+                        listen, into, config, &pairing, sink, on_bound, cancel,
+                    )
+                    .await
+                })
+            }
+            PeerSource::Mdns { token } => {
+                let (token, invite_ttl) = match token {
+                    Some(token) => (token, None),
+                    None => (new_token()?, Some(DEFAULT_INVITE_TTL_SECS)),
+                };
+                let pairing = shared_token(&token)?;
+                let config = self.session_config(options);
+                let cancel = cancel.clone();
+                let on_bound = advertise(events.clone(), token, invite_ttl);
+                let events = events.clone();
+                Box::pin(async move {
+                    events.emit(TransferEvent::Binding {
+                        direction: TransferDirection::Receive,
+                        mode,
+                    });
+                    receive_transfer_enable_mdns(
+                        listen, into, config, &pairing, sink, on_bound, cancel,
+                    )
+                    .await
+                })
+            }
+            PeerSource::Room { code, broker } => {
+                span.record("room", room_id_of(&code));
+                let broker =
+                    parse_broker_addr(&broker, options.relay.as_deref()).map_err(setup_error)?;
+                let config = self.session_config(options);
+                let cancel = cancel.clone();
+                let events = events.clone();
+                Box::pin(async move {
+                    events.emit(TransferEvent::Binding {
+                        direction: TransferDirection::Receive,
+                        mode,
+                    });
+                    receive_transfer_via_room(broker, &code, listen, into, config, sink, cancel)
+                        .await
+                })
+            }
+            PeerSource::Manual { .. } | PeerSource::Invite { .. } => {
+                return Err(TransferError::input(
+                    "this peer source dials a listener; receiving from it needs \
+                     protocol role negotiation and is not supported yet",
+                ));
+            }
+        };
+        Ok((fut, span))
+    }
+
     /// Builds one receive attempt's future + tracing span, emitting through the
     /// given event channel. The receive-side counterpart to [`Self::build_send`],
     /// shared by [`Self::receive`] and [`Self::run`].
@@ -401,8 +747,8 @@ impl Client {
                     .await
                 })
             }
-            PeerSource::ShowInvite { ttl_secs } => {
-                let token = new_token()?;
+            PeerSource::ShowInvite { ttl_secs, token } => {
+                let token = token.map_or_else(new_token, Ok)?;
                 let pairing = shared_token(&token)?;
                 let config = self.session_config(options);
                 let cancel = cancel.clone();
@@ -497,6 +843,9 @@ impl Client {
                 "no peer source attempted".to_string(),
             ));
             for (i, source) in sources.into_iter().enumerate() {
+                let source_mode = source.mode();
+                let preconnect_timeout =
+                    preconnect_timeout_for_source(direction, source_mode, i + 1 < count);
                 let built = match direction {
                     TransferDirection::Send => {
                         client.build_send(source, path.clone(), &options, &events, &loop_cancel)
@@ -517,7 +866,17 @@ impl Client {
                         continue;
                     }
                 };
-                match with_summary(fut, stats.clone()).instrument(span).await {
+                let fut = with_preconnection_timeout(
+                    fut,
+                    stats.clone(),
+                    preconnect_timeout,
+                    direction,
+                    source_mode,
+                );
+                match with_summary(Box::pin(fut), stats.clone())
+                    .instrument(span)
+                    .await
+                {
                     Ok(summary) => return Ok(summary),
                     Err(error) => {
                         last = Err(error);
@@ -536,13 +895,192 @@ impl Client {
                 let reason = error.to_string();
                 events.emit(TransferEvent::Failed {
                     direction,
-                    reason_code: event::FailureCode::classify(&reason),
+                    reason_code: event::SessionFailureCode::classify(&reason),
                     reason,
                 });
             }
             last
         });
         Ok(Transfer::new(
+            event_receiver,
+            cancel,
+            events_phase,
+            events_stats,
+            task,
+        ))
+    }
+
+    /// Runs one Manifest send, falling back to the next source only when the
+    /// previous source failed before selecting a live data path.
+    pub fn run_manifest(
+        &self,
+        request: ManifestTransferRequest,
+    ) -> Result<TransferSet, TransferError> {
+        let ManifestTransferRequest {
+            request,
+            sources,
+            options,
+        } = request;
+        if sources.is_empty() {
+            return Err(TransferError::input(
+                "a Manifest transfer needs at least one peer source",
+            ));
+        }
+        crate::validate_chunk_size(self.chunk_size).map_err(setup_error)?;
+        validate_path_policy(&options)?;
+        request
+            .manifest
+            .validate_structure()
+            .map_err(|error| TransferError::input(error.to_string()))?;
+
+        let (events, event_receiver) = EventSender::channel();
+        let events_phase = events.phase_cell();
+        let events_stats = events.stats_handle();
+        let cancel = TransferCancelToken::new();
+        let client = self.clone();
+        let stats = events_stats.clone();
+        let loop_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            let count = sources.len();
+            let mut last: Result<SessionTransferSummary, PublicError> = Err(PublicError::Transfer(
+                "no peer source attempted".to_string(),
+            ));
+            for (index, source) in sources.into_iter().enumerate() {
+                let mode = source.mode();
+                let timeout =
+                    preconnect_timeout_for_source(TransferDirection::Send, mode, index + 1 < count);
+                let (fut, span) = match client.build_manifest_send(
+                    source,
+                    request.clone(),
+                    &options,
+                    &events,
+                    &loop_cancel,
+                ) {
+                    Ok(pair) => pair,
+                    Err(error) => {
+                        last = Err(PublicError::InvalidInput(error.to_string()));
+                        if index + 1 == count {
+                            break;
+                        }
+                        continue;
+                    }
+                };
+                let fut = with_preconnection_timeout(
+                    fut,
+                    stats.clone(),
+                    timeout,
+                    TransferDirection::Send,
+                    mode,
+                );
+                match with_transfer_set_summary(Box::pin(fut), stats.clone())
+                    .instrument(span)
+                    .await
+                {
+                    Ok(summary) => return Ok(summary),
+                    Err(error) => {
+                        last = Err(error);
+                        if stats.connected() || index + 1 == count {
+                            break;
+                        }
+                    }
+                }
+            }
+            emit_terminal_transfer_set_failure(&events, TransferDirection::Send, &last);
+            last
+        });
+        Ok(TransferSet::new(
+            event_receiver,
+            cancel,
+            events_phase,
+            events_stats,
+            task,
+        ))
+    }
+
+    /// Runs an ALPN-negotiated receive across ordered rendezvous sources.
+    /// The request must be receive-direction; senders use [`Self::run_manifest`].
+    pub fn run_receive_transfer(
+        &self,
+        request: TransferRequest,
+    ) -> Result<TransferSet, TransferError> {
+        let TransferRequest {
+            direction,
+            path,
+            sources,
+            options,
+        } = request;
+        if direction != TransferDirection::Receive {
+            return Err(TransferError::input(
+                "run_receive_transfer requires receive direction",
+            ));
+        }
+        if sources.is_empty() {
+            return Err(TransferError::input(
+                "a negotiated receive needs at least one peer source",
+            ));
+        }
+        crate::validate_chunk_size(self.chunk_size).map_err(setup_error)?;
+        validate_path_policy(&options)?;
+
+        let (events, event_receiver) = EventSender::channel();
+        let events_phase = events.phase_cell();
+        let events_stats = events.stats_handle();
+        let cancel = TransferCancelToken::new();
+        let client = self.clone();
+        let stats = events_stats.clone();
+        let loop_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            let count = sources.len();
+            let mut last: Result<SessionTransferSummary, PublicError> = Err(PublicError::Transfer(
+                "no peer source attempted".to_string(),
+            ));
+            for (index, source) in sources.into_iter().enumerate() {
+                let mode = source.mode();
+                let timeout = preconnect_timeout_for_source(
+                    TransferDirection::Receive,
+                    mode,
+                    index + 1 < count,
+                );
+                let (fut, span) = match client.build_receive_transfer(
+                    source,
+                    path.clone(),
+                    &options,
+                    &events,
+                    &loop_cancel,
+                ) {
+                    Ok(pair) => pair,
+                    Err(error) => {
+                        last = Err(PublicError::InvalidInput(error.to_string()));
+                        if index + 1 == count {
+                            break;
+                        }
+                        continue;
+                    }
+                };
+                let fut = with_preconnection_timeout(
+                    fut,
+                    stats.clone(),
+                    timeout,
+                    TransferDirection::Receive,
+                    mode,
+                );
+                match with_transfer_set_summary(Box::pin(fut), stats.clone())
+                    .instrument(span)
+                    .await
+                {
+                    Ok(summary) => return Ok(summary),
+                    Err(error) => {
+                        last = Err(error);
+                        if stats.connected() || index + 1 == count {
+                            break;
+                        }
+                    }
+                }
+            }
+            emit_terminal_transfer_set_failure(&events, TransferDirection::Receive, &last);
+            last
+        });
+        Ok(TransferSet::new(
             event_receiver,
             cancel,
             events_phase,
@@ -561,6 +1099,61 @@ impl Client {
             candidates: self.candidates.clone(),
             data_stream_window: self.data_stream_window,
         }
+    }
+}
+
+fn preconnect_timeout_for_source(
+    direction: TransferDirection,
+    mode: TransferMode,
+    has_fallback: bool,
+) -> Option<Duration> {
+    (direction == TransferDirection::Send && mode == TransferMode::Room && has_fallback)
+        .then_some(ROOM_SEND_PRECONNECT_TIMEOUT)
+}
+
+async fn with_preconnection_timeout<R>(
+    fut: Pin<Box<dyn Future<Output = Result<R, PublicError>> + Send>>,
+    stats: StatsHandle,
+    timeout: Option<Duration>,
+    direction: TransferDirection,
+    mode: TransferMode,
+) -> Result<R, PublicError> {
+    let Some(timeout) = timeout else {
+        return fut.await;
+    };
+    let deadline = tokio::time::Instant::now() + timeout;
+    tokio::pin!(fut);
+    loop {
+        if stats.connected() {
+            return fut.await;
+        }
+        tokio::select! {
+            result = &mut fut => return result,
+            _ = tokio::time::sleep_until(deadline) => {
+                if stats.connected() {
+                    return fut.await;
+                }
+                return Err(PublicError::Transfer(format!(
+                    "{direction:?} via {mode:?} timed out before connecting; trying fallback"
+                )));
+            }
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+        }
+    }
+}
+
+fn emit_terminal_transfer_set_failure(
+    events: &EventSender,
+    direction: TransferDirection,
+    result: &Result<SessionTransferSummary, PublicError>,
+) {
+    if let Err(error) = result {
+        let reason = error.to_string();
+        events.emit(TransferEvent::Failed {
+            direction,
+            reason_code: event::SessionFailureCode::classify(&reason),
+            reason,
+        });
     }
 }
 
@@ -589,10 +1182,16 @@ fn advertise(
     events: EventSender,
     token: String,
     invite_ttl: Option<u64>,
-) -> impl FnOnce(PeerDescriptor) + Send {
-    move |peer: PeerDescriptor| {
+) -> impl FnOnce(PeerDescriptor, Vec<String>) + Send {
+    move |peer: PeerDescriptor, relay_urls: Vec<String>| {
         let invite = invite_ttl.map(|ttl| {
-            QrInvitePayload::new(token.clone(), peer.clone(), unix_now() + ttl).encode()
+            QrInvitePayload::new_with_relay_urls(
+                token.clone(),
+                peer.clone(),
+                relay_urls,
+                unix_now() + ttl,
+            )
+            .encode()
         });
         events.emit(TransferEvent::Advertised {
             peer,
@@ -611,13 +1210,20 @@ fn validate_path_policy(options: &TransferOptions) -> Result<(), TransferError> 
     Ok(())
 }
 
-/// Decodes and validates an invite, returning the peer to dial and the token.
-fn resolve_invite(invite: &str) -> Result<(PeerDescriptor, String), TransferError> {
+/// Decodes and validates an invite, returning the endpoint address to dial and the token.
+fn resolve_invite(
+    invite: &str,
+    continuation: bool,
+) -> Result<(EndpointAddr, String), TransferError> {
     let to_err = |e| TransferError::input(format!("invalid invite: {e}"));
     let payload = QrInvitePayload::decode(invite).map_err(to_err)?;
-    payload.validate(unix_now()).map_err(to_err)?;
-    let peer = payload.peer_descriptor().map_err(to_err)?;
-    Ok((peer, payload.token))
+    if continuation {
+        payload.validate_for_resume().map_err(to_err)?;
+    } else {
+        payload.validate(unix_now()).map_err(to_err)?;
+    }
+    let peer_addr = payload.endpoint_addr().map_err(to_err)?;
+    Ok((peer_addr, payload.token))
 }
 
 /// Current Unix time in whole seconds.
@@ -629,244 +1235,5 @@ fn unix_now() -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn client() -> Client {
-        Client::new()
-    }
-
-    #[test]
-    fn send_rejects_producer_sources() {
-        for source in [
-            PeerSource::ShowManual { token: None },
-            PeerSource::ShowInvite { ttl_secs: 300 },
-        ] {
-            let error = client()
-                .send("f.txt".into(), source, TransferOptions::default())
-                .unwrap_err();
-            assert_eq!(error.kind, ErrorKind::Input);
-        }
-    }
-
-    #[test]
-    fn send_rejects_invalid_chunk_size() {
-        let mut client = Client::new();
-        client.chunk_size = 0;
-        let error = client
-            .send(
-                "f.txt".into(),
-                PeerSource::Mdns {
-                    token: Some("abcdefghijkl".into()),
-                },
-                TransferOptions::default(),
-            )
-            .unwrap_err();
-        assert_eq!(error.kind, ErrorKind::Input);
-    }
-
-    #[test]
-    fn send_over_mdns_requires_token() {
-        let error = client()
-            .send(
-                "f.txt".into(),
-                PeerSource::Mdns { token: None },
-                TransferOptions::default(),
-            )
-            .unwrap_err();
-        assert_eq!(error.kind, ErrorKind::Input);
-    }
-
-    #[test]
-    fn relay_only_requires_relay() {
-        let options = TransferOptions {
-            path: PathPolicy::RelayOnly,
-            ..Default::default()
-        };
-        let error = client()
-            .send(
-                "f.txt".into(),
-                PeerSource::Room {
-                    code: "123456-a-b".into(),
-                    broker: "unused".into(),
-                },
-                options,
-            )
-            .unwrap_err();
-        assert_eq!(error.kind, ErrorKind::Input);
-    }
-
-    #[test]
-    fn receive_rejects_consumer_sources() {
-        let peer = PeerDescriptor::new("peer", vec!["[::1]:9000".parse().unwrap()]).unwrap();
-        for source in [
-            PeerSource::Manual {
-                peer,
-                token: "abcdefghijkl".into(),
-            },
-            PeerSource::Invite {
-                invite: "envoix:whatever".into(),
-            },
-        ] {
-            let error = client()
-                .receive("out".into(), source, TransferOptions::default())
-                .unwrap_err();
-            assert_eq!(error.kind, ErrorKind::Input);
-        }
-    }
-
-    #[test]
-    fn runtime_sources_read_candidate_cidrs_from_config_file() {
-        let path = std::env::temp_dir().join(format!(
-            "envoix-api-config-{}-candidates.toml",
-            std::process::id()
-        ));
-        std::fs::write(
-            &path,
-            "chunk_size = \"1M\"\n[candidates]\ndeny = [\"10.0.0.0/8\", \"fe80::/10\"]\n",
-        )
-        .unwrap();
-
-        let client = Client::from_runtime_sources(Some(&path)).unwrap();
-
-        assert_eq!(client.chunk_size, 1024 * 1024);
-        // The deny list scopes addresses: a LAN address is dropped, a public one kept.
-        let kept = client
-            .candidates
-            .apply(["10.0.0.5:1".parse().unwrap(), "1.2.3.4:2".parse().unwrap()]);
-        assert_eq!(kept, vec!["1.2.3.4:2".parse().unwrap()]);
-        std::fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn runtime_sources_reject_invalid_candidate_cidr() {
-        let path = std::env::temp_dir().join(format!(
-            "envoix-api-config-{}-badcidr.toml",
-            std::process::id()
-        ));
-        std::fs::write(&path, "[candidates]\ndeny = [\"not-a-cidr\"]\n").unwrap();
-        assert!(Client::from_runtime_sources(Some(&path)).is_err());
-        std::fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn runtime_sources_read_chunk_size_from_config_file() {
-        let path = std::env::temp_dir().join(format!(
-            "envoix-api-config-{}-chunk.toml",
-            std::process::id()
-        ));
-        std::fs::write(&path, "chunk_size = \"1M\"\n").unwrap();
-
-        let client = Client::from_runtime_sources(Some(&path)).unwrap();
-
-        assert_eq!(client.chunk_size, 1024 * 1024);
-        std::fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn config_fields_apply_chunk_size_and_candidate_cidrs() {
-        // The FFI path passes discrete fields (no file) and must assemble the
-        // same client as the equivalent config.toml above.
-        let deny = vec!["10.0.0.0/8".to_string(), "fe80::/10".to_string()];
-        let client = Client::from_config_fields(Some("1M"), &[], &deny, None).unwrap();
-
-        assert_eq!(client.chunk_size, 1024 * 1024);
-        let kept = client
-            .candidates
-            .apply(["10.0.0.5:1".parse().unwrap(), "1.2.3.4:2".parse().unwrap()]);
-        assert_eq!(kept, vec!["1.2.3.4:2".parse().unwrap()]);
-    }
-
-    #[test]
-    fn config_fields_reject_invalid_candidate_cidr() {
-        assert!(Client::from_config_fields(None, &[], &["not-a-cidr".to_string()], None).is_err());
-    }
-
-    #[test]
-    fn send_rejects_garbage_invite() {
-        let error = client()
-            .send(
-                "f.txt".into(),
-                PeerSource::Invite {
-                    invite: "not-an-invite".into(),
-                },
-                TransferOptions::default(),
-            )
-            .unwrap_err();
-        assert_eq!(error.kind, ErrorKind::Input);
-    }
-
-    #[test]
-    fn run_rejects_empty_sources() {
-        let error = client()
-            .run(TransferRequest {
-                direction: TransferDirection::Send,
-                path: "f.txt".into(),
-                sources: vec![],
-                options: TransferOptions::default(),
-            })
-            .unwrap_err();
-        assert_eq!(error.kind, ErrorKind::Input);
-    }
-
-    #[test]
-    fn run_validates_chunk_size_up_front() {
-        let mut client = Client::new();
-        client.chunk_size = 0;
-        let error = client
-            .run(TransferRequest {
-                direction: TransferDirection::Send,
-                path: "f.txt".into(),
-                sources: vec![PeerSource::Mdns {
-                    token: Some("abcdefghijkl".into()),
-                }],
-                options: TransferOptions::default(),
-            })
-            .unwrap_err();
-        assert_eq!(error.kind, ErrorKind::Input);
-    }
-
-    #[tokio::test]
-    async fn run_surfaces_a_source_failure_through_wait() {
-        // A lone unbuildable source (garbage invite) has no fallback, so the
-        // error surfaces on the returned handle rather than synchronously.
-        let error = client()
-            .run(TransferRequest {
-                direction: TransferDirection::Send,
-                path: "f.txt".into(),
-                sources: vec![PeerSource::Invite {
-                    invite: "not-an-invite".into(),
-                }],
-                options: TransferOptions::default(),
-            })
-            .expect("run spawns the transfer")
-            .wait()
-            .await
-            .unwrap_err();
-        assert_eq!(error.kind, ErrorKind::Input);
-    }
-
-    #[tokio::test]
-    async fn run_emits_a_terminal_failed_event_with_reason_code() {
-        // The event stream must tell the whole story on its own: a failed run
-        // ends with a Failed event carrying the typed reason_code (frontends
-        // branch on it; the operation's Result is a separate channel).
-        let mut transfer = client()
-            .run(TransferRequest {
-                direction: TransferDirection::Send,
-                path: "f.txt".into(),
-                sources: vec![PeerSource::Invite {
-                    invite: "not-an-invite".into(),
-                }],
-                options: TransferOptions::default(),
-            })
-            .expect("run spawns the transfer");
-        let mut terminal = None;
-        while let Some(stamped) = transfer.next_event().await {
-            if let TransferEvent::Failed { reason_code, .. } = stamped.event {
-                terminal = Some(reason_code);
-            }
-        }
-        assert_eq!(terminal, Some(FailureCode::Other));
-    }
-}
+#[path = "api_tests.rs"]
+mod tests;

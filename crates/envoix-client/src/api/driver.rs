@@ -10,17 +10,18 @@
 //! terminal from the run RESULT (`RunEnded`), which the "every failed run ends
 //! its stream with a typed Failed" contract keeps equivalent.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use envoix_session::TransferDirection;
+use envoix_session::{IdentityConfig, MemoryIdentity, TransferDirection};
 use envoix_storage::LocalFileStorage;
+use envoix_types::TransferId;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
-use super::error::TransferError;
-use super::event::FailureCode;
+use super::error::{Phase, TransferError, TransferFailure};
+use super::event::SessionFailureCode as FailureCode;
 use super::machine::{AttemptEvent, Effect, Input, Session};
 use super::receipt;
 use super::record::{RecordStore, TransferRecord, unix_now_ms};
@@ -42,7 +43,10 @@ const COMMIT_RETRY: [Duration; 3] = [
 fn is_post_commit(effect: &Effect) -> bool {
     matches!(
         effect,
-        Effect::StartAttempt { .. } | Effect::PostReceipt | Effect::DiscardPartial
+        Effect::StartAttempt { .. }
+            | Effect::PostReceipt
+            | Effect::DiscardPartial
+            | Effect::DiscardStagedFile
     )
 }
 /// The state-scoped mailbox poll schedule (design: bounded). Runs in PARALLEL
@@ -81,16 +85,40 @@ pub struct ClientContext {
     /// frontend's current setting (pre-field records).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipt_server: Option<String>,
+    /// Per-transfer endpoint identity used by durable listener sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_file: Option<PathBuf>,
 }
 
 impl ClientContext {
+    pub fn from_config_path(path: Option<&Path>) -> Result<Self, TransferError> {
+        let Some(path) = path else {
+            return Ok(Self::default());
+        };
+        let config = crate::RuntimeConfig::read(path)
+            .map_err(|error| TransferError::from_core(error, Phase::Setup))?;
+        let candidates = config.candidates.unwrap_or_default();
+        Ok(Self {
+            chunk_size: config.chunk_size,
+            data_stream_window: config.data_stream_window,
+            candidates_allow: candidates.allow,
+            candidates_deny: candidates.deny,
+            receipt_server: None,
+            identity_file: None,
+        })
+    }
+
     pub fn client(&self) -> Result<Client, TransferError> {
-        Client::from_config_fields(
+        let mut client = Client::from_config_fields(
             self.chunk_size.as_deref(),
             &self.candidates_allow,
             &self.candidates_deny,
             self.data_stream_window.as_deref(),
-        )
+        )?;
+        if let Some(path) = &self.identity_file {
+            client.identity = IdentityConfig::Persistent(path.clone());
+        }
+        Ok(client)
     }
 }
 
@@ -104,6 +132,22 @@ pub struct SessionContext {
     pub params: SessionParams,
 }
 
+impl SessionContext {
+    /// Static listener coordinates are handed to the peer and must survive a
+    /// durable resume. Dialers and room peers stay ephemeral.
+    pub fn requires_stable_listener_identity(&self) -> bool {
+        self.params.direction == TransferDirection::Receive
+            && self.params.sources.iter().any(|source| {
+                matches!(
+                    source,
+                    PeerSource::ShowManual { .. }
+                        | PeerSource::ShowInvite { .. }
+                        | PeerSource::Mdns { .. }
+                )
+            })
+    }
+}
+
 /// Direction, paths, rendezvous sources, and attempt options for one transfer.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SessionParams {
@@ -114,6 +158,10 @@ pub struct SessionParams {
     /// `options.resume` applies to attempt 1 (a user-initiated NEW transfer is
     /// fresh); resumed attempts follow the machine's `StartAttempt` effect.
     pub options: TransferOptions,
+    /// The receive lands in app-private staging and needs a native publication
+    /// step before it is user-visible.
+    #[serde(default)]
+    pub publication_required: bool,
 }
 
 /// One emission of the session's observable state.
@@ -129,10 +177,31 @@ pub struct SessionSnapshot {
     pub session: Session,
 }
 
+fn stabilize_listening_tokens(context: &mut SessionContext) -> Result<(), TransferError> {
+    for source in &mut context.params.sources {
+        let token = match source {
+            PeerSource::ShowManual { token }
+            | PeerSource::ShowInvite { token, .. }
+            | PeerSource::Mdns { token } => token,
+            _ => continue,
+        };
+        if token.is_none() {
+            *token = Some(super::new_token()?);
+        }
+    }
+    Ok(())
+}
+
 /// What the driver tells the frontend.
 #[derive(Clone, Debug)]
+// Boxing `Snapshot` would break the established public match surface merely to
+// optimize this infrequent UI notification enum.
+#[allow(clippy::large_enum_variant)]
 pub enum SessionNotice {
     Snapshot(SessionSnapshot),
+    /// Raw event for diagnostics and invite/token presentation. Lifecycle UI
+    /// must render snapshots rather than fold this stream independently.
+    Event(super::StampedEvent),
     /// GET `<server>/receipts/<key>` and call
     /// [`TransferSession::receipt_response`] with the body (or None on 404).
     FetchReceipt {
@@ -162,6 +231,7 @@ enum Cmd {
     },
     /// Courier ack-back: the receipt POST got its 2xx.
     ReceiptPosted,
+    Published(String),
     /// D2 (Remove): delete the partial, resume state, and receipt sidecars.
     Discard,
     /// Serve the peer's re-verify (courier tier: one-shot, bounded, never
@@ -201,16 +271,29 @@ impl TransferSession {
     /// the notice stream (snapshots + courier requests). With `record`, every
     /// state change is persisted for restore-across-restart.
     pub fn start(
-        context: SessionContext,
+        mut context: SessionContext,
         record: Option<(RecordStore, u64)>,
         extras: Option<serde_json::Value>,
     ) -> Result<(Self, mpsc::UnboundedReceiver<SessionNotice>), TransferError> {
-        let client = context.client.client()?;
+        stabilize_listening_tokens(&mut context)?;
+        if context.requires_stable_listener_identity()
+            && context.client.identity_file.is_none()
+            && let Some((store, id)) = &record
+        {
+            context.client.identity_file = Some(store.identity_path(*id));
+        }
+        let mut client = context.client.client()?;
+        if context.requires_stable_listener_identity() && context.client.identity_file.is_none() {
+            client.identity = IdentityConfig::Memory(MemoryIdentity::generate());
+        }
         let direction = context.params.direction;
+        let mut session = Session::new(direction);
+        session.publication_required = context.params.publication_required;
         Ok(Self::spawn(
             client,
             context,
-            Session::new(direction),
+            session,
+            unix_now_ms(),
             record,
             extras,
             true,
@@ -233,7 +316,15 @@ impl TransferSession {
         // The source is not yet in hand — staging copies it first. A retry
         // consults this to re-stage rather than launch a partial file.
         session.facts.source_ready = false;
-        Ok(Self::spawn(client, context, session, record, extras, false))
+        Ok(Self::spawn(
+            client,
+            context,
+            session,
+            unix_now_ms(),
+            record,
+            extras,
+            false,
+        ))
     }
 
     /// Rehydrate a persisted session WITHOUT launching an attempt. A record
@@ -245,8 +336,21 @@ impl TransferSession {
         record: TransferRecord,
         store: Option<(RecordStore, u64)>,
     ) -> Result<(Self, mpsc::UnboundedReceiver<SessionNotice>), TransferError> {
-        let client = record.context.client.client()?;
+        let mut context = record.context;
+        stabilize_listening_tokens(&mut context)?;
+        if context.requires_stable_listener_identity()
+            && context.client.identity_file.is_none()
+            && let Some((store, id)) = &store
+        {
+            context.client.identity_file = Some(store.identity_path(*id));
+        }
+        let mut client = context.client.client()?;
+        if context.requires_stable_listener_identity() && context.client.identity_file.is_none() {
+            client.identity = IdentityConfig::Memory(MemoryIdentity::generate());
+        }
+        let created_ms = record.created_ms;
         let mut session = record.session;
+        session.publication_required = context.params.publication_required;
         use super::machine::{PauseOrigin, State};
         if matches!(
             session.state,
@@ -275,8 +379,9 @@ impl TransferSession {
         // (stage_failed) per that grant.
         Ok(Self::spawn(
             client,
-            record.context,
+            context,
             session,
+            created_ms,
             store,
             record.platform_extras,
             false,
@@ -287,6 +392,7 @@ impl TransferSession {
         client: Client,
         context: SessionContext,
         mut session: Session,
+        created_ms: u64,
         record: Option<(RecordStore, u64)>,
         platform_extras: Option<serde_json::Value>,
         launch: bool,
@@ -315,6 +421,7 @@ impl TransferSession {
             notices: notice_tx,
             current: None,
             pending: None,
+            pending_failure: None,
             seq: 0,
             apply_seq: 0,
             confirm_deadline: None,
@@ -322,6 +429,7 @@ impl TransferSession {
             poll_key: None,
             rate: RateTracker::default(),
             last_progress_snapshot: None,
+            created_ms,
             record,
             platform_extras,
             staged: Vec::new(),
@@ -356,48 +464,54 @@ impl TransferSession {
         (Self { cmds: cmd_tx }, notice_rx)
     }
 
-    pub fn pause(&self) {
-        let _ = self.cmds.send(Cmd::Pause);
+    pub fn pause(&self) -> bool {
+        self.cmds.send(Cmd::Pause).is_ok()
     }
 
-    pub fn cancel(&self) {
-        let _ = self.cmds.send(Cmd::Cancel);
+    pub fn cancel(&self) -> bool {
+        self.cmds.send(Cmd::Cancel).is_ok()
     }
 
-    pub fn resume(&self) {
-        let _ = self.cmds.send(Cmd::Resume);
+    pub fn resume(&self) -> bool {
+        self.cmds.send(Cmd::Resume).is_ok()
     }
 
     /// The courier's answer to a [`SessionNotice::FetchReceipt`] — the raw
     /// mailbox blob, or `None` when the slot was empty (404). `key` echoes
     /// the fetched slot, so an answer from a superseded attempt is dropped.
-    pub fn receipt_response(&self, key: String, blob: Option<Vec<u8>>) {
-        let _ = self.cmds.send(Cmd::ReceiptResponse { key, blob });
+    pub fn receipt_response(&self, key: String, blob: Option<Vec<u8>>) -> bool {
+        self.cmds.send(Cmd::ReceiptResponse { key, blob }).is_ok()
     }
 
     /// Courier ack-back: the receipt POST was acknowledged - the receiver's
     /// confirmation duty is discharged (drives ↻ retirement + stops re-posts).
-    pub fn receipt_posted(&self) {
-        let _ = self.cmds.send(Cmd::ReceiptPosted);
+    pub fn receipt_posted(&self) -> bool {
+        self.cmds.send(Cmd::ReceiptPosted).is_ok()
+    }
+
+    /// Native publication finished; advances a staged receive to user-visible
+    /// Completed and durably stores its final path or URI.
+    pub fn published(&self, path: String) -> bool {
+        self.cmds.send(Cmd::Published(path)).is_ok()
     }
 
     /// D2 (Remove, the one true abandon): delete this transfer's partial,
     /// resume state, and receipt sidecars. Call before dropping the handle.
-    pub fn discard(&self) {
-        let _ = self.cmds.send(Cmd::Discard);
+    pub fn discard(&self) -> bool {
+        self.cmds.send(Cmd::Discard).is_ok()
     }
 
     /// Serve the peer's re-verify from a Completed card: the mailbox-
     /// unreachable fallback. A service, not a resurrection - the card and the
     /// machine are untouched.
-    pub fn serve_reverify(&self) {
-        let _ = self.cmds.send(Cmd::ServeReverify);
+    pub fn serve_reverify(&self) -> bool {
+        self.cmds.send(Cmd::ServeReverify).is_ok()
     }
 
     /// Replace the frontend-owned card context (QR payload, saved URI, ...)
     /// persisted with the record. Opaque to the core; survives restarts.
-    pub fn set_extras(&self, extras: serde_json::Value) {
-        let _ = self.cmds.send(Cmd::SetExtras(extras));
+    pub fn set_extras(&self, extras: serde_json::Value) -> bool {
+        self.cmds.send(Cmd::SetExtras(extras)).is_ok()
     }
 
     /// A Preparing send: report staging copy progress (moves the bar only,
@@ -482,6 +596,9 @@ struct Actor {
     /// [`Effect::StartAttempt`]); drained by the [`Self::apply`] loop so it
     /// takes the same reduce->effects->persist path as every other input.
     pending: Option<Input>,
+    /// Structured detail paired with `pending` when an attempt fails before it
+    /// can produce an event stream.
+    pending_failure: Option<TransferFailure>,
     seq: u64,
     /// Monotonic per-`apply` id: groups a batch of `decided` edges to the one
     /// `record.committed` that persists their final state (diagnostics v2, P8).
@@ -493,6 +610,7 @@ struct Actor {
     poll_key: Option<String>,
     rate: RateTracker,
     last_progress_snapshot: Option<Instant>,
+    created_ms: u64,
     record: Option<(RecordStore, u64)>,
     /// False when restoring: no attempt is launched; standing effects are
     /// re-derived from the restored state instead.
@@ -509,8 +627,10 @@ impl Actor {
             self.staged.push(Effect::StartAttempt { resume });
         } else if self.session.state == super::machine::State::Unconfirmed {
             self.run_effect(Effect::StartMailboxPoll).await;
-        } else if self.session.state == super::machine::State::Completed
-            && self.session.direction == TransferDirection::Receive
+        } else if matches!(
+            self.session.state,
+            super::machine::State::Completed | super::machine::State::AwaitingPublication
+        ) && self.session.direction == TransferDirection::Receive
             && !self.session.facts.proof_delivered
         {
             // Restored with the confirmation duty undischarged: re-post.
@@ -518,7 +638,8 @@ impl Actor {
         }
         self.try_commit().await;
         if let Some(input) = self.pending.take() {
-            self.apply(input).await;
+            let failure = self.pending_failure.take();
+            self.apply_with_failure(input, failure).await;
         }
 
         loop {
@@ -570,7 +691,8 @@ impl Actor {
                     self.commit_retry_at = None;
                     self.try_commit().await;
                     if let Some(input) = self.pending.take() {
-                        self.apply(input).await;
+                        let failure = self.pending_failure.take();
+                        self.apply_with_failure(input, failure).await;
                     }
                 }
             }
@@ -654,6 +776,7 @@ impl Actor {
                 );
                 self.apply(Input::ReceiptPosted).await
             }
+            Cmd::Published(path) => self.apply(Input::Published { path }).await,
             Cmd::ReceiptResponse { blob: None, .. } => {
                 // empty slot; later polls may hit
                 tracing::info!(
@@ -733,6 +856,18 @@ impl Actor {
     }
 
     async fn on_transfer_event(&mut self, event: super::StampedEvent) {
+        if let TransferEvent::Advertised { peer, .. } = &event.event
+            && let Some(rebind) = self
+                .context
+                .params
+                .options
+                .listen_addrs
+                .as_ref()
+                .and_then(|addrs| addrs.rebind_from_advertised(&peer.direct_addrs))
+        {
+            self.context.params.options.listen_addrs = Some(rebind);
+        }
+        let _ = self.notices.send(SessionNotice::Event(event.clone()));
         let mapped = match event.event {
             TransferEvent::Advertised { .. } => Some(AttemptEvent::Advertised),
             TransferEvent::Pairing { .. } => Some(AttemptEvent::Pairing),
@@ -778,11 +913,23 @@ impl Actor {
                 transfer_id,
                 file_name,
                 bytes_transferred,
-            } => Some(AttemptEvent::Completed {
-                transfer_id: transfer_id.to_string(),
-                file_name,
-                bytes: bytes_transferred,
-            }),
+            } => {
+                let completed_file_path =
+                    (self.context.params.direction == TransferDirection::Receive).then(|| {
+                        self.context
+                            .params
+                            .path
+                            .join(&file_name)
+                            .to_string_lossy()
+                            .into_owned()
+                    });
+                Some(AttemptEvent::Completed {
+                    transfer_id: transfer_id.to_string(),
+                    file_name,
+                    bytes: bytes_transferred,
+                    completed_file_path,
+                })
+            }
             // D4: mid-run Failed events are retry reports, not attempt
             // outcomes; the terminal comes from RunEnded.
             TransferEvent::Failed { .. } => None,
@@ -795,29 +942,64 @@ impl Actor {
     }
 
     async fn on_run_ended(&mut self) {
-        let failure = match self.current.take() {
+        let (failure, structured_failure) = match self.current.take() {
             Some(transfer) => match transfer.wait().await {
-                Ok(_) => None,
-                Err(error) => Some((failure_code_of(&error), error.message)),
+                Ok(_) => (None, None),
+                Err(error) => {
+                    let structured = transfer_failure_for_session(
+                        &error,
+                        &self.session,
+                        self.context.params.direction,
+                    );
+                    (
+                        Some((failure_code_of(&error), error.message)),
+                        Some(structured),
+                    )
+                }
             },
-            None => None,
+            None => (None, None),
         };
         let attempt = self.session.attempt;
-        self.apply(Input::Event {
-            attempt,
-            event: AttemptEvent::RunEnded { failure },
-        })
+        self.apply_with_failure(
+            Input::Event {
+                attempt,
+                event: AttemptEvent::RunEnded { failure },
+            },
+            structured_failure,
+        )
         .await;
+        self.park_after_remote_stop().await;
+    }
+
+    /// A remote pause/loss must park a fresh listening or dialing attempt so
+    /// the side that later resumes can reconnect without requiring a second
+    /// user action on the peer device. Local pause still waits for Resume.
+    async fn park_after_remote_stop(&mut self) {
+        if matches!(
+            self.session.state,
+            super::machine::State::Paused(super::machine::PauseOrigin::Peer)
+                | super::machine::State::Paused(super::machine::PauseOrigin::Lost)
+        ) {
+            self.apply(Input::Resume).await;
+        }
     }
 
     /// Feed one input to the machine, execute its effects, emit a snapshot.
     async fn apply(&mut self, input: Input) {
+        self.apply_with_failure(input, None).await;
+    }
+
+    async fn apply_with_failure(
+        &mut self,
+        input: Input,
+        structured_failure: Option<TransferFailure>,
+    ) {
         self.apply_seq += 1;
         let before = self.session.clone();
         let mut progress_only = true;
-        let mut next = Some(input);
+        let mut next = Some((input, structured_failure));
         loop {
-            while let Some(input) = next.take() {
+            while let Some((input, structured_failure)) = next.take() {
                 let is_progress = matches!(
                     input,
                     Input::Event {
@@ -826,6 +1008,7 @@ impl Actor {
                     } | Input::StageProgress { .. }
                 );
                 progress_only &= is_progress;
+                let before_input = self.session.clone();
                 // Observe THIS reduction (cheap Copy snapshot of state+facts).
                 // Progress is excluded: it would flood the timeline (v2 P6). For
                 // everything else, snapshot the FULL session so acceptance is
@@ -846,7 +1029,15 @@ impl Actor {
                         self.run_effect(effect).await;
                     }
                 }
-                next = self.pending.take();
+                if self.session != before_input
+                    && let Some(failure) = structured_failure
+                {
+                    self.session.failure = Some(failure);
+                }
+                next = self
+                    .pending
+                    .take()
+                    .map(|input| (input, self.pending_failure.take()));
             }
             if self.session == before && self.staged.is_empty() {
                 return; // no legal edge, nothing to commit
@@ -869,7 +1060,9 @@ impl Actor {
             match self.pending.take() {
                 // A drained StartAttempt failed synchronously: reduce it
                 // through the same loop.
-                Some(input) => next = Some(input),
+                Some(input) => {
+                    next = Some((input, self.pending_failure.take()));
+                }
                 None => return,
             }
         }
@@ -1016,6 +1209,7 @@ impl Actor {
         let record = TransferRecord {
             version: super::record::RECORD_VERSION,
             id: *id,
+            created_ms: self.created_ms,
             updated_ms: unix_now_ms(),
             context: self.context.clone(),
             session: self.session.clone(),
@@ -1055,12 +1249,14 @@ impl Actor {
             }
             Effect::PostReceipt => self.post_receipt().await,
             Effect::DiscardPartial => self.discard_partial().await,
+            Effect::DiscardStagedFile => self.discard_staged_file().await,
         }
     }
 
     fn launch_attempt(&mut self, resume: bool) {
         let mut options = self.context.params.options.clone();
         options.resume = resume;
+        options.continuation = self.session.attempt > 1;
         // Carry the card id onto the transfer span so engine timeline events
         // (protocol.complete_ack) route by session_id (diagnostics v2, P4).
         options.session_id = self.record.as_ref().map(|(_, id)| *id);
@@ -1080,6 +1276,11 @@ impl Actor {
                 // the old inline shortcut dropped effects and skipped persist,
                 // so the failure vanished on restore.
                 let attempt = self.session.attempt;
+                self.pending_failure = Some(transfer_failure_for_session(
+                    &error,
+                    &self.session,
+                    self.context.params.direction,
+                ));
                 let failure = Some((failure_code_of(&error), error.message));
                 self.pending = Some(Input::Event {
                     attempt,
@@ -1126,6 +1327,59 @@ impl Actor {
         .await;
     }
 
+    /// Delete only the final staging artifact that belongs to this transfer.
+    /// The matching receipt is the ownership proof; otherwise preserve it.
+    async fn discard_staged_file(&self) {
+        if !self.context.params.publication_required
+            || self.context.params.direction != TransferDirection::Receive
+        {
+            return;
+        }
+        let (Some(name), Some(tid)) = (&self.session.file_name, &self.session.transfer_id) else {
+            return;
+        };
+        let transfer_id = TransferId::new(tid.clone());
+        match LocalFileStorage::read_receipt(&self.context.params.path, name).await {
+            Ok(Some(receipt)) if receipt.transfer_id == transfer_id => {}
+            Ok(Some(receipt)) => {
+                tracing::warn!(
+                    expected_transfer_id = %transfer_id,
+                    actual_transfer_id = %receipt.transfer_id,
+                    file_name = %name,
+                    "discard: staged file belongs to another transfer; preserving it"
+                );
+                return;
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    transfer_id = %transfer_id,
+                    file_name = %name,
+                    "discard: staged file has no matching receipt; preserving it"
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "discard: cannot validate staged receipt; preserving file");
+                return;
+            }
+        }
+        let final_path = self.context.params.path.join(name);
+        if let Err(error) = tokio::fs::remove_file(&final_path).await
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::debug!(%error, path = %final_path.display(), "discard: staged final");
+        }
+        if let Err(error) = LocalFileStorage::delete_receipt_for_transfer(
+            &self.context.params.path,
+            name,
+            &transfer_id,
+        )
+        .await
+        {
+            tracing::debug!(%error, "discard: staged receipt");
+        }
+    }
+
     /// The pairing code, for sealing/verifying mailbox blobs.
     fn code(&self) -> Option<String> {
         self.context.params.sources.iter().find_map(|s| match s {
@@ -1157,13 +1411,30 @@ impl Actor {
 }
 
 /// The machine's failure code for an attempt result.
-fn failure_code_of(error: &TransferError) -> FailureCode {
+pub(super) fn failure_code_of(error: &TransferError) -> FailureCode {
     use super::ErrorKind;
     match error.kind {
-        ErrorKind::Cancelled => FailureCode::Cancelled,
-        ErrorKind::Paused => FailureCode::Paused,
+        ErrorKind::Cancelled => match FailureCode::classify(&error.message) {
+            FailureCode::PeerCancelled => FailureCode::PeerCancelled,
+            _ => FailureCode::Cancelled,
+        },
+        ErrorKind::Paused => match FailureCode::classify(&error.message) {
+            FailureCode::PeerPaused => FailureCode::PeerPaused,
+            _ => FailureCode::Paused,
+        },
         _ => FailureCode::classify(&error.message),
     }
+}
+
+pub(super) fn transfer_failure_for_session(
+    error: &TransferError,
+    session: &Session,
+    direction: TransferDirection,
+) -> TransferFailure {
+    let mut failure = error.to_failure(Some(direction));
+    failure.transfer_id = session.transfer_id.clone();
+    failure.attempt_id = Some(format!("attempt-{}", session.attempt));
+    failure
 }
 
 /// Await the current attempt's next event (guarded by `if current.is_some()`).
@@ -1183,439 +1454,5 @@ async fn sleep_until(at: Option<Instant>) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::super::machine::{AttemptEvent, Input, State};
-    use super::*;
-    use envoix_storage::{LocalFileStorage, TransferReceipt};
-
-    fn failing_params(direction: TransferDirection) -> SessionParams {
-        SessionParams {
-            direction,
-            path: "nonexistent.bin".into(),
-            sources: vec![PeerSource::Invite {
-                invite: "not-an-invite".into(),
-            }],
-            options: TransferOptions::default(),
-        }
-    }
-
-    fn failing_context(direction: TransferDirection) -> SessionContext {
-        SessionContext {
-            client: ClientContext::default(),
-            params: failing_params(direction),
-        }
-    }
-
-    fn record(direction: TransferDirection, session: Session) -> TransferRecord {
-        TransferRecord {
-            version: super::super::record::RECORD_VERSION,
-            id: 7,
-            updated_ms: 1,
-            context: failing_context(direction),
-            session,
-            platform_extras: None,
-        }
-    }
-
-    fn actor_for_context(
-        context: SessionContext,
-    ) -> (Actor, mpsc::UnboundedReceiver<SessionNotice>) {
-        let (cmds, cmd_rx) = mpsc::unbounded_channel();
-        drop(cmds);
-        let (notice_tx, notice_rx) = mpsc::unbounded_channel();
-        (
-            Actor {
-                client: Client::new(),
-                session: Session::new(context.params.direction),
-                context,
-                cmds: cmd_rx,
-                notices: notice_tx,
-                current: None,
-                pending: None,
-                seq: 0,
-                apply_seq: 0,
-                confirm_deadline: None,
-                polls: Vec::new(),
-                poll_key: None,
-                rate: RateTracker::default(),
-                last_progress_snapshot: None,
-                record: None,
-                platform_extras: None,
-                staged: Vec::new(),
-                commit_failures: 0,
-                commit_retry_at: None,
-                launch: false,
-            },
-            notice_rx,
-        )
-    }
-
-    /// Drain notices until a snapshot in the wanted state arrives.
-    async fn wait_for_state(
-        notices: &mut mpsc::UnboundedReceiver<SessionNotice>,
-        wanted: State,
-    ) -> SessionSnapshot {
-        let mut last_seq = 0;
-        loop {
-            let notice = tokio::time::timeout(Duration::from_secs(10), notices.recv())
-                .await
-                .expect("notice within timeout")
-                .expect("stream open");
-            if let SessionNotice::Snapshot(snapshot) = notice {
-                assert!(snapshot.seq > last_seq, "snapshot seq must be monotonic");
-                last_seq = snapshot.seq;
-                if snapshot.session.state == wanted {
-                    return snapshot;
-                }
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn failing_attempt_reaches_failed_via_run_ended() {
-        let (_session, mut notices) =
-            TransferSession::start(failing_context(TransferDirection::Send), None, None).unwrap();
-        let snapshot = wait_for_state(&mut notices, State::Failed).await;
-        assert_eq!(snapshot.session.attempt, 1);
-        assert!(snapshot.session.reason.is_some());
-    }
-
-    #[tokio::test]
-    async fn resume_launches_attempt_two() {
-        let (session, mut notices) =
-            TransferSession::start(failing_context(TransferDirection::Send), None, None).unwrap();
-        wait_for_state(&mut notices, State::Failed).await;
-        session.resume();
-        let snapshot = wait_for_state(&mut notices, State::Connecting).await;
-        assert_eq!(snapshot.session.attempt, 2);
-        // …and the second attempt fails the same way.
-        let snapshot = wait_for_state(&mut notices, State::Failed).await;
-        assert_eq!(snapshot.session.attempt, 2);
-    }
-
-    #[tokio::test]
-    async fn restore_coerces_active_to_paused_lost() {
-        let mut session = Session::new(TransferDirection::Receive);
-        session.bytes = 40;
-        assert_eq!(session.state, State::Connecting); // "active" when persisted
-        let (_handle, mut notices) =
-            TransferSession::restore(record(TransferDirection::Receive, session), None).unwrap();
-        let snapshot = wait_for_state(
-            &mut notices,
-            State::Paused(super::super::machine::PauseOrigin::Lost),
-        )
-        .await;
-        assert_eq!(snapshot.session.bytes, 40, "progress display survives");
-        assert_eq!(snapshot.session.attempt, 1, "no attempt was launched");
-    }
-
-    /// The commit barrier under a dead store: no snapshot may leak an
-    /// uncommitted state, the attempt never launches, and after the bounded
-    /// retries the session fails VISIBLY (never a silent stall).
-    #[tokio::test(start_paused = true)]
-    async fn unwritable_store_escalates_to_a_visible_failure() {
-        let root = std::env::temp_dir().join(format!("envoix-deadstore-{}", std::process::id()));
-        let _ = tokio::fs::remove_dir_all(&root).await;
-        tokio::fs::create_dir_all(&root).await.unwrap();
-        // A FILE where the store wants a directory: every save fails.
-        tokio::fs::write(root.join("blocker"), b"x").await.unwrap();
-        let store = RecordStore::new(root.join("blocker").join("records"));
-
-        let (_handle, mut notices) = TransferSession::start(
-            failing_context(TransferDirection::Send),
-            Some((store, 5)),
-            None,
-        )
-        .unwrap();
-
-        // The paused clock drives the retry backoff instantly; the FIRST
-        // snapshot ever observed must already be the terminal escalation -
-        // anything earlier would be a view of uncommitted state.
-        let snapshot = loop {
-            match notices.recv().await.expect("stream open") {
-                SessionNotice::Snapshot(s) => break s,
-                _ => continue,
-            }
-        };
-        assert_eq!(snapshot.session.state, State::Failed);
-        assert!(
-            snapshot
-                .session
-                .reason
-                .as_deref()
-                .unwrap_or("")
-                .contains("record store"),
-            "the failure names the store, not the transfer"
-        );
-        let _ = tokio::fs::remove_dir_all(&root).await;
-    }
-
-    #[tokio::test]
-    async fn start_staging_waits_in_preparing_and_persists_before_any_attempt() {
-        let dir = std::env::temp_dir().join(format!("envoix-staging-{}", std::process::id()));
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        let store = RecordStore::new(&dir);
-        let (_session, mut notices) = TransferSession::start_staging(
-            failing_context(TransferDirection::Send),
-            Some((store.clone(), 8)),
-            None,
-        )
-        .unwrap();
-
-        // The FIRST snapshot is Preparing - no attempt was launched (the
-        // failing context would otherwise drive it straight to Failed).
-        let snapshot = wait_for_state(&mut notices, State::Preparing).await;
-        assert_eq!(snapshot.session.state, State::Preparing);
-        // And the record committed as Preparing BEFORE the copy would start.
-        let persisted = store.load(8).await.expect("record persisted");
-        assert_eq!(persisted.session.state, State::Preparing);
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-    }
-
-    #[tokio::test]
-    async fn stage_progress_moves_the_bar_but_is_not_persisted() {
-        let dir = std::env::temp_dir().join(format!("envoix-stageprog-{}", std::process::id()));
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        let store = RecordStore::new(&dir);
-        let (session, mut notices) = TransferSession::start_staging(
-            failing_context(TransferDirection::Send),
-            Some((store.clone(), 12)),
-            None,
-        )
-        .unwrap();
-        wait_for_state(&mut notices, State::Preparing).await;
-
-        session.stage_progress(1, 200);
-        // The snapshot shows the staging bar move...
-        let snapshot = loop {
-            match notices.recv().await.expect("stream open") {
-                SessionNotice::Snapshot(s) if s.session.bytes == 200 => break s,
-                _ => continue,
-            }
-        };
-        assert_eq!(snapshot.session.bytes, 200);
-        // ...but the record is NOT rewritten for progress (would be churn).
-        let persisted = store.load(12).await.expect("record exists");
-        assert_eq!(
-            persisted.session.bytes, 0,
-            "staging progress is snapshot-only"
-        );
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-    }
-
-    #[tokio::test]
-    async fn stage_complete_leaves_preparing_and_launches() {
-        let (session, mut notices) =
-            TransferSession::start_staging(failing_context(TransferDirection::Send), None, None)
-                .unwrap();
-        wait_for_state(&mut notices, State::Preparing).await;
-        session.stage_complete(1);
-        // The attempt launches (and fails, via the failing context) - the
-        // point is it LEFT Preparing rather than staying stuck.
-        wait_for_state(&mut notices, State::Failed).await;
-    }
-
-    #[tokio::test]
-    async fn stage_failed_fails_the_preparing_transfer() {
-        let (session, mut notices) =
-            TransferSession::start_staging(failing_context(TransferDirection::Send), None, None)
-                .unwrap();
-        wait_for_state(&mut notices, State::Preparing).await;
-        session.stage_failed(1, "source could not be read".into());
-        let snapshot = wait_for_state(&mut notices, State::Failed).await;
-        assert_eq!(
-            snapshot.session.reason.as_deref(),
-            Some("source could not be read")
-        );
-    }
-
-    #[tokio::test]
-    async fn restored_preparing_stays_preparing_for_the_platform() {
-        let mut session = Session::new(TransferDirection::Send);
-        session.state = State::Preparing;
-        let (_handle, mut notices) =
-            TransferSession::restore(record(TransferDirection::Send, session), None).unwrap();
-        // Not coerced to Paused(Lost): the platform decides re-stage vs fail.
-        let snapshot = wait_for_state(&mut notices, State::Preparing).await;
-        assert_eq!(snapshot.session.state, State::Preparing);
-    }
-
-    #[tokio::test]
-    async fn restored_confirming_with_sent_hash_is_unconfirmed() {
-        // sent_hash is recorded exactly at Confirming: every byte + the
-        // Complete frame went out, only the ack died with the process. The
-        // honest restored state is Unconfirmed (poll resumes), not Paused.
-        let mut session = Session::new(TransferDirection::Send);
-        session.state = State::Confirming;
-        session.transfer_id = Some("transfer-confirming".into());
-        session.sent_hash = Some("committed-hash".into());
-        let (_handle, mut notices) =
-            TransferSession::restore(record(TransferDirection::Send, session), None).unwrap();
-        let snapshot = wait_for_state(&mut notices, State::Unconfirmed).await;
-        assert_eq!(snapshot.session.state, State::Unconfirmed);
-
-        // Without the committed fact (a pre-fact record), Paused(Lost) stands.
-        let mut session = Session::new(TransferDirection::Send);
-        session.state = State::Confirming;
-        let (_handle, mut notices) =
-            TransferSession::restore(record(TransferDirection::Send, session), None).unwrap();
-        wait_for_state(
-            &mut notices,
-            State::Paused(super::super::machine::PauseOrigin::Lost),
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn sync_launch_failure_is_persisted() {
-        // Client::run fails synchronously on empty sources; the failure must
-        // take the same apply path as any input - the old inline shortcut
-        // skipped persist(), so the Failed state vanished on restore.
-        let dir = std::env::temp_dir().join(format!("envoix-launchfail-{}", std::process::id()));
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        let store = RecordStore::new(&dir);
-        let mut context = failing_context(TransferDirection::Send);
-        context.params.sources = Vec::new();
-        let (_handle, mut notices) =
-            TransferSession::start(context, Some((store.clone(), 3)), None).unwrap();
-        wait_for_state(&mut notices, State::Failed).await;
-
-        // Persist happens-before emit: by the time any snapshot is observed,
-        // the record already holds that state. No polling.
-        let persisted = store.load(3).await.expect("record exists");
-        assert_eq!(
-            persisted.session.state,
-            State::Failed,
-            "the record commits before the snapshot goes out"
-        );
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-    }
-
-    #[tokio::test]
-    async fn restore_unconfirmed_resumes_the_mailbox_poll() {
-        let mut session = Session::new(TransferDirection::Send);
-        session.state = State::Unconfirmed;
-        session.transfer_id = Some("transfer-restored".into());
-        let (_handle, mut notices) =
-            TransferSession::restore(record(TransferDirection::Send, session), None).unwrap();
-        // Receipt confirmation must survive restarts: the restored session
-        // re-derives its standing effect and asks the courier to fetch.
-        loop {
-            let notice = tokio::time::timeout(Duration::from_secs(20), notices.recv())
-                .await
-                .expect("courier request within the poll schedule")
-                .expect("stream open");
-            if let SessionNotice::FetchReceipt { key, .. } = notice {
-                assert_eq!(key.len(), 64);
-                break;
-            }
-        }
-    }
-
-    #[test]
-    fn restore_validates_persisted_client_context() {
-        let mut record = record(
-            TransferDirection::Receive,
-            Session::new(TransferDirection::Receive),
-        );
-        record.context.client.chunk_size = Some("not-a-size".into());
-
-        assert!(TransferSession::restore(record, None).is_err());
-    }
-
-    #[tokio::test]
-    async fn completed_without_started_still_posts_receipt() {
-        let dir =
-            std::env::temp_dir().join(format!("envoix-driver-receipt-{}", std::process::id()));
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        LocalFileStorage::write_receipt(
-            &dir,
-            &TransferReceipt {
-                file_name: "done.bin".into(),
-                file_size: 77,
-                file_hash: "hash".into(),
-            },
-        )
-        .await
-        .unwrap();
-
-        let mut context = failing_context(TransferDirection::Receive);
-        context.params.path = dir.clone();
-        context.params.sources = vec![PeerSource::Room {
-            code: "123456-kelp-coral".into(),
-            broker: "id@1.2.3.4:5".into(),
-        }];
-        let (mut actor, mut notices) = actor_for_context(context);
-
-        actor
-            .apply(Input::Event {
-                attempt: 1,
-                event: AttemptEvent::Completed {
-                    transfer_id: "transfer-fast".into(),
-                    file_name: "done.bin".into(),
-                    bytes: 77,
-                },
-            })
-            .await;
-
-        match notices.recv().await.expect("receipt posted") {
-            SessionNotice::PostReceipt { key, blob, .. } => {
-                assert_eq!(key.len(), 64);
-                assert!(!blob.is_empty());
-            }
-            notice => panic!("expected receipt post, got {notice:?}"),
-        }
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-    }
-
-    #[tokio::test]
-    async fn stale_receipt_responses_are_dropped_by_key() {
-        let mut context = failing_context(TransferDirection::Send);
-        context.params.sources = vec![PeerSource::Room {
-            code: "123456-kelp-coral".into(),
-            broker: "id@1.2.3.4:5".into(),
-        }];
-        let (mut actor, _notices) = actor_for_context(context);
-        actor.session.state = State::Unconfirmed;
-        actor.session.transfer_id = Some("transfer-current".into());
-        actor.session.sent_hash = Some("sent".into());
-        let current_key = receipt::receipt_mailbox_key("transfer-current");
-        actor.poll_key = Some(current_key.clone());
-        actor.polls = vec![Instant::now() + Duration::from_secs(60)];
-
-        // A late answer for a superseded attempt's slot changes nothing.
-        actor
-            .on_cmd(Cmd::ReceiptResponse {
-                key: receipt::receipt_mailbox_key("transfer-previous"),
-                blob: Some(vec![1, 2, 3]),
-            })
-            .await;
-        assert_eq!(actor.polls.len(), 1, "stale response must not clear polls");
-
-        // The current slot with a mismatching blob records the fact and keeps
-        // the bounded polls alive: the receiver overwrites the slot if it
-        // re-completes our offer, so a later poll can still verify.
-        actor
-            .on_cmd(Cmd::ReceiptResponse {
-                key: current_key,
-                blob: Some(vec![1, 2, 3]),
-            })
-            .await;
-        assert!(
-            actor.session.facts.receipt_mismatch,
-            "the mismatch is a recorded machine fact"
-        );
-        assert_eq!(actor.polls.len(), 1, "polling continues after a mismatch");
-    }
-
-    #[tokio::test]
-    async fn cancel_wins_over_the_attempt() {
-        let (session, mut notices) =
-            TransferSession::start(failing_context(TransferDirection::Receive), None, None)
-                .unwrap();
-        session.cancel();
-        let snapshot = wait_for_state(&mut notices, State::Cancelled).await;
-        // Whatever the racing attempt reported, the user's cancel is final.
-        assert_eq!(snapshot.session.state, State::Cancelled);
-    }
-}
+#[path = "driver_tests.rs"]
+mod tests;

@@ -264,7 +264,10 @@ prepare_build() {
         "$staged_jni"
     jni_replaced=1
     printf 'Building the debug APK...\n'
-    (cd "$repo_root/android" && ./gradlew assembleDebug --no-daemon)
+    (cd "$repo_root/android" && \
+        ENVOIX_ANDROID_ABIS=x86_64 \
+        ENVOIX_NAT_TEST_CA_DER_PATH="$cert_dir/ca.der" \
+        ./gradlew assembleDebug --no-daemon --rerun-tasks)
     [ -f "$apk" ] || die "Gradle did not produce $apk"
 }
 

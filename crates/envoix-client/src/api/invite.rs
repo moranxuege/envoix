@@ -15,6 +15,9 @@ use super::{PeerSource, TransferError};
 const SCHEME: &str = "envoix://pair/";
 /// Word count in a generated code (`<digits>-<word>-<word>`).
 const CODE_WORDS: usize = 2;
+/// Older clients used four-digit numeric nameplates; current clients use six.
+const MIN_NAMEPLATE_DIGITS: usize = 4;
+const MAX_NAMEPLATE_DIGITS: usize = 6;
 
 /// The role the invite's creator will take; a peer that scans/opens it should
 /// take the [`opposite`](Role::opposite). A hint only - the transfer still runs
@@ -175,6 +178,11 @@ impl Invite {
         if code.is_empty() {
             return Err(TransferError::input("empty pairing code"));
         }
+        if !is_pairing_code(code) {
+            return Err(TransferError::input(
+                "pairing code must have the form <digits>-<word>-<word>",
+            ));
+        }
         Ok(Self {
             code: code.to_string(),
             broker: None,
@@ -182,6 +190,28 @@ impl Invite {
             role: None,
         })
     }
+}
+
+fn is_pairing_code(code: &str) -> bool {
+    let mut parts = code.split('-');
+    let Some(nameplate) = parts.next() else {
+        return false;
+    };
+    let Some(first_word) = parts.next() else {
+        return false;
+    };
+    let Some(second_word) = parts.next() else {
+        return false;
+    };
+    if parts.next().is_some() {
+        return false;
+    }
+
+    (MIN_NAMEPLATE_DIGITS..=MAX_NAMEPLATE_DIGITS).contains(&nameplate.len())
+        && nameplate.bytes().all(|byte| byte.is_ascii_digit())
+        && [first_word, second_word]
+            .into_iter()
+            .all(|word| !word.is_empty() && word.bytes().all(|byte| byte.is_ascii_alphabetic()))
 }
 
 /// Percent-encode a query-parameter value, keeping only RFC 3986 unreserved bytes.
@@ -219,81 +249,5 @@ fn decode(s: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const BROKER: &str = "e946a31a@67.230.187.238:8445";
-    const RELAY: &str = "https://envoix.example:8444";
-
-    #[test]
-    fn room_generates_a_typeable_code() {
-        let inv = Invite::room(BROKER.into(), Some(RELAY.into())).unwrap();
-        // <digits>-<word>-<word>
-        assert_eq!(inv.code().split('-').count(), 3);
-        assert!(
-            inv.code()
-                .split('-')
-                .next()
-                .unwrap()
-                .chars()
-                .all(|c| c.is_ascii_digit())
-        );
-    }
-
-    #[test]
-    fn payload_round_trips_through_parse() {
-        let inv = Invite::room(BROKER.into(), Some(RELAY.into())).unwrap();
-        let parsed = Invite::parse(&inv.payload()).unwrap();
-        assert_eq!(parsed, inv);
-        // The reserved-char values survive encoding.
-        assert_eq!(parsed.broker.as_deref(), Some(BROKER));
-        assert_eq!(parsed.relay(), Some(RELAY));
-    }
-
-    #[test]
-    fn typed_code_and_full_url_converge_on_the_code() {
-        let inv = Invite::room("id@1.2.3.4:5".into(), None).unwrap();
-        let code = inv.code().to_string();
-        let from_url = Invite::parse(&inv.payload()).unwrap();
-        let from_code = Invite::parse(&code).unwrap();
-        assert_eq!(from_url.code(), from_code.code());
-        // A bare code has no transport hints; they come from config/defaults.
-        assert_eq!(from_code.broker, None);
-        assert_eq!(from_url.broker.as_deref(), Some("id@1.2.3.4:5"));
-    }
-
-    #[test]
-    fn unknown_params_are_ignored_for_forward_compat() {
-        let url =
-            "envoix://pair/1234-amber-comet?broker=id%40h%3A1&direct=9.9.9.9%3A1&mdns=envoix-x";
-        let inv = Invite::parse(url).unwrap();
-        assert_eq!(inv.code(), "1234-amber-comet");
-        assert_eq!(inv.broker.as_deref(), Some("id@h:1"));
-    }
-
-    #[test]
-    fn role_hint_round_trips_and_flips() {
-        let inv = Invite::room("id@h:1".into(), None)
-            .unwrap()
-            .with_role(Role::Send);
-        let parsed = Invite::parse(&inv.payload()).unwrap();
-        assert_eq!(parsed.role(), Some(Role::Send));
-        assert_eq!(parsed.role().unwrap().opposite(), Role::Receive);
-        // A bare code carries no role.
-        assert_eq!(Invite::parse("1234-amber-comet").unwrap().role(), None);
-    }
-
-    #[test]
-    fn empty_code_is_rejected() {
-        assert!(Invite::parse("").is_err());
-        assert!(Invite::parse("envoix://pair/").is_err());
-    }
-
-    #[test]
-    fn peer_source_uses_fallback_broker_for_a_bare_code() {
-        let inv = Invite::parse("1234-amber-comet").unwrap();
-        assert!(inv.peer_source(None).is_err());
-        let source = inv.peer_source(Some("id@h:1".into())).unwrap();
-        assert!(matches!(source, PeerSource::Room { broker, .. } if broker == "id@h:1"));
-    }
-}
+#[path = "invite_tests.rs"]
+mod tests;

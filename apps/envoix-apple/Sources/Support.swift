@@ -3,8 +3,10 @@ import SwiftUI
 import AppKit
 #elseif os(iOS)
 import UIKit
+import QuickLook
 #endif
 import CoreImage.CIFilterBuiltins
+import CryptoKit
 import EnvoixCore
 
 #if os(macOS)
@@ -17,6 +19,46 @@ typealias PlatformImage = UIImage
 let minTokenLength = 12
 let defaultRendezvousBroker = "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445"
 let defaultRelayURL = "https://envoix.chkxwlyh.us:8444"
+let defaultLogServer = "https://rdz.chkxwlyh.us:8460"
+let deprecatedLogServers: Set<String> = [
+    "http://67.230.187.238:8460",
+    "https://envoix.chkxwlyh.us:8460",
+    "http://envoix.chkxwlyh.us:8460",
+]
+
+struct ActivityActionAvailability: Equatable {
+    let canPause: Bool
+    let canResume: Bool
+    let canCancel: Bool
+    let canDelete: Bool
+    let isFinalizing: Bool
+}
+
+/// Single lifecycle-to-UI action policy. SwiftUI must not infer buttons from
+/// presentation state independently of the canonical transfer snapshot.
+func activityActionAvailability(for record: FfiTransferActivityRecord) -> ActivityActionAvailability {
+    let actions = transferActivityActions(record: record)
+    return ActivityActionAvailability(
+        canPause: actions.canPause,
+        canResume: actions.canResume,
+        canCancel: actions.canCancel,
+        canDelete: actions.canDelete,
+        isFinalizing: actions.isFinalizing
+    )
+}
+
+/// True when this attempt completed entirely from bytes already present at
+/// the destination. `bytesTransferred` is the verified total, while
+/// `bytesResumed` identifies how much of that total crossed no wire this time.
+func isFullyResumedCompletion(_ record: FfiTransferActivityRecord) -> Bool {
+    record.state == .completed
+        && record.totalBytes > 0
+        && record.bytesTransferred >= record.totalBytes
+        && record.bytesResumed >= record.totalBytes
+}
+
+let expectedCoreFFIAPIVersion: UInt32 = 3
+let appDebugBuildLabel = "Debug build 2026.07.08.19"
 
 /// Generates a short, memorable, easy-to-type pairing token of the form
 /// `word-word-NN` (always ≥ `minTokenLength` since each word is ≥4 letters).
@@ -33,9 +75,9 @@ func friendlyToken() -> String {
 
 /// How two peers find and authenticate each other.
 enum PairingMode: Hashable {
-    case room    // rendezvous room, short code, broker-assisted pairing
-    case invite  // QR / invite link carrying the receiver's address
-    case token   // same LAN, shared token, mDNS auto-discovery
+    case room    // Android-compatible QR/code, broker-assisted pairing
+    case invite  // legacy direct invite link, kept for compatibility
+    case token   // compatibility-only shared token; no longer exposed in Apple UI
 }
 
 extension String {
@@ -48,17 +90,27 @@ enum RuntimeSettingsProvider {
         language: String,
         serverURL: String,
         relayURL: String,
+        configChunkSize: String,
+        candidatesAllow: String = "",
+        candidatesDeny: String = "",
         speedLimit: Int
     ) throws -> EnvoixRuntimeSettings {
         guard speedLimit >= 0 else {
             throw RuntimeSettingsError("Speed limit cannot be negative.")
         }
 
+        let configPath = try resolveConfigPath(
+            chunkSize: configChunkSize,
+            candidatesAllow: candidatesAllow,
+            candidatesDeny: candidatesDeny
+        )
+
         return EnvoixRuntimeSettings(
             concurrentTransfers: concurrentTransfers,
             language: language,
             serverUrl: serverURL.trimmed,
             relayUrl: relayURL.trimmed,
+            configPath: configPath,
             speedLimitMbps: UInt64(speedLimit)
         )
     }
@@ -129,7 +181,7 @@ struct TokenField: View {
                         .contentShape(Rectangle())
                 }
                 Button {
-                    copyWithToast(token, AppText.value("Token copied", "口令已复制", language: language))
+                    copyWithToast(token, AppText.value("Token copied", "口令已复制", language: language), language: language)
                 } label: {
                     Label(AppText.value("Copy Token", "复制口令", language: language), systemImage: "doc.on.doc")
                         .frame(minHeight: 34)
@@ -183,7 +235,7 @@ struct TokenField: View {
                 .disabled(disabled)
 
                 Button {
-                    copyWithToast(token, AppText.value("Token copied", "口令已复制", language: language))
+                    copyWithToast(token, AppText.value("Token copied", "口令已复制", language: language), language: language)
                 } label: {
                     Label(AppText.value("Copy", "复制", language: language), systemImage: "doc.on.doc")
                         .frame(maxWidth: .infinity, minHeight: 36)
@@ -206,7 +258,10 @@ struct RoomCodeField: View {
     var canGenerate: Bool = false
     var generateLabel = "Generate"
     var copyLabel = "Copy Code"
+    var showsCopyAction = true
+    var pasteAction: (() -> Void)?
     var helper: String
+    var accessibilityIdentifier = ""
 
     var body: some View {
         #if os(iOS)
@@ -227,6 +282,7 @@ struct RoomCodeField: View {
                     .font(.body.monospaced())
                     .foregroundStyle(Theme.text)
                     .disabled(disabled)
+                    .accessibilityIdentifier(accessibilityIdentifier)
                 if canGenerate {
                     Button {
                         code = newRoomCode()
@@ -239,7 +295,7 @@ struct RoomCodeField: View {
                     .disabled(disabled)
                 }
                 Button {
-                    copyWithToast(code, AppText.value("Room code copied", "接收码已复制", language: language))
+                    copyWithToast(code, AppText.value("Room code copied", "接收码已复制", language: language), language: language)
                 } label: {
                     Label(copyLabel, systemImage: "doc.on.doc")
                         .frame(minHeight: 34)
@@ -256,10 +312,12 @@ struct RoomCodeField: View {
             )
             .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
 
-            Text(helper)
-                .font(.body)
-                .foregroundStyle(Theme.muted)
-                .fixedSize(horizontal: false, vertical: true)
+            if !helper.trimmed.isEmpty {
+                Text(helper)
+                    .font(.body)
+                    .foregroundStyle(Theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
@@ -270,50 +328,80 @@ struct RoomCodeField: View {
                 .font(.headline.weight(.semibold))
                 .foregroundStyle(Theme.muted)
 
-            TextField(placeholder, text: $code)
-                .textFieldStyle(.plain)
-                .font(.body.monospaced())
-                .foregroundStyle(Theme.text)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .disabled(disabled)
-                .padding(.horizontal, 10)
-                .frame(minHeight: 44)
-                .background(Theme.surface)
-                .overlay(
-                    RoundedRectangle(cornerRadius: Theme.cardRadius)
-                        .strokeBorder(Theme.line.opacity(0.75), lineWidth: 0.8)
-                )
-                .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
-
             HStack(spacing: 8) {
-                if canGenerate {
-                    Button {
-                        code = newRoomCode()
-                        ToastCenter.shared.show(AppText.value("Room code generated", "接收码已生成", language: language))
-                    } label: {
-                        Label(generateLabel, systemImage: "wand.and.stars")
-                            .frame(maxWidth: .infinity, minHeight: 36)
+                TextField(placeholder, text: $code)
+                    .textFieldStyle(.plain)
+                    .font(.body.monospaced())
+                    .foregroundStyle(Theme.text)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .disabled(disabled)
+                    .accessibilityIdentifier(accessibilityIdentifier)
+
+                if let pasteAction {
+                    Button(action: pasteAction) {
+                        Label(AppText.value("Paste", "粘贴", language: language), systemImage: "doc.on.clipboard")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(disabled ? Theme.text : Theme.accentStrong)
+                            .padding(.horizontal, 12)
+                            .frame(minHeight: 36)
+                            .background(
+                                disabled ? Theme.line : Theme.accentSoft,
+                                in: RoundedRectangle(cornerRadius: 8)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .strokeBorder(Theme.line, lineWidth: 1)
+                            )
                     }
+                    .buttonStyle(.plain)
                     .disabled(disabled)
                 }
-
-                Button {
-                    copyWithToast(code, AppText.value("Room code copied", "接收码已复制", language: language))
-                } label: {
-                    Label(copyLabel == "Copy Code" ? AppText.value("Copy", "复制", language: language) : copyLabel, systemImage: "doc.on.doc")
-                        .frame(maxWidth: .infinity, minHeight: 36)
-                }
-                .disabled(code.trimmed.isEmpty)
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
+            .padding(.horizontal, 10)
+            .frame(minHeight: 48)
+            .background(Theme.surface)
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.cardRadius)
+                    .strokeBorder(Theme.line.opacity(0.75), lineWidth: 0.8)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
 
-            Text(helper)
-                .font(.footnote)
-                .foregroundStyle(Theme.muted)
-                .fixedSize(horizontal: false, vertical: true)
+            if canGenerate || showsCopyAction {
+                HStack(spacing: 8) {
+                    if canGenerate {
+                        Button {
+                            code = newRoomCode()
+                            ToastCenter.shared.show(AppText.value("Room code generated", "接收码已生成", language: language))
+                        } label: {
+                            Label(generateLabel, systemImage: "wand.and.stars")
+                                .frame(maxWidth: .infinity, minHeight: 36)
+                        }
+                        .disabled(disabled)
+                    }
+
+                    if showsCopyAction {
+                        Button {
+                            copyWithToast(code, AppText.value("Room code copied", "接收码已复制", language: language), language: language)
+                        } label: {
+                            Label(copyLabel == "Copy Code" ? AppText.value("Copy", "复制", language: language) : copyLabel, systemImage: "doc.on.doc")
+                                .frame(maxWidth: .infinity, minHeight: 36)
+                        }
+                        .disabled(code.trimmed.isEmpty)
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+
+            if !helper.trimmed.isEmpty {
+                Text(helper)
+                    .font(.footnote)
+                    .foregroundStyle(Theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
+        .tint(Theme.accentStrong)
     }
     #endif
 }
@@ -349,12 +437,15 @@ func chooseURL(directory: Bool) -> URL? {
     #endif
 }
 
-func copyToPasteboard(_ text: String) {
+@discardableResult
+func copyToPasteboard(_ text: String) -> Bool {
     #if os(macOS)
     NSPasteboard.general.clearContents()
-    NSPasteboard.general.setString(text, forType: .string)
+    guard NSPasteboard.general.setString(text, forType: .string) else { return false }
+    return NSPasteboard.general.string(forType: .string) == text
     #elseif os(iOS)
     UIPasteboard.general.string = text
+    return UIPasteboard.general.string == text
     #endif
 }
 
@@ -390,12 +481,19 @@ func pastedFileURL() -> URL? {
 }
 
 /// Selects the file in Finder (opening its enclosing folder).
+#if os(macOS)
 func revealInFinder(_ url: URL) {
-    #if os(macOS)
-    NSWorkspace.shared.activateFileViewerSelecting([url])
-    #elseif os(iOS)
-    UIApplication.shared.open(url)
-    #endif
+    revealInFinder([url])
+}
+
+func revealInFinder(_ urls: [URL]) {
+    guard !urls.isEmpty else { return }
+    NSWorkspace.shared.activateFileViewerSelecting(urls)
+}
+#endif
+
+func isRegularFileURL(_ url: URL) -> Bool {
+    (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
 }
 
 func platformRevealTitle(language: String) -> String {
@@ -406,9 +504,179 @@ func platformRevealTitle(language: String) -> String {
     #endif
 }
 
+#if os(iOS)
+struct ReceivedItemsPresentation: Identifiable {
+    let id = UUID()
+    let urls: [URL]
+}
+
+private struct ReceivedItemsList: View {
+    @Environment(\.appLanguage) private var language
+    let urls: [URL]
+    @Binding var previewFileURL: URL?
+    let openDirectory: (URL) -> Void
+
+    var body: some View {
+        List(urls, id: \.self) { url in
+            let isDirectory = availableCompletedDirectoryURL(path: url.path) != nil
+            HStack(spacing: 12) {
+                if isDirectory {
+                    Button {
+                        openDirectory(url)
+                    } label: {
+                        receivedItemLabel(url, systemImage: "folder")
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("received_folder_open_\(url.lastPathComponent)")
+                } else {
+                    Button {
+                        previewFileURL = url
+                    } label: {
+                        receivedItemLabel(url, systemImage: "doc")
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("received_item_open_\(url.lastPathComponent)")
+                }
+
+                ShareLink(item: url) {
+                    Image(systemName: "square.and.arrow.up")
+                        .frame(width: 36, height: 36)
+                }
+                .accessibilityLabel(AppText.value("Share", "分享", language: language))
+                .accessibilityIdentifier("received_item_share_\(url.lastPathComponent)")
+            }
+        }
+    }
+
+    private func receivedItemLabel(_ url: URL, systemImage: String) -> some View {
+        Label(url.lastPathComponent, systemImage: systemImage)
+            .lineLimit(2)
+            .truncationMode(.middle)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+    }
+}
+
+struct ReceivedItemsSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.appLanguage) private var language
+    let urls: [URL]
+    @State private var previewFileURL: URL?
+    @State private var directoryPath: [URL] = []
+
+    var body: some View {
+        NavigationStack(path: $directoryPath) {
+            ReceivedItemsList(
+                urls: urls,
+                previewFileURL: $previewFileURL,
+                openDirectory: { directoryPath.append($0) }
+            )
+            .navigationTitle(AppText.value(
+                "Received Items",
+                "已接收项目",
+                language: language
+            ))
+            .navigationBarTitleDisplayMode(.inline)
+            .navigationDestination(for: URL.self) { directory in
+                let children = availableReceivedDirectoryItemURLs(directory: directory)
+                ReceivedItemsList(
+                    urls: children,
+                    previewFileURL: $previewFileURL,
+                    openDirectory: { directoryPath.append($0) }
+                )
+                    .navigationTitle(directory.lastPathComponent)
+                    .navigationBarTitleDisplayMode(.inline)
+                    .overlay {
+                        if children.isEmpty {
+                            Label(
+                                AppText.value(
+                                    "This folder is empty or unavailable.",
+                                    "此文件夹为空或当前无法访问。",
+                                    language: language
+                                ),
+                                systemImage: "folder"
+                            )
+                            .font(.callout)
+                            .foregroundStyle(Theme.muted)
+                            .padding()
+                        }
+                    }
+            }
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(AppText.value("Done", "完成", language: language)) { dismiss() }
+                }
+            }
+        }
+        .quickLookPreview($previewFileURL)
+        .presentationDetents([.medium, .large])
+    }
+}
+#endif
+
 /// Formats a byte count as a short human-readable string (auto KB/MB/GB).
 func byteString(_ bytes: UInt64) -> String {
     ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+}
+
+/// Writes a minimal `config.toml` fragment to app storage and returns its path,
+/// or returns an empty string when no config overrides are configured.
+private let runtimeConfigFileName = "envoix-runtime-config.toml"
+
+func resolveConfigPath(
+    chunkSize: String,
+    candidatesAllow: String = "",
+    candidatesDeny: String = ""
+) throws -> String {
+    let chunkSize = chunkSize.trimmed
+    let allow = configListLines(candidatesAllow)
+    let deny = configListLines(candidatesDeny)
+    if chunkSize.isEmpty && allow.isEmpty && deny.isEmpty {
+        return ""
+    }
+
+    let supportDir = FileManager.default.urls(
+        for: .applicationSupportDirectory,
+        in: .userDomainMask,
+    ).first
+    guard let supportDir else {
+        throw RuntimeSettingsError("Could not locate Application Support directory.")
+    }
+    let configDir = supportDir.appendingPathComponent("envoix", isDirectory: true)
+    try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+    let configFile = configDir.appendingPathComponent(runtimeConfigFileName)
+    var lines: [String] = []
+    if !chunkSize.isEmpty {
+        lines.append("chunk_size = \"\(tomlEscaped(chunkSize))\"")
+    }
+    if !allow.isEmpty || !deny.isEmpty {
+        lines.append("[candidates]")
+        if !allow.isEmpty {
+            lines.append("allow = \(tomlArray(allow))")
+        }
+        if !deny.isEmpty {
+            lines.append("deny = \(tomlArray(deny))")
+        }
+    }
+    let contents = lines.joined(separator: "\n") + "\n"
+    try contents.write(to: configFile, atomically: true, encoding: .utf8)
+    return configFile.path
+}
+
+func configListLines(_ text: String) -> [String] {
+    text
+        .split(whereSeparator: \.isNewline)
+        .map { String($0).trimmed }
+        .filter { !$0.isEmpty }
+}
+
+private func tomlArray(_ values: [String]) -> String {
+    "[" + values.map { "\"\(tomlEscaped($0))\"" }.joined(separator: ", ") + "]"
+}
+
+private func tomlEscaped(_ value: String) -> String {
+    value.replacingOccurrences(of: "\\", with: "\\\\")
+        .replacingOccurrences(of: "\"", with: "\\\"")
 }
 
 /// Formats a transfer rate, picking the most fitting unit (e.g. "12.3 MB/s").
@@ -424,208 +692,307 @@ func etaString(_ seconds: Double) -> String {
     return String(format: "ETA %d:%02d", m, sec)
 }
 
-/// Shared status / progress section used by both the send and receive views.
-struct TransferStatusView: View {
-    @Environment(\.appLanguage) private var language
-    @ObservedObject var viewModel: TransferViewModel
+/// Builds a compact, bounded diagnostic report for a transfer and its snapshots.
+struct TransferDiagnostics {
+    static let clipboardMaxBytes = 256 * 1024
+    static let uploadMaxBytes = RemoteLogUpload.bodyMaxBytes
+    #if os(macOS)
+    static let appIdentifier = "envoix-macos"
+    #else
+    static let appIdentifier = "envoix-ios"
+    #endif
+    private static let headerMaxBytes = 2048
+    private static let failureMaxBytes = 48 * 1024
+    private static let eventLinesMaxBytes = 80 * 1024
+    private static let eventLogMaxBytes = 96 * 1024
 
-    var body: some View {
-        if showsStatus {
-            statusCard
-        }
-    }
+    static func report(
+        for record: FfiTransferActivityRecord,
+        eventLog: [String] = [],
+        transferEventLines: [String] = [],
+        budget: Int = clipboardMaxBytes,
+        includeSensitiveFields: Bool = true
+    ) -> String {
+        var remaining = budget
+        var lines: [String] = []
 
-    private var showsStatus: Bool {
-        switch viewModel.phase {
-        case .idle: return !viewModel.statusText.isEmpty
-        default: return true
-        }
-    }
-
-    private var statusCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top, spacing: 12) {
-                Image(systemName: iconName)
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(tint)
-                    .frame(width: 30, height: 30)
-                    .background(tint.opacity(0.10), in: Circle())
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(titleText)
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(Theme.text)
-                        .lineLimit(2)
-
-                    if let detailText {
-                        Text(detailText)
-                            .font(.body)
-                            .foregroundStyle(Theme.muted)
-                            .lineLimit(3)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-
-                Spacer(minLength: 8)
-            }
-
-            switch viewModel.phase {
-            case .idle, .waiting, .canceled, .failed:
-                EmptyView()
-            case .transferring:
-                ProgressBar(value: viewModel.progressFraction)
-                HStack(spacing: 6) {
-                    Text("\(byteString(viewModel.transferred)) / \(byteString(viewModel.total))")
-                    if viewModel.bytesPerSec > 0 {
-                        Text("·"); Text(rateString(viewModel.bytesPerSec))
-                    }
-                    if let eta = viewModel.etaSeconds {
-                        Text("·"); Text(etaString(eta))
-                    }
-                }
-                .font(.body.monospacedDigit())
-                .foregroundStyle(Theme.muted)
-            case .completed(let bytes):
-                Text(byteString(bytes))
-                    .font(.body.monospacedDigit())
-                    .foregroundStyle(Theme.muted)
-                if let url = viewModel.completedFileURL {
-                    completedFileControls(url)
-                }
-            }
-
-            if let stepText {
-                Text(stepText)
-                    .font(.callout.monospaced())
-                    .foregroundStyle(Theme.muted)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(backgroundTint)
-        .overlay(
-            RoundedRectangle(cornerRadius: Theme.cardRadius)
-                .strokeBorder(tint.opacity(borderOpacity), lineWidth: 0.9)
+        append(
+            section: section("header", headerText(for: record)),
+            cap: headerMaxBytes,
+            into: &lines,
+            remaining: &remaining
         )
-        .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
-    }
 
-    private var titleText: String {
-        switch viewModel.phase {
-        case .idle:
-            return AppText.value("Status", "状态", language: language)
-        case .waiting:
-            return AppText.value("Waiting for the other device", "正在等待另一台设备", language: language)
-        case .transferring:
-            return viewModel.fileName.isEmpty ? AppText.value("Transferring", "正在传输", language: language) : viewModel.fileName
-        case .completed:
-            return AppText.value("Transfer completed", "传输完成", language: language)
-        case .canceled:
-            return AppText.value("Transfer canceled", "传输已取消", language: language)
-        case .failed(let reason):
-            return friendlyFailure(reason).title
-        }
-    }
-
-    private var detailText: String? {
-        switch viewModel.phase {
-        case .idle:
-            return viewModel.statusText.isEmpty ? nil : viewModel.statusText
-        case .waiting:
-            return viewModel.statusText.isEmpty
-                ? AppText.value("Keep this window open until the peer connects.", "请保持此窗口打开，直到对方连接。", language: language)
-                : viewModel.statusText
-        case .transferring:
-            return AppText.value("Keep both devices awake until the transfer finishes.", "请保持两台设备唤醒，直到传输完成。", language: language)
-        case .completed:
-            return viewModel.statusText.isEmpty ? AppText.value("The file is ready.", "文件已准备好。", language: language) : viewModel.statusText
-        case .canceled:
-            return AppText.value("Ready to start another transfer.", "可以开始新的传输。", language: language)
-        case .failed(let reason):
-            return friendlyFailure(reason).detail
-        }
-    }
-
-    private var stepText: String? {
-        let text = viewModel.statusText.trimmed
-        guard !text.isEmpty else { return nil }
-        if case .failed = viewModel.phase {
-            return AppText.value("Last step: \(text)", "上一步：\(text)", language: language)
-        }
-        return nil
-    }
-
-    private var iconName: String {
-        switch viewModel.phase {
-        case .idle: return "info.circle"
-        case .waiting: return "antenna.radiowaves.left.and.right"
-        case .transferring: return "arrow.up.arrow.down.circle"
-        case .completed: return "checkmark.circle.fill"
-        case .canceled: return "xmark.circle"
-        case .failed: return "exclamationmark.triangle.fill"
-        }
-    }
-
-    private var tint: Color {
-        switch viewModel.phase {
-        case .idle: return Theme.muted
-        case .waiting, .transferring: return Theme.warning
-        case .completed: return Theme.success
-        case .canceled: return Theme.muted
-        case .failed: return Theme.danger
-        }
-    }
-
-    private var backgroundTint: Color {
-        switch viewModel.phase {
-        case .failed: return Theme.dangerSoft.opacity(0.55)
-        case .waiting, .transferring: return Theme.warning.opacity(0.06)
-        case .completed: return Theme.success.opacity(0.06)
-        case .idle, .canceled: return Theme.surface
-        }
-    }
-
-    private var borderOpacity: Double {
-        switch viewModel.phase {
-        case .idle: return 0.25
-        default: return 0.35
-        }
-    }
-
-    private func friendlyFailure(_ reason: String) -> (title: String, detail: String) {
-        let cleanReason = reason.trimmed
-        let lower = cleanReason.lowercased()
-        if lower.contains("mdns") && lower.contains("peers discovered") {
-            return (
-                AppText.value("No device found on the local network", "未在局域网发现设备", language: language),
-                AppText.value("Make sure the other device is receiving with the same token and both devices are on the same network.", "请确认另一台设备正在使用相同口令接收，并且两台设备在同一网络中。", language: language)
+        if hasFailureMetadata(record) {
+            append(
+                section: section("failure", failureText(for: record)),
+                cap: failureMaxBytes,
+                into: &lines,
+                remaining: &remaining
             )
         }
-        if cleanReason.isEmpty {
-            return (
-                AppText.value("Transfer failed", "传输失败", language: language),
-                AppText.value("Try again, or switch pairing method if discovery keeps failing.", "请重试；如果一直无法发现设备，请切换配对方式。", language: language)
-            )
-        }
-        return (AppText.value("Transfer failed", "传输失败", language: language), cleanReason)
+
+        append(
+            section: section("activity", activityText(for: record, includeSensitiveFields: includeSensitiveFields)),
+            cap: remaining,
+            into: &lines,
+            remaining: &remaining
+        )
+
+        append(
+            section: section("transfer_events", transferEventLines.joined(separator: "\n")),
+            cap: eventLinesMaxBytes,
+            into: &lines,
+            remaining: &remaining
+        )
+
+        append(
+            section: section("activity_log", eventLog.joined(separator: "\n")),
+            cap: eventLogMaxBytes,
+            into: &lines,
+            remaining: &remaining
+        )
+
+        return lines.joined(separator: "\n")
     }
 
-    /// Reveal + copyable absolute path for a received file (handy for pasting
-    /// into an AI or another tool).
-    @ViewBuilder private func completedFileControls(_ url: URL) -> some View {
-        HStack {
-            Button(platformRevealTitle(language: language)) { revealInFinder(url) }
-            Button(AppText.value("Copy Path", "复制路径", language: language)) {
-                copyWithToast(url.path, AppText.value("Path copied", "路径已复制", language: language))
+    /// Remote reports are larger than clipboard copies but never contain pairing secrets.
+    static func remoteReport(
+        for record: FfiTransferActivityRecord,
+        eventLog: [String] = [],
+        transferEventLines: [String] = []
+    ) -> String {
+        report(
+            for: record,
+            eventLog: eventLog,
+            transferEventLines: transferEventLines,
+            budget: uploadMaxBytes,
+            includeSensitiveFields: false
+        )
+    }
+
+    /// App-level report used before a Room exists and for cross-transfer diagnosis.
+    static func appReport(
+        activities: [FfiTransferActivityRecord],
+        eventLines: [String] = []
+    ) -> String {
+        var remaining = uploadMaxBytes
+        var lines: [String] = []
+        append(
+            section: section("header", ([
+                "app=\(appIdentifier)",
+                "version=\(appVersion)",
+                "build=\(appBuild)",
+                "generated=\(isoDate())",
+                "activity_count=\(activities.count)",
+            ] + runtimeIdentityLines).joined(separator: "\n")),
+            cap: headerMaxBytes,
+            into: &lines,
+            remaining: &remaining
+        )
+
+        let activitySnapshots = activities.map { record in
+            var sections = ["[activity \(record.activityId)]", activityText(for: record, includeSensitiveFields: false)]
+            if hasFailureMetadata(record) {
+                sections.append(failureText(for: record))
             }
+            return sections.joined(separator: "\n")
+        }.joined(separator: "\n\n")
+        append(
+            section: section("activities", activitySnapshots),
+            cap: remaining,
+            into: &lines,
+            remaining: &remaining
+        )
+
+        append(
+            section: section("activity_events", eventLines.joined(separator: "\n")),
+            cap: remaining,
+            into: &lines,
+            remaining: &remaining
+        )
+
+        return lines.joined(separator: "\n")
+    }
+
+    static func transferEventLine(_ event: FfiTransferEvent) -> String {
+        let date = formatTime(event.tsMs)
+        var parts = [
+            "[\(date)]",
+            "\(event.kind)",
+            "\(event.direction)",
+            "\(event.mode)",
+            "\(event.pairingStep)",
+        ]
+        let file = event.fileName.isEmpty ? "unknown" : event.fileName
+        parts.append("file=\(file)")
+        parts.append("bytes=\(event.bytesTransferred)/\(event.totalBytes)")
+        if event.bytesResumed > 0 {
+            parts.append("resumed=\(event.bytesResumed)")
         }
-        Text(url.path)
-            .font(.body.monospaced())
-            .foregroundStyle(Theme.muted)
-            .textSelection(.enabled)
-            .lineLimit(1)
-            .truncationMode(.middle)
+        if !event.dataPathDetail.isEmpty {
+            parts.append("path=\(event.dataPathKind) \(event.dataPathDetail)")
+        }
+        if !event.diagnosticMessage.isEmpty {
+            parts.append("message=\(event.diagnosticMessage)")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private static func append(
+        section: String,
+        cap: Int,
+        into report: inout [String],
+        remaining: inout Int
+    ) {
+        guard cap > 0 else { return }
+        let allowed = min(cap, remaining)
+        if allowed <= 0 { return }
+        let piece = tail(section, maxBytes: allowed)
+        guard !piece.isEmpty else { return }
+        if piece.utf8.count > remaining { return }
+        report.append(piece)
+        remaining -= piece.utf8.count
+        if remaining > 0 { remaining -= 1 }
+    }
+
+    private static func section(_ title: String, _ body: String) -> String {
+        if body.isEmpty { return "[\(title)]\n(empty)" }
+        return "[\(title)]\n\(body)"
+    }
+
+    private static func headerText(for record: FfiTransferActivityRecord) -> String {
+        ([
+            "app=\(appIdentifier)",
+            "version=\(appVersion)",
+            "build=\(appBuild)",
+            "record_id=\(record.activityId)",
+            "attempt_id=\(record.attemptId)",
+            "generated=\(isoDate())",
+        ] + runtimeIdentityLines).joined(separator: "\n")
+    }
+
+    private static func failureText(for record: FfiTransferActivityRecord) -> String {
+        [
+            "failure_code=\(record.failureCode)",
+            "failure_category=\(record.failureCategory)",
+            "failure_phase=\(record.failurePhase)",
+            "failure_origin=\(record.failureOrigin)",
+            "user_message_key=\(record.userMessageKey)",
+            "retryable=\(record.retryable)",
+            "recovery_action=\(record.recoveryAction)",
+            "diagnostic_message=\(record.diagnosticMessage)",
+        ].joined(separator: "\n")
+    }
+
+    private static func activityText(
+        for record: FfiTransferActivityRecord,
+        includeSensitiveFields: Bool
+    ) -> String {
+        [
+            "activity_id=\(record.activityId)",
+            "attempt_id=\(record.attemptId)",
+            "state=\(record.state)",
+            "direction=\(record.direction)",
+            "mode=\(record.mode)",
+            "created_at=\(formatTime(record.createdAtMs))",
+            "updated_at=\(formatTime(record.updatedAtMs))",
+            "started_at=\(formatTime(record.startedAtMs))",
+            "completed_at=\(formatTime(record.completedAtMs))",
+            "transfer_id=\(record.transferId)",
+            "file_name=\(record.fileName)",
+            "bytes=\(record.bytesTransferred)/\(record.totalBytes)",
+            "resumed_bytes=\(record.bytesResumed)",
+            "invite=\(sensitiveValue(record.invite, include: includeSensitiveFields))",
+            "token=\(sensitiveValue(record.token, include: includeSensitiveFields))",
+            "peer=\(sensitiveValue(record.peerDescriptor, include: includeSensitiveFields))",
+            "data_path=\(record.dataPathKind) \(record.dataPathDetail)",
+            "limits=\(record.limits)",
+            "completed_file_path=\(sensitiveValue(record.completedFilePath, include: includeSensitiveFields))",
+            "diagnostic_message=\(record.diagnosticMessage)",
+        ].joined(separator: "\n")
+    }
+
+    private static func hasFailureMetadata(_ record: FfiTransferActivityRecord) -> Bool {
+        record.state == .failed
+            || record.state == .unconfirmed
+            || record.failureCode != .unknown
+            || record.failureCategory != .unknown
+            || !record.userMessageKey.isEmpty
+            || record.recoveryAction != .none
+    }
+
+    private static func sensitiveValue(_ value: String, include: Bool) -> String {
+        guard !value.isEmpty else { return "" }
+        return include ? value : "[redacted]"
+    }
+
+    private static var appVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+    }
+
+    private static var appBuild: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "dev"
+    }
+
+    private static var runtimeIdentityLines: [String] {
+        let core = envoixCoreInfo()
+        return [
+            "core_version=\(core.coreVersion)",
+            "core_ffi_api=\(core.ffiApiVersion)",
+            "core_capabilities=\(core.capabilities.sorted().joined(separator: ","))",
+            "executable_sha256=\(executableFingerprint)",
+            "runtime_code_file=\(runtimeCodeURL?.lastPathComponent ?? "unavailable")",
+            "runtime_code_sha256=\(fileFingerprint(runtimeCodeURL))",
+        ]
+    }
+
+    private static let executableFingerprint = fileFingerprint(Bundle.main.executableURL)
+
+    private static let runtimeCodeURL: URL? = {
+        guard let executableURL = Bundle.main.executableURL else { return nil }
+        let debugDylibURL = executableURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("\(executableURL.lastPathComponent).debug.dylib")
+        if FileManager.default.isReadableFile(atPath: debugDylibURL.path) {
+            return debugDylibURL
+        }
+        return executableURL
+    }()
+
+    private static func fileFingerprint(_ url: URL?) -> String {
+        guard let url, let handle = try? FileHandle(forReadingFrom: url) else {
+            return "unavailable"
+        }
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while true {
+            let data = handle.readData(ofLength: 1024 * 1024)
+            if data.isEmpty { break }
+            hasher.update(data: data)
+        }
+        return hasher.finalize().prefix(12).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func formatTime(_ ms: UInt64) -> String {
+        guard ms > 0 else { return "0" }
+        let date = Date(timeIntervalSince1970: TimeInterval(ms) / 1000)
+        let formatter = ISO8601DateFormatter()
+        return formatter.string(from: date)
+    }
+
+    private static func isoDate() -> String {
+        ISO8601DateFormatter().string(from: Date())
+    }
+
+    private static func tail(_ text: String, maxBytes: Int) -> String {
+        let bytes = Array(text.utf8)
+        if bytes.count <= maxBytes { return text }
+        let head = "[… trimmed — last \(maxBytes / 1024) KB]\n"
+        let headBytes = Array(head.utf8)
+        let remaining = max(0, maxBytes - headBytes.count)
+        if remaining == 0 { return head }
+        let tailBytes = bytes.suffix(remaining)
+        return head + String(decoding: tailBytes, as: UTF8.self)
     }
 }

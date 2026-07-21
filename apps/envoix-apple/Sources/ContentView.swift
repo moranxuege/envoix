@@ -1,34 +1,95 @@
 import SwiftUI
+import EnvoixCore
+#if os(iOS)
+import UniformTypeIdentifiers
+#endif
 
 private enum AppStage: String, CaseIterable {
-    case sender, receiver, transfer, settings
+    case transfer, activity, settings
 
     func title(language: String) -> String {
         switch self {
-        case .sender: return AppText.value("Sender", "发送", language: language)
-        case .receiver: return AppText.value("Receiver", "接收", language: language)
-        case .transfer: return AppText.value("Activity", "活动", language: language)
+        case .transfer: return AppText.value("Transfer", "传输", language: language)
+        case .activity: return AppText.value("Activity", "活动", language: language)
         case .settings: return AppText.value("Settings", "设置", language: language)
         }
     }
 
     var icon: String {
         switch self {
-        case .sender: return "paperplane"
-        case .receiver: return "tray.and.arrow.down"
         case .transfer: return "arrow.up.arrow.down"
+        case .activity: return "list.bullet.rectangle"
         case .settings: return "gearshape"
+        }
+    }
+
+    func mobileTitle(language: String) -> String {
+        switch self {
+        case .transfer: return AppText.value("Home", "首页", language: language)
+        case .activity: return AppText.value("Activity", "活动", language: language)
+        case .settings: return AppText.value("Settings", "设置", language: language)
         }
     }
 }
 
+private enum TransferRole: String, CaseIterable {
+    case send, receive
+
+    func title(language: String) -> String {
+        switch self {
+        case .send: return AppText.value("Send", "发送", language: language)
+        case .receive: return AppText.value("Receive", "接收", language: language)
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .send: return "paperplane"
+        case .receive: return "tray.and.arrow.down"
+        }
+    }
+}
+
+private enum MobileSheet: String, Identifiable {
+    case send, receive, nearbyPairing, activity, settings
+
+    var id: String { rawValue }
+}
+
 struct ContentView: View {
+    private static let roleSwitchPresentationDelay: TimeInterval = 0.2
+
     @EnvironmentObject private var model: AppModel
+    @Environment(\.scenePhase) private var scenePhase
     @AppStorage("envoix.appearance") private var appearance: Appearance = .system
     @AppStorage("envoix.language") private var language = "en"
-    @State private var stage: AppStage = .sender
+    @State private var stage: AppStage = .transfer
+    @State private var mobileSheet: MobileSheet? = {
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--ui-testing-start-activity") {
+            return .activity
+        }
+        #endif
+        return nil
+    }()
+    @State private var preservedSendSelection = SendSelectionSnapshot()
+    @State private var pendingSendPairingInput: String?
+    @State private var pendingReceivePairingInput: String?
+    @State private var nearbyPairingSelection: NearbyPairingSelection?
+    #if os(iOS)
+    @AppStorage("envoix.serverURL") private var nearbyServerURL = ""
+    @AppStorage("envoix.relayURL") private var nearbyRelayURL = ""
+    @StateObject private var nearbyCoordinator = NearbyDiscoveryCoordinator()
+    @State private var nearbyInboundInvite: String?
+    @State private var nearbyPairingBusy = false
+    @State private var nearbyPairingError: String?
+    #endif
+    #if DEBUG
+    @State private var didStageBackgroundShareFixture = false
+    @State private var openInUITestFixtureURL: URL?
+    #endif
 
-    private let primaryStages: [AppStage] = [.sender, .receiver, .transfer]
+    private let primaryStages: [AppStage] = [.transfer, .activity]
 
     var body: some View {
         ZStack {
@@ -42,6 +103,9 @@ struct ContentView: View {
         }
         .toastHost()
         .preferredColorScheme(appearance.colorScheme)
+        #if os(iOS)
+        .onOpenURL(perform: handleIncomingURL)
+        #endif
     }
 
     private var desktopContent: some View {
@@ -62,23 +126,661 @@ struct ContentView: View {
 
     #if os(iOS)
     private var mobileContent: some View {
-        TabView(selection: $stage) {
-            ForEach(AppStage.allCases, id: \.self) { item in
-                NavigationStack {
-                    stageContent(for: item)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                        .padding(.horizontal, 16)
-                        .background(Theme.surface)
-                        .navigationTitle(item.title(language: language))
-                        .navigationBarTitleDisplayMode(.inline)
+        NavigationStack {
+            mobileHome
+                .padding(.horizontal, 16)
+                .background(Theme.bg)
+                .navigationTitle("Envoix")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button {
+                            mobileSheet = .activity
+                        } label: {
+                            Image(systemName: "clock.arrow.circlepath")
+                                .font(.body.weight(.semibold))
+                        }
+                        .accessibilityLabel(AppText.value("Activity", "活动", language: language))
+                        .accessibilityIdentifier("open_activity")
+                    }
+
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button {
+                            mobileSheet = .settings
+                        } label: {
+                            Image(systemName: "gearshape")
+                                .font(.body.weight(.semibold))
+                        }
+                        .accessibilityLabel(AppText.value("Settings", "设置", language: language))
+                        .accessibilityIdentifier("open_settings")
+                    }
                 }
-                .tabItem {
-                    Label(item.title(language: language), systemImage: item.icon)
-                }
-                .tag(item)
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            mobileActivityCapsule
+                .padding(.bottom, 8)
+        }
+        .sheet(item: $mobileSheet) { sheet in
+            NavigationStack {
+                mobileSheetContent(sheet)
+                    .padding(.horizontal, 16)
+                    .background(Theme.bg)
+                    .navigationTitle(mobileSheetTitle(sheet))
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button {
+                                dismissMobileSheet()
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.body.weight(.semibold))
+                                    .frame(width: 44, height: 44)
+                            }
+                            .tint(Theme.accentStrong)
+                            .accessibilityLabel(AppText.value("Close", "关闭", language: language))
+                            .accessibilityIdentifier("mobile_sheet_done")
+                        }
+                    }
+            }
+            .presentationDragIndicator(.visible)
+            .presentationDetents([.large])
+        }
+        .onChange(of: model.send.isBusy) { isBusy in
+            if isBusy, !model.send.isPreparingManifest, mobileSheet == .send {
+                mobileSheet = nil
+                nearbyPairingSelection = nil
+            } else if !isBusy {
+                presentPendingSendSelection()
             }
         }
+        .onChange(of: model.send.transferActivity?.activityId) { activityID in
+            if activityID != nil {
+                preservedSendSelection = SendSelectionSnapshot()
+            }
+            if activityID != nil, mobileSheet == .send {
+                mobileSheet = nil
+            }
+        }
+        .onChange(of: model.receive.isBusy) { isBusy in
+            if isBusy, mobileSheet == .receive {
+                mobileSheet = nil
+                nearbyPairingSelection = nil
+            }
+        }
+        .onChange(of: nearbyCoordinator.state.incomingRendezvousOffer?.id) { _ in
+            presentIncomingNearbyOfferIfNeeded()
+        }
+        .onAppear(perform: presentPendingSendSelection)
+        .onChange(of: scenePhase) { phase in
+            #if DEBUG
+            if phase == .background {
+                stageBackgroundShareFixtureIfRequested()
+            }
+            #endif
+            guard phase == .active else { return }
+            presentPendingSendSelection()
+        }
+        #if DEBUG
+        .onAppear {
+            FolderPickerUITestFixture.cleanIfRequested()
+            FilePickerUITestFixture.cleanIfRequested()
+            FilePickerUITestFixture.stageIfRequested()
+            OpenInUITestFixture.cleanIfRequested()
+            openInUITestFixtureURL = OpenInUITestFixture.stageIfRequested()
+            guard ProcessInfo.processInfo.arguments.contains("--ui-testing") else { return }
+            let initialSheet: MobileSheet? = ProcessInfo.processInfo.arguments.contains("--ui-testing-start-activity")
+                ? .activity
+                : nil
+            DispatchQueue.main.async {
+                mobileSheet = initialSheet
+            }
+        }
+        #endif
     }
+
+    private var mobileHome: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(AppText.value("Move something", "传点东西", language: language))
+                        .font(.largeTitle.bold())
+                        .foregroundStyle(Theme.text)
+                    Text(AppText.value(
+                        "Choose what this device will do. Either device may show a QR code; the other scans it.",
+                        "选择这台设备要发送还是接收。任意一台设备都可以显示二维码，由另一台扫描。",
+                        language: language
+                    ))
+                    .font(.body)
+                    .foregroundStyle(Theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+
+                NavigationLink {
+                    NearbyDiscoveryView(coordinator: nearbyCoordinator) { selection in
+                        nearbyPairingSelection = selection
+                        nearbyInboundInvite = nil
+                        nearbyPairingError = nil
+                        mobileSheet = .nearbyPairing
+                    }
+                } label: {
+                    mobileHomeActionLabel(
+                        systemImage: "dot.radiowaves.left.and.right",
+                        title: AppText.value("Find nearby devices", "发现附近设备", language: language),
+                        subtitle: AppText.value(
+                            "Discover Envoix devices over Bluetooth and the local network.",
+                            "通过蓝牙和局域网发现 Envoix 设备。",
+                            language: language
+                        ),
+                        chevron: "chevron.right"
+                    )
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("home_nearby")
+
+                mobileHomeAction(
+                    sheet: .send,
+                    role: .send,
+                    title: AppText.value("Send items", "发送项目", language: language),
+                    subtitle: AppText.value(
+                        "Choose files or a folder, then show your send QR or scan a receive QR.",
+                        "选择文件或文件夹，然后显示发送码或扫描接收码。",
+                        language: language
+                    ),
+                    identifier: "home_send"
+                )
+
+                mobileHomeAction(
+                    sheet: .receive,
+                    role: .receive,
+                    title: AppText.value("Receive a file", "接收文件", language: language),
+                    subtitle: AppText.value(
+                        "Choose where to save, then show your receive QR or scan a send QR.",
+                        "确认保存位置，然后显示接收码或扫描发送码。",
+                        language: language
+                    ),
+                    identifier: "home_receive"
+                )
+
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .foregroundStyle(Theme.accentStrong)
+                    Text(AppText.value(
+                        "The two devices choose opposite roles. It does not matter which one scans.",
+                        "两台设备选择相反角色即可，由哪一台扫码都可以。",
+                        language: language
+                    ))
+                    .font(.footnote)
+                    .foregroundStyle(Theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+                .card(padding: 14)
+
+                #if DEBUG
+                if let openInUITestFixtureURL {
+                    Text(openInUITestFixtureURL.absoluteString)
+                        .font(.caption2)
+                        .accessibilityIdentifier("open_in_fixture_url")
+                }
+                #endif
+            }
+            .padding(.vertical, 16)
+        }
+        .accessibilityIdentifier("transfer_home")
+    }
+
+    private func mobileHomeAction(
+        sheet: MobileSheet,
+        role: TransferRole,
+        title: String,
+        subtitle: String,
+        identifier: String
+    ) -> some View {
+        Button {
+            mobileSheet = sheet
+        } label: {
+            mobileHomeActionLabel(
+                systemImage: role.icon,
+                title: title,
+                subtitle: subtitle,
+                chevron: "chevron.up"
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier(identifier)
+    }
+
+    private func mobileHomeActionLabel(
+        systemImage: String,
+        title: String,
+        subtitle: String,
+        chevron: String
+    ) -> some View {
+        HStack(spacing: 14) {
+            Image(systemName: systemImage)
+                .font(.title2.weight(.semibold))
+                .foregroundStyle(Theme.accentStrong)
+                .frame(width: 50, height: 50)
+                .background(Theme.accentSoft, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text(title)
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(Theme.text)
+                Text(subtitle)
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 6)
+            Image(systemName: chevron)
+                .font(.caption.weight(.bold))
+                .foregroundStyle(Theme.muted)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, minHeight: 96, alignment: .leading)
+        .background(Theme.surfaceRaised)
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .strokeBorder(Theme.line.opacity(0.72), lineWidth: 0.8)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+    }
+
+    @ViewBuilder
+    private func mobileSheetContent(_ sheet: MobileSheet) -> some View {
+        switch sheet {
+        case .send:
+            SendView(
+                viewModel: model.send,
+                initialFiles: preservedSendSelection.items.isEmpty
+                    ? model.pendingSendSelection?.fileURLs ?? []
+                    : preservedSendSelection.items,
+                initialFileAccess: preservedSendSelection.items.isEmpty
+                    ? model.pendingSendSelection?.sourceAccess
+                    : preservedSendSelection.sourceAccess,
+                initialPendingSelectionID: preservedSendSelection.items.isEmpty
+                    ? model.pendingSendSelection?.id
+                    : preservedSendSelection.pendingSelectionID,
+                initialPairingInput: pendingSendPairingInput,
+                onInitialPairingInputConsumed: { pendingSendPairingInput = nil },
+                onSwitchToReceive: switchMobileToReceive
+            )
+        case .receive:
+            ReceiveView(
+                viewModel: model.receive,
+                initialPairingInput: pendingReceivePairingInput,
+                onInitialPairingInputConsumed: { pendingReceivePairingInput = nil },
+                onSwitchToSend: switchMobileToSend
+            )
+        case .nearbyPairing:
+            if let nearbyPairingSelection {
+                NearbyPairingView(
+                    selection: nearbyPairingSelection,
+                    sendEnabled: nearbyAllowedRole != .receive,
+                    receiveEnabled: nearbyAllowedRole != .send,
+                    isBusy: nearbyPairingBusy,
+                    error: nearbyPairingError,
+                    onSend: { beginNearbyPairing(role: .send) },
+                    onReceive: { beginNearbyPairing(role: .receive) }
+                )
+            } else {
+                EmptyView()
+            }
+        case .activity:
+            TransferStageView(
+                records: model.activities,
+                pendingRemovalIDs: model.pendingActivityRemovalIDs,
+                manifestByActivityID: model.manifestActivities,
+                metricsByActivityID: model.activityMetrics,
+                onCopyDiagnostics: model.diagnosticReport,
+                onRemoteLogTarget: model.remoteLogTarget,
+                onRemoteDiagnosticReport: model.remoteDiagnosticReport,
+                onAppDiagnosticReport: model.appDiagnosticReport,
+                onPause: model.pauseActivity,
+                onCanResume: model.canResumeActivity,
+                onResume: model.resumeActivity,
+                onCancel: model.cancelActivity,
+                onReplacePublicationTarget: model.replaceReceivePublicationTarget,
+                onDelete: model.removeActivity
+            )
+        case .settings:
+            SettingsStageView()
+        }
+    }
+
+    private func mobileSheetTitle(_ sheet: MobileSheet) -> String {
+        switch sheet {
+        case .send: return AppText.value("Send", "发送", language: language)
+        case .receive: return AppText.value("Receive", "接收", language: language)
+        case .nearbyPairing: return AppText.value("Experimental BLE pairing", "实验性蓝牙配对", language: language)
+        case .activity: return AppText.value("Activity", "活动", language: language)
+        case .settings: return AppText.value("Settings", "设置", language: language)
+        }
+    }
+
+    private func switchMobileToReceive(_ input: String, selection: SendSelectionSnapshot) {
+        preservedSendSelection = selection
+        pendingReceivePairingInput = input
+        replaceMobileSheet(with: .receive)
+    }
+
+    private func switchMobileToSend(_ input: String) {
+        pendingSendPairingInput = input
+        replaceMobileSheet(with: .send)
+    }
+
+    private func replaceMobileSheet(with sheet: MobileSheet) {
+        mobileSheet = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.roleSwitchPresentationDelay) {
+            mobileSheet = sheet
+        }
+    }
+
+    private func dismissMobileSheet() {
+        mobileSheet = nil
+        nearbyPairingSelection = nil
+        nearbyInboundInvite = nil
+        nearbyPairingBusy = false
+        nearbyPairingError = nil
+    }
+
+    private var nearbyAllowedRole: FfiInviteRole? {
+        guard let nearbyInboundInvite,
+              let invite = try? parsePairingInvite(input: nearbyInboundInvite) else {
+            return nil
+        }
+        switch invite.role {
+        case .send: return .receive
+        case .receive: return .send
+        case .unknown: return nil
+        }
+    }
+
+    private func presentIncomingNearbyOfferIfNeeded() {
+        guard let offer = nearbyCoordinator.state.incomingRendezvousOffer else { return }
+        defer { nearbyCoordinator.consumeRendezvousOffer(id: offer.id) }
+        guard (try? parsePairingInvite(input: offer.invite)) != nil else {
+            ToastCenter.shared.show(AppText.value(
+                "An invalid Bluetooth invitation was rejected.",
+                "已拒绝无效的蓝牙邀请。",
+                language: language
+            ))
+            return
+        }
+        nearbyPairingSelection = NearbyPairingSelection(
+            discoveryPeerKey: offer.senderPeerKey,
+            displayName: offer.senderDisplayName,
+            sources: [.bluetooth]
+        )
+        nearbyInboundInvite = offer.invite
+        nearbyPairingError = nil
+        mobileSheet = .nearbyPairing
+    }
+
+    private func beginNearbyPairing(role: FfiInviteRole) {
+        guard !nearbyPairingBusy, let selection = nearbyPairingSelection else { return }
+        if let inbound = nearbyInboundInvite {
+            guard nearbyAllowedRole == role else {
+                nearbyPairingError = AppText.value(
+                    "Choose the opposite role advertised by the other device.",
+                    "请选择与对方设备相反的角色。",
+                    language: language
+                )
+                return
+            }
+            nearbyInboundInvite = nil
+            nearbyCoordinator.stop()
+            if role == .send {
+                pendingSendPairingInput = inbound
+                replaceMobileSheet(with: .send)
+            } else {
+                pendingReceivePairingInput = inbound
+                replaceMobileSheet(with: .receive)
+            }
+            return
+        }
+
+        guard selection.sources.contains(.bluetooth) else {
+            nearbyPairingError = AppText.value(
+                "This device is no longer reachable over Bluetooth.",
+                "当前已无法通过蓝牙连接此设备。",
+                language: language
+            )
+            return
+        }
+        do {
+            let invite = try makePairingInvite(
+                role: role,
+                broker: nearbyServerURL,
+                relay: nearbyRelayURL
+            )
+            nearbyPairingBusy = true
+            nearbyPairingError = nil
+            nearbyCoordinator.offerInvite(
+                peerKey: selection.discoveryPeerKey,
+                invite: invite.payload
+            ) { error in
+                nearbyPairingBusy = false
+                if let error {
+                    nearbyPairingError = error
+                    return
+                }
+                nearbyCoordinator.stop()
+                if role == .send {
+                    pendingSendPairingInput = invite.code
+                    replaceMobileSheet(with: .send)
+                } else {
+                    pendingReceivePairingInput = invite.code
+                    replaceMobileSheet(with: .receive)
+                }
+            }
+        } catch {
+            nearbyPairingError = error.localizedDescription
+        }
+    }
+
+    private func handleIncomingURL(_ url: URL) {
+        if let id = ShareDraftLink.draftID(from: url) {
+            presentSharedDraft(preferredID: id)
+            return
+        }
+        guard url.isFileURL else { return }
+
+        do {
+            switch try model.importOpenedSendFile(url) {
+            case .imported:
+                mobileSheet = .send
+            case .queued:
+                ToastCenter.shared.show(AppText.value(
+                    "The file is ready and will open after the current send finishes.",
+                    "文件已准备好，将在当前发送完成后打开。",
+                    language: language
+                ))
+            }
+        } catch let error as OpenedSendFileError {
+            ToastCenter.shared.show(openedSendFileErrorMessage(error))
+        } catch {
+            ToastCenter.shared.show(error.localizedDescription)
+        }
+    }
+
+    private func presentPendingSendSelection() {
+        if !model.send.isBusy, model.pendingSendSelection != nil {
+            mobileSheet = .send
+            return
+        }
+        presentSharedDraft(preferredID: nil)
+    }
+
+    private func openedSendFileErrorMessage(_ error: OpenedSendFileError) -> String {
+        switch error {
+        case .unsupportedURL:
+            return AppText.value(
+                "Envoix can open local files only.",
+                "Envoix 目前只能打开本地文件。",
+                language: language
+            )
+        case .unsupportedItem:
+            return AppText.value(
+                "This item type is not supported. Choose a regular file or folder.",
+                "暂不支持此项目类型。请选择普通文件或文件夹。",
+                language: language
+            )
+        case .inaccessible:
+            return AppText.value(
+                "Envoix could not access this file. Download it first, then try again.",
+                "Envoix 无法访问此文件。请先下载完成，然后重试。",
+                language: language
+            )
+        }
+    }
+
+    #if DEBUG
+    private func stageBackgroundShareFixtureIfRequested() {
+        let arguments = ProcessInfo.processInfo.arguments
+        let stagesSingleItem = arguments.contains("--ui-testing-stage-share-on-background")
+        let stagesMultipleItems = arguments.contains("--ui-testing-stage-multi-share-on-background")
+        guard !didStageBackgroundShareFixture,
+              stagesSingleItem || stagesMultipleItems else {
+            return
+        }
+        didStageBackgroundShareFixture = true
+
+        let sourceURLs = stagesMultipleItems
+            ? ["foreground-photo.jpg", "foreground-notes.txt"].map {
+                FileManager.default.temporaryDirectory.appendingPathComponent($0)
+            }
+            : [FileManager.default.temporaryDirectory.appendingPathComponent("foreground-share.txt")]
+        do {
+            for (index, sourceURL) in sourceURLs.enumerated() {
+                try Data("foreground share fixture \(index)".utf8).write(to: sourceURL, options: .atomic)
+            }
+            defer { sourceURLs.forEach { try? FileManager.default.removeItem(at: $0) } }
+            let items = sourceURLs.map {
+                ShareDraftStagingItem(
+                    sourceURL: $0,
+                    contentTypeIdentifier: UTType(filenameExtension: $0.pathExtension)?.identifier
+                        ?? UTType.data.identifier,
+                    mediaKind: $0.pathExtension == "jpg" ? .image : .file,
+                    preferredFileName: nil
+                )
+            }
+            _ = try ShareDraftStore.live().stage(items: items)
+        } catch {
+            assertionFailure("Could not stage the background Share fixture: \(error)")
+        }
+    }
+    #endif
+
+    private func presentSharedDraft(preferredID: UUID?) {
+        do {
+            switch try model.importSharedSendDraft(preferredID: preferredID) {
+            case .imported:
+                mobileSheet = .send
+            case .noPendingDraft:
+                break
+            case .sendBusy:
+                ToastCenter.shared.show(AppText.value(
+                    "Finish the current send, then Envoix will open the shared item.",
+                    "请先完成当前发送，随后 Envoix 会打开已分享的项目。",
+                    language: language
+                ))
+            }
+        } catch {
+            ToastCenter.shared.show(error.localizedDescription)
+        }
+    }
+
+    @ViewBuilder
+    private var mobileActivityCapsule: some View {
+        if mobileSheet != .activity, let activity = featuredActivity {
+            Button {
+                mobileSheet = .activity
+            } label: {
+                HStack(spacing: 11) {
+                    Image(systemName: mobileActivityIcon(activity))
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(Theme.accentStrong)
+                        .frame(width: 34, height: 34)
+                        .background(Theme.accentSoft, in: Circle())
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(mobileActivityTitle(activity))
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(Theme.text)
+                            .lineLimit(1)
+                        Text(mobileActivitySubtitle(activity))
+                            .font(.caption)
+                            .foregroundStyle(Theme.muted)
+                            .lineLimit(1)
+                    }
+
+                    Spacer(minLength: 8)
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(Theme.muted)
+                }
+                .padding(.horizontal, 12)
+                .frame(maxWidth: .infinity, minHeight: 54)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .strokeBorder(Theme.line.opacity(0.72), lineWidth: 0.8)
+                )
+                .shadow(color: Theme.shadowColor, radius: 8, y: 3)
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 14)
+            .accessibilityIdentifier("active_transfer_capsule")
+        }
+    }
+
+    private var featuredActivity: FfiTransferActivityRecord? {
+        model.activities.first { ActivityProjectionPolicy.isPending($0.state) }
+    }
+
+    private func mobileActivityTitle(_ record: FfiTransferActivityRecord) -> String {
+        switch record.state {
+        case .queued, .binding, .waitingForPeer:
+            return AppText.value("Waiting to connect", "等待连接", language: language)
+        case .pairing, .connecting:
+            return AppText.value("Connecting", "正在连接", language: language)
+        case .transferring:
+            return record.direction == .send
+                ? AppText.value("Sending", "正在发送", language: language)
+                : AppText.value("Receiving", "正在接收", language: language)
+        case .verifying, .publishing, .unconfirmed:
+            return AppText.value("Saving", "正在保存", language: language)
+        case .paused:
+            return AppText.value("Transfer paused", "传输已暂停", language: language)
+        case .completed:
+            return AppText.value("Transfer complete", "传输完成", language: language)
+        case .failed:
+            return AppText.value("Transfer needs attention", "传输需要处理", language: language)
+        case .canceled, .unknown:
+            return AppText.value("Transfer", "传输", language: language)
+        }
+    }
+
+    private func mobileActivitySubtitle(_ record: FfiTransferActivityRecord) -> String {
+        let name = record.fileName.trimmed.isEmpty
+            ? AppText.value("Open Activity for details", "打开活动查看详情", language: language)
+            : record.fileName
+        guard record.totalBytes > 0 else { return name }
+        let percent = min(100, Int(Double(record.bytesTransferred) / Double(record.totalBytes) * 100))
+        return "\(name) · \(percent)%"
+    }
+
+    private func mobileActivityIcon(_ record: FfiTransferActivityRecord) -> String {
+        switch record.state {
+        case .paused: return "pause.fill"
+        case .verifying, .publishing, .unconfirmed: return "tray.and.arrow.down.fill"
+        default: return record.direction == .send ? "arrow.up" : "arrow.down"
+        }
+    }
+
     #endif
 
     private var stageRail: some View {
@@ -93,7 +795,7 @@ struct ContentView: View {
                     title: item.title(language: language),
                     systemImage: item.icon,
                     isSelected: stage == item,
-                    badge: item == .transfer ? pendingTransferCount : 0
+                    badge: item == .activity ? pendingTransferCount : 0
                 ) {
                     stage = item
                 }
@@ -146,7 +848,7 @@ struct ContentView: View {
     private var desktopToolbar: some View {
         HStack(alignment: .top, spacing: 16) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(AppText.value(platformPairingTitle, platformPairingTitleZh, language: language))
+                Text("ENVOIX")
                     .font(.title3.weight(.semibold))
                     .foregroundStyle(Theme.accentStrong)
                 Text(stageTitle)
@@ -165,40 +867,37 @@ struct ContentView: View {
 
     @ViewBuilder private func stageContent(for stage: AppStage) -> some View {
         switch stage {
-        case .sender:
-            SendView(viewModel: model.send)
-        case .receiver:
-            ReceiveView(viewModel: model.receive)
         case .transfer:
-            TransferStageView(receive: model.receive, send: model.send)
+            TransferSetupStageView(send: model.send, receive: model.receive) {
+                self.stage = .activity
+            }
+        case .activity:
+            TransferStageView(
+                records: model.activities,
+                pendingRemovalIDs: model.pendingActivityRemovalIDs,
+                manifestByActivityID: model.manifestActivities,
+                metricsByActivityID: model.activityMetrics,
+                onCopyDiagnostics: model.diagnosticReport,
+                onRemoteLogTarget: model.remoteLogTarget,
+                onRemoteDiagnosticReport: model.remoteDiagnosticReport,
+                onAppDiagnosticReport: model.appDiagnosticReport,
+                onPause: model.pauseActivity,
+                onCanResume: model.canResumeActivity,
+                onResume: model.resumeActivity,
+                onCancel: model.cancelActivity,
+                onReplacePublicationTarget: model.replaceReceivePublicationTarget,
+                onDelete: model.removeActivity
+            )
         case .settings:
             SettingsStageView()
         }
     }
 
-    private var platformPairingTitle: String {
-        #if os(iOS)
-        return "iPhone Pairing"
-        #else
-        return "macOS Pairing"
-        #endif
-    }
-
-    private var platformPairingTitleZh: String {
-        #if os(iOS)
-        return "iPhone 配对"
-        #else
-        return "macOS 配对"
-        #endif
-    }
-
     private var stageTitle: String {
         switch stage {
-        case .sender:
-            return AppText.value("Send a File", "发送文件", language: language)
-        case .receiver:
-            return AppText.value("Receive a File", "接收文件", language: language)
         case .transfer:
+            return AppText.value("Send or Receive", "发送或接收", language: language)
+        case .activity:
             return AppText.value("Activity", "活动", language: language)
         case .settings:
             return AppText.value("Settings", "设置", language: language)
@@ -207,15 +906,18 @@ struct ContentView: View {
 
     private var headerStatus: String {
         switch stage {
-        case .sender:
-            return model.send.isBusy
-                ? AppText.value("Sending", "正在发送", language: language)
-                : AppText.value("Ready to send", "可发送", language: language)
-        case .receiver:
-            return model.receive.isBusy
-                ? AppText.value("Waiting for sender", "等待发送方", language: language)
-                : AppText.value("Ready to receive", "可接收", language: language)
         case .transfer:
+            if model.send.isBusy && model.receive.isBusy {
+                return AppText.value("Send and receive active", "发送和接收进行中", language: language)
+            }
+            if model.send.isBusy {
+                return AppText.value("Sending", "正在发送", language: language)
+            }
+            if model.receive.isBusy {
+                return AppText.value("Waiting for sender", "等待发送方", language: language)
+            }
+            return AppText.value("Ready", "就绪", language: language)
+        case .activity:
             if hasFailedTransfer {
                 return AppText.value("Needs attention", "需要处理", language: language)
             }
@@ -230,20 +932,18 @@ struct ContentView: View {
 
     private var headerIcon: String {
         switch stage {
-        case .sender: return "paperplane"
-        case .receiver: return "antenna.radiowaves.left.and.right"
         case .transfer: return "arrow.up.arrow.down"
+        case .activity: return "list.bullet.rectangle"
         case .settings: return "gearshape"
         }
     }
 
     private var headerKind: StatusPill.Kind {
         switch stage {
-        case .sender:
-            return kind(for: model.send)
-        case .receiver:
-            return kind(for: model.receive)
         case .transfer:
+            if isFailed(model.send) || isFailed(model.receive) { return .error }
+            return model.isActive ? .warning : .neutral
+        case .activity:
             return hasFailedTransfer ? .error : (pendingTransferCount > 0 ? .warning : .neutral)
         case .settings:
             return .neutral
@@ -254,26 +954,20 @@ struct ContentView: View {
         switch viewModel.phase {
         case .completed: return .success
         case .failed: return .error
-        case .waiting, .transferring: return .warning
+        case .waiting, .transferring, .paused: return .warning
         case .idle, .canceled: return .neutral
         }
     }
 
     private var pendingTransferCount: Int {
-        pendingCount(for: model.receive) + pendingCount(for: model.send)
+        ActivityProjectionPolicy.pendingCount(model.activities)
     }
 
     private var hasFailedTransfer: Bool {
-        isFailed(model.receive) || isFailed(model.send)
-    }
-
-    private func pendingCount(for viewModel: TransferViewModel) -> Int {
-        switch viewModel.phase {
-        case .waiting, .transferring:
-            return 1
-        case .idle, .completed, .canceled, .failed:
-            return 0
+        if model.activities.contains(where: { $0.state == .failed }) {
+            return true
         }
+        return isFailed(model.receive) || isFailed(model.send)
     }
 
     private func isFailed(_ viewModel: TransferViewModel) -> Bool {
@@ -282,325 +976,122 @@ struct ContentView: View {
     }
 }
 
-private struct TransferStageView: View {
+private struct TransferSetupStageView: View {
     @Environment(\.appLanguage) private var language
-    @ObservedObject var receive: TransferViewModel
+    @AppStorage("envoix.defaultRole") private var defaultRole = "send"
+    @State private var role: TransferRole = .send
+    @State private var didApplyDefaultRole = false
+    @State private var preservedSendSelection = SendSelectionSnapshot()
+    @State private var pendingSendPairingInput: String?
+    @State private var pendingReceivePairingInput: String?
     @ObservedObject var send: TransferViewModel
+    @ObservedObject var receive: TransferViewModel
+    let onShowActivity: () -> Void
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: 12) {
-                overviewCard
-                transferCard(title: AppText.value("Receiving", "接收", language: language), systemImage: "tray.and.arrow.down", viewModel: receive)
-                transferCard(title: AppText.value("Sending", "发送", language: language), systemImage: "paperplane", viewModel: send)
-            }
-            .padding(.vertical, 12)
-        }
+        #if os(macOS)
+        desktopBody
+        #else
+        EmptyView()
+        #endif
     }
 
-    private var overviewCard: some View {
-        HStack(spacing: 14) {
-            Image(systemName: overviewIcon)
-                .font(.system(size: 34, weight: .semibold))
-                .foregroundStyle(overviewTint)
-                .frame(width: 44)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(overviewTitle)
-                    .font(.title2.weight(.semibold))
-                    .foregroundStyle(Theme.text)
-                Text(activitySummary)
-                    .font(.title3)
-                    .foregroundStyle(Theme.muted)
-            }
-
-            Spacer(minLength: 8)
-        }
-        .card(raised: true, padding: 16)
-    }
-
-    private func transferCard(title: String, systemImage: String, viewModel: TransferViewModel) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: systemImage)
-                    .foregroundStyle(Theme.accentStrong)
-                    .frame(width: 22)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(title)
-                        .font(.title2.weight(.semibold))
-                        .foregroundStyle(Theme.text)
-                    Text(summary(for: viewModel))
-                        .font(.title3)
-                        .foregroundStyle(Theme.muted)
-                        .lineLimit(2)
+    #if os(macOS)
+    private var desktopBody: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if showsActivityShortcut {
+                Button(action: onShowActivity) {
+                    Label(AppText.value("View Activity", "查看活动", language: language), systemImage: "list.bullet.rectangle")
+                        .font(.body.weight(.semibold))
+                        .frame(maxWidth: .infinity, minHeight: 40)
+                        .contentShape(Rectangle())
                 }
-                Spacer(minLength: 8)
-                ModePill(text: modeText(for: viewModel))
+                .buttonStyle(.bordered)
+                .controlSize(.regular)
+                .accessibilityIdentifier("transfer_view_activity_button")
             }
-
-            if viewModel.isBusy || viewModel.progressFraction > 0 {
-                ProgressBar(value: viewModel.progressFraction)
-                transferMeta(for: viewModel)
+            rolePicker
+            Group {
+                switch role {
+                case .send:
+                    SendView(
+                        viewModel: send,
+                        initialFiles: preservedSendSelection.items,
+                        initialFileAccess: preservedSendSelection.sourceAccess,
+                        initialPendingSelectionID: preservedSendSelection.pendingSelectionID,
+                        initialPairingInput: pendingSendPairingInput,
+                        onInitialPairingInputConsumed: { pendingSendPairingInput = nil },
+                        onSwitchToReceive: { input, selection in
+                            preservedSendSelection = selection
+                            pendingReceivePairingInput = input
+                            role = .receive
+                        }
+                    )
+                case .receive:
+                    ReceiveView(
+                        viewModel: receive,
+                        initialPairingInput: pendingReceivePairingInput,
+                        onInitialPairingInputConsumed: { pendingReceivePairingInput = nil },
+                        onSwitchToSend: { input in
+                            pendingSendPairingInput = input
+                            role = .send
+                        }
+                    )
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .onAppear(perform: applyDefaultRoleOnce)
+        .onChange(of: send.transferActivity?.activityId) { activityID in
+            if activityID != nil {
+                preservedSendSelection = SendSelectionSnapshot()
             }
         }
-        .card(raised: true, padding: 14)
     }
+    #endif
 
-    @ViewBuilder private func transferMeta(for viewModel: TransferViewModel) -> some View {
-        HStack(spacing: 8) {
-            Text("\(byteString(viewModel.transferred)) / \(byteString(viewModel.total))")
-            Spacer(minLength: 4)
-            if viewModel.bytesPerSec > 0 {
-                Text(rateString(viewModel.bytesPerSec))
-            }
-            if let eta = viewModel.etaSeconds {
-                Text(etaString(eta))
-            }
-        }
-        .font(.body.monospacedDigit())
-        .foregroundStyle(Theme.muted)
-    }
-
-    private func summary(for viewModel: TransferViewModel) -> String {
-        switch viewModel.phase {
-        case .idle:
-            return AppText.value("No active transfer", "没有活动传输", language: language)
-        case .waiting:
-            return AppText.value("Waiting for the other device", "正在等待另一台设备", language: language)
-        case .transferring:
-            return viewModel.fileName.isEmpty ? AppText.value("Transferring", "正在传输", language: language) : viewModel.fileName
-        case .completed(let bytes):
-            return AppText.value("Completed \(byteString(bytes))", "已完成 \(byteString(bytes))", language: language)
-        case .canceled:
-            return AppText.value("Canceled", "已取消", language: language)
-        case .failed(let reason):
-            return reason
-        }
-    }
-
-    private func modeText(for viewModel: TransferViewModel) -> String {
-        switch viewModel.phase {
-        case .idle: return AppText.value("Idle", "空闲", language: language)
-        case .waiting: return AppText.value("Wait", "等待", language: language)
-        case .transferring: return "\(Int((viewModel.progressFraction * 100).rounded()))%"
-        case .completed: return AppText.value("Done", "完成", language: language)
-        case .canceled: return AppText.value("Canceled", "取消", language: language)
-        case .failed: return AppText.value("Error", "错误", language: language)
-        }
-    }
-
-    private var pendingCount: Int {
-        pendingCount(for: receive) + pendingCount(for: send)
-    }
-
-    private var failedCount: Int {
-        failedCount(for: receive) + failedCount(for: send)
-    }
-
-    private func pendingCount(for viewModel: TransferViewModel) -> Int {
-        switch viewModel.phase {
-        case .waiting, .transferring:
-            return 1
-        case .idle, .completed, .canceled, .failed:
-            return 0
-        }
-    }
-
-    private func failedCount(for viewModel: TransferViewModel) -> Int {
-        if case .failed = viewModel.phase { return 1 }
-        return 0
-    }
-
-    private var overviewIcon: String {
-        if pendingCount > 0 { return "clock.badge.exclamationmark" }
-        if failedCount > 0 { return "exclamationmark.triangle" }
-        return "checkmark.circle"
-    }
-
-    private var overviewTint: Color {
-        if pendingCount > 0 { return Theme.warning }
-        if failedCount > 0 { return Theme.danger }
-        return Theme.success
-    }
-
-    private var overviewTitle: String {
-        if pendingCount > 0 {
-            return AppText.value(
-                "\(pendingCount) pending task\(pendingCount == 1 ? "" : "s")",
-                "\(pendingCount) 个待处理任务",
-                language: language
-            )
-        }
-        if failedCount > 0 {
-            return AppText.value(
-                "\(failedCount) item\(failedCount == 1 ? "" : "s") need attention",
-                "\(failedCount) 个项目需要处理",
-                language: language
-            )
-        }
-        return AppText.value("No pending transfers", "没有待处理传输", language: language)
-    }
-
-    private var activitySummary: String {
-        if pendingCount == 0 {
-            if failedCount > 0 {
-                return AppText.value("Review failed transfers below, or start a new operation when ready.", "请查看下方失败的传输，或在准备好后开始新操作。", language: language)
-            }
-            return AppText.value("Completed transfers stay visible below until the next operation.", "已完成的传输会保留在下方，直到下一次操作。", language: language)
-        }
-        if receive.isBusy && send.isBusy {
-            return AppText.value("Receiving and sending are both in progress.", "接收和发送都在进行中。", language: language)
-        }
-        if receive.isBusy {
-            return AppText.value("A receive task is currently waiting or transferring.", "当前有一个接收任务正在等待或传输。", language: language)
-        }
-        if send.isBusy {
-            return AppText.value("A send task is currently transferring.", "当前有一个发送任务正在传输。", language: language)
-        }
-        return AppText.value("Review failed tasks below before starting another transfer.", "开始新的传输前，请先查看下方失败任务。", language: language)
-    }
-}
-
-private struct SettingsStageView: View {
-    @AppStorage("envoix.appearance") private var appearance: Appearance = .system
-    @AppStorage("envoix.concurrentTransfers") private var concurrentTransfers = true
-    @AppStorage("envoix.language") private var language = "en"
-    @AppStorage("envoix.serverURL") private var serverURL = ""
-    @AppStorage("envoix.relayURL") private var relayURL = ""
-    @AppStorage("envoix.speedLimit") private var speedLimit = 40
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
+    #if os(macOS)
+    private var rolePicker: some View {
+        HStack(spacing: 4) {
+            ForEach(TransferRole.allCases, id: \.self) { item in
                 Button {
-                    concurrentTransfers.toggle()
+                    role = item
                 } label: {
-                    HStack {
-                        Text(AppText.value("Allow simultaneous send and receive", "允许同时发送和接收", language: language))
-                            .font(.title3)
-                        Spacer()
-                        Text(concurrentTransfers
-                             ? AppText.value("On", "开启", language: language)
-                             : AppText.value("Off", "关闭", language: language))
-                            .fontWeight(.bold)
-                            .foregroundStyle(Theme.accentStrong)
-                    }
-                    .frame(minHeight: 42)
+                    Label(item.title(language: language), systemImage: item.icon)
+                        .font(.body.weight(.semibold))
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .foregroundStyle(role == item ? Theme.accentStrong : Theme.muted)
+                        .contentShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
                 }
                 .buttonStyle(.plain)
-                .card(raised: true, padding: 14)
-
-                appearanceSection
-
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(AppText.value("Language", "语言", language: language))
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(Theme.muted)
-                    Picker("Language", selection: $language) {
-                        Text("English").tag("en")
-                        Text("简体中文").tag("zh-Hans")
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                }
-                .card(padding: 14)
-
-                settingField(
-                    AppText.value("Rendezvous broker", "配对服务器", language: language),
-                    text: $serverURL,
-                    placeholder: defaultRendezvousBroker,
-                    helper: AppText.value("Leave empty to use the built-in Envoix broker.", "留空则使用内置 Envoix 配对服务器。", language: language)
+                .background(
+                    role == item ? Theme.surface : Color.clear,
+                    in: RoundedRectangle(cornerRadius: Theme.cardRadius)
                 )
-                settingField(
-                    AppText.value("Relay URL", "中继 URL", language: language),
-                    text: $relayURL,
-                    placeholder: defaultRelayURL,
-                    helper: AppText.value("Leave empty to use the built-in relay for Room pairing.", "留空则使用内置中继服务。", language: language)
-                )
-
-                Text(AppText.value(
-                    "Speed limiting is not exposed yet because current transfers do not enforce it.",
-                    "当前传输尚未强制执行限速，因此暂不展示速度限制设置。",
-                    language: language
-                ))
-                .font(.body)
-                .foregroundStyle(Theme.muted)
-                .card(padding: 14)
-            }
-            .padding(.vertical, 12)
-        }
-    }
-
-    private var appearanceSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(AppText.value("Appearance", "外观", language: language))
-                .font(.title3.weight(.semibold))
-                .foregroundStyle(Theme.muted)
-
-            Button {
-                appearance = appearance.next
-            } label: {
-                HStack(spacing: 10) {
-                    Image(systemName: appearance.icon)
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(Theme.accentStrong)
-                        .frame(width: 24)
-                    Text(appearanceTitle)
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(Theme.text)
-                    Spacer()
-                    Text(AppText.value("System / Light / Dark", "跟随系统 / 浅色 / 深色", language: language))
-                        .font(.body)
-                        .foregroundStyle(Theme.muted)
-                }
-                .frame(minHeight: 42)
-                .contentShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
-            }
-            .buttonStyle(.plain)
-        }
-        .card(padding: 14)
-    }
-
-    private var appearanceTitle: String {
-        switch appearance {
-        case .system:
-            return AppText.value("System", "跟随系统", language: language)
-        case .light:
-            return AppText.value("Light", "浅色", language: language)
-        case .dark:
-            return AppText.value("Dark", "深色", language: language)
-        }
-    }
-
-    private func settingField(
-        _ title: String,
-        text: Binding<String>,
-        placeholder: String = "",
-        helper: String? = nil
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(.title3.weight(.semibold))
-                .foregroundStyle(Theme.muted)
-            TextField(placeholder.isEmpty ? title : placeholder, text: text)
-                .textFieldStyle(.plain)
-                .font(.body.monospaced())
-                .foregroundStyle(Theme.text)
-                .padding(.horizontal, 10)
-                .frame(minHeight: 44)
-                .background(Theme.surface)
                 .overlay(
                     RoundedRectangle(cornerRadius: Theme.cardRadius)
-                        .strokeBorder(Theme.line.opacity(0.75), lineWidth: 0.8)
+                        .strokeBorder(role == item ? Theme.accent.opacity(0.45) : Color.clear, lineWidth: 0.8)
                 )
-                .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
-            if let helper {
-                Text(helper)
-                    .font(.body)
-                    .foregroundStyle(Theme.muted)
-                    .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("transfer_role_\(item.rawValue)")
             }
         }
-        .card(padding: 14)
+        .padding(4)
+        .background(Theme.line.opacity(0.35), in: RoundedRectangle(cornerRadius: Theme.cardRadius))
+    }
+    #endif
+
+    private func applyDefaultRoleOnce() {
+        guard !didApplyDefaultRole else { return }
+        didApplyDefaultRole = true
+        role = TransferRole(rawValue: defaultRole) ?? .send
+    }
+
+    private var showsActivityShortcut: Bool {
+        !isIdle(send) || !isIdle(receive)
+    }
+
+    private func isIdle(_ viewModel: TransferViewModel) -> Bool {
+        if case .idle = viewModel.phase { return true }
+        return false
     }
 }

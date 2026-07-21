@@ -48,6 +48,9 @@ object TransferRepository {
         qrPayload: String? = null,
         savedUri: String? = null,
         publishedName: String? = null,
+        publishedSize: Long? = null,
+        publishedSha256: String? = null,
+        publicationInvalid: Boolean = false,
         publishFailed: Boolean = false,
     ): Boolean {
         if (_transfers.value.any { it.id == id }) return false
@@ -60,6 +63,9 @@ object TransferRepository {
                 qrPayload = qrPayload,
                 savedUri = savedUri,
                 publishedName = publishedName,
+                publishedSize = publishedSize,
+                publishedSha256 = publishedSha256,
+                publicationInvalid = publicationInvalid,
                 publishFailed = publishFailed,
             )
         return true

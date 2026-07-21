@@ -1,5 +1,6 @@
 use std::fs;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, ErrorKind, Read};
+use std::net::UdpSocket;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::process::{Child, ChildStderr, Command, Output, Stdio};
@@ -23,11 +24,17 @@ fn test_peer_descriptor() -> PeerDescriptor {
 
 #[test]
 fn cli_transfers_file_over_default_quic_loopback() {
+    if !loopback_transport_available() {
+        return;
+    }
     run_cli_loopback();
 }
 
 #[test]
 fn cli_wrong_token_does_not_finalize_or_create_sidecar() {
+    if !loopback_transport_available() {
+        return;
+    }
     let root = unique_test_dir();
     let source_dir = root.join("source");
     let output_dir = root.join("received");
@@ -64,6 +71,9 @@ fn cli_wrong_token_does_not_finalize_or_create_sidecar() {
 
 #[test]
 fn qr_invite_loopback() {
+    if !loopback_transport_available() {
+        return;
+    }
     let root = unique_test_dir();
     let source_dir = root.join("source");
     let output_dir = root.join("received");
@@ -106,6 +116,9 @@ fn qr_invite_loopback() {
 
 #[test]
 fn qr_receiver_keeps_waiting_after_wrong_token() {
+    if !loopback_transport_available() {
+        return;
+    }
     let root = unique_test_dir();
     let source_dir = root.join("source");
     let output_dir = root.join("received");
@@ -162,6 +175,9 @@ fn qr_receiver_keeps_waiting_after_wrong_token() {
 
 #[test]
 fn cli_enable_mdns_flow() {
+    if !loopback_transport_available() {
+        return;
+    }
     let root = unique_test_dir();
     let source_dir = root.join("source");
     let output_dir = root.join("received");
@@ -306,6 +322,20 @@ fn spawn_receiver(output_dir: &Path, token: &str) -> SpawnedReceiver {
         .unwrap();
     let peer = read_bound_peer(&mut child);
     SpawnedReceiver { child, peer }
+}
+
+fn loopback_transport_available() -> bool {
+    if let Ok(_probe) = UdpSocket::bind(("127.0.0.1", 0)) {
+        return true;
+    }
+    if let Err(error) = UdpSocket::bind(("0.0.0.0", 0)) {
+        if error.kind() == ErrorKind::PermissionDenied {
+            println!("skipping CLI loopback tests: UDP bind permission denied ({error})");
+            return false;
+        }
+        panic!("CLI loopback transport pre-check failed: {error}");
+    }
+    true
 }
 
 struct SpawnedAutoReceiver {
@@ -487,18 +517,51 @@ fn loopback_peer_for(peer: &PeerDescriptor) -> PeerDescriptor {
 
 fn read_bound_peer(child: &mut Child) -> PeerDescriptor {
     let stderr = child.stderr.as_mut().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
     let mut line = String::new();
     let mut byte = [0_u8; 1];
+    let mut observed = String::new();
 
     loop {
-        stderr.read_exact(&mut byte).unwrap();
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!(
+                "timed out waiting for `peer:` line in receiver stderr after 10s\ncaptured output: {observed}"
+            );
+        }
+
+        match stderr.read_exact(&mut byte) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::UnexpectedEof => {
+                if observed.is_empty() {
+                    let status = child.try_wait().unwrap_or(None);
+                    let _ = child.kill();
+                    panic!(
+                        "receiver exited before printing `peer:` line (status: {status:?}); no stderr lines captured"
+                    );
+                }
+                let _ = child.kill();
+                panic!("receiver exited before printing `peer:` line; stderr: {observed}");
+            }
+            Err(error) => {
+                let _ = child.kill();
+                panic!("failed reading receiver stderr: {error}");
+            }
+        }
         if byte[0] == b'\n' {
             if let Some(peer) = line.strip_prefix("peer: ") {
-                return peer.trim().parse().unwrap();
+                return peer
+                    .trim()
+                    .parse()
+                    .unwrap_or_else(|_| panic!("malformed `peer:` descriptor: `{peer}`"));
             }
             line.clear();
         } else {
-            line.push(byte[0] as char);
+            let c = byte[0] as char;
+            if observed.len() < 2000 {
+                observed.push(c);
+            }
+            line.push(c);
         }
     }
 }

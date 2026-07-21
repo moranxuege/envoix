@@ -1,16 +1,13 @@
 name: ci
 
-# Enforce the checks that release.yml doesn't: rustfmt, clippy, and Android lint.
-# Runs on every push and PR so formatting / clippy / Compose-lint regressions are
-# caught before they can ship.
+# Enforce formatting, Rust tests, and Android build/lint checks on PRs or explicit runs.
 on:
-  push:
-    branches: ['**']
   pull_request:
+  workflow_dispatch:
 
 jobs:
   rust:
-    name: rust fmt + clippy
+    name: rust fmt + clippy + test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,9 +22,11 @@ jobs:
         run: cargo fmt --all -- --check
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: test
+        run: cargo test --workspace --all-targets
 
-  android-lint:
-    name: android lint
+  android:
+    name: android lint + JNI build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -38,12 +37,33 @@ jobs:
           java-version: '17'
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-      - name: Install SDK components
-        run: sdkmanager --install "platforms;android-34" "build-tools;34.0.0"
-      # Lint only needs the Kotlin/resources, not the native .so, so skip the JNI build.
+      - name: Set up Rust + Android target
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup target add aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --version 4.1.2 --locked
+      - name: Install NDK r26 + SDK components
+        run: |
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager --install "ndk;26.3.11579264" "platforms;android-34" "build-tools;34.0.0"
       - name: Kotlin style
         working-directory: android
         run: ./gradlew :app:ktlintCheck --no-daemon --stacktrace
       - name: Lint
         working-directory: android
         run: ./gradlew :app:lintDebug --no-daemon --stacktrace
+      - name: Check Android JNI compatibility
+        run: scripts/check-android-jni-transfer-surface.sh
+      - name: Build app and instrumentation APKs
+        working-directory: android
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/26.3.11579264
+          ENVOIX_ANDROID_ABIS: arm64-v8a
+        run: ./gradlew :app:assembleDebug :app:assembleDebugAndroidTest --no-daemon --stacktrace
+      - name: Verify Android test artifacts
+        run: |
+          test -s android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+          unzip -Z1 android/app/build/outputs/apk/debug/app-debug.apk | grep -Fx 'lib/arm64-v8a/libenvoix_jni.so'

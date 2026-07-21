@@ -72,6 +72,9 @@ pub fn seal_receipt(
     code: &str,
     receipt: &TransferReceipt,
 ) -> Result<Vec<u8>, TransferError> {
+    if receipt.transfer_id.0 != transfer_id {
+        return Err(crypto_error("receipt transfer id does not match mailbox"));
+    }
     envoix_pairing::seal_json(
         &receipt_seal_key(transfer_id, code),
         &mailbox_aad(KIND_RECEIPT),
@@ -87,12 +90,16 @@ pub fn open_receipt(
     code: &str,
     blob: &[u8],
 ) -> Result<TransferReceipt, TransferError> {
-    envoix_pairing::open_json(
+    let receipt: TransferReceipt = envoix_pairing::open_json(
         &receipt_seal_key(transfer_id, code),
         &mailbox_aad(KIND_RECEIPT),
         blob,
     )
-    .map_err(|e| crypto_error(format!("opening receipt: {e}")))
+    .map_err(|e| crypto_error(format!("opening receipt: {e}")))?;
+    if receipt.transfer_id.0 != transfer_id {
+        return Err(crypto_error("receipt transfer id does not match mailbox"));
+    }
+    Ok(receipt)
 }
 
 /// Open a mailbox blob and verify it against the committed send facts: the
@@ -171,74 +178,5 @@ async fn hash_file(path: &Path) -> std::io::Result<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn receipt() -> TransferReceipt {
-        TransferReceipt {
-            file_name: "photo.jpg".into(),
-            file_size: 42,
-            file_hash: "abc123".into(),
-        }
-    }
-
-    #[test]
-    fn seal_open_round_trips() {
-        let blob = seal_receipt("transfer-aa11", "123456-kelp-coral", &receipt()).unwrap();
-        let opened = open_receipt("transfer-aa11", "123456-kelp-coral", &blob).unwrap();
-        assert_eq!(opened, receipt());
-    }
-
-    #[test]
-    fn wrong_code_or_transfer_id_fails_to_open() {
-        let blob = seal_receipt("transfer-aa11", "123456-kelp-coral", &receipt()).unwrap();
-        assert!(open_receipt("transfer-aa11", "123456-kelp-CORAL", &blob).is_err());
-        assert!(open_receipt("transfer-bb22", "123456-kelp-coral", &blob).is_err());
-    }
-
-    #[test]
-    fn mailbox_key_is_stable_hex_and_id_bound() {
-        let key = receipt_mailbox_key("transfer-aa11");
-        assert_eq!(key.len(), 64);
-        assert_eq!(key, receipt_mailbox_key("transfer-aa11"));
-        assert_ne!(key, receipt_mailbox_key("transfer-bb22"));
-    }
-
-    #[test]
-    fn verify_against_fact_checks_size_and_hash() {
-        let blob = seal_receipt("t-1", "1-a-b", &receipt()).unwrap();
-        assert!(verify_receipt_against_fact("t-1", "1-a-b", &blob, "abc123", 42).is_ok());
-        // Wrong committed hash or size: an authenticated mismatch.
-        assert!(verify_receipt_against_fact("t-1", "1-a-b", &blob, "abc124", 42).is_err());
-        assert!(verify_receipt_against_fact("t-1", "1-a-b", &blob, "abc123", 43).is_err());
-        // Wrong seal (stale key from another attempt) fails to open at all.
-        assert!(verify_receipt_against_fact("t-2", "1-a-b", &blob, "abc123", 42).is_err());
-    }
-
-    #[tokio::test]
-    async fn verify_checks_size_and_hash_against_the_file() {
-        let dir = std::env::temp_dir().join(format!("envoix-receipt-test-{}", std::process::id()));
-        tokio::fs::create_dir_all(&dir).await.unwrap();
-        let path = dir.join("v.bin");
-        tokio::fs::write(&path, b"verified bytes").await.unwrap();
-        let real = TransferReceipt {
-            file_name: "v.bin".into(),
-            file_size: 14,
-            file_hash: blake3::hash(b"verified bytes").to_hex().to_string(),
-        };
-        let blob = seal_receipt("t-1", "1-a-b", &real).unwrap();
-        assert!(
-            verify_receipt_against_file("t-1", "1-a-b", &blob, &path)
-                .await
-                .is_ok()
-        );
-
-        // Same size, different bytes: must fail on the hash.
-        tokio::fs::write(&path, b"verifieD bytes").await.unwrap();
-        assert!(
-            verify_receipt_against_file("t-1", "1-a-b", &blob, &path)
-                .await
-                .is_err()
-        );
-    }
-}
+#[path = "receipt_tests.rs"]
+mod tests;

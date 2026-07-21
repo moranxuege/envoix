@@ -50,6 +50,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.envoix.app.InviteCodec
 import dev.envoix.app.SettingsStore
+import dev.envoix.app.discovery.DiscoverySource
+import dev.envoix.app.discovery.NearbyPairingSelection
 
 /**
  * New-transfer sheet. The top is a mutually-exclusive **Show QR / Scan QR** pane
@@ -61,6 +63,9 @@ import dev.envoix.app.SettingsStore
 fun NewTransferSheet(
     onReceive: (code: String, broker: String, relay: String, qrPayload: String?) -> Unit,
     onSend: (code: String, broker: String, relay: String, file: Uri, qrPayload: String?) -> Unit,
+    nearbySelection: NearbyPairingSelection? = null,
+    initialPairingInput: String? = null,
+    onOfferInvite: ((invite: String, completion: (error: String?) -> Unit) -> Unit)? = null,
 ) {
     val colors = Envoix.colors
     val context = LocalContext.current
@@ -76,6 +81,8 @@ fun NewTransferSheet(
     var fileUri by remember { mutableStateOf<Uri?>(null) }
     var fileName by remember { mutableStateOf<String?>(null) }
     var topMode by remember { mutableStateOf("show") } // "show" | "scan"
+    var rendezvousBusy by remember { mutableStateOf(false) }
+    var rendezvousError by remember { mutableStateOf<String?>(null) }
 
     val filePicker =
         rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -104,10 +111,18 @@ fun NewTransferSheet(
         topMode = "show" // stop the camera; the code is filled in now
     }
 
+    LaunchedEffect(initialPairingInput) {
+        initialPairingInput?.takeIf(String::isNotBlank)?.let(::applyScanned)
+    }
+
     val code = if (joining) typed.trim() else generated?.first
     val useBroker = scannedBroker ?: broker
     val useRelay = scannedRelay ?: relay
-    val ready = !code.isNullOrBlank() && code.contains("-") && (role == "receive" || fileUri != null)
+    val ready =
+        !rendezvousBusy &&
+            !code.isNullOrBlank() &&
+            code.contains("-") &&
+            (role == "receive" || fileUri != null)
 
     Column(
         Modifier
@@ -118,6 +133,16 @@ fun NewTransferSheet(
     ) {
         Text("New transfer", color = colors.text, fontSize = 21.sp, fontWeight = FontWeight.ExtraBold)
         Spacer(Modifier.height(14.dp))
+
+        nearbySelection?.let { selection ->
+            NearbyPairingContext(selection)
+            Spacer(Modifier.height(14.dp))
+        }
+
+        rendezvousError?.let { error ->
+            Text(error, color = colors.danger, fontSize = 12.sp, lineHeight = 17.sp)
+            Spacer(Modifier.height(10.dp))
+        }
 
         // ---- top pane: show my QR vs scan one ----
         Row(
@@ -227,17 +252,86 @@ fun NewTransferSheet(
                 .clickable(enabled = ready) {
                     val c = code ?: return@clickable
                     val qr = if (joining) null else generated?.second
-                    if (role == "send") onSend(c, useBroker, useRelay, fileUri!!, qr) else onReceive(c, useBroker, useRelay, qr)
+                    val startLocal = {
+                        if (role == "send") {
+                            onSend(c, useBroker, useRelay, fileUri!!, qr)
+                        } else {
+                            onReceive(c, useBroker, useRelay, qr)
+                        }
+                    }
+                    val offer = onOfferInvite
+                    if (!joining && offer != null) {
+                        val payload = generated?.second ?: return@clickable
+                        rendezvousBusy = true
+                        rendezvousError = null
+                        offer(payload) { error ->
+                            rendezvousBusy = false
+                            if (error == null) {
+                                startLocal()
+                            } else {
+                                rendezvousError = error
+                            }
+                        }
+                    } else {
+                        startLocal()
+                    }
                 },
             contentAlignment = Alignment.Center,
         ) {
             Text(
-                if (role == "send") "Send" else "Receive",
+                when {
+                    rendezvousBusy -> "Delivering invite…"
+                    role == "send" -> "Send"
+                    else -> "Receive"
+                },
                 color = Color.White,
                 fontWeight = FontWeight.Bold,
                 fontSize = 16.sp,
             )
         }
+    }
+}
+
+@Composable
+private fun NearbyPairingContext(selection: NearbyPairingSelection) {
+    val colors = Envoix.colors
+    val sourceText =
+        selection.sources
+            .sortedBy(DiscoverySource::ordinal)
+            .joinToString(" + ") { source ->
+                when (source) {
+                    DiscoverySource.Bluetooth -> "BLE"
+                    DiscoverySource.Mdns -> "mDNS"
+                    DiscoverySource.WifiAware -> "Wi-Fi Aware"
+                }
+            }
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(colors.accentSoft)
+            .padding(14.dp),
+    ) {
+        Text(
+            selection.displayName ?: "Nearby Envoix device",
+            color = colors.text,
+            fontWeight = FontWeight.Bold,
+            fontSize = 16.sp,
+        )
+        if (sourceText.isNotEmpty()) {
+            Text("Found over $sourceText", color = colors.muted, fontSize = 12.sp)
+        }
+        Spacer(Modifier.height(6.dp))
+        Text(
+            if (DiscoverySource.Bluetooth in selection.sources) {
+                "Experimental insecure BLE pairing: the invitation is sent without peer authentication. A nearby attacker may impersonate or relay this device."
+            } else {
+                "This device is not currently reachable over BLE. Use QR or a typed Envoix code to continue."
+            },
+            color = colors.muted,
+            fontSize = 12.sp,
+            lineHeight = 17.sp,
+        )
     }
 }
 

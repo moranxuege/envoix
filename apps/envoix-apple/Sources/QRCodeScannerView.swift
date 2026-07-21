@@ -6,9 +6,10 @@ import UIKit
 struct QRCodeScannerSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var cameraStatus = AVCaptureDevice.authorizationStatus(for: .video)
+    @State private var scanError: String?
 
     let language: String
-    let onScan: (String) -> Void
+    let onScan: (String) -> String?
 
     var body: some View {
         NavigationStack {
@@ -16,19 +17,18 @@ struct QRCodeScannerSheet: View {
                 switch cameraStatus {
                 case .authorized:
                     QRCodeScannerCameraView { value in
-                        onScan(value)
-                        dismiss()
+                        acceptScannedValue(value)
                     }
                     .ignoresSafeArea()
                 case .denied, .restricted:
                     scannerMessage(
                         title: AppText.value("Camera access is off", "相机权限未开启", language: language),
-                        detail: AppText.value("Allow camera access in Settings to scan an Envoix QR invite.", "请在系统设置中允许相机访问，然后扫描 Envoix 邀请二维码。", language: language)
+                        detail: AppText.value("Allow camera access in Settings to scan an Envoix pairing QR code.", "请在系统设置中允许相机访问，然后扫描 Envoix 配对二维码。", language: language)
                     )
                 case .notDetermined:
                     scannerMessage(
                         title: AppText.value("Camera permission needed", "需要相机权限", language: language),
-                        detail: AppText.value("Envoix uses the camera only to scan invite QR codes.", "Envoix 仅使用相机扫描邀请二维码。", language: language)
+                        detail: AppText.value("Envoix uses the camera only to scan pairing QR codes.", "Envoix 仅使用相机扫描配对二维码。", language: language)
                     )
                 @unknown default:
                     scannerMessage(
@@ -40,8 +40,24 @@ struct QRCodeScannerSheet: View {
                 if cameraStatus == .authorized {
                     scannerFrame
                 }
+
+                if let scanError {
+                    scannerError(scanError)
+                }
+
+                #if DEBUG
+                if let testValue = scannerUITestValue {
+                    Button("Use test QR") {
+                        _ = acceptScannedValue(testValue)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("qr_scanner_test_payload")
+                    .frame(maxHeight: .infinity, alignment: .bottom)
+                    .padding(.bottom, 28)
+                }
+                #endif
             }
-            .navigationTitle(AppText.value("Scan Invite", "扫描邀请", language: language))
+            .navigationTitle(AppText.value("Scan pairing QR", "扫描配对二维码", language: language))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -51,6 +67,9 @@ struct QRCodeScannerSheet: View {
                 }
             }
             .task {
+                #if DEBUG
+                guard scannerUITestValue == nil else { return }
+                #endif
                 await requestCameraAccessIfNeeded()
             }
         }
@@ -80,6 +99,39 @@ struct QRCodeScannerSheet: View {
         .padding(24)
     }
 
+    private func scannerError(_ message: String) -> some View {
+        Text(message)
+            .font(.callout.weight(.semibold))
+            .foregroundStyle(.white)
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(.black.opacity(0.78), in: RoundedRectangle(cornerRadius: 12))
+            .padding(.horizontal, 24)
+            .frame(maxHeight: .infinity, alignment: .bottom)
+            .padding(.bottom, 88)
+            .accessibilityIdentifier("qr_scanner_error")
+    }
+
+    private func acceptScannedValue(_ value: String) -> Bool {
+        if let error = onScan(value) {
+            scanError = error
+            return false
+        }
+        scanError = nil
+        dismiss()
+        return true
+    }
+
+    #if DEBUG
+    private var scannerUITestValue: String? {
+        guard ProcessInfo.processInfo.arguments.contains("--ui-testing-scanner") else {
+            return nil
+        }
+        return ProcessInfo.processInfo.environment["ENVOIX_UI_TEST_SCAN_PAYLOAD"]
+    }
+    #endif
+
     @MainActor private func requestCameraAccessIfNeeded() async {
         guard cameraStatus == .notDetermined else { return }
         let granted = await withCheckedContinuation { continuation in
@@ -92,7 +144,7 @@ struct QRCodeScannerSheet: View {
 }
 
 private struct QRCodeScannerCameraView: UIViewControllerRepresentable {
-    let onScan: (String) -> Void
+    let onScan: (String) -> Bool
 
     func makeUIViewController(context: Context) -> QRCodeScannerViewController {
         let controller = QRCodeScannerViewController()
@@ -100,16 +152,19 @@ private struct QRCodeScannerCameraView: UIViewControllerRepresentable {
         return controller
     }
 
-    func updateUIViewController(_ uiViewController: QRCodeScannerViewController, context: Context) {}
+    func updateUIViewController(_ uiViewController: QRCodeScannerViewController, context: Context) {
+        uiViewController.onScan = onScan
+    }
 }
 
 private final class QRCodeScannerViewController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
+    private static let rejectedScanRetryDelay: TimeInterval = 1
     private let session = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "com.envoix.qr-scanner.session")
     private var previewLayer: AVCaptureVideoPreviewLayer?
     private var didScan = false
 
-    var onScan: ((String) -> Void)?
+    var onScan: ((String) -> Bool)?
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -207,12 +262,17 @@ private final class QRCodeScannerViewController: UIViewController, AVCaptureMeta
         }
 
         didScan = true
-        sessionQueue.async { [session] in
-            if session.isRunning {
-                session.stopRunning()
+        if onScan?(code) == true {
+            sessionQueue.async { [session] in
+                if session.isRunning {
+                    session.stopRunning()
+                }
+            }
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.rejectedScanRetryDelay) { [weak self] in
+                self?.didScan = false
             }
         }
-        onScan?(code)
     }
 }
 #endif

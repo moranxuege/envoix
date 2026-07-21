@@ -3,8 +3,9 @@ use std::time::Duration;
 
 use envoix_error::CoreError;
 use envoix_protocol::{
-    Frame, FrameConnection, ProtocolError, flush_frame_writer, read_frame, write_chunk_frame,
-    write_frame,
+    Frame, FrameConnection, ManifestFrame, ManifestFrameConnection, ManifestId, ProtocolError,
+    TransferProtocol, flush_frame_writer, read_frame, read_manifest_frame, write_chunk_frame,
+    write_frame, write_manifest_chunk_frame, write_manifest_frame,
 };
 use envoix_transfer::{EventSink, TransferEvent};
 use envoix_types::DataPath;
@@ -24,6 +25,7 @@ pub(crate) struct IrohFrameConnection {
     pub(crate) connection: Connection,
     pub(crate) send: SendStream,
     pub(crate) recv: RecvStream,
+    protocol: TransferProtocol,
     /// Watches the selected data path and reports it as soon as one is selected
     /// and again on every change, so the path is visible *during* the transfer
     /// rather than only at the end. Aborted when the connection is dropped.
@@ -91,6 +93,7 @@ impl IrohFrameConnection {
         connection: Connection,
         send: SendStream,
         recv: RecvStream,
+        protocol: TransferProtocol,
     ) -> Self {
         let path_watcher = spawn_path_watcher(connection.clone(), None);
         Self {
@@ -98,8 +101,14 @@ impl IrohFrameConnection {
             connection,
             send,
             recv,
+            protocol,
             path_watcher,
         }
+    }
+
+    /// Returns the protocol selected by the QUIC/TLS ALPN handshake.
+    pub(crate) fn protocol(&self) -> TransferProtocol {
+        self.protocol
     }
 
     /// Restart the path watcher with an event sink, so path selection and
@@ -150,6 +159,25 @@ impl FrameConnection for IrohFrameConnection {
         flush_frame_writer(&mut self.send).await
     }
 
+    async fn send_chunk_or_recv_frame(
+        &mut self,
+        transfer_id: &envoix_types::TransferId,
+        index: u64,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<Option<Frame>, ProtocolError> {
+        let send = &mut self.send;
+        let recv = &mut self.recv;
+        tokio::select! {
+            biased;
+            frame = read_frame(recv) => frame.map(Some),
+            result = async {
+                write_chunk_frame(send, transfer_id, index, offset, bytes).await?;
+                flush_frame_writer(send).await
+            } => result.map(|()| None),
+        }
+    }
+
     async fn recv_frame(&mut self) -> Result<Frame, ProtocolError> {
         read_frame(&mut self.recv).await
     }
@@ -172,6 +200,71 @@ impl FrameConnection for IrohFrameConnection {
         }
         self.connection.close(VarInt::from_u32(0), b"done");
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl ManifestFrameConnection for IrohFrameConnection {
+    async fn send_manifest_frame(&mut self, frame: ManifestFrame) -> Result<(), ProtocolError> {
+        write_manifest_frame(&mut self.send, &frame).await?;
+        flush_frame_writer(&mut self.send).await
+    }
+
+    async fn send_manifest_chunk(
+        &mut self,
+        manifest_id: &ManifestId,
+        entry_id: u32,
+        transfer_id: &envoix_types::TransferId,
+        index: u64,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<(), ProtocolError> {
+        write_manifest_chunk_frame(
+            &mut self.send,
+            manifest_id,
+            entry_id,
+            transfer_id,
+            index,
+            offset,
+            bytes,
+        )
+        .await?;
+        flush_frame_writer(&mut self.send).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn send_manifest_chunk_or_recv_frame(
+        &mut self,
+        manifest_id: &ManifestId,
+        entry_id: u32,
+        transfer_id: &envoix_types::TransferId,
+        index: u64,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<Option<ManifestFrame>, ProtocolError> {
+        let send = &mut self.send;
+        let recv = &mut self.recv;
+        tokio::select! {
+            biased;
+            frame = read_manifest_frame(recv) => frame.map(Some),
+            result = async {
+                write_manifest_chunk_frame(
+                    send,
+                    manifest_id,
+                    entry_id,
+                    transfer_id,
+                    index,
+                    offset,
+                    bytes,
+                )
+                .await?;
+                flush_frame_writer(send).await
+            } => result.map(|()| None),
+        }
+    }
+
+    async fn recv_manifest_frame(&mut self) -> Result<ManifestFrame, ProtocolError> {
+        read_manifest_frame(&mut self.recv).await
     }
 }
 

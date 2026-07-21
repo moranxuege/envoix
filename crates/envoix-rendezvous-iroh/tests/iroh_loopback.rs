@@ -2,6 +2,8 @@
 //! join the same room, and pair via `pair_in_room`, exchanging their real iroh
 //! `PeerDescriptor`s through the broker's blind relay.
 
+use std::io::ErrorKind;
+use std::net::UdpSocket;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,6 +34,17 @@ async fn ready_addr(ep: &Endpoint) -> EndpointAddr {
     endpoint_addr(ep)
 }
 
+fn udp_transport_available() -> bool {
+    match UdpSocket::bind(("127.0.0.1", 0)) {
+        Ok(_) => true,
+        Err(error) if error.kind() == ErrorKind::PermissionDenied => {
+            println!("skipping iroh loopback test: UDP bind permission denied ({error})");
+            false
+        }
+        Err(error) => panic!("transport pre-check failed: {error}"),
+    }
+}
+
 /// This endpoint's app-level descriptor (id + direct addrs).
 fn descriptor(ep: &Endpoint) -> PeerDescriptor {
     PeerDescriptor::new(ep.id().to_string(), ep.addr().ip_addrs().copied().collect())
@@ -40,6 +53,10 @@ fn descriptor(ep: &Endpoint) -> PeerDescriptor {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_iroh_peers_pair_through_the_rendezvous() {
+    if !udp_transport_available() {
+        return;
+    }
+
     // Broker.
     let server = endpoint().await;
     let broker = ready_addr(&server).await;

@@ -11,11 +11,13 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use iroh::dns::DnsResolver;
 use iroh::endpoint::{Connection, Incoming, RecvStream, RelayMode, SendStream, presets};
 use iroh::{Endpoint, EndpointAddr, RelayMap, RelayUrl, SecretKey, TransportAddr};
 
 use tracing::Instrument;
 
+pub use envoix_rendezvous::JoinIntent;
 use envoix_rendezvous::{
     CloseWaiter, Join, PeerConn, Reply, Role, RoomRegistry, read_framed, write_framed,
 };
@@ -76,6 +78,18 @@ pub async fn build_endpoint(
     secret_key: SecretKey,
     relay: RelayMode,
 ) -> Result<Endpoint> {
+    build_endpoint_with_dns(bind, secret_key, relay, None).await
+}
+
+/// Same as [`build_endpoint`], with an optional resolver for relay hostnames.
+/// Native clients can supply their platform DNS resolver without changing the
+/// rendezvous transport's direct-only behavior.
+pub async fn build_endpoint_with_dns(
+    bind: SocketAddr,
+    secret_key: SecretKey,
+    relay: RelayMode,
+    dns_resolver: Option<DnsResolver>,
+) -> Result<Endpoint> {
     let builder = Endpoint::builder(presets::N0);
     // Defined by build.rs only when the NAT harness supplies its generated CA.
     #[cfg(envoix_nat_test_local_ca)]
@@ -86,11 +100,15 @@ pub async fn build_endpoint(
         .to_vec()
         .into()]),
     );
-    builder
+    let mut builder = builder
         .secret_key(secret_key)
         .relay_mode(relay)
         .clear_address_lookup()
-        .alpns(vec![RENDEZVOUS_ALPN.to_vec()])
+        .alpns(vec![RENDEZVOUS_ALPN.to_vec()]);
+    if let Some(dns_resolver) = dns_resolver {
+        builder = builder.dns_resolver(dns_resolver);
+    }
+    builder
         .clear_ip_transports()
         .bind_addr(bind)
         .context("invalid bind address")?
@@ -249,12 +267,25 @@ pub async fn join_room(
     broker: EndpointAddr,
     room_id: &str,
 ) -> Result<BrokerSession> {
+    join_room_with_intent(endpoint, broker, room_id, None).await
+}
+
+/// Intent-aware variant of [`join_room`]. New clients declare the transfer
+/// direction so the broker cannot pair two senders or two receivers sharing a
+/// room id. Passing `None` preserves legacy room-only matching.
+pub async fn join_room_with_intent(
+    endpoint: &Endpoint,
+    broker: EndpointAddr,
+    room_id: &str,
+    intent: Option<JoinIntent>,
+) -> Result<BrokerSession> {
     let connection = endpoint.connect(broker, RENDEZVOUS_ALPN).await?;
     let (mut send, mut recv) = connection.open_bi().await?;
     write_framed(
         &mut send,
         &Join {
             room_id: room_id.to_string(),
+            intent,
         },
     )
     .await?;
@@ -287,6 +318,22 @@ where
     T: serde::Serialize + serde::de::DeserializeOwned,
 {
     let session = join_room(endpoint, broker, room_id).await?;
+    drive_pairing(session, password, mine).await
+}
+
+/// Intent-aware variant of [`pair_in_room`].
+pub async fn pair_in_room_with_intent<T>(
+    endpoint: &Endpoint,
+    broker: EndpointAddr,
+    room_id: &str,
+    password: &str,
+    mine: &T,
+    intent: JoinIntent,
+) -> Result<RoomPairing<T>>
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    let session = join_room_with_intent(endpoint, broker, room_id, Some(intent)).await?;
     drive_pairing(session, password, mine).await
 }
 

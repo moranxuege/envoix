@@ -109,10 +109,23 @@ if [ "$missing" -ne 0 ]; then
     exit 1
 fi
 
-printf 'Environment is ready. Build and stage the JNI libraries now? [y/N] '
-read -r answer || answer=""
+if [ "${ENVOIX_CHECK_ANDROID_ENV_BUILD:-0}" = "1" ]; then
+    answer="yes"
+else
+    printf 'Environment is ready. Build and stage the JNI libraries now? [y/N] '
+    read -r answer || answer=""
+fi
 case "$answer" in
     y|Y|yes|YES|Yes)
+        if [ "${ENVOIX_BUILD_LEASE_HELD:-0}" = "1" ] \
+            && [ "${ENVOIX_BUILD_LEASE_MODE:-writer}" = "reader" ]; then
+            printf 'error: JNI build cannot run under a reader lease\n' >&2
+            exit 3
+        fi
+        if [ "${ENVOIX_BUILD_LEASE_HELD:-0}" != "1" ]; then
+            exec "$repo_root/scripts/with-build-cache-guard.sh" \
+                env ENVOIX_CHECK_ANDROID_ENV_BUILD=1 "$0" "$@"
+        fi
         export ANDROID_NDK_HOME="$android_ndk_home"
         cd "$repo_root"
         cargo ndk -t arm64-v8a -t x86_64 --platform 26 \

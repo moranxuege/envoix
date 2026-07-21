@@ -15,10 +15,26 @@ pub enum Role {
     Responder,
 }
 
+/// The transfer direction a peer intends to use after rendezvous.
+///
+/// This is deliberately independent of [`Role`]: the broker still assigns the
+/// SPAKE2 role from join order. `None` on [`Join`] is retained for clients that
+/// predate intent-aware matching.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JoinIntent {
+    Send,
+    Receive,
+}
+
 /// A peer's opening message: which room it wants to pair in.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct Join {
     pub room_id: String,
+    /// New clients always set an intent. The optional field keeps deserialization
+    /// compatible with pre-intent clients during a rolling upgrade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<JoinIntent>,
 }
 
 /// The broker's reply once a partner is present: the peer's assigned role.

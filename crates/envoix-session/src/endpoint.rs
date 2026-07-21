@@ -1,17 +1,219 @@
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::Arc;
-
 use envoix_error::CoreError;
-use envoix_protocol::PeerDescriptor;
+use envoix_protocol::{PeerDescriptor, TransferProtocol};
+#[cfg(any(target_os = "ios", target_os = "android"))]
+use iroh::dns::{BoxIter, DnsError, DnsResolver, Resolver, TxtRecordData};
 use iroh::endpoint::{BindOpts, QuicTransportConfig, RelayMode, VarInt, presets};
-use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMap, RelayUrl, TransportAddr};
+use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMap, RelayUrl, TransportAddr, Watcher as _};
 use iroh_mdns_address_lookup::MdnsAddressLookup;
-use noq_proto::congestion::Bbr3Config;
+#[cfg(any(target_os = "ios", target_os = "android"))]
+use n0_future::boxed::BoxFuture;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use crate::candidates::CandidateFilter;
 use crate::connection::IrohFrameConnection;
 use crate::identity::{IdentityConfig, load_secret_key};
-use crate::{ALPN, SessionError};
+use crate::{EventSink, SessionError, TransferEvent};
+
+const ENDPOINT_ADDR_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const ENDPOINT_ADDR_WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+#[cfg(any(target_os = "ios", target_os = "android"))]
+const PLATFORM_DNS_FALLBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+#[cfg(any(target_os = "ios", target_os = "android"))]
+#[derive(Debug)]
+struct PlatformSystemDnsResolver {
+    fallback: Option<DnsResolver>,
+}
+
+#[cfg(any(target_os = "ios", target_os = "android"))]
+impl Default for PlatformSystemDnsResolver {
+    fn default() -> Self {
+        Self {
+            fallback: platform_dns_fallback_server().map(DnsResolver::with_nameserver),
+        }
+    }
+}
+
+#[cfg(any(target_os = "ios", target_os = "android"))]
+impl Resolver for PlatformSystemDnsResolver {
+    fn lookup_ipv4(&self, host: String) -> BoxFuture<Result<BoxIter<Ipv4Addr>, DnsError>> {
+        let fallback = self.fallback.clone();
+        Box::pin(async move {
+            let addrs = match system_lookup(&host).await {
+                Ok(addrs) => addrs,
+                Err(error) => {
+                    let Some(fallback) = fallback else {
+                        return Err(error);
+                    };
+                    tracing::debug!(host, "falling back from platform system DNS");
+                    let ips = fallback
+                        .lookup_ipv4(&host, PLATFORM_DNS_FALLBACK_TIMEOUT)
+                        .await?
+                        .filter_map(|ip| match ip {
+                            IpAddr::V4(ip) => Some(ip),
+                            IpAddr::V6(_) => None,
+                        })
+                        .collect::<Vec<_>>();
+                    let result: BoxIter<Ipv4Addr> = Box::new(ips.into_iter());
+                    return Ok(result);
+                }
+            };
+            let ips = ipv4_addresses(addrs);
+            if !ips.is_empty() {
+                let result: BoxIter<Ipv4Addr> = Box::new(ips.into_iter());
+                return Ok(result);
+            }
+
+            let Some(fallback) = fallback else {
+                let result: BoxIter<Ipv4Addr> = Box::new(std::iter::empty());
+                return Ok(result);
+            };
+            tracing::debug!(
+                host,
+                "platform system DNS returned no IPv4 addresses; using fallback resolver"
+            );
+            let ips = fallback
+                .lookup_ipv4(&host, PLATFORM_DNS_FALLBACK_TIMEOUT)
+                .await?
+                .filter_map(|ip| match ip {
+                    IpAddr::V4(ip) => Some(ip),
+                    IpAddr::V6(_) => None,
+                })
+                .collect::<Vec<_>>();
+            let result: BoxIter<Ipv4Addr> = Box::new(ips.into_iter());
+            Ok(result)
+        })
+    }
+
+    fn lookup_ipv6(&self, host: String) -> BoxFuture<Result<BoxIter<Ipv6Addr>, DnsError>> {
+        let fallback = self.fallback.clone();
+        Box::pin(async move {
+            let addrs = match system_lookup(&host).await {
+                Ok(addrs) => addrs,
+                Err(error) => {
+                    let Some(fallback) = fallback else {
+                        return Err(error);
+                    };
+                    tracing::debug!(host, "falling back from platform system DNS");
+                    let ips = fallback
+                        .lookup_ipv6(&host, PLATFORM_DNS_FALLBACK_TIMEOUT)
+                        .await?
+                        .filter_map(|ip| match ip {
+                            IpAddr::V4(_) => None,
+                            IpAddr::V6(ip) => Some(ip),
+                        })
+                        .collect::<Vec<_>>();
+                    let result: BoxIter<Ipv6Addr> = Box::new(ips.into_iter());
+                    return Ok(result);
+                }
+            };
+            let ips = ipv6_addresses(addrs);
+            if !ips.is_empty() {
+                let result: BoxIter<Ipv6Addr> = Box::new(ips.into_iter());
+                return Ok(result);
+            }
+
+            let Some(fallback) = fallback else {
+                let result: BoxIter<Ipv6Addr> = Box::new(std::iter::empty());
+                return Ok(result);
+            };
+            tracing::debug!(
+                host,
+                "platform system DNS returned no IPv6 addresses; using fallback resolver"
+            );
+            let ips = fallback
+                .lookup_ipv6(&host, PLATFORM_DNS_FALLBACK_TIMEOUT)
+                .await?
+                .filter_map(|ip| match ip {
+                    IpAddr::V4(_) => None,
+                    IpAddr::V6(ip) => Some(ip),
+                })
+                .collect::<Vec<_>>();
+            let result: BoxIter<Ipv6Addr> = Box::new(ips.into_iter());
+            Ok(result)
+        })
+    }
+
+    fn lookup_txt(&self, _host: String) -> BoxFuture<Result<BoxIter<TxtRecordData>, DnsError>> {
+        // Envoix clears iroh's DNS address lookup and only adds mDNS separately,
+        // so these endpoints need the system resolver for relay A/AAAA records
+        // only. Returning an empty TXT answer avoids routing the query back to
+        // Hickory while preserving that invariant.
+        Box::pin(async {
+            let result: BoxIter<TxtRecordData> = Box::new(std::iter::empty());
+            Ok(result)
+        })
+    }
+
+    fn clear_cache(&self) {}
+
+    fn reset(&self) -> Box<dyn Resolver> {
+        Box::new(Self::default())
+    }
+}
+
+#[cfg(any(target_os = "ios", target_os = "android"))]
+pub(crate) fn platform_system_dns_resolver() -> DnsResolver {
+    DnsResolver::custom(PlatformSystemDnsResolver::default())
+}
+
+#[cfg(any(target_os = "ios", target_os = "android"))]
+async fn system_lookup(host: &str) -> Result<Vec<SocketAddr>, DnsError> {
+    match tokio::net::lookup_host((host, 0)).await {
+        Ok(addrs) => {
+            let addrs = addrs.collect::<Vec<_>>();
+            tracing::debug!(host, ?addrs, "platform system DNS lookup completed");
+            Ok(addrs)
+        }
+        Err(error) => {
+            tracing::warn!(host, %error, "platform system DNS lookup failed");
+            Err(DnsError::from(n0_error::anyerr!(
+                error,
+                "platform system DNS lookup failed for {host}"
+            )))
+        }
+    }
+}
+
+#[cfg(target_os = "ios")]
+fn platform_dns_fallback_server() -> Option<SocketAddr> {
+    std::env::var("ENVOIX_IOS_DNS_SERVER")
+        .ok()
+        .and_then(|value| value.parse().ok())
+}
+
+#[cfg(target_os = "android")]
+fn platform_dns_fallback_server() -> Option<SocketAddr> {
+    None
+}
+
+#[cfg(any(target_os = "ios", target_os = "android", test))]
+fn ipv4_addresses(addrs: impl IntoIterator<Item = SocketAddr>) -> Vec<Ipv4Addr> {
+    let mut result = Vec::new();
+    for ip in addrs.into_iter().filter_map(|addr| match addr.ip() {
+        IpAddr::V4(ip) => Some(ip),
+        IpAddr::V6(_) => None,
+    }) {
+        if !result.contains(&ip) {
+            result.push(ip);
+        }
+    }
+    result
+}
+
+#[cfg(any(target_os = "ios", target_os = "android", test))]
+fn ipv6_addresses(addrs: impl IntoIterator<Item = SocketAddr>) -> Vec<Ipv6Addr> {
+    let mut result = Vec::new();
+    for ip in addrs.into_iter().filter_map(|addr| match addr.ip() {
+        IpAddr::V4(_) => None,
+        IpAddr::V6(ip) => Some(ip),
+    }) {
+        if !result.contains(&ip) {
+            result.push(ip);
+        }
+    }
+    result
+}
 
 /// Local socket addresses an accepting iroh endpoint should bind.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -38,6 +240,45 @@ impl BindAddrs {
                 BindAddr::optional(SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port)),
             ],
         }
+    }
+
+    /// Freeze OS-assigned ports from an advertised descriptor for a later
+    /// rebind. Concrete IPs are intentionally not retained: interfaces may
+    /// change while a transfer is paused, while same-network peers still need
+    /// the old QR's socket ports to remain valid.
+    pub fn rebind_from_advertised(&self, advertised: &[SocketAddr]) -> Option<Self> {
+        if self.addrs.iter().all(|bind| bind.addr.port() != 0) {
+            return None;
+        }
+        let v4_port = advertised
+            .iter()
+            .find(|addr| addr.is_ipv4())
+            .map(SocketAddr::port);
+        let v6_port = advertised
+            .iter()
+            .find(|addr| addr.is_ipv6())
+            .map(SocketAddr::port);
+        let mut addrs = Vec::with_capacity(self.addrs.len());
+        for bind in &self.addrs {
+            if bind.addr.port() != 0 {
+                addrs.push(*bind);
+                continue;
+            }
+            let port = if bind.addr.is_ipv4() {
+                v4_port
+            } else {
+                v6_port
+            };
+            match port {
+                Some(port) => addrs.push(BindAddr {
+                    addr: SocketAddr::new(bind.addr.ip(), port),
+                    ..*bind
+                }),
+                None if bind.required => return None,
+                None => {}
+            }
+        }
+        (!addrs.is_empty()).then_some(Self { addrs })
     }
 
     fn iter(&self) -> impl Iterator<Item = BindAddr> + '_ {
@@ -226,26 +467,125 @@ impl BoundEndpoint {
         EndpointAddr::from_parts(self.local_endpoint.id(), ips.chain(relays))
     }
 
-    pub(crate) async fn accept(&self) -> Result<IrohFrameConnection, SessionError> {
+    /// Wait until this endpoint has learned an address worth advertising.
+    ///
+    /// Direct addresses are available immediately from local sockets, while a
+    /// relay home takes a round-trip to register. When `want_relay` is true we
+    /// wait for the relay home so cross-network peers do not receive a
+    /// direct-only address by accident.
+    pub(crate) async fn ready_endpoint_addr(&self, want_relay: bool) -> EndpointAddr {
+        let deadline = tokio::time::Instant::now() + ENDPOINT_ADDR_WAIT_TIMEOUT;
+        loop {
+            let raw = self.local_endpoint.addr();
+            let ready = if want_relay {
+                raw.relay_urls().next().is_some()
+            } else {
+                !raw.is_empty()
+            };
+            if ready {
+                return self.endpoint_addr();
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(ENDPOINT_ADDR_WAIT_POLL).await;
+        }
+
+        let addr = self.endpoint_addr();
+        if want_relay && addr.relay_urls().next().is_none() {
+            let relay_status = relay_status_summary(&self.local_endpoint);
+            tracing::warn!(
+                relay_status,
+                "relay configured but its home did not register in time; advertising a \
+                 direct-only address - a peer that cannot reach us directly may fail to connect"
+            );
+        }
+        addr
+    }
+
+    pub(crate) async fn accept_with_events(
+        &self,
+        events: &dyn EventSink,
+    ) -> Result<IrohFrameConnection, SessionError> {
+        events.on_event(TransferEvent::Diagnostic {
+            message: format!(
+                "accept waiting {}",
+                endpoint_addr_shape(&self.endpoint_addr())
+            ),
+        });
         let incoming = self
             .local_endpoint
             .accept()
             .await
             .ok_or_else(|| CoreError::Transport("iroh endpoint closed".into()))?;
+        events.on_event(TransferEvent::Diagnostic {
+            message: "accept incoming received; awaiting connection".to_string(),
+        });
         let connection = incoming
             .await
             .map_err(|error| CoreError::Transport(error.to_string()))?;
+        let alpn = connection.alpn();
+        let protocol = TransferProtocol::from_alpn(alpn).ok_or_else(|| {
+            CoreError::Protocol(format!(
+                "unsupported negotiated ALPN {:?}",
+                String::from_utf8_lossy(alpn)
+            ))
+        })?;
+        events.on_event(TransferEvent::Diagnostic {
+            message: format!(
+                "accept connection established alpn={}",
+                String::from_utf8_lossy(alpn)
+            ),
+        });
         let (send, recv) = connection
             .accept_bi()
             .await
             .map_err(|error| CoreError::Transport(error.to_string()))?;
+        events.on_event(TransferEvent::Diagnostic {
+            message: "accept stream opened".to_string(),
+        });
         Ok(IrohFrameConnection::new(
             self.local_endpoint.clone(),
             connection,
             send,
             recv,
+            protocol,
         ))
     }
+}
+
+fn endpoint_addr_shape(addr: &EndpointAddr) -> String {
+    format!(
+        "endpoint={} direct={} relay={}",
+        short_endpoint_id(&addr.id.to_string()),
+        addr.ip_addrs().count(),
+        addr.relay_urls().count()
+    )
+}
+
+pub(crate) fn relay_status_summary(endpoint: &Endpoint) -> String {
+    let mut watcher = endpoint.home_relay_status();
+    let statuses = watcher.get();
+    if statuses.is_empty() {
+        return "home relay status unavailable".to_string();
+    }
+    statuses
+        .iter()
+        .map(|status| match status.last_error() {
+            Some(error) => format!(
+                "{} connected={} error={error:#}",
+                status.url(),
+                status.is_connected()
+            ),
+            None => format!("{} connected={}", status.url(), status.is_connected()),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn short_endpoint_id(id: &str) -> &str {
+    let end = id.len().min(12);
+    &id[..end]
 }
 
 pub(crate) fn peer_addr_from_descriptor(
@@ -312,7 +652,28 @@ pub(crate) async fn build_accept_endpoint(
     build_endpoint(
         Some(listen_addrs),
         identity,
-        true,
+        &[TransferProtocol::SingleFileV1],
+        false,
+        relay,
+        relay_only,
+        candidates,
+        window,
+    )
+    .await
+}
+
+pub(crate) async fn build_transfer_accept_endpoint(
+    listen_addrs: BindAddrs,
+    identity: &IdentityConfig,
+    relay: &Option<String>,
+    relay_only: bool,
+    candidates: &CandidateFilter,
+    window: u32,
+) -> Result<Endpoint, SessionError> {
+    build_endpoint(
+        Some(listen_addrs),
+        identity,
+        &[TransferProtocol::SingleFileV1, TransferProtocol::ManifestV1],
         false,
         relay,
         relay_only,
@@ -333,7 +694,28 @@ pub(crate) async fn build_advertising_accept_endpoint(
     build_endpoint(
         Some(listen_addrs),
         identity,
+        &[TransferProtocol::SingleFileV1],
         true,
+        relay,
+        relay_only,
+        candidates,
+        window,
+    )
+    .await
+}
+
+pub(crate) async fn build_transfer_advertising_accept_endpoint(
+    listen_addrs: BindAddrs,
+    identity: &IdentityConfig,
+    relay: &Option<String>,
+    relay_only: bool,
+    candidates: &CandidateFilter,
+    window: u32,
+) -> Result<Endpoint, SessionError> {
+    build_endpoint(
+        Some(listen_addrs),
+        identity,
+        &[TransferProtocol::SingleFileV1, TransferProtocol::ManifestV1],
         true,
         relay,
         relay_only,
@@ -351,14 +733,22 @@ pub(crate) async fn build_dial_endpoint(
     window: u32,
 ) -> Result<Endpoint, SessionError> {
     build_endpoint(
-        None, identity, false, false, relay, relay_only, candidates, window,
+        None,
+        identity,
+        &[],
+        false,
+        relay,
+        relay_only,
+        candidates,
+        window,
     )
     .await
 }
 
 /// Default per-stream QUIC flow-control window (receive and send), in bytes.
-/// 16 MiB fills ~57 MB/s at 280 ms RTT, with headroom for lower-latency links.
-pub const DEFAULT_DATA_STREAM_WINDOW: u32 = 16 * 1024 * 1024;
+/// Four MiB bounds mobile queueing while still allowing callers to opt into a
+/// larger per-session window for high-bandwidth, high-latency paths.
+pub const DEFAULT_DATA_STREAM_WINDOW: u32 = 4 * 1024 * 1024;
 /// Accepted range for a caller-supplied window: below ~1 MiB throttles even a
 /// LAN, above 128 MiB risks excessive per-transfer memory on constrained
 /// devices. A value outside this range is rejected (never silently clamped).
@@ -378,19 +768,13 @@ pub const MAX_DATA_STREAM_WINDOW: u32 = 128 * 1024 * 1024;
 /// global: it never enters the wire header, resume state, or any hash, so it
 /// affects throughput only — concurrent sessions each keep their own value.
 fn data_transport_config(window: u32) -> QuicTransportConfig {
-    let mut builder = QuicTransportConfig::builder()
+    let builder = QuicTransportConfig::builder()
         .stream_receive_window(VarInt::from_u32(window))
         .send_window(window as u64);
-    // Default to BBRv3. The loss-based default (CUBIC) treats every packet loss
-    // as congestion and backs off, which erodes throughput on lossy long-fat
-    // links (e.g. trans-Pacific, ~0.3% loss at 280 ms RTT): measured ~2.5x
-    // slower than BBRv3 there, while the two match on clean paths. BBRv3 instead
-    // paces at the measured bandwidth and rides through non-congestion loss. Set
-    // ENVOIX_CC=cubic to fall back to CUBIC.
-    let use_cubic = std::env::var("ENVOIX_CC").is_ok_and(|v| v.eq_ignore_ascii_case("cubic"));
-    if !use_cubic {
-        builder = builder.congestion_controller_factory(Arc::new(Bbr3Config::default()));
-    }
+    // Keep noq's stable CUBIC default. noq-proto 1.0.x BBRv3 can underflow in
+    // `inflight_at_loss` on a lossy path and panic the whole mobile process.
+    // BBRv3 must not be re-enabled until that upstream invariant is fixed and
+    // covered by a lossy-link regression test.
     builder.build()
 }
 
@@ -400,7 +784,7 @@ fn data_transport_config(window: u32) -> QuicTransportConfig {
 async fn build_endpoint(
     local_listen_addrs: Option<BindAddrs>,
     identity: &IdentityConfig,
-    accept_incoming: bool,
+    accepted_protocols: &[TransferProtocol],
     advertise_self: bool,
     relay: &Option<String>,
     relay_only: bool,
@@ -423,8 +807,17 @@ async fn build_endpoint(
         .relay_mode(relay_mode(relay)?)
         .transport_config(data_transport_config(window))
         .clear_address_lookup();
-    if accept_incoming {
-        builder = builder.alpns(vec![ALPN.to_vec()]);
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    {
+        builder = builder.dns_resolver(platform_system_dns_resolver());
+    }
+    if !accepted_protocols.is_empty() {
+        builder = builder.alpns(
+            accepted_protocols
+                .iter()
+                .map(|protocol| protocol.alpn().to_vec())
+                .collect(),
+        );
     }
     if advertise_self {
         builder = builder.address_lookup(MdnsAddressLookup::builder().advertise(true));
@@ -473,122 +866,5 @@ async fn build_endpoint(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use iroh::SecretKey;
-
-    #[test]
-    fn resolve_interfaces_excludes_denied_ranges_from_the_bind() {
-        // Deny a real local interface address; resolving the unspecified binds
-        // must not include it (so iroh never binds it, never uses it as a
-        // candidate) - this is what makes the filter suppress e.g. Tailscale.
-        let locals = local_interface_addrs();
-        let Some(&(denied, _)) = locals.first() else {
-            return; // no non-loopback interfaces in this environment
-        };
-        let cidr = match denied {
-            IpAddr::V4(_) => format!("{denied}/32"),
-            IpAddr::V6(_) => format!("{denied}/128"),
-        };
-        let filter = CandidateFilter::from_lists(&[], &[cidr]).unwrap();
-        let resolved: Vec<IpAddr> = BindAddrs::dual_stack(0)
-            .resolve_interfaces(&filter)
-            .iter()
-            .map(|bind| bind.addr.ip())
-            .collect();
-        assert!(
-            !resolved.contains(&denied),
-            "denied interface {denied} must not be bound, got {resolved:?}"
-        );
-    }
-
-    #[test]
-    fn resolve_interfaces_is_a_noop_without_a_filter() {
-        let base = BindAddrs::dual_stack(0);
-        assert_eq!(
-            base.clone().resolve_interfaces(&CandidateFilter::default()),
-            base
-        );
-    }
-
-    #[test]
-    fn resolve_with_binds_all_permitted_addresses_per_family() {
-        // `[candidates]` scopes the set: two permitted IPv4 interfaces must BOTH
-        // be bound (not one arbitrary survivor by enumeration order), only the
-        // first marked as the family's default route; a denied address is dropped.
-        let a: IpAddr = "10.0.0.5".parse().unwrap();
-        let b: IpAddr = "192.168.1.5".parse().unwrap();
-        let denied: IpAddr = "100.64.0.5".parse().unwrap(); // Tailscale CGNAT
-        let locals = [(a, 24), (denied, 10), (b, 24)];
-        let filter = CandidateFilter::from_lists(&[], &["100.64.0.0/10".into()]).unwrap();
-
-        let bound = BindAddrs::dual_stack(0).resolve_with(&filter, &locals);
-        let ips: Vec<IpAddr> = bound.iter().map(|bind| bind.addr.ip()).collect();
-
-        assert!(
-            ips.contains(&a) && ips.contains(&b),
-            "both permitted IPv4 addresses must be bound, got {ips:?}"
-        );
-        assert!(!ips.contains(&denied), "denied address must be dropped");
-        let v4_default_routes = bound
-            .iter()
-            .filter(|bind| bind.addr.is_ipv4() && bind.default_route)
-            .count();
-        assert_eq!(v4_default_routes, 1, "exactly one IPv4 default route");
-    }
-
-    #[test]
-    fn dual_stack_bind_addrs_include_ipv4_and_ipv6_unspecified() {
-        let addrs: Vec<_> = BindAddrs::dual_stack(0)
-            .iter()
-            .map(|bind_addr| bind_addr.addr)
-            .collect();
-
-        assert_eq!(addrs.len(), 2);
-        assert!(addrs.contains(&"0.0.0.0:0".parse().unwrap()));
-        assert!(addrs.contains(&"[::]:0".parse().unwrap()));
-    }
-
-    #[test]
-    fn dual_stack_makes_ipv6_best_effort() {
-        let addrs: Vec<_> = BindAddrs::dual_stack(0).iter().collect();
-
-        assert!(
-            addrs
-                .iter()
-                .any(|bind_addr| bind_addr.addr.is_ipv4() && bind_addr.required)
-        );
-        assert!(
-            addrs
-                .iter()
-                .any(|bind_addr| bind_addr.addr.is_ipv6() && !bind_addr.required)
-        );
-    }
-
-    #[test]
-    fn broker_addr_parses_id_and_socket() {
-        let id = SecretKey::generate().public();
-        let addr = parse_broker_addr(&format!("{id}@127.0.0.1:8445"), None).unwrap();
-        let socket: SocketAddr = "127.0.0.1:8445".parse().unwrap();
-        assert_eq!(
-            addr,
-            EndpointAddr::from_parts(id, [TransportAddr::Ip(socket)])
-        );
-    }
-
-    #[test]
-    fn broker_addr_appends_relay() {
-        let id = SecretKey::generate().public();
-        let addr = parse_broker_addr(
-            &format!("{id}@127.0.0.1:8445"),
-            Some("https://relay.example:8444"),
-        )
-        .unwrap();
-        assert_eq!(addr.relay_urls().count(), 1);
-    }
-
-    #[test]
-    fn broker_addr_requires_at_sign() {
-        assert!(parse_broker_addr("127.0.0.1:8445", None).is_err());
-    }
-}
+#[path = "endpoint_tests.rs"]
+mod tests;

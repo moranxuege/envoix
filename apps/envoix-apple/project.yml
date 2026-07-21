@@ -53,22 +53,36 @@ targets:
     deploymentTarget: "16.0"
     sources:
       - Sources
+      - Shared
       - Assets.xcassets
-      - Resources
+      - path: Resources
+        excludes:
+          - Info.plist
+          - Info-Debug.plist
+          - Envoix-iOS.entitlements
     dependencies:
       - package: EnvoixCore
+      - target: EnvoixShare
+        embed: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app.ios
         MARKETING_VERSION: "0.1.0"
         CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "5.0"
-        GENERATE_INFOPLIST_FILE: YES
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Resources/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Resources/Envoix-iOS.entitlements
         SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
-        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: 6638TTB2SF
         INFOPLIST_KEY_UILaunchStoryboardName: LaunchScreen
         INFOPLIST_KEY_UIRequiresFullScreen: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+        INFOPLIST_KEY_UIFileSharingEnabled: YES
+        INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace: YES
         INFOPLIST_KEY_CFBundleDisplayName: Envoix
         INFOPLIST_KEY_NSCameraUsageDescription: "Envoix uses the camera to scan invite QR codes from receiving devices."
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: "Envoix connects to nearby devices on your local network to transfer files."
@@ -79,3 +93,156 @@ targets:
           - "Network"
           - "-framework"
           - "Security"
+      configs:
+        Debug:
+          # The existing diagnostics collector is HTTP-only. Keep this exception
+          # out of Release builds; uploads themselves are additionally gated by
+          # Developer Mode in the app.
+          GENERATE_INFOPLIST_FILE: NO
+          INFOPLIST_FILE: Resources/Info-Debug.plist
+
+  EnvoixShare:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: ShareExtension
+        excludes:
+          - Info.plist
+          - EnvoixShare.entitlements
+      - Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app.ios.share
+        PRODUCT_NAME: EnvoixShare
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: ShareExtension/Info.plist
+        CODE_SIGN_ENTITLEMENTS: ShareExtension/EnvoixShare.entitlements
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: 6638TTB2SF
+        TARGETED_DEVICE_FAMILY: "1"
+
+  Envoix-iOSUITests:
+    # The transfer core opens sockets itself. Host these tests in the app so
+    # they inherit the app's networking and local-network permissions instead
+    # of the isolated UI-test runner's network sandbox.
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - Tests/EnvoixIOSUITests
+    dependencies:
+      - target: Envoix-iOS
+      - package: EnvoixCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app.ios.uitests
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: 6638TTB2SF
+        TEST_TARGET_NAME: Envoix-iOS
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Envoix-iOS.app/Envoix-iOS"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        OTHER_LDFLAGS:
+          - "-framework"
+          - "SystemConfiguration"
+          - "-framework"
+          - "Network"
+          - "-framework"
+          - "Security"
+
+  Envoix-iOSAppUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - Tests/EnvoixIOSAppUITests
+    dependencies:
+      - target: Envoix-iOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app.ios.app-uitests
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: 6638TTB2SF
+        TEST_TARGET_NAME: Envoix-iOS
+
+  Envoix-macOSTests:
+    # Host the test in Envoix.app so cross-device acceptance exercises the
+    # production AppModel, Activity projection, and macOS destination path.
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "13.0"
+    sources:
+      - Tests/EnvoixMacOSHostedTests
+    dependencies:
+      - target: Envoix
+      - package: EnvoixCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app.macos-tests
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Envoix.app/Contents/MacOS/Envoix"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+
+schemes:
+  Envoix:
+    build:
+      targets:
+        Envoix: all
+
+  Envoix-iOS:
+    build:
+      targets:
+        Envoix-iOS: all
+        Envoix-iOSUITests: [test]
+        Envoix-iOSAppUITests: [test]
+    test:
+      config: Debug
+      gatherCoverageData: false
+      targets:
+        - Envoix-iOSUITests
+        - Envoix-iOSAppUITests
+
+  Envoix-iOS-Hosted:
+    build:
+      targets:
+        Envoix-iOS: all
+        Envoix-iOSUITests: [test]
+    test:
+      config: Debug
+      gatherCoverageData: false
+      targets:
+        - Envoix-iOSUITests
+
+  Envoix-iOS-AppUI:
+    build:
+      targets:
+        Envoix-iOS: all
+        Envoix-iOSAppUITests: [test]
+    test:
+      config: Debug
+      gatherCoverageData: false
+      targets:
+        - Envoix-iOSAppUITests
+
+  Envoix-macOS-Hosted:
+    build:
+      targets:
+        Envoix: all
+        Envoix-macOSTests: [test]
+    test:
+      config: Debug
+      gatherCoverageData: false
+      commandLineArguments:
+        "--macos-hosted-testing": true
+      targets:
+        - Envoix-macOSTests

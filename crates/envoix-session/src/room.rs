@@ -2,70 +2,48 @@
 //! short code, then transfer over iroh with the existing data plane.
 //!
 //! The rendezvous only finds + authenticates the peers and exchanges their iroh
-//! addresses; the file transfer itself is the unchanged `send_file_manual` /
-//! `receive_one_authenticated` path, authenticated with a token derived from the
-//! pairing key (so the data-plane SPAKE2 still runs and is channel-bound).
+//! addresses; the data transfer then uses either the compatible single-file
+//! path or the additive ALPN-negotiated Manifest path, authenticated with a
+//! token derived from the pairing key (so data-plane SPAKE2 still runs and is
+//! channel-bound).
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use envoix_error::CoreError;
-use envoix_rendezvous_iroh::{RoomPairing, build_endpoint, drive_pairing, join_room, split_code};
+use envoix_rendezvous_iroh::{
+    JoinIntent, RoomPairing, build_endpoint_with_dns, drive_pairing, join_room_with_intent,
+    split_code,
+};
 use envoix_types::PairingStep;
 use iroh::{Endpoint, EndpointAddr, SecretKey};
 
 use crate::{
-    BindAddrs, BoundEndpoint, EventSink, PairingConfig, SessionConfig, SessionError,
+    BindAddrs, BoundEndpoint, EventSink, ManifestSendRequest, ManifestTransferSummary,
+    PairingConfig, SessionConfig, SessionError, SessionEventSink, SessionTransferSummary,
     TransferCancelToken, TransferEvent, TransferSummary, bind_iroh_endpoint_with_relay,
-    receive_with_auth_retries, send_file_to_endpoint_addr,
+    bind_iroh_transfer_endpoint_with_relay, receive_transfer_with_auth_retries,
+    receive_with_auth_retries, send_file_to_endpoint_addr, send_manifest_to_endpoint_addr,
 };
+
+const SEND_ROOM_PAIRING_TIMEOUT: Duration = Duration::from_secs(35);
 
 /// An ephemeral iroh endpoint used only to reach the rendezvous broker, routed
 /// through `relay` (a relay URL) when set so it can reach a NATed broker.
 async fn rendezvous_endpoint(relay: &Option<String>) -> Result<Endpoint, SessionError> {
-    build_endpoint(
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    let dns_resolver = Some(crate::endpoint::platform_system_dns_resolver());
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    let dns_resolver = None;
+
+    build_endpoint_with_dns(
         "0.0.0.0:0".parse().expect("valid addr"),
         SecretKey::generate(),
         crate::endpoint::relay_mode(relay)?,
+        dns_resolver,
     )
     .await
     .map_err(|error| CoreError::Transport(error.to_string()))
-}
-
-/// Wait until `bound` has learned an address to advertise, then return its full
-/// endpoint addr. When a relay is configured we wait for the relay home to
-/// register (not just any direct addr): direct addrs are learned instantly from
-/// local sockets, but the relay home takes a round-trip, so returning on the
-/// first direct addr would exchange a descriptor with no relay home - leaving a
-/// peer that cannot reach us directly (true CGNAT) unable to dial us at all.
-async fn ready_endpoint_addr(bound: &BoundEndpoint, want_relay: bool) -> EndpointAddr {
-    for _ in 0..100 {
-        // Poll readiness on the raw endpoint address so the candidate filter -
-        // and its per-drop `-v` logging - runs once, on the address we return,
-        // not on every poll iteration.
-        let raw = bound.local_endpoint.addr();
-        let ready = if want_relay {
-            raw.relay_urls().next().is_some()
-        } else {
-            !raw.is_empty()
-        };
-        if ready {
-            return bound.endpoint_addr();
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    // Fell through the wait. If a relay was configured but its home never
-    // registered (relay unreachable), we advertise a direct-only descriptor.
-    // Warn rather than error: the peer may still reach us directly - but if it
-    // needs the relay, the data-plane dial will fail later, so make it visible.
-    let addr = bound.endpoint_addr();
-    if want_relay && addr.relay_urls().next().is_none() {
-        tracing::warn!(
-            "relay configured but its home did not register in time; advertising a \
-             direct-only address - a peer that cannot reach us directly may fail to connect"
-        );
-    }
-    addr
 }
 
 /// Pair in a room, re-joining if the broker matched us with a stale dead peer.
@@ -81,6 +59,7 @@ async fn pair_in_room_retrying<T>(
     room_id: &str,
     password: &str,
     mine: &T,
+    intent: JoinIntent,
     events: &dyn EventSink,
 ) -> Result<RoomPairing<T>, SessionError>
 where
@@ -93,7 +72,7 @@ where
         events.on_event(TransferEvent::Pairing {
             step: PairingStep::Joining,
         });
-        let session = join_room(rdz, broker.clone(), room_id)
+        let session = join_room_with_intent(rdz, broker.clone(), room_id, Some(intent))
             .await
             .map_err(|error| CoreError::Transport(error.to_string()))?;
         events.on_event(TransferEvent::Pairing {
@@ -119,28 +98,47 @@ where
 /// cancel token, so a Ctrl-C while waiting for a partner would hang; this lets
 /// it exit promptly and cleanly instead. `rdz` is also closed on a pairing
 /// error so it never drops without a graceful close.
+#[allow(clippy::too_many_arguments)]
 async fn pair_or_cancel<T>(
     rdz: &Endpoint,
     broker: &EndpointAddr,
     room_id: &str,
     password: &str,
     mine: &T,
+    intent: JoinIntent,
     cancel: &TransferCancelToken,
     events: &dyn EventSink,
+    timeout: Option<Duration>,
 ) -> Result<RoomPairing<T>, SessionError>
 where
     T: serde::Serialize + serde::de::DeserializeOwned,
 {
-    let result = tokio::select! {
-        result = pair_in_room_retrying(rdz, broker, room_id, password, mine, events) => result,
-        _ = cancel.cancelled() => Err(CoreError::Transfer(
-            if cancel.is_pause() { crate::USER_PAUSE_MESSAGE } else { crate::USER_INTERRUPT_MESSAGE }.into(),
-        )),
+    let result = if let Some(timeout) = timeout {
+        tokio::select! {
+            result = pair_in_room_retrying(rdz, broker, room_id, password, mine, intent, events) => result,
+            _ = cancel.cancelled() => Err(CoreError::Transfer(interrupt_message(cancel).into())),
+            _ = tokio::time::sleep(timeout) => {
+                Err(CoreError::Transport("rendezvous pairing timed out".into()))
+            }
+        }
+    } else {
+        tokio::select! {
+            result = pair_in_room_retrying(rdz, broker, room_id, password, mine, intent, events) => result,
+            _ = cancel.cancelled() => Err(CoreError::Transfer(interrupt_message(cancel).into())),
+        }
     };
     if result.is_err() {
         rdz.close().await;
     }
     result
+}
+
+fn interrupt_message(cancel: &TransferCancelToken) -> &'static str {
+    if cancel.is_pause() {
+        crate::USER_PAUSE_MESSAGE
+    } else {
+        crate::USER_INTERRUPT_MESSAGE
+    }
 }
 
 /// Receive a file by pairing in a room: bind the data endpoint, exchange its
@@ -155,7 +153,6 @@ pub async fn receive_file_via_room(
     events: Box<dyn EventSink>,
     cancel: TransferCancelToken,
 ) -> Result<TransferSummary, SessionError> {
-    let (room_id, password) = split_code(code);
     let bound = bind_iroh_endpoint_with_relay(
         listen_addrs,
         &config.identity,
@@ -165,19 +162,66 @@ pub async fn receive_file_via_room(
         config.data_stream_window,
     )
     .await?;
+    let auth = pair_room_receiver(&bound, broker, code, &config, events.as_ref(), &cancel).await?;
+    receive_with_auth_retries(bound, output_dir, config, &auth, events, cancel).await
+}
+
+/// Receive a negotiated single-file or Manifest transfer through the existing
+/// room rendezvous flow.
+pub async fn receive_transfer_via_room(
+    broker: EndpointAddr,
+    code: &str,
+    listen_addrs: impl Into<BindAddrs>,
+    output_dir: PathBuf,
+    config: SessionConfig,
+    events: Box<dyn SessionEventSink>,
+    cancel: TransferCancelToken,
+) -> Result<SessionTransferSummary, SessionError> {
+    let bound = bind_iroh_transfer_endpoint_with_relay(
+        listen_addrs,
+        &config.identity,
+        &config.data_relay(),
+        config.relay_only,
+        &config.candidates,
+        config.data_stream_window,
+    )
+    .await?;
+    let auth = pair_room_receiver(&bound, broker, code, &config, events.as_ref(), &cancel).await?;
+    receive_transfer_with_auth_retries(bound, output_dir, config, &auth, events, cancel).await
+}
+
+async fn pair_room_receiver(
+    bound: &BoundEndpoint,
+    broker: EndpointAddr,
+    code: &str,
+    config: &SessionConfig,
+    events: &dyn EventSink,
+    cancel: &TransferCancelToken,
+) -> Result<PairingConfig, SessionError> {
+    let (room_id, password) = split_code(code);
     // With direct-only the data endpoint has no relay home, so wait for a direct
     // addr rather than a relay home; otherwise wait for the relay home as usual.
-    let my_addr = ready_endpoint_addr(&bound, config.data_relay().is_some()).await;
+    let my_addr = bound
+        .ready_endpoint_addr(config.data_relay().is_some())
+        .await;
 
-    let rdz = rendezvous_endpoint(&config.relay).await?;
+    let rdz = match rendezvous_endpoint(&config.relay).await {
+        Ok(rdz) => rdz,
+        Err(error) => {
+            bound.local_endpoint.close().await;
+            return Err(error);
+        }
+    };
     let pairing = match pair_or_cancel(
         &rdz,
         &broker,
         room_id,
         password,
         &my_addr,
-        &cancel,
-        events.as_ref(),
+        JoinIntent::Receive,
+        cancel,
+        events,
+        None,
     )
     .await
     {
@@ -201,7 +245,7 @@ pub async fn receive_file_via_room(
     let auth = PairingConfig::Spake2SharedToken {
         token: pairing.token,
     };
-    receive_with_auth_retries(bound, output_dir, config, &auth, events, cancel).await
+    Ok(auth)
 }
 
 /// Send a file by pairing in a room: exchange descriptors with the receiver over
@@ -216,35 +260,7 @@ pub async fn send_file_via_room(
     events: Box<dyn EventSink>,
     cancel: TransferCancelToken,
 ) -> Result<TransferSummary, SessionError> {
-    let (room_id, password) = split_code(code);
-    let rdz = rendezvous_endpoint(&config.relay).await?;
-    // The receiver ignores the sender's payload (the sender only dials), so any
-    // valid endpoint address works as a placeholder.
-    let placeholder = rdz.addr();
-
-    let pairing = match pair_or_cancel(
-        &rdz,
-        &broker,
-        room_id,
-        password,
-        &placeholder,
-        &cancel,
-        events.as_ref(),
-    )
-    .await
-    {
-        Ok(pairing) => pairing,
-        Err(error) => {
-            // Close the rendezvous endpoint before returning so a pairing
-            // failure does not drop it ungracefully.
-            rdz.close().await;
-            return Err(error);
-        }
-    };
-    // The rendezvous endpoint is only needed for the broker handshake; close it
-    // so it does not linger (and log) while the data transfer runs.
-    rdz.close().await;
-
+    let pairing = pair_room_sender(broker, code, &config, events.as_ref(), &cancel).await?;
     let auth = PairingConfig::Spake2SharedToken {
         token: pairing.token,
     };
@@ -259,3 +275,65 @@ pub async fn send_file_via_room(
     )
     .await
 }
+
+/// Send one Manifest transfer set through the existing room rendezvous flow.
+pub async fn send_manifest_via_room(
+    broker: EndpointAddr,
+    code: &str,
+    request: ManifestSendRequest,
+    resume: bool,
+    config: SessionConfig,
+    events: Box<dyn SessionEventSink>,
+    cancel: TransferCancelToken,
+) -> Result<ManifestTransferSummary, SessionError> {
+    let pairing = pair_room_sender(broker, code, &config, events.as_ref(), &cancel).await?;
+    let auth = PairingConfig::Spake2SharedToken {
+        token: pairing.token,
+    };
+    send_manifest_to_endpoint_addr(pairing.peer, request, resume, config, &auth, events, cancel)
+        .await
+}
+
+async fn pair_room_sender(
+    broker: EndpointAddr,
+    code: &str,
+    config: &SessionConfig,
+    events: &dyn EventSink,
+    cancel: &TransferCancelToken,
+) -> Result<RoomPairing<EndpointAddr>, SessionError> {
+    let (room_id, password) = split_code(code);
+    let rdz = rendezvous_endpoint(&config.relay).await?;
+    // The receiver ignores the sender's payload (the sender only dials), so any
+    // valid endpoint address works as a placeholder.
+    let placeholder = rdz.addr();
+
+    let pairing = match pair_or_cancel(
+        &rdz,
+        &broker,
+        room_id,
+        password,
+        &placeholder,
+        JoinIntent::Send,
+        cancel,
+        events,
+        Some(SEND_ROOM_PAIRING_TIMEOUT),
+    )
+    .await
+    {
+        Ok(pairing) => pairing,
+        Err(error) => {
+            // Close the rendezvous endpoint before returning so a pairing
+            // failure does not drop it ungracefully.
+            rdz.close().await;
+            return Err(error);
+        }
+    };
+    // The rendezvous endpoint is only needed for the broker handshake; close it
+    // so it does not linger (and log) while the data transfer runs.
+    rdz.close().await;
+    Ok(pairing)
+}
+
+#[cfg(test)]
+#[path = "room_tests.rs"]
+mod tests;

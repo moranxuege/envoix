@@ -1,6 +1,9 @@
 //! Local file and transfer-state storage.
 
+use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, SystemTime};
 
 use envoix_error::CoreError;
 use envoix_types::TransferId;
@@ -15,14 +18,75 @@ pub type StorageError = CoreError;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LocalFileStorage;
 
+static ACTIVE_RESUME_LEASES: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+
+/// Process-local ownership of one resumable partial.
+///
+/// A sender creates a new protocol transfer id for each attempt, so a receiver
+/// may rebind a compatible partial to that new id. The lease prevents a second
+/// concurrent receive from selecting and renaming the same partial while the
+/// first receive still has it open.
+#[derive(Debug)]
+pub struct ResumeLease {
+    key: PathBuf,
+}
+
+/// Result of one stale-partial cleanup pass.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ResumeCleanupReport {
+    pub files_deleted: u64,
+    pub bytes_deleted: u64,
+}
+
+impl ResumeLease {
+    /// Moves the lease together with a resume sidecar that is rebound to a new
+    /// protocol transfer id.
+    pub fn rebind(
+        &mut self,
+        output_dir: &Path,
+        file_name: &str,
+        transfer_id: &TransferId,
+    ) -> Result<(), StorageError> {
+        validate_resume_path_parts(file_name, transfer_id)?;
+        let new_key = resumable_state_path(output_dir, file_name, transfer_id);
+        if new_key == self.key {
+            return Ok(());
+        }
+        let mut leases = active_resume_leases()
+            .lock()
+            .map_err(|_| CoreError::Storage("resume lease registry is unavailable".to_string()))?;
+        if leases.contains(&new_key) {
+            return Err(CoreError::Storage(format!(
+                "resume state is already in use: {}",
+                new_key.display()
+            )));
+        }
+        leases.remove(&self.key);
+        leases.insert(new_key.clone());
+        self.key = new_key;
+        Ok(())
+    }
+}
+
+impl Drop for ResumeLease {
+    fn drop(&mut self) {
+        if let Ok(mut leases) = active_resume_leases().lock() {
+            leases.remove(&self.key);
+        }
+    }
+}
+
 /// Durable proof that a transfer completed: written beside the final file on
 /// finalize and kept after the file itself is moved or published away (e.g.
 /// Android publishes to MediaStore and deletes the output copy). A later
-/// re-offer of the same file matches against it, so the receiver can re-confirm
-/// completion — re-deliver a lost CompleteAck — without the file on hand and
-/// without any bytes being re-sent.
+/// re-offer of the same transfer matches against it, so the receiver can
+/// re-confirm completion — re-deliver a lost CompleteAck — without the file on
+/// hand and without any bytes being re-sent.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TransferReceipt {
+    /// Exact transfer identity. File name and size are not sufficient: a later
+    /// transfer may reuse both after the previous final file was moved away.
+    pub transfer_id: TransferId,
     /// Plain destination file name, without path components.
     pub file_name: String,
     /// Final file length in bytes.
@@ -59,6 +123,60 @@ pub struct TransferResumeState {
 }
 
 impl LocalFileStorage {
+    /// Acquires exclusive in-process use of one resumable partial.
+    pub fn try_acquire_resume_lease(
+        output_dir: &Path,
+        file_name: &str,
+        transfer_id: &TransferId,
+    ) -> Result<Option<ResumeLease>, StorageError> {
+        validate_resume_path_parts(file_name, transfer_id)?;
+        let key = resumable_state_path(output_dir, file_name, transfer_id);
+        let mut leases = active_resume_leases()
+            .lock()
+            .map_err(|_| CoreError::Storage("resume lease registry is unavailable".to_string()))?;
+        if !leases.insert(key.clone()) {
+            return Ok(None);
+        }
+        Ok(Some(ResumeLease { key }))
+    }
+
+    /// Deletes abandoned resume sidecars and partials older than `max_age`.
+    /// Active in-process transfers are protected by their [`ResumeLease`].
+    pub async fn cleanup_stale_resume_artifacts(
+        output_dir: &Path,
+        max_age: Duration,
+    ) -> Result<ResumeCleanupReport, StorageError> {
+        if !fs::try_exists(output_dir).await? {
+            return Ok(ResumeCleanupReport::default());
+        }
+        let mut report = ResumeCleanupReport::default();
+        let mut entries = fs::read_dir(output_dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if !name.starts_with(".envoix.") || !name.ends_with(".json") {
+                continue;
+            }
+            if is_resume_key_leased(&path) || !is_older_than(&path, max_age).await? {
+                continue;
+            }
+            let state = fs::read(&path)
+                .await
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<TransferResumeState>(&bytes).ok())
+                .filter(|state| validate_resume_state_name(state).is_ok());
+            if let Some(state) = state {
+                let temp_path =
+                    resumable_temp_path(output_dir, &state.file_name, &state.transfer_id);
+                delete_artifact(&temp_path, &mut report).await?;
+            }
+            delete_artifact(&path, &mut report).await?;
+        }
+        Ok(report)
+    }
+
     /// Opens a source file for reading.
     pub async fn open_source(path: &Path) -> Result<File, StorageError> {
         File::open(path).await.map_err(CoreError::from)
@@ -302,12 +420,7 @@ impl LocalFileStorage {
         output_dir: &Path,
         receipt: &TransferReceipt,
     ) -> Result<(), StorageError> {
-        if !is_plain_file_name(&receipt.file_name) {
-            return Err(CoreError::Storage(format!(
-                "invalid output file name: {}",
-                receipt.file_name
-            )));
-        }
+        validate_resume_path_parts(&receipt.file_name, &receipt.transfer_id)?;
         fs::create_dir_all(output_dir).await?;
 
         let path = receipt_path(output_dir, &receipt.file_name);
@@ -336,6 +449,23 @@ impl LocalFileStorage {
             fs::remove_file(path).await?;
         }
         Ok(())
+    }
+
+    /// Deletes a receipt only when it belongs to `transfer_id`. Cleanup from
+    /// an older Activity must not remove a newer completion for the same name.
+    pub async fn delete_receipt_for_transfer(
+        output_dir: &Path,
+        file_name: &str,
+        transfer_id: &TransferId,
+    ) -> Result<bool, StorageError> {
+        let Some(receipt) = Self::read_receipt(output_dir, file_name).await? else {
+            return Ok(false);
+        };
+        if &receipt.transfer_id != transfer_id {
+            return Ok(false);
+        }
+        Self::delete_receipt(output_dir, file_name).await?;
+        Ok(true)
     }
 
     /// Reads the completion receipt for `file_name`, if present. A receipt that
@@ -422,260 +552,41 @@ fn receipt_path(output_dir: &Path, file_name: &str) -> PathBuf {
     output_dir.join(format!(".envoix-receipt.{file_name}.json"))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tokio::io::AsyncWriteExt;
-
-    #[tokio::test]
-    async fn creates_and_finalizes_temp_destination() {
-        let dir = unique_test_dir();
-        let final_path = dir.join("hello.txt");
-
-        let (temp_path, mut file) = LocalFileStorage::create_temp_destination(&dir, "hello.txt")
-            .await
-            .unwrap();
-        let text = b"hello";
-        file.write_all(text).await.unwrap();
-        file.flush().await.unwrap();
-        drop(file);
-
-        LocalFileStorage::finalize_temp_file(&temp_path, &final_path)
-            .await
-            .unwrap();
-
-        assert_eq!(fs::read(&final_path).await.unwrap(), text);
-    }
-
-    #[test]
-    fn resume_state_without_target_field_still_parses() {
-        // Sidecars written before target_file_name existed must keep loading.
-        let legacy = r#"{
-            "transfer_id": "transfer-1",
-            "file_name": "hello.txt",
-            "file_size": 11,
-            "chunk_size": 4,
-            "bytes_received": 4,
-            "next_chunk_index": 1,
-            "hash_bytes": 4,
-            "hash_checkpoint": null
-        }"#;
-        let state: TransferResumeState = serde_json::from_str(legacy).unwrap();
-        assert_eq!(state.target_file_name, None);
-
-        // And a same-name target round-trips without serializing the field.
-        let json = serde_json::to_string(&state).unwrap();
-        assert!(!json.contains("target_file_name"));
-    }
-
-    #[test]
-    fn resume_state_with_traversal_target_is_rejected() {
-        let state = TransferResumeState {
-            transfer_id: TransferId::new("transfer-1"),
-            file_name: "hello.txt".into(),
-            file_size: 11,
-            chunk_size: 4,
-            bytes_received: 4,
-            next_chunk_index: 1,
-            hash_bytes: 4,
-            hash_checkpoint: None,
-            target_file_name: Some("../escape.txt".into()),
-        };
-        assert!(validate_resume_state_name(&state).is_err());
-    }
-
-    #[tokio::test]
-    async fn rejects_nested_destination_file_name() {
-        let dir = unique_test_dir();
-
-        let error = LocalFileStorage::create_temp_destination(&dir, "../hello.txt")
-            .await
-            .unwrap_err();
-
-        assert!(matches!(error, CoreError::Storage(_)));
-    }
-
-    #[tokio::test]
-    async fn writes_reads_updates_and_deletes_resume_state() {
-        let dir = unique_test_dir();
-        let state = TransferResumeState {
-            transfer_id: TransferId::new("transfer-1"),
-            file_name: "hello.txt".into(),
-            file_size: 11,
-            chunk_size: 4,
-            bytes_received: 4,
-            next_chunk_index: 1,
-            hash_bytes: 4,
-            hash_checkpoint: Some("abc123".into()),
-            target_file_name: None,
-        };
-
-        LocalFileStorage::write_resume_state(&dir, &state)
-            .await
-            .unwrap();
-        assert_eq!(
-            LocalFileStorage::read_resume_state(&dir, "hello.txt", &state.transfer_id)
-                .await
-                .unwrap(),
-            Some(state.clone())
-        );
-
-        let mut updated = state.clone();
-        updated.bytes_received = 8;
-        updated.next_chunk_index = 2;
-        LocalFileStorage::write_resume_state(&dir, &updated)
-            .await
-            .unwrap();
-        assert_eq!(
-            LocalFileStorage::read_resume_state(&dir, "hello.txt", &state.transfer_id)
-                .await
-                .unwrap(),
-            Some(updated.clone())
-        );
-
-        LocalFileStorage::delete_resume_state(&dir, "hello.txt", &state.transfer_id)
-            .await
-            .unwrap();
-        assert_eq!(
-            LocalFileStorage::read_resume_state(&dir, "hello.txt", &state.transfer_id)
-                .await
-                .unwrap(),
-            None
-        );
-    }
-
-    #[tokio::test]
-    async fn opens_deterministic_resume_temp_for_append() {
-        let dir = unique_test_dir();
-        let state = TransferResumeState {
-            transfer_id: TransferId::new("transfer-1"),
-            file_name: "hello.txt".into(),
-            file_size: 11,
-            chunk_size: 4,
-            bytes_received: 0,
-            next_chunk_index: 0,
-            hash_bytes: 0,
-            hash_checkpoint: None,
-            target_file_name: None,
-        };
-
-        let (temp_path, mut file) = LocalFileStorage::open_resumable_destination(&dir, &state)
-            .await
-            .unwrap();
-        file.write_all(b"hello").await.unwrap();
-        drop(file);
-
-        let (second_temp_path, mut file) =
-            LocalFileStorage::open_resumable_destination(&dir, &state)
-                .await
-                .unwrap();
-        file.write_all(b" world").await.unwrap();
-        file.flush().await.unwrap();
-        drop(file);
-
-        assert_eq!(second_temp_path, temp_path);
-        assert_eq!(fs::read(temp_path).await.unwrap(), b"hello world");
-    }
-
-    #[tokio::test]
-    async fn finds_only_envoix_resume_sidecars_for_file() {
-        let dir = unique_test_dir();
-        fs::create_dir_all(&dir).await.unwrap();
-        fs::write(dir.join("notes.json"), b"{not json")
-            .await
-            .unwrap();
-        fs::write(
-            dir.join(".other.txt.transfer-1.json"),
-            br#"{"file_name":"hello.txt"}"#,
-        )
-        .await
-        .unwrap();
-        let state = TransferResumeState {
-            transfer_id: TransferId::new("transfer-1"),
-            file_name: "hello.txt".into(),
-            file_size: 11,
-            chunk_size: 4,
-            bytes_received: 4,
-            next_chunk_index: 1,
-            hash_bytes: 4,
-            hash_checkpoint: Some("abc123".into()),
-            target_file_name: None,
-        };
-        LocalFileStorage::write_resume_state(&dir, &state)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            LocalFileStorage::find_resume_state(&dir, "hello.txt", 11, 4)
-                .await
-                .unwrap(),
-            Some(state)
-        );
-    }
-
-    #[tokio::test]
-    async fn find_resume_state_prefers_most_advanced_sidecar() {
-        let dir = unique_test_dir();
-        let stale = TransferResumeState {
-            transfer_id: TransferId::new("transfer-stale"),
-            file_name: "movie.mkv".into(),
-            file_size: 1024,
-            chunk_size: 64,
-            bytes_received: 0,
-            next_chunk_index: 0,
-            hash_bytes: 0,
-            hash_checkpoint: None,
-            target_file_name: None,
-        };
-        let advanced = TransferResumeState {
-            transfer_id: TransferId::new("transfer-advanced"),
-            file_name: "movie.mkv".into(),
-            file_size: 1024,
-            chunk_size: 64,
-            bytes_received: 512,
-            next_chunk_index: 8,
-            hash_bytes: 512,
-            hash_checkpoint: Some("abc123".into()),
-            target_file_name: None,
-        };
-
-        LocalFileStorage::write_resume_state(&dir, &stale)
-            .await
-            .unwrap();
-        LocalFileStorage::write_resume_state(&dir, &advanced)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            LocalFileStorage::find_resume_state(&dir, "movie.mkv", 1024, 64)
-                .await
-                .unwrap(),
-            Some(advanced)
-        );
-    }
-
-    struct TestDir(tempfile::TempDir);
-
-    impl std::ops::Deref for TestDir {
-        type Target = Path;
-
-        fn deref(&self) -> &Self::Target {
-            self.0.path()
-        }
-    }
-
-    impl AsRef<Path> for TestDir {
-        fn as_ref(&self) -> &Path {
-            self.0.path()
-        }
-    }
-
-    fn unique_test_dir() -> TestDir {
-        TestDir(
-            tempfile::Builder::new()
-                .prefix("envoix-storage-test-")
-                .tempdir()
-                .unwrap(),
-        )
-    }
+fn active_resume_leases() -> &'static Mutex<HashSet<PathBuf>> {
+    ACTIVE_RESUME_LEASES.get_or_init(|| Mutex::new(HashSet::new()))
 }
+
+fn is_resume_key_leased(path: &Path) -> bool {
+    active_resume_leases()
+        .lock()
+        .is_ok_and(|leases| leases.contains(path))
+}
+
+async fn is_older_than(path: &Path, max_age: Duration) -> Result<bool, StorageError> {
+    let modified = fs::metadata(path)
+        .await?
+        .modified()
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    Ok(SystemTime::now()
+        .duration_since(modified)
+        .unwrap_or_default()
+        >= max_age)
+}
+
+async fn delete_artifact(
+    path: &Path,
+    report: &mut ResumeCleanupReport,
+) -> Result<(), StorageError> {
+    let metadata = match fs::metadata(path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    fs::remove_file(path).await?;
+    report.files_deleted += 1;
+    report.bytes_deleted = report.bytes_deleted.saturating_add(metadata.len());
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests;

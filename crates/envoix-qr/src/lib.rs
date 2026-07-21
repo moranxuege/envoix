@@ -15,6 +15,7 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use envoix_protocol::PeerDescriptor;
+use iroh::{EndpointAddr, EndpointId, RelayUrl, TransportAddr};
 use qrcode::QrCode;
 use qrcode::types::Color;
 use serde::{Deserialize, Serialize};
@@ -39,6 +40,11 @@ pub struct QrInvitePayload {
     pub token: String,
     /// Direct iroh endpoint descriptor the sender should dial.
     pub peer: PeerDescriptor,
+    /// Optional relay home URLs for the endpoint. Older clients ignore this
+    /// field and keep dialing direct addresses; newer clients combine it with
+    /// `peer` into a full iroh endpoint address for relay fallback.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relay_urls: Vec<String>,
     /// Expiry as a Unix timestamp in seconds.  Senders reject payloads where
     /// `expires_at <= now`.
     pub expires_at: u64,
@@ -66,6 +72,9 @@ pub enum QrError {
 
     #[error("malformed endpoint id: {0}")]
     MalformedEndpointId(String),
+
+    #[error("malformed relay url: {0}")]
+    MalformedRelayUrl(String),
 
     #[error("decode error: {0}")]
     DecodeError(String),
@@ -114,6 +123,22 @@ impl QrInvitePayload {
     /// `std::time::SystemTime::now()` converted to seconds, or a fixed value
     /// in tests.
     pub fn validate(&self, now: u64) -> Result<(), QrError> {
+        self.validate_versions()?;
+        if self.expires_at <= now {
+            return Err(QrError::Expired);
+        }
+        self.validate_body()
+    }
+
+    /// Validates a previously accepted invite for the continuation of that
+    /// same transfer. Expiry prevents new pairing attempts; it must not destroy
+    /// an established transfer's ability to resume after a long pause.
+    pub fn validate_for_resume(&self) -> Result<(), QrError> {
+        self.validate_versions()?;
+        self.validate_body()
+    }
+
+    fn validate_versions(&self) -> Result<(), QrError> {
         if self.version != PAYLOAD_VERSION {
             return Err(QrError::VersionMismatch {
                 found: self.version,
@@ -128,10 +153,10 @@ impl QrInvitePayload {
             });
         }
 
-        if self.expires_at <= now {
-            return Err(QrError::Expired);
-        }
+        Ok(())
+    }
 
+    fn validate_body(&self) -> Result<(), QrError> {
         if self.peer.direct_addrs.is_empty() {
             return Err(QrError::NoDirectAddresses);
         }
@@ -140,8 +165,14 @@ impl QrInvitePayload {
             return Err(QrError::WeakToken);
         }
 
-        if let Err(error) = validate_endpoint_id_hex(&self.peer.endpoint_id) {
+        if let Err(error) = self.peer.endpoint_id.parse::<EndpointId>() {
             return Err(QrError::MalformedEndpointId(error.to_string()));
+        }
+
+        for relay_url in &self.relay_urls {
+            relay_url
+                .parse::<RelayUrl>()
+                .map_err(|error| QrError::MalformedRelayUrl(error.to_string()))?;
         }
 
         if self.flags != 0 {
@@ -159,14 +190,46 @@ impl QrInvitePayload {
         Ok(self.peer.clone())
     }
 
+    /// Returns the full iroh endpoint address described by the invite,
+    /// including relay URLs when present.
+    pub fn endpoint_addr(&self) -> Result<EndpointAddr, QrError> {
+        let peer = self.peer_descriptor()?;
+        let id = peer
+            .endpoint_id
+            .parse::<EndpointId>()
+            .map_err(|error| QrError::MalformedEndpointId(error.to_string()))?;
+        let direct = peer.direct_addrs.iter().copied().map(TransportAddr::Ip);
+        let relays = self
+            .relay_urls
+            .iter()
+            .map(|url| {
+                url.parse::<RelayUrl>()
+                    .map(TransportAddr::Relay)
+                    .map_err(|error| QrError::MalformedRelayUrl(error.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(EndpointAddr::from_parts(id, direct.chain(relays)))
+    }
+
     /// Constructs a new payload with the current protocol version and schema
     /// version pre-filled.
     pub fn new(token: String, peer: PeerDescriptor, expires_at: u64) -> Self {
+        Self::new_with_relay_urls(token, peer, Vec::new(), expires_at)
+    }
+
+    /// Constructs a new payload with optional relay home URLs.
+    pub fn new_with_relay_urls(
+        token: String,
+        peer: PeerDescriptor,
+        relay_urls: Vec<String>,
+        expires_at: u64,
+    ) -> Self {
         Self {
             version: PAYLOAD_VERSION,
             protocol_version: PROTOCOL_VERSION,
             token,
             peer,
+            relay_urls,
             expires_at,
             flags: 0,
         }
@@ -238,234 +301,5 @@ pub fn render_terminal_qr(data: &str) -> Option<String> {
     Some(output)
 }
 
-/// Lightweight endpoint-id shape check (64 hex chars = a 32-byte key), so this
-/// encoding crate does not pull the whole iroh stack for one parse; a truly
-/// invalid key still fails fast when the session dials it.
-fn validate_endpoint_id_hex(s: &str) -> Result<(), String> {
-    if s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()) {
-        Ok(())
-    } else {
-        Err("endpoint id must be 64 hex characters".into())
-    }
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const TOKEN: &str = "abcdefghijkl"; // exactly MIN_SHARED_TOKEN_LEN bytes
-
-    fn valid_peer() -> PeerDescriptor {
-        PeerDescriptor::new(
-            iroh::SecretKey::generate().public().to_string(),
-            vec!["127.0.0.1:9000".parse().unwrap()],
-        )
-        .unwrap()
-    }
-
-    fn valid_payload(now: u64) -> QrInvitePayload {
-        QrInvitePayload::new(TOKEN.into(), valid_peer(), now + 300)
-    }
-
-    // --- encode / decode ---
-
-    #[test]
-    fn round_trip_encode_decode() {
-        let payload = valid_payload(0);
-        let encoded = payload.encode();
-        let decoded = QrInvitePayload::decode(&encoded).unwrap();
-        assert_eq!(payload, decoded);
-    }
-
-    #[test]
-    fn decode_rejects_missing_prefix() {
-        let err = QrInvitePayload::decode("badstring").unwrap_err();
-        assert!(matches!(err, QrError::DecodeError(_)));
-    }
-
-    #[test]
-    fn decode_rejects_invalid_base64() {
-        let err = QrInvitePayload::decode("envoix:!!!").unwrap_err();
-        assert!(matches!(err, QrError::DecodeError(_)));
-    }
-
-    #[test]
-    fn decode_rejects_invalid_json() {
-        let b64 = URL_SAFE_NO_PAD.encode(b"not json");
-        let err = QrInvitePayload::decode(&format!("envoix:{b64}")).unwrap_err();
-        assert!(matches!(err, QrError::DecodeError(_)));
-    }
-
-    // Invite strings copied from a terminal or QR scanner often carry a
-    // trailing newline or leading space.
-    #[test]
-    fn decode_tolerates_surrounding_whitespace() {
-        let invite = format!("  {}\n", valid_payload(0).encode());
-        QrInvitePayload::decode(&invite).unwrap();
-    }
-
-    // --- validate ---
-
-    #[test]
-    fn valid_payload_passes_validation() {
-        let now = 1_000_000_u64;
-        valid_payload(now).validate(now).unwrap();
-    }
-
-    // expires_at == now satisfies the `<=` condition and must be rejected.
-    #[test]
-    fn expired_payload_is_rejected() {
-        let payload = valid_payload(0); // expires_at = 300
-        let err = payload.validate(300).unwrap_err(); // now == expires_at -> expired
-        assert_eq!(err, QrError::Expired);
-    }
-
-    // expires_at == now + 1 is the tightest value that must pass.
-    #[test]
-    fn payload_expiring_in_one_second_passes() {
-        let now = 1_000_000_u64;
-        let mut payload = valid_payload(0);
-        payload.expires_at = now + 1;
-        payload.validate(now).unwrap();
-    }
-
-    #[test]
-    fn version_mismatch_is_rejected() {
-        let mut payload = valid_payload(0);
-        payload.version = 99;
-        let err = payload.validate(0).unwrap_err();
-        assert!(matches!(err, QrError::VersionMismatch { found: 99, .. }));
-    }
-
-    #[test]
-    fn protocol_version_mismatch_is_rejected() {
-        let mut payload = valid_payload(0);
-        payload.protocol_version = 999;
-        let err = payload.validate(0).unwrap_err();
-        assert!(matches!(
-            err,
-            QrError::ProtocolVersionMismatch { found: 999, .. }
-        ));
-    }
-
-    #[test]
-    fn nonzero_flags_are_rejected() {
-        let mut payload = valid_payload(0);
-        payload.flags = 1;
-        let err = payload.validate(0).unwrap_err();
-        assert!(matches!(err, QrError::UnsupportedFlags(1)));
-    }
-
-    #[test]
-    fn empty_direct_addresses_are_rejected() {
-        let mut payload = valid_payload(0);
-        payload.peer.direct_addrs.clear();
-        let err = payload.validate(0).unwrap_err();
-        assert_eq!(err, QrError::NoDirectAddresses);
-    }
-
-    // Token exactly one byte short of the minimum must be rejected.
-    #[test]
-    fn token_one_byte_short_of_minimum_is_rejected() {
-        let mut payload = valid_payload(0);
-        payload.token = "a".repeat(MIN_SHARED_TOKEN_LEN - 1);
-        assert_eq!(payload.validate(0).unwrap_err(), QrError::WeakToken);
-    }
-
-    #[test]
-    fn non_ascii_token_is_rejected() {
-        let mut payload = valid_payload(0);
-        payload.token = "abcdefghijklé".into(); // non-ASCII suffix, still ≥12 bytes
-        assert_eq!(payload.validate(0).unwrap_err(), QrError::WeakToken);
-    }
-
-    #[test]
-    fn malformed_endpoint_id_is_rejected() {
-        let mut payload = valid_payload(0);
-        payload.peer.endpoint_id = "not-an-endpoint-id".into();
-        let err = payload.validate(0).unwrap_err();
-        assert!(matches!(err, QrError::MalformedEndpointId(_)));
-    }
-
-    #[test]
-    fn ipv6_direct_address_is_accepted() {
-        let mut payload = valid_payload(0);
-        payload.peer.direct_addrs = vec!["[::1]:9000".parse().unwrap()];
-        payload.validate(0).unwrap();
-    }
-
-    // --- peer_descriptor ---
-
-    #[test]
-    fn peer_descriptor_returns_descriptor() {
-        let mut payload = valid_payload(0);
-        payload.peer.direct_addrs = vec![
-            "1.2.3.4:1000".parse().unwrap(),
-            "5.6.7.8:2000".parse().unwrap(),
-        ];
-        let peer = payload.peer_descriptor().unwrap();
-        assert_eq!(peer.direct_addrs, payload.peer.direct_addrs);
-    }
-
-    #[test]
-    fn peer_descriptor_on_empty_direct_addresses_returns_error() {
-        let mut payload = valid_payload(0);
-        payload.peer.direct_addrs.clear();
-        assert_eq!(
-            payload.peer_descriptor().unwrap_err(),
-            QrError::NoDirectAddresses
-        );
-    }
-
-    // --- generate_token ---
-
-    // Verify all structural requirements in a single test: length, charset,
-    // and SPAKE2 minimum - these are the same property viewed from three angles.
-    #[test]
-    fn generated_token_is_valid_hex_and_meets_spake2_minimum() {
-        let token = generate_token().unwrap();
-        assert_eq!(token.len(), TOKEN_RANDOM_BYTES * 2);
-        assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
-        assert!(token.len() >= MIN_SHARED_TOKEN_LEN);
-    }
-
-    #[test]
-    fn generated_token_passes_payload_validation() {
-        let token = generate_token().unwrap();
-        let payload = QrInvitePayload::new(token, valid_peer(), 999);
-        payload.validate(0).unwrap();
-    }
-
-    // --- render_terminal_qr ---
-
-    #[test]
-    fn render_output_contains_only_block_chars_and_newlines() {
-        let qr = render_terminal_qr("test").unwrap();
-        for ch in qr.chars() {
-            assert!(
-                matches!(ch, '█' | '▀' | '▄' | ' ' | '\n'),
-                "unexpected character: {ch:?}"
-            );
-        }
-    }
-
-    // All lines must be the same width so the QR matrix is square.
-    #[test]
-    fn render_all_lines_have_equal_width() {
-        let qr = render_terminal_qr("envoix test payload").unwrap();
-        let lines: Vec<&str> = qr.trim_end_matches('\n').split('\n').collect();
-        let widths: Vec<usize> = lines.iter().map(|l| l.chars().count()).collect();
-        assert!(
-            widths.windows(2).all(|w| w[0] == w[1]),
-            "lines have different widths: {widths:?}"
-        );
-    }
-
-    // A real invite string must encode without hitting the QR data limit.
-    #[test]
-    fn render_invite_string_produces_scannable_qr() {
-        let payload = valid_payload(0);
-        let invite = payload.encode();
-        assert!(render_terminal_qr(&invite).is_some());
-    }
-}
+mod tests;

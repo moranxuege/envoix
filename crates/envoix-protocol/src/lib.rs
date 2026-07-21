@@ -1,5 +1,20 @@
 //! Wire protocol frame types and codecs.
 
+pub mod manifest;
+
+pub use manifest::{
+    MANIFEST_V1_ALPN, MANIFEST_V1_PROTOCOL_VERSION, MAX_MANIFEST_V1_COMPONENT_BYTES,
+    MAX_MANIFEST_V1_ENCODED_BYTES, MAX_MANIFEST_V1_ENTRIES, MAX_MANIFEST_V1_PATH_BYTES,
+    MAX_MANIFEST_V1_PATH_DEPTH, ManifestAcceptV1, ManifestChunkV1, ManifestCompleteAckV1,
+    ManifestCompleteV1, ManifestEntryCompleteAckV1, ManifestEntryCompleteV1,
+    ManifestEntryDispositionKind, ManifestEntryDispositionV1, ManifestEntryKind,
+    ManifestEntryResultStatus, ManifestEntryResultV1, ManifestEntryStartV1, ManifestEntryV1,
+    ManifestErrorV1, ManifestFrame, ManifestHashAlgorithm, ManifestHelloV1, ManifestId,
+    ManifestOfferV1, ManifestPathViolation, ManifestResumeStatusV1, ManifestV1,
+    ManifestValidationError, SINGLE_FILE_V1_ALPN, TransferProtocol, read_manifest_frame,
+    validate_manifest_relative_path, write_manifest_chunk_frame, write_manifest_frame,
+};
+
 use std::fmt;
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -58,6 +73,20 @@ pub trait FrameConnection: Send {
         bytes: &[u8],
     ) -> Result<(), ProtocolError>;
 
+    /// Sends one chunk while allowing a full-duplex transport to surface a
+    /// peer control frame. The default keeps simple transports compatible;
+    /// production full-duplex transports should override this method.
+    async fn send_chunk_or_recv_frame(
+        &mut self,
+        transfer_id: &TransferId,
+        index: u64,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<Option<Frame>, ProtocolError> {
+        self.send_chunk(transfer_id, index, offset, bytes).await?;
+        Ok(None)
+    }
+
     /// Receives one protocol frame.
     async fn recv_frame(&mut self) -> Result<Frame, ProtocolError>;
 
@@ -74,6 +103,51 @@ pub trait FrameConnection: Send {
 
     /// Closes the underlying transport connection.
     async fn close(&mut self) -> Result<(), ProtocolError>;
+}
+
+/// Bidirectional Manifest v1 frame stream used after the existing authenticated
+/// handshake completes.
+///
+/// This is intentionally separate from [`FrameConnection`]. Authentication
+/// continues to use the stable `Frame::Auth` family, while a negotiated
+/// `envoix/manifest/1` connection switches to this interface for transfer
+/// frames. Existing `FrameConnection` implementors therefore remain source
+/// compatible.
+#[async_trait]
+pub trait ManifestFrameConnection: Send {
+    /// Sends one Manifest v1 control frame.
+    async fn send_manifest_frame(&mut self, frame: ManifestFrame) -> Result<(), ProtocolError>;
+
+    /// Sends one Manifest v1 chunk without requiring an owned payload buffer.
+    async fn send_manifest_chunk(
+        &mut self,
+        manifest_id: &ManifestId,
+        entry_id: u32,
+        transfer_id: &TransferId,
+        index: u64,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<(), ProtocolError>;
+
+    /// Sends a chunk while allowing a full-duplex transport to surface a peer
+    /// control frame. The default keeps simple in-memory transports compatible.
+    #[allow(clippy::too_many_arguments)]
+    async fn send_manifest_chunk_or_recv_frame(
+        &mut self,
+        manifest_id: &ManifestId,
+        entry_id: u32,
+        transfer_id: &TransferId,
+        index: u64,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<Option<ManifestFrame>, ProtocolError> {
+        self.send_manifest_chunk(manifest_id, entry_id, transfer_id, index, offset, bytes)
+            .await?;
+        Ok(None)
+    }
+
+    /// Receives one Manifest v1 frame.
+    async fn recv_manifest_frame(&mut self) -> Result<ManifestFrame, ProtocolError>;
 }
 
 /// Direct addressing data needed to dial an iroh endpoint without a relay.
@@ -299,6 +373,17 @@ pub async fn read_frame<R>(reader: &mut R) -> Result<Frame, ProtocolError>
 where
     R: AsyncRead + Unpin,
 {
+    let (raw_frame_type, payload) = read_frame_payload(reader).await?;
+    let frame_type = FrameType::try_from(raw_frame_type)
+        .map_err(|error| CoreError::Protocol(error.to_string()))?;
+
+    decode_frame(frame_type, &payload)
+}
+
+async fn read_frame_payload<R>(reader: &mut R) -> Result<(u8, Vec<u8>), ProtocolError>
+where
+    R: AsyncRead + Unpin,
+{
     let mut header = [0_u8; HEADER_LEN];
     reader.read_exact(&mut header).await?;
 
@@ -311,8 +396,7 @@ where
             "unsupported frame version {version}"
         )));
     }
-    let frame_type =
-        FrameType::try_from(header[6]).map_err(|error| CoreError::Protocol(error.to_string()))?;
+    let frame_type = header[6];
     if header[7] != 0 {
         return Err(CoreError::Protocol(
             "reserved frame byte must be zero".into(),
@@ -329,7 +413,7 @@ where
     let mut payload = vec![0_u8; length];
     reader.read_exact(&mut payload).await?;
 
-    decode_frame(frame_type, &payload)
+    Ok((frame_type, payload))
 }
 
 /// Writes one versioned binary frame to `writer`.
@@ -346,7 +430,7 @@ where
         )));
     }
 
-    write_frame_header(writer, frame_type, payload.len()).await?;
+    write_frame_header(writer, frame_type as u8, payload.len()).await?;
     writer.write_all(&payload).await?;
     Ok(())
 }
@@ -374,7 +458,7 @@ where
         .and_then(|len| len.checked_add(bytes.len()))
         .ok_or_else(|| CoreError::Protocol("frame length overflow".into()))?;
 
-    write_frame_header(writer, FrameType::Chunk, payload_len).await?;
+    write_frame_header(writer, FrameType::Chunk as u8, payload_len).await?;
     writer.write_all(&transfer_id_len.to_be_bytes()).await?;
     writer.write_all(transfer_id.0.as_bytes()).await?;
     writer.write_all(&index.to_be_bytes()).await?;
@@ -395,7 +479,7 @@ where
 
 async fn write_frame_header<W>(
     writer: &mut W,
-    frame_type: FrameType,
+    frame_type: u8,
     payload_len: usize,
 ) -> Result<(), ProtocolError>
 where
@@ -409,7 +493,7 @@ where
 
     writer.write_all(MAGIC).await?;
     writer.write_all(&WIRE_VERSION.to_be_bytes()).await?;
-    writer.write_all(&[frame_type as u8, 0]).await?;
+    writer.write_all(&[frame_type, 0]).await?;
     writer
         .write_all(&(payload_len as u32).to_be_bytes())
         .await?;
@@ -664,203 +748,4 @@ impl<'a> PayloadReader<'a> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use envoix_types::{PROTOCOL_VERSION, PeerRole, TransferId};
-
-    #[tokio::test]
-    async fn frame_round_trip() {
-        let (mut writer, mut reader) = tokio::io::duplex(1024);
-        let frame = Frame::FileHeader(FileHeader {
-            transfer_id: TransferId::new("transfer-1"),
-            file_name: "hello.txt".into(),
-            file_size: 5,
-            chunk_size: 1024,
-            resume_requested: true,
-        });
-
-        write_frame(&mut writer, &frame).await.unwrap();
-        let decoded = read_frame(&mut reader).await.unwrap();
-
-        assert_eq!(decoded, frame);
-    }
-
-    #[tokio::test]
-    async fn resumable_v1_frames_round_trip() {
-        let frames = vec![
-            Frame::Auth(AuthFrame::Spake2Start(Spake2Start {
-                protocol_version: PROTOCOL_VERSION,
-                role: PeerRole::Sender,
-                nonce: b"sender nonce".to_vec(),
-                message: b"sender spake2 message".to_vec(),
-            })),
-            Frame::Auth(AuthFrame::Spake2Message(Spake2Message {
-                nonce: b"receiver nonce".to_vec(),
-                message: b"receiver spake2 message".to_vec(),
-            })),
-            Frame::Auth(AuthFrame::Spake2Confirm(Spake2Confirm {
-                proof: b"confirmation proof".to_vec(),
-            })),
-            Frame::Hello(Hello {
-                protocol_version: PROTOCOL_VERSION,
-                role: PeerRole::Sender,
-            }),
-            Frame::Ready(Ready),
-            Frame::FileHeader(FileHeader {
-                transfer_id: TransferId::new("transfer-1"),
-                file_name: "hello.txt".into(),
-                file_size: 128,
-                chunk_size: 64,
-                resume_requested: true,
-            }),
-            Frame::ResumeStatus(ResumeStatus {
-                transfer_id: TransferId::new("transfer-1"),
-                next_chunk_index: 2,
-                bytes_received: 128,
-                prefix_hash: "abc123".into(),
-            }),
-            Frame::Chunk(Chunk {
-                transfer_id: TransferId::new("transfer-1"),
-                index: 2,
-                offset: 128,
-                bytes: b"hello".to_vec(),
-            }),
-            Frame::Complete(Complete {
-                transfer_id: TransferId::new("transfer-1"),
-                file_hash: "abc123".into(),
-            }),
-            Frame::CompleteAck(CompleteAck {
-                transfer_id: TransferId::new("transfer-1"),
-            }),
-            Frame::Error(ErrorFrame {
-                message: "bad frame".into(),
-            }),
-        ];
-
-        for frame in frames {
-            let (mut writer, mut reader) = tokio::io::duplex(1024);
-            write_frame(&mut writer, &frame).await.unwrap();
-            assert_eq!(read_frame(&mut reader).await.unwrap(), frame);
-        }
-    }
-
-    #[tokio::test]
-    async fn rejects_oversized_frame() {
-        let mut input = frame_bytes(FrameType::Ready, &[]);
-        input[8..12].copy_from_slice(&((MAX_FRAME_SIZE as u32) + 1).to_be_bytes());
-
-        let error = read_frame(&mut input.as_slice()).await.unwrap_err();
-
-        assert!(matches!(error, CoreError::Protocol(_)));
-    }
-
-    #[tokio::test]
-    async fn chunk_payload_is_encoded_as_raw_bytes() {
-        let frame = Frame::Chunk(Chunk {
-            transfer_id: TransferId::new("transfer-1"),
-            index: 7,
-            offset: 1024,
-            bytes: br#"{"not":"json-expanded"}"#.to_vec(),
-        });
-        let mut encoded = Vec::new();
-
-        write_frame(&mut encoded, &frame).await.unwrap();
-
-        assert!(encoded.ends_with(br#"{"not":"json-expanded"}"#));
-        assert_eq!(read_frame(&mut encoded.as_slice()).await.unwrap(), frame);
-    }
-
-    #[tokio::test]
-    async fn direct_chunk_writer_round_trips() {
-        let expected = Frame::Chunk(Chunk {
-            transfer_id: TransferId::new("transfer-1"),
-            index: 7,
-            offset: 1024,
-            bytes: b"hello".to_vec(),
-        });
-        let mut encoded = Vec::new();
-
-        write_chunk_frame(
-            &mut encoded,
-            &TransferId::new("transfer-1"),
-            7,
-            1024,
-            b"hello",
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(read_frame(&mut encoded.as_slice()).await.unwrap(), expected);
-    }
-
-    #[tokio::test]
-    async fn rejects_bad_magic_version_and_type() {
-        let mut bad_magic = frame_bytes(FrameType::Ready, &[]);
-        bad_magic[0] = b'X';
-        assert!(matches!(
-            read_frame(&mut bad_magic.as_slice()).await,
-            Err(CoreError::Protocol(_))
-        ));
-
-        let mut bad_version = frame_bytes(FrameType::Ready, &[]);
-        bad_version[5] = 2;
-        assert!(matches!(
-            read_frame(&mut bad_version.as_slice()).await,
-            Err(CoreError::Protocol(_))
-        ));
-
-        let bad_type = raw_frame_bytes(255, &[]);
-        assert!(matches!(
-            read_frame(&mut bad_type.as_slice()).await,
-            Err(CoreError::Protocol(_))
-        ));
-    }
-
-    #[tokio::test]
-    async fn rejects_invalid_utf8_and_malformed_payloads() {
-        let invalid_utf8 = frame_bytes(FrameType::Error, &[0, 0, 0, 1, 0xff]);
-        assert!(matches!(
-            read_frame(&mut invalid_utf8.as_slice()).await,
-            Err(CoreError::Protocol(_))
-        ));
-
-        let malformed = frame_bytes(FrameType::CompleteAck, &[0, 0, 0, 8, b't', b'r']);
-        assert!(matches!(
-            read_frame(&mut malformed.as_slice()).await,
-            Err(CoreError::Protocol(_))
-        ));
-
-        let trailing = frame_bytes(FrameType::Ready, &[0]);
-        assert!(matches!(
-            read_frame(&mut trailing.as_slice()).await,
-            Err(CoreError::Protocol(_))
-        ));
-    }
-
-    #[tokio::test]
-    async fn hello_frame_carries_protocol_version_and_role() {
-        let (mut writer, mut reader) = tokio::io::duplex(1024);
-        let frame = Frame::Hello(Hello {
-            protocol_version: PROTOCOL_VERSION,
-            role: PeerRole::Sender,
-        });
-
-        write_frame(&mut writer, &frame).await.unwrap();
-
-        assert_eq!(read_frame(&mut reader).await.unwrap(), frame);
-    }
-
-    fn frame_bytes(frame_type: FrameType, payload: &[u8]) -> Vec<u8> {
-        raw_frame_bytes(frame_type as u8, payload)
-    }
-
-    fn raw_frame_bytes(frame_type: u8, payload: &[u8]) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(MAGIC);
-        bytes.extend_from_slice(&WIRE_VERSION.to_be_bytes());
-        bytes.extend_from_slice(&[frame_type, 0]);
-        bytes.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-        bytes.extend_from_slice(payload);
-        bytes
-    }
-}
+mod tests;

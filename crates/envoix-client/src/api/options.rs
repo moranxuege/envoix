@@ -36,6 +36,10 @@ pub struct TransferOptions {
     /// Local socket addresses to bind when listening; `None` binds
     /// dual-stack IPv4 + IPv6 with OS-assigned ports (receive side).
     pub listen_addrs: Option<BindAddrs>,
+    /// Internal canonical-session marker: the invite was accepted by an
+    /// earlier attempt, so expiry no longer blocks this transfer's resume.
+    #[serde(skip)]
+    pub(crate) continuation: bool,
     /// Diagnostic only: the durable card id, recorded on the transfer span so
     /// engine timeline events (e.g. `protocol.complete_ack`) route by card id
     /// (docs/design/diagnostics.md v2, P4). Transient — the driver sets it fresh
@@ -51,21 +55,12 @@ impl Default for TransferOptions {
             path: PathPolicy::Auto,
             resume: true,
             listen_addrs: None,
+            continuation: false,
             session_id: None,
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn defaults_resume_on_auto_path_no_relay() {
-        let options = TransferOptions::default();
-        assert!(options.resume);
-        assert_eq!(options.path, PathPolicy::Auto);
-        assert_eq!(options.relay, None);
-        assert_eq!(options.listen_addrs, None);
-    }
-}
+#[path = "options_tests.rs"]
+mod tests;

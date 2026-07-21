@@ -4,7 +4,7 @@
 //! must be an event here, never a log line. Every variant is emitted by the
 //! current implementation - no speculative vocabulary.
 
-use envoix_protocol::PeerDescriptor;
+use envoix_protocol::{ManifestEntryResultV1, ManifestId, ManifestV1, PeerDescriptor};
 use envoix_session::TransferDirection;
 use envoix_types::{DataPath, PairingStep, TransferId};
 use serde::{Deserialize, Serialize};
@@ -32,6 +32,12 @@ pub struct StampedEvent {
 #[non_exhaustive]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum TransferEvent {
+    /// Diagnostic-only status. It is meant for logs/tests and does not change
+    /// the activity state.
+    Diagnostic {
+        /// Human-readable diagnostic message.
+        message: String,
+    },
     /// The local endpoint is being set up.
     Binding {
         /// Direction of this local operation.
@@ -113,7 +119,7 @@ pub enum TransferEvent {
     },
     /// SEND only: every byte and the Complete frame are sent; awaiting the
     /// receiver's CompleteAck (the final round trip). A failure in this phase
-    /// means the file very likely arrived - see `FailureCode::ConnectionLost`
+    /// means the file very likely arrived - see `SessionFailureCode::ConnectionLost`
     /// handling in the state machine.
     Confirming {
         /// Transfer identifier for correlating events.
@@ -132,6 +138,88 @@ pub enum TransferEvent {
         /// Plaintext bytes transferred in total.
         bytes_transferred: u64,
     },
+    /// Sender-side preflight is hashing and validating one Manifest file.
+    ManifestPreparingEntry {
+        /// Transfer-set identifier.
+        manifest_id: ManifestId,
+        /// Stable entry identifier within the Manifest.
+        entry_id: u32,
+        /// Portable destination-relative path.
+        relative_path: String,
+        /// Expected plaintext size.
+        size: u64,
+    },
+    /// Both peers accepted the complete Manifest plan. Durable consumers use
+    /// this one event as the authoritative entry inventory.
+    ManifestPlanned {
+        /// Direction of this local operation.
+        direction: TransferDirection,
+        /// Validated transfer-set description, including every entry.
+        manifest: ManifestV1,
+    },
+    /// A negotiated Manifest transfer set has started.
+    ManifestStarted {
+        /// Transfer-set identifier.
+        manifest_id: ManifestId,
+        /// Direction of this local operation.
+        direction: TransferDirection,
+        /// Number of regular-file entries.
+        file_count: u32,
+        /// Number of directory entries.
+        directory_count: u32,
+        /// Aggregate expected plaintext bytes.
+        total_bytes: u64,
+    },
+    /// One Manifest file entered its sequential payload phase.
+    ManifestEntryStarted {
+        /// Transfer-set identifier.
+        manifest_id: ManifestId,
+        /// Stable entry identifier within the Manifest.
+        entry_id: u32,
+        /// Per-entry transfer identifier.
+        transfer_id: TransferId,
+        /// Portable destination-relative path.
+        relative_path: String,
+        /// Expected plaintext bytes for this entry.
+        total_bytes: u64,
+        /// Verified bytes already present before this attempt.
+        bytes_resumed: u64,
+    },
+    /// Aggregate Manifest progress plus the active entry's persisted bytes.
+    ManifestProgress {
+        /// Transfer-set identifier.
+        manifest_id: ManifestId,
+        /// Active entry identifier.
+        entry_id: u32,
+        /// Plaintext bytes sent or persisted for the active entry.
+        entry_bytes: u64,
+        /// Expected plaintext bytes for the active entry.
+        entry_total_bytes: u64,
+        /// Aggregate plaintext bytes completed or active so far.
+        completed_bytes: u64,
+        /// Aggregate expected plaintext bytes.
+        total_bytes: u64,
+    },
+    /// One Manifest entry reached a terminal result.
+    ManifestEntryCompleted {
+        /// Transfer-set identifier.
+        manifest_id: ManifestId,
+        /// Receiver-authoritative result for the entry.
+        result: ManifestEntryResultV1,
+    },
+    /// Every offered Manifest entry reached a successful terminal result.
+    ManifestCompleted {
+        /// Transfer-set identifier.
+        manifest_id: ManifestId,
+        /// Number of regular-file entries.
+        file_count: u32,
+        /// Number of directory entries.
+        directory_count: u32,
+        /// Aggregate verified plaintext bytes.
+        total_bytes: u64,
+        /// Receiver-authoritative result for every entry.
+        entries: Vec<ManifestEntryResultV1>,
+    },
     /// The transfer failed; the operation's result carries the same error.
     Failed {
         /// Direction of this local operation.
@@ -140,7 +228,7 @@ pub enum TransferEvent {
         reason: String,
         /// Typed classification of the failure, so frontends branch on an enum
         /// instead of matching the prose in `reason`.
-        reason_code: FailureCode,
+        reason_code: SessionFailureCode,
     },
 }
 
@@ -152,7 +240,7 @@ pub enum TransferEvent {
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum FailureCode {
+pub enum SessionFailureCode {
     /// The local user cancelled the transfer.
     Cancelled,
     /// The local user paused the transfer (resumable intent).
@@ -167,7 +255,19 @@ pub enum FailureCode {
     Other,
 }
 
-impl FailureCode {
+impl SessionFailureCode {
+    /// Stable string form for durable per-entry diagnostics.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cancelled => "cancelled",
+            Self::Paused => "paused",
+            Self::PeerCancelled => "peer_cancelled",
+            Self::PeerPaused => "peer_paused",
+            Self::ConnectionLost => "connection_lost",
+            Self::Other => "other",
+        }
+    }
+
     /// Classify a failure reason string. This is the ONE place the canonical
     /// interrupt messages (and the connection-drop phrasings the session layer
     /// produces) are matched — frontends must branch on the resulting enum,
@@ -190,44 +290,5 @@ impl FailureCode {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::FailureCode;
-
-    #[test]
-    fn classify_maps_canonical_messages_to_codes() {
-        // The session layer prefixes/wraps these, so classify uses contains.
-        assert_eq!(
-            FailureCode::classify("transfer paused by user"),
-            FailureCode::Paused
-        );
-        assert_eq!(
-            FailureCode::classify("transfer interrupted by user"),
-            FailureCode::Cancelled
-        );
-        assert_eq!(
-            FailureCode::classify("transfer paused by peer"),
-            FailureCode::PeerPaused
-        );
-        assert_eq!(
-            FailureCode::classify("transfer interrupted by peer"),
-            FailureCode::PeerCancelled
-        );
-        assert_eq!(
-            FailureCode::classify("io error: connection lost"),
-            FailureCode::ConnectionLost
-        );
-        assert_eq!(
-            FailureCode::classify("connection closed by peer"),
-            FailureCode::ConnectionLost
-        );
-        assert_eq!(FailureCode::classify("hash mismatch"), FailureCode::Other);
-    }
-
-    #[test]
-    fn reason_code_serializes_snake_case() {
-        assert_eq!(
-            serde_json::to_string(&FailureCode::PeerPaused).unwrap(),
-            r#""peer_paused""#
-        );
-    }
-}
+#[path = "event_tests.rs"]
+mod tests;

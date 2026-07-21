@@ -9,6 +9,7 @@
 //! Lifecycle (per the decided semantics): Cancel KEEPS the record; Remove is
 //! the one true abandon — record, partials, and receipt all deleted.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Deserializer, Serialize, de};
@@ -21,6 +22,8 @@ use super::machine::Session;
 /// `session.facts.source_ready`, which needs a state-derived migration rather
 /// than a bare default (see [`migrate_source_ready`]).
 pub const RECORD_VERSION: u32 = 2;
+/// Platform-extra key carrying a frontend's original string card identifier.
+pub const EXTERNAL_RECORD_ID_KEY: &str = "external_record_id";
 
 /// Pre-v2 records lack `source_ready`; a bare serde default (`false`) would
 /// wrongly re-stage every past-staging record. Derive it from the persisted
@@ -54,6 +57,8 @@ pub struct TransferRecord {
     pub version: u32,
     /// The frontend's card id — stable across restarts.
     pub id: u64,
+    /// First creation time, ms since the Unix epoch.
+    pub created_ms: u64,
     /// Last-write time, ms since the Unix epoch (display/GC only).
     pub updated_ms: u64,
     /// Complete immutable context needed to recreate the same Rust session.
@@ -76,7 +81,9 @@ impl<'de> Deserialize<'de> for TransferRecord {
         struct Wire {
             #[serde(default)]
             version: u32,
-            id: u64,
+            id: RecordId,
+            #[serde(default)]
+            created_ms: Option<u64>,
             updated_ms: u64,
             context: Option<SessionContext>,
             params: Option<SessionParams>,
@@ -96,18 +103,45 @@ impl<'de> Deserialize<'de> for TransferRecord {
                 return Err(de::Error::missing_field("context"));
             }
         };
+        let (id, external_id) = wire.id.into_parts();
+        let mut platform_extras = wire.platform_extras;
+        if let Some(external_id) = external_id {
+            let extras = platform_extras.get_or_insert_with(|| serde_json::json!({}));
+            if let Some(object) = extras.as_object_mut() {
+                object
+                    .entry(EXTERNAL_RECORD_ID_KEY)
+                    .or_insert_with(|| external_id.into());
+            }
+        }
         let mut session = wire.session;
         if wire.version < RECORD_VERSION {
-            migrate_source_ready(&mut session, &wire.platform_extras);
+            migrate_source_ready(&mut session, &platform_extras);
         }
         Ok(Self {
             version: wire.version,
-            id: wire.id,
+            id,
+            created_ms: wire.created_ms.unwrap_or(wire.updated_ms),
             updated_ms: wire.updated_ms,
             context,
             session,
-            platform_extras: wire.platform_extras,
+            platform_extras,
         })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RecordId {
+    Number(u64),
+    String(String),
+}
+
+impl RecordId {
+    fn into_parts(self) -> (u64, Option<String>) {
+        match self {
+            Self::Number(value) => (value, None),
+            Self::String(value) => (stable_record_id(&value), Some(value)),
+        }
     }
 }
 
@@ -171,6 +205,20 @@ impl TransferRecord {
     }
 }
 
+/// Stable adapter for frontends whose public card identifiers are strings.
+/// Decimal identifiers retain their historic numeric value; other strings use
+/// deterministic FNV-1a so the mapping survives process and app restarts.
+pub fn stable_record_id(value: &str) -> u64 {
+    if let Ok(id) = value.parse::<u64>() {
+        return id;
+    }
+    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    value.as_bytes().iter().fold(OFFSET_BASIS, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)
+    })
+}
+
 /// Filesystem store: `<dir>/record-<id>.json`, atomic writes.
 #[derive(Clone, Debug)]
 pub struct RecordStore {
@@ -186,6 +234,14 @@ impl RecordStore {
         self.dir.join(format!("record-{id}.json"))
     }
 
+    /// Private endpoint identity for one durable transfer. A separate key per
+    /// card avoids relay identity collisions between concurrent receivers.
+    pub fn identity_path(&self, id: u64) -> PathBuf {
+        self.dir
+            .join("identities")
+            .join(format!("identity-{id}.json"))
+    }
+
     /// Write (or replace) a record atomically.
     pub async fn save(&self, record: &TransferRecord) -> std::io::Result<()> {
         tokio::fs::create_dir_all(&self.dir).await?;
@@ -194,15 +250,24 @@ impl RecordStore {
         let tmp = self.dir.join(format!(".record-{}.json.tmp", record.id));
         tokio::fs::write(&tmp, &bytes).await?;
         tokio::fs::rename(&tmp, self.path(record.id)).await?;
+        if let Some(external_id) = external_record_id(record) {
+            let legacy_path = self.dir.join(format!(
+                "record-{}.json",
+                legacy_record_file_key(external_id)
+            ));
+            if legacy_path != self.path(record.id) {
+                let _ = tokio::fs::remove_file(legacy_path).await;
+            }
+        }
         Ok(())
     }
 
     /// Load every parseable record (unparseable files are skipped, not fatal —
     /// a corrupt record must never block app start).
     pub async fn load_all(&self) -> Vec<TransferRecord> {
-        let mut records = Vec::new();
+        let mut records = BTreeMap::new();
         let Ok(mut entries) = tokio::fs::read_dir(&self.dir).await else {
-            return records;
+            return Vec::new();
         };
         while let Ok(Some(entry)) = entries.next_entry().await {
             let name = entry.file_name();
@@ -212,14 +277,23 @@ impl RecordStore {
             }
             match tokio::fs::read(entry.path()).await {
                 Ok(bytes) => match serde_json::from_slice::<TransferRecord>(&bytes) {
-                    Ok(record) => records.push(record),
+                    Ok(record) => {
+                        let replace =
+                            records
+                                .get(&record.id)
+                                .is_none_or(|current: &TransferRecord| {
+                                    record.updated_ms >= current.updated_ms
+                                });
+                        if replace {
+                            records.insert(record.id, record);
+                        }
+                    }
                     Err(error) => tracing::warn!(%error, name, "skipping unparseable record"),
                 },
                 Err(error) => tracing::warn!(%error, name, "skipping unreadable record"),
             }
         }
-        records.sort_by_key(|r| r.id);
-        records
+        records.into_values().collect()
     }
 
     /// Load one record by id, if present and parseable.
@@ -237,6 +311,29 @@ impl RecordStore {
     /// Delete a record (Remove — the one true abandon). Missing is fine.
     pub async fn delete(&self, id: u64) {
         let _ = tokio::fs::remove_file(self.path(id)).await;
+        let _ = tokio::fs::remove_file(self.identity_path(id)).await;
+    }
+}
+
+fn external_record_id(record: &TransferRecord) -> Option<&str> {
+    record
+        .platform_extras
+        .as_ref()?
+        .as_object()?
+        .get(EXTERNAL_RECORD_ID_KEY)?
+        .as_str()
+}
+
+fn legacy_record_file_key(id: &str) -> String {
+    if !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        id.to_string()
+    } else {
+        blake3::hash(id.as_bytes()).to_hex().to_string()
     }
 }
 
@@ -301,230 +398,5 @@ pub(crate) fn unix_now_ms() -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::super::machine::State;
-    use super::*;
-    use envoix_session::TransferDirection;
-
-    fn record(id: u64) -> TransferRecord {
-        TransferRecord {
-            version: RECORD_VERSION,
-            id,
-            updated_ms: 1,
-            platform_extras: None,
-            context: SessionContext {
-                client: Default::default(),
-                params: SessionParams {
-                    direction: TransferDirection::Receive,
-                    path: "/tmp/x".into(),
-                    sources: vec![super::super::PeerSource::Room {
-                        code: "123456-kelp-coral".into(),
-                        broker: "id@1.2.3.4:5".into(),
-                    }],
-                    options: super::super::TransferOptions::default(),
-                },
-            },
-            session: Session::new(TransferDirection::Receive),
-        }
-    }
-
-    #[tokio::test]
-    async fn save_load_delete_round_trip() {
-        let dir = std::env::temp_dir().join(format!("envoix-records-{}", std::process::id()));
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        let store = RecordStore::new(&dir);
-
-        let mut r = record(7);
-        r.session.state = State::Unconfirmed;
-        r.session.transfer_id = Some("transfer-x".into());
-        store.save(&r).await.unwrap();
-        store.save(&record(3)).await.unwrap();
-
-        let loaded = store.load_all().await;
-        assert_eq!(loaded.len(), 2);
-        assert_eq!(loaded[0].id, 3, "sorted by id");
-        assert_eq!(loaded[1].session.state, State::Unconfirmed);
-        assert_eq!(loaded[1].session.transfer_id.as_deref(), Some("transfer-x"),);
-        assert_eq!(
-            loaded[1].context.params.sources,
-            record(7).context.params.sources,
-            "relaunch context survives"
-        );
-
-        store.delete(3).await;
-        assert_eq!(store.load_all().await.len(), 1);
-
-        // A corrupt file is skipped, never fatal.
-        tokio::fs::write(dir.join("record-9.json"), b"{nope")
-            .await
-            .unwrap();
-        assert_eq!(store.load_all().await.len(), 1);
-    }
-
-    #[test]
-    fn restore_context_summarizes_the_typed_record() {
-        let mut r = record(5); // a Room receive by default
-        r.context.params.path = "/out/dir".into();
-        let ctx = r.restore_context();
-        assert_eq!(ctx.id, 5);
-        assert_eq!(ctx.direction, "receive");
-        assert_eq!(ctx.code, "123456-kelp-coral");
-        assert_eq!(ctx.path, "/out/dir");
-        assert!(ctx.use_room);
-        assert!(!ctx.use_mdns);
-    }
-
-    #[test]
-    fn source_ready_migrates_from_state_for_legacy_records() {
-        // A pre-v2 record lacks source_ready; the migration derives it from
-        // state (a bare serde default of false would wrongly re-stage every
-        // past-staging record). Serialize a legacy record with a deliberately
-        // WRONG source_ready and confirm the migration overrides it.
-        let migrated = |state: State, extras: Option<serde_json::Value>| -> bool {
-            let mut r = record(1);
-            r.version = 0; // legacy
-            r.session = Session::new(TransferDirection::Send);
-            r.session.state = state;
-            r.session.facts.source_ready = true; // wrong on purpose
-            r.platform_extras = extras;
-            let json = serde_json::to_string(&r).unwrap();
-            serde_json::from_str::<TransferRecord>(&json)
-                .unwrap()
-                .session
-                .facts
-                .source_ready
-        };
-        let staged = || Some(serde_json::json!({ "source_uri": "content://x" }));
-        assert!(!migrated(State::Preparing, None), "Preparing -> not ready");
-        assert!(migrated(State::Connecting, None), "past staging -> ready");
-        assert!(migrated(State::Completed, None), "completed -> ready");
-        assert!(
-            !migrated(State::Cancelled, staged()),
-            "cancelled staged -> re-stage",
-        );
-        assert!(
-            migrated(State::Cancelled, None),
-            "cancelled direct -> ready"
-        );
-    }
-
-    #[test]
-    fn restore_context_needs_no_frontend_migration_for_legacy_records() {
-        // A pre-context record (params at the top level) deserializes via the
-        // typed migration, so restore_context reads it with no fallback - the
-        // whole reason the frontend can drop its `context ?: params` dance.
-        let mut value = serde_json::to_value(record(9)).unwrap();
-        let object = value.as_object_mut().unwrap();
-        let context = object.remove("context").unwrap();
-        object.insert("params".into(), context["params"].clone());
-        let loaded: TransferRecord = serde_json::from_value(value).unwrap();
-
-        let ctx = loaded.restore_context();
-        assert_eq!(ctx.id, 9);
-        assert_eq!(ctx.code, "123456-kelp-coral");
-        assert!(ctx.use_room);
-    }
-
-    #[tokio::test]
-    async fn discard_record_cleans_artifacts_without_a_live_session() {
-        use envoix_storage::{LocalFileStorage, TransferReceipt, TransferResumeState};
-        let dir = std::env::temp_dir().join(format!("envoix-discard-{}", std::process::id()));
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        tokio::fs::create_dir_all(&dir).await.unwrap();
-        let store = RecordStore::new(dir.join("records"));
-
-        // A paused receive: record + partial + state + receipt on disk.
-        let mut r = record(4);
-        r.context.params.path = dir.clone();
-        r.session.file_name = Some("f.bin".into());
-        r.session.transfer_id = Some("t-1".into());
-        store.save(&r).await.unwrap();
-        let tid = envoix_types::TransferId::new("t-1");
-        let temp = LocalFileStorage::resumable_temp_path(&dir, "f.bin", &tid).unwrap();
-        tokio::fs::write(&temp, b"partial").await.unwrap();
-        LocalFileStorage::write_resume_state(
-            &dir,
-            &TransferResumeState {
-                transfer_id: tid.clone(),
-                file_name: "f.bin".into(),
-                file_size: 100,
-                chunk_size: 10,
-                bytes_received: 7,
-                next_chunk_index: 1,
-                hash_bytes: 7,
-                hash_checkpoint: None,
-                target_file_name: None,
-            },
-        )
-        .await
-        .unwrap();
-        LocalFileStorage::write_receipt(
-            &dir,
-            &TransferReceipt {
-                file_name: "f.bin".into(),
-                file_size: 100,
-                file_hash: "h".into(),
-            },
-        )
-        .await
-        .unwrap();
-
-        // No live session anywhere: Remove still cleans everything.
-        discard_record(&store, 4).await;
-
-        assert!(store.load(4).await.is_none(), "record deleted");
-        assert!(
-            !tokio::fs::try_exists(&temp).await.unwrap(),
-            "partial deleted"
-        );
-        assert!(
-            LocalFileStorage::read_receipt(&dir, "f.bin")
-                .await
-                .unwrap()
-                .is_none(),
-            "receipt deleted"
-        );
-        assert!(
-            LocalFileStorage::find_resume_state(&dir, "f.bin", 100, 10)
-                .await
-                .unwrap()
-                .is_none(),
-            "state deleted"
-        );
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-    }
-
-    #[tokio::test]
-    async fn platform_extras_survive_the_round_trip() {
-        let dir = std::env::temp_dir().join(format!("envoix-extras-{}", std::process::id()));
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-        let store = RecordStore::new(&dir);
-        let mut r = record(11);
-        r.platform_extras =
-            Some(serde_json::json!({"qr": "envoix:abc", "saved_uri": "content://x"}));
-        store.save(&r).await.unwrap();
-
-        let loaded = store.load(11).await.unwrap();
-        assert_eq!(loaded.version, RECORD_VERSION);
-        assert_eq!(
-            loaded.platform_extras.unwrap()["qr"],
-            serde_json::json!("envoix:abc"),
-            "the core persists the frontend's context verbatim"
-        );
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-    }
-
-    #[test]
-    fn deserialize_legacy_params_record_as_default_context() {
-        let mut value = serde_json::to_value(record(9)).unwrap();
-        let object = value.as_object_mut().unwrap();
-        let context = object.remove("context").unwrap();
-        object.insert("params".into(), context["params"].clone());
-
-        let loaded: TransferRecord = serde_json::from_value(value).unwrap();
-
-        assert_eq!(loaded.id, 9);
-        assert_eq!(loaded.context.client.chunk_size, None);
-        assert_eq!(loaded.context.params.path, PathBuf::from("/tmp/x"));
-    }
-}
+#[path = "record_tests.rs"]
+mod tests;
