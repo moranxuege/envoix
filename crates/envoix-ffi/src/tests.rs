@@ -3,6 +3,8 @@ use envoix_qr::QrInvitePayload;
 use envoix_rendezvous::RoomRegistry;
 use envoix_rendezvous_iroh::{build_endpoint, endpoint_addr, serve_endpoint};
 use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
+use std::io::ErrorKind;
+use std::net::UdpSocket;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Mutex, OnceLock, Weak};
@@ -238,11 +240,15 @@ impl TransferObserver for DurablePauseOnProgressObserver {
 
 static LOOPBACK_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
-fn lock_loopback_tests() -> std::sync::MutexGuard<'static, ()> {
+fn lock_loopback_tests() -> Option<std::sync::MutexGuard<'static, ()>> {
+    if !loopback_transport_available() {
+        return None;
+    }
     LOOPBACK_TEST_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap()
+        .into()
 }
 
 fn recv_invite(rx: &std::sync::mpsc::Receiver<Msg>, timeout: Duration) -> String {
@@ -254,6 +260,17 @@ fn recv_invite(rx: &std::sync::mpsc::Receiver<Msg>, timeout: Duration) -> String
             Msg::Event(_) => {}
             Msg::Activity(_) => {}
         }
+    }
+}
+
+fn loopback_transport_available() -> bool {
+    match UdpSocket::bind(("127.0.0.1", 0)) {
+        Ok(_) => true,
+        Err(error) if error.kind() == ErrorKind::PermissionDenied => {
+            println!("skipping loopback/queue tests: UDP bind permission denied ({error})");
+            false
+        }
+        Err(error) => panic!("transport pre-check failed: {error}"),
     }
 }
 
@@ -1386,6 +1403,10 @@ fn invite_send_auto_adds_relay_only_retry_when_invite_has_relay() {
 
 #[test]
 fn ffi_queue_respects_serial_runtime_setting() {
+    if !loopback_transport_available() {
+        return;
+    }
+
     let dir = tempfile::tempdir().unwrap();
     let first_dir = dir.path().join("first");
     let second_dir = dir.path().join("second");
@@ -1434,6 +1455,10 @@ fn ffi_queue_respects_serial_runtime_setting() {
 
 #[test]
 fn ffi_queue_holds_and_cancels_pending_activity() {
+    if !loopback_transport_available() {
+        return;
+    }
+
     let dir = tempfile::tempdir().unwrap();
     let first_dir = dir.path().join("first");
     let second_dir = dir.path().join("second");
@@ -1494,6 +1519,10 @@ fn ffi_queue_holds_and_cancels_pending_activity() {
 
 #[test]
 fn ffi_queue_discards_pending_activity() {
+    if !loopback_transport_available() {
+        return;
+    }
+
     let dir = tempfile::tempdir().unwrap();
     let first_dir = dir.path().join("first");
     let second_dir = dir.path().join("second");
@@ -1544,6 +1573,10 @@ fn ffi_queue_discards_pending_activity() {
 
 #[test]
 fn ffi_queue_pauses_and_resumes_pending_activity() {
+    if !loopback_transport_available() {
+        return;
+    }
+
     let dir = tempfile::tempdir().unwrap();
     let first_dir = dir.path().join("first");
     let second_dir = dir.path().join("second");
@@ -1611,7 +1644,9 @@ fn loopback_invite(invite: &str) -> String {
 
 #[test]
 fn ffi_qr_invite_loopback() {
-    let _loopback_guard = lock_loopback_tests();
+    let Some(_loopback_guard) = lock_loopback_tests() else {
+        return;
+    };
     let dir = tempfile::tempdir().unwrap();
     let output_dir = dir.path().join("received");
     std::fs::create_dir_all(&output_dir).unwrap();
@@ -1672,7 +1707,9 @@ fn ffi_qr_invite_loopback() {
 
 #[test]
 fn durable_ffi_invite_loopback_persists_canonical_completion() {
-    let _loopback_guard = lock_loopback_tests();
+    let Some(_loopback_guard) = lock_loopback_tests() else {
+        return;
+    };
     let dir = tempfile::tempdir().unwrap();
     let output_dir = dir.path().join("received");
     let receive_records = dir.path().join("receive-records");
@@ -1747,7 +1784,9 @@ fn durable_ffi_invite_loopback_persists_canonical_completion() {
 
 #[test]
 fn durable_ffi_room_existing_file_completion_preserves_resumed_bytes() {
-    let _loopback_guard = lock_loopback_tests();
+    let Some(_loopback_guard) = lock_loopback_tests() else {
+        return;
+    };
     let broker = start_test_broker();
     let dir = tempfile::tempdir().unwrap();
     let output_dir = dir.path().join("received");
@@ -1864,7 +1903,9 @@ fn durable_ffi_room_existing_file_completion_preserves_resumed_bytes() {
 
 #[test]
 fn durable_manifest_receiver_existing_single_file_preserves_resumed_bytes() {
-    let _loopback_guard = lock_loopback_tests();
+    let Some(_loopback_guard) = lock_loopback_tests() else {
+        return;
+    };
     let dir = tempfile::tempdir().unwrap();
     let output_dir = dir.path().join("received");
     let receive_records = dir.path().join("receive-records");
@@ -1946,7 +1987,9 @@ fn durable_manifest_receiver_existing_single_file_preserves_resumed_bytes() {
 
 #[test]
 fn durable_invite_pause_reuses_the_scanned_endpoint_and_token() {
-    let _loopback_guard = lock_loopback_tests();
+    let Some(_loopback_guard) = lock_loopback_tests() else {
+        return;
+    };
     let dir = tempfile::tempdir().unwrap();
     let output_dir = dir.path().join("received");
     let receive_records = dir.path().join("receive-records");
@@ -2041,7 +2084,9 @@ fn durable_invite_pause_reuses_the_scanned_endpoint_and_token() {
 
 #[test]
 fn durable_restore_marks_interrupted_attempt_lost_and_remove_discards_exact_state() {
-    let _loopback_guard = lock_loopback_tests();
+    let Some(_loopback_guard) = lock_loopback_tests() else {
+        return;
+    };
     let dir = tempfile::tempdir().unwrap();
     let output_dir = dir.path().join("received");
     let records_dir = dir.path().join("records");
@@ -2152,7 +2197,9 @@ fn durable_restore_marks_interrupted_attempt_lost_and_remove_discards_exact_stat
 
 #[test]
 fn durable_room_pause_resumes_from_initiating_side_only() {
-    let _loopback_guard = lock_loopback_tests();
+    let Some(_loopback_guard) = lock_loopback_tests() else {
+        return;
+    };
     let broker = start_test_broker();
     let dir = tempfile::tempdir().unwrap();
     let output_dir = dir.path().join("received");
@@ -2283,7 +2330,9 @@ fn durable_room_pause_resumes_from_initiating_side_only() {
 
 #[test]
 fn durable_unconfirmed_restore_completes_from_verified_mailbox_receipt() {
-    let _loopback_guard = lock_loopback_tests();
+    let Some(_loopback_guard) = lock_loopback_tests() else {
+        return;
+    };
     let dir = tempfile::tempdir().unwrap();
     let records_dir = dir.path().join("records");
     let source = dir.path().join("mailbox.bin");
@@ -2377,7 +2426,9 @@ fn durable_unconfirmed_restore_completes_from_verified_mailbox_receipt() {
 
 #[test]
 fn durable_staged_receive_is_not_completed_until_native_publication() {
-    let _loopback_guard = lock_loopback_tests();
+    let Some(_loopback_guard) = lock_loopback_tests() else {
+        return;
+    };
     let dir = tempfile::tempdir().unwrap();
     let records_dir = dir.path().join("records");
     let staging = dir.path().join("staging");
@@ -2455,7 +2506,9 @@ fn durable_staged_receive_is_not_completed_until_native_publication() {
 
 #[test]
 fn durable_publication_failure_and_replacement_survive_restart() {
-    let _loopback_guard = lock_loopback_tests();
+    let Some(_loopback_guard) = lock_loopback_tests() else {
+        return;
+    };
     let dir = tempfile::tempdir().unwrap();
     let records_dir = dir.path().join("records");
     let staging = dir.path().join("staging");
@@ -2630,7 +2683,9 @@ fn durable_publication_failure_and_replacement_survive_restart() {
 
 #[test]
 fn canceling_durable_publication_discards_only_its_staged_artifacts() {
-    let _loopback_guard = lock_loopback_tests();
+    let Some(_loopback_guard) = lock_loopback_tests() else {
+        return;
+    };
     let dir = tempfile::tempdir().unwrap();
     let records_dir = dir.path().join("records");
     let staging = dir.path().join("staging");
@@ -2748,7 +2803,9 @@ fn canceling_durable_publication_discards_only_its_staged_artifacts() {
 
 #[test]
 fn ffi_room_loopback() {
-    let _loopback_guard = lock_loopback_tests();
+    let Some(_loopback_guard) = lock_loopback_tests() else {
+        return;
+    };
     let broker = start_test_broker();
 
     let dir = tempfile::tempdir().unwrap();
@@ -2814,7 +2871,9 @@ fn ffi_room_loopback() {
 
 #[test]
 fn ffi_room_pause_resumes_from_one_side_and_preserves_file() {
-    let _loopback_guard = lock_loopback_tests();
+    let Some(_loopback_guard) = lock_loopback_tests() else {
+        return;
+    };
     let broker = start_test_broker();
     let dir = tempfile::tempdir().unwrap();
     let output_dir = dir.path().join("received");

@@ -1,3 +1,5 @@
+use std::io::ErrorKind;
+use std::net::UdpSocket;
 use std::sync::Arc;
 
 use envoix_rendezvous::RoomRegistry;
@@ -17,8 +19,23 @@ async fn ready_addr(ep: &Endpoint) -> EndpointAddr {
     endpoint_addr(ep)
 }
 
+fn loopback_transport_available() -> bool {
+    match UdpSocket::bind(("127.0.0.1", 0)) {
+        Ok(_) => true,
+        Err(error) if error.kind() == ErrorKind::PermissionDenied => {
+            println!("skipping room test: UDP bind permission denied ({error})");
+            false
+        }
+        Err(error) => panic!("transport pre-check failed: {error}"),
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sender_room_pairing_timeout_returns_before_room_expiry() {
+    if !loopback_transport_available() {
+        return;
+    }
+
     let server = build_endpoint(
         "127.0.0.1:0".parse().unwrap(),
         SecretKey::generate(),

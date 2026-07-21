@@ -7,6 +7,8 @@ use envoix_client::api::{
     TransferEvent, TransferOptions, TransferRequest,
 };
 use envoix_client::{PeerDescriptor, TransferDirection};
+use std::io::ErrorKind;
+use std::net::UdpSocket;
 
 static IROH_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -37,6 +39,9 @@ async fn wait_for_transfer_set_advertisement(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn manual_loopback_roundtrip() {
+    if !loopback_transport_available() {
+        return;
+    }
     let _guard = IROH_TEST_LOCK.lock().await;
     let root = std::env::temp_dir().join(format!(
         "envoix-api-loopback-{}-{}",
@@ -129,6 +134,9 @@ async fn manual_loopback_roundtrip() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn manual_manifest_loopback_roundtrip() {
+    if !loopback_transport_available() {
+        return;
+    }
     let _guard = IROH_TEST_LOCK.lock().await;
     let root = std::env::temp_dir().join(format!(
         "envoix-api-manifest-loopback-{}-{}",
@@ -299,6 +307,9 @@ async fn manual_manifest_loopback_roundtrip() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn negotiated_receiver_keeps_legacy_single_file_compatible() {
+    if !loopback_transport_available() {
+        return;
+    }
     let _guard = IROH_TEST_LOCK.lock().await;
     let root = std::env::temp_dir().join(format!(
         "envoix-api-negotiated-single-loopback-{}-{}",
@@ -364,4 +375,15 @@ async fn negotiated_receiver_keeps_legacy_single_file_compatible() {
     );
 
     tokio::fs::remove_dir_all(&root).await.ok();
+}
+
+fn loopback_transport_available() -> bool {
+    match UdpSocket::bind(("127.0.0.1", 0)) {
+        Ok(_) => true,
+        Err(error) if error.kind() == ErrorKind::PermissionDenied => {
+            println!("skipping API loopback tests: UDP bind permission denied ({error})");
+            false
+        }
+        Err(error) => panic!("API loopback transport pre-check failed: {error}"),
+    }
 }
