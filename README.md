@@ -2,6 +2,8 @@
 
 Minimal CLI-first secure file transfer walking skeleton for VE441.
 
+**[Download Envoix / 下载 Envoix](https://ece4410j-nuub.github.io/envoix/)**
+
 ## Debug Build Marker
 
 Current app debug marker: `Debug build 2026.07.08.19`.

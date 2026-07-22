@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="下载 Envoix 图形客户端，或从源码安装跨平台命令行工具。">
+  <link rel="alternate" hreflang="en" href="./en/">
   <title>Envoix 下载</title>
   <style>
     :root {
@@ -58,6 +59,22 @@
     }
 
     a { color: inherit; }
+
+    .language-switch {
+      display: inline-flex;
+      align-items: center;
+      min-height: 34px;
+      margin-bottom: 22px;
+      padding: 6px 12px;
+      border: 1px solid var(--line-strong);
+      border-radius: 999px;
+      color: var(--cyan);
+      background: rgba(97, 210, 221, 0.06);
+      font-size: 0.74rem;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      text-decoration: none;
+    }
 
     a:focus-visible {
       outline: 3px solid rgba(97, 210, 221, 0.72);
@@ -521,6 +538,7 @@
   <main class="shell">
     <header class="hero">
       <div>
+        <a class="language-switch" href="./en/" lang="en">English version →</a>
         <p class="eyebrow">Envoix · v0.2.0</p>
         <h1>把文件交给<br><span>离你最近的设备。</span></h1>
         <p class="lede">选择图形客户端快速开始，或使用命令行把 Envoix 接入脚本与自动化工作流。</p>
