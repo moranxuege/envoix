@@ -24,9 +24,14 @@ mod transfer;
 pub use envoix_protocol::{
     ManifestEntryKind, ManifestEntryResultStatus, ManifestEntryV1, ManifestHashAlgorithm,
     ManifestId, ManifestV1,
+    manifest_v2::{CompressionPolicyV2, JobIdV2, ManifestEntryKindV2},
 };
 pub use envoix_session::{
-    CandidateFilter, ManifestSendRequest, ManifestTransferSummary, SessionTransferSummary,
+    AddSourceResult, CandidateFilter, CanonicalTransferJob, DEFAULT_INVENTORY_PAGE_SIZE,
+    InventoryCursor, InventoryItem, InventoryPage, InventorySummary, JobLifecycle,
+    LocalSourceOrigin, MAX_INVENTORY_PAGE_SIZE, ManifestSendRequest, ManifestTransferSummary,
+    SessionTransferSummary, SourceDecision, SourceIssue, SourceIssueKind, SourceItemId,
+    SourceSelectionInfo, SourceSelectionState, TransferJobError, TransferJobStore,
 };
 pub use envoix_types::{DataPath, PairingStep};
 pub use error::{

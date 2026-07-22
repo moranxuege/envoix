@@ -16,11 +16,15 @@ use envoix_error::CoreError;
 pub use envoix_protocol::TransferProtocol;
 use envoix_protocol::{FrameConnection, PeerDescriptor};
 pub use envoix_transfer::{
-    DEFAULT_CHUNK_SIZE, EventSink, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE, ManifestEventSink,
+    AddSourceResult, CanonicalTransferJob, DEFAULT_CHUNK_SIZE, DEFAULT_INVENTORY_PAGE_SIZE,
+    EventSink, InventoryCursor, InventoryItem, InventoryPage, InventorySummary, JobLifecycle,
+    LocalSourceOrigin, MAX_CHUNK_SIZE, MAX_INVENTORY_PAGE_SIZE, MIN_CHUNK_SIZE, ManifestEventSink,
     ManifestNoopEventSink, ManifestSendRequest, ManifestTransferEngine, ManifestTransferEvent,
     ManifestTransferSummary, NoopEventSink, PEER_INTERRUPT_MESSAGE, PEER_PAUSE_MESSAGE,
-    TransferCancelToken, TransferEngine, TransferEvent, TransferSummary, USER_INTERRUPT_MESSAGE,
-    USER_PAUSE_MESSAGE, discard_manifest_resume_state, validate_chunk_size,
+    SourceDecision, SourceIssue, SourceIssueKind, SourceItemId, SourceSelectionInfo,
+    SourceSelectionState, TransferCancelToken, TransferEngine, TransferEvent, TransferJobError,
+    TransferJobStore, TransferSummary, USER_INTERRUPT_MESSAGE, USER_PAUSE_MESSAGE,
+    discard_manifest_resume_state, validate_chunk_size,
 };
 pub use envoix_types::TransferDirection;
 // Re-exported so the client facade reaches rendezvous-code helpers through its

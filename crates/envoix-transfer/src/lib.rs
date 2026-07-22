@@ -1,6 +1,14 @@
 //! File-transfer state machine.
 
+mod job;
 mod manifest;
+
+pub use job::{
+    AddSourceResult, CanonicalTransferJob, DEFAULT_INVENTORY_PAGE_SIZE, InventoryCursor,
+    InventoryItem, InventoryPage, InventorySummary, JobLifecycle, LocalSourceOrigin,
+    MAX_INVENTORY_PAGE_SIZE, SourceDecision, SourceIssue, SourceIssueKind, SourceItemId,
+    SourceSelectionInfo, SourceSelectionState, TransferJobError, TransferJobStore,
+};
 
 pub use manifest::{
     ManifestEventSink, ManifestNoopEventSink, ManifestSendRequest, ManifestTransferEngine,

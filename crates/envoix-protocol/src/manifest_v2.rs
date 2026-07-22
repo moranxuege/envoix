@@ -389,10 +389,9 @@ impl ManifestV2 {
 }
 
 pub fn encode_manifest_offer_v2(manifest: &ManifestV2) -> Result<Vec<u8>, ManifestV2CodecError> {
-    manifest.validate()?;
+    let offer = build_manifest_offer_v2(manifest.clone())?;
     let mut body = Vec::new();
-    encode_manifest_body(manifest, &mut body);
-    let structural_digest = blake3::hash(&body);
+    encode_manifest_body(&offer.manifest, &mut body);
     let payload_len = DIGEST_BYTES
         .checked_add(body.len())
         .ok_or(ManifestV2CodecError::EncodedOfferTooLarge)?;
@@ -411,9 +410,23 @@ pub fn encode_manifest_offer_v2(manifest: &ManifestV2) -> Result<Vec<u8>, Manife
         &mut encoded,
         u32::try_from(payload_len).map_err(|_| ManifestV2CodecError::EncodedOfferTooLarge)?,
     );
-    encoded.extend_from_slice(structural_digest.as_bytes());
+    encoded.extend_from_slice(&offer.structural_digest.0);
     encoded.extend_from_slice(&body);
     Ok(encoded)
+}
+
+/// Validates and seals one structural Manifest without performing network I/O.
+pub fn build_manifest_offer_v2(
+    manifest: ManifestV2,
+) -> Result<ManifestOfferV2, ManifestV2CodecError> {
+    manifest.validate()?;
+    let mut body = Vec::new();
+    encode_manifest_body(&manifest, &mut body);
+    let structural_digest = ContentDigestV2(*blake3::hash(&body).as_bytes());
+    Ok(ManifestOfferV2 {
+        structural_digest,
+        manifest,
+    })
 }
 
 pub fn decode_manifest_offer_v2(encoded: &[u8]) -> Result<ManifestOfferV2, ManifestV2CodecError> {

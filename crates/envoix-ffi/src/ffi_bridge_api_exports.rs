@@ -117,6 +117,8 @@ pub fn envoix_core_info() -> FfiCoreInfo {
             "manifest_activity_v1".to_string(),
             "manifest_selection_builder_v1".to_string(),
             "manifest_diagnostic_events_v1".to_string(),
+            "canonical_transfer_job_v2".to_string(),
+            "paged_transfer_inventory_v2".to_string(),
         ],
     }
 }
