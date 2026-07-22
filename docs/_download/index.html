@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Envoix — Download</title>
+    <title>Envoix 下载</title>
     <style>
         :root {
             --bg: #0d0d0d;
@@ -84,6 +84,11 @@
             margin-bottom: 8px;
         }
         .download-option a { width: 100%; }
+        .download-option a.secondary {
+            background: transparent;
+            border: 1px solid var(--accent);
+            color: var(--accent);
+        }
         .badge {
             color: var(--green);
             font-size: 0.72rem;
@@ -115,80 +120,46 @@
 <body>
     <header>
         <h1>Envoix</h1>
-        <p>Minimal · Secure · Cross-Platform File Transfer</p>
+        <p>简单、安全的跨平台文件传输</p>
     </header>
 
     <div class="grid">
         <!-- macOS App -->
         <div class="card">
-            <h3>🍎 macOS App<span class="ver">v0.2.0 Signed &amp; Notarized Universal</span></h3>
-            <p class="desc">Native SwiftUI app for arm64 and x86_64 with drag & drop, menu-bar, QR scan, room code, and nearby discovery.</p>
-            <a href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/Envoix-macOS-v0.2.0.zip">Download macOS App</a>
-            <p class="note">Developer ID signed and notarized universal build for Apple silicon and Intel Macs.</p>
+            <h3>🍎 macOS <span class="ver">v0.2.0</span></h3>
+            <p class="desc">已通过 Apple Developer ID 签名与公证，支持 Apple Silicon 和 Intel 芯片的 Mac。</p>
+            <a href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/Envoix-macOS-v0.2.0.zip">下载 macOS v0.2.0</a>
+            <p class="note">下载 ZIP 文件后解压，将 Envoix.app 拖入“应用程序”即可。</p>
         </div>
 
         <!-- Android -->
         <div class="card">
             <h3>🤖 Android</h3>
-            <p class="desc">APK for Android 10+. QR scan, room code, mDNS/BLE/Wi-Fi Aware discovery.</p>
+            <p class="desc">下载 APK 后即可在 Android 手机上手动安装。演示时建议使用稳定版。</p>
             <div class="download-options">
                 <div class="download-option">
-                    <h4>v0.1.0 <span class="badge">Recommended / Stable</span></h4>
-                    <a href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/envoix-android.apk">Download Stable APK</a>
-                    <p class="warning">Debug-key build for demonstration and sideloading only.</p>
+                    <h4>v0.1.0 <span class="badge">推荐 · 稳定版</span></h4>
+                    <a href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/envoix-android.apk">下载 Android 稳定版</a>
                 </div>
                 <div class="download-option">
-                    <h4>v0.2.0 <span class="badge">Latest / Experimental</span></h4>
-                    <a href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/envoix-android-v0.2.0.apk">Download Experimental APK</a>
-                    <p class="warning">Debug-key build for demonstration and sideloading only.</p>
+                    <h4>v0.2.0 <span class="badge">实验版</span></h4>
+                    <a class="secondary" href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/envoix-android-v0.2.0.apk">下载 Android 实验版</a>
                 </div>
             </div>
-            <p class="note">Sideload: enable "Install unknown apps" for your browser or file manager before opening the APK.</p>
+            <p class="note">两个版本均使用调试密钥签名，仅供演示和手动安装。安装前请允许浏览器或文件管理器“安装未知应用”。</p>
         </div>
 
         <!-- iOS / TestFlight -->
         <div class="card">
             <h3>📱 iOS<span class="ver">v0.2.0</span></h3>
-            <p class="desc">The iOS build will be distributed through TestFlight.</p>
-            <span class="unavailable" aria-disabled="true">TestFlight Link Coming Soon</span>
-            <p class="note">The public invitation link has not been published yet.</p>
-        </div>
-
-        <!-- CLI: macOS Apple Silicon -->
-        <div class="card">
-            <h3>💻 CLI — macOS (Apple Silicon)</h3>
-            <p class="desc">Terminal client for scripting and headless transfers on Apple Silicon Macs.</p>
-            <a href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/envoix-macos-aarch64">Download CLI (Apple Silicon)</a>
-            <p class="note">After download: chmod +x envoix-macos-aarch64 && ./envoix-macos-aarch64 --help</p>
-        </div>
-
-        <!-- CLI: macOS Intel -->
-        <div class="card">
-            <h3>💻 CLI — macOS (Intel)</h3>
-            <p class="desc">Terminal client for Intel-based Macs.</p>
-            <a href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/envoix-macos-x86_64">Download CLI (Intel)</a>
-            <p class="note">After download: chmod +x envoix-macos-x86_64 && ./envoix-macos-x86_64 --help</p>
-        </div>
-
-        <!-- CLI: Linux -->
-        <div class="card">
-            <h3>🐧 CLI — Linux (x86_64)</h3>
-            <p class="desc">Static musl binary. Works on any modern Linux distribution.</p>
-            <a href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/envoix-linux-x86_64">Download CLI (Linux)</a>
-            <p class="note">After download: chmod +x envoix-linux-x86_64 && ./envoix-linux-x86_64 --help</p>
-        </div>
-
-        <!-- CLI: Windows -->
-        <div class="card">
-            <h3>🪟 CLI — Windows (x86_64)</h3>
-            <p class="desc">Standalone .exe. No runtime required — just run it.</p>
-            <a href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/envoix-windows-x86_64.exe">Download CLI (Windows)</a>
-            <p class="note">Open PowerShell or cmd in the download folder and run: .\envoix-windows-x86_64.exe --help</p>
+            <p class="desc">TestFlight 版本已经构建完成，公开邀请链接暂未开放。</p>
+            <span class="unavailable" aria-disabled="true">TestFlight 链接暂未公开</span>
+            <p class="note">邀请链接公开后，可通过 iPhone 上的 TestFlight 安装。</p>
         </div>
     </div>
 
     <footer>
-        <a href="https://github.com/ECE4410J-NUUB/envoix/releases">View all releases on GitHub →</a>
+        <a href="https://github.com/ECE4410J-NUUB/envoix/releases">查看 GitHub 上的全部发布版本 →</a>
         <br><br>
         <span>v0.2.0 &mdash; ECE4410J</span>
     </footer>
