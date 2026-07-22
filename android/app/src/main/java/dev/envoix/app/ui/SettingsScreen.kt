@@ -117,6 +117,20 @@ fun SettingsScreen(onBack: () -> Unit) {
             RoleToggle(settings.defaultRole) { SettingsStore.update { s -> s.copy(defaultRole = it) } }
         }
         Spacer(Modifier.height(18.dp))
+        Column {
+            Text(
+                "COMPRESSION",
+                color = colors.muted,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.sp,
+            )
+            Spacer(Modifier.height(6.dp))
+            CompressionToggle(settings.compressionPolicy) {
+                SettingsStore.update { current -> current.copy(compressionPolicy = it) }
+            }
+        }
+        Spacer(Modifier.height(18.dp))
         ToggleRow(
             title = "Avoid Tailscale addresses",
             subtitle = "Don't advertise your 100.x Tailscale IP, so transfers take the real WAN or relay path.",
@@ -344,6 +358,27 @@ private fun RoleToggle(
     ) {
         RoleSeg("Send", role == "send") { onChange("send") }
         RoleSeg("Receive", role == "receive") { onChange("receive") }
+    }
+}
+
+@Composable
+private fun CompressionToggle(
+    policy: String,
+    onChange: (String) -> Unit,
+) {
+    val colors = Envoix.colors
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(colors.bg)
+            .border(1.dp, colors.line, RoundedCornerShape(10.dp))
+            .padding(3.dp),
+        horizontalArrangement = Arrangement.SpaceEvenly,
+    ) {
+        RoleSeg("Never", policy == "never") { onChange("never") }
+        RoleSeg("Always", policy == "always") { onChange("always") }
+        RoleSeg("Smart", policy == "smart") { onChange("smart") }
     }
 }
 

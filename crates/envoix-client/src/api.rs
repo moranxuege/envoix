@@ -24,8 +24,9 @@ mod transfer;
 pub use envoix_protocol::{
     ManifestEntryKind, ManifestEntryResultStatus, ManifestEntryV1, ManifestHashAlgorithm,
     ManifestId, ManifestV1,
-    manifest_v2::{CompressionPolicyV2, JobIdV2, ManifestEntryKindV2},
+    manifest_v2::{CompressionPolicyV2, EntryContentDigestV2, JobIdV2, ManifestEntryKindV2},
 };
+pub use envoix_session::parse_broker_addr;
 pub use envoix_session::{
     AUTO_RECEIVE_PLAINTEXT_LIMIT_BYTES, AddSourceResult, CandidateFilter, CanonicalTransferJob,
     DEFAULT_INVENTORY_PAGE_SIZE, DeliveryAuthorityErrorV2, DestinationDecisionV2,
@@ -33,14 +34,24 @@ pub use envoix_session::{
     DestinationWritePlanV2, InventoryCursor, InventoryItem, InventoryPage, InventorySummary,
     JobLifecycle, LocalDestinationProviderV2, LocalSourceOrigin, MAX_INVENTORY_PAGE_SIZE,
     ManifestSendRequest, ManifestTransferSummary, ManifestV2DataError, ManifestV2DataPlane,
-    ManifestV2DeliveryAuthority, ManifestV2PayloadSink, POST_SAVE_RESERVE_BYTES,
-    PreparedFileSource, ReceiverDataPlaneLedgerV2, ReceiverDataPlaneStoreV2,
-    ReceiverDataPlaneSummaryV2, ReceiverDeliveryRecordV2, ReceiverDeliveryStoreV2, SavedEntryV2,
-    SenderDataPlaneSummaryV2, SenderDeliveryRecordV2, SenderDeliveryStoreV2, SenderTransferPhaseV2,
-    SessionTransferSummary, SourceDecision, SourceIssue, SourceIssueKind, SourceItemId,
-    SourceSelectionInfo, SourceSelectionState, StorageDomainIdentityV2, TransferJobError,
-    TransferJobStore, VerifiedEntryV2,
+    ManifestV2DeliveryAuthority, ManifestV2PayloadSink, ManifestV2ProgressPhase,
+    ManifestV2ProgressSink, ManifestV2ResultGate, NoopManifestV2ResultGate,
+    POST_SAVE_RESERVE_BYTES, PreparedFileSource, ProviderSourceIssue, ReceiverDataPlaneLedgerV2,
+    ReceiverDataPlaneStoreV2, ReceiverDataPlaneSummaryV2, ReceiverDeliveryRecordV2,
+    ReceiverDeliveryStoreV2, SavedEntryV2, SenderDataPlaneSummaryV2, SenderDeliveryRecordV2,
+    SenderDeliveryStoreV2, SenderResumeIntentV2, SenderTransferPhaseV2, SessionTransferSummary,
+    SourceDecision, SourceIssue, SourceIssueKind, SourceItemId, SourceSelectionInfo,
+    SourceSelectionState, StorageDomainIdentityV2, TransferJobError, TransferJobStore,
+    VerifiedEntryV2, local_allocatable_bytes,
 };
+pub use envoix_session::{
+    EndpointAddr, PairingConfig, PendingManifestV2Receive, ReceiverManifestV2SessionSummary,
+    SenderManifestV2SessionSummary, SessionConfig, SessionError, TransferCancelToken,
+    receive_manifest_v2_offer_enable_mdns, receive_manifest_v2_offer_via_room,
+    receive_manifest_v2_offer_with_bound_peer, send_manifest_v2_enable_mdns,
+    send_manifest_v2_manual, send_manifest_v2_to_endpoint_addr, send_manifest_v2_via_room,
+};
+pub use envoix_session::{EventSink as SessionEventSink, TransferEvent as SessionTransferEvent};
 pub use envoix_types::{DataPath, PairingStep};
 pub use error::{
     ErrorKind, FailureCategory, FailureCode, FailureOrigin, FailurePhase, Phase, RecoveryAction,
@@ -59,18 +70,16 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use envoix_qr::{QrInvitePayload, generate_token};
 use envoix_session::{
-    BindAddrs, DEFAULT_CHUNK_SIZE, DEFAULT_DATA_STREAM_WINDOW, EndpointAddr, SessionConfig,
-    TransferCancelToken, TransferDirection, TransferSummary, parse_broker_addr,
-    receive_file_enable_mdns, receive_file_via_room, receive_file_with_bound_peer,
-    receive_transfer_enable_mdns, receive_transfer_via_room, receive_transfer_with_bound_peer,
-    send_file_enable_mdns, send_file_manual, send_file_to_endpoint_addr, send_file_via_room,
-    send_manifest_enable_mdns, send_manifest_manual, send_manifest_to_endpoint_addr,
-    send_manifest_via_room,
+    BindAddrs, DEFAULT_CHUNK_SIZE, DEFAULT_DATA_STREAM_WINDOW, TransferDirection, TransferSummary,
+    parse_broker_addr, receive_file_enable_mdns, receive_file_via_room,
+    receive_file_with_bound_peer, receive_transfer_enable_mdns, receive_transfer_via_room,
+    receive_transfer_with_bound_peer, send_file_enable_mdns, send_file_manual,
+    send_file_to_endpoint_addr, send_file_via_room, send_manifest_enable_mdns,
+    send_manifest_manual, send_manifest_to_endpoint_addr, send_manifest_via_room,
 };
 use tracing::Instrument;
 
 use crate::{IdentityConfig, PeerDescriptor, PublicError};
-use envoix_auth::PairingConfig;
 use transfer::{EventSender, SessionEventAdapter, StatsHandle};
 
 /// The transfer body each dispatch arm produces, run under the correlation span.
@@ -1102,7 +1111,10 @@ impl Client {
         ))
     }
 
-    fn session_config(&self, options: &TransferOptions) -> SessionConfig {
+    /// Builds the canonical session-layer configuration used by every public
+    /// transfer facade. Native and CLI Manifest-v2 adapters use this instead
+    /// of duplicating runtime configuration policy.
+    pub fn session_config(&self, options: &TransferOptions) -> SessionConfig {
         SessionConfig {
             chunk_size: self.chunk_size,
             identity: self.identity.clone(),

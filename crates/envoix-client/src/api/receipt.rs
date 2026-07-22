@@ -63,6 +63,7 @@ fn crypto_error(message: impl Into<String>) -> TransferError {
         phase: Phase::Transfer,
         kind: ErrorKind::Crypto,
         message: message.into(),
+        failure_code: None,
     }
 }
 

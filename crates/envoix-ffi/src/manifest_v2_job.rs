@@ -140,6 +140,18 @@ pub struct FfiTransferJobV2 {
     store: TransferJobStore,
 }
 
+impl FfiTransferJobV2 {
+    pub(crate) async fn clone_sealed_job(&self) -> Result<CanonicalTransferJob, EnvoixError> {
+        let job = self.job.lock().await;
+        if job.manifest().is_none() {
+            return Err(EnvoixError::Operation {
+                reason: "transfer job must be sealed by an explicit Send action".into(),
+            });
+        }
+        Ok(job.clone())
+    }
+}
+
 #[uniffi::export]
 impl FfiTransferJobV2 {
     pub async fn snapshot(&self) -> FfiTransferJobSnapshotV2 {
@@ -242,6 +254,13 @@ impl FfiTransferJobV2 {
         let mut job = self.job.lock().await;
         job.set_compression_policy(core_compression_policy(policy))
             .map_err(op_err)?;
+        self.store.save(&job).await.map_err(op_err)?;
+        Ok(snapshot(&job))
+    }
+
+    pub async fn cancel_job(&self) -> Result<FfiTransferJobSnapshotV2, EnvoixError> {
+        let mut job = self.job.lock().await;
+        job.cancel().map_err(op_err)?;
         self.store.save(&job).await.map_err(op_err)?;
         Ok(snapshot(&job))
     }
@@ -377,6 +396,37 @@ pub async fn restore_transfer_job_v2(
         job: Mutex::new(job),
         store,
     }))
+}
+
+/// Bounded durable index for native unsent-job restoration. Sealed/canceled
+/// records remain on disk for their owning session/GC policy but are not
+/// returned as editable preparations.
+#[uniffi::export]
+pub async fn list_preparing_transfer_jobs_v2(
+    store_directory: String,
+) -> Result<Vec<FfiTransferJobSnapshotV2>, EnvoixError> {
+    if store_directory.trim().is_empty() {
+        return Err(EnvoixError::Operation {
+            reason: "store_directory must not be empty".into(),
+        });
+    }
+    let jobs = TransferJobStore::new(PathBuf::from(store_directory))
+        .load_all()
+        .await
+        .map_err(op_err)?;
+    Ok(jobs
+        .iter()
+        .filter(|job| {
+            !job.source_selections().is_empty()
+                && matches!(
+                    job.lifecycle(),
+                    JobLifecycle::Preparing
+                        | JobLifecycle::NeedsSourceDecision
+                        | JobLifecycle::ReadyToSend
+                )
+        })
+        .map(snapshot)
+        .collect())
 }
 
 fn snapshot(job: &CanonicalTransferJob) -> FfiTransferJobSnapshotV2 {

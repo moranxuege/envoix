@@ -45,6 +45,7 @@ ipnet = "2"
 maxminddb = "0.29"
 base64 = "0.22"
 qrcode = { version = "0.14", default-features = false }
+rustix = { version = "1.1", features = ["fs"] }
 blake3 = "1"
 chacha20poly1305 = "0.10"
 clap = { version = "4", features = ["derive"] }
@@ -66,6 +67,7 @@ toml = "0.8"
 uniffi = "0.31"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+zstd = "0.13"
 
 [patch.crates-io]
 # Android kernels can advertise UDP_SEGMENT while the active Wi-Fi path rejects

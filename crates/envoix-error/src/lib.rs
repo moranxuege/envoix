@@ -2,6 +2,43 @@
 
 use thiserror::Error;
 
+/// Stable machine cause for recovery decisions. Human-readable diagnostics
+/// are carried separately and must never be parsed to recover this value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransferCause {
+    SenderSourceUnavailable,
+    SenderPermissionLost,
+    SenderSourceChanged,
+    SenderItemRemoved,
+    SenderCanceled,
+    ProtocolOrIntegrityFailure,
+    ReceiverSpaceInsufficient,
+    ReceiverDestinationDecisionRequired,
+    ReceiverDestinationUnavailable,
+    ReceiverSaveFailed,
+    ReceiverReusedObjectLost,
+    ReceiverFinalizationOutcomeUnknown,
+}
+
+impl TransferCause {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::SenderSourceUnavailable => "sender_source_unavailable",
+            Self::SenderPermissionLost => "sender_permission_lost",
+            Self::SenderSourceChanged => "sender_source_changed",
+            Self::SenderItemRemoved => "sender_item_removed",
+            Self::SenderCanceled => "sender_canceled",
+            Self::ProtocolOrIntegrityFailure => "protocol_or_integrity_failure",
+            Self::ReceiverSpaceInsufficient => "receiver_space_insufficient",
+            Self::ReceiverDestinationDecisionRequired => "receiver_destination_decision_required",
+            Self::ReceiverDestinationUnavailable => "receiver_destination_unavailable",
+            Self::ReceiverSaveFailed => "receiver_save_failed",
+            Self::ReceiverReusedObjectLost => "receiver_reused_object_lost",
+            Self::ReceiverFinalizationOutcomeUnknown => "receiver_finalization_outcome_unknown",
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum CoreError {
     #[error("invalid input: {0}")]
@@ -20,6 +57,11 @@ pub enum CoreError {
     Discovery(String),
     #[error("transfer error: {0}")]
     Transfer(String),
+    #[error("{cause}: {detail}", cause = .cause.code())]
+    Cause {
+        cause: TransferCause,
+        detail: String,
+    },
     #[error("operation cancelled")]
     Cancelled,
 }

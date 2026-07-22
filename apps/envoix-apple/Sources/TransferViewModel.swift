@@ -203,11 +203,13 @@ final class AppModel: ObservableObject {
         } else {
             DispatchQueue.main.async { [weak self] in
                 self?.restoreDurableTransfers()
+                self?.send.restorePreparedManifestSelection()
             }
         }
         #else
         DispatchQueue.main.async { [weak self] in
             self?.restoreDurableTransfers()
+            self?.send.restorePreparedManifestSelection()
         }
         #endif
     }
@@ -1314,6 +1316,22 @@ final class AppModel: ObservableObject {
 /// All `@Published` mutations happen on the main thread: user actions are
 /// invoked from the UI, and core callbacks are marshaled to main by `Observer`.
 final class TransferViewModel: ObservableObject {
+    private struct PreparedManifestV2Selection {
+        let job: FfiTransferJobV2
+        var sourcePaths: [String]
+        let stateDirectory: String
+        let sourceAccess: AnyObject?
+    }
+
+    private struct PendingManifestV2Send {
+        let job: FfiTransferJobV2
+        let settings: EnvoixRuntimeSettings
+        let request: FfiTransferRequest
+        let stateDirectory: String
+        let cancellation: FfiManifestV2Cancellation
+        let sourceAccess: AnyObject?
+    }
+
     enum Phase: Equatable {
         case idle
         case waiting          // receiver: endpoint up, invite shown, awaiting sender
@@ -1339,12 +1357,25 @@ final class TransferViewModel: ObservableObject {
     @Published var transferEvents: [FfiTransferEvent] = []
     @Published var transferActivity: FfiTransferActivityRecord?
     @Published private(set) var isPreparingManifest = false
+    @Published private(set) var isManifestSelectionReady = false
+    @Published private(set) var preparedManifestSourcePaths: [String] = []
+    @Published private(set) var requiresExceptionalTransferApproval = false
+    @Published private(set) var pendingOfferEntries: [FfiManifestOfferEntryV2] = []
+    @Published private(set) var pendingSourceSelections: [FfiSourceSelectionV2] = []
 
     weak var appModel: AppModel?
 
     private var session: DurableEnvoixSession?
     private var manifestSession: DurableEnvoixManifestSession?
     private var manifestPreparationTask: Task<Void, Never>?
+    private var manifestV2Task: Task<Void, Never>?
+    private var manifestV2Cancellation: FfiManifestV2Cancellation?
+    private var pendingManifestV2Offer: FfiPendingManifestV2Receive?
+    private var pendingManifestV2TargetDirectory: String?
+    private var pendingManifestV2AvailableBytes: UInt64?
+    private var pendingManifestV2Send: PendingManifestV2Send?
+    private var preparedManifestV2Selection: PreparedManifestV2Selection?
+    private var manifestPreparationSourcePaths: [String] = []
     private var destinationDir: String?       // receiver only
     private var resourceAccess: AnyObject?    // keeps iOS Files permission alive
     private var rate = RateTracker()
@@ -1631,6 +1662,147 @@ final class TransferViewModel: ObservableObject {
         )
     }
 
+    /// Starts local-only preparation as soon as native selection succeeds.
+    /// No rendezvous, peer metadata, Manifest offer, or payload is created
+    /// here; explicit Send remains the first job-specific network boundary.
+    func prepareManifestSelection(
+        selectedPaths: [String],
+        sourceAccess: AnyObject? = nil
+    ) {
+        let paths = normalizedSourcePaths(selectedPaths)
+        guard !paths.isEmpty else { return }
+        if preparedManifestV2Selection?.sourcePaths == paths
+            || manifestPreparationSourcePaths == paths {
+            return
+        }
+
+        let previousJob = preparedManifestV2Selection?.job
+        manifestPreparationTask?.cancel()
+        manifestPreparationTask = nil
+        preparedManifestV2Selection = nil
+        pendingManifestV2Send = nil
+        pendingSourceSelections = []
+        preparedManifestSourcePaths = []
+        isManifestSelectionReady = false
+        isPreparingManifest = true
+        manifestPreparationSourcePaths = paths
+        fallbackFailure = nil
+        fallbackPhase = .idle
+        statusText = AppText.value(
+            "Preparing selected items…",
+            "正在准备所选项目…",
+            language: displayLanguage
+        )
+        if let previousJob {
+            Task { _ = try? await previousJob.cancelJob() }
+        }
+
+        let expectedOperationID = UUID()
+        operationID = expectedOperationID
+        manifestPreparationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.operationID == expectedOperationID {
+                    self.manifestPreparationSourcePaths = []
+                }
+            }
+            do {
+                let job = try await createTransferJobV2(
+                    storeDirectory: try self.manifestV2JobStoreDirectory(),
+                    compressionPolicy: self.manifestV2CompressionPolicy
+                )
+                let snapshot = try await job.addLocalPaths(paths: paths)
+                guard self.operationID == expectedOperationID else {
+                    _ = try? await job.cancelJob()
+                    return
+                }
+                self.preparedManifestV2Selection = PreparedManifestV2Selection(
+                    job: job,
+                    sourcePaths: paths,
+                    stateDirectory: try self.manifestV2SessionStateDirectory(
+                        jobID: snapshot.jobId
+                    ),
+                    sourceAccess: sourceAccess
+                )
+                self.preparedManifestSourcePaths = paths
+                self.pendingSourceSelections = snapshot.selections.filter {
+                    $0.state == .needsDecision
+                }
+                self.isManifestSelectionReady = snapshot.state == .readyToSend
+                self.isPreparingManifest = false
+                self.manifestPreparationTask = nil
+                self.statusText = self.isManifestSelectionReady
+                    ? AppText.value("Ready to send", "已准备发送", language: self.displayLanguage)
+                    : AppText.value(
+                        "Some selected content needs your decision before sending.",
+                        "部分所选内容需要你决定后才能发送。",
+                        language: self.displayLanguage
+                    )
+            } catch {
+                guard self.operationID == expectedOperationID else { return }
+                self.manifestPreparationTask = nil
+                self.isPreparingManifest = false
+                self.isManifestSelectionReady = false
+                self.handleFailed(error.localizedDescription)
+            }
+        }
+    }
+
+    func restorePreparedManifestSelection() {
+        guard preparedManifestV2Selection == nil, !isBusy else { return }
+        let expectedOperationID = UUID()
+        operationID = expectedOperationID
+        isPreparingManifest = true
+        manifestPreparationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                self.manifestPreparationTask = nil
+                self.isPreparingManifest = false
+            }
+            do {
+                let storeDirectory = try self.manifestV2JobStoreDirectory()
+                guard let snapshot = try await listPreparingTransferJobsV2(
+                    storeDirectory: storeDirectory
+                ).max(by: { $0.updatedUnixMs < $1.updatedUnixMs }) else {
+                    return
+                }
+                let job = try await restoreTransferJobV2(
+                    storeDirectory: storeDirectory,
+                    jobId: snapshot.jobId
+                )
+                var paths: [String] = []
+                for selection in snapshot.selections {
+                    if let path = await job.sourcePathForPreview(itemId: selection.rootItemId),
+                       FileManager.default.fileExists(atPath: path) {
+                        paths.append(path)
+                    }
+                }
+                guard self.operationID == expectedOperationID, !paths.isEmpty else { return }
+                self.preparedManifestV2Selection = PreparedManifestV2Selection(
+                    job: job,
+                    sourcePaths: paths,
+                    stateDirectory: try self.manifestV2SessionStateDirectory(jobID: snapshot.jobId),
+                    sourceAccess: nil
+                )
+                self.preparedManifestSourcePaths = paths
+                self.pendingSourceSelections = snapshot.selections.filter {
+                    $0.state == .needsDecision
+                }
+                self.isManifestSelectionReady = snapshot.state == .readyToSend
+                self.statusText = self.isManifestSelectionReady
+                    ? AppText.value("Prepared items restored", "已恢复准备内容", language: self.displayLanguage)
+                    : AppText.value(
+                        "Restored items need your decision before sending.",
+                        "恢复的内容需要你决定后才能发送。",
+                        language: self.displayLanguage
+                    )
+            } catch {
+                guard self.operationID == expectedOperationID else { return }
+                self.handleFailed(error.localizedDescription)
+            }
+        }
+    }
+
     /// Requests cancellation without detaching the observer. Activity owns
     /// lifecycle controls after a transfer starts, so its terminal state must
     /// still flow back from the core before this view model resets.
@@ -1641,7 +1813,13 @@ final class TransferViewModel: ObservableObject {
               !activityID.isEmpty,
               activityID == currentActivityID else { return false }
         suppressNextFailure = true
-        let accepted = manifestSession?.cancel() ?? session?.cancel() ?? false
+        let accepted: Bool
+        if let manifestV2Cancellation {
+            manifestV2Cancellation.cancel()
+            accepted = true
+        } else {
+            accepted = manifestSession?.cancel() ?? session?.cancel() ?? false
+        }
         if accepted {
             bytesPerSec = 0
             statusText = AppText.value("Cancelling…", "正在取消…", language: displayLanguage)
@@ -1667,16 +1845,86 @@ final class TransferViewModel: ObservableObject {
 
     @discardableResult
     func cancelManifestPreparation() -> Bool {
-        guard isPreparingManifest else { return false }
+        guard isPreparingManifest || preparedManifestV2Selection != nil else { return false }
+        let pendingJob = pendingManifestV2Send?.job ?? preparedManifestV2Selection?.job
         manifestPreparationTask?.cancel()
         manifestPreparationTask = nil
+        pendingManifestV2Send = nil
+        preparedManifestV2Selection = nil
+        manifestPreparationSourcePaths = []
+        pendingSourceSelections = []
+        preparedManifestSourcePaths = []
         isPreparingManifest = false
+        isManifestSelectionReady = false
         operationID = UUID()
         forgetRoomID(for: currentActivityID)
         resourceAccess = nil
         fallbackPhase = .canceled
         statusText = AppText.value("Canceled", "已取消", language: displayLanguage)
+        if let pendingJob {
+            Task { _ = try? await pendingJob.cancelJob() }
+        }
         return true
+    }
+
+    /// Exceptional offers are the only receive path that requires an
+    /// additional confirmation. Ordinary authenticated offers continue
+    /// automatically after their destination plan is valid.
+    @discardableResult
+    func approveExceptionalTransfer() -> Bool {
+        guard requiresExceptionalTransferApproval,
+              let pending = pendingManifestV2Offer,
+              let targetDirectory = pendingManifestV2TargetDirectory,
+              let availableBytes = pendingManifestV2AvailableBytes,
+              let appModel else { return false }
+        requiresExceptionalTransferApproval = false
+        let observer = Observer(
+            self,
+            appModel: appModel,
+            operationID: operationID,
+            activityID: currentActivityID
+        )
+        let activityID = currentActivityID
+        manifestV2Task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await self.continueManifestV2Receive(
+                    pending: pending,
+                    targetDirectory: targetDirectory,
+                    availableBytes: availableBytes,
+                    approvedExceptionalTransfer: true,
+                    observer: observer
+                )
+            } catch {
+                guard self.currentActivityID == activityID else { return }
+                self.handleFailed(error.localizedDescription)
+            }
+        }
+        return true
+    }
+
+    func approvePartialManifestSource(rootItemID: UInt64) {
+        resolveManifestV2Source(
+            rootItemID: rootItemID,
+            decision: .approvePartial,
+            reauthorizedPath: nil
+        )
+    }
+
+    func removeManifestSource(rootItemID: UInt64) {
+        resolveManifestV2Source(
+            rootItemID: rootItemID,
+            decision: .removeSelection,
+            reauthorizedPath: nil
+        )
+    }
+
+    func reauthorizeManifestSource(rootItemID: UInt64, path: String) {
+        resolveManifestV2Source(
+            rootItemID: rootItemID,
+            decision: .reauthorize,
+            reauthorizedPath: path
+        )
     }
 
     func listTransferActivities() -> [FfiTransferActivityRecord] {
@@ -1728,27 +1976,63 @@ final class TransferViewModel: ObservableObject {
         request: FfiTransferRequest
     ) -> Bool {
         beginManifestOperation(settings: settings, request: request)
-        do {
-            guard let appModel else {
-                throw RuntimeSettingsError("The transfer service is unavailable.")
-            }
-            let observer = AppleManifestObserver(
-                viewModel: self,
-                appModel: appModel,
-                activityID: request.activityId
-            )
-            let startedSession = try appModel.startDurableManifestReceiveSession(
-                settings: settings,
-                request: request,
-                observer: observer
-            )
-            manifestSession = startedSession
-            handleManifestActivity(startedSession.activity())
-            return true
-        } catch {
-            fallbackPhase = .failed(friendlyError(error.localizedDescription, language: displayLanguage))
+        guard let appModel else {
+            fallbackPhase = .failed("The transfer service is unavailable.")
             return false
         }
+        let cancellation = FfiManifestV2Cancellation()
+        manifestV2Cancellation = cancellation
+        let observer = Observer(
+            self,
+            appModel: appModel,
+            operationID: operationID,
+            activityID: request.activityId
+        )
+        let targetDirectory = destinationDir ?? request.outputDir
+        retainResourceAccess(resourceAccess)
+        manifestV2Task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let stateDirectory = try self.manifestV2StateDirectory(activityID: request.activityId)
+                let pending = try await receiveTransferOfferV2(
+                    settings: settings,
+                    request: request,
+                    stateDirectory: stateDirectory,
+                    cancellation: cancellation,
+                    observer: observer
+                )
+                guard self.currentActivityID == request.activityId else { return }
+                self.pendingManifestV2Offer = pending
+                let summary = pending.summary()
+                self.fileName = "\(summary.rootCount) items"
+                self.total = summary.totalPlaintextBytes
+                self.pendingOfferEntries = pending.listEntries(offset: 0, limit: 128).entries
+                let available = try self.allocatableBytes(at: targetDirectory)
+                let exceptional = summary.exceptionalOffer || summary.totalPlaintextBytes > available / 2
+                if exceptional {
+                    self.pendingManifestV2TargetDirectory = targetDirectory
+                    self.pendingManifestV2AvailableBytes = available
+                    self.requiresExceptionalTransferApproval = true
+                    self.statusText = AppText.value(
+                        "Large transfer ready. Confirm to begin receiving.",
+                        "大文件传输已就绪，请确认后开始接收。",
+                        language: self.displayLanguage
+                    )
+                    return
+                }
+                try await self.continueManifestV2Receive(
+                    pending: pending,
+                    targetDirectory: targetDirectory,
+                    availableBytes: available,
+                    approvedExceptionalTransfer: false,
+                    observer: observer
+                )
+            } catch {
+                guard self.currentActivityID == request.activityId else { return }
+                self.handleFailed(error.localizedDescription)
+            }
+        }
+        return true
     }
 
     private func prepareAndStartManifestSend(
@@ -1758,37 +2042,91 @@ final class TransferViewModel: ObservableObject {
         sourceAccess: AnyObject?
     ) {
         destinationDir = nil
+        let paths = normalizedSourcePaths(selectedPaths)
+        if let prepared = preparedManifestV2Selection,
+           prepared.sourcePaths == paths {
+            let sourceSelections = pendingSourceSelections
+            let selectionReady = isManifestSelectionReady
+            beginManifestOperation(settings: settings, request: request)
+            pendingSourceSelections = sourceSelections
+            isManifestSelectionReady = selectionReady
+            let cancellation = FfiManifestV2Cancellation()
+            manifestV2Cancellation = cancellation
+            let pending = PendingManifestV2Send(
+                job: prepared.job,
+                settings: settings,
+                request: request,
+                stateDirectory: prepared.stateDirectory,
+                cancellation: cancellation,
+                sourceAccess: prepared.sourceAccess ?? sourceAccess
+            )
+            pendingManifestV2Send = pending
+            if sourceSelections.isEmpty && selectionReady {
+                let expectedOperationID = operationID
+                manifestPreparationTask = Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    do {
+                        try await self.launchManifestV2Send(
+                            pending,
+                            operationID: expectedOperationID
+                        )
+                    } catch {
+                        guard self.operationID == expectedOperationID else { return }
+                        self.handleFailed(error.localizedDescription)
+                    }
+                }
+            } else {
+                isPreparingManifest = false
+                statusText = AppText.value(
+                    "Resolve selected-content warnings before sending.",
+                    "请先处理所选内容的警告，再发送。",
+                    language: displayLanguage
+                )
+            }
+            return
+        }
+
         beginManifestOperation(settings: settings, request: request)
         statusText = AppText.value("Preparing selected items…", "正在准备所选项目…", language: displayLanguage)
         resourceAccess = sourceAccess
         isPreparingManifest = true
         let operationID = operationID
+        let cancellation = FfiManifestV2Cancellation()
+        manifestV2Cancellation = cancellation
         manifestPreparationTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                let prepared = try await prepareManifestSend(
-                    activityId: request.activityId,
-                    selectedPaths: selectedPaths
+                let stateDirectory = try self.manifestV2StateDirectory(activityID: request.activityId)
+                let job = try await createTransferJobV2(
+                    storeDirectory: stateDirectory + "/jobs",
+                    compressionPolicy: self.manifestV2CompressionPolicy
                 )
-                guard operationID == self.operationID,
-                      request.activityId == self.currentActivityID,
-                      let appModel = self.appModel else { return }
-                self.manifestPreparationTask = nil
-                self.isPreparingManifest = false
-                let observer = AppleManifestObserver(
-                    viewModel: self,
-                    appModel: appModel,
-                    activityID: request.activityId
-                )
-                let startedSession = try appModel.startDurableManifestSendSession(
+                let snapshot = try await job.addLocalPaths(paths: paths)
+                let pending = PendingManifestV2Send(
+                    job: job,
                     settings: settings,
                     request: request,
-                    prepared: prepared,
-                    observer: observer
+                    stateDirectory: stateDirectory,
+                    cancellation: cancellation,
+                    sourceAccess: sourceAccess
                 )
-                self.manifestSession = startedSession
-                self.handleManifestActivity(startedSession.activity())
-                self.retainResourceAccess(sourceAccess)
+                if snapshot.state != .readyToSend {
+                    guard snapshot.state == .needsSourceDecision else {
+                        throw RuntimeSettingsError("Selected items could not be prepared for Send.")
+                    }
+                    self.pendingManifestV2Send = pending
+                    self.pendingSourceSelections = snapshot.selections.filter {
+                        $0.state == .needsDecision
+                    }
+                    self.manifestPreparationTask = nil
+                    self.statusText = AppText.value(
+                        "Some selected content needs your decision before sending.",
+                        "部分所选内容需要你决定后才能发送。",
+                        language: self.displayLanguage
+                    )
+                    return
+                }
+                try await self.launchManifestV2Send(pending, operationID: operationID)
             } catch {
                 guard operationID == self.operationID else { return }
                 self.manifestPreparationTask = nil
@@ -1800,12 +2138,174 @@ final class TransferViewModel: ObservableObject {
         }
     }
 
+    private func resolveManifestV2Source(
+        rootItemID: UInt64,
+        decision: FfiSourceDecisionV2,
+        reauthorizedPath: String?
+    ) {
+        guard let job = pendingManifestV2Send?.job ?? preparedManifestV2Selection?.job else {
+            return
+        }
+        let pending = pendingManifestV2Send
+        let expectedOperationID = operationID
+        manifestPreparationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let previousPath = await job.sourcePathForPreview(itemId: rootItemID)
+                let snapshot = try await job.resolveSourceIssue(
+                    rootItemId: rootItemID,
+                    decision: decision,
+                    reauthorizedPath: reauthorizedPath
+                )
+                guard self.operationID == expectedOperationID else { return }
+                self.pendingSourceSelections = snapshot.selections.filter {
+                    $0.state == .needsDecision
+                }
+                if snapshot.state == .readyToSend {
+                    self.isManifestSelectionReady = true
+                    if let pending {
+                        try await self.launchManifestV2Send(
+                            pending,
+                            operationID: expectedOperationID
+                        )
+                    } else {
+                        self.updatePreparedSourcePaths(
+                            decision: decision,
+                            previousPath: previousPath,
+                            reauthorizedPath: reauthorizedPath
+                        )
+                        self.manifestPreparationTask = nil
+                        self.isPreparingManifest = false
+                        self.statusText = AppText.value(
+                            "Ready to send",
+                            "已准备发送",
+                            language: self.displayLanguage
+                        )
+                    }
+                } else if snapshot.state == .canceled {
+                    self.pendingManifestV2Send = nil
+                    self.preparedManifestV2Selection = nil
+                    self.preparedManifestSourcePaths = []
+                    self.isPreparingManifest = false
+                    self.isManifestSelectionReady = false
+                    self.fallbackPhase = .canceled
+                    self.statusText = AppText.value("Canceled", "已取消", language: self.displayLanguage)
+                } else {
+                    self.updatePreparedSourcePaths(
+                        decision: decision,
+                        previousPath: previousPath,
+                        reauthorizedPath: reauthorizedPath
+                    )
+                    self.isManifestSelectionReady = false
+                }
+            } catch {
+                guard self.operationID == expectedOperationID else { return }
+                self.manifestPreparationTask = nil
+                self.handleFailed(error.localizedDescription)
+            }
+        }
+    }
+
+    private func updatePreparedSourcePaths(
+        decision: FfiSourceDecisionV2,
+        previousPath: String?,
+        reauthorizedPath: String?
+    ) {
+        guard var prepared = preparedManifestV2Selection else { return }
+        switch decision {
+        case .removeSelection:
+            if let previousPath {
+                prepared.sourcePaths.removeAll {
+                    URL(fileURLWithPath: $0).standardizedFileURL.path
+                        == URL(fileURLWithPath: previousPath).standardizedFileURL.path
+                }
+            }
+        case .reauthorize:
+            if let previousPath,
+               let reauthorizedPath,
+               let index = prepared.sourcePaths.firstIndex(where: {
+                   URL(fileURLWithPath: $0).standardizedFileURL.path
+                       == URL(fileURLWithPath: previousPath).standardizedFileURL.path
+               }) {
+                prepared.sourcePaths[index] = URL(fileURLWithPath: reauthorizedPath)
+                    .standardizedFileURL.path
+            }
+        case .approvePartial, .cancelJob:
+            break
+        }
+        preparedManifestV2Selection = prepared
+        preparedManifestSourcePaths = prepared.sourcePaths
+    }
+
+    private func normalizedSourcePaths(_ paths: [String]) -> [String] {
+        var seen = Set<String>()
+        return paths.compactMap { path in
+            guard !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return nil
+            }
+            let normalized = URL(fileURLWithPath: path).standardizedFileURL.path
+            return seen.insert(normalized).inserted ? normalized : nil
+        }
+    }
+
+    private func launchManifestV2Send(
+        _ pending: PendingManifestV2Send,
+        operationID expectedOperationID: UUID
+    ) async throws {
+        _ = try await pending.job.sealForSend()
+        guard expectedOperationID == operationID,
+              pending.request.activityId == currentActivityID,
+              let appModel else { return }
+        manifestPreparationTask = nil
+        pendingManifestV2Send = nil
+        preparedManifestV2Selection = nil
+        pendingSourceSelections = []
+        preparedManifestSourcePaths = []
+        isPreparingManifest = false
+        isManifestSelectionReady = false
+        let observer = Observer(
+            self,
+            appModel: appModel,
+            operationID: expectedOperationID,
+            activityID: pending.request.activityId
+        )
+        manifestV2Task = Task { @MainActor [weak self] in
+            do {
+                _ = try await sendTransferJobV2(
+                    job: pending.job,
+                    settings: pending.settings,
+                    request: pending.request,
+                    stateDirectory: pending.stateDirectory,
+                    cancellation: pending.cancellation,
+                    observer: observer
+                )
+            } catch {
+                guard let self,
+                      self.currentActivityID == pending.request.activityId else { return }
+                self.handleFailed(error.localizedDescription)
+            }
+        }
+        retainResourceAccess(pending.sourceAccess)
+        statusText = AppText.value("Connecting…", "正在连接…", language: displayLanguage)
+    }
+
     private func beginManifestOperation(
         settings: EnvoixRuntimeSettings,
         request: FfiTransferRequest
     ) {
         manifestPreparationTask?.cancel()
+        manifestV2Task?.cancel()
+        manifestV2Cancellation?.cancel()
         manifestPreparationTask = nil
+        manifestV2Task = nil
+        manifestV2Cancellation = nil
+        pendingManifestV2Offer = nil
+        pendingManifestV2TargetDirectory = nil
+        pendingManifestV2AvailableBytes = nil
+        pendingManifestV2Send = nil
+        requiresExceptionalTransferApproval = false
+        pendingOfferEntries = []
+        pendingSourceSelections = []
         isPreparingManifest = false
         suppressNextFailure = false
         reset()
@@ -1866,6 +2366,120 @@ final class TransferViewModel: ObservableObject {
             resourceAccess = access
             AppModel.shared.retainResourceAccess(access, for: currentActivityID)
         }
+    }
+
+    private var manifestV2CompressionPolicy: FfiCompressionPolicyV2 {
+        switch UserDefaults.standard.string(forKey: "envoix.compressionPolicy") {
+        case "never": return .never
+        case "always": return .always
+        default: return .smart
+        }
+    }
+
+    private var manifestV2DestinationDecision: FfiDestinationDecisionV2 {
+        UserDefaults.standard.string(forKey: "envoix.destinationSaveMode") == "copy"
+            ? .copyAfterVerify
+            : .saveDirectly
+    }
+
+    private func manifestV2StateDirectory(activityID: String) throws -> String {
+        guard !activityID.isEmpty else {
+            throw RuntimeSettingsError("Could not create Manifest v2 state storage.")
+        }
+        let directory = try manifestV2RootDirectory()
+            .appendingPathComponent(activityID, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        return directory.path
+    }
+
+    private func manifestV2JobStoreDirectory() throws -> String {
+        let directory = try manifestV2RootDirectory()
+            .appendingPathComponent("jobs", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory.path
+    }
+
+    private func manifestV2SessionStateDirectory(jobID: String) throws -> String {
+        guard !jobID.isEmpty else {
+            throw RuntimeSettingsError("Manifest v2 job identity is unavailable.")
+        }
+        let directory = try manifestV2RootDirectory()
+            .appendingPathComponent("sessions", isDirectory: true)
+            .appendingPathComponent(jobID, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory.path
+    }
+
+    private func manifestV2RootDirectory() throws -> URL {
+        guard let supportDirectory = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first else {
+            throw RuntimeSettingsError("Could not create Manifest v2 state storage.")
+        }
+        let directory = supportDirectory
+            .appendingPathComponent("envoix/manifest-v2", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
+    }
+
+    private func allocatableBytes(at path: String) throws -> UInt64 {
+        let values = try URL(fileURLWithPath: path, isDirectory: true).resourceValues(
+            forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey]
+        )
+        if let available = values.volumeAvailableCapacityForImportantUsage, available >= 0 {
+            return UInt64(available)
+        }
+        if let available = values.volumeAvailableCapacity, available >= 0 {
+            return UInt64(available)
+        }
+        throw RuntimeSettingsError("The selected destination did not report available capacity.")
+    }
+
+    private func continueManifestV2Receive(
+        pending: FfiPendingManifestV2Receive,
+        targetDirectory: String,
+        availableBytes: UInt64,
+        approvedExceptionalTransfer: Bool,
+        observer: Observer
+    ) async throws {
+        let decision = manifestV2DestinationDecision
+        let copyStagingDirectory: String?
+        let stagingAvailableBytes: UInt64?
+        if decision == .copyAfterVerify {
+            let directory = try manifestV2RootDirectory()
+                .appendingPathComponent("copy-staging", isDirectory: true)
+                .appendingPathComponent(pending.summary().jobId, isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            copyStagingDirectory = directory.path
+            stagingAvailableBytes = try allocatableBytes(at: directory.path)
+        } else {
+            copyStagingDirectory = nil
+            stagingAvailableBytes = nil
+        }
+        let completion = try await pending.receive(
+            destination: FfiDestinationRequestV2(
+                targetDirectory: targetDirectory,
+                copyStagingDirectory: copyStagingDirectory,
+                decision: decision,
+                targetAllocatableBytes: availableBytes,
+                stagingAllocatableBytes: stagingAvailableBytes,
+                stableObjectIdentity: false,
+                exceptionalTransferApproved: approvedExceptionalTransfer
+            ),
+            observer: observer
+        )
+        completedItemURLs = completion.savedPaths.map {
+            URL(fileURLWithPath: $0, isDirectory: false)
+        }
+        completedFileURL = completedItemURLs.count == 1 ? completedItemURLs[0] : nil
+        pendingManifestV2Offer = nil
+        pendingManifestV2TargetDirectory = nil
+        pendingManifestV2AvailableBytes = nil
+        requiresExceptionalTransferApproval = false
     }
 
     private func rememberRoomID(for activityID: String, code: String) {
@@ -2142,6 +2756,9 @@ final class TransferViewModel: ObservableObject {
         fallbackFailure = nil
         transferActivity = nil
         isPreparingManifest = false
+        requiresExceptionalTransferApproval = false
+        pendingOfferEntries = []
+        pendingSourceSelections = []
         resourceAccess = nil
         eventLog.removeAll()
         transferEvents.removeAll()
@@ -2347,6 +2964,28 @@ func friendlyFailure(code: FfiFailureCode, diagnosticMessage: String, language: 
         return AppText.value("The transfer timed out. Try again; a retry may resume from partial progress.", "传输超时。请重试，可能会从已有进度继续。", language: language)
     case .internalError:
         return AppText.value("An internal transfer error occurred. Try again or copy diagnostics from Activity.", "发生内部传输错误。请重试，或从活动页复制诊断信息。", language: language)
+    case .senderSourceUnavailable:
+        return AppText.value("A selected source is no longer available. Restore access and retry.", "所选内容已不可用。请恢复访问后重试。", language: language)
+    case .senderPermissionLost:
+        return AppText.value("Access to a selected source expired. Select or authorize it again.", "所选内容的访问权限已失效。请重新选择或授权。", language: language)
+    case .senderSourceChanged:
+        return AppText.value("A selected source changed during preparation or transfer. Start it again to send one consistent version.", "所选内容在准备或传输期间发生变化。请重新开始，以发送同一个完整版本。", language: language)
+    case .senderItemRemoved, .senderCanceled:
+        return AppText.value("The sender removed or canceled this content.", "发送方已移除或取消此内容。", language: language)
+    case .protocolOrIntegrityFailure:
+        return AppText.value("The authenticated transfer data did not pass protocol or integrity checks.", "认证后的传输数据未通过协议或完整性校验。", language: language)
+    case .receiverSpaceInsufficient:
+        return AppText.value("The selected destination does not have enough allocatable space.", "所选目标没有足够的可用空间。", language: language)
+    case .receiverDestinationDecisionRequired:
+        return AppText.value("Choose a supported save method or another destination before receiving.", "请在接收前选择受支持的保存方式或其他目标。", language: language)
+    case .receiverDestinationUnavailable:
+        return AppText.value("The selected destination or its recovery state is unavailable. Choose it again.", "所选目标或其恢复状态不可用。请重新选择。", language: language)
+    case .receiverSaveFailed:
+        return AppText.value("The receiver could not durably save the verified content.", "接收端未能持久保存已校验的内容。", language: language)
+    case .receiverReusedObjectLost:
+        return AppText.value("A file selected for local reuse changed or disappeared before completion.", "准备复用的本地文件在完成前发生变化或消失。", language: language)
+    case .receiverFinalizationOutcomeUnknown:
+        return AppText.value("The receiver must reconcile an interrupted save before retrying.", "接收端需要先确认中断的保存结果，再重试。", language: language)
     case .unknown:
         return diagnosticMessage
     }

@@ -84,6 +84,90 @@ struct TransferStatusView: View {
                 }
             }
 
+            if !viewModel.pendingOfferEntries.isEmpty {
+                Divider().overlay(Theme.line)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(AppText.value("Incoming items", "即将接收", language: language))
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(Theme.text)
+                    ForEach(viewModel.pendingOfferEntries.prefix(12), id: \.entryId) { entry in
+                        HStack(spacing: 6) {
+                            Image(systemName: entry.kind == .directory ? "folder" : "doc")
+                            Text(entry.name)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Spacer(minLength: 8)
+                            if entry.kind == .file {
+                                Text(byteString(entry.plaintextSize))
+                                    .monospacedDigit()
+                            }
+                        }
+                        .font(.footnote)
+                        .foregroundStyle(Theme.muted)
+                    }
+                    if viewModel.pendingOfferEntries.count > 12 {
+                        Text(AppText.value(
+                            "More items are available in the paged inventory.",
+                            "其余项目可在分页清单中继续查看。",
+                            language: language
+                        ))
+                            .font(.footnote)
+                            .foregroundStyle(Theme.muted)
+                    }
+                }
+            }
+
+            if !viewModel.pendingSourceSelections.isEmpty {
+                Divider().overlay(Theme.line)
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(AppText.value("Source access decision", "来源访问决定", language: language))
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(Theme.text)
+                    ForEach(viewModel.pendingSourceSelections, id: \.rootItemId) { selection in
+                        VStack(alignment: .leading, spacing: 7) {
+                            Text(selection.requestedName)
+                                .font(.body.weight(.semibold))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Text(AppText.value(
+                                "Some descendants could not be read. Re-select the source to grant access again, send only accessible content, or remove this root.",
+                                "部分子项目无法读取。你可以重新选择来源以授权、仅发送可访问内容，或移除此根项目。",
+                                language: language
+                            ))
+                                .font(.footnote)
+                                .foregroundStyle(Theme.muted)
+                                .fixedSize(horizontal: false, vertical: true)
+                            HStack {
+                                Button(AppText.value("Send accessible content", "发送可访问内容", language: language)) {
+                                    viewModel.approvePartialManifestSource(
+                                        rootItemID: selection.rootItemId
+                                    )
+                                }
+                                .buttonStyle(.borderedProminent)
+                                Button(AppText.value("Remove", "移除", language: language)) {
+                                    viewModel.removeManifestSource(rootItemID: selection.rootItemId)
+                                }
+                                .buttonStyle(.bordered)
+                            }
+                        }
+                    }
+                }
+            }
+
+            if viewModel.requiresExceptionalTransferApproval {
+                Button {
+                    _ = viewModel.approveExceptionalTransfer()
+                } label: {
+                    Label(
+                        AppText.value("Receive this large transfer", "接收此大文件传输", language: language),
+                        systemImage: "arrow.down.circle"
+                    )
+                    .frame(maxWidth: .infinity, minHeight: 38)
+                }
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("approve_exceptional_transfer")
+            }
+
             if let stepText {
                 Text(stepText)
                     .font(.callout.monospaced())
@@ -318,6 +402,17 @@ struct TransferStatusView: View {
             title = AppText.value("Update required", "需要更新", language: language)
         case .internalError, .unknown:
             title = AppText.value("Transfer failed", "传输失败", language: language)
+        case .senderSourceUnavailable, .senderPermissionLost, .senderSourceChanged,
+             .senderItemRemoved, .senderCanceled:
+            title = AppText.value("Source unavailable", "发送内容不可用", language: language)
+        case .protocolOrIntegrityFailure:
+            title = AppText.value("Verification failed", "校验失败", language: language)
+        case .receiverSpaceInsufficient:
+            title = AppText.value("Not enough space", "空间不足", language: language)
+        case .receiverDestinationDecisionRequired, .receiverDestinationUnavailable,
+             .receiverSaveFailed, .receiverReusedObjectLost,
+             .receiverFinalizationOutcomeUnknown:
+            title = AppText.value("Could not save", "无法保存", language: language)
         }
         return (title, friendlyFailure(failure, language: language))
     }

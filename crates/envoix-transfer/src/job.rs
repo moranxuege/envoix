@@ -80,6 +80,15 @@ pub struct SourceIssue {
     pub kind: SourceIssueKind,
 }
 
+/// A platform SourceProvider issue discovered while stabilizing an opaque
+/// tree. The core assigns durable issue/root identities when it attaches this
+/// fact to a canonical job.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProviderSourceIssue {
+    pub relative_components: Vec<String>,
+    pub kind: SourceIssueKind,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceSelectionInfo {
     pub root_item_id: SourceItemId,
@@ -449,6 +458,55 @@ impl CanonicalTransferJob {
             .await
     }
 
+    /// Adds a platform-stabilized file or directory while preserving provider
+    /// completeness facts. Platform staging remains platform-owned; explicit
+    /// Remove lets the platform delete it after this durable mutation commits.
+    pub async fn add_provider_path(
+        &mut self,
+        path: PathBuf,
+        requested_name: String,
+        origin: LocalSourceOrigin,
+        provider_issues: Vec<ProviderSourceIssue>,
+    ) -> Result<AddSourceResult, TransferJobError> {
+        if origin == LocalSourceOrigin::Filesystem {
+            return Err(TransferJobError::InvalidRecord(
+                "provider source must retain its platform origin".into(),
+            ));
+        }
+        validate_component(&requested_name)?;
+        self.validate_provider_issues(&provider_issues)?;
+        let added = self
+            .add_local_source(path, requested_name, origin, false)
+            .await?;
+        if added.folded_into_existing_selection {
+            return Ok(added);
+        }
+        self.prepare_selection(added.root_item_id).await?;
+        self.attach_provider_issues(added.root_item_id, provider_issues)?;
+        Ok(added)
+    }
+
+    /// Replaces one opaque provider root after the user grants access again.
+    /// Platform-discovered inaccessible boundaries are committed with the new
+    /// stabilized root so reauthorization cannot silently claim completeness.
+    pub async fn reauthorize_provider_source(
+        &mut self,
+        root_item_id: SourceItemId,
+        local_path: PathBuf,
+        provider_issues: Vec<ProviderSourceIssue>,
+    ) -> Result<(), TransferJobError> {
+        let selection_index = self.selection_index(root_item_id)?;
+        if self.selections[selection_index].origin == LocalSourceOrigin::Filesystem {
+            return Err(TransferJobError::InvalidRecord(
+                "filesystem sources must use filesystem reauthorization".into(),
+            ));
+        }
+        self.validate_provider_issues(&provider_issues)?;
+        self.resolve_source_decision(root_item_id, SourceDecision::Reauthorize { local_path })?;
+        self.prepare_selection(root_item_id).await?;
+        self.attach_provider_issues(root_item_id, provider_issues)
+    }
+
     async fn add_staged_source(
         &mut self,
         path: PathBuf,
@@ -660,7 +718,12 @@ impl CanonicalTransferJob {
     ) -> Result<Option<PathBuf>, TransferJobError> {
         self.ensure_mutable()?;
         let selection_index = self.selection_index(root_item_id)?;
-        if self.selections[selection_index].state != SourceSelectionState::NeedsDecision {
+        if self.selections[selection_index].state != SourceSelectionState::NeedsDecision
+            && !matches!(
+                &decision,
+                SourceDecision::RemoveSelection | SourceDecision::CancelJob
+            )
+        {
             return Err(TransferJobError::DecisionNotRequired);
         }
         match decision {
@@ -697,7 +760,12 @@ impl CanonicalTransferJob {
             }
             SourceDecision::ApprovePartial => {
                 let selection = &mut self.selections[selection_index];
-                if selection.root_inventory_item_id.is_none() {
+                if selection.root_inventory_item_id.is_none()
+                    || selection
+                        .issues
+                        .iter()
+                        .any(|issue| issue.relative_components.is_empty())
+                {
                     return Err(TransferJobError::EmptyPartialRoot);
                 }
                 if selection
@@ -708,7 +776,8 @@ impl CanonicalTransferJob {
                     return Err(TransferJobError::PartialNotAllowed);
                 }
                 selection.completeness = SourceCompletenessV2::UserApprovedPartial {
-                    omitted_entry_count: selection.issues.len() as u64,
+                    inaccessible_boundary_count: selection.issues.len() as u64,
+                    omitted_entry_count: None,
                 };
                 selection.state = SourceSelectionState::Ready;
             }
@@ -856,6 +925,12 @@ impl CanonicalTransferJob {
         self.source_bindings
             .get(&item_id)
             .map(|binding| binding.path.as_path())
+            .or_else(|| {
+                self.selections
+                    .iter()
+                    .find(|selection| selection.root_item_id == item_id)
+                    .map(|selection| selection.path.as_path())
+            })
     }
 
     pub fn content_digest_for_item(&self, item_id: SourceItemId) -> Option<ContentDigestV2> {
@@ -1262,6 +1337,39 @@ impl CanonicalTransferJob {
             relative_components,
             kind,
         })
+    }
+
+    fn validate_provider_issues(
+        &self,
+        provider_issues: &[ProviderSourceIssue],
+    ) -> Result<(), TransferJobError> {
+        for issue in provider_issues {
+            for component in &issue.relative_components {
+                validate_component(component)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn attach_provider_issues(
+        &mut self,
+        root_item_id: SourceItemId,
+        provider_issues: Vec<ProviderSourceIssue>,
+    ) -> Result<(), TransferJobError> {
+        if provider_issues.is_empty() {
+            return Ok(());
+        }
+        self.validate_provider_issues(&provider_issues)?;
+        let mut resolved = Vec::with_capacity(provider_issues.len());
+        for issue in provider_issues {
+            resolved.push(self.issue(root_item_id, issue.relative_components, issue.kind)?);
+        }
+        let selection_index = self.selection_index(root_item_id)?;
+        self.selections[selection_index].issues.extend(resolved);
+        self.selections[selection_index].state = SourceSelectionState::NeedsDecision;
+        self.bump_revision()?;
+        self.refresh_lifecycle();
+        Ok(())
     }
 
     fn allocate_source_item_id(&mut self) -> Result<SourceItemId, TransferJobError> {

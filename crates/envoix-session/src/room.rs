@@ -8,6 +8,7 @@
 //! channel-bound).
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use envoix_error::CoreError;
@@ -19,11 +20,14 @@ use envoix_types::PairingStep;
 use iroh::{Endpoint, EndpointAddr, SecretKey};
 
 use crate::{
-    BindAddrs, BoundEndpoint, EventSink, ManifestSendRequest, ManifestTransferSummary,
-    PairingConfig, SessionConfig, SessionError, SessionEventSink, SessionTransferSummary,
-    TransferCancelToken, TransferEvent, TransferSummary, bind_iroh_endpoint_with_relay,
-    bind_iroh_transfer_endpoint_with_relay, receive_transfer_with_auth_retries,
-    receive_with_auth_retries, send_file_to_endpoint_addr, send_manifest_to_endpoint_addr,
+    BindAddrs, BoundEndpoint, CanonicalTransferJob, EventSink, ManifestSendRequest,
+    ManifestTransferSummary, PairingConfig, PendingManifestV2Receive,
+    SenderManifestV2SessionSummary, SessionConfig, SessionError, SessionEventSink,
+    SessionTransferSummary, TransferCancelToken, TransferEvent, TransferSummary,
+    bind_iroh_endpoint_with_relay, bind_iroh_manifest_v2_endpoint,
+    bind_iroh_transfer_endpoint_with_relay, receive_manifest_v2_offer,
+    receive_transfer_with_auth_retries, receive_with_auth_retries, send_file_to_endpoint_addr,
+    send_manifest_to_endpoint_addr, send_manifest_v2_to_endpoint_addr,
 };
 
 const SEND_ROOM_PAIRING_TIMEOUT: Duration = Duration::from_secs(35);
@@ -292,6 +296,57 @@ pub async fn send_manifest_via_room(
     };
     send_manifest_to_endpoint_addr(pairing.peer, request, resume, config, &auth, events, cancel)
         .await
+}
+
+/// Receives an authenticated Manifest v2 offer through room pairing. No
+/// destination or payload effect occurs until the returned pending offer is
+/// explicitly continued.
+pub async fn receive_manifest_v2_offer_via_room(
+    broker: EndpointAddr,
+    code: &str,
+    listen_addrs: impl Into<BindAddrs>,
+    config: SessionConfig,
+    events: Arc<dyn EventSink>,
+    cancel: &TransferCancelToken,
+) -> Result<PendingManifestV2Receive, SessionError> {
+    let bound = bind_iroh_manifest_v2_endpoint(
+        listen_addrs,
+        &config.identity,
+        &config.data_relay(),
+        config.relay_only,
+        &config.candidates,
+        config.data_stream_window,
+    )
+    .await?;
+    let auth = pair_room_receiver(&bound, broker, code, &config, events.as_ref(), cancel).await?;
+    receive_manifest_v2_offer(bound, &auth, events, cancel).await
+}
+
+/// Sends a sealed canonical job through room pairing and returns only after
+/// the receiver's durable save proof is committed.
+pub async fn send_manifest_v2_via_room(
+    broker: EndpointAddr,
+    code: &str,
+    job: &CanonicalTransferJob,
+    state_directory: PathBuf,
+    config: SessionConfig,
+    events: Arc<dyn EventSink>,
+    cancel: &TransferCancelToken,
+) -> Result<SenderManifestV2SessionSummary, SessionError> {
+    let pairing = pair_room_sender(broker, code, &config, events.as_ref(), cancel).await?;
+    let auth = PairingConfig::Spake2SharedToken {
+        token: pairing.token,
+    };
+    send_manifest_v2_to_endpoint_addr(
+        pairing.peer,
+        job,
+        state_directory,
+        config,
+        &auth,
+        events,
+        cancel,
+    )
+    .await
 }
 
 async fn pair_room_sender(

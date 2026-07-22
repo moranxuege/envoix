@@ -38,6 +38,7 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.HorizontalDivider
@@ -85,6 +86,7 @@ import dev.envoix.app.SettingsStore
 import dev.envoix.app.Status
 import dev.envoix.app.Transfer
 import dev.envoix.app.humanBytes
+import dev.envoix.app.isTerminal
 import dev.envoix.app.smoothedBps
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
@@ -93,15 +95,19 @@ import kotlin.math.roundToInt
 @Composable
 fun HomeScreen(
     transfers: List<Transfer>,
-    onReceive: (code: String, broker: String, relay: String, qrPayload: String?) -> Unit,
-    onSend: (code: String, broker: String, relay: String, file: android.net.Uri, qrPayload: String?) -> Unit,
+    initialSharedUris: List<android.net.Uri> = emptyList(),
+    onSharedUrisConsumed: () -> Unit = {},
+    onReceive: (code: String, broker: String, relay: String, qrPayload: String?, copyApproved: Boolean) -> Unit,
+    onSend: (code: String, broker: String, relay: String, jobId: String, qrPayload: String?) -> Unit,
     onPauseResume: (Long) -> Unit,
+    onApproveReceive: (Long) -> Unit,
     onCancel: (Long) -> Unit,
     onRemove: (Long) -> Unit,
     onOpenDiscovery: () -> Unit,
     onOpenLogs: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpen: (Transfer) -> Unit,
+    onShare: (Transfer) -> Unit,
 ) {
     val colors = Envoix.colors
     var sheetOpen by remember { mutableStateOf(false) }
@@ -113,12 +119,11 @@ fun HomeScreen(
     LaunchedEffect(newestId) {
         if (newestId >= 0) listState.animateScrollToItem(0)
     }
+    LaunchedEffect(initialSharedUris) {
+        if (initialSharedUris.isNotEmpty()) sheetOpen = true
+    }
     val active =
-        transfers.count {
-            it.status == Status.Preparing ||
-                it.status == Status.Connecting ||
-                it.status == Status.Transferring
-        }
+        transfers.count { !it.status.isTerminal }
 
     Scaffold(
         containerColor = colors.bg,
@@ -156,9 +161,11 @@ fun HomeScreen(
                             expanded = t.id in expanded,
                             onToggleDetail = { if (it in expanded) expanded.remove(it) else expanded.add(it) },
                             onPauseResume = onPauseResume,
+                            onApproveReceive = onApproveReceive,
                             onCancel = onCancel,
                             onRemove = onRemove,
                             onOpen = onOpen,
+                            onShare = onShare,
                         )
                     }
                 }
@@ -175,13 +182,15 @@ fun HomeScreen(
             containerColor = colors.surface,
         ) {
             NewTransferSheet(
-                onReceive = { c, b, r, qr ->
+                initialSources = initialSharedUris,
+                onReceive = { c, b, r, qr, copyApproved ->
                     sheetOpen = false
-                    onReceive(c, b, r, qr)
+                    onReceive(c, b, r, qr, copyApproved)
                 },
-                onSend = { c, b, r, uri, qr ->
+                onSend = { c, b, r, jobId, qr ->
                     sheetOpen = false
-                    onSend(c, b, r, uri, qr)
+                    onSharedUrisConsumed()
+                    onSend(c, b, r, jobId, qr)
                 },
             )
         }
@@ -265,9 +274,11 @@ private fun TransferCard(
     expanded: Boolean,
     onToggleDetail: (Long) -> Unit,
     onPauseResume: (Long) -> Unit,
+    onApproveReceive: (Long) -> Unit,
     onCancel: (Long) -> Unit,
     onRemove: (Long) -> Unit,
     onOpen: (Transfer) -> Unit,
+    onShare: (Transfer) -> Unit,
 ) {
     val colors = Envoix.colors
     val failed = t.status == Status.Failed
@@ -317,7 +328,7 @@ private fun TransferCard(
                     onLongClick = { onToggleDetail(t.id) },
                 ),
         ) {
-            if ((t.status == Status.Waiting || t.status == Status.Connecting) && t.qrPayload != null) {
+            if (t.status == Status.Connecting && t.qrPayload != null) {
                 WaitingBody(t, onCancel)
             } else {
                 Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -350,7 +361,7 @@ private fun TransferCard(
                             color =
                                 when {
                                     failed -> colors.danger
-                                    t.status == Status.Paused || t.status == Status.Unconfirmed -> colors.warning
+                                    t.status == Status.Paused || t.status == Status.AwaitingDecision -> colors.warning
                                     cancelled -> colors.muted
                                     else -> colors.accent
                                 },
@@ -366,23 +377,9 @@ private fun TransferCard(
                             Spacer(Modifier.height(6.dp))
                             Text(t.error, color = colors.danger, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
                         }
-                        if (t.publicationInvalid && t.error != null) {
-                            Spacer(Modifier.height(6.dp))
-                            Text(t.error, color = colors.danger, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                        }
-                        if (t.status == Status.Unconfirmed) {
-                            Spacer(Modifier.height(6.dp))
-                            Text(
-                                "All bytes sent — peer didn't confirm receipt. It likely arrived; tap ↻ to re-confirm.",
-                                color = colors.warning,
-                                fontSize = 12.sp,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
                     }
                     Spacer(Modifier.width(10.dp))
-                    CardControls(t, onPauseResume, onCancel, onOpen)
+                    CardControls(t, onPauseResume, onApproveReceive, onCancel, onOpen, onShare)
                 }
             }
             if (expanded) DetailDrawer(t)
@@ -394,8 +391,10 @@ private fun TransferCard(
 private fun CardControls(
     t: Transfer,
     onPauseResume: (Long) -> Unit,
+    onApproveReceive: (Long) -> Unit,
     onCancel: (Long) -> Unit,
     onOpen: (Transfer) -> Unit,
+    onShare: (Transfer) -> Unit,
 ) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -404,8 +403,8 @@ private fun CardControls(
         when (t.status) {
             Status.Preparing ->
                 CircleBtn(Icons.Default.Close, filled = false) { onCancel(t.id) }
-            Status.Waiting, Status.Connecting, Status.Verifying,
-            Status.Transferring, Status.Confirming,
+            Status.Connecting, Status.Transferring, Status.Receiving, Status.Verifying,
+            Status.Saving, Status.WaitingForReceiverSave, Status.Received,
             -> {
                 CircleBtn(Icons.Default.Pause, filled = true) { onPauseResume(t.id) }
                 CircleBtn(Icons.Default.Close, filled = false) { onCancel(t.id) }
@@ -414,16 +413,13 @@ private fun CardControls(
                 CircleBtn(Icons.Default.PlayArrow, filled = true) { onPauseResume(t.id) }
                 CircleBtn(Icons.Default.Close, filled = false) { onCancel(t.id) }
             }
-            Status.Failed, Status.Unconfirmed, Status.Cancelled ->
+            Status.AwaitingDecision ->
+                CircleBtn(Icons.Default.PlayArrow, filled = true) { onApproveReceive(t.id) }
+            Status.Failed, Status.Cancelled ->
                 CircleBtn(Icons.Default.Refresh, filled = true) { onPauseResume(t.id) }
             Status.Completed -> {
                 if (t.savedUri != null) CircleBtn(Icons.Default.OpenInNew, filled = false) { onOpen(t) }
-                // RECEIVER, and ONLY while the confirmation duty is open (the
-                // receipt has not reached the rdz): the manual fallback for
-                // serving the peer's re-verify. Once delivered - retired, no ↻.
-                if (t.direction == Direction.Receive && !t.proofDelivered && !t.publicationInvalid) {
-                    CircleBtn(Icons.Default.Refresh, filled = false) { onPauseResume(t.id) }
-                }
+                if (t.savedUris.isNotEmpty()) CircleBtn(Icons.Default.Share, filled = false) { onShare(t) }
             }
         }
     }
@@ -560,8 +556,28 @@ private fun DetailDrawer(t: Transfer) {
         }
         Spacer(Modifier.height(4.dp))
         DetailRow("Room", t.room)
-        if (t.pathAddr != null) DetailRow("Path", "${t.pathType ?: "—"} · ${t.pathAddr}")
+        if (t.pathAddr != null) DetailRow("Path", t.pathAddr)
         DetailRow("Transferred", "${humanBytes(t.bytes)} / ${humanBytes(t.total)}")
+        if (t.rootCount > 0) {
+            DetailRow(
+                "Inventory",
+                "${t.rootCount} roots · ${t.fileCount} files · ${t.directoryCount} folders",
+            )
+            DrawerLabel("Authenticated items")
+            t.inventoryPreview.take(20).forEach { entry ->
+                DetailRow(
+                    if (entry.directory) "Folder" else "File",
+                    if (entry.directory) entry.name else "${entry.name} · ${humanBytes(entry.size)}",
+                )
+            }
+            if (t.inventoryPreview.size > 20 || t.inventoryHasMore) {
+                Text(
+                    "More items are available in bounded pages; only the first 20 are shown here.",
+                    color = colors.muted,
+                    fontSize = 11.sp,
+                )
+            }
+        }
         if (t.log.isNotEmpty()) {
             val clip = LocalClipboardManager.current
             var copied by remember(t.id) { mutableStateOf(false) }
@@ -735,17 +751,17 @@ private fun PathBadge(t: Transfer) {
     val (label, fg, bg) =
         when {
             t.status == Status.Completed -> Triple("Done", colors.success, colors.successSoft)
-            t.status == Status.Unconfirmed ->
-                Triple("Sent · unconfirmed", colors.warning, colors.warning.copy(alpha = 0.14f))
             t.status == Status.Failed -> Triple("Failed", colors.danger, colors.danger.copy(alpha = 0.12f))
             t.status == Status.Cancelled -> Triple("Cancelled", colors.muted, colors.line.copy(alpha = 0.5f))
             t.status == Status.Paused -> Triple("Paused", colors.warning, colors.warning.copy(alpha = 0.14f))
             t.status == Status.Preparing -> Triple("Preparing", colors.accent, colors.accentSoft)
-            t.status == Status.Waiting -> Triple("Waiting", colors.accent, colors.accentSoft)
+            t.status == Status.AwaitingDecision -> Triple("Review", colors.warning, colors.warning.copy(alpha = 0.14f))
+            t.status == Status.Receiving -> Triple("Receiving", colors.accent, colors.accentSoft)
+            t.status == Status.Transferring -> Triple("Sending", colors.accent, colors.accentSoft)
             t.status == Status.Verifying -> Triple("Verifying", colors.accent, colors.accentSoft)
-            t.status == Status.Confirming -> Triple("Confirming", colors.accent, colors.accentSoft)
-            t.pathType == "relay" -> Triple("Relay", colors.accent, colors.accentSoft)
-            t.pathType == "direct" -> Triple("Direct", colors.accent, colors.accentSoft)
+            t.status == Status.Saving -> Triple("Saving", colors.accent, colors.accentSoft)
+            t.status == Status.WaitingForReceiverSave -> Triple("Saving remotely", colors.accent, colors.accentSoft)
+            t.status == Status.Received -> Triple("Confirming", colors.accent, colors.accentSoft)
             // pre-connection, path unknown: say what is HAPPENING, never "…"
             else -> Triple("Pairing", colors.accent, colors.accentSoft)
         }
@@ -786,7 +802,6 @@ private fun title(t: Transfer): String {
 
 private fun subtitle(t: Transfer): String =
     when {
-        t.publicationInvalid -> "Saved file is missing or changed"
         t.status == Status.Completed && t.savedUri != null -> "Saved to Downloads · tap to open"
         t.pathAddr != null -> t.pathAddr
         else -> "room ${t.room}"
@@ -799,19 +814,21 @@ private fun fraction(t: Transfer): Float {
 }
 
 private fun speedText(t: Transfer): String {
-    if (t.status != Status.Transferring || t.speedBps <= 0) {
+    if (t.status !in setOf(Status.Transferring, Status.Receiving) || t.speedBps <= 0) {
         return when (t.status) {
             Status.Preparing -> "preparing"
-            Status.Waiting -> "waiting for peer"
             Status.Connecting -> "connecting"
+            Status.AwaitingDecision -> "review required"
+            Status.Transferring -> "sending"
+            Status.Receiving -> "receiving"
             Status.Verifying -> "verifying"
-            Status.Confirming -> "confirming"
+            Status.Saving -> "saving"
+            Status.WaitingForReceiverSave -> "receiver saving"
+            Status.Received -> "confirming"
             Status.Completed -> "complete"
             Status.Paused -> "paused"
             Status.Failed -> "failed"
-            Status.Unconfirmed -> "unconfirmed"
             Status.Cancelled -> "cancelled"
-            else -> "—"
         }
     }
     val bps = smoothedBps(t)
@@ -825,7 +842,7 @@ private fun speedText(t: Transfer): String {
 
 private fun etaText(t: Transfer): String {
     val bps = smoothedBps(t)
-    if (t.status != Status.Transferring || bps <= 0 || t.total <= 0) return "—"
+    if (t.status !in setOf(Status.Transferring, Status.Receiving) || bps <= 0 || t.total <= 0) return "—"
     val remain = (t.total - t.bytes).coerceAtLeast(0)
     val secs = (remain / bps).roundToInt()
     val m = secs / 60
@@ -836,18 +853,6 @@ private fun etaText(t: Transfer): String {
 private fun sizeText(t: Transfer): String {
     val bytes = if (t.total > 0) t.total else t.bytes
     return humanBytes(bytes)
-}
-
-private fun humanBytes(b: Long): String {
-    if (b <= 0) return "0 B"
-    val units = listOf("B", "KB", "MB", "GB")
-    var v = b.toDouble()
-    var i = 0
-    while (v >= 1024 && i < units.size - 1) {
-        v /= 1024
-        i++
-    }
-    return if (i == 0) "$b B" else "${(v * 10).roundToInt() / 10.0} ${units[i]}"
 }
 
 private fun humanBps(bps: Double): String {

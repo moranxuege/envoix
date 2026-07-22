@@ -17,6 +17,7 @@ struct ReceiveView: View {
     @AppStorage("envoix.candidatesAllow") private var candidatesAllow = ""
     @AppStorage("envoix.candidatesDeny") private var candidatesDeny = ""
     @AppStorage("envoix.speedLimit") private var speedLimit = 40
+    @AppStorage("envoix.destinationSaveMode") private var destinationSaveMode = "direct"
     @State private var mode: PairingMode = .room
     @State private var roomCode = newRoomCode()
     @State private var joinRoomCode = ""
@@ -280,6 +281,32 @@ struct ReceiveView: View {
                 .disabled(viewModel.isBusy)
             }
             #endif
+
+            Divider().overlay(Theme.line.opacity(0.5))
+            Text(AppText.value("Save method", "保存方式", language: uiLanguage))
+                .font(.body.weight(.semibold))
+                .foregroundStyle(Theme.text)
+            Picker("Save method", selection: $destinationSaveMode) {
+                Text(AppText.value("Save directly", "直接保存", language: uiLanguage)).tag("direct")
+                Text(AppText.value("Verify, then copy", "校验后复制", language: uiLanguage)).tag("copy")
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .disabled(viewModel.isBusy)
+            Text(destinationSaveMode == "copy"
+                 ? AppText.value(
+                    "Uses additional temporary space and saving time for destinations that cannot safely finalize the same object.",
+                    "适用于无法安全原地完成保存的目标；会额外占用临时空间和保存时间。",
+                    language: uiLanguage
+                 )
+                 : AppText.value(
+                    "Writes once on the selected storage and reveals the verified object when ready.",
+                    "在所选存储上只写入一次，校验完成后直接显示文件。",
+                    language: uiLanguage
+                 ))
+                .font(.footnote)
+                .foregroundStyle(Theme.muted)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .card(padding: 14)
     }

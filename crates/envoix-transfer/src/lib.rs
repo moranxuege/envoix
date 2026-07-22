@@ -11,6 +11,7 @@ pub use destination_v2::{
     AUTO_RECEIVE_PLAINTEXT_LIMIT_BYTES, DestinationDecisionV2, DestinationModeV2,
     DestinationPlanErrorV2, DestinationPlanStoreV2, DestinationRequestV2, DestinationWritePlanV2,
     LocalDestinationProviderV2, POST_SAVE_RESERVE_BYTES, StorageDomainIdentityV2,
+    local_allocatable_bytes,
 };
 
 pub use delivery_v2::{
@@ -21,8 +22,9 @@ pub use delivery_v2::{
 pub use job::{
     AddSourceResult, CanonicalTransferJob, DEFAULT_INVENTORY_PAGE_SIZE, InventoryCursor,
     InventoryItem, InventoryPage, InventorySummary, JobLifecycle, LocalSourceOrigin,
-    MAX_INVENTORY_PAGE_SIZE, PreparedFileSource, SourceDecision, SourceIssue, SourceIssueKind,
-    SourceItemId, SourceSelectionInfo, SourceSelectionState, TransferJobError, TransferJobStore,
+    MAX_INVENTORY_PAGE_SIZE, PreparedFileSource, ProviderSourceIssue, SourceDecision, SourceIssue,
+    SourceIssueKind, SourceItemId, SourceSelectionInfo, SourceSelectionState, TransferJobError,
+    TransferJobStore,
 };
 
 pub use manifest::{
@@ -31,9 +33,10 @@ pub use manifest::{
 };
 
 pub use manifest_v2_engine::{
-    ManifestV2DataError, ManifestV2DataPlane, ManifestV2PayloadSink, ReceiverDataPlaneLedgerV2,
-    ReceiverDataPlaneStoreV2, ReceiverDataPlaneSummaryV2, SavedEntryV2, SenderDataPlaneSummaryV2,
-    VerifiedEntryV2,
+    ManifestV2DataError, ManifestV2DataPlane, ManifestV2PayloadSink, ManifestV2ProgressPhase,
+    ManifestV2ProgressSink, ManifestV2ResultGate, NoopManifestV2ResultGate,
+    ReceiverDataPlaneLedgerV2, ReceiverDataPlaneStoreV2, ReceiverDataPlaneSummaryV2, SavedEntryV2,
+    SenderDataPlaneSummaryV2, SenderResumeIntentV2, VerifiedEntryV2, sender_resume_intent,
 };
 
 use std::io::SeekFrom;
@@ -228,6 +231,13 @@ pub enum TransferEvent {
         bytes_transferred: u64,
         /// Total expected plaintext bytes.
         total_bytes: u64,
+    },
+    /// Canonical Manifest-v2 lifecycle fact. Native UI must project this
+    /// variant directly and must not infer state from diagnostic text.
+    ManifestV2Phase {
+        transfer_id: TransferId,
+        direction: TransferDirection,
+        phase: ManifestV2ProgressPhase,
     },
     /// A hash-only verification phase has started.
     HashStarted {

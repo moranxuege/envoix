@@ -5,9 +5,8 @@ use std::path::PathBuf;
 
 use envoix_protocol::manifest_v2::{ContentDigestV2, JobIdV2, ManifestOfferV2};
 use envoix_protocol::manifest_v2_frames::{
-    DeliveryProofAckV2, DeliveryProofV2, EntryResultV2, JobGenerationV2, ManifestAcceptV2,
-    ManifestV2Frame, ManifestV2FrameConnection, ProofCapabilityV2, ProofChallengeV2,
-    ProofResponseV2, canonical_manifest_v2_frame_body_digest, encode_manifest_v2_frame,
+    DeliveryProofV2, EntryResultV2, JobGenerationV2, ManifestAcceptV2, ManifestV2Frame,
+    ManifestV2FrameConnection, ProofCapabilityV2, encode_manifest_v2_frame,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -16,7 +15,7 @@ use tokio::io::AsyncWriteExt;
 
 use crate::{ManifestV2DataError, ReceiverDataPlaneSummaryV2, SenderDataPlaneSummaryV2};
 
-const SENDER_DELIVERY_SCHEMA_VERSION: u16 = 1;
+const SENDER_DELIVERY_SCHEMA_VERSION: u16 = 2;
 const RECEIVER_DELIVERY_SCHEMA_VERSION: u16 = 1;
 const CHALLENGE_KEY_CONTEXT: &str = "envoix/manifest/v2/accept-challenge-key";
 const DELIVERY_KEY_CONTEXT: &str = "envoix/manifest/v2/delivery-proof-key";
@@ -41,8 +40,9 @@ pub struct SenderDeliveryRecordV2 {
     identity: JobGenerationV2,
     manifest_digest: ContentDigestV2,
     phase: SenderTransferPhaseV2,
+    accept: Option<ManifestAcceptV2>,
     accept_body_digest: Option<ContentDigestV2>,
-    proof_capability: Option<ProofCapabilityV2>,
+    sender_completion_set_digest: Option<ContentDigestV2>,
     entry_results: Vec<EntryResultV2>,
     delivery_proof: Option<DeliveryProofV2>,
 }
@@ -71,8 +71,9 @@ impl SenderDeliveryRecordV2 {
             },
             manifest_digest: offer.structural_digest,
             phase: SenderTransferPhaseV2::Offering,
+            accept: None,
             accept_body_digest: None,
-            proof_capability: None,
+            sender_completion_set_digest: None,
             entry_results: Vec::new(),
             delivery_proof: None,
         }
@@ -84,6 +85,27 @@ impl SenderDeliveryRecordV2 {
 
     pub fn identity(&self) -> JobGenerationV2 {
         self.identity
+    }
+
+    pub fn accept(&self) -> Option<&ManifestAcceptV2> {
+        self.accept.as_ref()
+    }
+
+    pub fn accept_body_digest(&self) -> Option<ContentDigestV2> {
+        self.accept_body_digest
+    }
+
+    pub fn proof_capability(&self) -> Option<ProofCapabilityV2> {
+        self.accept.as_ref().map(|accept| accept.proof_capability)
+    }
+
+    pub fn completed_data_summary(&self) -> Option<SenderDataPlaneSummaryV2> {
+        Some(SenderDataPlaneSummaryV2 {
+            identity: self.identity,
+            accept_body_digest: self.accept_body_digest?,
+            sender_completion_set_digest: self.sender_completion_set_digest?,
+            entry_results: (!self.entry_results.is_empty()).then(|| self.entry_results.clone())?,
+        })
     }
 
     pub fn validate_offer(&self, offer: &ManifestOfferV2) -> Result<(), DeliveryAuthorityErrorV2> {
@@ -114,13 +136,12 @@ impl SenderDeliveryRecordV2 {
         if accept.identity != self.identity || accept.manifest_digest != self.manifest_digest {
             return Err(DeliveryAuthorityErrorV2::IdentityMismatch);
         }
-        match (self.accept_body_digest, self.proof_capability) {
-            (Some(existing_digest), Some(existing_capability))
-                if existing_digest == accept_body_digest
-                    && existing_capability == accept.proof_capability => {}
+        match (self.accept_body_digest, self.accept.as_ref()) {
+            (Some(existing_digest), Some(existing_accept))
+                if existing_digest == accept_body_digest && existing_accept == accept => {}
             (None, None) => {
+                self.accept = Some(accept.clone());
                 self.accept_body_digest = Some(accept_body_digest);
-                self.proof_capability = Some(accept.proof_capability);
             }
             _ => return Err(DeliveryAuthorityErrorV2::CapabilityMismatch),
         }
@@ -152,6 +173,13 @@ impl SenderDeliveryRecordV2 {
         } else if self.entry_results != summary.entry_results {
             return Err(DeliveryAuthorityErrorV2::ResultMismatch);
         }
+        match self.sender_completion_set_digest {
+            Some(existing) if existing != summary.sender_completion_set_digest => {
+                return Err(DeliveryAuthorityErrorV2::ResultMismatch);
+            }
+            Some(_) => {}
+            None => self.sender_completion_set_digest = Some(summary.sender_completion_set_digest),
+        }
         if self.phase == SenderTransferPhaseV2::Transferring {
             self.phase = SenderTransferPhaseV2::WaitingForReceiverSave;
         }
@@ -159,8 +187,9 @@ impl SenderDeliveryRecordV2 {
     }
 
     fn validate(&self) -> Result<(), DeliveryAuthorityErrorV2> {
-        let accept_committed = self.accept_body_digest.is_some() && self.proof_capability.is_some();
-        if self.accept_body_digest.is_some() != self.proof_capability.is_some()
+        let accept_committed = self.accept_body_digest.is_some() && self.accept.is_some();
+        if self.accept_body_digest.is_some() != self.accept.is_some()
+            || self.entry_results.is_empty() != self.sender_completion_set_digest.is_none()
             || self
                 .entry_results
                 .iter()
@@ -176,7 +205,9 @@ impl SenderDeliveryRecordV2 {
         }
         if let Some(proof) = self.delivery_proof {
             let capability = self
-                .proof_capability
+                .accept
+                .as_ref()
+                .map(|accept| accept.proof_capability)
                 .ok_or(DeliveryAuthorityErrorV2::InvalidRecord)?;
             if proof.manifest_digest != self.manifest_digest
                 || proof.result_set_digest != result_set_digest(&self.entry_results)?
@@ -225,7 +256,6 @@ pub struct ReceiverDeliveryRecordV2 {
     entry_results: Vec<EntryResultV2>,
     proof_capability: ProofCapabilityV2,
     delivery_proof: Option<DeliveryProofV2>,
-    proof_acknowledged: bool,
 }
 
 impl fmt::Debug for ReceiverDeliveryRecordV2 {
@@ -237,7 +267,6 @@ impl fmt::Debug for ReceiverDeliveryRecordV2 {
             .field("result_set_digest", &self.result_set_digest)
             .field("result_count", &self.entry_results.len())
             .field("proof_committed", &self.delivery_proof.is_some())
-            .field("proof_acknowledged", &self.proof_acknowledged)
             .finish()
     }
 }
@@ -265,17 +294,12 @@ impl ReceiverDeliveryRecordV2 {
             entry_results: summary.entry_results.clone(),
             proof_capability: accept.proof_capability,
             delivery_proof: None,
-            proof_acknowledged: false,
         }
         .validated()?)
     }
 
     pub fn delivery_proof(&self) -> Option<DeliveryProofV2> {
         self.delivery_proof
-    }
-
-    pub fn proof_acknowledged(&self) -> bool {
-        self.proof_acknowledged
     }
 
     fn validate(&self) -> Result<(), DeliveryAuthorityErrorV2> {
@@ -288,7 +312,6 @@ impl ReceiverDeliveryRecordV2 {
                     result.identity != self.identity || result.entry_id != index as u32
                 })
             || result_set_digest(&self.entry_results)? != self.result_set_digest
-            || self.proof_acknowledged && self.delivery_proof.is_none()
         {
             return Err(DeliveryAuthorityErrorV2::InvalidRecord);
         }
@@ -327,8 +350,6 @@ pub enum DeliveryAuthorityErrorV2 {
     ResultMismatch,
     #[error("delivery proof MAC is invalid")]
     InvalidProof,
-    #[error("delivery proof acknowledgement is invalid")]
-    InvalidProofAck,
     #[error("delivery record schema is unsupported or inconsistent")]
     InvalidRecord,
     #[error("receiver entropy unavailable")]
@@ -341,12 +362,6 @@ pub enum DeliveryAuthorityErrorV2 {
     Codec(#[from] envoix_protocol::manifest_v2_frames::ManifestV2FrameCodecError),
     #[error("transport failed: {0}")]
     Transport(String),
-}
-
-impl From<DeliveryAuthorityErrorV2> for ManifestV2DataError {
-    fn from(error: DeliveryAuthorityErrorV2) -> Self {
-        ManifestV2DataError::Delivery(error.to_string())
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -459,21 +474,6 @@ impl ManifestV2DeliveryAuthority {
             .send_manifest_v2_frame(ManifestV2Frame::DeliveryProof(proof))
             .await
             .map_err(|error| DeliveryAuthorityErrorV2::Transport(error.to_string()))?;
-        let ack = match connection
-            .recv_manifest_v2_frame()
-            .await
-            .map_err(|error| DeliveryAuthorityErrorV2::Transport(error.to_string()))?
-        {
-            ManifestV2Frame::DeliveryProofAck(ack) => ack,
-            _ => return Err(DeliveryAuthorityErrorV2::InvalidProofAck),
-        };
-        let proof_digest =
-            canonical_manifest_v2_frame_body_digest(&ManifestV2Frame::DeliveryProof(proof))?;
-        if ack.identity != record.identity || ack.delivery_proof_digest != proof_digest {
-            return Err(DeliveryAuthorityErrorV2::InvalidProofAck);
-        }
-        record.proof_acknowledged = true;
-        store.save(record).await?;
         Ok(proof)
     }
 
@@ -503,11 +503,12 @@ impl ManifestV2DeliveryAuthority {
             if record.delivery_proof != Some(proof) {
                 return Err(DeliveryAuthorityErrorV2::InvalidProof);
             }
-            send_delivery_proof_ack(record.identity, proof, connection).await?;
             return Ok(proof);
         }
         let capability = record
-            .proof_capability
+            .accept
+            .as_ref()
+            .map(|accept| accept.proof_capability)
             .ok_or(DeliveryAuthorityErrorV2::InvalidRecord)?;
         let expected_result_digest = result_set_digest(&record.entry_results)?;
         if proof.identity != record.identity
@@ -527,65 +528,38 @@ impl ManifestV2DeliveryAuthority {
         record.delivery_proof = Some(proof);
         record.phase = SenderTransferPhaseV2::Delivered;
         store.save(record).await?;
-        send_delivery_proof_ack(record.identity, proof, connection).await?;
         Ok(proof)
     }
 
-    pub fn challenge(
-        identity: JobGenerationV2,
-    ) -> Result<ProofChallengeV2, DeliveryAuthorityErrorV2> {
-        let mut challenge_nonce = [0_u8; 32];
-        getrandom::fill(&mut challenge_nonce).map_err(|_| DeliveryAuthorityErrorV2::Entropy)?;
-        Ok(ProofChallengeV2 {
-            identity,
-            challenge_nonce,
-        })
-    }
-
-    pub fn answer_challenge(
-        challenge: ProofChallengeV2,
-        capability: ProofCapabilityV2,
-    ) -> ProofResponseV2 {
-        ProofResponseV2 {
-            identity: challenge.identity,
-            challenge_nonce: challenge.challenge_nonce,
-            challenge_mac: challenge_mac(capability, challenge.identity, challenge.challenge_nonce),
+    pub fn new_challenge_nonce() -> Result<[u8; 32], DeliveryAuthorityErrorV2> {
+        loop {
+            let mut challenge_nonce = [0_u8; 32];
+            getrandom::fill(&mut challenge_nonce).map_err(|_| DeliveryAuthorityErrorV2::Entropy)?;
+            if challenge_nonce != [0; 32] {
+                return Ok(challenge_nonce);
+            }
         }
     }
 
-    pub fn verify_challenge(
-        challenge: ProofChallengeV2,
-        response: ProofResponseV2,
+    pub fn answer_resume_challenge(
+        identity: JobGenerationV2,
+        challenge_nonce: [u8; 32],
+        capability: ProofCapabilityV2,
+    ) -> [u8; 32] {
+        challenge_mac(capability, identity, challenge_nonce)
+    }
+
+    pub fn verify_resume_challenge(
+        identity: JobGenerationV2,
+        challenge_nonce: [u8; 32],
+        response_mac: [u8; 32],
         capability: ProofCapabilityV2,
     ) -> Result<(), DeliveryAuthorityErrorV2> {
-        if response.identity != challenge.identity
-            || response.challenge_nonce != challenge.challenge_nonce
-            || response.challenge_mac
-                != challenge_mac(capability, challenge.identity, challenge.challenge_nonce)
-        {
+        if response_mac != challenge_mac(capability, identity, challenge_nonce) {
             return Err(DeliveryAuthorityErrorV2::InvalidProof);
         }
         Ok(())
     }
-}
-
-async fn send_delivery_proof_ack<C>(
-    identity: JobGenerationV2,
-    proof: DeliveryProofV2,
-    connection: &mut C,
-) -> Result<(), DeliveryAuthorityErrorV2>
-where
-    C: ManifestV2FrameConnection,
-{
-    let proof_digest =
-        canonical_manifest_v2_frame_body_digest(&ManifestV2Frame::DeliveryProof(proof))?;
-    connection
-        .send_manifest_v2_frame(ManifestV2Frame::DeliveryProofAck(DeliveryProofAckV2 {
-            identity,
-            delivery_proof_digest: proof_digest,
-        }))
-        .await
-        .map_err(|error| DeliveryAuthorityErrorV2::Transport(error.to_string()))
 }
 
 fn result_set_digest(

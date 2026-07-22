@@ -18,10 +18,13 @@ pub use envoix_protocol::{
     PeerDescriptor,
 };
 pub use envoix_session::{
-    BindAddrs, IdentityConfig, ManifestSendRequest, ManifestTransferSummary, MemoryIdentity,
-    SessionTransferSummary, TransferCancelToken, TransferDirection, TransferSummary,
+    BindAddrs, EndpointAddr, IdentityConfig, ManifestSendRequest, ManifestTransferSummary,
+    MemoryIdentity, PairingConfig, PendingManifestV2Receive, ReceiverManifestV2SessionSummary,
+    SenderManifestV2SessionSummary, SessionConfig, SessionError, SessionTransferSummary,
+    TransferCancelToken, TransferDirection, TransferSummary,
 };
 pub use envoix_storage::TransferReceipt;
+pub use envoix_types::PROTOCOL_VERSION;
 // Chunk-size bounds + validation are a transfer-engine constraint; they live in
 // envoix-transfer next to DEFAULT_CHUNK_SIZE and are reached through session.
 // The flow-control window bounds live in envoix-session (a transport tuning).

@@ -182,21 +182,17 @@ implementation. Frame tags are reserved in code:
 |---:|---|---|
 | 1 | `Offer` | S→R; structural digest + Manifest body |
 | 2 | `Accept` | R→S; job/generation, Manifest digest, Accept nonce, first-send proof capability, plan revision, root name plan, per-entry Receive/Reuse plan |
-| 3 | `AcceptCommittedAck` | S→R; job/generation + Accept body digest |
-| 4 | `EntryStart` | S→R; entry, effective Identity/Zstd encoding, plaintext block size |
-| 5 | `EntryContentDigest` | S→R; entry + set-or-equal BLAKE3 digest |
-| 6 | `EntryBlock` | S→R; entry, block index, plaintext offset/length, encoded length and bytes |
-| 7 | `EntryComplete` | S→R; entry, final size/digest, PayloadComplete/ReuseChosen |
-| 8 | `EntryResult` | R→S; entry, Saved/ReuseExisting result, final size/digest and optional final-component override |
-| 9 | `JobComplete` | S→R; canonical sender entry completion-set digest |
-| 10 | `DeliveryProof` | R→S; Manifest/result digests, receiver nonce, aggregate MAC |
-| 11 | `DeliveryProofAck` | S→R; delivery-proof digest |
-| 12 | `ResumeRequest` | S→R; job/generation and sender-known checkpoint digest |
-| 13 | `ResumeStatus` | R→S; canonical entry arbiter, next complete block, standing save/result facts |
-| 14 | `ProofChallenge` | S→R; fresh nonce after capability acknowledgment |
-| 15 | `ProofResponse` | R→S; domain-separated challenge MAC |
-| 16 | `Cancel` | Either direction; typed scope/reason without raw OS text |
-| 17 | `Error` | Either direction; #38 failure code, phase and optional entry ID |
+| 3 | `EntryStart` | S→R; entry, effective Identity/Zstd encoding, plaintext block size |
+| 4 | `EntryContentDigest` | Bidirectional; proposed set-or-equal BLAKE3 digest, then ContinuePayload/ReuseExisting decision |
+| 5 | `EntryBlock` | S→R; entry, block index, plaintext offset/length, encoded length and bytes |
+| 6 | `EntryComplete` | S→R; entry, final size/digest, PayloadComplete/ReuseChosen |
+| 7 | `EntryResult` | R→S; entry, Saved/ReuseExisting result, final size/digest and optional final-component override |
+| 8 | `JobComplete` | S→R; canonical sender entry completion-set digest |
+| 9 | `DeliveryProof` | R→S; Manifest/result digests, receiver nonce, aggregate MAC |
+| 10 | `ResumeRequest` | S→R first frame; immutable Offer, sender checkpoint and fresh challenge |
+| 11 | `ResumeStatus` | R→S; durable entry boundaries plus the challenge MAC |
+| 12 | `Cancel` | Either direction; typed scope/reason without raw OS text |
+| 13 | `Error` | Either direction; #38 failure code, phase and optional entry ID |
 
 Every frame after Offer repeats `job_id` and `generation`. `attempt_id` is bound
 to the authenticated connection/session context instead of being duplicated in
@@ -219,11 +215,11 @@ Accept                = P || manifest_digest: bytes32 || accept_nonce: bytes32
 RootPlan              = root_id: u32 || planned_name: string
 EntryPlan             = entry_id: u32 || disposition: u8
                         || next_plaintext_block: u64
-AcceptCommittedAck    = P || accept_body_digest: bytes32
 
 EntryStart            = P || entry_id: u32 || encoding: u8
                         || plaintext_block_bytes: u32
 EntryContentDigest    = P || entry_id: u32 || digest: bytes32
+                        || decision: u8
 EntryBlock            = P || entry_id: u32 || block_index: u64
                         || plaintext_offset: u64 || plaintext_length: u32
                         || encoded_length: u32 || encoded_bytes
@@ -237,19 +233,19 @@ JobComplete           = P || sender_completion_set_digest: bytes32
 DeliveryProof         = P || manifest_digest: bytes32
                         || result_set_digest: bytes32 || proof_nonce: bytes32
                         || proof_mac: bytes32
-DeliveryProofAck      = P || delivery_proof_digest: bytes32
 
-ResumeRequest         = P || accept_body_digest: bytes32
+ResumeRequest         = P || encoded_offer_length: u32 || encoded Offer
+                        || accept_body_digest: bytes32
                         || sender_checkpoint_digest: bytes32
+                        || challenge_nonce: bytes32
 ResumeStatus          = P || accept_body_digest: bytes32
                         || plan_revision: u32 || array<ResumeEntry>
+                        || challenge_nonce: bytes32 || challenge_mac: bytes32
 ResumeEntry           = entry_id: u32 || arbiter: u8
                         || next_plaintext_block: u64
                         || optional<content_digest: bytes32>
                         || optional<canonical EntryResult body>
 
-ProofChallenge        = P || challenge_nonce: bytes32
-ProofResponse         = P || challenge_nonce: bytes32 || challenge_mac: bytes32
 Cancel                = P || scope: u8 || optional<entry_id: u32>
                         || failure_code: u32
 Error                 = P || failure_code: u32 || phase: u8
@@ -262,6 +258,7 @@ Frozen enum tags:
 |---|---|
 | `EntryPlan.disposition` | `ReceivePayload=0`, `ReuseExisting=1` |
 | `EntryStart.encoding` | `Identity=0`, `Zstd=1` |
+| `EntryContentDigest.decision` | `Proposed=0`, `ContinuePayload=1`, `ReuseExisting=2` |
 | `EntryComplete.completion_choice` | `PayloadComplete=0`, `ReuseChosen=1` |
 | `EntryResult.result` | `Saved=0`, `ReusedExisting=1` |
 | `ResumeEntry.arbiter` | `PayloadOpen=0`, `ReuseChosen=1`, `PayloadCompleteChosen=2` |
@@ -273,16 +270,29 @@ results require a digest. `ReuseExisting` is invalid unless the receiver's
 provider matrix and stable opened identity permit it. `encoded_length` must
 equal the remaining frame payload bytes and stay within the encoded-block
 limit; `plaintext_offset` must equal `block_index * plaintext_block_bytes`
-except the last block may be shorter. Control frames are limited to 4 MiB;
-`EntryBlock` alone may use the encoded-block limit plus its fixed metadata.
+except the last block may be shorter. Ordinary control frames are limited to
+4 MiB; `ResumeRequest` is bounded to one maximum-size Offer plus 120 bytes, and
+`EntryBlock` uses the encoded-block limit plus its fixed metadata.
 
-The receiver sends the same first Accept bytes until `AcceptCommittedAck` is
-durably observed. Afterwards it never sends the raw capability again; reconnect
-uses `ProofChallenge/ProofResponse`. The sender and receiver hash canonical
-Accept, checkpoint, completion, result and proof bodies exactly as encoded, so
-replay equality is byte equality rather than reconstructed object equality.
+A new connection begins with `Offer` and receives `Accept`; it never sends a
+zero-filled resume sentinel. A reconnect begins with `ResumeRequest`, which
+carries the immutable Offer so the receiver can validate and display it before
+loading durable state. The sender persists Accept before its first payload
+frame. That first durably recorded payload frame is the implicit commitment:
+after it exists, the receiver rejects a plain Offer and requires an authenticated
+ResumeRequest. The fresh challenge and its MAC are folded into
+`ResumeRequest/ResumeStatus`.
 
-`proof_capability` is sent only inside the first encrypted Accept. Key material
+The receiver persists DeliveryProof before sending it and replays the same proof
+when a connection is lost. The sender enters Delivered only after validating and
+persisting that proof; no additional proof-Ack frame is required. The sender and
+receiver hash canonical Accept, checkpoint, completion, result and proof bodies
+exactly as encoded, so replay equality is byte equality rather than reconstructed
+object equality.
+
+`proof_capability` is sent only inside the encrypted Accept, which may be
+repeated only until the receiver has durably observed the first payload frame.
+Key material
 uses BLAKE3 `derive_key` with distinct exact contexts:
 
 ```text
@@ -456,8 +466,10 @@ Rules:
 
 1. `Known` digest may choose `ReuseExisting` before payload only when the
    destination holds a stable opened object identity.
-2. `Deferred` starts payload immediately. `EntryContentDigest` is set-or-equal:
-   the first value commits; exact duplicates replay; a different value fails.
+2. `Deferred` starts payload immediately. The sender proposes the first
+   `EntryContentDigest`; the receiver commits it set-or-equal and replies with
+   the same frame carrying `ContinuePayload` or `ReuseExisting`. Exact duplicate
+   proposals replay the committed decision; a different value fails.
 3. Receiver comparison and payload may race. Reuse wins only while the arbiter
    is `PayloadOpen`; sender stops at the next complete compression-block boundary.
 4. A complete block is decode-verified, BLAKE3-fed, flushed according to the

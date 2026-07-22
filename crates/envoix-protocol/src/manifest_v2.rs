@@ -39,21 +39,17 @@ pub struct ContentDigestV2(pub [u8; DIGEST_BYTES]);
 pub enum ManifestV2FrameType {
     Offer = 1,
     Accept = 2,
-    AcceptCommittedAck = 3,
-    EntryStart = 4,
-    EntryContentDigest = 5,
-    EntryBlock = 6,
-    EntryComplete = 7,
-    EntryResult = 8,
-    JobComplete = 9,
-    DeliveryProof = 10,
-    DeliveryProofAck = 11,
-    ResumeRequest = 12,
-    ResumeStatus = 13,
-    ProofChallenge = 14,
-    ProofResponse = 15,
-    Cancel = 16,
-    Error = 17,
+    EntryStart = 3,
+    EntryContentDigest = 4,
+    EntryBlock = 5,
+    EntryComplete = 6,
+    EntryResult = 7,
+    JobComplete = 8,
+    DeliveryProof = 9,
+    ResumeRequest = 10,
+    ResumeStatus = 11,
+    Cancel = 12,
+    Error = 13,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -105,7 +101,10 @@ pub enum EntryContentDigestV2 {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum SourceCompletenessV2 {
     Complete,
-    UserApprovedPartial { omitted_entry_count: u64 },
+    UserApprovedPartial {
+        inaccessible_boundary_count: u64,
+        omitted_entry_count: Option<u64>,
+    },
 }
 
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
@@ -267,7 +266,8 @@ impl ManifestV2 {
             if matches!(
                 root.completeness,
                 SourceCompletenessV2::UserApprovedPartial {
-                    omitted_entry_count: 0
+                    inaccessible_boundary_count: 0,
+                    ..
                 }
             ) {
                 return Err(ManifestV2ValidationError::EmptyPartialFact {
@@ -539,10 +539,18 @@ fn encode_manifest_body(manifest: &ManifestV2, output: &mut Vec<u8>) {
         match root.completeness {
             SourceCompletenessV2::Complete => output.push(0),
             SourceCompletenessV2::UserApprovedPartial {
+                inaccessible_boundary_count,
                 omitted_entry_count,
             } => {
                 output.push(1);
-                push_u64(output, omitted_entry_count);
+                push_u64(output, inaccessible_boundary_count);
+                match omitted_entry_count {
+                    Some(count) => {
+                        output.push(1);
+                        push_u64(output, count);
+                    }
+                    None => output.push(0),
+                }
             }
         }
     }
@@ -597,7 +605,12 @@ fn decode_manifest_body(reader: &mut Reader<'_>) -> Result<ManifestV2, ManifestV
         let completeness = match reader.read_u8()? {
             0 => SourceCompletenessV2::Complete,
             1 => SourceCompletenessV2::UserApprovedPartial {
-                omitted_entry_count: reader.read_u64()?,
+                inaccessible_boundary_count: reader.read_u64()?,
+                omitted_entry_count: match reader.read_u8()? {
+                    0 => None,
+                    1 => Some(reader.read_u64()?),
+                    other => return Err(ManifestV2CodecError::UnknownCompleteness(other)),
+                },
             },
             other => return Err(ManifestV2CodecError::UnknownCompleteness(other)),
         };
@@ -1038,7 +1051,6 @@ mod tests {
         let actual = [
             ManifestV2FrameType::Offer as u16,
             ManifestV2FrameType::Accept as u16,
-            ManifestV2FrameType::AcceptCommittedAck as u16,
             ManifestV2FrameType::EntryStart as u16,
             ManifestV2FrameType::EntryContentDigest as u16,
             ManifestV2FrameType::EntryBlock as u16,
@@ -1046,18 +1058,12 @@ mod tests {
             ManifestV2FrameType::EntryResult as u16,
             ManifestV2FrameType::JobComplete as u16,
             ManifestV2FrameType::DeliveryProof as u16,
-            ManifestV2FrameType::DeliveryProofAck as u16,
             ManifestV2FrameType::ResumeRequest as u16,
             ManifestV2FrameType::ResumeStatus as u16,
-            ManifestV2FrameType::ProofChallenge as u16,
-            ManifestV2FrameType::ProofResponse as u16,
             ManifestV2FrameType::Cancel as u16,
             ManifestV2FrameType::Error as u16,
         ];
-        assert_eq!(
-            actual,
-            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
-        );
+        assert_eq!(actual, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
     }
 
     #[test]

@@ -4,6 +4,7 @@ mod candidates;
 mod connection;
 mod endpoint;
 mod identity;
+mod manifest_v2_session;
 mod room;
 
 use std::future::Future;
@@ -24,14 +25,16 @@ pub use envoix_transfer::{
     MAX_INVENTORY_PAGE_SIZE, MIN_CHUNK_SIZE, ManifestEventSink, ManifestNoopEventSink,
     ManifestSendRequest, ManifestTransferEngine, ManifestTransferEvent, ManifestTransferSummary,
     ManifestV2DataError, ManifestV2DataPlane, ManifestV2DeliveryAuthority, ManifestV2PayloadSink,
-    NoopEventSink, PEER_INTERRUPT_MESSAGE, PEER_PAUSE_MESSAGE, POST_SAVE_RESERVE_BYTES,
-    PreparedFileSource, ReceiverDataPlaneLedgerV2, ReceiverDataPlaneStoreV2,
+    ManifestV2ProgressPhase, ManifestV2ProgressSink, ManifestV2ResultGate, NoopEventSink,
+    NoopManifestV2ResultGate, PEER_INTERRUPT_MESSAGE, PEER_PAUSE_MESSAGE, POST_SAVE_RESERVE_BYTES,
+    PreparedFileSource, ProviderSourceIssue, ReceiverDataPlaneLedgerV2, ReceiverDataPlaneStoreV2,
     ReceiverDataPlaneSummaryV2, ReceiverDeliveryRecordV2, ReceiverDeliveryStoreV2, SavedEntryV2,
-    SenderDataPlaneSummaryV2, SenderDeliveryRecordV2, SenderDeliveryStoreV2, SenderTransferPhaseV2,
-    SourceDecision, SourceIssue, SourceIssueKind, SourceItemId, SourceSelectionInfo,
-    SourceSelectionState, StorageDomainIdentityV2, TransferCancelToken, TransferEngine,
-    TransferEvent, TransferJobError, TransferJobStore, TransferSummary, USER_INTERRUPT_MESSAGE,
-    USER_PAUSE_MESSAGE, VerifiedEntryV2, discard_manifest_resume_state, validate_chunk_size,
+    SenderDataPlaneSummaryV2, SenderDeliveryRecordV2, SenderDeliveryStoreV2, SenderResumeIntentV2,
+    SenderTransferPhaseV2, SourceDecision, SourceIssue, SourceIssueKind, SourceItemId,
+    SourceSelectionInfo, SourceSelectionState, StorageDomainIdentityV2, TransferCancelToken,
+    TransferEngine, TransferEvent, TransferJobError, TransferJobStore, TransferSummary,
+    USER_INTERRUPT_MESSAGE, USER_PAUSE_MESSAGE, VerifiedEntryV2, discard_manifest_resume_state,
+    local_allocatable_bytes, sender_resume_intent, validate_chunk_size,
 };
 pub use envoix_types::TransferDirection;
 // Re-exported so the client facade reaches rendezvous-code helpers through its
@@ -49,13 +52,19 @@ pub use endpoint::{
 };
 use endpoint::{
     build_accept_endpoint, build_advertising_accept_endpoint, build_dial_endpoint,
+    build_manifest_v2_accept_endpoint, build_manifest_v2_advertising_accept_endpoint,
     build_transfer_accept_endpoint, build_transfer_advertising_accept_endpoint,
     peer_addr_from_descriptor,
 };
 pub use identity::{IdentityConfig, MemoryIdentity};
 pub use iroh::EndpointAddr;
+pub use manifest_v2_session::{
+    PendingManifestV2Receive, ReceiverManifestV2SessionSummary, SenderManifestV2SessionSummary,
+    receive_manifest_v2_offer, send_manifest_v2_manual, send_manifest_v2_to_endpoint_addr,
+};
 pub use room::{
-    receive_file_via_room, receive_transfer_via_room, send_file_via_room, send_manifest_via_room,
+    receive_file_via_room, receive_manifest_v2_offer_via_room, receive_transfer_via_room,
+    send_file_via_room, send_manifest_v2_via_room, send_manifest_via_room,
 };
 
 const MAX_AUTH_FAILURES: u32 = 50;
@@ -238,6 +247,50 @@ pub async fn bind_iroh_transfer_endpoint_enable_mdns(
 ) -> Result<BoundEndpoint, SessionError> {
     Ok(BoundEndpoint {
         local_endpoint: build_transfer_advertising_accept_endpoint(
+            listen_addrs.into(),
+            identity,
+            &None,
+            false,
+            candidates,
+            window,
+        )
+        .await?,
+        candidates: candidates.clone(),
+    })
+}
+
+/// Binds an endpoint that accepts only the canonical Manifest v2 protocol.
+pub async fn bind_iroh_manifest_v2_endpoint(
+    listen_addrs: impl Into<BindAddrs>,
+    identity: &IdentityConfig,
+    relay: &Option<String>,
+    relay_only: bool,
+    candidates: &CandidateFilter,
+    window: u32,
+) -> Result<BoundEndpoint, SessionError> {
+    Ok(BoundEndpoint {
+        local_endpoint: build_manifest_v2_accept_endpoint(
+            listen_addrs.into(),
+            identity,
+            relay,
+            relay_only,
+            candidates,
+            window,
+        )
+        .await?,
+        candidates: candidates.clone(),
+    })
+}
+
+/// Binds and advertises an endpoint that accepts only Manifest v2.
+pub async fn bind_iroh_manifest_v2_endpoint_enable_mdns(
+    listen_addrs: impl Into<BindAddrs>,
+    identity: &IdentityConfig,
+    candidates: &CandidateFilter,
+    window: u32,
+) -> Result<BoundEndpoint, SessionError> {
+    Ok(BoundEndpoint {
+        local_endpoint: build_manifest_v2_advertising_accept_endpoint(
             listen_addrs.into(),
             identity,
             &None,
@@ -509,6 +562,60 @@ pub async fn send_manifest_enable_mdns(
     result
 }
 
+/// Sends one sealed canonical job to the first mDNS-discovered Manifest v2
+/// receiver. Discovery never changes the data-plane engine.
+pub async fn send_manifest_v2_enable_mdns(
+    job: CanonicalTransferJob,
+    state_directory: PathBuf,
+    config: SessionConfig,
+    pairing: &PairingConfig,
+    events: Arc<dyn EventSink>,
+    cancel: TransferCancelToken,
+) -> Result<SenderManifestV2SessionSummary, SessionError> {
+    if job.manifest().is_none() {
+        return Err(CoreError::InvalidInput(
+            "transfer job must be sealed before mDNS discovery".into(),
+        ));
+    }
+    let discovery_endpoint = build_dial_endpoint(
+        &config.identity,
+        &config.data_relay(),
+        config.relay_only,
+        &config.candidates,
+        config.data_stream_window,
+    )
+    .await?;
+    let send_events = events.clone();
+    let send_cancel = cancel.clone();
+    let result = send_to_first_mdns_peer(
+        &discovery_endpoint,
+        events.as_ref(),
+        &cancel,
+        move |peer_addr| {
+            let job = job.clone();
+            let state_directory = state_directory.clone();
+            let config = config.clone();
+            let events = send_events.clone();
+            let cancel = send_cancel.clone();
+            async move {
+                send_manifest_v2_to_endpoint_addr(
+                    peer_addr,
+                    &job,
+                    state_directory,
+                    config,
+                    pairing,
+                    events,
+                    &cancel,
+                )
+                .await
+            }
+        },
+    )
+    .await;
+    discovery_endpoint.close().await;
+    result
+}
+
 async fn send_to_first_mdns_peer<T, F, Fut>(
     local_endpoint: &Endpoint,
     events: &dyn EventSink,
@@ -659,6 +766,65 @@ where
     on_bound_peer(peer, relay_urls);
     receive_one_authenticated_transfer(bound_endpoint, output_dir, config, pairing, events, cancel)
         .await
+}
+
+/// Binds a Manifest-v2-only endpoint, reports its descriptor, then returns the
+/// authenticated Offer before any destination/payload decision.
+pub async fn receive_manifest_v2_offer_with_bound_peer<F>(
+    listen_addrs: impl Into<BindAddrs>,
+    config: SessionConfig,
+    pairing: &PairingConfig,
+    events: Arc<dyn EventSink>,
+    on_bound_peer: F,
+    cancel: &TransferCancelToken,
+) -> Result<PendingManifestV2Receive, SessionError>
+where
+    F: FnOnce(PeerDescriptor, Vec<String>) + Send,
+{
+    let bound_endpoint = bind_iroh_manifest_v2_endpoint(
+        listen_addrs,
+        &config.identity,
+        &config.data_relay(),
+        config.relay_only,
+        &config.candidates,
+        config.data_stream_window,
+    )
+    .await?;
+    let endpoint_addr = bound_endpoint
+        .ready_endpoint_addr(config.data_relay().is_some())
+        .await;
+    let peer = bound_endpoint.peer_descriptor()?;
+    let relay_urls = endpoint_addr
+        .relay_urls()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    on_bound_peer(peer, relay_urls);
+    receive_manifest_v2_offer(bound_endpoint, pairing, events, cancel).await
+}
+
+/// Advertises a Manifest-v2-only receiver over mDNS and returns its
+/// authenticated Offer before payload begins.
+pub async fn receive_manifest_v2_offer_enable_mdns<F>(
+    listen_addrs: impl Into<BindAddrs>,
+    config: SessionConfig,
+    pairing: &PairingConfig,
+    events: Arc<dyn EventSink>,
+    on_bound_peer: F,
+    cancel: &TransferCancelToken,
+) -> Result<PendingManifestV2Receive, SessionError>
+where
+    F: FnOnce(PeerDescriptor, Vec<String>) + Send,
+{
+    let bound_endpoint = bind_iroh_manifest_v2_endpoint_enable_mdns(
+        listen_addrs,
+        &config.identity,
+        &config.candidates,
+        config.data_stream_window,
+    )
+    .await?;
+    let peer = bound_endpoint.peer_descriptor()?;
+    on_bound_peer(peer, Vec::new());
+    receive_manifest_v2_offer(bound_endpoint, pairing, events, cancel).await
 }
 
 /// Receives one file over an mDNS-advertised endpoint: binds an mDNS endpoint,

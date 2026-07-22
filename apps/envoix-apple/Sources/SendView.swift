@@ -13,8 +13,8 @@ private final class SelectedResourceAccessGroup {
     }
 }
 
-func sendSelectionRequiresManifest(_ urls: [URL]) -> Bool {
-    guard urls.count == 1, let url = urls.first else { return urls.count > 1 }
+func sendSelectionContainsDirectory(_ urls: [URL]) -> Bool {
+    guard urls.count == 1, let url = urls.first else { return false }
     let values = try? url.resourceValues(forKeys: [.isDirectoryKey])
     return values?.isDirectory == true
 }
@@ -131,8 +131,12 @@ struct SendView: View {
         }
         .onAppear(perform: adoptSharedSelectionIfAvailable)
         .onAppear(perform: applyInitialPairingInputIfNeeded)
+        .onAppear(perform: prepareCurrentSelectionIfNeeded)
         .onChange(of: model.pendingSendSelection?.id) { _ in
             adoptSharedSelectionIfAvailable()
+        }
+        .onChange(of: viewModel.preparedManifestSourcePaths) { paths in
+            adoptPreparedManifestPaths(paths)
         }
         .onDisappear(perform: cancelPhotoImport)
         #else
@@ -143,6 +147,10 @@ struct SendView: View {
                 .padding(.top, 12)
         }
         .onAppear(perform: applyInitialPairingInputIfNeeded)
+        .onAppear(perform: prepareCurrentSelectionIfNeeded)
+        .onChange(of: viewModel.preparedManifestSourcePaths) { paths in
+            adoptPreparedManifestPaths(paths)
+        }
         #endif
     }
 
@@ -908,7 +916,9 @@ struct SendView: View {
     }
 
     private var canSend: Bool {
-        guard !selectedItems.isEmpty else { return false }
+        guard !selectedItems.isEmpty,
+              viewModel.isManifestSelectionReady,
+              viewModel.pendingSourceSelections.isEmpty else { return false }
         switch mode {
         case .room:
             return !roomCode.trimmed.isEmpty || pairingInvite != nil
@@ -960,7 +970,7 @@ struct SendView: View {
                 language: uiLanguage
             )
             #endif
-        case 1 where sendSelectionRequiresManifest(selectedItems):
+        case 1 where sendSelectionContainsDirectory(selectedItems):
             return AppText.value("Folder structure will be preserved.", "将完整保留文件夹结构。", language: uiLanguage)
         case 1:
             #if os(iOS)
@@ -982,7 +992,7 @@ struct SendView: View {
             #endif
         }
         if selectedItems.count > 1 { return "square.stack.3d.up.fill" }
-        return sendSelectionRequiresManifest(selectedItems) ? "folder.fill" : "doc.fill"
+        return sendSelectionContainsDirectory(selectedItems) ? "folder.fill" : "doc.fill"
     }
 
     @discardableResult
@@ -1012,7 +1022,29 @@ struct SendView: View {
         selectedPendingSelectionID = pendingSelectionID
         selectedItems = accepted
         filePathInput = accepted.count == 1 ? accepted[0].path : ""
+        viewModel.prepareManifestSelection(
+            selectedPaths: accepted.map(\.path),
+            sourceAccess: access
+        )
         return true
+    }
+
+    private func prepareCurrentSelectionIfNeeded() {
+        if selectedItems.isEmpty, !viewModel.preparedManifestSourcePaths.isEmpty {
+            adoptPreparedManifestPaths(viewModel.preparedManifestSourcePaths)
+            return
+        }
+        guard !selectedItems.isEmpty else { return }
+        viewModel.prepareManifestSelection(
+            selectedPaths: selectedItems.map(\.path),
+            sourceAccess: selectedSourceAccess
+        )
+    }
+
+    private func adoptPreparedManifestPaths(_ paths: [String]) {
+        guard !viewModel.isBusy else { return }
+        selectedItems = paths.map { URL(fileURLWithPath: $0).standardizedFileURL }
+        filePathInput = selectedItems.count == 1 ? selectedItems[0].path : ""
     }
 
     #if os(iOS)
@@ -1255,59 +1287,32 @@ struct SendView: View {
 
     private func startRoomSend(code: String, settings: EnvoixRuntimeSettings) {
         let access = selectedSourceAccessForTransfer()
-        if sendSelectionRequiresManifest(selectedItems) {
-            viewModel.startSendingManifestWithRoom(
-                selectedPaths: selectedItems.map(\.path),
-                code: code,
-                settings: settings,
-                sourceAccess: access
-            )
-        } else if let file = selectedItems.first {
-            viewModel.startSendingWithRoom(
-                filePath: file.path,
-                code: code,
-                settings: settings,
-                sourceAccess: access
-            )
-        }
+        viewModel.startSendingManifestWithRoom(
+            selectedPaths: selectedItems.map(\.path),
+            code: code,
+            settings: settings,
+            sourceAccess: access
+        )
     }
 
     private func startInviteSend(invite: String, settings: EnvoixRuntimeSettings) {
         let access = selectedSourceAccessForTransfer()
-        if sendSelectionRequiresManifest(selectedItems) {
-            viewModel.startSendingManifestWithInvite(
-                selectedPaths: selectedItems.map(\.path),
-                invite: invite,
-                settings: settings,
-                sourceAccess: access
-            )
-        } else if let file = selectedItems.first {
-            viewModel.startSendingWithInvite(
-                filePath: file.path,
-                invite: invite,
-                settings: settings,
-                sourceAccess: access
-            )
-        }
+        viewModel.startSendingManifestWithInvite(
+            selectedPaths: selectedItems.map(\.path),
+            invite: invite,
+            settings: settings,
+            sourceAccess: access
+        )
     }
 
     private func startTokenSend(token: String, settings: EnvoixRuntimeSettings) {
         let access = selectedSourceAccessForTransfer()
-        if sendSelectionRequiresManifest(selectedItems) {
-            viewModel.startSendingManifestWithToken(
-                selectedPaths: selectedItems.map(\.path),
-                token: token,
-                settings: settings,
-                sourceAccess: access
-            )
-        } else if let file = selectedItems.first {
-            viewModel.startSendingWithToken(
-                filePath: file.path,
-                token: token,
-                settings: settings,
-                sourceAccess: access
-            )
-        }
+        viewModel.startSendingManifestWithToken(
+            selectedPaths: selectedItems.map(\.path),
+            token: token,
+            settings: settings,
+            sourceAccess: access
+        )
     }
 
     private func primaryButtonAction() {

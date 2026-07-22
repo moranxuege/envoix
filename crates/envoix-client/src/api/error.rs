@@ -4,7 +4,7 @@
 
 use std::fmt;
 
-use envoix_error::CoreError;
+use envoix_error::{CoreError, TransferCause};
 use envoix_session::{
     PEER_INTERRUPT_MESSAGE, PEER_PAUSE_MESSAGE, TransferDirection, USER_INTERRUPT_MESSAGE,
     USER_PAUSE_MESSAGE,
@@ -100,6 +100,18 @@ pub enum FailureCode {
     UnsupportedFeature,
     Timeout,
     InternalError,
+    SenderSourceUnavailable,
+    SenderPermissionLost,
+    SenderSourceChanged,
+    SenderItemRemoved,
+    SenderCanceled,
+    ProtocolOrIntegrityFailure,
+    ReceiverSpaceInsufficient,
+    ReceiverDestinationDecisionRequired,
+    ReceiverDestinationUnavailable,
+    ReceiverSaveFailed,
+    ReceiverReusedObjectLost,
+    ReceiverFinalizationOutcomeUnknown,
     Unknown,
 }
 
@@ -188,6 +200,9 @@ pub struct TransferError {
     pub kind: ErrorKind,
     /// Human-readable details.
     pub message: String,
+    /// Exact cause supplied by the canonical pipeline. Legacy paths leave it
+    /// unset and retain their coarse fallback classification.
+    pub failure_code: Option<FailureCode>,
 }
 
 impl TransferError {
@@ -197,6 +212,7 @@ impl TransferError {
             phase: Phase::Setup,
             kind: ErrorKind::Input,
             message: message.into(),
+            failure_code: None,
         }
     }
 
@@ -206,6 +222,7 @@ impl TransferError {
             phase,
             kind: ErrorKind::Cancelled,
             message: "interrupted before completion".into(),
+            failure_code: None,
         }
     }
 
@@ -215,39 +232,46 @@ impl TransferError {
             phase,
             kind: ErrorKind::Transport,
             message: message.into(),
+            failure_code: None,
         }
     }
 
     /// Classifies an internal error, attaching the phase the transfer had
     /// reached when it surfaced.
     pub(crate) fn from_core(error: CoreError, phase: Phase) -> Self {
-        let (kind, message) = match error {
-            CoreError::InvalidInput(message) => (ErrorKind::Input, message),
-            CoreError::Io(message) => (ErrorKind::Io, message),
-            CoreError::Protocol(message) => (ErrorKind::Protocol, message),
-            CoreError::Transport(message) => (ErrorKind::Transport, message),
-            CoreError::Crypto(message) => (ErrorKind::Crypto, message),
-            CoreError::Storage(message) => (ErrorKind::Storage, message),
-            CoreError::Discovery(message) => (ErrorKind::Discovery, message),
+        let (kind, message, failure_code) = match error {
+            CoreError::InvalidInput(message) => (ErrorKind::Input, message, None),
+            CoreError::Io(message) => (ErrorKind::Io, message, None),
+            CoreError::Protocol(message) => (ErrorKind::Protocol, message, None),
+            CoreError::Transport(message) => (ErrorKind::Transport, message, None),
+            CoreError::Crypto(message) => (ErrorKind::Crypto, message, None),
+            CoreError::Storage(message) => (ErrorKind::Storage, message, None),
+            CoreError::Discovery(message) => (ErrorKind::Discovery, message, None),
             CoreError::Transfer(message) if message == USER_INTERRUPT_MESSAGE => {
-                (ErrorKind::Cancelled, message)
+                (ErrorKind::Cancelled, message, None)
             }
             CoreError::Transfer(message) if message == PEER_INTERRUPT_MESSAGE => {
-                (ErrorKind::Cancelled, message)
+                (ErrorKind::Cancelled, message, None)
             }
             CoreError::Transfer(message) if message == USER_PAUSE_MESSAGE => {
-                (ErrorKind::Paused, message)
+                (ErrorKind::Paused, message, None)
             }
             CoreError::Transfer(message) if message == PEER_PAUSE_MESSAGE => {
-                (ErrorKind::Paused, message)
+                (ErrorKind::Paused, message, None)
             }
-            CoreError::Transfer(message) => (ErrorKind::Transfer, message),
-            CoreError::Cancelled => (ErrorKind::Cancelled, "operation cancelled".into()),
+            CoreError::Transfer(message) => (ErrorKind::Transfer, message, None),
+            CoreError::Cause { cause, detail } => (
+                ErrorKind::Transfer,
+                detail,
+                Some(failure_code_for_cause(cause)),
+            ),
+            CoreError::Cancelled => (ErrorKind::Cancelled, "operation cancelled".into(), None),
         };
         Self {
             phase,
             kind,
             message,
+            failure_code,
         }
     }
 
@@ -270,6 +294,9 @@ impl TransferError {
     }
 
     fn failure_code(&self) -> FailureCode {
+        if let Some(code) = self.failure_code {
+            return code;
+        }
         let message = self.message.to_ascii_lowercase();
         match self.kind {
             ErrorKind::Cancelled if contains_any(&message, &["peer", "other device"]) => {
@@ -295,8 +322,30 @@ impl TransferError {
 
     fn failure_phase(&self, code: FailureCode) -> FailurePhase {
         let message = self.message.to_ascii_lowercase();
-        if code == FailureCode::HashMismatch || contains_any(&message, &["hash", "verify"]) {
+        if matches!(
+            code,
+            FailureCode::HashMismatch
+                | FailureCode::SenderSourceChanged
+                | FailureCode::ProtocolOrIntegrityFailure
+        ) || contains_any(&message, &["hash", "verify"])
+        {
             return FailurePhase::Verifying;
+        }
+        if matches!(
+            code,
+            FailureCode::ReceiverDestinationDecisionRequired
+                | FailureCode::ReceiverDestinationUnavailable
+                | FailureCode::ReceiverSpaceInsufficient
+        ) {
+            return FailurePhase::Negotiating;
+        }
+        if matches!(
+            code,
+            FailureCode::ReceiverSaveFailed
+                | FailureCode::ReceiverReusedObjectLost
+                | FailureCode::ReceiverFinalizationOutcomeUnknown
+        ) {
+            return FailurePhase::Committing;
         }
         if contains_any(&message, &["confirm completion", "completeack", "ack"]) {
             return FailurePhase::Acknowledging;
@@ -326,11 +375,45 @@ impl TransferError {
             FailureCode::UserCanceled
             | FailureCode::PermissionDenied
             | FailureCode::DiskFull
-            | FailureCode::DestinationConflict => FailureOrigin::Local,
+            | FailureCode::DestinationConflict
+            | FailureCode::SenderSourceUnavailable
+            | FailureCode::SenderPermissionLost
+            | FailureCode::SenderSourceChanged
+            | FailureCode::SenderItemRemoved
+            | FailureCode::SenderCanceled
+            | FailureCode::ReceiverSpaceInsufficient
+            | FailureCode::ReceiverDestinationDecisionRequired
+            | FailureCode::ReceiverDestinationUnavailable
+            | FailureCode::ReceiverSaveFailed
+            | FailureCode::ReceiverReusedObjectLost
+            | FailureCode::ReceiverFinalizationOutcomeUnknown => FailureOrigin::Local,
             _ if contains_any(&message, &["peer reported", "by peer", "closed by peer"]) => {
                 FailureOrigin::Peer
             }
             _ => FailureOrigin::Unknown,
+        }
+    }
+}
+
+fn failure_code_for_cause(cause: TransferCause) -> FailureCode {
+    match cause {
+        TransferCause::SenderSourceUnavailable => FailureCode::SenderSourceUnavailable,
+        TransferCause::SenderPermissionLost => FailureCode::SenderPermissionLost,
+        TransferCause::SenderSourceChanged => FailureCode::SenderSourceChanged,
+        TransferCause::SenderItemRemoved => FailureCode::SenderItemRemoved,
+        TransferCause::SenderCanceled => FailureCode::SenderCanceled,
+        TransferCause::ProtocolOrIntegrityFailure => FailureCode::ProtocolOrIntegrityFailure,
+        TransferCause::ReceiverSpaceInsufficient => FailureCode::ReceiverSpaceInsufficient,
+        TransferCause::ReceiverDestinationDecisionRequired => {
+            FailureCode::ReceiverDestinationDecisionRequired
+        }
+        TransferCause::ReceiverDestinationUnavailable => {
+            FailureCode::ReceiverDestinationUnavailable
+        }
+        TransferCause::ReceiverSaveFailed => FailureCode::ReceiverSaveFailed,
+        TransferCause::ReceiverReusedObjectLost => FailureCode::ReceiverReusedObjectLost,
+        TransferCause::ReceiverFinalizationOutcomeUnknown => {
+            FailureCode::ReceiverFinalizationOutcomeUnknown
         }
     }
 }
@@ -396,17 +479,33 @@ fn classify_transfer_message(message: &str) -> FailureCode {
 
 fn failure_category(code: FailureCode) -> FailureCategory {
     match code {
-        FailureCode::UserCanceled | FailureCode::PeerCanceled => FailureCategory::User,
+        FailureCode::UserCanceled
+        | FailureCode::PeerCanceled
+        | FailureCode::SenderItemRemoved
+        | FailureCode::SenderCanceled => FailureCategory::User,
         FailureCode::NetworkLost | FailureCode::PeerUnreachable | FailureCode::Timeout => {
             FailureCategory::Network
         }
         FailureCode::AuthenticationFailed => FailureCategory::Authentication,
-        FailureCode::PermissionDenied => FailureCategory::Permission,
-        FailureCode::DiskFull | FailureCode::DestinationConflict => FailureCategory::Storage,
-        FailureCode::HashMismatch => FailureCategory::Integrity,
+        FailureCode::PermissionDenied | FailureCode::SenderPermissionLost => {
+            FailureCategory::Permission
+        }
+        FailureCode::DiskFull
+        | FailureCode::DestinationConflict
+        | FailureCode::ReceiverSpaceInsufficient
+        | FailureCode::ReceiverDestinationDecisionRequired
+        | FailureCode::ReceiverDestinationUnavailable
+        | FailureCode::ReceiverSaveFailed
+        | FailureCode::ReceiverReusedObjectLost
+        | FailureCode::ReceiverFinalizationOutcomeUnknown => FailureCategory::Storage,
+        FailureCode::HashMismatch
+        | FailureCode::SenderSourceChanged
+        | FailureCode::ProtocolOrIntegrityFailure => FailureCategory::Integrity,
         FailureCode::ProtocolError => FailureCategory::Protocol,
         FailureCode::UnsupportedFeature => FailureCategory::Unsupported,
-        FailureCode::InternalError => FailureCategory::Internal,
+        FailureCode::InternalError | FailureCode::SenderSourceUnavailable => {
+            FailureCategory::Internal
+        }
         FailureCode::Unknown => FailureCategory::Unknown,
     }
 }
@@ -420,6 +519,15 @@ fn retryable(code: FailureCode) -> bool {
             | FailureCode::PermissionDenied
             | FailureCode::DiskFull
             | FailureCode::DestinationConflict
+            | FailureCode::SenderSourceUnavailable
+            | FailureCode::SenderPermissionLost
+            | FailureCode::SenderSourceChanged
+            | FailureCode::ReceiverSpaceInsufficient
+            | FailureCode::ReceiverDestinationDecisionRequired
+            | FailureCode::ReceiverDestinationUnavailable
+            | FailureCode::ReceiverSaveFailed
+            | FailureCode::ReceiverReusedObjectLost
+            | FailureCode::ReceiverFinalizationOutcomeUnknown
     )
 }
 
@@ -435,7 +543,17 @@ fn recovery_action(code: FailureCode, message: &str) -> RecoveryAction {
         FailureCode::PermissionDenied | FailureCode::DestinationConflict => {
             RecoveryAction::ChooseFolder
         }
-        FailureCode::DiskFull => RecoveryAction::ChooseFolder,
+        FailureCode::DiskFull
+        | FailureCode::ReceiverSpaceInsufficient
+        | FailureCode::ReceiverDestinationDecisionRequired
+        | FailureCode::ReceiverDestinationUnavailable
+        | FailureCode::ReceiverSaveFailed
+        | FailureCode::ReceiverReusedObjectLost
+        | FailureCode::ReceiverFinalizationOutcomeUnknown => RecoveryAction::ChooseFolder,
+        FailureCode::SenderSourceUnavailable | FailureCode::SenderSourceChanged => {
+            RecoveryAction::Retry
+        }
+        FailureCode::SenderPermissionLost => RecoveryAction::OpenSettings,
         FailureCode::AuthenticationFailed => RecoveryAction::RePair,
         FailureCode::UnsupportedFeature => RecoveryAction::UpdateApp,
         _ => RecoveryAction::None,
@@ -457,6 +575,22 @@ fn user_message_key(code: FailureCode) -> &'static str {
         FailureCode::UnsupportedFeature => "transfer.unsupported_feature",
         FailureCode::Timeout => "transfer.timeout",
         FailureCode::InternalError => "transfer.internal_error",
+        FailureCode::SenderSourceUnavailable => "transfer.sender_source_unavailable",
+        FailureCode::SenderPermissionLost => "transfer.sender_permission_lost",
+        FailureCode::SenderSourceChanged => "transfer.sender_source_changed",
+        FailureCode::SenderItemRemoved => "transfer.sender_item_removed",
+        FailureCode::SenderCanceled => "transfer.sender_canceled",
+        FailureCode::ProtocolOrIntegrityFailure => "transfer.protocol_or_integrity_failure",
+        FailureCode::ReceiverSpaceInsufficient => "transfer.receiver_space_insufficient",
+        FailureCode::ReceiverDestinationDecisionRequired => {
+            "transfer.receiver_destination_decision_required"
+        }
+        FailureCode::ReceiverDestinationUnavailable => "transfer.receiver_destination_unavailable",
+        FailureCode::ReceiverSaveFailed => "transfer.receiver_save_failed",
+        FailureCode::ReceiverReusedObjectLost => "transfer.receiver_reused_object_lost",
+        FailureCode::ReceiverFinalizationOutcomeUnknown => {
+            "transfer.receiver_finalization_outcome_unknown"
+        }
         FailureCode::Unknown => "transfer.unknown",
     }
 }

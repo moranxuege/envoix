@@ -312,6 +312,18 @@ pub enum FfiFailureCode {
     UnsupportedFeature,
     Timeout,
     InternalError,
+    SenderSourceUnavailable,
+    SenderPermissionLost,
+    SenderSourceChanged,
+    SenderItemRemoved,
+    SenderCanceled,
+    ProtocolOrIntegrityFailure,
+    ReceiverSpaceInsufficient,
+    ReceiverDestinationDecisionRequired,
+    ReceiverDestinationUnavailable,
+    ReceiverSaveFailed,
+    ReceiverReusedObjectLost,
+    ReceiverFinalizationOutcomeUnknown,
     Unknown,
 }
 

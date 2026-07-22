@@ -2107,6 +2107,24 @@ fn ffi_failure_code(code: FailureCode) -> FfiFailureCode {
         FailureCode::UnsupportedFeature => FfiFailureCode::UnsupportedFeature,
         FailureCode::Timeout => FfiFailureCode::Timeout,
         FailureCode::InternalError => FfiFailureCode::InternalError,
+        FailureCode::SenderSourceUnavailable => FfiFailureCode::SenderSourceUnavailable,
+        FailureCode::SenderPermissionLost => FfiFailureCode::SenderPermissionLost,
+        FailureCode::SenderSourceChanged => FfiFailureCode::SenderSourceChanged,
+        FailureCode::SenderItemRemoved => FfiFailureCode::SenderItemRemoved,
+        FailureCode::SenderCanceled => FfiFailureCode::SenderCanceled,
+        FailureCode::ProtocolOrIntegrityFailure => FfiFailureCode::ProtocolOrIntegrityFailure,
+        FailureCode::ReceiverSpaceInsufficient => FfiFailureCode::ReceiverSpaceInsufficient,
+        FailureCode::ReceiverDestinationDecisionRequired => {
+            FfiFailureCode::ReceiverDestinationDecisionRequired
+        }
+        FailureCode::ReceiverDestinationUnavailable => {
+            FfiFailureCode::ReceiverDestinationUnavailable
+        }
+        FailureCode::ReceiverSaveFailed => FfiFailureCode::ReceiverSaveFailed,
+        FailureCode::ReceiverReusedObjectLost => FfiFailureCode::ReceiverReusedObjectLost,
+        FailureCode::ReceiverFinalizationOutcomeUnknown => {
+            FfiFailureCode::ReceiverFinalizationOutcomeUnknown
+        }
         FailureCode::Unknown => FfiFailureCode::Unknown,
     }
 }

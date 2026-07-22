@@ -44,6 +44,17 @@ pub enum DestinationDecisionV2 {
     ContinueWithCopyAfterVerify,
 }
 
+/// Returns bytes currently allocatable by an ordinary user on the storage
+/// domain containing `path`. The provider must already have authorized and
+/// created the directory; an unknown result is never treated as unlimited.
+pub fn local_allocatable_bytes(path: &Path) -> Result<u64, DestinationPlanErrorV2> {
+    let stats = rustix::fs::statvfs(path)?;
+    stats
+        .f_bavail
+        .checked_mul(stats.f_frsize)
+        .ok_or(DestinationPlanErrorV2::SpaceOverflow)
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct StorageDomainIdentityV2 {
     pub provider: String,
@@ -146,12 +157,6 @@ pub enum DestinationPlanErrorV2 {
     InvalidEntryState,
     #[error(transparent)]
     Io(#[from] std::io::Error),
-}
-
-impl From<DestinationPlanErrorV2> for ManifestV2DataError {
-    fn from(error: DestinationPlanErrorV2) -> Self {
-        ManifestV2DataError::Destination(error.to_string())
-    }
 }
 
 impl DestinationWritePlanV2 {
@@ -268,6 +273,74 @@ impl DestinationWritePlanV2 {
             .get(root_id as usize)
             .filter(|plan| plan.root_id == root_id)
             .map(|plan| self.target_directory.join(&plan.planned_name))
+    }
+
+    pub async fn validate_resume_request(
+        &self,
+        offer: &ManifestOfferV2,
+        request: &DestinationRequestV2,
+    ) -> Result<(), DestinationPlanErrorV2> {
+        self.validate_shape()?;
+        let target = fs::canonicalize(&request.target_directory).await?;
+        let mode_matches = matches!(
+            (self.mode, request.decision),
+            (
+                DestinationModeV2::DirectSave,
+                DestinationDecisionV2::UseDirectSave
+            ) | (
+                DestinationModeV2::CopyAfterVerify,
+                DestinationDecisionV2::ContinueWithCopyAfterVerify
+            )
+        );
+        if self.job_id != offer.manifest.job_id
+            || self.generation != offer.manifest.generation
+            || self.root_plans.len() != offer.manifest.roots.len()
+            || self.target_directory != target
+            || self.storage_domain.stable_object_identity != request.stable_object_identity
+            || !mode_matches
+            || self.exceptional_transfer_approved && !request.exceptional_transfer_approved
+        {
+            return Err(DestinationPlanErrorV2::InvalidEntryState);
+        }
+        if self.mode == DestinationModeV2::CopyAfterVerify {
+            let staging = request
+                .copy_staging_directory
+                .as_ref()
+                .ok_or(DestinationPlanErrorV2::MissingCopyStaging)?;
+            let staging = fs::canonicalize(staging).await?;
+            if !self
+                .staging_directory
+                .starts_with(staging.join("envoix-staging-v2"))
+            {
+                return Err(DestinationPlanErrorV2::InvalidEntryState);
+            }
+        }
+        let current_domain = local_storage_domain(
+            &self.target_directory,
+            self.storage_domain.stable_object_identity,
+        )
+        .await?;
+        if current_domain != self.storage_domain {
+            return Err(DestinationPlanErrorV2::InvalidEntryState);
+        }
+        let copy_staging_same_domain = if self.mode == DestinationModeV2::CopyAfterVerify {
+            same_storage_domain(
+                &self.target_directory,
+                request
+                    .copy_staging_directory
+                    .as_deref()
+                    .ok_or(DestinationPlanErrorV2::MissingCopyStaging)?,
+            )
+            .await?
+        } else {
+            false
+        };
+        validate_space(
+            &offer.manifest,
+            request,
+            self.mode,
+            copy_staging_same_domain,
+        )
     }
 
     fn validate_shape(&self) -> Result<(), DestinationPlanErrorV2> {
@@ -626,6 +699,56 @@ impl LocalDestinationProviderV2 {
 
     pub fn plan(&self) -> &DestinationWritePlanV2 {
         &self.plan
+    }
+
+    /// Reconciles durable block boundaries with receiver-owned staging before
+    /// advertising ResumeStatus. A missing/inconsistent incomplete payload is
+    /// reset to block zero; an already-finalized root is left for save-intent
+    /// adoption and is never downloaded again.
+    pub async fn reconcile_resume(
+        &self,
+        ledger: &mut crate::ReceiverDataPlaneLedgerV2,
+        store: &crate::ReceiverDataPlaneStoreV2,
+    ) -> Result<(), ManifestV2DataError> {
+        for (entry_id, next_plaintext_block, plaintext_bytes, payload_complete) in
+            ledger.pending_payload_boundaries()
+        {
+            if next_plaintext_block == 0 && !payload_complete {
+                continue;
+            }
+            let entry = &self.manifest.entries[entry_id as usize];
+            let root_state = &self.save_ledger.roots[entry.root_id as usize];
+            if matches!(
+                root_state,
+                RootSaveStateV2::Saved { .. } | RootSaveStateV2::FinalizeIntent { .. }
+            ) && fs::try_exists(
+                self.plan
+                    .target_path_for_root(entry.root_id)
+                    .ok_or(DestinationPlanErrorV2::InvalidEntryState)?,
+            )
+            .await?
+            {
+                continue;
+            }
+            let path = &self.entry_paths[entry_id as usize];
+            let boundary_is_owned = match fs::metadata(path).await {
+                Ok(metadata) => metadata.is_file() && metadata.len() == plaintext_bytes,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => return Err(error.into()),
+            };
+            if boundary_is_owned {
+                continue;
+            }
+            match fs::remove_file(path).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            ledger
+                .reset_payload_checkpoint(&self.manifest, entry_id, store)
+                .await?;
+        }
+        Ok(())
     }
 
     async fn try_open_reuse(

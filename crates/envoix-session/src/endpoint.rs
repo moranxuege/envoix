@@ -673,7 +673,32 @@ pub(crate) async fn build_transfer_accept_endpoint(
     build_endpoint(
         Some(listen_addrs),
         identity,
-        &[TransferProtocol::SingleFileV1, TransferProtocol::ManifestV1],
+        &[
+            TransferProtocol::SingleFileV1,
+            TransferProtocol::ManifestV1,
+            TransferProtocol::ManifestV2,
+        ],
+        false,
+        relay,
+        relay_only,
+        candidates,
+        window,
+    )
+    .await
+}
+
+pub(crate) async fn build_manifest_v2_accept_endpoint(
+    listen_addrs: BindAddrs,
+    identity: &IdentityConfig,
+    relay: &Option<String>,
+    relay_only: bool,
+    candidates: &CandidateFilter,
+    window: u32,
+) -> Result<Endpoint, SessionError> {
+    build_endpoint(
+        Some(listen_addrs),
+        identity,
+        &[TransferProtocol::ManifestV2],
         false,
         relay,
         relay_only,
@@ -715,7 +740,32 @@ pub(crate) async fn build_transfer_advertising_accept_endpoint(
     build_endpoint(
         Some(listen_addrs),
         identity,
-        &[TransferProtocol::SingleFileV1, TransferProtocol::ManifestV1],
+        &[
+            TransferProtocol::SingleFileV1,
+            TransferProtocol::ManifestV1,
+            TransferProtocol::ManifestV2,
+        ],
+        true,
+        relay,
+        relay_only,
+        candidates,
+        window,
+    )
+    .await
+}
+
+pub(crate) async fn build_manifest_v2_advertising_accept_endpoint(
+    listen_addrs: BindAddrs,
+    identity: &IdentityConfig,
+    relay: &Option<String>,
+    relay_only: bool,
+    candidates: &CandidateFilter,
+    window: u32,
+) -> Result<Endpoint, SessionError> {
+    build_endpoint(
+        Some(listen_addrs),
+        identity,
+        &[TransferProtocol::ManifestV2],
         true,
         relay,
         relay_only,

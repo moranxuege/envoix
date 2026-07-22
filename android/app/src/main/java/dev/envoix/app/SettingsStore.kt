@@ -28,6 +28,8 @@ data class Settings(
     /** A user-picked SAF folder for received files; empty = default Downloads/[saveFolder]. */
     val saveTreeUri: String = "",
     val defaultRole: String = "receive",
+    /** Canonical Manifest-v2 compression policy: never, always, or smart. */
+    val compressionPolicy: String = "smart",
     // rendezvous modes to attempt, in order Room → mDNS (fall back on failure)
     val useRoom: Boolean = true,
     val useMdns: Boolean = true,
@@ -62,6 +64,7 @@ object SettingsStore {
                 saveFolder = prefs.getString("saveFolder", "Envoix")!!,
                 saveTreeUri = prefs.getString("saveTreeUri", "")!!,
                 defaultRole = prefs.getString("defaultRole", "receive")!!,
+                compressionPolicy = prefs.getString("compressionPolicy", "smart")!!,
                 useRoom = prefs.getBoolean("useRoom", true),
                 useMdns = prefs.getBoolean("useMdns", true),
                 devMode = prefs.getBoolean("devMode", false),
@@ -97,6 +100,7 @@ object SettingsStore {
             .putString("saveFolder", s.saveFolder)
             .putString("saveTreeUri", s.saveTreeUri)
             .putString("defaultRole", s.defaultRole)
+            .putString("compressionPolicy", s.compressionPolicy)
             .putBoolean("useRoom", s.useRoom)
             .putBoolean("useMdns", s.useMdns)
             .putBoolean("devMode", s.devMode)

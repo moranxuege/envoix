@@ -8,104 +8,14 @@
 //! `ndk_context`. [`initContext`] wires the VM + app context in once; without it
 //! those crates panic ("android context was not initialized").
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
-use envoix_client::TransferDirection;
-use envoix_client::api::driver::{ClientContext, SessionContext, SessionParams, TransferSession};
-use envoix_client::api::{Invite, PeerSource, Role, TransferOptions};
+use envoix_client::api::{Invite, Role};
 use jni::JNIEnv;
 use jni::JavaVM;
 use jni::objects::{GlobalRef, JClass, JObject, JString, JValue};
-use jni::sys::{jboolean, jint, jlong};
 
 static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-
-/// The durable record store (roadmap #5), set once by `initRecords`.
-static RECORDS: OnceLock<envoix_client::api::record::RecordStore> = OnceLock::new();
-
-fn record_for(id: i64) -> Option<(envoix_client::api::record::RecordStore, u64)> {
-    RECORDS.get().map(|s| (s.clone(), id as u64))
-}
-
-/// Live transfer sessions (the state-machine driver), keyed by the Kotlin id.
-type SessionMap = HashMap<i64, envoix_client::api::driver::TransferSession>;
-static SESSIONS: OnceLock<Mutex<SessionMap>> = OnceLock::new();
-
-fn sessions() -> &'static Mutex<SessionMap> {
-    SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Monotone pump generation: every createSession/restoreSession claims one
-/// and stamps it into all of that session's notices. Kotlin gates per card,
-/// so a stale pump (a torn-down session for the same id) can never mutate
-/// the current card - the fence is explicit, not an artifact of flow
-/// mechanics.
-static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
-
-/// Intents addressed to a record id whose session is not registered yet (the
-/// restore-then-intent race: Kotlin fires "resume" right after asking for a
-/// restore, and the registration may not have happened). Queued here, drained
-/// in order on registration, cleared on destroy. Lock order is always
-/// sessions() before pending_intents().
-static PENDING_INTENTS: OnceLock<Mutex<HashMap<i64, Vec<String>>>> = OnceLock::new();
-/// Per-id bound; an id nobody registers must not accumulate garbage.
-const MAX_PENDING_INTENTS: usize = 8;
-
-fn pending_intents() -> &'static Mutex<HashMap<i64, Vec<String>>> {
-    PENDING_INTENTS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Dispatch one intent string to a live session (shared by the direct path
-/// and the pending-queue drain).
-fn route_intent(id: i64, session: &envoix_client::api::driver::TransferSession, intent: &str) {
-    match intent {
-        "pause" => {
-            session.pause();
-        }
-        "resume" => {
-            session.resume();
-        }
-        "cancel" => {
-            session.cancel();
-        }
-        "reverify" => {
-            session.serve_reverify();
-        }
-        "receipt_posted" => {
-            session.receipt_posted();
-        }
-        _ => tracing::warn!(id, intent, "sessionIntent: unknown intent"),
-    }
-}
-
-/// Register a freshly created/restored session, then drain any intents that
-/// arrived before it existed. Refuses to replace a live session: silently
-/// swapping the map entry would orphan a running driver (the caller's new
-/// session is dropped, which detaches without touching the wire).
-fn register_session(id: i64, session: envoix_client::api::driver::TransferSession) -> bool {
-    let Ok(mut map) = sessions().lock() else {
-        return false;
-    };
-    if map.contains_key(&id) {
-        tracing::warn!(id, "session already live; duplicate start/restore ignored");
-        return false;
-    }
-    map.insert(id, session);
-    let queued = pending_intents()
-        .lock()
-        .ok()
-        .and_then(|mut p| p.remove(&id))
-        .unwrap_or_default();
-    if let Some(session) = map.get(&id) {
-        for intent in queued {
-            tracing::info!(id, intent, "applying queued intent");
-            route_intent(id, session, &intent);
-        }
-    }
-    true
-}
 
 fn runtime() -> &'static tokio::runtime::Runtime {
     RT.get_or_init(|| {
@@ -215,30 +125,8 @@ fn to_jstring(env: &mut JNIEnv, s: &str) -> jni::sys::jstring {
         })
 }
 
-fn error_jstring(
-    env: &mut JNIEnv,
-    context: &str,
-    error: impl std::fmt::Display,
-) -> jni::sys::jstring {
-    let message = format!("{context}: {error}");
-    tracing::warn!(%message);
-    to_jstring(env, &format!(r#"{{"error":{}}}"#, json_str(&message)))
-}
-
 fn opt_json(s: Option<&str>) -> String {
     s.map(json_str).unwrap_or_else(|| "null".to_string())
-}
-
-/// Everything one native transfer needs, bundled so the JNI entry point and
-/// Split a comma-joined FFI config field into trimmed, non-empty entries.
-/// Commas never appear in CIDR prefixes, so this round-trips the Kotlin lists.
-fn split_csv(value: &str) -> Vec<String> {
-    value
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(String::from)
-        .collect()
 }
 
 fn jstr(env: &mut JNIEnv, s: &JString) -> String {
@@ -285,19 +173,6 @@ fn json_str(s: &str) -> String {
     out
 }
 
-fn failed_snapshot(reason: &str) -> String {
-    format!(
-        r#"{{"notice":"snapshot","seq":1,"state":"failed","reason":{}}}"#,
-        json_str(reason)
-    )
-}
-
-fn emit_failed_snapshot(vm: &JavaVM, cb: &GlobalRef, context: &str, error: impl std::fmt::Display) {
-    let reason = format!("{context}: {error}");
-    tracing::warn!(%reason);
-    emit(vm, cb, &failed_snapshot(&reason));
-}
-
 fn java_vm_or_log(env: &JNIEnv, context: &str) -> Option<JavaVM> {
     match env.get_java_vm() {
         Ok(vm) => Some(vm),
@@ -318,48 +193,5 @@ fn callback_or_log(env: &JNIEnv, callback: &JObject, context: &str) -> Option<Gl
     }
 }
 
-// ---------------------------------------------------------------------------
-// Session API (the state-machine driver; replaces runTransfer in step C).
-// ---------------------------------------------------------------------------
-
-/// One notice as JSON for the Kotlin side.
-fn notice_json(notice: envoix_client::api::driver::SessionNotice, generation: u64) -> String {
-    use base64::Engine;
-    use envoix_client::api::driver::SessionNotice as N;
-    match notice {
-        N::Snapshot(snapshot) => {
-            let mut value = serde_json::to_value(&snapshot).unwrap_or_default();
-            if let Some(map) = value.as_object_mut() {
-                map.insert("notice".into(), "snapshot".into());
-                map.insert("gen".into(), generation.into());
-                // `path` stays the TYPED DataPath encoding ({type, addr|url|
-                // description}); the frontend reads those fields directly, never
-                // a Display string it then has to re-parse (which lost the type
-                // for DataPath::Other and truncated relay URLs with spaces).
-            }
-            value.to_string()
-        }
-        N::Event(event) => {
-            let mut value = serde_json::to_value(&event).unwrap_or_default();
-            if let Some(map) = value.as_object_mut() {
-                map.insert("notice".into(), "event".into());
-                map.insert("gen".into(), generation.into());
-            }
-            value.to_string()
-        }
-        N::FetchReceipt { key, server } => format!(
-            r#"{{"notice":"fetch_receipt","gen":{generation},"key":{},"server":{}}}"#,
-            json_str(&key),
-            json_str(&server.unwrap_or_default()),
-        ),
-        N::PostReceipt { key, blob, server } => format!(
-            r#"{{"notice":"post_receipt","gen":{generation},"key":{},"blob":{},"server":{}}}"#,
-            json_str(&key),
-            json_str(&base64::engine::general_purpose::STANDARD.encode(blob)),
-            json_str(&server.unwrap_or_default()),
-        ),
-    }
-}
-
 mod logging;
-mod session;
+mod manifest_v2;

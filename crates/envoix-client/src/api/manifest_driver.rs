@@ -1118,6 +1118,7 @@ fn protocol_event_error(message: impl Into<String>) -> TransferError {
         phase: Phase::Transfer,
         kind: ErrorKind::Protocol,
         message: message.into(),
+        failure_code: None,
     }
 }
 

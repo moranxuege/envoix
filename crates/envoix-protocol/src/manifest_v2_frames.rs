@@ -23,6 +23,8 @@ const DIGEST_BYTES: usize = 32;
 const NONCE_BYTES: usize = 32;
 const MAX_CONTROL_FRAME_BYTES: usize = MAX_MANIFEST_V2_ENCODED_BYTES;
 const ENTRY_BLOCK_FIXED_PAYLOAD_BYTES: usize = COMMON_PREFIX_BYTES + 4 + 8 + 8 + 4 + 4;
+const RESUME_REQUEST_FIXED_PAYLOAD_BYTES: usize =
+    COMMON_PREFIX_BYTES + 4 + DIGEST_BYTES * 2 + NONCE_BYTES;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct JobGenerationV2 {
@@ -51,6 +53,14 @@ pub enum EntryDispositionV2 {
 pub enum EntryEncodingV2 {
     Identity = 0,
     Zstd = 1,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[repr(u8)]
+pub enum EntryDigestDecisionV2 {
+    Proposed = 0,
+    ContinuePayload = 1,
+    ReuseExisting = 2,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -143,12 +153,6 @@ impl fmt::Debug for ManifestAcceptV2 {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct AcceptCommittedAckV2 {
-    pub identity: JobGenerationV2,
-    pub accept_body_digest: ContentDigestV2,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct EntryStartV2 {
     pub identity: JobGenerationV2,
     pub entry_id: u32,
@@ -161,6 +165,7 @@ pub struct EntryContentDigestFrameV2 {
     pub identity: JobGenerationV2,
     pub entry_id: u32,
     pub digest: ContentDigestV2,
+    pub decision: EntryDigestDecisionV2,
 }
 
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
@@ -238,17 +243,13 @@ pub struct DeliveryProofV2 {
     pub proof_mac: [u8; DIGEST_BYTES],
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct DeliveryProofAckV2 {
-    pub identity: JobGenerationV2,
-    pub delivery_proof_digest: ContentDigestV2,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResumeRequestV2 {
     pub identity: JobGenerationV2,
+    pub offer: ManifestOfferV2,
     pub accept_body_digest: ContentDigestV2,
     pub sender_checkpoint_digest: ContentDigestV2,
+    pub challenge_nonce: [u8; NONCE_BYTES],
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -266,17 +267,6 @@ pub struct ResumeStatusV2 {
     pub accept_body_digest: ContentDigestV2,
     pub plan_revision: u32,
     pub entries: Vec<ResumeEntryV2>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ProofChallengeV2 {
-    pub identity: JobGenerationV2,
-    pub challenge_nonce: [u8; NONCE_BYTES],
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ProofResponseV2 {
-    pub identity: JobGenerationV2,
     pub challenge_nonce: [u8; NONCE_BYTES],
     pub challenge_mac: [u8; DIGEST_BYTES],
 }
@@ -301,7 +291,6 @@ pub struct ManifestErrorV2 {
 pub enum ManifestV2Frame {
     Offer(ManifestOfferV2),
     Accept(ManifestAcceptV2),
-    AcceptCommittedAck(AcceptCommittedAckV2),
     EntryStart(EntryStartV2),
     EntryContentDigest(EntryContentDigestFrameV2),
     EntryBlock(EntryBlockV2),
@@ -309,11 +298,8 @@ pub enum ManifestV2Frame {
     EntryResult(EntryResultV2),
     JobComplete(JobCompleteV2),
     DeliveryProof(DeliveryProofV2),
-    DeliveryProofAck(DeliveryProofAckV2),
     ResumeRequest(ResumeRequestV2),
     ResumeStatus(ResumeStatusV2),
-    ProofChallenge(ProofChallengeV2),
-    ProofResponse(ProofResponseV2),
     Cancel(CancelV2),
     Error(ManifestErrorV2),
 }
@@ -344,6 +330,8 @@ pub enum ManifestV2FrameCodecError {
     UnsafeComponent,
     #[error("Manifest v2 identity is invalid")]
     InvalidIdentity,
+    #[error("Manifest v2 resume challenge is invalid")]
+    InvalidChallenge,
     #[error("Manifest v2 entry id is outside the offered entry set")]
     InvalidEntryId,
     #[error("Manifest v2 root id or ordering is invalid")]
@@ -404,13 +392,7 @@ pub fn encode_manifest_v2_frame(
 
     let mut payload = Vec::new();
     let frame_type = encode_payload(frame, &mut payload)?;
-    let maximum = if frame_type == ManifestV2FrameType::EntryBlock {
-        ENTRY_BLOCK_FIXED_PAYLOAD_BYTES
-            .checked_add(MAX_MANIFEST_V2_BLOCK_ENCODED_BYTES as usize)
-            .ok_or(ManifestV2FrameCodecError::FrameTooLarge)?
-    } else {
-        MAX_CONTROL_FRAME_BYTES - HEADER_BYTES
-    };
+    let maximum = maximum_payload_bytes(frame_type)?;
     if payload.len() > maximum {
         return Err(ManifestV2FrameCodecError::FrameTooLarge);
     }
@@ -440,13 +422,7 @@ pub fn decode_manifest_v2_frame(
             .map(ManifestV2Frame::Offer)
             .map_err(|error| ManifestV2FrameCodecError::Offer(error.to_string()));
     }
-    let maximum = if header.frame_type == ManifestV2FrameType::EntryBlock {
-        ENTRY_BLOCK_FIXED_PAYLOAD_BYTES
-            .checked_add(MAX_MANIFEST_V2_BLOCK_ENCODED_BYTES as usize)
-            .ok_or(ManifestV2FrameCodecError::FrameTooLarge)?
-    } else {
-        MAX_CONTROL_FRAME_BYTES - HEADER_BYTES
-    };
+    let maximum = maximum_payload_bytes(header.frame_type)?;
     if header.payload_length > maximum {
         return Err(ManifestV2FrameCodecError::FrameTooLarge);
     }
@@ -475,13 +451,7 @@ where
     let mut header_bytes = [0_u8; HEADER_BYTES];
     reader.read_exact(&mut header_bytes).await?;
     let header = parse_header(&header_bytes)?;
-    let maximum = if header.frame_type == ManifestV2FrameType::EntryBlock {
-        ENTRY_BLOCK_FIXED_PAYLOAD_BYTES
-            .checked_add(MAX_MANIFEST_V2_BLOCK_ENCODED_BYTES as usize)
-            .ok_or(ManifestV2FrameCodecError::FrameTooLarge)?
-    } else {
-        MAX_CONTROL_FRAME_BYTES - HEADER_BYTES
-    };
+    let maximum = maximum_payload_bytes(header.frame_type)?;
     if header.payload_length > maximum {
         return Err(ManifestV2FrameCodecError::FrameTooLarge);
     }
@@ -511,6 +481,20 @@ struct Header {
     payload_length: usize,
 }
 
+fn maximum_payload_bytes(
+    frame_type: ManifestV2FrameType,
+) -> Result<usize, ManifestV2FrameCodecError> {
+    match frame_type {
+        ManifestV2FrameType::EntryBlock => ENTRY_BLOCK_FIXED_PAYLOAD_BYTES
+            .checked_add(MAX_MANIFEST_V2_BLOCK_ENCODED_BYTES as usize)
+            .ok_or(ManifestV2FrameCodecError::FrameTooLarge),
+        ManifestV2FrameType::ResumeRequest => RESUME_REQUEST_FIXED_PAYLOAD_BYTES
+            .checked_add(MAX_MANIFEST_V2_ENCODED_BYTES)
+            .ok_or(ManifestV2FrameCodecError::FrameTooLarge),
+        _ => Ok(MAX_CONTROL_FRAME_BYTES - HEADER_BYTES),
+    }
+}
+
 fn parse_header(encoded: &[u8]) -> Result<Header, ManifestV2FrameCodecError> {
     let header = encoded
         .get(..HEADER_BYTES)
@@ -536,21 +520,17 @@ fn frame_type(value: u16) -> Result<ManifestV2FrameType, ManifestV2FrameCodecErr
     match value {
         1 => Ok(ManifestV2FrameType::Offer),
         2 => Ok(ManifestV2FrameType::Accept),
-        3 => Ok(ManifestV2FrameType::AcceptCommittedAck),
-        4 => Ok(ManifestV2FrameType::EntryStart),
-        5 => Ok(ManifestV2FrameType::EntryContentDigest),
-        6 => Ok(ManifestV2FrameType::EntryBlock),
-        7 => Ok(ManifestV2FrameType::EntryComplete),
-        8 => Ok(ManifestV2FrameType::EntryResult),
-        9 => Ok(ManifestV2FrameType::JobComplete),
-        10 => Ok(ManifestV2FrameType::DeliveryProof),
-        11 => Ok(ManifestV2FrameType::DeliveryProofAck),
-        12 => Ok(ManifestV2FrameType::ResumeRequest),
-        13 => Ok(ManifestV2FrameType::ResumeStatus),
-        14 => Ok(ManifestV2FrameType::ProofChallenge),
-        15 => Ok(ManifestV2FrameType::ProofResponse),
-        16 => Ok(ManifestV2FrameType::Cancel),
-        17 => Ok(ManifestV2FrameType::Error),
+        3 => Ok(ManifestV2FrameType::EntryStart),
+        4 => Ok(ManifestV2FrameType::EntryContentDigest),
+        5 => Ok(ManifestV2FrameType::EntryBlock),
+        6 => Ok(ManifestV2FrameType::EntryComplete),
+        7 => Ok(ManifestV2FrameType::EntryResult),
+        8 => Ok(ManifestV2FrameType::JobComplete),
+        9 => Ok(ManifestV2FrameType::DeliveryProof),
+        10 => Ok(ManifestV2FrameType::ResumeRequest),
+        11 => Ok(ManifestV2FrameType::ResumeStatus),
+        12 => Ok(ManifestV2FrameType::Cancel),
+        13 => Ok(ManifestV2FrameType::Error),
         other => Err(ManifestV2FrameCodecError::UnknownFrameType(other)),
     }
 }
@@ -591,11 +571,6 @@ fn encode_payload(
             }
             Ok(ManifestV2FrameType::Accept)
         }
-        ManifestV2Frame::AcceptCommittedAck(value) => {
-            identity(output, value.identity)?;
-            digest(output, value.accept_body_digest);
-            Ok(ManifestV2FrameType::AcceptCommittedAck)
-        }
         ManifestV2Frame::EntryStart(value) => {
             identity(output, value.identity)?;
             checked_entry_id(value.entry_id)?;
@@ -614,6 +589,7 @@ fn encode_payload(
             checked_entry_id(value.entry_id)?;
             u32_value(output, value.entry_id);
             digest(output, value.digest);
+            output.push(value.decision as u8);
             Ok(ManifestV2FrameType::EntryContentDigest)
         }
         ManifestV2Frame::EntryBlock(value) => {
@@ -664,19 +640,43 @@ fn encode_payload(
             output.extend_from_slice(&value.proof_mac);
             Ok(ManifestV2FrameType::DeliveryProof)
         }
-        ManifestV2Frame::DeliveryProofAck(value) => {
-            identity(output, value.identity)?;
-            digest(output, value.delivery_proof_digest);
-            Ok(ManifestV2FrameType::DeliveryProofAck)
-        }
         ManifestV2Frame::ResumeRequest(value) => {
             identity(output, value.identity)?;
+            if value.challenge_nonce == [0; NONCE_BYTES] {
+                return Err(ManifestV2FrameCodecError::InvalidChallenge);
+            }
+            if value.identity.job_id != value.offer.manifest.job_id
+                || value.identity.generation != value.offer.manifest.generation
+            {
+                return Err(ManifestV2FrameCodecError::InvalidIdentity);
+            }
+            let rebuilt_offer =
+                crate::manifest_v2::build_manifest_offer_v2(value.offer.manifest.clone())
+                    .map_err(|error| ManifestV2FrameCodecError::Offer(error.to_string()))?;
+            if rebuilt_offer.structural_digest != value.offer.structural_digest {
+                return Err(ManifestV2FrameCodecError::Offer(
+                    "structural digest does not match the canonical Manifest body".into(),
+                ));
+            }
+            let encoded_offer = encode_manifest_offer_v2(&value.offer.manifest)
+                .map_err(|error| ManifestV2FrameCodecError::Offer(error.to_string()))?;
+            u32_value(
+                output,
+                u32::try_from(encoded_offer.len())
+                    .map_err(|_| ManifestV2FrameCodecError::FrameTooLarge)?,
+            );
+            output.extend_from_slice(&encoded_offer);
             digest(output, value.accept_body_digest);
             digest(output, value.sender_checkpoint_digest);
+            output.extend_from_slice(&value.challenge_nonce);
             Ok(ManifestV2FrameType::ResumeRequest)
         }
         ManifestV2Frame::ResumeStatus(value) => {
             identity(output, value.identity)?;
+            if value.challenge_nonce == [0; NONCE_BYTES] || value.challenge_mac == [0; DIGEST_BYTES]
+            {
+                return Err(ManifestV2FrameCodecError::InvalidChallenge);
+            }
             digest(output, value.accept_body_digest);
             u32_value(output, value.plan_revision);
             count(output, value.entries.len(), MAX_MANIFEST_V2_ENTRIES)?;
@@ -696,18 +696,9 @@ fn encode_payload(
                     None => output.push(0),
                 }
             }
-            Ok(ManifestV2FrameType::ResumeStatus)
-        }
-        ManifestV2Frame::ProofChallenge(value) => {
-            identity(output, value.identity)?;
-            output.extend_from_slice(&value.challenge_nonce);
-            Ok(ManifestV2FrameType::ProofChallenge)
-        }
-        ManifestV2Frame::ProofResponse(value) => {
-            identity(output, value.identity)?;
             output.extend_from_slice(&value.challenge_nonce);
             output.extend_from_slice(&value.challenge_mac);
-            Ok(ManifestV2FrameType::ProofResponse)
+            Ok(ManifestV2FrameType::ResumeStatus)
         }
         ManifestV2Frame::Cancel(value) => {
             identity(output, value.identity)?;
@@ -781,12 +772,6 @@ fn decode_payload(
                 entry_plans,
             })
         }
-        ManifestV2FrameType::AcceptCommittedAck => {
-            ManifestV2Frame::AcceptCommittedAck(AcceptCommittedAckV2 {
-                identity: reader.identity()?,
-                accept_body_digest: reader.digest()?,
-            })
-        }
         ManifestV2FrameType::EntryStart => {
             let value = EntryStartV2 {
                 identity: reader.identity()?,
@@ -806,6 +791,7 @@ fn decode_payload(
                 identity: reader.identity()?,
                 entry_id: reader.entry_id()?,
                 digest: reader.digest()?,
+                decision: entry_digest_decision(reader.u8()?)?,
             })
         }
         ManifestV2FrameType::EntryBlock => {
@@ -844,17 +830,28 @@ fn decode_payload(
             proof_nonce: reader.array()?,
             proof_mac: reader.array()?,
         }),
-        ManifestV2FrameType::DeliveryProofAck => {
-            ManifestV2Frame::DeliveryProofAck(DeliveryProofAckV2 {
-                identity: reader.identity()?,
-                delivery_proof_digest: reader.digest()?,
-            })
+        ManifestV2FrameType::ResumeRequest => {
+            let identity = reader.identity()?;
+            let encoded_offer = reader.bytes(MAX_MANIFEST_V2_ENCODED_BYTES)?;
+            let offer = decode_manifest_offer_v2(&encoded_offer)
+                .map_err(|error| ManifestV2FrameCodecError::Offer(error.to_string()))?;
+            if identity.job_id != offer.manifest.job_id
+                || identity.generation != offer.manifest.generation
+            {
+                return Err(ManifestV2FrameCodecError::InvalidIdentity);
+            }
+            let request = ResumeRequestV2 {
+                identity,
+                offer,
+                accept_body_digest: reader.digest()?,
+                sender_checkpoint_digest: reader.digest()?,
+                challenge_nonce: reader.array()?,
+            };
+            if request.challenge_nonce == [0; NONCE_BYTES] {
+                return Err(ManifestV2FrameCodecError::InvalidChallenge);
+            }
+            ManifestV2Frame::ResumeRequest(request)
         }
-        ManifestV2FrameType::ResumeRequest => ManifestV2Frame::ResumeRequest(ResumeRequestV2 {
-            identity: reader.identity()?,
-            accept_body_digest: reader.digest()?,
-            sender_checkpoint_digest: reader.digest()?,
-        }),
         ManifestV2FrameType::ResumeStatus => {
             let identity = reader.identity()?;
             let accept_body_digest = reader.digest()?;
@@ -887,22 +884,21 @@ fn decode_payload(
                     entry_result,
                 });
             }
-            ManifestV2Frame::ResumeStatus(ResumeStatusV2 {
+            let status = ResumeStatusV2 {
                 identity,
                 accept_body_digest,
                 plan_revision,
                 entries,
-            })
+                challenge_nonce: reader.array()?,
+                challenge_mac: reader.array()?,
+            };
+            if status.challenge_nonce == [0; NONCE_BYTES]
+                || status.challenge_mac == [0; DIGEST_BYTES]
+            {
+                return Err(ManifestV2FrameCodecError::InvalidChallenge);
+            }
+            ManifestV2Frame::ResumeStatus(status)
         }
-        ManifestV2FrameType::ProofChallenge => ManifestV2Frame::ProofChallenge(ProofChallengeV2 {
-            identity: reader.identity()?,
-            challenge_nonce: reader.array()?,
-        }),
-        ManifestV2FrameType::ProofResponse => ManifestV2Frame::ProofResponse(ProofResponseV2 {
-            identity: reader.identity()?,
-            challenge_nonce: reader.array()?,
-            challenge_mac: reader.array()?,
-        }),
         ManifestV2FrameType::Cancel => {
             let identity = reader.identity()?;
             let scope = cancel_scope(reader.u8()?)?;
@@ -1058,6 +1054,11 @@ tag_decoder!(entry_disposition, "entry disposition", EntryDispositionV2, {
 tag_decoder!(entry_encoding, "entry encoding", EntryEncodingV2, {
     0 => EntryEncodingV2::Identity,
     1 => EntryEncodingV2::Zstd,
+});
+tag_decoder!(entry_digest_decision, "entry digest decision", EntryDigestDecisionV2, {
+    0 => EntryDigestDecisionV2::Proposed,
+    1 => EntryDigestDecisionV2::ContinuePayload,
+    2 => EntryDigestDecisionV2::ReuseExisting,
 });
 tag_decoder!(entry_completion, "entry completion", EntryCompletionChoiceV2, {
     0 => EntryCompletionChoiceV2::PayloadComplete,

@@ -48,10 +48,6 @@ object TransferRepository {
         qrPayload: String? = null,
         savedUri: String? = null,
         publishedName: String? = null,
-        publishedSize: Long? = null,
-        publishedSha256: String? = null,
-        publicationInvalid: Boolean = false,
-        publishFailed: Boolean = false,
     ): Boolean {
         if (_transfers.value.any { it.id == id }) return false
         nextId = maxOf(nextId, id + 1)
@@ -63,10 +59,6 @@ object TransferRepository {
                 qrPayload = qrPayload,
                 savedUri = savedUri,
                 publishedName = publishedName,
-                publishedSize = publishedSize,
-                publishedSha256 = publishedSha256,
-                publicationInvalid = publicationInvalid,
-                publishFailed = publishFailed,
             )
         return true
     }
@@ -104,8 +96,10 @@ object TransferRepository {
         _transfers.value = _transfers.value.filterNot { it.id == id }
     }
 
-    /** Ids of transfers still in flight (drive the foreground notification). */
-    fun activeCount(): Int = _transfers.value.count { !it.status.isTerminal }
+    /** Attempts that still own active native work and therefore require the
+     * foreground service. Paused records remain durable without a worker. */
+    fun activeCount(): Int =
+        _transfers.value.count { !it.status.isTerminal && it.status != Status.Paused }
 }
 
 /** Deployed Envoix broker + relay defaults (overridable in Settings later). */

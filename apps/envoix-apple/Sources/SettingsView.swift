@@ -15,6 +15,7 @@ struct SettingsStageView: View {
     @AppStorage("envoix.candidatesDeny") private var candidatesDeny = ""
     @AppStorage("envoix.useRoom") private var useRoom = true
     @AppStorage("envoix.useMdns") private var useMdns = true
+    @AppStorage("envoix.compressionPolicy") private var compressionPolicy = "smart"
     @AppStorage("envoix.developerMode") private var developerMode = false
     @AppStorage("envoix.verboseLog") private var verboseLog = false
     @AppStorage("envoix.logServer") private var logServer = defaultLogServer
@@ -75,6 +76,27 @@ struct SettingsStageView: View {
                         subtitle: AppText.value("Also try mDNS on the same network.", "同时尝试同一网络内的 mDNS。", language: language),
                         isOn: $useMdns
                     )
+                }
+                .card(padding: 14)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(AppText.value("Compression", "压缩", language: language))
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(Theme.muted)
+                    Picker("Compression", selection: $compressionPolicy) {
+                        Text(AppText.value("Never", "从不", language: language)).tag("never")
+                        Text(AppText.value("Always", "始终", language: language)).tag("always")
+                        Text(AppText.value("Smart", "智能", language: language)).tag("smart")
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    Text(AppText.value(
+                        "The selected policy is fixed when a new transfer job is created.",
+                        "新建传输任务时会固定当前策略，之后修改不会影响该任务。",
+                        language: language
+                    ))
+                        .font(.footnote)
+                        .foregroundStyle(Theme.muted)
                 }
                 .card(padding: 14)
 

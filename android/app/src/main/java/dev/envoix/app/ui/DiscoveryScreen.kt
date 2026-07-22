@@ -1,6 +1,5 @@
 package dev.envoix.app.ui
 
-import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -62,8 +61,8 @@ import dev.envoix.app.discovery.ProviderStatus
 @Composable
 internal fun DiscoveryScreen(
     onBack: () -> Unit,
-    onReceive: (code: String, broker: String, relay: String, qrPayload: String?) -> Unit,
-    onSend: (code: String, broker: String, relay: String, file: Uri, qrPayload: String?) -> Unit,
+    onReceive: (code: String, broker: String, relay: String, qrPayload: String?, copyApproved: Boolean) -> Unit,
+    onSend: (code: String, broker: String, relay: String, jobId: String, qrPayload: String?) -> Unit,
     discoveryViewModel: DiscoveryViewModel = viewModel(),
 ) {
     val colors = Envoix.colors
@@ -217,15 +216,15 @@ internal fun DiscoveryScreen(
                     } else {
                         null
                     },
-                onReceive = { code, broker, relay, qrPayload ->
+                onReceive = { code, broker, relay, qrPayload, copyApproved ->
                     pairingSelection = null
                     initialPairingInput = null
-                    onReceive(code, broker, relay, qrPayload)
+                    onReceive(code, broker, relay, qrPayload, copyApproved)
                 },
-                onSend = { code, broker, relay, file, qrPayload ->
+                onSend = { code, broker, relay, jobId, qrPayload ->
                     pairingSelection = null
                     initialPairingInput = null
-                    onSend(code, broker, relay, file, qrPayload)
+                    onSend(code, broker, relay, jobId, qrPayload)
                 },
             )
         }
