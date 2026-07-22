@@ -1,0 +1,104 @@
+[meta]
+schema_version = 1
+purpose = "Authoritative Envoix dev/test/prod deployment identifiers"
+node_endpoint_derivation = "<node_id>@<rendezvous.host>:<rendezvous.port>"
+https_url_derivation = "https://<service.host>:<service.port>"
+provisioned_status = "provisioned"
+
+[validation]
+allowed_environments = ["dev", "test", "prod"]
+require_distinct_hosts = true
+require_distinct_node_ids = true
+require_distinct_trust_roots = true
+reject_legacy_node_ids = true
+reject_legacy_hosts = true
+prod_must_not_trust_non_prod_roots = true
+node_id_format_when_provisioned = "^[0-9a-f]{64}$"
+trust_root_sha256_format_when_provisioned = "^sha256:[0-9a-f]{64}$"
+
+# Replace each environment's two TBD values and set both statuses to
+# `provisioned` before that environment can be packaged or deployed.
+
+[environment.dev]
+name = "dev"
+
+[environment.dev.rendezvous]
+host = "rdz.dev.envoix.chkxwlyh.us"
+port = 9445
+node_id = "TBD_PROVISION_DEV_RENDEZVOUS_NODE_ID"
+provisioning_status = "tbd"
+
+[environment.dev.relay]
+scheme = "https"
+host = "relay.dev.envoix.chkxwlyh.us"
+port = 9444
+
+[environment.dev.mailbox]
+scheme = "https"
+host = "mailbox.dev.envoix.chkxwlyh.us"
+port = 9460
+
+[environment.dev.evidence]
+scheme = "https"
+host = "evidence.dev.envoix.chkxwlyh.us"
+port = 9461
+
+[environment.dev.trust]
+root_sha256 = "TBD_PROVISION_DEV_TRUST_ROOT_SHA256"
+provisioning_status = "tbd"
+
+[environment.test]
+name = "test"
+
+[environment.test.rendezvous]
+host = "rdz.test.envoix.chkxwlyh.us"
+port = 9445
+node_id = "TBD_PROVISION_TEST_RENDEZVOUS_NODE_ID"
+provisioning_status = "tbd"
+
+[environment.test.relay]
+scheme = "https"
+host = "relay.test.envoix.chkxwlyh.us"
+port = 9444
+
+[environment.test.mailbox]
+scheme = "https"
+host = "mailbox.test.envoix.chkxwlyh.us"
+port = 9460
+
+[environment.test.evidence]
+scheme = "https"
+host = "evidence.test.envoix.chkxwlyh.us"
+port = 9461
+
+[environment.test.trust]
+root_sha256 = "TBD_PROVISION_TEST_TRUST_ROOT_SHA256"
+provisioning_status = "tbd"
+
+[environment.prod]
+name = "prod"
+
+[environment.prod.rendezvous]
+host = "rdz.prod.envoix.chkxwlyh.us"
+port = 9445
+node_id = "TBD_PROVISION_PROD_RENDEZVOUS_NODE_ID"
+provisioning_status = "tbd"
+
+[environment.prod.relay]
+scheme = "https"
+host = "relay.prod.envoix.chkxwlyh.us"
+port = 9444
+
+[environment.prod.mailbox]
+scheme = "https"
+host = "mailbox.prod.envoix.chkxwlyh.us"
+port = 9460
+
+[environment.prod.evidence]
+scheme = "https"
+host = "evidence.prod.envoix.chkxwlyh.us"
+port = 9461
+
+[environment.prod.trust]
+root_sha256 = "TBD_PROVISION_PROD_TRUST_ROOT_SHA256"
+provisioning_status = "tbd"

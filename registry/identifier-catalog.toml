@@ -1,0 +1,589 @@
+[meta]
+schema_version = 1
+purpose = "Owner index for fresh Envoix 0.2.0 identifiers"
+live_values_allowed = false
+default_comparison = "exact-within-collision-scope"
+
+# This file is an index, not a value store. `extract` names the mechanical way
+# `xtask identifier-check` obtains the live value from its sole owner.
+
+# -----------------------------------------------------------------------------
+# Workspace, protocol set, and wire dialects
+# -----------------------------------------------------------------------------
+
+[[identifier]]
+key = "build.workspace_package_version"
+owner = "manifest:root-cargo"
+owner_path = "Cargo.toml"
+collision_scope = "workspace-package-version"
+extract = "toml-key:workspace.package.version"
+
+[[identifier]]
+key = "protocol.set_id"
+owner = "crate:envoix-protocol"
+owner_path = "crates/l1/envoix-protocol/src/identifiers.rs"
+collision_scope = "protocol-set-id"
+extract = "rust-const:PROTOCOL_SET_ID"
+
+[[identifier]]
+key = "protocol.data.alpn"
+owner = "crate:envoix-protocol"
+owner_path = "crates/l1/envoix-protocol/src/identifiers.rs"
+collision_scope = "alpn"
+extract = "rust-bytes-const:DATA_ALPN"
+
+[[identifier]]
+key = "protocol.data.magic"
+owner = "crate:envoix-protocol"
+owner_path = "crates/l1/envoix-protocol/src/identifiers.rs"
+collision_scope = "data-wire-dialect-component"
+comparison = "compare-only-as-data-dialect-tuple"
+extract = "rust-bytes-const:DATA_MAGIC"
+
+[[identifier]]
+key = "protocol.data.wire_version"
+owner = "crate:envoix-protocol"
+owner_path = "crates/l1/envoix-protocol/src/identifiers.rs"
+collision_scope = "data-wire-dialect-component"
+comparison = "compare-only-as-data-dialect-tuple"
+extract = "rust-const:DATA_WIRE_VERSION"
+
+[[identifier]]
+key = "protocol.data.dialect_tuple"
+owner = "crate:envoix-protocol"
+owner_path = "crates/l1/envoix-protocol/src/identifiers.rs"
+collision_scope = "data-wire-dialect"
+extract = "rust-function:DataDialect::canonical_identifier"
+
+[[identifier]]
+key = "protocol.rendezvous.alpn"
+owner = "crate:envoix-rendezvous"
+owner_path = "crates/l2/envoix-rendezvous/src/identifiers.rs"
+collision_scope = "alpn"
+extract = "rust-bytes-const:RENDEZVOUS_ALPN"
+
+[[identifier]]
+key = "protocol.rendezvous.magic"
+owner = "crate:envoix-rendezvous"
+owner_path = "crates/l2/envoix-rendezvous/src/identifiers.rs"
+collision_scope = "rendezvous-wire-dialect-component"
+comparison = "compare-only-as-rendezvous-dialect-tuple"
+extract = "rust-bytes-const:RENDEZVOUS_MAGIC"
+
+[[identifier]]
+key = "protocol.rendezvous.wire_version"
+owner = "crate:envoix-rendezvous"
+owner_path = "crates/l2/envoix-rendezvous/src/identifiers.rs"
+collision_scope = "rendezvous-wire-dialect-component"
+comparison = "compare-only-as-rendezvous-dialect-tuple"
+extract = "rust-const:RENDEZVOUS_WIRE_VERSION"
+
+[[identifier]]
+key = "protocol.rendezvous.dialect_tuple"
+owner = "crate:envoix-rendezvous"
+owner_path = "crates/l2/envoix-rendezvous/src/identifiers.rs"
+collision_scope = "rendezvous-wire-dialect"
+extract = "rust-function:RendezvousDialect::canonical_identifier"
+
+# -----------------------------------------------------------------------------
+# Discovery, invite, and room identifiers
+# -----------------------------------------------------------------------------
+
+[[identifier]]
+key = "discovery.mdns.service_label"
+owner = "crate:envoix-session-iroh"
+owner_path = "crates/l2/envoix-session-iroh/src/identifiers.rs"
+collision_scope = "mdns-service-label"
+extract = "rust-const:MDNS_SERVICE_LABEL"
+
+[[identifier]]
+key = "discovery.mdns.service_fqdn"
+owner = "crate:envoix-session-iroh"
+owner_path = "crates/l2/envoix-session-iroh/src/identifiers.rs"
+collision_scope = "mdns-service-fqdn"
+extract = "derive-dns-sd-fqdn:discovery.mdns.service_label"
+
+[[identifier]]
+key = "invite.uri_scheme"
+owner = "crate:envoix-invite"
+owner_path = "crates/l1/envoix-invite/src/identifiers.rs"
+collision_scope = "invite-brand-component"
+comparison = "compare-only-as-invite-outer-dialect"
+extract = "rust-const:URI_SCHEME"
+
+[[identifier]]
+key = "invite.qr_outer_prefix"
+owner = "crate:envoix-invite"
+owner_path = "crates/l1/envoix-invite/src/identifiers.rs"
+collision_scope = "invite-outer-dialect"
+extract = "rust-const:QR_OUTER_PREFIX"
+
+[[identifier]]
+key = "invite.deep_link_outer_prefix"
+owner = "crate:envoix-invite"
+owner_path = "crates/l1/envoix-invite/src/identifiers.rs"
+collision_scope = "invite-outer-dialect"
+extract = "rust-const:DEEP_LINK_OUTER_PREFIX"
+
+[[identifier]]
+key = "invite.payload_version"
+owner = "crate:envoix-invite"
+owner_path = "crates/l1/envoix-invite/src/identifiers.rs"
+collision_scope = "invite-payload-version-component"
+comparison = "compare-only-as-invite-outer-dialect"
+extract = "rust-const:INVITE_PAYLOAD_VERSION"
+
+[[identifier]]
+key = "invite.dialect_tuple"
+owner = "crate:envoix-invite"
+owner_path = "crates/l1/envoix-invite/src/identifiers.rs"
+collision_scope = "invite-dialect"
+extract = "rust-function:InviteDialect::canonical_identifier"
+
+[[identifier]]
+key = "invite.room_code_namespace_prefix"
+owner = "crate:envoix-invite"
+owner_path = "crates/l1/envoix-invite/src/identifiers.rs"
+collision_scope = "broker-room-key-prefix"
+extract = "rust-const:ROOM_CODE_NAMESPACE_PREFIX"
+
+[[identifier]]
+key = "invite.legacy_recognized_invalid_set"
+owner = "crate:envoix-invite"
+owner_path = "crates/l1/envoix-invite/src/identifiers.rs"
+collision_scope = "invite-rejection-policy"
+extract = "rust-function:InviteDialect::legacy_rejection_identifiers"
+
+# -----------------------------------------------------------------------------
+# Mailbox, evidence, record, and binding schemas
+# -----------------------------------------------------------------------------
+
+[[identifier]]
+key = "mailbox.receipt_http_route"
+owner = "crate:envoix-protocol"
+owner_path = "crates/l1/envoix-protocol/src/mailbox/identifiers.rs"
+collision_scope = "server-http-route"
+extract = "rust-const:RECEIPT_HTTP_ROUTE"
+
+[[identifier]]
+key = "mailbox.receipt_payload_schema_id"
+owner = "crate:envoix-protocol"
+owner_path = "crates/l1/envoix-protocol/src/mailbox/identifiers.rs"
+collision_scope = "mailbox-payload-schema"
+extract = "rust-const:RECEIPT_PAYLOAD_SCHEMA_ID"
+
+[[identifier]]
+key = "mailbox.receipt_kind"
+owner = "crate:envoix-protocol"
+owner_path = "crates/l1/envoix-protocol/src/mailbox/identifiers.rs"
+collision_scope = "mailbox-kind"
+extract = "rust-const:RECEIPT_KIND"
+
+[[identifier]]
+key = "mailbox.receipt_slot_kdf_context"
+owner = "crate:envoix-protocol"
+owner_path = "crates/l1/envoix-protocol/src/mailbox/identifiers.rs"
+collision_scope = "crypto-label"
+extract = "rust-const:RECEIPT_SLOT_KDF_CONTEXT"
+
+[[identifier]]
+key = "mailbox.receipt_seal_kdf_context"
+owner = "crate:envoix-protocol"
+owner_path = "crates/l1/envoix-protocol/src/mailbox/identifiers.rs"
+collision_scope = "crypto-label"
+extract = "rust-const:RECEIPT_SEAL_KDF_CONTEXT"
+
+[[identifier]]
+key = "mailbox.receipt_aad_prefix"
+owner = "crate:envoix-protocol"
+owner_path = "crates/l1/envoix-protocol/src/mailbox/identifiers.rs"
+collision_scope = "crypto-label"
+extract = "rust-const:RECEIPT_AAD_PREFIX"
+
+[[identifier]]
+key = "mailbox.receipt_slot_derivation"
+owner = "crate:envoix-protocol"
+owner_path = "crates/l1/envoix-protocol/src/mailbox/identifiers.rs"
+collision_scope = "mailbox-slot-derivation"
+extract = "rust-function:ReceiptSlotDerivation::canonical_identifier"
+
+[[identifier]]
+key = "mailbox.server_table_name"
+owner = "manifest:server-storage"
+owner_path = "apps/envoix-server/storage-identifiers.toml"
+collision_scope = "server-table-name"
+extract = "toml-key:mailbox.receipt_table"
+
+[[identifier]]
+key = "mailbox.server_key_prefix"
+owner = "manifest:server-storage"
+owner_path = "apps/envoix-server/storage-identifiers.toml"
+collision_scope = "mailbox-table-key-prefix"
+extract = "toml-key:mailbox.receipt_key_prefix"
+
+[[identifier]]
+key = "evidence.http_route"
+owner = "crate:envoix-evidence"
+owner_path = "crates/l4/envoix-evidence/src/identifiers.rs"
+collision_scope = "server-http-route"
+extract = "rust-const:EVIDENCE_HTTP_ROUTE"
+
+[[identifier]]
+key = "evidence.server_table_name"
+owner = "manifest:server-storage"
+owner_path = "apps/envoix-server/storage-identifiers.toml"
+collision_scope = "server-table-name"
+extract = "toml-key:evidence.session_table"
+
+[[identifier]]
+key = "evidence.server_key_prefix"
+owner = "manifest:server-storage"
+owner_path = "apps/envoix-server/storage-identifiers.toml"
+collision_scope = "evidence-table-key-prefix"
+extract = "toml-key:evidence.session_key_prefix"
+
+[[identifier]]
+key = "product.record_schema_id"
+owner = "crate:envoix-product"
+owner_path = "crates/l3/envoix-product/src/record/identifiers.rs"
+collision_scope = "durable-record-schema"
+extract = "rust-const:PRODUCT_RECORD_SCHEMA_ID"
+
+[[identifier]]
+key = "storage.operation_envelope_schema_id"
+owner = "crate:envoix-storage-api"
+owner_path = "crates/l1/envoix-storage-api/src/identifiers.rs"
+collision_scope = "storage-envelope-schema"
+extract = "rust-const:OPERATION_ENVELOPE_SCHEMA_ID"
+
+[[identifier]]
+key = "binding.read_schema_id"
+owner = "schema:envoix-bindings"
+owner_path = "crates/l5/envoix-bindings/schema/read.schema"
+collision_scope = "binding-schema-id"
+extract = "binding-schema-header:id"
+
+[[identifier]]
+key = "binding.command_schema_id"
+owner = "schema:envoix-bindings"
+owner_path = "crates/l5/envoix-bindings/schema/command.schema"
+collision_scope = "binding-schema-id"
+extract = "binding-schema-header:id"
+
+# -----------------------------------------------------------------------------
+# Android, Apple, CLI, and key-storage namespaces
+# -----------------------------------------------------------------------------
+
+[[identifier]]
+key = "android.namespace"
+owner = "manifest:flutter-android-gradle"
+owner_path = "apps/envoix-flutter/android/app/build.gradle.kts"
+collision_scope = "android-namespace"
+extract = "gradle-property:android.namespace"
+
+[[identifier]]
+key = "android.application_id.prod"
+owner = "manifest:flutter-android-gradle"
+owner_path = "apps/envoix-flutter/android/app/build.gradle.kts"
+collision_scope = "android-application-id"
+extract = "gradle-variant-application-id:prod"
+
+[[identifier]]
+key = "android.application_id.dev"
+owner = "manifest:flutter-android-gradle"
+owner_path = "apps/envoix-flutter/android/app/build.gradle.kts"
+collision_scope = "android-application-id"
+extract = "gradle-variant-application-id:dev"
+
+[[identifier]]
+key = "android.application_id.test"
+owner = "manifest:flutter-android-gradle"
+owner_path = "apps/envoix-flutter/android/app/build.gradle.kts"
+collision_scope = "android-application-id"
+extract = "gradle-variant-application-id:test"
+
+[[identifier]]
+key = "android.file_provider_authority"
+owner = "manifest:flutter-android"
+owner_path = "apps/envoix-flutter/android/app/src/main/AndroidManifest.xml"
+collision_scope = "android-provider-authority"
+extract = "android-manifest-provider-authority:generated-per-variant"
+
+[[identifier]]
+key = "android.internal_action_namespace"
+owner = "crate:envoix-platform-android"
+owner_path = "crates/l6/envoix-platform-android/src/identifiers.rs"
+collision_scope = "android-intent-action"
+extract = "rust-function:internal_action_identifiers"
+
+[[identifier]]
+key = "android.private_storage_root"
+owner = "crate:envoix-platform-android"
+owner_path = "crates/l6/envoix-platform-android/src/identifiers.rs"
+collision_scope = "android-app-private-storage-root"
+extract = "rust-const:PRIVATE_STORAGE_ROOT"
+
+[[identifier]]
+key = "apple.bundle_id.ios"
+owner = "manifest:flutter-apple-identifiers"
+owner_path = "apps/envoix-flutter/apple/Identifiers.xcconfig"
+collision_scope = "apple-bundle-id"
+extract = "xcconfig-key:ENVOIX_IOS_BUNDLE_ID"
+
+[[identifier]]
+key = "apple.bundle_id.macos"
+owner = "manifest:flutter-apple-identifiers"
+owner_path = "apps/envoix-flutter/apple/Identifiers.xcconfig"
+collision_scope = "apple-bundle-id"
+extract = "xcconfig-key:ENVOIX_MACOS_BUNDLE_ID"
+
+[[identifier]]
+key = "apple.keychain_service"
+owner = "manifest:flutter-apple-identifiers"
+owner_path = "apps/envoix-flutter/apple/Identifiers.xcconfig"
+collision_scope = "apple-keychain-service"
+extract = "xcconfig-key:ENVOIX_KEYCHAIN_SERVICE"
+
+[[identifier]]
+key = "apple.application_support_root"
+owner = "crate:envoix-platform-apple"
+owner_path = "crates/l6/envoix-platform-apple/src/identifiers.rs"
+collision_scope = "apple-application-support-root"
+extract = "rust-const:APPLICATION_SUPPORT_ROOT"
+
+[[identifier]]
+key = "cli.executable"
+owner = "manifest:envoix-cli-cargo"
+owner_path = "apps/envoix-cli/Cargo.toml"
+collision_scope = "cli-executable"
+comparison = "same-product-name-approved"
+extract = "toml-key:bin[0].name"
+
+[[identifier]]
+key = "cli.config_root"
+owner = "crate:envoix-platform-local"
+owner_path = "crates/l6/envoix-platform-local/src/identifiers.rs"
+collision_scope = "cli-config-root"
+extract = "rust-function:config_root_identifier"
+
+[[identifier]]
+key = "cli.state_root"
+owner = "crate:envoix-platform-local"
+owner_path = "crates/l6/envoix-platform-local/src/identifiers.rs"
+collision_scope = "cli-state-root"
+extract = "rust-function:state_root_identifier"
+
+[[identifier]]
+key = "iroh.client_peer_key_alias"
+owner = "crate:envoix-session-iroh"
+owner_path = "crates/l2/envoix-session-iroh/src/identifiers.rs"
+collision_scope = "iroh-peer-key-storage"
+extract = "rust-const:CLIENT_PEER_KEY_ALIAS"
+
+[[identifier]]
+key = "iroh.rendezvous_node_key_path"
+owner = "manifest:envoix-server"
+owner_path = "apps/envoix-server/server-identifiers.toml"
+collision_scope = "iroh-node-key-storage"
+extract = "toml-key:rendezvous.node_key_path"
+
+# -----------------------------------------------------------------------------
+# Deployment endpoints and trust material
+# -----------------------------------------------------------------------------
+
+[[identifier]]
+key = "deployment.rendezvous_hosts"
+owner = "manifest:environments"
+owner_path = "deploy/environments.toml"
+collision_scope = "deployed-service-host"
+extract = "toml-map:environment.*.rendezvous.host"
+
+[[identifier]]
+key = "deployment.rendezvous_ports"
+owner = "manifest:environments"
+owner_path = "deploy/environments.toml"
+collision_scope = "rendezvous-service-port"
+extract = "toml-map:environment.*.rendezvous.port"
+
+[[identifier]]
+key = "deployment.rendezvous_node_ids"
+owner = "manifest:environments"
+owner_path = "deploy/environments.toml"
+collision_scope = "deployed-rendezvous-node-id"
+extract = "toml-map:environment.*.rendezvous.node_id where provisioning_status=provisioned"
+
+[[identifier]]
+key = "deployment.relay_hosts"
+owner = "manifest:environments"
+owner_path = "deploy/environments.toml"
+collision_scope = "deployed-service-host"
+extract = "toml-map:environment.*.relay.host"
+
+[[identifier]]
+key = "deployment.relay_ports"
+owner = "manifest:environments"
+owner_path = "deploy/environments.toml"
+collision_scope = "relay-service-port"
+extract = "toml-map:environment.*.relay.port"
+
+[[identifier]]
+key = "deployment.mailbox_hosts"
+owner = "manifest:environments"
+owner_path = "deploy/environments.toml"
+collision_scope = "deployed-service-host"
+extract = "toml-map:environment.*.mailbox.host"
+
+[[identifier]]
+key = "deployment.mailbox_ports"
+owner = "manifest:environments"
+owner_path = "deploy/environments.toml"
+collision_scope = "mailbox-service-port"
+extract = "toml-map:environment.*.mailbox.port"
+
+[[identifier]]
+key = "deployment.evidence_hosts"
+owner = "manifest:environments"
+owner_path = "deploy/environments.toml"
+collision_scope = "deployed-service-host"
+extract = "toml-map:environment.*.evidence.host"
+
+[[identifier]]
+key = "deployment.evidence_ports"
+owner = "manifest:environments"
+owner_path = "deploy/environments.toml"
+collision_scope = "evidence-service-port"
+extract = "toml-map:environment.*.evidence.port"
+
+[[identifier]]
+key = "deployment.trust_root_fingerprints"
+owner = "manifest:environments"
+owner_path = "deploy/environments.toml"
+collision_scope = "deployment-trust-root"
+extract = "toml-map:environment.*.trust.root_sha256 where provisioning_status=provisioned"
+
+# -----------------------------------------------------------------------------
+# Data-authentication cryptographic labels
+# -----------------------------------------------------------------------------
+
+[[identifier]]
+key = "crypto.data_auth.spake2_domain"
+owner = "crate:envoix-auth"
+owner_path = "crates/l2/envoix-auth/src/identifiers.rs"
+collision_scope = "crypto-label"
+extract = "rust-bytes-const:SPAKE2_DOMAIN"
+
+[[identifier]]
+key = "crypto.data_auth.sender_identity"
+owner = "crate:envoix-auth"
+owner_path = "crates/l2/envoix-auth/src/identifiers.rs"
+collision_scope = "crypto-label"
+extract = "rust-bytes-const:SENDER_IDENTITY"
+
+[[identifier]]
+key = "crypto.data_auth.receiver_identity"
+owner = "crate:envoix-auth"
+owner_path = "crates/l2/envoix-auth/src/identifiers.rs"
+collision_scope = "crypto-label"
+extract = "rust-bytes-const:RECEIVER_IDENTITY"
+
+[[identifier]]
+key = "crypto.data_auth.exporter_label"
+owner = "crate:envoix-auth"
+owner_path = "crates/l2/envoix-auth/src/identifiers.rs"
+collision_scope = "crypto-label"
+extract = "rust-bytes-const:EXPORTER_LABEL"
+
+[[identifier]]
+key = "crypto.data_auth.exporter_context"
+owner = "crate:envoix-auth"
+owner_path = "crates/l2/envoix-auth/src/identifiers.rs"
+collision_scope = "crypto-label"
+extract = "rust-bytes-const:EXPORTER_CONTEXT"
+
+[[identifier]]
+key = "crypto.data_auth.sender_confirm"
+owner = "crate:envoix-auth"
+owner_path = "crates/l2/envoix-auth/src/identifiers.rs"
+collision_scope = "crypto-label"
+extract = "rust-bytes-const:SENDER_CONFIRM_LABEL"
+
+[[identifier]]
+key = "crypto.data_auth.receiver_confirm"
+owner = "crate:envoix-auth"
+owner_path = "crates/l2/envoix-auth/src/identifiers.rs"
+collision_scope = "crypto-label"
+extract = "rust-bytes-const:RECEIVER_CONFIRM_LABEL"
+
+# -----------------------------------------------------------------------------
+# Rendezvous-pairing cryptographic labels
+# -----------------------------------------------------------------------------
+
+[[identifier]]
+key = "crypto.rdz_pair.spake2_domain"
+owner = "crate:envoix-pairing"
+owner_path = "crates/l1/envoix-pairing/src/identifiers.rs"
+collision_scope = "crypto-label"
+extract = "rust-bytes-const:SPAKE2_DOMAIN"
+
+[[identifier]]
+key = "crypto.rdz_pair.initiator_identity"
+owner = "crate:envoix-pairing"
+owner_path = "crates/l1/envoix-pairing/src/identifiers.rs"
+collision_scope = "crypto-label"
+extract = "rust-bytes-const:INITIATOR_IDENTITY"
+
+[[identifier]]
+key = "crypto.rdz_pair.responder_identity"
+owner = "crate:envoix-pairing"
+owner_path = "crates/l1/envoix-pairing/src/identifiers.rs"
+collision_scope = "crypto-label"
+extract = "rust-bytes-const:RESPONDER_IDENTITY"
+
+[[identifier]]
+key = "crypto.rdz_pair.confirm_key_context"
+owner = "crate:envoix-pairing"
+owner_path = "crates/l1/envoix-pairing/src/identifiers.rs"
+collision_scope = "crypto-label"
+extract = "rust-const:CONFIRM_KEY_CONTEXT"
+
+[[identifier]]
+key = "crypto.rdz_pair.initiator_confirm"
+owner = "crate:envoix-pairing"
+owner_path = "crates/l1/envoix-pairing/src/identifiers.rs"
+collision_scope = "crypto-label"
+extract = "rust-bytes-const:INITIATOR_CONFIRM_LABEL"
+
+[[identifier]]
+key = "crypto.rdz_pair.responder_confirm"
+owner = "crate:envoix-pairing"
+owner_path = "crates/l1/envoix-pairing/src/identifiers.rs"
+collision_scope = "crypto-label"
+extract = "rust-bytes-const:RESPONDER_CONFIRM_LABEL"
+
+[[identifier]]
+key = "crypto.rdz_pair.bundle_key_context"
+owner = "crate:envoix-pairing"
+owner_path = "crates/l1/envoix-pairing/src/identifiers.rs"
+collision_scope = "crypto-label"
+extract = "rust-const:BUNDLE_KEY_CONTEXT"
+
+[[identifier]]
+key = "crypto.rdz_pair.initiator_seal_aad"
+owner = "crate:envoix-pairing"
+owner_path = "crates/l1/envoix-pairing/src/identifiers.rs"
+collision_scope = "crypto-label"
+extract = "rust-bytes-const:INITIATOR_SEAL_AAD"
+
+[[identifier]]
+key = "crypto.rdz_pair.responder_seal_aad"
+owner = "crate:envoix-pairing"
+owner_path = "crates/l1/envoix-pairing/src/identifiers.rs"
+collision_scope = "crypto-label"
+extract = "rust-bytes-const:RESPONDER_SEAL_AAD"
+
+[[identifier]]
+key = "crypto.rdz_pair.data_token_context"
+owner = "crate:envoix-pairing"
+owner_path = "crates/l1/envoix-pairing/src/identifiers.rs"
+collision_scope = "crypto-label"
+extract = "rust-const:DATA_TOKEN_CONTEXT"

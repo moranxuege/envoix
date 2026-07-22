@@ -1,0 +1,789 @@
+[meta]
+schema_version = 1
+purpose = "Immutable deny-list for the pre-0.2.0 Envoix identifier generation"
+source_tree = "envoix-android"
+immutable = true
+
+# `forbid-exact` means a fresh extracted value may not equal this value in the
+# same collision scope. `scoped-component` records an exact legacy component
+# whose reuse was explicitly approved only inside a different outer dialect.
+
+# -----------------------------------------------------------------------------
+# Network dialects and persisted formats
+# -----------------------------------------------------------------------------
+
+[[network_dialect]]
+key = "legacy.data.alpn"
+value = "envoix/1"
+value_type = "utf8-bytes"
+collision_scope = "alpn"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-session/src/lib.rs:44"]
+
+[[network_dialect]]
+key = "legacy.rendezvous.alpn"
+value = "envoix-rendezvous/1"
+value_type = "utf8-bytes"
+collision_scope = "alpn"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-rendezvous-iroh/src/lib.rs:59-60"]
+
+[[network_dialect]]
+key = "legacy.data.dialect_tuple"
+value = "alpn=envoix/1;magic=ENVX;wire-version=1"
+value_type = "canonical-tuple"
+collision_scope = "data-wire-dialect"
+policy = "forbid-exact"
+sources = [
+  "envoix-android/crates/envoix-session/src/lib.rs:44",
+  "envoix-android/crates/envoix-protocol/src/lib.rs:14-16",
+]
+
+[[network_dialect]]
+key = "legacy.data.magic"
+value = "ENVX"
+value_type = "four-byte-magic"
+collision_scope = "data-wire-dialect-component"
+policy = "scoped-component"
+sources = ["envoix-android/crates/envoix-protocol/src/lib.rs:14"]
+
+[[network_dialect]]
+key = "legacy.data.wire_version"
+value = "1"
+value_type = "u16"
+collision_scope = "data-wire-dialect-component"
+policy = "scoped-component"
+sources = ["envoix-android/crates/envoix-protocol/src/lib.rs:15"]
+
+[[network_dialect]]
+key = "legacy.data.global_protocol_version"
+value = "1"
+value_type = "u32"
+collision_scope = "unscoped-global-protocol-version"
+policy = "forbid-authority-shape"
+sources = ["envoix-android/crates/envoix-types/src/lib.rs:7-8"]
+
+[[network_dialect]]
+key = "legacy.rendezvous.unversioned_control_shape"
+value = "serde-bincode:Join{room_id}|Reply{Paired{role}|Expired}"
+value_type = "structural-dialect"
+collision_scope = "rendezvous-wire-dialect"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-rendezvous/src/protocol.rs:18-37"]
+
+[[network_dialect]]
+key = "legacy.qr.payload_version"
+value = "2"
+value_type = "u32"
+collision_scope = "invite-payload-version-component"
+policy = "scoped-component"
+sources = ["envoix-android/crates/envoix-qr/src/lib.rs:27-37"]
+
+[[network_dialect]]
+key = "legacy.qr.embedded_protocol_version"
+value = "1"
+value_type = "u32"
+collision_scope = "legacy-direct-qr-protocol-version"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-qr/src/lib.rs:35-37,124-127"]
+
+[[network_dialect]]
+key = "legacy.record.schema_version"
+value = "2"
+value_type = "u32"
+collision_scope = "durable-record-schema"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-client/src/api/record.rs:19-23"]
+
+[[network_dialect]]
+key = "legacy.record.launch_context_field"
+value = "context"
+value_type = "json-field"
+collision_scope = "legacy-record-field"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-client/src/api/record.rs:59-67,75-96"]
+
+[[network_dialect]]
+key = "legacy.record.pre_context_field"
+value = "params"
+value_type = "json-field"
+collision_scope = "legacy-record-field"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-client/src/api/record.rs:75-96"]
+
+[[network_dialect]]
+key = "legacy.record.schema_fields"
+values = ["version", "id", "updated_ms", "context", "session", "platform_extras"]
+value_type = "json-field-set"
+collision_scope = "durable-record-schema"
+policy = "forbid-exact-set"
+sources = ["envoix-android/crates/envoix-client/src/api/record.rs:49-67,75-85"]
+
+[[network_dialect]]
+key = "legacy.iroh_identity.schema_version"
+value = "1"
+value_type = "u32"
+collision_scope = "iroh-peer-key-file-schema"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-session/src/identity.rs:13,34-40"]
+
+[[network_dialect]]
+key = "legacy.iroh_identity.schema_fields"
+values = ["version", "secret_key"]
+value_type = "json-field-set"
+collision_scope = "iroh-peer-key-file-schema"
+policy = "forbid-exact-set"
+sources = ["envoix-android/crates/envoix-session/src/identity.rs:34-40"]
+
+[[network_dialect]]
+key = "legacy.workspace.package_version"
+value = "0.1.0"
+value_type = "semver"
+collision_scope = "workspace-package-version"
+policy = "forbid-exact"
+sources = ["envoix-android/Cargo.toml:22-25"]
+
+# -----------------------------------------------------------------------------
+# Discovery and invites
+# -----------------------------------------------------------------------------
+
+[[discovery_invite]]
+key = "legacy.mdns.service_label"
+value = "irohv1"
+value_type = "dns-sd-service-label"
+collision_scope = "mdns-service-label"
+policy = "forbid-exact"
+sources = [
+  "envoix-android/crates/envoix-session/src/lib.rs:254-256",
+  "envoix-android/crates/envoix-session/src/endpoint.rs:426-430",
+  "$CARGO_HOME/registry/src/index.crates.io-1949cf8c6b5b557f/iroh-mdns-address-lookup-0.4.0/src/lib.rs:83,167-193",
+]
+
+[[discovery_invite]]
+key = "legacy.mdns.service_fqdn"
+value = "_irohv1._udp.local."
+value_type = "dns-sd-service-fqdn"
+collision_scope = "mdns-service-fqdn"
+policy = "forbid-exact"
+sources = [
+  "envoix-android/crates/envoix-session/src/lib.rs:254-256",
+  "$CARGO_HOME/registry/src/index.crates.io-1949cf8c6b5b557f/iroh-mdns-address-lookup-0.4.0/src/lib.rs:187-193",
+]
+
+[[discovery_invite]]
+key = "legacy.invite.room_prefix"
+value = "envoix://pair/"
+value_type = "uri-prefix"
+collision_scope = "invite-outer-dialect"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-client/src/api/invite.rs:14-17,103-140"]
+
+[[discovery_invite]]
+key = "legacy.invite.direct_qr_prefix"
+value = "envoix:"
+value_type = "uri-prefix"
+collision_scope = "invite-outer-dialect"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-qr/src/lib.rs:24-29,95-108"]
+
+[[discovery_invite]]
+key = "legacy.invite.scheme_component"
+value = "envoix"
+value_type = "uri-scheme"
+collision_scope = "invite-brand-component"
+policy = "scoped-component"
+sources = [
+  "envoix-android/crates/envoix-client/src/api/invite.rs:14-17",
+  "envoix-android/crates/envoix-qr/src/lib.rs:24-29",
+]
+
+[[discovery_invite]]
+key = "legacy.invite.query_keys"
+values = ["broker", "relay", "role"]
+value_type = "string-set"
+collision_scope = "legacy-room-invite-query-key"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-client/src/api/invite.rs:103-140"]
+
+[[discovery_invite]]
+key = "legacy.invite.bare_room_code_grammar"
+value = "^[0-9]{6}-<legacy-word>-<legacy-word>$"
+value_type = "grammar"
+collision_scope = "invite-outer-dialect"
+policy = "forbid-recognition-as-valid"
+sources = [
+  "envoix-android/crates/envoix-client/src/api/invite.rs:124-140",
+  "envoix-android/crates/envoix-rendezvous-iroh/src/code.rs:22-43",
+]
+
+[[discovery_invite]]
+key = "legacy.room.nameplate_grammar"
+value = "^[0-9]{6}$"
+value_type = "grammar"
+collision_scope = "broker-room-namespace"
+policy = "forbid-recognition-as-valid"
+sources = ["envoix-android/crates/envoix-rendezvous-iroh/src/code.rs:22-43"]
+
+[[discovery_invite]]
+key = "legacy.room.nameplate_space"
+value = "1000000"
+value_type = "u32"
+collision_scope = "legacy-room-code-policy"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-rendezvous-iroh/src/code.rs:22-31"]
+
+[[discovery_invite]]
+key = "legacy.room.word_count"
+value = "2"
+value_type = "usize"
+collision_scope = "legacy-room-code-policy"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-client/src/api/invite.rs:16-17"]
+
+[[discovery_invite]]
+key = "legacy.room.word_list"
+values = [
+  "amber", "anchor", "apple", "arrow", "aspen", "azure", "basil", "beacon",
+  "birch", "blaze", "brass", "bridge", "cabin", "cedar", "chant", "cliff",
+  "clover", "comet", "coral", "crane", "delta", "ember", "fable", "falcon",
+  "fern", "flint", "frost", "garnet", "glade", "grove", "harbor", "hazel",
+  "indigo", "ivory", "jade", "kelp", "lantern", "lily", "lunar", "maple",
+  "marble", "meadow", "nimbus", "ocean", "onyx", "opal", "orbit", "petal",
+  "pine", "quartz", "raven", "reed", "river", "saffron", "sage", "slate",
+  "spruce", "thistle", "tundra", "umber", "violet", "willow", "yarrow", "zephyr",
+]
+value_type = "ordered-string-set"
+collision_scope = "legacy-room-code-word-list"
+policy = "forbid-exact-set"
+sources = ["envoix-android/crates/envoix-rendezvous-iroh/src/code.rs:11-20"]
+
+[[discovery_invite]]
+key = "legacy.broker.room_key_prefix"
+value = ""
+value_type = "string-prefix"
+collision_scope = "broker-room-key-prefix"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-rendezvous/src/broker.rs:43"]
+
+[[discovery_invite]]
+key = "legacy.apple.manual_token_grammar"
+value = "<legacy-apple-word>-<legacy-apple-word>-[0-9]{2}"
+value_type = "grammar"
+collision_scope = "manual-pairing-token-grammar"
+policy = "forbid-recognition-as-valid"
+sources = ["envoix-android/apps/envoix-apple/Sources/Support.swift:21-31"]
+
+[[discovery_invite]]
+key = "legacy.apple.manual_token_words"
+values = [
+  "river", "stone", "cloud", "tiger", "maple", "otter", "amber", "comet",
+  "delta", "ember", "flint", "grove", "ivory", "larch", "mango", "ocean",
+  "pearl", "raven", "spark", "topaz", "coral", "hazel", "basil", "willow",
+  "pine", "reef", "surf", "teal",
+]
+value_type = "ordered-string-set"
+collision_scope = "legacy-apple-token-word-list"
+policy = "forbid-exact-set"
+sources = ["envoix-android/apps/envoix-apple/Sources/Support.swift:21-31"]
+
+# -----------------------------------------------------------------------------
+# Deployments and node identities
+# -----------------------------------------------------------------------------
+
+[[deployment]]
+key = "legacy.prod.rendezvous_endpoint"
+value = "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445"
+value_type = "iroh-endpoint-at-socket"
+collision_scope = "deployed-rendezvous-endpoint"
+policy = "forbid-exact"
+sources = [
+  "envoix-android/android/app/src/main/java/dev/envoix/app/TransferRepository.kt:105-109",
+  "envoix-android/crates/envoix-ffi/src/lib.rs:29-33",
+  "envoix-android/apps/envoix-apple/Sources/Support.swift:16-19",
+]
+
+[[deployment]]
+key = "legacy.prod.rendezvous_node_id"
+value = "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff"
+value_type = "iroh-node-id"
+collision_scope = "deployed-rendezvous-node-id"
+policy = "forbid-exact"
+sources = [
+  "envoix-android/android/app/src/main/java/dev/envoix/app/TransferRepository.kt:105-109",
+  "envoix-android/crates/envoix-ffi/src/lib.rs:29-33",
+  "envoix-android/apps/envoix-apple/Sources/Support.swift:16-19",
+]
+
+[[deployment]]
+key = "legacy.prod.rendezvous_host"
+value = "67.230.187.238"
+value_type = "host"
+collision_scope = "deployed-service-host"
+policy = "forbid-exact"
+sources = ["envoix-android/android/app/src/main/java/dev/envoix/app/TransferRepository.kt:105-115"]
+
+[[deployment]]
+key = "legacy.prod.rendezvous_port"
+value = "8445"
+value_type = "u16"
+collision_scope = "rendezvous-service-port"
+policy = "forbid-exact"
+sources = [
+  "envoix-android/android/app/src/main/java/dev/envoix/app/TransferRepository.kt:105-109",
+  "envoix-android/apps/envoix-rendezvous-server/src/main.rs:26-34",
+]
+
+[[deployment]]
+key = "legacy.prod.relay_url"
+value = "https://envoix.chkxwlyh.us:8444"
+value_type = "https-url"
+collision_scope = "deployed-service-url"
+policy = "forbid-exact"
+sources = [
+  "envoix-android/android/app/src/main/java/dev/envoix/app/TransferRepository.kt:105-110",
+  "envoix-android/crates/envoix-ffi/src/lib.rs:32-33",
+  "envoix-android/apps/envoix-apple/Sources/Support.swift:18-19",
+]
+
+[[deployment]]
+key = "legacy.prod.relay_host"
+value = "envoix.chkxwlyh.us"
+value_type = "host"
+collision_scope = "deployed-service-host"
+policy = "forbid-exact"
+sources = ["envoix-android/android/app/src/main/java/dev/envoix/app/TransferRepository.kt:105-110"]
+
+[[deployment]]
+key = "legacy.prod.relay_port"
+value = "8444"
+value_type = "u16"
+collision_scope = "relay-service-port"
+policy = "forbid-exact"
+sources = ["envoix-android/android/app/src/main/java/dev/envoix/app/TransferRepository.kt:105-110"]
+
+[[deployment]]
+key = "legacy.prod.log_receipt_url"
+value = "https://rdz.chkxwlyh.us:8460"
+value_type = "https-url"
+collision_scope = "deployed-service-url"
+policy = "forbid-exact"
+sources = ["envoix-android/android/app/src/main/java/dev/envoix/app/TransferRepository.kt:111-115"]
+
+[[deployment]]
+key = "legacy.prod.log_receipt_host"
+value = "rdz.chkxwlyh.us"
+value_type = "host"
+collision_scope = "deployed-service-host"
+policy = "forbid-exact"
+sources = ["envoix-android/android/app/src/main/java/dev/envoix/app/TransferRepository.kt:111-115"]
+
+[[deployment]]
+key = "legacy.prod.log_receipt_port"
+value = "8460"
+value_type = "u16"
+collision_scope = "mailbox-evidence-service-port"
+policy = "forbid-exact"
+sources = ["envoix-android/android/app/src/main/java/dev/envoix/app/TransferRepository.kt:111-115"]
+
+[[deployment]]
+key = "legacy.pre_tls.log_receipt_url"
+value = "http://67.230.187.238:8460"
+value_type = "http-url"
+collision_scope = "deployed-service-url"
+policy = "forbid-exact"
+sources = ["envoix-android/android/app/src/main/java/dev/envoix/app/TransferRepository.kt:111-115"]
+
+[[deployment]]
+key = "legacy.server.bind"
+value = "0.0.0.0:8445"
+value_type = "socket-address"
+collision_scope = "server-default-bind"
+policy = "forbid-exact"
+sources = ["envoix-android/apps/envoix-rendezvous-server/src/main.rs:26-34"]
+
+[[deployment]]
+key = "legacy.server.node_key_filename"
+value = "rendezvous-secret.key"
+value_type = "relative-path"
+collision_scope = "iroh-node-key-storage"
+policy = "forbid-exact"
+sources = ["envoix-android/apps/envoix-rendezvous-server/src/main.rs:31-34"]
+
+[[deployment]]
+key = "legacy.nat_test.relay_host"
+value = "relay.nat-test.envoix"
+value_type = "host"
+collision_scope = "test-service-host"
+policy = "forbid-exact"
+sources = ["envoix-android/scripts/nat-test.sh:27-28"]
+
+# -----------------------------------------------------------------------------
+# Receipt mailbox and diagnostics service
+# -----------------------------------------------------------------------------
+
+[[service_api]]
+key = "legacy.mailbox.receipt_route"
+value = "/receipts/{key}"
+value_type = "http-route-template"
+collision_scope = "server-http-route"
+policy = "forbid-exact"
+sources = [
+  "envoix-android/apps/envoix-rendezvous-server/src/receipts.rs:66-70",
+  "envoix-android/android/app/src/main/java/dev/envoix/app/TransferService.kt:812-856",
+]
+
+[[service_api]]
+key = "legacy.mailbox.table_key_prefix"
+value = ""
+value_type = "string-prefix"
+collision_scope = "mailbox-table-key-prefix"
+policy = "forbid-exact"
+sources = ["envoix-android/apps/envoix-rendezvous-server/src/receipts.rs:31-34,45-53"]
+
+[[service_api]]
+key = "legacy.mailbox.receipt_kind"
+value = "receipt"
+value_type = "mailbox-kind"
+collision_scope = "mailbox-kind"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-client/src/api/receipt.rs:23-28"]
+
+[[service_api]]
+key = "legacy.mailbox.slot_derivation"
+value = "hex(blake3(utf8(transfer_id) || 0x0a || utf8(kind)))"
+value_type = "derivation-rule"
+collision_scope = "mailbox-slot-derivation"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-client/src/api/receipt.rs:30-40"]
+
+[[service_api]]
+key = "legacy.mailbox.receipt_seal_kdf_context"
+value = "envoix 2026-07-09 receipt-seal v1"
+value_type = "blake3-kdf-context"
+collision_scope = "crypto-label"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-client/src/api/receipt.rs:27-28,52-59"]
+
+[[service_api]]
+key = "legacy.mailbox.receipt_seal_derivation"
+value = "blake3::derive_key(\"envoix 2026-07-09 receipt-seal v1\", utf8(transfer_id) || 0x0a || utf8(code))"
+value_type = "derivation-rule"
+collision_scope = "mailbox-seal-key-derivation"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-client/src/api/receipt.rs:52-59"]
+
+[[service_api]]
+key = "legacy.mailbox.receipt_aad_prefix"
+value = "envoix-mailbox-v1:"
+value_type = "aead-aad-prefix"
+collision_scope = "crypto-label"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-client/src/api/receipt.rs:42-45"]
+
+[[service_api]]
+key = "legacy.mailbox.receipt_aad"
+value = "envoix-mailbox-v1:receipt"
+value_type = "aead-aad"
+collision_scope = "crypto-label"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-client/src/api/receipt.rs:23-26,42-49"]
+
+[[service_api]]
+key = "legacy.evidence.log_route"
+value = "/logs/{room}"
+value_type = "http-route-template"
+collision_scope = "server-http-route"
+policy = "forbid-exact"
+sources = [
+  "envoix-android/apps/envoix-rendezvous-server/src/logs.rs:257-262",
+  "envoix-android/android/app/src/main/java/dev/envoix/app/LogUpload.kt:8-24",
+]
+
+[[service_api]]
+key = "legacy.evidence.log_side_query_key"
+value = "side"
+value_type = "http-query-key"
+collision_scope = "legacy-evidence-api-query-key"
+policy = "forbid-exact"
+sources = [
+  "envoix-android/apps/envoix-rendezvous-server/src/logs.rs:257-268",
+  "envoix-android/android/app/src/main/java/dev/envoix/app/LogUpload.kt:14-24",
+]
+
+[[service_api]]
+key = "legacy.evidence.table_key_shape"
+value = "room -> {rdz-lines, clients[side]}"
+value_type = "structural-keyspace"
+collision_scope = "evidence-table-keyspace"
+policy = "forbid-exact"
+sources = ["envoix-android/apps/envoix-rendezvous-server/src/logs.rs:45-48,60-64,74-96"]
+
+# -----------------------------------------------------------------------------
+# Platform and local-storage namespaces
+# -----------------------------------------------------------------------------
+
+[[platform_storage]]
+key = "legacy.android.namespace"
+value = "dev.envoix.app"
+value_type = "android-namespace"
+collision_scope = "android-namespace"
+policy = "forbid-exact"
+sources = ["envoix-android/android/app/build.gradle.kts:25-30"]
+
+[[platform_storage]]
+key = "legacy.android.application_id"
+value = "dev.envoix.app"
+value_type = "android-application-id"
+collision_scope = "android-application-id"
+policy = "forbid-exact"
+sources = [
+  "envoix-android/android/app/build.gradle.kts:25-34",
+  "envoix-android/scripts/nat-test.sh:4-10",
+]
+
+[[platform_storage]]
+key = "legacy.android.service_actions"
+values = [
+  "dev.envoix.app.START",
+  "dev.envoix.app.CANCEL",
+  "dev.envoix.app.PAUSE",
+  "dev.envoix.app.RESUME",
+  "dev.envoix.app.REMOVE",
+  "dev.envoix.app.RESTORE_ALL",
+  "dev.envoix.app.REVERIFY",
+]
+value_type = "string-set"
+collision_scope = "android-intent-action"
+policy = "forbid-exact"
+sources = ["envoix-android/android/app/src/main/java/dev/envoix/app/TransferService.kt:1277-1286"]
+
+[[platform_storage]]
+key = "legacy.android.preferences_file"
+value = "envoix.settings"
+value_type = "shared-preferences-file"
+collision_scope = "android-preferences-namespace"
+policy = "forbid-exact"
+sources = ["envoix-android/android/app/src/main/java/dev/envoix/app/SettingsStore.kt:48-54"]
+
+[[platform_storage]]
+key = "legacy.android.preference_keys"
+values = [
+  "broker", "relay", "chunkSize", "dataStreamWindow", "candidatesAllow",
+  "candidatesDeny", "saveFolder", "saveTreeUri", "defaultRole", "useRoom",
+  "useMdns", "devMode", "verboseLog", "traceIroh", "logServer",
+]
+value_type = "string-set"
+collision_scope = "legacy-android-preference-key"
+policy = "forbid-exact"
+sources = ["envoix-android/android/app/src/main/java/dev/envoix/app/SettingsStore.kt:52-76,87-106"]
+
+[[platform_storage]]
+key = "legacy.android.private_roots"
+values = ["files/records", "files/incoming/<id>", "cache/send/<id>", "files/logs"]
+value_type = "path-pattern-set"
+collision_scope = "android-app-private-storage-root"
+policy = "forbid-exact"
+sources = [
+  "envoix-android/android/app/src/main/java/dev/envoix/app/EnvoixApp.kt:9-14",
+  "envoix-android/android/app/src/main/java/dev/envoix/app/TransferService.kt:240-276,359-362",
+  "envoix-android/android/app/src/main/java/dev/envoix/app/LogStore.kt:26-33",
+]
+
+[[platform_storage]]
+key = "legacy.android.publish_journal_pattern"
+value = ".envoix-publish.<name>.json"
+value_type = "filename-pattern"
+collision_scope = "artifact-sidecar-namespace"
+policy = "forbid-exact"
+sources = ["envoix-android/android/app/src/main/java/dev/envoix/app/TransferService.kt:932-936"]
+
+[[platform_storage]]
+key = "legacy.rust.transfer_sidecar_patterns"
+values = [
+  ".envoix.<file>.<transfer>.part",
+  ".envoix.<file>.<transfer>.json",
+  ".envoix.<file>.<transfer>.json.tmp",
+  ".envoix-receipt.<file>.json",
+]
+value_type = "filename-pattern-set"
+collision_scope = "artifact-sidecar-namespace"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-storage/src/lib.rs:397-422"]
+
+[[platform_storage]]
+key = "legacy.rust.record_filename_patterns"
+values = ["record-<id>.json", ".record-<id>.json.tmp"]
+value_type = "filename-pattern-set"
+collision_scope = "operation-record-file-namespace"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-client/src/api/record.rs:174-196"]
+
+[[platform_storage]]
+key = "legacy.apple.bundle_ids"
+values = ["com.envoix.app", "com.envoix.app.ios"]
+value_type = "apple-bundle-id-set"
+collision_scope = "apple-bundle-id"
+policy = "forbid-exact"
+sources = ["envoix-android/apps/envoix-apple/project.yml:23-26,60-63"]
+
+[[platform_storage]]
+key = "legacy.apple.preference_and_bookmark_keys"
+values = [
+  "envoix.appearance", "envoix.language", "envoix.concurrentTransfers",
+  "envoix.serverURL", "envoix.relayURL", "envoix.speedLimit",
+  "envoix.outputDir", "envoix.token", "envoix.outputDirBookmark",
+]
+value_type = "string-set"
+collision_scope = "legacy-apple-preference-key"
+policy = "forbid-exact"
+sources = [
+  "envoix-android/apps/envoix-apple/Sources/ContentView.swift:27-28,465-470",
+  "envoix-android/apps/envoix-apple/Sources/ReceiveView.swift:8-14,28",
+  "envoix-android/apps/envoix-apple/Sources/SendView.swift:12-17",
+]
+
+[[platform_storage]]
+key = "legacy.cli.executable"
+value = "envoix"
+value_type = "executable-name"
+collision_scope = "cli-executable"
+policy = "scoped-component"
+sources = ["envoix-android/apps/envoix-cli/Cargo.toml:7-9"]
+
+[known_absences]
+android_provider_authority = { value = "<none>", source = "envoix-android/android/app/src/main/AndroidManifest.xml:13-35" }
+apple_keychain_service = { value = "<none>", source = "envoix-android/apps/envoix-apple/project.yml:15-70" }
+cli_default_config_root = { value = "<none; caller-supplied>", source = "envoix-android/apps/envoix-cli/src/args.rs:55-66,103-119,155-166,327-329" }
+client_peer_key_alias = { value = "<none; ephemeral default>", source = "envoix-android/crates/envoix-client/src/api.rs:124-142" }
+
+# -----------------------------------------------------------------------------
+# Cryptographic transcript, KDF, exporter, confirmation, and sealing labels
+# -----------------------------------------------------------------------------
+
+[[crypto_label]]
+key = "legacy.data_auth.spake2_domain"
+value = "envoix-auth-spake2-v1"
+value_type = "bytes"
+collision_scope = "crypto-label"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-auth/src/lib.rs:21-22"]
+
+[[crypto_label]]
+key = "legacy.data_auth.sender_identity"
+value = "envoix sender"
+value_type = "bytes"
+collision_scope = "crypto-label"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-auth/src/lib.rs:27-29"]
+
+[[crypto_label]]
+key = "legacy.data_auth.receiver_identity"
+value = "envoix receiver"
+value_type = "bytes"
+collision_scope = "crypto-label"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-auth/src/lib.rs:27-30"]
+
+[[crypto_label]]
+key = "legacy.data_auth.exporter_context"
+value = "pairing"
+value_type = "bytes"
+collision_scope = "crypto-label"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-auth/src/lib.rs:30,70-82"]
+
+[[crypto_label]]
+key = "legacy.data_auth.sender_confirm"
+value = "sender-confirm"
+value_type = "bytes"
+collision_scope = "crypto-label"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-auth/src/lib.rs:31"]
+
+[[crypto_label]]
+key = "legacy.data_auth.receiver_confirm"
+value = "receiver-confirm"
+value_type = "bytes"
+collision_scope = "crypto-label"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-auth/src/lib.rs:32"]
+
+[[crypto_label]]
+key = "legacy.rdz_pair.spake2_domain"
+value = "envoix-pairing-spake2-v1"
+value_type = "bytes"
+collision_scope = "crypto-label"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-pairing/src/handshake.rs:18-19"]
+
+[[crypto_label]]
+key = "legacy.rdz_pair.initiator_identity"
+value = "envoix pairing initiator"
+value_type = "bytes"
+collision_scope = "crypto-label"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-pairing/src/handshake.rs:20-22"]
+
+[[crypto_label]]
+key = "legacy.rdz_pair.responder_identity"
+value = "envoix pairing responder"
+value_type = "bytes"
+collision_scope = "crypto-label"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-pairing/src/handshake.rs:20-22"]
+
+[[crypto_label]]
+key = "legacy.rdz_pair.confirm_key_context"
+value = "envoix-pairing confirm key v1"
+value_type = "blake3-kdf-context"
+collision_scope = "crypto-label"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-pairing/src/handshake.rs:23-24"]
+
+[[crypto_label]]
+key = "legacy.rdz_pair.initiator_confirm"
+value = "initiator-confirm"
+value_type = "bytes"
+collision_scope = "crypto-label"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-pairing/src/handshake.rs:25-27"]
+
+[[crypto_label]]
+key = "legacy.rdz_pair.responder_confirm"
+value = "responder-confirm"
+value_type = "bytes"
+collision_scope = "crypto-label"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-pairing/src/handshake.rs:25-27"]
+
+[[crypto_label]]
+key = "legacy.rdz_pair.bundle_key_context"
+value = "envoix-pairing bundle key v1"
+value_type = "blake3-kdf-context"
+collision_scope = "crypto-label"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-pairing/src/bundle.rs:18-26"]
+
+[[crypto_label]]
+key = "legacy.rdz_pair.initiator_seal_aad"
+value = "envoix-pairing seal initiator v1"
+value_type = "aead-aad"
+collision_scope = "crypto-label"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-rendezvous-iroh/src/lib.rs:29-32"]
+
+[[crypto_label]]
+key = "legacy.rdz_pair.responder_seal_aad"
+value = "envoix-pairing seal responder v1"
+value_type = "aead-aad"
+collision_scope = "crypto-label"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-rendezvous-iroh/src/lib.rs:29-32"]
+
+[[crypto_label]]
+key = "legacy.rdz_pair.data_token_context"
+value = "envoix rendezvous data-plane token v1"
+value_type = "blake3-kdf-context"
+collision_scope = "crypto-label"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-rendezvous-iroh/src/lib.rs:26-27"]

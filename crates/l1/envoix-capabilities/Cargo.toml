@@ -1,9 +1,9 @@
 [package]
-name = "envoix-cli"
+name = "envoix-capabilities"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [package.metadata.envoix]
-layer = "L7"
-role = "composition-root"
+layer = "L1"
+role = "library"
