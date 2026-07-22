@@ -69,6 +69,33 @@
             color: var(--dim);
             cursor: not-allowed;
         }
+        .download-options {
+            display: grid;
+            gap: 10px;
+        }
+        .download-option {
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 12px;
+        }
+        .download-option h4 {
+            color: #fff;
+            font-size: 0.9rem;
+            margin-bottom: 8px;
+        }
+        .download-option a { width: 100%; }
+        .badge {
+            color: var(--green);
+            font-size: 0.72rem;
+            font-weight: 600;
+            margin-left: 6px;
+            text-transform: uppercase;
+        }
+        .download-option .warning {
+            color: var(--dim);
+            font-size: 0.75rem;
+            margin-top: 8px;
+        }
         .card .note {
             font-size: 0.78rem;
             color: #666;
@@ -102,9 +129,20 @@
 
         <!-- Android -->
         <div class="card">
-            <h3>🤖 Android<span class="ver">v0.2.0</span></h3>
+            <h3>🤖 Android</h3>
             <p class="desc">APK for Android 10+. QR scan, room code, mDNS/BLE/Wi-Fi Aware discovery.</p>
-            <a href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/envoix-android.apk">Download APK</a>
+            <div class="download-options">
+                <div class="download-option">
+                    <h4>v0.1.0 <span class="badge">Recommended / Stable</span></h4>
+                    <a href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/envoix-android.apk">Download Stable APK</a>
+                    <p class="warning">Debug-key build for demonstration and sideloading only.</p>
+                </div>
+                <div class="download-option">
+                    <h4>v0.2.0 <span class="badge">Latest / Experimental</span></h4>
+                    <a href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/envoix-android-v0.2.0.apk">Download Experimental APK</a>
+                    <p class="warning">Debug-key build for demonstration and sideloading only.</p>
+                </div>
+            </div>
             <p class="note">Sideload: enable "Install unknown apps" for your browser or file manager before opening the APK.</p>
         </div>
 
