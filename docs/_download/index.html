@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Envoix — Download</title>
+    <style>
+        :root {
+            --bg: #0d0d0d;
+            --card: #1a1a1a;
+            --border: #2a2a2a;
+            --text: #e0e0e0;
+            --dim: #888;
+            --accent: #4da6ff;
+            --green: #4ecdc4;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        header {
+            text-align: center;
+            padding: 60px 20px 30px;
+        }
+        header h1 { font-size: 2.2rem; font-weight: 700; color: #fff; }
+        header p { color: var(--dim); margin-top: 8px; font-size: 0.95rem; }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 16px;
+            max-width: 920px;
+            width: 100%;
+            padding: 0 20px 60px;
+        }
+        .card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .card h3 { font-size: 1.1rem; color: #fff; }
+        .card .ver { font-size: 0.8rem; color: var(--dim); font-weight: 400; }
+        .card .desc { font-size: 0.85rem; color: var(--dim); flex: 1; }
+        .card a,
+        .card .unavailable {
+            display: inline-block;
+            background: var(--accent);
+            color: #fff;
+            text-decoration: none;
+            padding: 10px 18px;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            font-weight: 600;
+            text-align: center;
+        }
+        .card a:hover { opacity: 0.85; }
+        .card .unavailable {
+            background: #333;
+            color: var(--dim);
+            cursor: not-allowed;
+        }
+        .card .note {
+            font-size: 0.78rem;
+            color: #666;
+            border-top: 1px solid var(--border);
+            padding-top: 8px;
+            margin-top: 4px;
+        }
+        footer {
+            padding: 20px;
+            color: var(--dim);
+            font-size: 0.8rem;
+            text-align: center;
+        }
+        footer a { color: var(--accent); }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Envoix</h1>
+        <p>Minimal · Secure · Cross-Platform File Transfer</p>
+    </header>
+
+    <div class="grid">
+        <!-- macOS App -->
+        <div class="card">
+            <h3>🍎 macOS App<span class="ver">v0.2.0</span></h3>
+            <p class="desc">Native SwiftUI app with drag & drop, menu-bar, QR scan, room code, and nearby discovery.</p>
+            <a href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/Envoix-macOS-v0.2.0.zip">Download macOS App</a>
+            <p class="note">After download, unzip and drag Envoix.app to Applications.</p>
+        </div>
+
+        <!-- Android -->
+        <div class="card">
+            <h3>🤖 Android<span class="ver">v0.2.0</span></h3>
+            <p class="desc">APK for Android 10+. QR scan, room code, mDNS/BLE/Wi-Fi Aware discovery.</p>
+            <a href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/envoix-android.apk">Download APK</a>
+            <p class="note">Sideload: enable "Install unknown apps" for your browser or file manager before opening the APK.</p>
+        </div>
+
+        <!-- iOS / TestFlight -->
+        <div class="card">
+            <h3>📱 iOS<span class="ver">v0.2.0</span></h3>
+            <p class="desc">The iOS build will be distributed through TestFlight.</p>
+            <span class="unavailable" aria-disabled="true">TestFlight Link Coming Soon</span>
+            <p class="note">The public invitation link has not been published yet.</p>
+        </div>
+
+        <!-- CLI: macOS Apple Silicon -->
+        <div class="card">
+            <h3>💻 CLI — macOS (Apple Silicon)</h3>
+            <p class="desc">Terminal client for scripting and headless transfers on Apple Silicon Macs.</p>
+            <a href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/envoix-macos-aarch64">Download CLI (Apple Silicon)</a>
+            <p class="note">After download: chmod +x envoix-macos-aarch64 && ./envoix-macos-aarch64 --help</p>
+        </div>
+
+        <!-- CLI: macOS Intel -->
+        <div class="card">
+            <h3>💻 CLI — macOS (Intel)</h3>
+            <p class="desc">Terminal client for Intel-based Macs.</p>
+            <a href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/envoix-macos-x86_64">Download CLI (Intel)</a>
+            <p class="note">After download: chmod +x envoix-macos-x86_64 && ./envoix-macos-x86_64 --help</p>
+        </div>
+
+        <!-- CLI: Linux -->
+        <div class="card">
+            <h3>🐧 CLI — Linux (x86_64)</h3>
+            <p class="desc">Static musl binary. Works on any modern Linux distribution.</p>
+            <a href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/envoix-linux-x86_64">Download CLI (Linux)</a>
+            <p class="note">After download: chmod +x envoix-linux-x86_64 && ./envoix-linux-x86_64 --help</p>
+        </div>
+
+        <!-- CLI: Windows -->
+        <div class="card">
+            <h3>🪟 CLI — Windows (x86_64)</h3>
+            <p class="desc">Standalone .exe. No runtime required — just run it.</p>
+            <a href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/envoix-windows-x86_64.exe">Download CLI (Windows)</a>
+            <p class="note">Open PowerShell or cmd in the download folder and run: .\envoix-windows-x86_64.exe --help</p>
+        </div>
+    </div>
+
+    <footer>
+        <a href="https://github.com/ECE4410J-NUUB/envoix/releases">View all releases on GitHub →</a>
+        <br><br>
+        <span>v0.2.0 &mdash; ECE4410J</span>
+    </footer>
+</body>
+</html>

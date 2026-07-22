@@ -1039,7 +1039,7 @@ dependencies = [
 
 [[package]]
 name = "envoix-android-jni"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "envoix-client",
@@ -1054,7 +1054,7 @@ dependencies = [
 
 [[package]]
 name = "envoix-auth"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "envoix-error",
@@ -1069,7 +1069,7 @@ dependencies = [
 
 [[package]]
 name = "envoix-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "envoix-client",
@@ -1084,7 +1084,7 @@ dependencies = [
 
 [[package]]
 name = "envoix-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "envoix-auth",
@@ -1105,14 +1105,14 @@ dependencies = [
 
 [[package]]
 name = "envoix-error"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "envoix-ffi"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "envoix-client",
@@ -1136,7 +1136,7 @@ dependencies = [
 
 [[package]]
 name = "envoix-pairing"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "chacha20poly1305",
@@ -1149,7 +1149,7 @@ dependencies = [
 
 [[package]]
 name = "envoix-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "envoix-error",
@@ -1163,7 +1163,7 @@ dependencies = [
 
 [[package]]
 name = "envoix-qr"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "envoix-protocol",
@@ -1178,7 +1178,7 @@ dependencies = [
 
 [[package]]
 name = "envoix-rendezvous"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "envoix-pairing",
  "serde",
@@ -1190,7 +1190,7 @@ dependencies = [
 
 [[package]]
 name = "envoix-rendezvous-iroh"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1206,7 +1206,7 @@ dependencies = [
 
 [[package]]
 name = "envoix-rendezvous-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1225,7 +1225,7 @@ dependencies = [
 
 [[package]]
 name = "envoix-session"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1253,7 +1253,7 @@ dependencies = [
 
 [[package]]
 name = "envoix-storage"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "envoix-error",
  "envoix-types",
@@ -1266,7 +1266,7 @@ dependencies = [
 
 [[package]]
 name = "envoix-transfer"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "blake3",
@@ -1284,7 +1284,7 @@ dependencies = [
 
 [[package]]
 name = "envoix-types"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
 ]
