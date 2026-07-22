@@ -119,6 +119,10 @@ version = "0.2.0"
 [[package]]
 name = "envoix-protocol"
 version = "0.2.0"
+dependencies = [
+ "envoix-outcomes",
+ "envoix-types",
+]
 
 [[package]]
 name = "envoix-rendezvous"
