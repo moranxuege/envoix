@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use cargo_metadata::{MetadataCommand, Package};
+use cargo_metadata::{DependencyKind, MetadataCommand, Package};
 use serde::Deserialize;
 
 pub type CheckResult<T> = Result<T, String>;
@@ -635,6 +635,9 @@ fn validate_package(
     }
 
     for dependency in &package.dependencies {
+        if !is_architectural_dependency(dependency.kind) {
+            continue;
+        }
         if internal_names.contains(dependency.name.as_str()) {
             let Some(dependency_layer) = package_layers.get(dependency.name.as_str()) else {
                 violations.push(format!(
@@ -643,9 +646,14 @@ fn validate_package(
                 ));
                 continue;
             };
-            if role != "composition-root"
-                && !allowed_internal_edge(&package.name, layer, &dependency.name, dependency_layer)
-            {
+            if violates_internal_edge(
+                role,
+                &package.name,
+                layer,
+                &dependency.name,
+                dependency_layer,
+                dependency.kind,
+            ) {
                 violations.push(format!(
                     "{} ({layer}) may not depend on {} ({dependency_layer})",
                     package.name, dependency.name
@@ -682,6 +690,23 @@ fn allowed_internal_edge(
         "L7" => true,
         _ => false,
     }
+}
+
+fn is_architectural_dependency(kind: DependencyKind) -> bool {
+    !matches!(kind, DependencyKind::Development | DependencyKind::Build)
+}
+
+fn violates_internal_edge(
+    role: &str,
+    package: &str,
+    layer: &str,
+    dependency: &str,
+    dependency_layer: &str,
+    kind: DependencyKind,
+) -> bool {
+    is_architectural_dependency(kind)
+        && role != "composition-root"
+        && !allowed_internal_edge(package, layer, dependency, dependency_layer)
 }
 
 fn validate_physical_layer(
@@ -752,6 +777,9 @@ fn validate_forbidden_dependencies(package: &Package, layer: &str, violations: &
         &[]
     };
     for dependency in &package.dependencies {
+        if !is_architectural_dependency(dependency.kind) {
+            continue;
+        }
         let normalized = dependency.name.to_ascii_lowercase();
         if forbidden.iter().any(|token| normalized.contains(token)) {
             violations.push(format!(
@@ -1009,5 +1037,24 @@ mod tests {
             !rejected.is_empty(),
             "a fresh tuple equal to a legacy tuple must be rejected"
         );
+    }
+
+    #[test]
+    fn dependency_kind_refines_layer_enforcement() {
+        let wrong_edge = |kind| {
+            violates_internal_edge(
+                "library",
+                "envoix-types",
+                "L0",
+                "envoix-product",
+                "L3",
+                kind,
+            )
+        };
+
+        assert!(!wrong_edge(DependencyKind::Development));
+        assert!(!wrong_edge(DependencyKind::Build));
+        assert!(wrong_edge(DependencyKind::Normal));
+        assert!(wrong_edge(DependencyKind::Unknown));
     }
 }

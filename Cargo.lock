@@ -85,6 +85,11 @@ version = "0.2.0"
 [[package]]
 name = "envoix-outcomes"
 version = "0.2.0"
+dependencies = [
+ "envoix-types",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "envoix-pairing"
@@ -145,6 +150,10 @@ version = "0.2.0"
 [[package]]
 name = "envoix-types"
 version = "0.2.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "equivalent"

@@ -7,3 +7,9 @@ license.workspace = true
 [package.metadata.envoix]
 layer = "L0"
 role = "library"
+
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

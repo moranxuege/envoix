@@ -1,2 +1,13 @@
-//! Envoix 0.2.0 canonical vocabulary (L0). Placeholder — the fresh identities,
-//! outcomes, and dialect constants land in build step V1.
+//! Canonical identities and values carried across Envoix boundaries.
+
+#![forbid(unsafe_code)]
+
+mod identity;
+mod name;
+mod secret;
+mod value;
+
+pub use identity::{ArtifactId, AttemptGen, RecordId, RequestId, TransferId};
+pub use name::{LandedName, OfferedName};
+pub use secret::Secret;
+pub use value::{ByteCount, Direction};
