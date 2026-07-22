@@ -71,3 +71,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # actual GSO sends with EIO. The patched crate keeps ordinary Android UDP socket
 # behavior but schedules one datagram per send.
 noq-udp = { path = "vendor/noq-udp" }
+# LOCAL (uncommitted) patch for the RT-AC68U experiment: make SO_REUSEPORT
+# best-effort so iroh mDNS can start on the router's pre-3.9 (2.6.36) kernel.
+# Harmless on modern kernels (set_reuse_port succeeds there). See
+# vendor/swarm-discovery-0.6.2/src/socket.rs.
+swarm-discovery = { path = "vendor/swarm-discovery-0.6.2" }
