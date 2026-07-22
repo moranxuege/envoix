@@ -1152,6 +1152,7 @@ name = "envoix-protocol"
 version = "0.2.0"
 dependencies = [
  "async-trait",
+ "blake3",
  "envoix-error",
  "envoix-types",
  "num_enum",

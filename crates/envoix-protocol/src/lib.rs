@@ -1,6 +1,7 @@
 //! Wire protocol frame types and codecs.
 
 pub mod manifest;
+pub mod manifest_v2;
 
 pub use manifest::{
     MANIFEST_V1_ALPN, MANIFEST_V1_PROTOCOL_VERSION, MAX_MANIFEST_V1_COMPONENT_BYTES,

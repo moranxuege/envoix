@@ -37,3 +37,6 @@ android/.kotlin/
 # local design docs
 /docs/design/wifi-aware-vertical-slice.md
 /docs/issues/issue-reconciliation-plan-2026-07-20.md
+/docs/debate.md
+/docs/manifest_plan.md
+/docs/manifest_goal.md
