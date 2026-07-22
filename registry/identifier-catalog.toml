@@ -116,6 +116,7 @@ key = "invite.qr_outer_prefix"
 owner = "crate:envoix-invite"
 owner_path = "crates/l1/envoix-invite/src/identifiers.rs"
 collision_scope = "invite-outer-dialect"
+comparison = "compare-only-as-invite-dialect-tuple"
 extract = "rust-const:QR_OUTER_PREFIX"
 
 [[identifier]]
@@ -206,6 +207,13 @@ owner = "crate:envoix-protocol"
 owner_path = "crates/l1/envoix-protocol/src/mailbox/identifiers.rs"
 collision_scope = "mailbox-slot-derivation"
 extract = "rust-function:ReceiptSlotDerivation::canonical_identifier"
+
+[[identifier]]
+key = "mailbox.receipt_seal_derivation"
+owner = "crate:envoix-protocol"
+owner_path = "crates/l1/envoix-protocol/src/mailbox/identifiers.rs"
+collision_scope = "mailbox-seal-key-derivation"
+extract = "rust-function:ReceiptSealDerivation::canonical_identifier"
 
 [[identifier]]
 key = "mailbox.server_table_name"

@@ -1,1 +1,3 @@
-//! envoix-invite (L1 library) — envoix 0.2.0 placeholder; filled in a later build step.
+//! Versioned invite and room-namespace identifiers.
+
+pub mod identifiers;

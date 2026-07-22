@@ -1,1 +1,3 @@
-//! envoix-auth (L2 library) — envoix 0.2.0 placeholder; filled in a later build step.
+//! Data-plane authentication mechanism identifiers.
+
+pub mod identifiers;

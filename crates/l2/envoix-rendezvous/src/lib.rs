@@ -1,1 +1,3 @@
-//! envoix-rendezvous (L2 library) — envoix 0.2.0 placeholder; filled in a later build step.
+//! Blind rendezvous mechanism and its versioned control-dialect identifiers.
+
+pub mod identifiers;

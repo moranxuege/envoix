@@ -1,0 +1,10 @@
+pub const SPAKE2_DOMAIN: &[u8] = b"envoix/rdz-pair/spake2/v2";
+pub const INITIATOR_IDENTITY: &[u8] = b"envoix/rdz-pair/identity/initiator/v2";
+pub const RESPONDER_IDENTITY: &[u8] = b"envoix/rdz-pair/identity/responder/v2";
+pub const CONFIRM_KEY_CONTEXT: &str = "envoix/rdz-pair/confirm-key/v2";
+pub const INITIATOR_CONFIRM_LABEL: &[u8] = b"envoix/rdz-pair/confirm/initiator/v2";
+pub const RESPONDER_CONFIRM_LABEL: &[u8] = b"envoix/rdz-pair/confirm/responder/v2";
+pub const BUNDLE_KEY_CONTEXT: &str = "envoix/rdz-pair/bundle-key/v2";
+pub const INITIATOR_SEAL_AAD: &[u8] = b"envoix/rdz-pair/seal/initiator/v2";
+pub const RESPONDER_SEAL_AAD: &[u8] = b"envoix/rdz-pair/seal/responder/v2";
+pub const DATA_TOKEN_CONTEXT: &str = "envoix/rdz-pair/data-token/v2";

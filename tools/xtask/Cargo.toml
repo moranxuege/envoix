@@ -7,3 +7,21 @@ license.workspace = true
 [package.metadata.envoix]
 layer = "tool"
 role = "tool"
+
+[dependencies]
+cargo_metadata = "0.18"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+envoix-auth = { path = "../../crates/l2/envoix-auth" }
+envoix-evidence = { path = "../../crates/l4/envoix-evidence" }
+envoix-invite = { path = "../../crates/l1/envoix-invite" }
+envoix-pairing = { path = "../../crates/l1/envoix-pairing" }
+envoix-platform-android = { path = "../../crates/l6/envoix-platform-android" }
+envoix-platform-apple = { path = "../../crates/l6/envoix-platform-apple" }
+envoix-platform-local = { path = "../../crates/l6/envoix-platform-local" }
+envoix-product = { path = "../../crates/l3/envoix-product" }
+envoix-protocol = { path = "../../crates/l1/envoix-protocol" }
+envoix-rendezvous = { path = "../../crates/l2/envoix-rendezvous" }
+envoix-session-iroh = { path = "../../crates/l2/envoix-session-iroh" }
+envoix-storage-api = { path = "../../crates/l1/envoix-storage-api" }

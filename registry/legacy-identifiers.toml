@@ -183,8 +183,24 @@ key = "legacy.invite.direct_qr_prefix"
 value = "envoix:"
 value_type = "uri-prefix"
 collision_scope = "invite-outer-dialect"
-policy = "forbid-exact"
+policy = "scoped-component"
 sources = ["envoix-android/crates/envoix-qr/src/lib.rs:24-29,95-108"]
+
+[[discovery_invite]]
+key = "legacy.invite.direct_qr_dialect_tuple"
+value = "qr-prefix=envoix:;deep-link-prefix=<none>;payload-version=2"
+value_type = "canonical-tuple"
+collision_scope = "invite-dialect"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-qr/src/lib.rs:24-37,95-127"]
+
+[[discovery_invite]]
+key = "legacy.invite.room_dialect_tuple"
+value = "qr-prefix=<none>;deep-link-prefix=envoix://pair/;payload-version=<none>"
+value_type = "canonical-tuple"
+collision_scope = "invite-dialect"
+policy = "forbid-exact"
+sources = ["envoix-android/crates/envoix-client/src/api/invite.rs:14-17,103-140"]
 
 [[discovery_invite]]
 key = "legacy.invite.scheme_component"

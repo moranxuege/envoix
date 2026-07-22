@@ -1,4 +1,11 @@
 /target/
+/target-*/
+/legacy/target/
+/legacy/android/.gradle/
+/legacy/android/.kotlin/
+/legacy/android/**/build/
+/legacy/android/app/src/main/jniLibs/
+/legacy/android/local.properties
 
 # large payloads
 *.mp4

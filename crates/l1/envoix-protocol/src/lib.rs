@@ -1,1 +1,4 @@
-//! envoix-protocol (L1 library) — envoix 0.2.0 placeholder; filled in a later build step.
+//! Versioned wire and service-protocol identifiers.
+
+pub mod identifiers;
+pub mod mailbox;
