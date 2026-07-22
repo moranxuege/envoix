@@ -7,3 +7,10 @@ license.workspace = true
 [package.metadata.envoix]
 layer = "L1"
 role = "library"
+
+[dependencies]
+envoix-types = { path = "../../l0/envoix-types" }
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
