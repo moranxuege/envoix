@@ -10,9 +10,9 @@ mod args;
 use args::{Cli, Command, SaveModeArg, SourceIssueActionArg, TransferPlan};
 use clap::Parser;
 use envoix_client::api::{
-    self, CanonicalTransferJob, DestinationDecisionV2, DestinationRequestV2, PairingConfig,
-    PeerSource, PendingManifestV2Receive, SessionEventSink, SessionTransferEvent, SourceDecision,
-    SourceSelectionState, TransferJobStore,
+    self, CanonicalTransferJob, DestinationDecisionV2, DestinationRequestV2, EventSink,
+    PairingConfig, PeerSource, PendingManifestV2Receive, SourceDecision, SourceSelectionState,
+    TransferEvent, TransferJobStore,
 };
 use envoix_client::{IdentityConfig, SPAKE2_EXPERIMENTAL_WARNING, TransferCancelToken};
 use envoix_qr::{QrInvitePayload, generate_token, render_terminal_qr};
@@ -115,7 +115,7 @@ async fn send(plan: TransferPlan, json: bool) -> CliResult<()> {
         manifest.totals.directory_count,
         manifest.totals.total_plaintext_bytes
     );
-    let events: Arc<dyn SessionEventSink> = Arc::new(CliEvents { json });
+    let events: Arc<dyn EventSink> = Arc::new(CliEvents { json });
     let cancel = TransferCancelToken::new();
     let operation = send_job(
         &plan.source,
@@ -152,11 +152,17 @@ async fn receive(plan: TransferPlan, json: bool) -> CliResult<()> {
     let available = api::local_allocatable_bytes(&target_directory)?;
     let state_directory = target_directory.join(".envoix-state-v2");
     let client = api_client(plan.config.as_deref(), plan.identity.clone())?;
+    let listen_addrs = plan
+        .options
+        .listen_addrs
+        .clone()
+        .unwrap_or_else(|| envoix_client::BindAddrs::dual_stack(0));
     let config = client.session_config(&plan.options);
-    let events: Arc<dyn SessionEventSink> = Arc::new(CliEvents { json });
+    let events: Arc<dyn EventSink> = Arc::new(CliEvents { json });
     let cancel = TransferCancelToken::new();
     let operation = receive_offer(
         &plan.source,
+        listen_addrs,
         config,
         events,
         &cancel,
@@ -221,7 +227,7 @@ async fn send_job(
     job: &CanonicalTransferJob,
     state_directory: PathBuf,
     config: api::SessionConfig,
-    events: Arc<dyn SessionEventSink>,
+    events: Arc<dyn EventSink>,
     cancel: &TransferCancelToken,
     relay: Option<&str>,
 ) -> Result<api::SenderManifestV2SessionSummary, api::SessionError> {
@@ -293,12 +299,12 @@ async fn send_job(
 
 async fn receive_offer(
     source: &PeerSource,
+    listen_addrs: envoix_client::BindAddrs,
     config: api::SessionConfig,
-    events: Arc<dyn SessionEventSink>,
+    events: Arc<dyn EventSink>,
     cancel: &TransferCancelToken,
     relay: Option<&str>,
 ) -> Result<PendingManifestV2Receive, api::SessionError> {
-    let listen = config.clone();
     match source {
         PeerSource::ShowManual { token } => {
             let token = token
@@ -308,7 +314,7 @@ async fn receive_offer(
                 .map_err(|error| api::SessionError::InvalidInput(error.to_string()))?;
             let pairing = PairingConfig::spake2_shared_token(token.clone())?;
             api::receive_manifest_v2_offer_with_bound_peer(
-                listen_addrs(&listen),
+                listen_addrs.clone(),
                 config,
                 &pairing,
                 events,
@@ -326,7 +332,7 @@ async fn receive_offer(
             let pairing = PairingConfig::spake2_shared_token(token.clone())?;
             let expires_at = now_unix_seconds().saturating_add(*ttl_secs);
             api::receive_manifest_v2_offer_with_bound_peer(
-                listen_addrs(&listen),
+                listen_addrs.clone(),
                 config,
                 &pairing,
                 events,
@@ -344,7 +350,7 @@ async fn receive_offer(
             let pairing = PairingConfig::spake2_shared_token(token.clone())?;
             let expires_at = now_unix_seconds().saturating_add(300);
             api::receive_manifest_v2_offer_enable_mdns(
-                listen_addrs(&listen),
+                listen_addrs.clone(),
                 config,
                 &pairing,
                 events,
@@ -358,7 +364,7 @@ async fn receive_offer(
             api::receive_manifest_v2_offer_via_room(
                 broker,
                 code,
-                listen_addrs(&listen),
+                listen_addrs,
                 config,
                 events,
                 cancel,
@@ -411,10 +417,6 @@ fn sender_state_directory() -> io::Result<PathBuf> {
     Ok(std::env::current_dir()?.join(".envoix-state-v2"))
 }
 
-fn listen_addrs(_config: &api::SessionConfig) -> envoix_client::BindAddrs {
-    envoix_client::BindAddrs::dual_stack(0)
-}
-
 fn api_client(config_path: Option<&Path>, identity: IdentityConfig) -> CliResult<api::Client> {
     eprintln!("{SPAKE2_EXPERIMENTAL_WARNING}");
     let mut client = api::Client::from_runtime_sources(config_path)?;
@@ -433,60 +435,40 @@ struct CliEvents {
     json: bool,
 }
 
-impl SessionEventSink for CliEvents {
-    fn on_event(&self, event: SessionTransferEvent) {
+impl EventSink for CliEvents {
+    fn on_event(&self, event: TransferEvent) {
         if self.json {
             let (kind, detail) = match event {
-                SessionTransferEvent::Diagnostic { message } => ("diagnostic", message),
-                SessionTransferEvent::Pairing { step } => ("pairing", format!("{step:?}")),
-                SessionTransferEvent::Connecting => ("connecting", String::new()),
-                SessionTransferEvent::Connected { path } => ("connected", path.to_string()),
-                SessionTransferEvent::PathChanged { path } => ("path_changed", path.to_string()),
-                SessionTransferEvent::Started { file_name, .. } => ("started", file_name),
-                SessionTransferEvent::Progress {
+                TransferEvent::Diagnostic { message } => ("diagnostic", message),
+                TransferEvent::Pairing { step } => ("pairing", format!("{step:?}")),
+                TransferEvent::Connecting => ("connecting", String::new()),
+                TransferEvent::Connected { path } => ("connected", path.to_string()),
+                TransferEvent::PathChanged { path } => ("path_changed", path.to_string()),
+                TransferEvent::Progress {
                     bytes_transferred,
                     total_bytes,
                     ..
                 } => ("progress", format!("{bytes_transferred}/{total_bytes}")),
-                SessionTransferEvent::ManifestV2Phase { phase, .. } => {
+                TransferEvent::ManifestV2Phase { phase, .. } => {
                     ("manifest_v2_phase", format!("{phase:?}"))
                 }
-                SessionTransferEvent::HashStarted { .. } => ("verifying", String::new()),
-                SessionTransferEvent::HashCompleted { .. } => ("verified", String::new()),
-                SessionTransferEvent::Confirming { .. } => {
-                    ("waiting_for_receiver_save", String::new())
-                }
-                SessionTransferEvent::Completed { .. } => ("completed", String::new()),
-                SessionTransferEvent::Failed { reason, .. } => ("failed", reason),
             };
             println!("{}", serde_json::json!({ "kind": kind, "detail": detail }));
         } else {
             match event {
-                SessionTransferEvent::Diagnostic { message } => eprintln!("{message}"),
-                SessionTransferEvent::Pairing { step } => eprintln!("pairing: {step:?}"),
-                SessionTransferEvent::Connecting => eprintln!("connecting…"),
-                SessionTransferEvent::Connected { path } => eprintln!("connected via {path}"),
-                SessionTransferEvent::PathChanged { path } => eprintln!("path changed: {path}"),
-                SessionTransferEvent::Started {
-                    file_name,
-                    total_bytes,
-                    ..
-                } => eprintln!("transferring {file_name} ({total_bytes} bytes)"),
-                SessionTransferEvent::Progress {
+                TransferEvent::Diagnostic { message } => eprintln!("{message}"),
+                TransferEvent::Pairing { step } => eprintln!("pairing: {step:?}"),
+                TransferEvent::Connecting => eprintln!("connecting…"),
+                TransferEvent::Connected { path } => eprintln!("connected via {path}"),
+                TransferEvent::PathChanged { path } => eprintln!("path changed: {path}"),
+                TransferEvent::Progress {
                     bytes_transferred,
                     total_bytes,
                     ..
                 } => eprintln!("{bytes_transferred}/{total_bytes}"),
-                SessionTransferEvent::ManifestV2Phase { phase, .. } => {
+                TransferEvent::ManifestV2Phase { phase, .. } => {
                     eprintln!("manifest v2: {phase:?}")
                 }
-                SessionTransferEvent::HashStarted { .. } => eprintln!("verifying…"),
-                SessionTransferEvent::HashCompleted { .. } => eprintln!("verified"),
-                SessionTransferEvent::Confirming { .. } => {
-                    eprintln!("waiting for receiver to save files…")
-                }
-                SessionTransferEvent::Completed { .. } => eprintln!("completed"),
-                SessionTransferEvent::Failed { reason, .. } => eprintln!("failed: {reason}"),
             }
         }
     }

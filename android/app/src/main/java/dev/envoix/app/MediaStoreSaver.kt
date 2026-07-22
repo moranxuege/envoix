@@ -100,7 +100,7 @@ object MediaStoreSaver {
         }
 
     /** Hash the current public bytes. Used only by crash recovery and manual
-     *  receipt re-verification, both exceptional paths. */
+     *  delivery-proof reconciliation, both exceptional paths. */
     fun inspect(
         context: Context,
         uri: Uri,

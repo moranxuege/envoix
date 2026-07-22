@@ -1,9 +1,9 @@
 # Manifest v2 Goal 0 contract
 
-- Status: frozen for Goal 1–9 implementation
+- Status: frozen contract; Goals 1–9 implemented on `feat/unified-transfer`
 - Frozen on: 2026-07-23
 - Branch base: `feat/unified-transfer` from `origin/dev@4bf42a74e49b8582bd1926a88e8a21b345edcb20`
-- Runtime status: no Manifest v2 transfer engine is enabled by Goal 0
+- Runtime status: canonical Manifest v2 is the only transfer pipeline
 
 This document is the implementation contract produced by Goal 0. It replaces
 Manifest v1 assumptions for the new pipeline; it does not provide a v1
@@ -46,7 +46,7 @@ and verified.
 | Client drivers | `api/driver.rs` and `api/manifest_driver.rs` | Replace with one reducer/driver | The Manifest driver currently drops confirmation timer/mailbox/post-receipt effects and has a different post-commit boundary |
 | Session state | current `Preparing/Waiting/.../AwaitingPublication` reducer | Replace projection and reducer | It conflates connection, transfer, and save; “publication” is not product language |
 | FFI | separate manifest module and action predicates | Replace with canonical job queries/actions | Native code must not choose engines or maintain a second reducer |
-| Apple send/receive | source-shape engine selection and `ReceivePublication.swift` | Adapt to providers | Current custom Files flow stages in app storage and clone/copies later; that is `CopyAfterVerify`, not default `DirectSave` |
+| Apple send/receive | former source-shape selection and publication adapter | Replaced by providers in Goal 9 | The canonical destination decision now distinguishes direct save from explicit copy-after-verify |
 | Android receive | `MediaStoreSaver`, `PublishJournal`, SAF branch | Adapt to providers | MediaStore pending is usable; generic SAF creates a user-visible document before copy and cannot be assumed atomic |
 | Local storage finalization | `LocalFileStorage::finalize_temp_file` | Replace in destination Goal 3 | Its FAT fallback is check-then-rename and is explicitly racy |
 | Durable ledgers/effect discipline | receipt, resume, activity stores, confirmation mailbox concepts | Reuse concepts, replace schemas | Commit-before-effect and replay are retained; V1 identities and facts are not |

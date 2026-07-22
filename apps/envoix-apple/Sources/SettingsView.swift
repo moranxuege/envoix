@@ -10,7 +10,6 @@ struct SettingsStageView: View {
     @AppStorage("envoix.defaultRole") private var defaultRole = "send"
     @AppStorage("envoix.serverURL") private var serverURL = ""
     @AppStorage("envoix.relayURL") private var relayURL = ""
-    @AppStorage("envoix.configChunkSize") private var configChunkSize = ""
     @AppStorage("envoix.candidatesAllow") private var candidatesAllow = ""
     @AppStorage("envoix.candidatesDeny") private var candidatesDeny = ""
     @AppStorage("envoix.useRoom") private var useRoom = true
@@ -120,16 +119,6 @@ struct SettingsStageView: View {
                         isURL: true
                     )
 
-                    settingField(
-                        AppText.value("config.toml · chunk size", "config.toml · 块大小", language: language),
-                        text: $configChunkSize,
-                        placeholder: AppText.value("16MB / 65536", "16MB / 65536", language: language),
-                        helper: AppText.value(
-                            "Chunk size override written into runtime config.toml (leave empty to disable).",
-                            "可选块大小覆盖，写入 runtime config.toml；留空则不使用。",
-                            language: language
-                        )
-                    )
                     settingMultilineField(
                         AppText.value("Candidate allow", "候选地址 allow", language: language),
                         text: $candidatesAllow,

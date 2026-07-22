@@ -12,17 +12,17 @@ import java.nio.file.StandardCopyOption
 
 /** Saves verified private roots into the actual user destination. This object
  * is called by the native result gate, so returning is the receiver's durable
- * Saved boundary—not merely a background publish request. */
-class ManifestV2Publisher(
+ * Saved boundary—not merely a background save request. */
+class ManifestV2DestinationWriter(
     private val context: Context,
 ) {
     fun save(requestJson: String): String {
         val request = JSONObject(requestJson)
         val jobId = request.getString("job_id")
         val roots = request.getJSONArray("roots")
-        val journal = File(context.filesDir, "manifest-v2/publication/$jobId.json")
+        val journal = File(context.filesDir, "manifest-v2/destination-save/$jobId.json")
         journal.parentFile?.mkdirs()
-        val recovered = recoverJournal(journal)
+        val recovered = recoverJournal(journal, roots)
         if (recovered.length() == roots.length()) {
             writeJournal(journal, "committed", recovered, null)
             return JSONObject().put("roots", recovered).toString()
@@ -136,6 +136,10 @@ class ManifestV2Publisher(
                 } else {
                     destination.createFile(mimeType(child.name), child.name)
                 } ?: error("Could not create ${child.name}")
+            check(target.name == child.name) {
+                target.delete()
+                "The destination provider changed the internal name ${child.name}"
+            }
             if (child.isDirectory) copyDirectory(child, target) else copyFile(child, target)
         }
     }
@@ -177,21 +181,82 @@ class ManifestV2Publisher(
     private fun mimeType(name: String): String =
         URLConnection.guessContentTypeFromName(name) ?: "application/octet-stream"
 
-    private fun recoverJournal(journal: File): JSONArray {
+    private fun recoverJournal(
+        journal: File,
+        requestedRoots: JSONArray,
+    ): JSONArray {
         val value = runCatching { JSONObject(journal.readText()) }.getOrNull() ?: return JSONArray()
-        value.optString("pending_uri").takeIf(String::isNotEmpty)?.let {
-            MediaStoreSaver.delete(context, Uri.parse(it))
+        value.optString("pending_uri").takeIf(String::isNotEmpty)?.let { encoded ->
+            val uri = Uri.parse(encoded)
+            check(!destinationExists(uri) || MediaStoreSaver.delete(context, uri)) {
+                "Could not remove an incomplete destination from the interrupted save"
+            }
         }
         val roots = value.optJSONArray("roots") ?: return JSONArray()
+        val requestedById =
+            (0 until requestedRoots.length()).associateBy {
+                requestedRoots.getJSONObject(it).getInt("root_id")
+            }
         val retained = JSONArray()
+        val retainedIds = mutableSetOf<Int>()
         for (index in 0 until roots.length()) {
             val root = roots.getJSONObject(index)
-            val uri = Uri.parse(root.getString("uri"))
-            if (MediaStoreSaver.resolves(context, uri)) retained.put(root)
+            val rootId = root.getInt("root_id")
+            val requested = requestedById[rootId] ?: continue
+            if (retainedIds.add(rootId) && savedRootMatches(requested, root)) retained.put(root)
         }
         writeJournal(journal, "committing", retained, null)
         return retained
     }
+
+    private fun savedRootMatches(
+        requested: JSONObject,
+        saved: JSONObject,
+    ): Boolean =
+        runCatching {
+            val source = File(requested.getString("local_path"))
+            val uri = Uri.parse(saved.getString("uri"))
+            if (source.isDirectory) {
+                val destination = DocumentFile.fromSingleUri(context, uri)
+                    ?: return@runCatching false
+                directoryMatches(source, destination)
+            } else {
+                source.isFile && source.inputStream().use(MediaStoreSaver::hash).matches(
+                    MediaStoreSaver.inspect(context, uri).getOrThrow(),
+                )
+            }
+        }.getOrDefault(false)
+
+    private fun directoryMatches(
+        source: File,
+        destination: DocumentFile,
+    ): Boolean {
+        if (!destination.isDirectory) return false
+        val sourceChildren = source.listFiles() ?: return false
+        val destinationChildren = destination.listFiles()
+        if (sourceChildren.size != destinationChildren.size) return false
+        val destinationByName = destinationChildren.groupBy { it.name }
+        return sourceChildren.all { child ->
+            val candidates = destinationByName[child.name]
+            if (candidates?.size != 1) return@all false
+            val target = candidates.single()
+            if (child.isDirectory) {
+                directoryMatches(child, target)
+            } else {
+                child.isFile && target.isFile &&
+                    child.inputStream().use(MediaStoreSaver::hash).matches(
+                        MediaStoreSaver.inspect(context, target.uri).getOrThrow(),
+                    )
+            }
+        }
+    }
+
+    private fun destinationExists(uri: Uri): Boolean =
+        if (DocumentFile.isDocumentUri(context, uri)) {
+            DocumentFile.fromSingleUri(context, uri)?.exists() == true
+        } else {
+            MediaStoreSaver.resolves(context, uri)
+        }
 
     private fun writeJournal(
         journal: File,

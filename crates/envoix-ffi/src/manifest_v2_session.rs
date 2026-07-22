@@ -8,21 +8,20 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use envoix_client::api::{
-    DestinationDecisionV2, DestinationRequestV2, PairingConfig, PeerSource,
-    PendingManifestV2Receive, SessionError, SessionEventSink, SessionTransferEvent,
-    TransferCancelToken,
-    parse_broker_addr, receive_manifest_v2_offer_enable_mdns,
-    receive_manifest_v2_offer_via_room, receive_manifest_v2_offer_with_bound_peer,
-    send_manifest_v2_enable_mdns, send_manifest_v2_manual, send_manifest_v2_to_endpoint_addr,
-    send_manifest_v2_via_room,
+    DestinationDecisionV2, DestinationRequestV2, EventSink, PairingConfig, PeerSource,
+    PendingManifestV2Receive, SessionError, TransferCancelToken, TransferEvent, parse_broker_addr,
+    receive_manifest_v2_offer_enable_mdns, receive_manifest_v2_offer_via_room,
+    receive_manifest_v2_offer_with_bound_peer, send_manifest_v2_enable_mdns,
+    send_manifest_v2_manual, send_manifest_v2_to_endpoint_addr, send_manifest_v2_via_room,
 };
 use envoix_qr::{QrInvitePayload, generate_token};
 use tokio::sync::Mutex;
+use tokio::task::JoinSet;
 
 use super::{
     EnvoixError, EnvoixRuntimeSettings, FfiFailureCategory, FfiFailureCode, FfiFailureOrigin,
-    FfiFailurePhase, FfiRecoveryAction, FfiTransferDirection, FfiTransferFailure,
-    FfiTransferJobV2, FfiTransferRequest, TransferObserver,
+    FfiFailurePhase, FfiManifestV2Phase, FfiRecoveryAction, FfiTransferDirection,
+    FfiTransferFailure, FfiTransferJobV2, FfiTransferRequest, TransferObserver,
     build_client_for_request, op_err, peer_sources_for_request, transfer_options_for_request,
 };
 
@@ -146,6 +145,7 @@ impl FfiPendingManifestV2Receive {
         destination: FfiDestinationRequestV2,
         observer: Arc<dyn TransferObserver>,
     ) -> Result<FfiManifestV2Completion, EnvoixError> {
+        let destination = core_destination_request(destination)?;
         let pending = self
             .pending
             .lock()
@@ -155,12 +155,12 @@ impl FfiPendingManifestV2Receive {
                 reason: "this authenticated offer has already been continued".into(),
             })?;
         observer.on_started(
-            format!("{} items", self.entries.len()),
+            u32::try_from(self.entries.len()).unwrap_or(u32::MAX),
             self.summary.total_plaintext_bytes,
         );
         let summary = match pending
             .receive(
-                core_destination_request(destination)?,
+                destination,
                 self.state_directory.clone(),
                 &self.cancellation.token,
             )
@@ -177,7 +177,7 @@ impl FfiPendingManifestV2Receive {
                 return Err(op_err(error));
             }
         };
-        observer.on_status("received files saved; confirming delivery".into());
+        observer.on_phase(FfiManifestV2Phase::Delivered);
         observer.on_completed(self.summary.total_plaintext_bytes);
         let saved_paths = summary
             .destination_plan
@@ -204,54 +204,43 @@ struct NativeSessionEvents {
     observer: Arc<dyn TransferObserver>,
 }
 
-impl SessionEventSink for NativeSessionEvents {
-    fn on_event(&self, event: SessionTransferEvent) {
+impl EventSink for NativeSessionEvents {
+    fn on_event(&self, event: TransferEvent) {
         match event {
-            SessionTransferEvent::Diagnostic { message } => self.observer.on_status(message),
-            SessionTransferEvent::Pairing { step } => {
-                self.observer.on_status(format!("pairing: {step:?}"));
+            TransferEvent::Diagnostic { message } => self.observer.on_diagnostic(message),
+            TransferEvent::Pairing { step } => {
+                self.observer.on_phase(FfiManifestV2Phase::Pairing);
+                self.observer.on_diagnostic(format!("pairing: {step:?}"));
             }
-            SessionTransferEvent::Connecting => self.observer.on_status("connecting".into()),
-            SessionTransferEvent::Connected { path } => {
-                self.observer.on_status(format!("connected via {path}"));
+            TransferEvent::Connecting => {
+                self.observer.on_phase(FfiManifestV2Phase::Connecting);
             }
-            SessionTransferEvent::PathChanged { path } => {
-                self.observer.on_status(format!("path changed: {path}"));
+            TransferEvent::Connected { path } => {
+                self.observer.on_diagnostic(format!("connected via {path}"));
             }
-            SessionTransferEvent::Started {
-                file_name,
-                total_bytes,
-                ..
-            } => self.observer.on_started(file_name, total_bytes),
-            SessionTransferEvent::Progress {
+            TransferEvent::PathChanged { path } => {
+                self.observer.on_diagnostic(format!("path changed: {path}"));
+            }
+            TransferEvent::Progress {
                 bytes_transferred,
                 total_bytes,
                 ..
             } => self.observer.on_progress(bytes_transferred, total_bytes),
-            SessionTransferEvent::ManifestV2Phase { phase, .. } => self.observer.on_status(
-                match phase {
-                    envoix_client::api::ManifestV2ProgressPhase::Transferring => "transferring files",
-                    envoix_client::api::ManifestV2ProgressPhase::Verifying => "verifying received content",
-                    envoix_client::api::ManifestV2ProgressPhase::Saving => "saving verified files",
-                    envoix_client::api::ManifestV2ProgressPhase::WaitingForReceiverSave => "waiting for receiver to save files",
-                    envoix_client::api::ManifestV2ProgressPhase::Received => "received files saved; confirming delivery",
+            TransferEvent::ManifestV2Phase { phase, .. } => self.observer.on_phase(match phase {
+                envoix_client::api::ManifestV2ProgressPhase::Transferring => {
+                    FfiManifestV2Phase::Transferring
                 }
-                .into(),
-            ),
-            SessionTransferEvent::Confirming { .. } => self
-                .observer
-                .on_status("waiting for receiver to save files".into()),
-            SessionTransferEvent::HashStarted { .. } => {
-                self.observer.on_status("verifying".into());
-            }
-            SessionTransferEvent::HashCompleted { .. } => {
-                self.observer.on_status("verified".into());
-            }
-            SessionTransferEvent::Completed {
-                bytes_transferred,
-                ..
-            } => self.observer.on_completed(bytes_transferred),
-            SessionTransferEvent::Failed { reason, .. } => self.observer.on_failed(reason),
+                envoix_client::api::ManifestV2ProgressPhase::Verifying => {
+                    FfiManifestV2Phase::Verifying
+                }
+                envoix_client::api::ManifestV2ProgressPhase::Saving => FfiManifestV2Phase::Saving,
+                envoix_client::api::ManifestV2ProgressPhase::WaitingForReceiverSave => {
+                    FfiManifestV2Phase::WaitingForReceiverSave
+                }
+                envoix_client::api::ManifestV2ProgressPhase::FinalizingDelivery => {
+                    FfiManifestV2Phase::FinalizingDelivery
+                }
+            }),
         }
     }
 }
@@ -277,20 +266,17 @@ pub async fn send_transfer_job_v2(
         .expect("clone_sealed_job guarantees a manifest")
         .clone();
     observer.on_started(
-        format!("{} items", manifest.entries.len()),
+        u32::try_from(manifest.entries.len()).unwrap_or(u32::MAX),
         manifest.totals.total_plaintext_bytes,
     );
     let attempts = peer_sources_for_request(&settings, &request)?;
     let mut last_error = None;
     for attempt in attempts {
-        let options = transfer_options_for_request(
-            &settings,
-            &request,
-            attempt.path_policy_override,
-        )?;
+        let options =
+            transfer_options_for_request(&settings, &request, attempt.path_policy_override)?;
         let client = build_client_for_request(&settings, &request)?;
         let config = client.session_config(&options);
-        let events: Arc<dyn SessionEventSink> = Arc::new(NativeSessionEvents {
+        let events: Arc<dyn EventSink> = Arc::new(NativeSessionEvents {
             observer: observer.clone(),
         });
         let result = send_attempt(
@@ -305,7 +291,7 @@ pub async fn send_transfer_job_v2(
         .await;
         match result {
             Ok(summary) => {
-                observer.on_status("receiver saved files; delivery confirmed".into());
+                observer.on_phase(FfiManifestV2Phase::Delivered);
                 observer.on_completed(manifest.totals.total_plaintext_bytes);
                 return Ok(FfiManifestV2Completion {
                     job_id: encode_job_id(manifest.job_id),
@@ -317,7 +303,7 @@ pub async fn send_transfer_job_v2(
                 });
             }
             Err(error) if !cancellation.token.is_cancelled() => {
-                observer.on_status(format!("route failed; trying next route: {error}"));
+                observer.on_diagnostic(format!("route failed; trying next route: {error}"));
                 last_error = Some(error);
             }
             Err(error) => {
@@ -358,40 +344,113 @@ pub async fn receive_transfer_offer_v2(
     }
     let state_directory = required_directory(state_directory, "state_directory")?;
     let attempts = peer_sources_for_request(&settings, &request)?;
-    let mut last_error = None;
-    for attempt in attempts {
-        let options = transfer_options_for_request(
+    receive_offer_from_attempts(
+        settings,
+        request,
+        attempts,
+        state_directory,
+        cancellation,
+        observer,
+    )
+    .await
+}
+
+async fn receive_offer_from_attempts(
+    settings: EnvoixRuntimeSettings,
+    request: FfiTransferRequest,
+    attempts: Vec<super::RouteAttempt>,
+    state_directory: PathBuf,
+    cancellation: Arc<FfiManifestV2Cancellation>,
+    observer: Arc<dyn TransferObserver>,
+) -> Result<Arc<FfiPendingManifestV2Receive>, EnvoixError> {
+    if attempts.len() == 1 {
+        let attempt = attempts
+            .into_iter()
+            .next()
+            .ok_or_else(|| EnvoixError::Operation {
+                reason: "no canonical receive route is available".into(),
+            })?;
+        let pending = receive_one_offer_attempt(
             &settings,
             &request,
-            attempt.path_policy_override,
-        )?;
-        let client = build_client_for_request(&settings, &request)?;
-        let config = client.session_config(&options);
-        let events: Arc<dyn SessionEventSink> = Arc::new(NativeSessionEvents {
-            observer: observer.clone(),
-        });
-        match receive_offer_attempt(
-            &attempt.source,
-            config,
-            events,
+            attempt,
             observer.clone(),
             &cancellation.token,
-            options.relay.as_deref(),
         )
         .await
-        {
-            Ok(pending) => {
-                return Ok(Arc::new(project_pending_offer(
-                    pending,
-                    state_directory,
-                    cancellation,
-                )));
-            }
-            Err(error) if !cancellation.token.is_cancelled() => {
-                observer.on_status(format!("route failed; trying next route: {error}"));
-                last_error = Some(error);
-            }
-            Err(error) => {
+        .map_err(|error| {
+            report_v2_failure(
+                observer.as_ref(),
+                &error,
+                FfiTransferDirection::Receive,
+                FfiFailurePhase::Connecting,
+            );
+            op_err(error)
+        })?;
+        return Ok(Arc::new(project_pending_offer(
+            pending,
+            state_directory,
+            cancellation,
+        )));
+    }
+
+    let mut routes = JoinSet::new();
+    let mut route_cancellations = Vec::with_capacity(attempts.len());
+    for (index, attempt) in attempts.into_iter().enumerate() {
+        let route_cancellation = TransferCancelToken::new();
+        route_cancellations.push(route_cancellation.clone());
+        let settings = settings.clone();
+        let request = request.clone();
+        let observer = observer.clone();
+        routes.spawn(async move {
+            let result = receive_one_offer_attempt(
+                &settings,
+                &request,
+                attempt,
+                observer,
+                &route_cancellation,
+            )
+            .await;
+            (index, result)
+        });
+    }
+
+    let mut last_error = None;
+    loop {
+        tokio::select! {
+            joined = routes.join_next() => match joined {
+                Some(Ok((winner, Ok(pending)))) => {
+                    for (index, token) in route_cancellations.iter().enumerate() {
+                        if index != winner {
+                            token.cancel();
+                        }
+                    }
+                    while routes.join_next().await.is_some() {}
+                    return Ok(Arc::new(project_pending_offer(
+                        pending,
+                        state_directory,
+                        cancellation,
+                    )));
+                }
+                Some(Ok((_, Err(error)))) => {
+                    observer.on_diagnostic(format!("receive route failed; keeping other routes active: {error}"));
+                    last_error = Some(error);
+                    if routes.is_empty() {
+                        break;
+                    }
+                }
+                Some(Err(error)) => {
+                    last_error = Some(SessionError::Transfer(format!("receive route task failed: {error}")));
+                    if routes.is_empty() {
+                        break;
+                    }
+                }
+                None => break,
+            },
+            () = cancellation.token.cancelled() => {
+                route_cancellations.iter().for_each(TransferCancelToken::cancel);
+                while routes.join_next().await.is_some() {}
+                let error = SessionError::Cancelled;
                 report_v2_failure(
                     observer.as_ref(),
                     &error,
@@ -414,16 +473,41 @@ pub async fn receive_transfer_offer_v2(
     Err(op_err(error))
 }
 
+async fn receive_one_offer_attempt(
+    settings: &EnvoixRuntimeSettings,
+    request: &FfiTransferRequest,
+    attempt: super::RouteAttempt,
+    observer: Arc<dyn TransferObserver>,
+    cancel: &TransferCancelToken,
+) -> Result<PendingManifestV2Receive, SessionError> {
+    let options = transfer_options_for_request(settings, request, attempt.path_policy_override)
+        .map_err(|error| SessionError::InvalidInput(error.to_string()))?;
+    let client = build_client_for_request(settings, request)
+        .map_err(|error| SessionError::InvalidInput(error.to_string()))?;
+    let config = client.session_config(&options);
+    let events: Arc<dyn EventSink> = Arc::new(NativeSessionEvents {
+        observer: observer.clone(),
+    });
+    receive_offer_attempt(
+        &attempt.source,
+        config,
+        events,
+        observer,
+        cancel,
+        options.relay.as_deref(),
+    )
+    .await
+}
+
 async fn send_attempt(
     source: &PeerSource,
     job: &envoix_client::api::CanonicalTransferJob,
     state_directory: PathBuf,
     config: envoix_client::api::SessionConfig,
-    events: Arc<dyn SessionEventSink>,
+    events: Arc<dyn EventSink>,
     cancel: &TransferCancelToken,
     relay: Option<&str>,
-) -> Result<envoix_client::api::SenderManifestV2SessionSummary, SessionError>
-{
+) -> Result<envoix_client::api::SenderManifestV2SessionSummary, SessionError> {
     match source {
         PeerSource::Manual { peer, token } => {
             let pairing = PairingConfig::spake2_shared_token(token.clone())?;
@@ -468,16 +552,8 @@ async fn send_attempt(
         }
         PeerSource::Room { code, broker } => {
             let broker = parse_broker_addr(broker, relay)?;
-            send_manifest_v2_via_room(
-                broker,
-                code,
-                job,
-                state_directory,
-                config,
-                events,
-                cancel,
-            )
-            .await
+            send_manifest_v2_via_room(broker, code, job, state_directory, config, events, cancel)
+                .await
         }
         _ => Err(SessionError::InvalidInput(
             "selected route cannot dial a canonical receiver".into(),
@@ -488,16 +564,19 @@ async fn send_attempt(
 async fn receive_offer_attempt(
     source: &PeerSource,
     config: envoix_client::api::SessionConfig,
-    events: Arc<dyn SessionEventSink>,
+    events: Arc<dyn EventSink>,
     observer: Arc<dyn TransferObserver>,
     cancel: &TransferCancelToken,
     relay: Option<&str>,
 ) -> Result<PendingManifestV2Receive, SessionError> {
-    let listen = config
-        .clone();
+    let listen = config.clone();
     match source {
         PeerSource::ShowManual { token } => {
-            let token = token.clone().map(Ok).unwrap_or_else(generate_token).map_err(op_err_core)?;
+            let token = token.clone().ok_or_else(|| {
+                SessionError::InvalidInput(
+                    "manual receiver display requires a caller-owned pairing token".into(),
+                )
+            })?;
             let pairing = PairingConfig::spake2_shared_token(token.clone())?;
             receive_manifest_v2_offer_with_bound_peer(
                 listen_addrs(&listen),
@@ -506,14 +585,17 @@ async fn receive_offer_attempt(
                 events,
                 move |peer, _| {
                     observer.on_invite_ready(peer.to_string());
-                    observer.on_status(format!("receiver token: {token}"));
                 },
                 cancel,
             )
             .await
         }
         PeerSource::ShowInvite { token, ttl_secs } => {
-            let token = token.clone().map(Ok).unwrap_or_else(generate_token).map_err(op_err_core)?;
+            let token = token
+                .clone()
+                .map(Ok)
+                .unwrap_or_else(generate_token)
+                .map_err(op_err_core)?;
             let pairing = PairingConfig::spake2_shared_token(token.clone())?;
             let expires_at = now_unix_seconds().saturating_add(*ttl_secs);
             receive_manifest_v2_offer_with_bound_peer(
@@ -540,7 +622,11 @@ async fn receive_offer_attempt(
             .await
         }
         PeerSource::Mdns { token } => {
-            let token = token.clone().map(Ok).unwrap_or_else(generate_token).map_err(op_err_core)?;
+            let token = token
+                .clone()
+                .map(Ok)
+                .unwrap_or_else(generate_token)
+                .map_err(op_err_core)?;
             let pairing = PairingConfig::spake2_shared_token(token.clone())?;
             let expires_at = now_unix_seconds().saturating_add(300);
             receive_manifest_v2_offer_enable_mdns(
@@ -768,14 +854,11 @@ fn report_v2_failure(
         phase,
         origin,
         direction,
-        transfer_id: String::new(),
-        attempt_id: String::new(),
         retryable,
         recovery_action,
         user_message_key: message_key.into(),
         diagnostic_message: error.to_string(),
     });
-    observer.on_failed(error.to_string());
 }
 
 #[allow(clippy::type_complexity)]

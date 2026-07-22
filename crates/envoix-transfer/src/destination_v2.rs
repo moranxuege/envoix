@@ -706,10 +706,18 @@ impl LocalDestinationProviderV2 {
     /// reset to block zero; an already-finalized root is left for save-intent
     /// adoption and is never downloaded again.
     pub async fn reconcile_resume(
-        &self,
+        &mut self,
         ledger: &mut crate::ReceiverDataPlaneLedgerV2,
         store: &crate::ReceiverDataPlaneStoreV2,
     ) -> Result<(), ManifestV2DataError> {
+        for (entry_id, digest) in ledger.pending_reuse_entries() {
+            let entry = &self.manifest.entries[entry_id as usize];
+            let reuse = self
+                .try_open_reuse(entry, digest)
+                .await?
+                .ok_or(DestinationPlanErrorV2::ReusedObjectLost)?;
+            self.reuse_objects.insert(entry_id, reuse);
+        }
         for (entry_id, next_plaintext_block, plaintext_bytes, payload_complete) in
             ledger.pending_payload_boundaries()
         {
@@ -790,6 +798,7 @@ impl LocalDestinationProviderV2 {
     async fn prepare_finalization_source(
         &self,
         root_id: u32,
+        verified_entries: &[VerifiedEntryV2],
     ) -> Result<PathBuf, DestinationPlanErrorV2> {
         let source = self.root_staging_path(root_id);
         if self.plan.mode != DestinationModeV2::CopyAfterVerify {
@@ -801,9 +810,38 @@ impl LocalDestinationProviderV2 {
             .join(".envoix-staging-v2")
             .join(encode_job_id(self.plan.job_id))
             .join(format!("copy-root-{root_id}"));
-        if !fs::try_exists(&destination_local).await? {
-            copy_tree(&source, &destination_local).await?;
+        if fs::try_exists(&destination_local).await? {
+            match verify_exact_root(
+                &destination_local,
+                &self.manifest,
+                verified_entries,
+                root_id,
+                &self.entry_overrides,
+            )
+            .await
+            {
+                Ok(()) => return Ok(destination_local),
+                Err(DestinationPlanErrorV2::LateCollision) | Err(DestinationPlanErrorV2::Io(_)) => {
+                    remove_private_staging_path(&destination_local).await?;
+                }
+                Err(error) => return Err(error),
+            }
         }
+
+        let partial = destination_local.with_extension("partial");
+        remove_private_staging_path(&partial).await?;
+        copy_tree(&source, &partial).await?;
+        sync_tree_directories(&partial).await?;
+        verify_exact_root(
+            &partial,
+            &self.manifest,
+            verified_entries,
+            root_id,
+            &self.entry_overrides,
+        )
+        .await?;
+        exclusive_rename(&partial, &destination_local)?;
+        sync_rename_directories(&partial, &destination_local).await?;
         Ok(destination_local)
     }
 
@@ -832,7 +870,10 @@ impl LocalDestinationProviderV2 {
             return Err(DestinationPlanErrorV2::ReservationLost);
         }
         match exclusive_rename(source, &final_path) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                sync_rename_directories(source, &final_path).await?;
+                Ok(())
+            }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 Err(DestinationPlanErrorV2::LateCollision)
             }
@@ -1143,7 +1184,9 @@ impl ManifestV2PayloadSink for LocalDestinationProviderV2 {
                 self.save_ledger.roots[root.root_id as usize],
                 RootSaveStateV2::Pending
             ) {
-                let source = self.prepare_finalization_source(root.root_id).await?;
+                let source = self
+                    .prepare_finalization_source(root.root_id, verified_entries)
+                    .await?;
                 sync_tree_directories(&source).await?;
                 let expected_object = object_identity(
                     &source,
@@ -1202,7 +1245,9 @@ impl ManifestV2PayloadSink for LocalDestinationProviderV2 {
                     )
                     .await
                 } else if self.plan.mode == DestinationModeV2::CopyAfterVerify {
-                    let source = self.prepare_finalization_source(root.root_id).await?;
+                    let source = self
+                        .prepare_finalization_source(root.root_id, verified_entries)
+                        .await?;
                     sync_tree_directories(&source).await?;
                     let expected_object = object_identity(
                         &source,
@@ -1767,6 +1812,17 @@ async fn copy_tree(source: &Path, destination: &Path) -> Result<(), std::io::Err
     Ok(())
 }
 
+async fn remove_private_staging_path(path: &Path) -> Result<(), std::io::Error> {
+    match fs::symlink_metadata(path).await {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            fs::remove_dir_all(path).await
+        }
+        Ok(_) => fs::remove_file(path).await,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 async fn sync_tree_directories(path: &Path) -> Result<(), std::io::Error> {
     #[cfg(unix)]
     {
@@ -1806,6 +1862,31 @@ async fn sync_tree_directories(path: &Path) -> Result<(), std::io::Error> {
     Ok(())
 }
 
+async fn sync_rename_directories(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
+    #[cfg(unix)]
+    {
+        let source_parent = source.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "rename source has no parent directory",
+            )
+        })?;
+        let destination_parent = destination.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "rename destination has no parent directory",
+            )
+        })?;
+        fs::File::open(source_parent).await?.sync_all().await?;
+        if source_parent != destination_parent {
+            fs::File::open(destination_parent).await?.sync_all().await?;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (source, destination);
+    Ok(())
+}
+
 async fn restrict_private_directory(path: &Path) -> Result<(), std::io::Error> {
     #[cfg(unix)]
     {
@@ -1840,17 +1921,29 @@ async fn exclusive_rename_probe(directory: &Path) -> Result<bool, std::io::Error
     Ok(collision_safe && source_retained && target_unchanged && success)
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "linux",
+    target_os = "android",
+    target_os = "windows"
+))]
 const fn exclusive_rename_supported() -> bool {
     true
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "linux",
+    target_os = "android",
+    target_os = "windows"
+)))]
 const fn exclusive_rename_supported() -> bool {
     false
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 fn exclusive_rename(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
     use std::os::unix::ffi::OsStrExt;
     const RENAME_EXCL: u32 = 0x0000_0004;
@@ -1868,6 +1961,48 @@ fn exclusive_rename(source: &Path, destination: &Path) -> Result<(), std::io::Er
     // SAFETY: both pointers reference live NUL-terminated path buffers for the
     // duration of the synchronous Darwin syscall; no Rust memory is aliased.
     let result = unsafe { renamex_np(source.as_ptr(), destination.as_ptr(), RENAME_EXCL) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "android")]
+fn exclusive_rename(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
+    use std::os::raw::c_long;
+    use std::os::unix::ffi::OsStrExt;
+
+    const AT_FDCWD: i32 = -100;
+    const RENAME_NOREPLACE: u32 = 1;
+    #[cfg(target_arch = "aarch64")]
+    const SYS_RENAMEAT2: c_long = 276;
+    #[cfg(target_arch = "x86_64")]
+    const SYS_RENAMEAT2: c_long = 316;
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    const SYS_RENAMEAT2: c_long = -1;
+
+    unsafe extern "C" {
+        fn syscall(number: c_long, ...) -> c_long;
+    }
+
+    let source = CString::new(source.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let destination = CString::new(destination.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    // SAFETY: Android API 29 does not export the renameat2 libc wrapper, so
+    // the supported Android ABIs invoke the kernel syscall directly. Both
+    // pointers are live NUL-terminated paths for this synchronous call.
+    let result = unsafe {
+        syscall(
+            SYS_RENAMEAT2,
+            AT_FDCWD,
+            source.as_ptr(),
+            AT_FDCWD,
+            destination.as_ptr(),
+            RENAME_NOREPLACE,
+        )
+    };
     if result == 0 {
         Ok(())
     } else {
@@ -1949,7 +2084,13 @@ fn exclusive_rename(source: &Path, destination: &Path) -> Result<(), std::io::Er
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "linux",
+    target_os = "android",
+    target_os = "windows"
+)))]
 fn exclusive_rename(_source: &Path, _destination: &Path) -> Result<(), std::io::Error> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,

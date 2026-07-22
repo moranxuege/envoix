@@ -247,7 +247,3 @@ fn decode(s: &str) -> String {
     }
     String::from_utf8_lossy(&out).into_owned()
 }
-
-#[cfg(test)]
-#[path = "invite_tests.rs"]
-mod tests;

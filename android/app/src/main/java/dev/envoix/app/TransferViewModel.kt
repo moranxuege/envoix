@@ -18,14 +18,14 @@ class TransferViewModel(
         broker: String,
         relay: String,
         qrPayload: String?,
-        copyAfterVerifyApproved: Boolean,
+        destinationCopyApproved: Boolean,
     ) = TransferService.startReceive(
         getApplication(),
         room,
         broker,
         relay,
         qrPayload,
-        copyAfterVerifyApproved,
+        destinationCopyApproved,
     )
 
     fun startSend(
@@ -43,7 +43,7 @@ class TransferViewModel(
     /** Remove a transfer from the list, cancelling it first if it's still active. */
     fun remove(id: Long) {
         // D2, the one true abandon: the service tears the session down and
-        // discards the partial + resume state + receipt.
+        // discards the partial + checkpoint state.
         TransferService.remove(getApplication(), id)
     }
 

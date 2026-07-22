@@ -404,7 +404,7 @@ private fun CardControls(
             Status.Preparing ->
                 CircleBtn(Icons.Default.Close, filled = false) { onCancel(t.id) }
             Status.Connecting, Status.Transferring, Status.Receiving, Status.Verifying,
-            Status.Saving, Status.WaitingForReceiverSave, Status.Received,
+            Status.Saving, Status.WaitingForReceiverSave, Status.FinalizingDelivery,
             -> {
                 CircleBtn(Icons.Default.Pause, filled = true) { onPauseResume(t.id) }
                 CircleBtn(Icons.Default.Close, filled = false) { onCancel(t.id) }
@@ -761,7 +761,8 @@ private fun PathBadge(t: Transfer) {
             t.status == Status.Verifying -> Triple("Verifying", colors.accent, colors.accentSoft)
             t.status == Status.Saving -> Triple("Saving", colors.accent, colors.accentSoft)
             t.status == Status.WaitingForReceiverSave -> Triple("Saving remotely", colors.accent, colors.accentSoft)
-            t.status == Status.Received -> Triple("Confirming", colors.accent, colors.accentSoft)
+            t.status == Status.FinalizingDelivery ->
+                Triple("Finalizing delivery", colors.accent, colors.accentSoft)
             // pre-connection, path unknown: say what is HAPPENING, never "…"
             else -> Triple("Pairing", colors.accent, colors.accentSoft)
         }
@@ -824,7 +825,7 @@ private fun speedText(t: Transfer): String {
             Status.Verifying -> "verifying"
             Status.Saving -> "saving"
             Status.WaitingForReceiverSave -> "receiver saving"
-            Status.Received -> "confirming"
+            Status.FinalizingDelivery -> "finalizing delivery"
             Status.Completed -> "complete"
             Status.Paused -> "paused"
             Status.Failed -> "failed"

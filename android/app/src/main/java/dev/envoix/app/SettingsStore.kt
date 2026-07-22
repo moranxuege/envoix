@@ -8,7 +8,7 @@ import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * Two layers, one flat holder:
- *  - core config — mirrors the CLI's `config.toml` schema (chunk_size, candidates)
+ *  - core config — mirrors the CLI's transport-only `config.toml` schema
  *    plus the connection defaults (broker/relay). Rendered by [SettingsStore.paramsJson (TransferService.Spec)].
  *  - native prefs — platform-only defaults that seed a transfer request (save
  *    folder, default role); never sent to the core.
@@ -18,7 +18,6 @@ data class Settings(
     val broker: String = Endpoints.BROKER,
     val relay: String = Endpoints.RELAY,
     // core config.toml (RuntimeConfig)
-    val chunkSize: String = "",
     /** Per-stream QUIC flow-control window (e.g. `32MB`); empty = transport default (16MB). */
     val dataStreamWindow: String = "",
     val candidatesAllow: List<String> = emptyList(),
@@ -30,7 +29,7 @@ data class Settings(
     val defaultRole: String = "receive",
     /** Canonical Manifest-v2 compression policy: never, always, or smart. */
     val compressionPolicy: String = "smart",
-    // rendezvous modes to attempt, in order Room → mDNS (fall back on failure)
+    // rendezvous routes: receivers listen concurrently; senders prefer Room then mDNS
     val useRoom: Boolean = true,
     val useMdns: Boolean = true,
     // developer / diagnostics
@@ -57,7 +56,6 @@ object SettingsStore {
             Settings(
                 broker = prefs.getString("broker", Endpoints.BROKER)!!,
                 relay = prefs.getString("relay", Endpoints.RELAY)!!,
-                chunkSize = prefs.getString("chunkSize", "")!!,
                 dataStreamWindow = prefs.getString("dataStreamWindow", "")!!,
                 candidatesAllow = readList("candidatesAllow"),
                 candidatesDeny = readList("candidatesDeny"),
@@ -70,12 +68,7 @@ object SettingsStore {
                 devMode = prefs.getBoolean("devMode", false),
                 verboseLog = prefs.getBoolean("verboseLog", false),
                 traceIroh = prefs.getBoolean("traceIroh", false),
-                logServer =
-                    prefs.getString("logServer", Endpoints.LOG_SERVER)!!.let {
-                        // Installs from before the TLS cutover have the old
-                        // plaintext default frozen in prefs; carry them over.
-                        if (it == Endpoints.LOG_SERVER_LEGACY) Endpoints.LOG_SERVER else it
-                    },
+                logServer = prefs.getString("logServer", Endpoints.LOG_SERVER)!!,
             )
     }
 
@@ -93,7 +86,6 @@ object SettingsStore {
             .edit()
             .putString("broker", s.broker)
             .putString("relay", s.relay)
-            .putString("chunkSize", s.chunkSize)
             .putString("dataStreamWindow", s.dataStreamWindow)
             .putString("candidatesAllow", s.candidatesAllow.joinToString("\n"))
             .putString("candidatesDeny", s.candidatesDeny.joinToString("\n"))

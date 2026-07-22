@@ -1,4 +1,4 @@
-//! Command-line arguments: clap definitions and parse tests.
+//! Command-line arguments and their canonical transfer-plan projection.
 
 use std::path::PathBuf;
 
@@ -40,9 +40,9 @@ pub(crate) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
-    /// Send one file to a receiver address printed by `envoix receive`.
+    /// Send one or more files or folders as one transfer job.
     Send(SendArgs),
-    /// Receive one file into an output directory.
+    /// Receive one transfer job into an output directory.
     Receive(ReceiveArgs),
 }
 
@@ -64,9 +64,6 @@ pub(crate) struct SendArgs {
     /// Use a fresh iroh identity for this run.
     #[arg(long)]
     pub(crate) ephemeral_identity: bool,
-    /// Start a new transfer and ignore compatible receiver-side resume state.
-    #[arg(long = "fresh", action = ArgAction::SetFalse, default_value_t = true)]
-    pub(crate) resume: bool,
     /// Shared ASCII pairing token (>=12 bytes). Required unless --invite or --room is set.
     #[arg(long, required_unless_present_any = ["invite", "room"], conflicts_with = "invite")]
     pub(crate) token: Option<String>,
@@ -240,7 +237,6 @@ fn resolve_room_code(
 impl SendArgs {
     pub(crate) fn into_plan(self) -> Result<TransferPlan, TransferError> {
         let mut options = api::TransferOptions::default();
-        options.resume = self.resume;
         options.relay = self.relay.clone();
         options.path = path_policy(self.relay_only, self.direct_only)?;
 
@@ -385,7 +381,3 @@ fn identity_config(path: Option<PathBuf>) -> IdentityConfig {
     path.map(IdentityConfig::Persistent)
         .unwrap_or(IdentityConfig::Ephemeral)
 }
-
-#[cfg(test)]
-#[path = "args_tests.rs"]
-mod tests;

@@ -100,7 +100,7 @@ fun NewTransferSheet(
     var sourceAwaitingReauthorization by remember {
         mutableStateOf<PreparedManifestV2Source?>(null)
     }
-    var copyAfterVerifyApproved by remember { mutableStateOf(false) }
+    var destinationCopyApproved by remember { mutableStateOf(false) }
     var topMode by remember { mutableStateOf("show") } // "show" | "scan"
     var rendezvousBusy by remember { mutableStateOf(false) }
     var rendezvousError by remember { mutableStateOf<String?>(null) }
@@ -345,7 +345,7 @@ fun NewTransferSheet(
                 "send" ->
                     preparedSources.isNotEmpty() && preparingCount == 0 && preparedJobId != null &&
                         preparedSources.all { it.issueCount == 0 || it.partialApproved }
-                else -> copyAfterVerifyApproved
+                else -> destinationCopyApproved
             }
 
     Column(
@@ -562,13 +562,13 @@ fun NewTransferSheet(
                     .fillMaxWidth()
                     .padding(top = 10.dp)
                     .clip(RoundedCornerShape(10.dp))
-                    .clickable { copyAfterVerifyApproved = !copyAfterVerifyApproved }
+                    .clickable { destinationCopyApproved = !destinationCopyApproved }
                     .padding(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Checkbox(
-                    checked = copyAfterVerifyApproved,
-                    onCheckedChange = { copyAfterVerifyApproved = it },
+                    checked = destinationCopyApproved,
+                    onCheckedChange = { destinationCopyApproved = it },
                 )
                 Column(Modifier.padding(start = 8.dp)) {
                     Text("Verify privately, then save", color = colors.text, fontSize = 14.sp)
@@ -596,7 +596,7 @@ fun NewTransferSheet(
                         if (role == "send") {
                             onSend(c, useBroker, useRelay, preparedJobId!!, qr)
                         } else {
-                            onReceive(c, useBroker, useRelay, qr, copyAfterVerifyApproved)
+                            onReceive(c, useBroker, useRelay, qr, destinationCopyApproved)
                         }
                     }
                     val offer = onOfferInvite
@@ -631,7 +631,6 @@ fun NewTransferSheet(
         }
     }
 }
-
 @Composable
 private fun NearbyPairingContext(selection: NearbyPairingSelection) {
     val colors = Envoix.colors

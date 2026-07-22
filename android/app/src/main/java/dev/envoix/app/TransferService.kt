@@ -18,9 +18,9 @@ import org.json.JSONObject
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
@@ -31,9 +31,12 @@ class TransferService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val callbacks = ConcurrentHashMap<Long, ManifestCallback>()
     private val specs = ConcurrentHashMap<Long, ManifestSpec>()
-    private val publisher by lazy { ManifestV2Publisher(this) }
+    private val destinationWriter by lazy { ManifestV2DestinationWriter(this) }
     private val nextNativeAttemptId = AtomicLong(1)
-    private val clock = SimpleDateFormat("HH:mm:ss", Locale.US)
+    private val clock =
+        DateTimeFormatter
+            .ofPattern("HH:mm:ss")
+            .withZone(ZoneId.systemDefault())
     private var foreground = false
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -80,8 +83,10 @@ class TransferService : Service() {
         direction: Direction,
     ) {
         val room = intent.getStringExtra(EXTRA_ROOM)?.takeIf(String::isNotBlank) ?: return
-        val broker = intent.getStringExtra(EXTRA_BROKER)?.takeIf(String::isNotBlank) ?: return
+        val broker = intent.getStringExtra(EXTRA_BROKER).orEmpty()
         val relay = intent.getStringExtra(EXTRA_RELAY).orEmpty()
+        val useRoom = intent.getBooleanExtra(EXTRA_USE_ROOM, true)
+        val useMdns = intent.getBooleanExtra(EXTRA_USE_MDNS, true)
         val id = TransferRepository.create(direction, room)
         val spec =
             ManifestSpec(
@@ -92,9 +97,23 @@ class TransferService : Service() {
                 relay = relay,
                 jobId = intent.getStringExtra(EXTRA_JOB_ID),
                 qrPayload = intent.getStringExtra(EXTRA_QR),
-                copyAfterVerifyApproved = intent.getBooleanExtra(EXTRA_COPY_APPROVED, false),
+                destinationCopyApproved = intent.getBooleanExtra(EXTRA_COPY_APPROVED, false),
+                useRoom = useRoom,
+                useMdns = useMdns,
                 holdState = null,
             )
+        if (!useRoom && !useMdns) {
+            TransferRepository.update(id) {
+                it.copy(status = Status.Failed, error = "Choose at least one available pairing route")
+            }
+            return
+        }
+        if (useRoom && broker.isBlank()) {
+            TransferRepository.update(id) {
+                it.copy(status = Status.Failed, error = "Room pairing requires a rendezvous broker")
+            }
+            return
+        }
         if (direction == Direction.Send && spec.jobId.isNullOrBlank()) {
             TransferRepository.update(id) {
                 it.copy(status = Status.Failed, error = "Prepared transfer job is missing")
@@ -159,7 +178,7 @@ class TransferService : Service() {
                 "saving" -> setState(id, Status.Saving, "saving to selected destination")
                 "waiting_for_receiver_save" ->
                     setState(id, Status.WaitingForReceiverSave, "waiting for receiver to save files")
-                "received" -> setState(id, Status.Received, "files saved; confirming delivery")
+                "finalizing_delivery" -> setState(id, Status.FinalizingDelivery, "saved; finalizing delivery proof")
                 "completed" -> onCompleted(id, event, this)
                 "failed" -> onFailed(id, event, this)
             }
@@ -167,7 +186,7 @@ class TransferService : Service() {
 
         override fun onSaveRequired(requestJson: String): String {
             check(callbacks[id] === this) { "Manifest v2 attempt is no longer active" }
-            return publisher.save(requestJson)
+            return destinationWriter.save(requestJson)
         }
     }
 
@@ -202,7 +221,7 @@ class TransferService : Service() {
         TransferRepository.update(id) {
             it.copy(
                 status =
-                    if (exceptional || needsFolder || !spec.copyAfterVerifyApproved) {
+                    if (exceptional || needsFolder || !spec.destinationCopyApproved) {
                         Status.AwaitingDecision
                     } else {
                         Status.Receiving
@@ -219,7 +238,7 @@ class TransferService : Service() {
                 error =
                     when {
                         needsFolder -> "Choose a writable save folder before receiving directories."
-                        !spec.copyAfterVerifyApproved ->
+                        !spec.destinationCopyApproved ->
                             "This Android destination requires private verification followed by an extra copy."
                         exceptional -> "Review this unusually large transfer before continuing."
                         else -> null
@@ -227,7 +246,7 @@ class TransferService : Service() {
                 log = addLog(it.log, "authenticated inventory received"),
             )
         }
-        if (!exceptional && !needsFolder && spec.copyAfterVerifyApproved) {
+        if (!exceptional && !needsFolder && spec.destinationCopyApproved) {
             continueReceive(id, exceptionalApproved = false)
         }
         updateNotification()
@@ -259,9 +278,9 @@ class TransferService : Service() {
             )
         val error = runCatching { JSONObject(response).optString("error") }.getOrDefault("")
         if (error.isNotEmpty()) {
-            TransferRepository.update(id) { it.copy(status = Status.Failed, error = error) }
+            TransferRepository.update(id) { it.copy(status = Status.AwaitingDecision, error = error) }
         } else {
-            specs[id] = spec.copy(copyAfterVerifyApproved = true)
+            specs[id] = spec.copy(destinationCopyApproved = true)
             persistSpecs()
             setState(id, Status.Receiving, "destination decision committed")
         }
@@ -281,7 +300,7 @@ class TransferService : Service() {
                 bytes = it.total,
                 savedUri = uris.firstOrNull(),
                 savedUris = uris,
-                publishedName = names.firstOrNull(),
+                savedName = names.firstOrNull(),
                 error = null,
                 log = addLog(it.log, "delivered · receiver save proof acknowledged"),
             )
@@ -349,10 +368,15 @@ class TransferService : Service() {
     private fun removeTransfer(id: Long) {
         callbacks.remove(id)?.let { Native.cancelManifestV2Session(it.nativeId) }
         val spec = specs.remove(id)
+        val jobId = spec?.jobId ?: TransferRepository.transfers.value.firstOrNull { it.id == id }?.jobId
         // Only job-owned private/incomplete artifacts are discarded. Public
         // saved URIs returned by the result gate are never deleted here.
         receiveBase(id).deleteRecursively()
-        spec?.jobId?.let { File(filesDir, "manifest-v2/source-staging/$it").deleteRecursively() }
+        jobId?.let {
+            File(filesDir, "manifest-v2/source-staging/$it").deleteRecursively()
+            File(filesDir, "manifest-v2/destination-save/$it.json").delete()
+            File(filesDir, "manifest-v2/destination-save/$it.json.tmp").delete()
+        }
         persistSpecs()
         TransferRepository.remove(id)
         leaveForegroundIfIdle()
@@ -390,7 +414,7 @@ class TransferService : Service() {
     private fun addLog(
         current: List<String>,
         message: String,
-    ): List<String> = (current + "${clock.format(Date())}  $message").takeLast(TransferRepository.LOG_CAP)
+    ): List<String> = (current + "${clock.format(Instant.now())}  $message").takeLast(TransferRepository.LOG_CAP)
 
     private fun explainFailure(
         cause: String,
@@ -403,6 +427,8 @@ class TransferService : Service() {
             "receiver_destination_decision_required" -> "The receiver must choose or approve a save destination."
             "receiver_destination_unavailable" -> "The selected receive destination is no longer available."
             "receiver_save_failed" -> "The receiver could not save the verified files: $detail"
+            "receiver_reused_object_lost" -> "A destination item selected for reuse changed or disappeared. Restore it and resume, or start a new transfer."
+            "receiver_finalization_outcome_unknown" -> "The final save could not be confirmed after an interruption. Resume to reconcile the destination."
             "protocol_or_integrity_failure" -> "Integrity verification failed; no unverified file was delivered."
             "transport" -> "The connection was interrupted. Resume to continue from verified data."
             else -> detail
@@ -418,6 +444,8 @@ class TransferService : Service() {
             .put("room", room)
             .put("broker", broker)
             .put("relay", relay)
+            .put("use_room", useRoom)
+            .put("use_mdns", useMdns)
             .put("state_directory", stateDirectory(id).apply { mkdirs() }.absolutePath)
             .put("job_store_directory", jobStoreDirectory(context).absolutePath)
             .apply { jobId?.let { put("job_id", it) } }
@@ -507,7 +535,7 @@ class TransferService : Service() {
             Status.Verifying -> "Verifying…"
             Status.Saving -> "Saving…"
             Status.WaitingForReceiverSave -> "Waiting for receiver to save…"
-            Status.Received -> "Received; confirming delivery…"
+            Status.FinalizingDelivery -> "Saved; finalizing delivery…"
             Status.Paused -> "Paused"
             Status.Completed -> "Completed"
             Status.Failed -> "Failed"
@@ -531,7 +559,9 @@ class TransferService : Service() {
         private const val EXTRA_RELAY = "relay"
         private const val EXTRA_QR = "qr"
         private const val EXTRA_JOB_ID = "job_id"
-        private const val EXTRA_COPY_APPROVED = "copy_after_verify_approved"
+        private const val EXTRA_COPY_APPROVED = "destination_copy_approved"
+        private const val EXTRA_USE_ROOM = "use_room"
+        private const val EXTRA_USE_MDNS = "use_mdns"
 
         fun startSend(
             context: Context,
@@ -557,7 +587,7 @@ class TransferService : Service() {
             broker: String,
             relay: String,
             qrPayload: String?,
-            copyAfterVerifyApproved: Boolean,
+            destinationCopyApproved: Boolean,
         ) = launch(
             context,
             ACTION_START_RECEIVE,
@@ -566,7 +596,7 @@ class TransferService : Service() {
             relay,
             qrPayload,
             jobId = null,
-            copyApproved = copyAfterVerifyApproved,
+            copyApproved = destinationCopyApproved,
         )
 
         private fun launch(
@@ -588,6 +618,8 @@ class TransferService : Service() {
                     putExtra(EXTRA_QR, qrPayload)
                     putExtra(EXTRA_JOB_ID, jobId)
                     putExtra(EXTRA_COPY_APPROVED, copyApproved)
+                    putExtra(EXTRA_USE_ROOM, SettingsStore.settings.value.useRoom)
+                    putExtra(EXTRA_USE_MDNS, SettingsStore.settings.value.useMdns)
                 },
             )
         }
@@ -634,7 +666,9 @@ private data class ManifestSpec(
     val relay: String,
     val jobId: String?,
     val qrPayload: String?,
-    val copyAfterVerifyApproved: Boolean,
+    val destinationCopyApproved: Boolean,
+    val useRoom: Boolean,
+    val useMdns: Boolean,
     val holdState: String?,
 ) {
     fun toJson(): JSONObject =
@@ -646,7 +680,9 @@ private data class ManifestSpec(
             .put("relay", relay)
             .put("job_id", jobId)
             .put("qr", qrPayload)
-            .put("copy_after_verify_approved", copyAfterVerifyApproved)
+            .put("destination_copy_approved", destinationCopyApproved)
+            .put("use_room", useRoom)
+            .put("use_mdns", useMdns)
             .put("hold_state", holdState)
 
     companion object {
@@ -659,7 +695,9 @@ private data class ManifestSpec(
                 relay = value.optString("relay"),
                 jobId = value.optString("job_id").takeIf(String::isNotEmpty),
                 qrPayload = value.optString("qr").takeIf(String::isNotEmpty),
-                copyAfterVerifyApproved = value.optBoolean("copy_after_verify_approved"),
+                destinationCopyApproved = value.optBoolean("destination_copy_approved"),
+                useRoom = value.getBoolean("use_room"),
+                useMdns = value.getBoolean("use_mdns"),
                 holdState = value.optString("hold_state").takeIf(String::isNotEmpty),
             )
     }

@@ -30,7 +30,7 @@ const MAX_RDZ_LINES: usize = 2000;
 const MAX_ROOM_KEY: usize = 64;
 /// Memory bounds — the log store accepts UNAUTHENTICATED POSTs, so it must cap
 /// its own footprint against room-id spraying / side flooding (the sibling
-/// receipts + broker stores already cap this way; this store was the gap).
+/// broker stores already cap this way; this store was the gap).
 /// Over-cap uploads are refused with 507.
 const MAX_ROOMS: usize = 1024;
 const MAX_CLIENTS_PER_ROOM: usize = 4;

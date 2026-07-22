@@ -174,25 +174,6 @@ targets:
         DEVELOPMENT_TEAM: 6638TTB2SF
         TEST_TARGET_NAME: Envoix-iOS
 
-  Envoix-macOSTests:
-    # Host the test in Envoix.app so cross-device acceptance exercises the
-    # production AppModel, Activity projection, and macOS destination path.
-    type: bundle.unit-test
-    platform: macOS
-    deploymentTarget: "13.0"
-    sources:
-      - Tests/EnvoixMacOSHostedTests
-    dependencies:
-      - target: Envoix
-      - package: EnvoixCore
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app.macos-tests
-        SWIFT_VERSION: "5.0"
-        GENERATE_INFOPLIST_FILE: YES
-        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Envoix.app/Contents/MacOS/Envoix"
-        BUNDLE_LOADER: "$(TEST_HOST)"
-
 schemes:
   Envoix:
     build:
@@ -233,16 +214,3 @@ schemes:
       gatherCoverageData: false
       targets:
         - Envoix-iOSAppUITests
-
-  Envoix-macOS-Hosted:
-    build:
-      targets:
-        Envoix: all
-        Envoix-macOSTests: [test]
-    test:
-      config: Debug
-      gatherCoverageData: false
-      commandLineArguments:
-        "--macos-hosted-testing": true
-      targets:
-        - Envoix-macOSTests

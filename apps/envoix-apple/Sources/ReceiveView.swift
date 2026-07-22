@@ -13,7 +13,6 @@ struct ReceiveView: View {
     @AppStorage("envoix.language") private var language = "en"
     @AppStorage("envoix.serverURL") private var serverURL = ""
     @AppStorage("envoix.relayURL") private var relayURL = ""
-    @AppStorage("envoix.configChunkSize") private var configChunkSize = ""
     @AppStorage("envoix.candidatesAllow") private var candidatesAllow = ""
     @AppStorage("envoix.candidatesDeny") private var candidatesDeny = ""
     @AppStorage("envoix.speedLimit") private var speedLimit = 40
@@ -870,7 +869,6 @@ struct ReceiveView: View {
                 language: language,
                 serverURL: serverURL,
                 relayURL: relayURL,
-                configChunkSize: configChunkSize,
                 candidatesAllow: candidatesAllow,
                 candidatesDeny: candidatesDeny,
                 speedLimit: speedLimit
@@ -879,8 +877,7 @@ struct ReceiveView: View {
                 outputDir: prepared.url.path,
                 token: token.trimmed,
                 settings: settings,
-                destinationAccess: prepared.access,
-                publishDestinationDir: prepared.publishDestinationDir
+                destinationAccess: prepared.access
             )
         } catch {
             viewModel.handleFailed(error.localizedDescription)
@@ -896,7 +893,6 @@ struct ReceiveView: View {
                 language: language,
                 serverURL: serverURL,
                 relayURL: relayURL,
-                configChunkSize: configChunkSize,
                 candidatesAllow: candidatesAllow,
                 candidatesDeny: candidatesDeny,
                 speedLimit: speedLimit
@@ -905,8 +901,7 @@ struct ReceiveView: View {
                 outputDir: prepared.url.path,
                 code: code,
                 settings: settings,
-                destinationAccess: prepared.access,
-                publishDestinationDir: prepared.publishDestinationDir
+                destinationAccess: prepared.access
             )
             prepareNextRoomAfterStart()
         } catch {
@@ -934,7 +929,6 @@ struct ReceiveView: View {
                 language: language,
                 serverURL: serverURL,
                 relayURL: relayURL,
-                configChunkSize: configChunkSize,
                 candidatesAllow: candidatesAllow,
                 candidatesDeny: candidatesDeny,
                 speedLimit: speedLimit
@@ -942,8 +936,7 @@ struct ReceiveView: View {
             viewModel.startReceivingWithInvite(
                 outputDir: prepared.url.path,
                 settings: settings,
-                destinationAccess: prepared.access,
-                publishDestinationDir: prepared.publishDestinationDir
+                destinationAccess: prepared.access
             )
         } catch {
             viewModel.handleFailed(error.localizedDescription)
@@ -1009,11 +1002,7 @@ struct ReceiveView: View {
     }
     #endif
 
-    private func prepareOutputDir() throws -> (
-        url: URL,
-        access: AnyObject?,
-        publishDestinationDir: String?
-    ) {
+    private func prepareOutputDir() throws -> (url: URL, access: AnyObject?) {
         guard let url = outputDir else {
             #if os(iOS)
             if hasCustomOutputDir {
@@ -1069,14 +1058,10 @@ struct ReceiveView: View {
             ))
         }
         #if os(iOS)
-        if !hasCustomOutputDir {
-            try removeOrphanedDirectReceiveReceipts(in: url)
-        }
-        return (url, access, hasCustomOutputDir ? url.path : nil)
+        return (url, access)
         #else
         model.retainDestinationAccessForAppLifetime(scopedAccess)
-        try removeOrphanedDirectReceiveReceipts(in: url)
-        return (url, access, nil)
+        return (url, access)
         #endif
     }
 

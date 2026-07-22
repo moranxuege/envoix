@@ -1,8 +1,4 @@
-//! Frozen structural Manifest v2 contract.
-//!
-//! Goal 0 intentionally exposes only the bounded structural offer codec. The
-//! transfer engine, persistence, destination effects, and native integration
-//! are implemented by later goals against this contract.
+//! Frozen, bounded structural contract for canonical Manifest v2 offers.
 
 use std::collections::{HashMap, HashSet};
 

@@ -641,52 +641,6 @@ pub(crate) fn relay_mode(relay: &Option<String>) -> Result<RelayMode, SessionErr
     }
 }
 
-pub(crate) async fn build_accept_endpoint(
-    listen_addrs: BindAddrs,
-    identity: &IdentityConfig,
-    relay: &Option<String>,
-    relay_only: bool,
-    candidates: &CandidateFilter,
-    window: u32,
-) -> Result<Endpoint, SessionError> {
-    build_endpoint(
-        Some(listen_addrs),
-        identity,
-        &[TransferProtocol::SingleFileV1],
-        false,
-        relay,
-        relay_only,
-        candidates,
-        window,
-    )
-    .await
-}
-
-pub(crate) async fn build_transfer_accept_endpoint(
-    listen_addrs: BindAddrs,
-    identity: &IdentityConfig,
-    relay: &Option<String>,
-    relay_only: bool,
-    candidates: &CandidateFilter,
-    window: u32,
-) -> Result<Endpoint, SessionError> {
-    build_endpoint(
-        Some(listen_addrs),
-        identity,
-        &[
-            TransferProtocol::SingleFileV1,
-            TransferProtocol::ManifestV1,
-            TransferProtocol::ManifestV2,
-        ],
-        false,
-        relay,
-        relay_only,
-        candidates,
-        window,
-    )
-    .await
-}
-
 pub(crate) async fn build_manifest_v2_accept_endpoint(
     listen_addrs: BindAddrs,
     identity: &IdentityConfig,
@@ -700,52 +654,6 @@ pub(crate) async fn build_manifest_v2_accept_endpoint(
         identity,
         &[TransferProtocol::ManifestV2],
         false,
-        relay,
-        relay_only,
-        candidates,
-        window,
-    )
-    .await
-}
-
-pub(crate) async fn build_advertising_accept_endpoint(
-    listen_addrs: BindAddrs,
-    identity: &IdentityConfig,
-    relay: &Option<String>,
-    relay_only: bool,
-    candidates: &CandidateFilter,
-    window: u32,
-) -> Result<Endpoint, SessionError> {
-    build_endpoint(
-        Some(listen_addrs),
-        identity,
-        &[TransferProtocol::SingleFileV1],
-        true,
-        relay,
-        relay_only,
-        candidates,
-        window,
-    )
-    .await
-}
-
-pub(crate) async fn build_transfer_advertising_accept_endpoint(
-    listen_addrs: BindAddrs,
-    identity: &IdentityConfig,
-    relay: &Option<String>,
-    relay_only: bool,
-    candidates: &CandidateFilter,
-    window: u32,
-) -> Result<Endpoint, SessionError> {
-    build_endpoint(
-        Some(listen_addrs),
-        identity,
-        &[
-            TransferProtocol::SingleFileV1,
-            TransferProtocol::ManifestV1,
-            TransferProtocol::ManifestV2,
-        ],
-        true,
         relay,
         relay_only,
         candidates,
@@ -828,8 +736,8 @@ fn data_transport_config(window: u32) -> QuicTransportConfig {
     builder.build()
 }
 
-// The endpoint knobs are independent flags/handles, not a cohesive config worth
-// its own type; the three thin wrappers above pin the common combinations.
+// Endpoint knobs are independent flags/handles; the v2 accept/dial wrappers
+// above pin the supported combinations without exposing legacy ALPN choices.
 #[allow(clippy::too_many_arguments)]
 async fn build_endpoint(
     local_listen_addrs: Option<BindAddrs>,
@@ -914,7 +822,3 @@ async fn build_endpoint(
         .await
         .map_err(|error| CoreError::Transport(error.to_string()))
 }
-
-#[cfg(test)]
-#[path = "endpoint_tests.rs"]
-mod tests;

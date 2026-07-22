@@ -432,7 +432,6 @@ struct ContentView: View {
             TransferStageView(
                 records: model.activities,
                 pendingRemovalIDs: model.pendingActivityRemovalIDs,
-                manifestByActivityID: model.manifestActivities,
                 metricsByActivityID: model.activityMetrics,
                 onCopyDiagnostics: model.diagnosticReport,
                 onRemoteLogTarget: model.remoteLogTarget,
@@ -442,7 +441,6 @@ struct ContentView: View {
                 onCanResume: model.canResumeActivity,
                 onResume: model.resumeActivity,
                 onCancel: model.cancelActivity,
-                onReplacePublicationTarget: model.replaceReceivePublicationTarget,
                 onDelete: model.removeActivity
             )
         case .settings:
@@ -737,13 +735,13 @@ struct ContentView: View {
         }
     }
 
-    private var featuredActivity: FfiTransferActivityRecord? {
+    private var featuredActivity: TransferActivityRecord? {
         model.activities.first { ActivityProjectionPolicy.isPending($0.state) }
     }
 
-    private func mobileActivityTitle(_ record: FfiTransferActivityRecord) -> String {
+    private func mobileActivityTitle(_ record: TransferActivityRecord) -> String {
         switch record.state {
-        case .queued, .binding, .waitingForPeer:
+        case .preparing, .waitingForPeer:
             return AppText.value("Waiting to connect", "等待连接", language: language)
         case .pairing, .connecting:
             return AppText.value("Connecting", "正在连接", language: language)
@@ -751,32 +749,34 @@ struct ContentView: View {
             return record.direction == .send
                 ? AppText.value("Sending", "正在发送", language: language)
                 : AppText.value("Receiving", "正在接收", language: language)
-        case .verifying, .publishing, .unconfirmed:
+        case .verifying, .saving, .waitingForReceiverSave, .finalizingDelivery:
             return AppText.value("Saving", "正在保存", language: language)
         case .paused:
             return AppText.value("Transfer paused", "传输已暂停", language: language)
-        case .completed:
+        case .delivered:
             return AppText.value("Transfer complete", "传输完成", language: language)
         case .failed:
             return AppText.value("Transfer needs attention", "传输需要处理", language: language)
-        case .canceled, .unknown:
+        case .canceled:
             return AppText.value("Transfer", "传输", language: language)
         }
     }
 
-    private func mobileActivitySubtitle(_ record: FfiTransferActivityRecord) -> String {
-        let name = record.fileName.trimmed.isEmpty
-            ? AppText.value("Open Activity for details", "打开活动查看详情", language: language)
-            : record.fileName
+    private func mobileActivitySubtitle(_ record: TransferActivityRecord) -> String {
+        let name = AppText.value(
+            "\(record.itemCount) items",
+            "\(record.itemCount) 个项目",
+            language: language
+        )
         guard record.totalBytes > 0 else { return name }
         let percent = min(100, Int(Double(record.bytesTransferred) / Double(record.totalBytes) * 100))
         return "\(name) · \(percent)%"
     }
 
-    private func mobileActivityIcon(_ record: FfiTransferActivityRecord) -> String {
+    private func mobileActivityIcon(_ record: TransferActivityRecord) -> String {
         switch record.state {
         case .paused: return "pause.fill"
-        case .verifying, .publishing, .unconfirmed: return "tray.and.arrow.down.fill"
+        case .verifying, .saving, .waitingForReceiverSave, .finalizingDelivery: return "tray.and.arrow.down.fill"
         default: return record.direction == .send ? "arrow.up" : "arrow.down"
         }
     }
@@ -875,7 +875,6 @@ struct ContentView: View {
             TransferStageView(
                 records: model.activities,
                 pendingRemovalIDs: model.pendingActivityRemovalIDs,
-                manifestByActivityID: model.manifestActivities,
                 metricsByActivityID: model.activityMetrics,
                 onCopyDiagnostics: model.diagnosticReport,
                 onRemoteLogTarget: model.remoteLogTarget,
@@ -885,7 +884,6 @@ struct ContentView: View {
                 onCanResume: model.canResumeActivity,
                 onResume: model.resumeActivity,
                 onCancel: model.cancelActivity,
-                onReplacePublicationTarget: model.replaceReceivePublicationTarget,
                 onDelete: model.removeActivity
             )
         case .settings:

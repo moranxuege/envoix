@@ -1,6 +1,5 @@
 package dev.envoix.app
 
-/** Callback invoked (off the main thread) with each transfer event's JSON. */
 /** Canonical Manifest-v2 callbacks. [onSaveRequired] is synchronous because
  * the core must not emit receiver results or delivery proof until the actual
  * SAF/MediaStore save has durably completed. It runs on a native worker. */

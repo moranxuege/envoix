@@ -57,7 +57,6 @@ fun SettingsScreen(onBack: () -> Unit) {
     // local buffers for text fields; each commits into the store on change
     var broker by remember { mutableStateOf(settings.broker) }
     var relay by remember { mutableStateOf(settings.relay) }
-    var chunkSize by remember { mutableStateOf(settings.chunkSize) }
     var dataStreamWindow by remember { mutableStateOf(settings.dataStreamWindow) }
     val context = LocalContext.current
     val folderPicker =
@@ -172,11 +171,6 @@ fun SettingsScreen(onBack: () -> Unit) {
 
             Spacer(Modifier.height(22.dp))
             SectionLabel("CONFIG.TOML")
-            Field("Chunk size · e.g. 64KB (16KB–16MB)", chunkSize) {
-                chunkSize = it
-                SettingsStore.update { s -> s.copy(chunkSize = it) }
-            }
-            Spacer(Modifier.height(12.dp))
             Field("Data stream window · e.g. 32MB (default 16MB)", dataStreamWindow) {
                 dataStreamWindow = it
                 SettingsStore.update { s -> s.copy(dataStreamWindow = it) }

@@ -357,6 +357,14 @@ impl ReceiverDataPlaneLedgerV2 {
             .collect()
     }
 
+    pub(crate) fn pending_reuse_entries(&self) -> Vec<(u32, ContentDigestV2)> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.result.is_none() && entry.arbiter == EntryArbiterV2::ReuseChosen)
+            .filter_map(|entry| entry.content_digest.map(|digest| (entry.entry_id, digest)))
+            .collect()
+    }
+
     pub(crate) async fn reset_payload_checkpoint(
         &mut self,
         manifest: &ManifestV2,
@@ -485,7 +493,7 @@ pub enum ManifestV2ProgressPhase {
     Verifying,
     Saving,
     WaitingForReceiverSave,
-    Received,
+    FinalizingDelivery,
 }
 
 pub trait ManifestV2ProgressSink: Send + Sync {
@@ -681,6 +689,16 @@ impl ManifestV2DataPlane {
                 completions.push(completion);
                 continue;
             }
+            if let Some(checkpoint) = resume_status
+                .as_ref()
+                .map(|status| &status.entries[entry.entry_id as usize])
+                .filter(|checkpoint| checkpoint.arbiter != EntryArbiterV2::PayloadOpen)
+            {
+                let completion = completion_from_resume_checkpoint(identity, entry, checkpoint)?;
+                update_completion_set(&mut completion_hasher, completion)?;
+                completions.push(completion);
+                continue;
+            }
             let plan = accept.entry_plans[entry.entry_id as usize];
             let completion = if entry.kind == ManifestEntryKindV2::Directory {
                 send_directory(connection, identity, entry).await?
@@ -776,6 +794,35 @@ impl ManifestV2DataPlane {
                 update_completion_set(&mut completion_hasher, completion)?;
                 continue;
             }
+            if ledger.entries[checkpoint_index].arbiter != EntryArbiterV2::PayloadOpen {
+                let completion = match ledger.entries[checkpoint_index].completion {
+                    Some(completion) => completion,
+                    None if ledger.entries[checkpoint_index].arbiter
+                        == EntryArbiterV2::ReuseChosen =>
+                    {
+                        EntryCompleteV2 {
+                            identity,
+                            entry_id: entry.entry_id,
+                            final_size: entry.plaintext_size,
+                            final_digest: ledger.entries[checkpoint_index].content_digest.ok_or(
+                                ManifestV2DataError::InvalidLedger(
+                                    "reused entry is missing its content digest".into(),
+                                ),
+                            )?,
+                            completion_choice: EntryCompletionChoiceV2::ReuseChosen,
+                        }
+                    }
+                    None => {
+                        return Err(ManifestV2DataError::InvalidLedger(
+                            "completed payload is missing its completion fact".into(),
+                        ));
+                    }
+                };
+                ledger.entries[checkpoint_index].completion = Some(completion);
+                store.save(ledger).await?;
+                update_completion_set(&mut completion_hasher, completion)?;
+                continue;
+            }
             let plan = ledger.accept.entry_plans[checkpoint_index];
             let start = recv_entry_start(connection, identity, entry.entry_id).await?;
             {
@@ -866,7 +913,7 @@ impl ManifestV2DataPlane {
                     .send_manifest_v2_frame(ManifestV2Frame::EntryResult(result.clone()))
                     .await?;
             }
-            progress.on_phase(ManifestV2ProgressPhase::Received);
+            progress.on_phase(ManifestV2ProgressPhase::FinalizingDelivery);
             return Ok(ReceiverDataPlaneSummaryV2 {
                 identity,
                 sender_completion_set_digest: sender_digest,
@@ -932,7 +979,7 @@ impl ManifestV2DataPlane {
                 .send_manifest_v2_frame(ManifestV2Frame::EntryResult(result.clone()))
                 .await?;
         }
-        progress.on_phase(ManifestV2ProgressPhase::Received);
+        progress.on_phase(ManifestV2ProgressPhase::FinalizingDelivery);
         Ok(ReceiverDataPlaneSummaryV2 {
             identity,
             sender_completion_set_digest: sender_digest,
@@ -1075,6 +1122,7 @@ where
     }
 
     let final_digest = if reuse_chosen {
+        source.verify_unchanged().await?;
         let entry_progress = resumed_entry_bytes.max(plaintext_offset).max(
             plan.next_plaintext_block
                 .saturating_mul(block_bytes as u64)
@@ -1675,6 +1723,47 @@ fn completion_from_result(
             EntryResultKindV2::Saved => EntryCompletionChoiceV2::PayloadComplete,
             EntryResultKindV2::ReusedExisting => EntryCompletionChoiceV2::ReuseChosen,
         },
+    })
+}
+
+fn completion_from_resume_checkpoint(
+    identity: JobGenerationV2,
+    entry: &ManifestEntryV2,
+    checkpoint: &ResumeEntryV2,
+) -> Result<EntryCompleteV2, ManifestV2DataError> {
+    let (final_digest, completion_choice) = match checkpoint.arbiter {
+        EntryArbiterV2::PayloadOpen => {
+            return Err(ManifestV2DataError::InvalidLedger(
+                "open payload cannot be treated as complete".into(),
+            ));
+        }
+        EntryArbiterV2::ReuseChosen => (
+            checkpoint.content_digest.ok_or_else(|| {
+                ManifestV2DataError::InvalidLedger(
+                    "reused entry is missing its content digest".into(),
+                )
+            })?,
+            EntryCompletionChoiceV2::ReuseChosen,
+        ),
+        EntryArbiterV2::PayloadCompleteChosen => (
+            if entry.kind == ManifestEntryKindV2::Directory {
+                empty_digest()
+            } else {
+                checkpoint.content_digest.ok_or_else(|| {
+                    ManifestV2DataError::InvalidLedger(
+                        "completed file is missing its content digest".into(),
+                    )
+                })?
+            },
+            EntryCompletionChoiceV2::PayloadComplete,
+        ),
+    };
+    Ok(EntryCompleteV2 {
+        identity,
+        entry_id: entry.entry_id,
+        final_size: entry.plaintext_size,
+        final_digest,
+        completion_choice,
     })
 }
 

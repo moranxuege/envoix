@@ -13,7 +13,6 @@ members = [
     "crates/envoix-rendezvous-iroh",
     "crates/envoix-qr",
     "crates/envoix-session",
-    "crates/envoix-storage",
     "crates/envoix-transfer",
     "crates/envoix-types",
 ]
@@ -35,7 +34,6 @@ envoix-rendezvous = { path = "crates/envoix-rendezvous" }
 envoix-rendezvous-iroh = { path = "crates/envoix-rendezvous-iroh" }
 envoix-qr = { path = "crates/envoix-qr" }
 envoix-session = { path = "crates/envoix-session" }
-envoix-storage = { path = "crates/envoix-storage" }
 envoix-transfer = { path = "crates/envoix-transfer" }
 envoix-types = { path = "crates/envoix-types" }
 async-trait = "0.1"

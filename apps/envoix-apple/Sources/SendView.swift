@@ -39,7 +39,6 @@ struct SendView: View {
     @AppStorage("envoix.language") private var language = "en"
     @AppStorage("envoix.serverURL") private var serverURL = ""
     @AppStorage("envoix.relayURL") private var relayURL = ""
-    @AppStorage("envoix.configChunkSize") private var configChunkSize = ""
     @AppStorage("envoix.candidatesAllow") private var candidatesAllow = ""
     @AppStorage("envoix.candidatesDeny") private var candidatesDeny = ""
     @AppStorage("envoix.speedLimit") private var speedLimit = 40
@@ -111,11 +110,11 @@ struct SendView: View {
             )
         }
         .sheet(isPresented: $isFolderPickerPresented) {
-            FolderPickerSheet(
+            MultiFolderPickerSheet(
                 initialDirectoryURL: folderPickerInitialDirectoryURL,
-                onPick: { url in
+                onPick: { urls in
                     isFolderPickerPresented = false
-                    handleImportedFolder(url)
+                    handleImportedFolders(urls)
                 },
                 onCancel: { isFolderPickerPresented = false }
             )
@@ -498,14 +497,14 @@ struct SendView: View {
     private var selectionGuidance: String {
         #if os(iOS)
         AppText.value(
-            "Choose Photos, one or more files, or one folder. In the folder picker, Open uploads the current folder.",
-            "可选择照片、一个或多个文件，或一个文件夹；在文件夹选择器中点“打开”即上传当前文件夹。",
+            "Choose Photos, files, or one or more folders. Folder structure is preserved.",
+            "可选择照片、文件或一个或多个文件夹；目录结构会完整保留。",
             language: uiLanguage
         )
         #else
         AppText.value(
-            "Choose one or more files, or a folder. Folder structure is preserved.",
-            "可选择一个或多个文件，也可选择文件夹；目录结构会完整保留。",
+            "Choose one or more files or folders. Folder structure is preserved.",
+            "可选择一个或多个文件或文件夹；目录结构会完整保留。",
             language: uiLanguage
         )
         #endif
@@ -892,7 +891,6 @@ struct SendView: View {
             language: language,
             serverURL: parsed.broker.trimmed.isEmpty ? serverURL : parsed.broker,
             relayURL: parsed.relay.trimmed.isEmpty ? relayURL : parsed.relay,
-            configChunkSize: configChunkSize,
             candidatesAllow: candidatesAllow,
             candidatesDeny: candidatesDeny,
             speedLimit: speedLimit
@@ -1048,19 +1046,22 @@ struct SendView: View {
     }
 
     #if os(iOS)
-    private func handleImportedFolder(_ url: URL) {
+    private func handleImportedFolders(_ urls: [URL]) {
         do {
-            guard try url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else {
-                throw RuntimeSettingsError(AppText.value(
-                    "Choose a folder, not a file.",
-                    "请选择文件夹，而不是文件。",
-                    language: uiLanguage
-                ))
+            guard !urls.isEmpty else { return }
+            for url in urls {
+                guard try url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else {
+                    throw RuntimeSettingsError(AppText.value(
+                        "Choose folders, not files.",
+                        "请选择文件夹，而不是文件。",
+                        language: uiLanguage
+                    ))
+                }
             }
-            guard try adoptUserSelectedItems([url]) else { return }
+            guard try adoptUserSelectedItems(urls) else { return }
             ToastCenter.shared.show(AppText.value(
-                "Folder ready to upload",
-                "文件夹已准备上传",
+                urls.count == 1 ? "Folder ready to upload" : "Folders ready to upload",
+                urls.count == 1 ? "文件夹已准备上传" : "多个文件夹已准备上传",
                 language: uiLanguage
             ))
         } catch {
@@ -1332,7 +1333,6 @@ struct SendView: View {
                 language: language,
                 serverURL: serverURL,
                 relayURL: relayURL,
-                configChunkSize: configChunkSize,
                 candidatesAllow: candidatesAllow,
                 candidatesDeny: candidatesDeny,
                 speedLimit: speedLimit

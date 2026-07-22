@@ -8,7 +8,6 @@ license.workspace = true
 async-trait.workspace = true
 envoix-error.workspace = true
 envoix-protocol.workspace = true
-envoix-storage.workspace = true
 envoix-types.workspace = true
 blake3.workspace = true
 getrandom.workspace = true

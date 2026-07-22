@@ -22,7 +22,7 @@ enum class Status(
     Verifying("verifying"),
     Saving("saving"),
     WaitingForReceiverSave("waiting_for_receiver_save"),
-    Received("received"),
+    FinalizingDelivery("finalizing_delivery"),
     Paused("paused"),
     Completed("completed"),
     Failed("failed"),
@@ -65,9 +65,9 @@ data class Transfer(
     /** Where a received file ended up (a `content://` in Downloads), for opening. */
     val savedUri: String? = null,
     val savedUris: List<String> = emptyList(),
-    /** The name the received file was actually published under — may differ from
+    /** The name the received file was actually saved under — may differ from
      *  [fileName] (the transfer identity) after a collision bump, e.g. "photo (1).jpg". */
-    val publishedName: String? = null,
+    val savedName: String? = null,
     /** Stable machine cause; never reconstructed from [error]. */
     val failureCause: String? = null,
     /** For an initiated session, the invite payload to show as a QR while waiting
@@ -95,7 +95,7 @@ val Status.isTerminal: Boolean
             Status.Verifying,
             Status.Saving,
             Status.WaitingForReceiverSave,
-            Status.Received,
+            Status.FinalizingDelivery,
             Status.Paused,
             -> false
         }

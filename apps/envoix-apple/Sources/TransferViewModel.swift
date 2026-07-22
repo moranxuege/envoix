@@ -1,12 +1,7 @@
-import Foundation
 import Combine
 import EnvoixCore
+import Foundation
 
-/// App-wide shared state: the two long-lived transfer view models (one per tab).
-///
-/// Both the main window and the menu-bar popover observe the same instances, so
-/// status stays in sync everywhere. Re-emitting the children's `objectWillChange`
-/// lets a view that observes only `AppModel` still update on transfer progress.
 struct ActivityMetrics {
     var speedBps: Double = 0
     var etaSeconds: Double?
@@ -14,120 +9,209 @@ struct ActivityMetrics {
     var peakBps: Double = 0
     var speedHistory: [Double] = []
     var log: [String] = []
-
-    fileprivate var lastLogKey: String = ""
 }
 
-func mergedActivityDiagnosticLog(
-    activityTimeline: [String],
-    observerLog: [String]
-) -> [String] {
-    activityTimeline + observerLog
+enum TransferActivityState: Equatable {
+    case preparing
+    case waitingForPeer
+    case pairing
+    case connecting
+    case transferring
+    case verifying
+    case saving
+    case waitingForReceiverSave
+    case finalizingDelivery
+    case paused
+    case delivered
+    case failed
+    case canceled
+}
+
+struct TransferActivityRecord: Identifiable {
+    let activityId: String
+    let direction: FfiTransferDirection
+    let mode: FfiTransferMode
+    var itemCount: UInt32
+    var totalBytes: UInt64
+    var bytesTransferred: UInt64
+    var state: TransferActivityState
+    var diagnosticMessage: String
+    var failure: FfiTransferFailure?
+    var savedPaths: [String]
+    var roomID: String?
+    var updatedAt: Date
+
+    var id: String { activityId }
 }
 
 enum ActivityProjectionPolicy {
-    static func pendingCount(_ records: [FfiTransferActivityRecord]) -> Int {
+    static func pendingCount(_ records: [TransferActivityRecord]) -> Int {
         records.lazy.filter { isPending($0.state) }.count
     }
 
-    static func isPending(_ state: FfiTransferActivityState) -> Bool {
+    static func isPending(_ state: TransferActivityState) -> Bool {
         switch state {
-        case .queued, .binding, .waitingForPeer, .pairing, .connecting, .transferring,
-                .verifying, .publishing, .unconfirmed, .paused:
+        case .delivered, .failed, .canceled:
+            return false
+        default:
             return true
-        case .completed, .failed, .canceled, .unknown:
-            return false
-        }
-    }
-
-    static func shouldAccept(
-        _ incoming: FfiTransferActivityRecord,
-        replacing current: FfiTransferActivityRecord
-    ) -> Bool {
-        guard incoming.activityId == current.activityId else { return false }
-        if incoming.sequence != current.sequence {
-            return incoming.sequence > current.sequence
-        }
-        return incoming.updatedAtMs >= current.updatedAtMs
-    }
-
-    static func pruneTerminalHistory(
-        _ records: [FfiTransferActivityRecord],
-        limit: Int
-    ) -> [FfiTransferActivityRecord] {
-        let sorted = records.sorted { lhs, rhs in
-            if lhs.updatedAtMs != rhs.updatedAtMs {
-                return lhs.updatedAtMs > rhs.updatedAtMs
-            }
-            return lhs.activityId < rhs.activityId
-        }
-        let nonTerminal = sorted.filter { !isTerminal($0.state) }
-        let terminalLimit = max(0, limit - nonTerminal.count)
-        let retainedTerminalIDs = Set(
-            sorted.lazy
-                .filter { isTerminal($0.state) }
-                .prefix(terminalLimit)
-                .map(\.activityId)
-        )
-        return sorted.filter { !isTerminal($0.state) || retainedTerminalIDs.contains($0.activityId) }
-    }
-
-    static func isTerminal(_ state: FfiTransferActivityState) -> Bool {
-        switch state {
-        case .completed, .failed, .canceled: return true
-        case .queued, .binding, .waitingForPeer, .pairing, .connecting, .transferring,
-                .verifying, .publishing, .unconfirmed, .paused, .unknown:
-            return false
         }
     }
 }
 
 enum ActivityExecutionPolicy {
-    static func occupiesExecutionSlot(_ state: FfiTransferActivityState) -> Bool {
+    static func occupiesExecutionSlot(_ state: TransferActivityState) -> Bool {
         switch state {
-        case .paused, .completed, .failed, .canceled:
+        case .paused, .delivered, .failed, .canceled:
             return false
-        case .queued, .binding, .waitingForPeer, .pairing, .connecting, .transferring,
-                .verifying, .publishing, .unconfirmed, .unknown:
+        default:
             return true
         }
     }
+}
 
-    static func canResume(
-        _ record: FfiTransferActivityRecord,
-        among records: [FfiTransferActivityRecord]
-    ) -> Bool {
-        let limit = max(1, Int(record.limits.maxParallelTransfers))
-        let occupied = records.lazy.filter {
-            $0.activityId != record.activityId && occupiesExecutionSlot($0.state)
-        }.count
-        return occupied < limit
+private struct StoredRuntimeSettingsV2: Codable {
+    let concurrentTransfers: Bool
+    let language: String
+    let serverURL: String
+    let relayURL: String
+    let configPath: String
+    let speedLimitMbps: UInt64
+
+    init(_ settings: EnvoixRuntimeSettings) {
+        concurrentTransfers = settings.concurrentTransfers
+        language = settings.language
+        serverURL = settings.serverUrl
+        relayURL = settings.relayUrl
+        configPath = settings.configPath
+        speedLimitMbps = settings.speedLimitMbps
+    }
+
+    var value: EnvoixRuntimeSettings {
+        EnvoixRuntimeSettings(
+            concurrentTransfers: concurrentTransfers,
+            language: language,
+            serverUrl: serverURL,
+            relayUrl: relayURL,
+            configPath: configPath,
+            speedLimitMbps: speedLimitMbps
+        )
     }
 }
 
-private struct ReceivePublication {
-    var destinationDirectory: URL
-    var resourceAccess: AnyObject?
-    var completedRecord: FfiTransferActivityRecord?
-    var isPublishing = false
+private struct StoredTransferRequestV2: Codable {
+    let direction: String
+    let mode: String
+    let peerDescriptor: String
+    let invite: String
+    let code: String
+    let token: String
+    let broker: String
+    let relay: String
+    let configPath: String
+    let pathPolicy: String
+    let useRoom: Bool
+    let useMdns: Bool
+    let internetAvailable: Bool
+
+    init(_ request: FfiTransferRequest) {
+        direction = request.direction == .send ? "send" : "receive"
+        switch request.mode {
+        case .manual: mode = "manual"
+        case .invite: mode = "invite"
+        case .showManual: mode = "show_manual"
+        case .showInvite: mode = "show_invite"
+        case .mdns: mode = "mdns"
+        case .room: mode = "room"
+        }
+        peerDescriptor = request.peerDescriptor
+        invite = request.invite
+        code = request.code
+        token = request.token
+        broker = request.broker
+        relay = request.relay
+        configPath = request.configPath
+        switch request.pathPolicy {
+        case .auto: pathPolicy = "auto"
+        case .relayOnly: pathPolicy = "relay_only"
+        case .directOnly: pathPolicy = "direct_only"
+        }
+        useRoom = request.rendezvous.useRoom
+        useMdns = request.rendezvous.useMdns
+        internetAvailable = request.rendezvous.internetAvailable
+    }
+
+    func value() throws -> FfiTransferRequest {
+        let direction: FfiTransferDirection
+        switch self.direction {
+        case "send": direction = .send
+        case "receive": direction = .receive
+        default: throw RuntimeSettingsError("Stored transfer direction is invalid.")
+        }
+        let mode: FfiTransferMode
+        switch self.mode {
+        case "manual": mode = .manual
+        case "invite": mode = .invite
+        case "show_manual": mode = .showManual
+        case "show_invite": mode = .showInvite
+        case "mdns": mode = .mdns
+        case "room": mode = .room
+        default: throw RuntimeSettingsError("Stored transfer mode is invalid.")
+        }
+        let pathPolicy: FfiPathPolicy
+        switch self.pathPolicy {
+        case "auto": pathPolicy = .auto
+        case "relay_only": pathPolicy = .relayOnly
+        case "direct_only": pathPolicy = .directOnly
+        default: throw RuntimeSettingsError("Stored path policy is invalid.")
+        }
+        return FfiTransferRequest(
+            direction: direction,
+            mode: mode,
+            peerDescriptor: peerDescriptor,
+            invite: invite,
+            code: code,
+            token: token,
+            broker: broker,
+            relay: relay,
+            configPath: configPath,
+            pathPolicy: pathPolicy,
+            rendezvous: FfiRendezvousPlan(
+                useRoom: useRoom,
+                useMdns: useMdns,
+                internetAvailable: internetAvailable
+            )
+        )
+    }
 }
 
+private struct StoredAppleManifestSessionV2: Codable {
+    static let schemaVersion = 1
+
+    let schemaVersion: Int
+    let activityID: String
+    let jobID: String?
+    let stateDirectory: String
+    let targetDirectory: String?
+    let sourcePaths: [String]
+    let sourceBookmarks: [Data]
+    let destinationBookmark: Data?
+    let shareDraftID: UUID?
+    let settings: StoredRuntimeSettingsV2
+    let request: StoredTransferRequestV2
+    let itemCount: UInt32
+    let totalBytes: UInt64
+    let roomID: String?
+}
+
+@MainActor
 final class AppModel: ObservableObject {
     static let shared = AppModel()
-    private static let commandSnapshotRefreshDelays: [TimeInterval] = [0.2, 1.0]
-    private static let activityRemovalPollInterval: TimeInterval = 0.1
-    private static let activityRemovalTimeout: TimeInterval = 5
-    #if DEBUG
-    private static let hostedTestRecordsDirectoryEnvironmentKey = "ENVOIX_APPLE_HOSTED_TEST_RECORDS_DIR"
-    private static let stalledActivityRemovalUITestArgument = "--ui-testing-stalled-activity-removal"
-    private static let macOSHostedTestArgument = "--macos-hosted-testing"
-    #endif
 
     let receive = TransferViewModel()
     let send = TransferViewModel()
-    @Published private(set) var activities: [FfiTransferActivityRecord] = []
+    @Published private(set) var activities: [TransferActivityRecord] = []
     @Published private(set) var pendingActivityRemovalIDs = Set<String>()
-    @Published private(set) var manifestActivities: [String: FfiManifestActivityRecord] = [:]
     @Published private(set) var activityMetrics: [String: ActivityMetrics] = [:]
     @Published private(set) var transferCacheSummary = TransferCacheSummary()
     @Published private(set) var isCleaningTransferCache = false
@@ -135,88 +219,154 @@ final class AppModel: ObservableObject {
     #if os(iOS)
     @Published private(set) var pendingSendSelection: PendingSendSelection?
     #endif
-    private var transferEventLinesByActivityID: [String: [String]] = [:]
-    private var transferLogByActivityID: [String: [String]] = [:]
-    private var activityResourceAccess: [String: AnyObject] = [:]
-    #if os(macOS)
-    private var appLifetimeDestinationAccess: [String: SecurityScopedResourceAccess] = [:]
-    #endif
-    private var receivePublications: [String: ReceivePublication] = [:]
-    private var durableSessions: [String: DurableEnvoixSession] = [:]
-    private var durableManifestSessions: [String: DurableEnvoixManifestSession] = [:]
 
     private var cancellables = Set<AnyCancellable>()
-    private var removedActivityIDs = Set<String>()
-    private let activityCap = 50
-    private let recordsDirectory: URL = {
-        #if DEBUG
-        if let path = ProcessInfo.processInfo.environment[AppModel.hostedTestRecordsDirectoryEnvironmentKey],
-           !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return URL(fileURLWithPath: path, isDirectory: true)
-        }
-        if ProcessInfo.processInfo.arguments.contains(AppModel.macOSHostedTestArgument) {
-            return FileManager.default.temporaryDirectory
-                .appendingPathComponent(
-                    "envoix-macos-hosted-\(ProcessInfo.processInfo.processIdentifier)/records",
-                    isDirectory: true
-                )
-        }
-        #endif
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-        return base.appendingPathComponent("envoix/transfer-records", isDirectory: true)
-    }()
-    private lazy var mailboxObserver = AppleMailboxObserver(model: self)
-    private let activityLogTimestamp: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm:ss"
-        return formatter
-    }()
 
     private init() {
         receive.appModel = self
         send.appModel = self
-
-        for vm in [receive, send] {
-            vm.objectWillChange
-                .throttle(for: .milliseconds(500), scheduler: RunLoop.main, latest: true)
+        for model in [receive, send] {
+            model.objectWillChange
                 .sink { [weak self] in self?.objectWillChange.send() }
                 .store(in: &cancellables)
-            vm.$transferActivity
+            model.$transferActivity
                 .compactMap { $0 }
-                .sink { [weak self, weak vm] record in
-                    self?.handleCoreActivity(record)
-                    if ActivityProjectionPolicy.isTerminal(record.state), let vm {
-                        self?.snapshotDiagnostics(from: vm, activityID: record.activityId)
-                    }
-                }
+                .sink { [weak self] in self?.upsert($0) }
                 .store(in: &cancellables)
         }
-        #if DEBUG
-        if ProcessInfo.processInfo.arguments.contains("--ui-testing-received-folder-fixture") {
-            let fixture = PreviewFixtures.completedFolderReceiveFixture
-            activities = [fixture.activity]
-            manifestActivities = [fixture.activity.activityId: fixture.manifest]
-        } else if ProcessInfo.processInfo.arguments.contains("--ui-testing-activity-fixtures") {
-            activities = PreviewFixtures.activityRecords
-            activityMetrics = PreviewFixtures.activityMetrics
-        } else {
-            DispatchQueue.main.async { [weak self] in
-                self?.restoreDurableTransfers()
-                self?.send.restorePreparedManifestSelection()
-            }
+        send.restoreActiveManifestSession(direction: .send)
+        receive.restoreActiveManifestSession(direction: .receive)
+        if !send.isBusy {
+            send.restorePreparedManifestSelection()
         }
-        #else
-        DispatchQueue.main.async { [weak self] in
-            self?.restoreDurableTransfers()
-            self?.send.restorePreparedManifestSelection()
-        }
-        #endif
     }
 
-    /// True while either side has a transfer in flight.
     var isActive: Bool {
-        receive.isBusy || send.isBusy || activities.contains { !ActivityProjectionPolicy.isTerminal($0.state) }
+        send.isBusy || receive.isBusy || activities.contains { ActivityProjectionPolicy.isPending($0.state) }
+    }
+
+    var hasExecutingActivity: Bool {
+        activities.contains { ActivityExecutionPolicy.occupiesExecutionSlot($0.state) }
+    }
+
+    @discardableResult
+    func pauseActivity(_ activityID: String) -> Bool {
+        owner(of: activityID)?.pause() ?? false
+    }
+
+    func canResumeActivity(_ activityID: String) -> Bool {
+        guard let record = activities.first(where: { $0.activityId == activityID }),
+              owner(of: activityID)?.hasResumableOperation == true else {
+            return false
+        }
+        return record.state == .paused || (record.state == .failed && record.failure?.retryable == true)
+    }
+
+    @discardableResult
+    func resumeActivity(_ activityID: String) -> Bool {
+        owner(of: activityID)?.resume() ?? false
+    }
+
+    @discardableResult
+    func cancelActivity(_ activityID: String) -> Bool {
+        owner(of: activityID)?.cancel() ?? false
+    }
+
+    @discardableResult
+    func removeActivity(_ activityID: String) -> Bool {
+        guard let record = activities.first(where: { $0.activityId == activityID }),
+              !ActivityProjectionPolicy.isPending(record.state) else { return false }
+        activities.removeAll { $0.activityId == activityID }
+        activityMetrics.removeValue(forKey: activityID)
+        owner(of: activityID)?.forgetActivity(activityID)
+        return true
+    }
+
+    func diagnosticReport(_ record: TransferActivityRecord) -> String {
+        [
+            "activity_id=\(record.activityId)",
+            "direction=\(record.direction)",
+            "mode=\(record.mode)",
+            "state=\(record.state)",
+            "items=\(record.itemCount)",
+            "bytes=\(record.bytesTransferred)/\(record.totalBytes)",
+            "diagnostic=\(record.diagnosticMessage)",
+        ].joined(separator: "\n")
+    }
+
+    func remoteLogTarget(_ record: TransferActivityRecord) -> RemoteLogUpload.Target? {
+        guard let roomID = record.roomID else { return nil }
+        return RemoteLogUpload.Target(
+            roomID: roomID,
+            side: record.direction == .send ? "sender" : "receiver"
+        )
+    }
+
+    func remoteDiagnosticReport(_ record: TransferActivityRecord) -> String {
+        [
+            "activity_id=\(record.activityId)",
+            "direction=\(record.direction)",
+            "mode=\(record.mode)",
+            "state=\(record.state)",
+            "items=\(record.itemCount)",
+            "bytes=\(record.bytesTransferred)/\(record.totalBytes)",
+            "failure_code=\(String(describing: record.failure?.code))",
+            "failure_category=\(String(describing: record.failure?.category))",
+            "failure_phase=\(String(describing: record.failure?.phase))",
+            "retryable=\(record.failure?.retryable ?? false)",
+            "recovery_action=\(String(describing: record.failure?.recoveryAction))",
+        ].joined(separator: "\n")
+    }
+
+    func appDiagnosticReport() -> String {
+        activities.map(diagnosticReport).joined(separator: "\n\n")
+    }
+
+    func refreshTransferCache() {
+        performTransferCacheWork(clean: false)
+    }
+
+    func cleanTransferCache() {
+        performTransferCacheWork(clean: true)
+    }
+
+    private func performTransferCacheWork(clean: Bool) {
+        guard !isCleaningTransferCache else { return }
+        isCleaningTransferCache = true
+        transferCacheError = nil
+        let protected = Set(activities.filter { ActivityProjectionPolicy.isPending($0.state) }.map(\.activityId))
+        #if os(iOS)
+        let drafts = Set(
+            [pendingSendSelection?.id, send.protectedShareDraftID].compactMap { $0 }
+        )
+        #else
+        let drafts = Set<UUID>()
+        #endif
+        Task.detached {
+            do {
+                let store = TransferCacheStore()
+                if clean {
+                    try store.cleanUnprotected(
+                        protectingDraftIDs: drafts,
+                        protectingActivityIDs: protected,
+                        createdBefore: Date()
+                    )
+                }
+                let summary = try store.summary(
+                    protectingDraftIDs: drafts,
+                    protectingActivityIDs: protected
+                )
+                await MainActor.run {
+                    self.transferCacheSummary = summary
+                    self.isCleaningTransferCache = false
+                }
+            } catch {
+                await MainActor.run {
+                    self.transferCacheError = error.localizedDescription
+                    self.isCleaningTransferCache = false
+                }
+            }
+        }
     }
 
     #if os(iOS)
@@ -240,25 +390,19 @@ final class AppModel: ObservableObject {
 
     func importOpenedSendFile(_ url: URL) throws -> OpenedSendFileOutcome {
         guard url.isFileURL else { throw OpenedSendFileError.unsupportedURL }
-
         let access = SecurityScopedResourceAccess(url: url)
         guard access.isActive || FileManager.default.isReadableFile(atPath: url.path) else {
             throw OpenedSendFileError.inaccessible
         }
-
-        let values: URLResourceValues
-        do {
-            values = try url.resourceValues(
-                forKeys: [.isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey]
-            )
-        } catch {
-            throw OpenedSendFileError.inaccessible
-        }
+        let values = try url.resourceValues(forKeys: [
+            .isRegularFileKey,
+            .isDirectoryKey,
+            .isSymbolicLinkKey,
+        ])
         guard values.isSymbolicLink != true,
               values.isRegularFile == true || values.isDirectory == true else {
             throw OpenedSendFileError.unsupportedItem
         }
-
         pendingSendSelection = PendingSendSelection(
             id: UUID(),
             fileURLs: [url],
@@ -268,1073 +412,42 @@ final class AppModel: ObservableObject {
     }
 
     func consumePendingSendSelection(id: UUID) {
-        guard pendingSendSelection?.id == id else { return }
-        pendingSendSelection = nil
+        if pendingSendSelection?.id == id { pendingSendSelection = nil }
     }
     #endif
 
-    @discardableResult
-    func pauseActivity(_ activityID: String) -> Bool {
-        if durableManifestSessions[activityID]?.pause() == true
-            || durableSessions[activityID]?.pause() == true {
-            syncActivitySnapshots()
-            scheduleCommandSnapshotRefreshes()
-            return true
-        }
-        return false
-    }
-
-    @discardableResult
-    func resumeActivity(_ activityID: String) -> Bool {
-        guard canResumeActivity(activityID) else { return false }
-        if retryReceivePublication(activityID) {
-            return true
-        }
-        if durableManifestSessions[activityID]?.resume() == true
-            || durableSessions[activityID]?.resume() == true {
-            syncActivitySnapshots()
-            scheduleCommandSnapshotRefreshes()
-            return true
-        }
-        return false
-    }
-
-    func canResumeActivity(_ activityID: String) -> Bool {
-        guard let record = activities.first(where: { $0.activityId == activityID }) else {
-            return false
-        }
-        return ActivityExecutionPolicy.canResume(record, among: activities)
-    }
-
-    var hasExecutingActivity: Bool {
-        activities.contains { ActivityExecutionPolicy.occupiesExecutionSlot($0.state) }
-    }
-
-    @discardableResult
-    func cancelActivity(_ activityID: String) -> Bool {
-        if durableManifestSessions[activityID]?.cancel() == true
-            || durableSessions[activityID]?.cancel() == true {
-            syncActivitySnapshots()
-            scheduleCommandSnapshotRefreshes()
-            return true
-        }
-        #if DEBUG
-        if ProcessInfo.processInfo.arguments.contains("--ui-testing-stalled-activity-command"),
-           activities.contains(where: { $0.activityId == activityID }) {
-            return true
-        }
-        #endif
-        return false
-    }
-
-    @discardableResult
-    func removeActivity(_ activityID: String) -> Bool {
-        guard activities.contains(where: { $0.activityId == activityID }),
-              !pendingActivityRemovalIDs.contains(activityID) else { return false }
-
-        pendingActivityRemovalIDs.insert(activityID)
-        removedActivityIDs.insert(activityID)
-        guard enqueueActivityRemoval(activityID) else {
-            pendingActivityRemovalIDs.remove(activityID)
-            removedActivityIDs.remove(activityID)
-            return false
-        }
-
-        verifyActivityRemoval(
-            activityID,
-            deadline: Date().addingTimeInterval(Self.activityRemovalTimeout)
-        )
-        return true
-    }
-
-    private func enqueueActivityRemoval(_ activityID: String) -> Bool {
-        if durableManifestSessions[activityID]?.remove() == true
-            || durableSessions[activityID]?.remove() == true {
-            return true
-        }
-
-        durableManifestSessions.removeValue(forKey: activityID)
-        durableSessions.removeValue(forKey: activityID)
-        do {
-            if try listDurableManifestRecords(recordsDir: recordsDirectory.path)
-                .contains(where: { $0.activity.activityId == activityID }) {
-                let observer = AppleManifestObserver(
-                    viewModel: nil,
-                    appModel: self,
-                    activityID: activityID
-                )
-                let session = try restoreDurableManifestTransferV2(
-                    activityId: activityID,
-                    recordsDir: recordsDirectory.path,
-                    observer: observer
-                )
-                durableManifestSessions[activityID] = session
-                return session.remove()
-            }
-
-            if try listDurableTransferRecords(recordsDir: recordsDirectory.path)
-                .contains(where: { $0.activityId == activityID }) {
-                let observer = Observer(
-                    nil,
-                    appModel: self,
-                    operationID: UUID(),
-                    activityID: activityID
-                )
-                let session = try restoreDurableTransferV2(
-                    activityId: activityID,
-                    recordsDir: recordsDirectory.path,
-                    observer: observer,
-                    mailbox: mailboxObserver
-                )
-                durableSessions[activityID] = session
-                return session.remove()
-            }
-
-            return true
-        } catch {
-            handleCoreStatus(
-                "Activity removal could not restore durable state: \(error.localizedDescription)",
-                activityID: activityID
-            )
-            return false
-        }
-    }
-
-    private func verifyActivityRemoval(_ activityID: String, deadline: Date) {
-        guard pendingActivityRemovalIDs.contains(activityID) else { return }
-        let isPersisted = persistedActivityPresence(activityID)
-        if isPersisted == false {
-            finishActivityRemoval(activityID)
-            return
-        }
-        if Date() < deadline {
-            DispatchQueue.main.asyncAfter(deadline: .now() + Self.activityRemovalPollInterval) { [weak self] in
-                self?.verifyActivityRemoval(activityID, deadline: deadline)
-            }
-            return
-        }
-
-        pendingActivityRemovalIDs.remove(activityID)
-        removedActivityIDs.remove(activityID)
-        durableManifestSessions.removeValue(forKey: activityID)
-        durableSessions.removeValue(forKey: activityID)
-        syncActivitySnapshots()
-        Task { @MainActor in
-            ToastCenter.shared.show(AppText.value(
-                "Activity could not be removed. It was kept so you can try again.",
-                "活动未能删除，已保留以便重试。",
-                language: UserDefaults.standard.string(forKey: "envoix.language") ?? "en"
-            ))
-        }
-    }
-
-    private func persistedActivityPresence(_ activityID: String) -> Bool? {
-        #if DEBUG
-        if ProcessInfo.processInfo.arguments.contains(Self.stalledActivityRemovalUITestArgument) {
-            return true
-        }
-        #endif
-        do {
-            if try listDurableManifestRecords(recordsDir: recordsDirectory.path)
-                .contains(where: { $0.activity.activityId == activityID }) {
-                return true
-            }
-            return try listDurableTransferRecords(recordsDir: recordsDirectory.path)
-                .contains(where: { $0.activityId == activityID })
-        } catch {
-            handleCoreStatus(
-                "Activity removal verification failed: \(error.localizedDescription)",
-                activityID: activityID
-            )
-            return nil
-        }
-    }
-
-    private func finishActivityRemoval(_ activityID: String) {
-        discardActivityResourceAccess(for: activityID)
-        pendingActivityRemovalIDs.remove(activityID)
-        durableManifestSessions.removeValue(forKey: activityID)
-        durableSessions.removeValue(forKey: activityID)
-        manifestActivities.removeValue(forKey: activityID)
-        let publication = receivePublications.removeValue(forKey: activityID)
-        if let publication,
-           let path = publication.completedRecord?.completedFilePath,
-           !path.isEmpty {
-            try? FileManager.default.removeItem(at: URL(fileURLWithPath: path))
-        }
-        if publication != nil {
-            cleanupReceiveStaging(activityID: activityID)
-            ReceivePublicationStore.remove(activityID: activityID)
-        }
-        receive.forgetRoomID(for: activityID)
-        send.forgetRoomID(for: activityID)
-        activities.removeAll { $0.activityId == activityID }
-        activityMetrics.removeValue(forKey: activityID)
-        transferEventLinesByActivityID.removeValue(forKey: activityID)
-        transferLogByActivityID.removeValue(forKey: activityID)
-    }
-
-    private func syncActivitySnapshots() {
-        let persisted = (try? listDurableTransferRecords(recordsDir: recordsDirectory.path)) ?? []
-        let live = durableSessions.values.map { $0.activity() }
-        let records = persisted + live
-        let uniqueRecords = Dictionary(records.map { ($0.activityId, $0) }, uniquingKeysWith: { _, latest in latest })
-        for record in uniqueRecords.values where !removedActivityIDs.contains(record.activityId) {
-            upsertActivity(record, speedBps: speedBps(for: record.activityId))
-        }
-        let persistedManifests = (try? listDurableManifestRecords(recordsDir: recordsDirectory.path)) ?? []
-        let liveManifests = durableManifestSessions.values.map { $0.activity() }
-        let manifestRecords = Dictionary(
-            (persistedManifests + liveManifests).map { ($0.activity.activityId, $0) },
-            uniquingKeysWith: { _, latest in latest }
-        )
-        for record in manifestRecords.values where !removedActivityIDs.contains(record.activity.activityId) {
-            handleManifestActivity(record)
-        }
-    }
-
-    private func scheduleCommandSnapshotRefreshes() {
-        for delay in Self.commandSnapshotRefreshDelays {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                self?.syncActivitySnapshots()
-            }
-        }
-    }
-
-    func startDurableSession(
-        settings: EnvoixRuntimeSettings,
-        request: FfiTransferRequest,
-        observer: TransferObserver
-    ) throws -> DurableEnvoixSession {
-        try FileManager.default.createDirectory(at: recordsDirectory, withIntermediateDirectories: true)
-        let session = try startDurableTransferV2(
-            settings: settings,
-            request: request,
-            recordsDir: recordsDirectory.path,
-            receiptServer: currentReceiptServer(),
-            observer: observer,
-            mailbox: mailboxObserver
-        )
-        durableSessions[request.activityId] = session
-        if let target = ReceivePublicationStore.loadAll()[request.activityId] {
-            _ = session.setPublicationTarget(target: target.ffiTarget)
-        }
-        upsertActivity(session.activity(), speedBps: 0)
-        return session
-    }
-
-    func startDurableManifestSendSession(
-        settings: EnvoixRuntimeSettings,
-        request: FfiTransferRequest,
-        prepared: FfiPreparedManifestSend,
-        observer: ManifestTransferObserverV2
-    ) throws -> DurableEnvoixManifestSession {
-        try FileManager.default.createDirectory(at: recordsDirectory, withIntermediateDirectories: true)
-        let session = try startDurableManifestSendV2(
-            settings: settings,
-            request: request,
-            prepared: prepared,
-            recordsDir: recordsDirectory.path,
-            observer: observer
-        )
-        durableManifestSessions[request.activityId] = session
-        handleManifestActivity(session.activity())
-        return session
-    }
-
-    func startDurableManifestReceiveSession(
-        settings: EnvoixRuntimeSettings,
-        request: FfiTransferRequest,
-        observer: ManifestTransferObserverV2
-    ) throws -> DurableEnvoixManifestSession {
-        try FileManager.default.createDirectory(at: recordsDirectory, withIntermediateDirectories: true)
-        let session = try startDurableManifestReceiveV2(
-            settings: settings,
-            request: request,
-            recordsDir: recordsDirectory.path,
-            observer: observer
-        )
-        durableManifestSessions[request.activityId] = session
-        if let target = ReceivePublicationStore.loadAll()[request.activityId] {
-            _ = session.setPublicationTarget(target: target.ffiTarget)
-        }
-        handleManifestActivity(session.activity())
-        return session
-    }
-
-    func deliverReceipt(_ data: Data, activityID: String) {
-        _ = durableSessions[activityID]?.receiptResponse(blob: data)
-    }
-
-    func acknowledgeReceiptPost(activityID: String) {
-        _ = durableSessions[activityID]?.receiptPosted()
-    }
-
-    private func restoreDurableTransfers() {
-        defer {
-            restoreClaimedShareDrafts()
-            reconcileTransferCache()
-        }
-        do {
-            try FileManager.default.createDirectory(at: recordsDirectory, withIntermediateDirectories: true)
-            let records = try listDurableTransferRecords(recordsDir: recordsDirectory.path)
-            let legacyPublicationTargets = ReceivePublicationStore.loadAll()
-            for record in records where !removedActivityIDs.contains(record.activityId) {
-                upsertActivity(record, speedBps: 0)
-                let observer = Observer(
-                    nil,
-                    appModel: self,
-                    operationID: UUID(),
-                    activityID: record.activityId
-                )
-                do {
-                    let session = try restoreDurableTransferV2(
-                        activityId: record.activityId,
-                        recordsDir: recordsDirectory.path,
-                        observer: observer,
-                        mailbox: mailboxObserver
-                    )
-                    durableSessions[record.activityId] = session
-                    let restoredRecord = session.activity()
-                    if restoredRecord.state == .publishing {
-                        let canonicalTarget = session.publicationTarget().map(ReceivePublicationTarget.init)
-                        let target = canonicalTarget ?? legacyPublicationTargets[record.activityId]
-                        if canonicalTarget == nil, let target {
-                            _ = session.setPublicationTarget(target: target.ffiTarget)
-                        }
-                        restoreReceivePublicationTarget(target, for: restoredRecord)
-                    }
-                    handleCoreActivity(session.activity())
-                } catch {
-                    handleCoreStatus("restore failed: \(error.localizedDescription)", activityID: record.activityId)
-                }
-            }
-            let manifestRecords = try listDurableManifestRecords(recordsDir: recordsDirectory.path)
-            for record in manifestRecords where !removedActivityIDs.contains(record.activity.activityId) {
-                handleManifestActivity(record)
-                let activityID = record.activity.activityId
-                let observer = AppleManifestObserver(
-                    viewModel: nil,
-                    appModel: self,
-                    activityID: activityID
-                )
-                do {
-                    let session = try restoreDurableManifestTransferV2(
-                        activityId: activityID,
-                        recordsDir: recordsDirectory.path,
-                        observer: observer
-                    )
-                    durableManifestSessions[activityID] = session
-                    let restoredRecord = session.activity()
-                    if restoredRecord.activity.state == .publishing {
-                        let canonicalTarget = session.publicationTarget().map(ReceivePublicationTarget.init)
-                        let target = canonicalTarget ?? legacyPublicationTargets[activityID]
-                        if canonicalTarget == nil, let target {
-                            _ = session.setPublicationTarget(target: target.ffiTarget)
-                        }
-                        restoreReceivePublicationTarget(target, for: restoredRecord.activity)
-                    }
-                    handleManifestActivity(restoredRecord)
-                } catch {
-                    handleCoreStatus("Manifest restore failed: \(error.localizedDescription)", activityID: activityID)
-                }
-            }
-        } catch {
-            transferLogByActivityID["app", default: []].append("restore scan failed: \(error.localizedDescription)")
-        }
-    }
-
-    private var protectedCacheActivityIDs: Set<String> {
-        var ids = Set(activities.compactMap { record -> String? in
-            if !ActivityProjectionPolicy.isTerminal(record.state)
-                || record.state == .failed && record.retryable {
-                return record.activityId
-            }
-            return nil
-        })
-        ids.formUnion(receivePublications.keys)
-        for viewModel in [receive, send] where !viewModel.activeActivityID.isEmpty {
-            ids.insert(viewModel.activeActivityID)
-        }
-        return ids
-    }
-
-    private var protectedCacheDraftIDs: Set<UUID> {
-        #if os(iOS)
-        var ids = Set(activityResourceAccess.values.compactMap { ($0 as? ShareDraftLease)?.id })
-        if let pendingSendSelection {
-            ids.insert(pendingSendSelection.id)
-        }
-        return ids
-        #else
-        return []
-        #endif
-    }
-
-    private func restoreClaimedShareDrafts() {
-        #if os(iOS)
-        do {
-            let store = try ShareDraftStore.live()
-            let protectedActivityIDs = protectedCacheActivityIDs
-            for (activityID, draftID) in try store.claimedDraftsByActivityID()
-                where protectedActivityIDs.contains(activityID)
-                    && activityResourceAccess[activityID] == nil {
-                _ = try store.load(id: draftID)
-                activityResourceAccess[activityID] = ShareDraftLease(id: draftID, store: store)
-            }
-        } catch {
-            transferCacheError = error.localizedDescription
-        }
-        #endif
-    }
-
-    func refreshTransferCache() {
-        performTransferCacheWork(cleanup: nil)
-    }
-
-    func cleanTransferCache() {
-        performTransferCacheWork(cleanup: .manual)
-    }
-
-    private func reconcileTransferCache() {
-        performTransferCacheWork(cleanup: .automatic)
-    }
-
-    private enum TransferCacheCleanup {
-        case automatic
-        case manual
-    }
-
-    private func performTransferCacheWork(cleanup: TransferCacheCleanup?) {
-        guard !isCleaningTransferCache else { return }
-        let protectedActivityIDs = protectedCacheActivityIDs
-        let protectedDraftIDs = protectedCacheDraftIDs
-        let startedAt = Date()
-        isCleaningTransferCache = true
-        transferCacheError = nil
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            do {
-                let store = TransferCacheStore()
-                switch cleanup {
-                case .automatic:
-                    try store.reconcile(
-                        protectingDraftIDs: protectedDraftIDs,
-                        protectingActivityIDs: protectedActivityIDs,
-                        createdBefore: startedAt
-                    )
-                case .manual:
-                    try store.cleanUnprotected(
-                        protectingDraftIDs: protectedDraftIDs,
-                        protectingActivityIDs: protectedActivityIDs,
-                        createdBefore: startedAt
-                    )
-                case nil:
-                    break
-                }
-                let summary = try store.summary(
-                    protectingDraftIDs: protectedDraftIDs,
-                    protectingActivityIDs: protectedActivityIDs
-                )
-                DispatchQueue.main.async {
-                    self?.transferCacheSummary = summary
-                    self?.isCleaningTransferCache = false
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self?.transferCacheError = error.localizedDescription
-                    self?.isCleaningTransferCache = false
-                }
-            }
-        }
-    }
-
-    private func restoreReceivePublicationTarget(
-        _ target: ReceivePublicationTarget?,
-        for record: FfiTransferActivityRecord
-    ) {
-        guard let target else { return }
-        let destination: URL
-        let access: AnyObject?
-        #if os(iOS)
-        if let bookmark = target.bookmark,
-           let resolved = try? resolveSecurityScopedFolderBookmark(bookmark) {
-            destination = resolved
-            access = SecurityScopedResourceAccess(url: resolved)
-        } else {
-            destination = URL(fileURLWithPath: target.destinationPath, isDirectory: true)
-            access = nil
-        }
-        #else
-        destination = URL(fileURLWithPath: target.destinationPath, isDirectory: true)
-        access = nil
-        #endif
-        receivePublications[record.activityId] = ReceivePublication(
-            destinationDirectory: destination,
-            resourceAccess: access,
-            completedRecord: record,
-            isPublishing: false
-        )
-        retainResourceAccess(access, for: record.activityId)
-    }
-
-    func handleManifestActivity(_ record: FfiManifestActivityRecord) {
-        let activityID = record.activity.activityId
-        guard !removedActivityIDs.contains(activityID) else { return }
-        if let current = manifestActivities[activityID],
-           !ActivityProjectionPolicy.shouldAccept(record.activity, replacing: current.activity) {
-            return
-        }
-        manifestActivities[activityID] = record
-        handleCoreActivity(record.activity)
-    }
-
-    func handleCoreActivity(_ record: FfiTransferActivityRecord) {
-        guard !removedActivityIDs.contains(record.activityId) else { return }
-        if record.direction == .receive,
-           record.state == .publishing,
-           receivePublications[record.activityId] != nil {
-            upsertActivity(record, speedBps: 0)
-            if !record.retryable {
-                beginReceivePublication(record)
-            }
-            return
-        }
-        upsertActivity(record, speedBps: speedBps(for: record.activityId))
-        if ActivityProjectionPolicy.isTerminal(record.state) {
-            let preservesResumeData = record.state == .failed && record.retryable
-            if !preservesResumeData {
-                discardActivityResourceAccess(for: record.activityId)
-            }
-            if record.direction == .receive,
-               record.state == .completed
-                || record.state == .canceled
-                || (record.state == .failed && !record.retryable) {
-                let publication = receivePublications.removeValue(forKey: record.activityId)
-                if publication != nil {
-                    cleanupReceiveStaging(activityID: record.activityId)
-                    ReceivePublicationStore.remove(activityID: record.activityId)
-                }
-            }
-        }
-    }
-
-    func handleCoreEvent(_ event: FfiTransferEvent, activityID: String) {
-        guard !removedActivityIDs.contains(activityID) else { return }
-        var lines = transferEventLinesByActivityID[activityID] ?? []
-        lines.append(TransferDiagnostics.transferEventLine(event))
-        transferEventLinesByActivityID[activityID] = Array(lines.suffix(240))
-    }
-
-    func handleCoreStatus(_ message: String, activityID: String) {
-        guard !removedActivityIDs.contains(activityID), !message.isEmpty else { return }
-        var lines = transferLogByActivityID[activityID] ?? []
-        lines.append("[\(activityLogTimestamp.string(from: Date()))] status · \(message)")
-        transferLogByActivityID[activityID] = Array(lines.suffix(160))
-    }
-
-    func retainResourceAccess(_ access: AnyObject?, for activityID: String) {
-        guard let access, !activityID.isEmpty else { return }
-        #if os(iOS)
-        if let lease = access as? ShareDraftLease {
-            do {
-                try lease.bind(to: activityID)
-                lease.acknowledge()
-            } catch {
-                handleCoreStatus(
-                    "Share source claim failed: \(error.localizedDescription)",
-                    activityID: activityID
-                )
-            }
-        }
-        #endif
-        activityResourceAccess[activityID] = access
-    }
-
-    #if os(macOS)
-    func retainDestinationAccessForAppLifetime(_ access: SecurityScopedResourceAccess?) {
-        guard let access else { return }
-        appLifetimeDestinationAccess[access.url.standardizedFileURL.path] = access
-    }
-    #endif
-
-    private func discardActivityResourceAccess(for activityID: String) {
-        guard let access = activityResourceAccess.removeValue(forKey: activityID) else { return }
-        #if os(iOS)
-        guard let lease = access as? ShareDraftLease else { return }
-        do {
-            try lease.discard()
-        } catch {
-            handleCoreStatus(
-                "Share source cleanup failed: \(error.localizedDescription)",
-                activityID: activityID
-            )
-        }
-        #endif
-    }
-
-    func registerReceivePublication(
-        activityID: String,
-        destinationDirectory: URL,
-        resourceAccess: AnyObject?
-    ) {
-        receivePublications[activityID] = ReceivePublication(
-            destinationDirectory: destinationDirectory,
-            resourceAccess: resourceAccess,
-            completedRecord: nil,
-            isPublishing: false
-        )
-        ReceivePublicationStore.save(
-            ReceivePublicationTarget(
-                destinationPath: destinationDirectory.path,
-                bookmark: UserDefaults.standard.data(forKey: "envoix.outputDirBookmark")
-            ),
-            activityID: activityID
-        )
-        retainResourceAccess(resourceAccess, for: activityID)
-    }
-
-    @discardableResult
-    func replaceReceivePublicationTarget(
-        activityID: String,
-        destinationDirectory: URL,
-        bookmark: Data?,
-        resourceAccess: AnyObject?
-    ) -> Bool {
-        guard var publication = receivePublications[activityID],
-              publication.completedRecord != nil else { return false }
-        let target = ReceivePublicationTarget(
-            destinationPath: destinationDirectory.path,
-            bookmark: bookmark
-        )
-        guard setPublicationTarget(target, activityID: activityID) else { return false }
-
-        ReceivePublicationStore.save(target, activityID: activityID)
-        publication.destinationDirectory = destinationDirectory
-        publication.resourceAccess = resourceAccess
-        publication.completedRecord = publicationActivity(activityID: activityID)
-        publication.isPublishing = false
-        receivePublications[activityID] = publication
-        if let resourceAccess {
-            retainResourceAccess(resourceAccess, for: activityID)
-        } else {
-            activityResourceAccess.removeValue(forKey: activityID)
-        }
-        guard let record = publicationActivity(activityID: activityID) else { return false }
-        upsertActivity(record, speedBps: 0)
-        beginReceivePublication(record)
-        return true
-    }
-
-    func abandonReceivePublication(activityID: String) {
-        receivePublications.removeValue(forKey: activityID)
-        ReceivePublicationStore.remove(activityID: activityID)
-        activityResourceAccess.removeValue(forKey: activityID)
-    }
-
-    private func setPublicationTarget(
-        _ target: ReceivePublicationTarget,
-        activityID: String
-    ) -> Bool {
-        if let session = durableManifestSessions[activityID] {
-            return session.setPublicationTarget(target: target.ffiTarget)
-        }
-        return durableSessions[activityID]?.setPublicationTarget(target: target.ffiTarget) == true
-    }
-
-    private func publicationActivity(activityID: String) -> FfiTransferActivityRecord? {
-        durableManifestSessions[activityID]?.activity().activity
-            ?? durableSessions[activityID]?.activity()
-    }
-
-    private func confirmPublication(activityID: String, path: String) -> Bool {
-        if let session = durableManifestSessions[activityID] {
-            return session.publicationSucceeded(path: path)
-        }
-        return durableSessions[activityID]?.publicationSucceeded(path: path) == true
-    }
-
-    private func failPublication(activityID: String, failure: FfiTransferFailure) -> Bool {
-        if let session = durableManifestSessions[activityID] {
-            return session.publicationFailed(failure: failure)
-        }
-        return durableSessions[activityID]?.publicationFailed(failure: failure) == true
-    }
-
-    private func beginReceivePublication(_ record: FfiTransferActivityRecord) {
-        guard var publication = receivePublications[record.activityId],
-              !publication.isPublishing else { return }
-        publication.completedRecord = record
-        publication.isPublishing = true
-        receivePublications[record.activityId] = publication
-
-        let source = URL(fileURLWithPath: record.completedFilePath)
-        let destination = publication.destinationDirectory
-        let manifest = manifestActivities[record.activityId]
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            let result = Result {
-                if let manifest {
-                    return try publishReceivedManifest(
-                        from: source,
-                        to: destination,
-                        record: manifest
-                    )
-                }
-                return try publishReceivedFile(
-                    from: source,
-                    to: destination,
-                    expectedBytes: record.bytesTransferred
-                )
-            }
-            DispatchQueue.main.async {
-                self?.finishReceivePublication(record, result: result)
-            }
-        }
-    }
-
-    private func finishReceivePublication(
-        _ record: FfiTransferActivityRecord,
-        result: Result<URL, Error>
-    ) {
-        guard var publication = receivePublications[record.activityId] else { return }
-        publication.isPublishing = false
-        receivePublications[record.activityId] = publication
-        switch result {
-        case .success(let finalURL):
-            guard confirmPublication(activityID: record.activityId, path: finalURL.path) else {
-                recordPublicationFailure(
-                    record,
-                    code: .internalError,
-                    category: .internal,
-                    recoveryAction: .retry,
-                    userMessageKey: "transfer.publish_confirmation_failed",
-                    diagnosticMessage: "publish confirmation was not accepted"
-                )
-                return
-            }
-            let stagingURL = URL(fileURLWithPath: record.completedFilePath)
-            try? FileManager.default.removeItem(at: stagingURL)
-            if manifestActivities[record.activityId] == nil {
-                try? FileManager.default.removeItem(at: stagingURL.deletingLastPathComponent())
-            }
-        case .failure(let error):
-            recordPublicationFailure(
-                record,
-                code: .destinationConflict,
-                category: .storage,
-                recoveryAction: .chooseFolder,
-                userMessageKey: "transfer.publish_failed",
-                diagnosticMessage: "publish failed: \(error.localizedDescription)"
-            )
-        }
-    }
-
-    private func recordPublicationFailure(
-        _ record: FfiTransferActivityRecord,
-        code: FfiFailureCode,
-        category: FfiFailureCategory,
-        recoveryAction: FfiRecoveryAction,
-        userMessageKey: String,
-        diagnosticMessage: String
-    ) {
-        let failure = FfiTransferFailure(
-            code: code,
-            category: category,
-            phase: .committing,
-            origin: .local,
-            direction: .receive,
-            transferId: record.transferId,
-            attemptId: record.attemptId,
-            retryable: true,
-            recoveryAction: recoveryAction,
-            userMessageKey: userMessageKey,
-            diagnosticMessage: diagnosticMessage
-        )
-        if failPublication(activityID: record.activityId, failure: failure) {
-            if let manifest = durableManifestSessions[record.activityId]?.activity() {
-                handleManifestActivity(manifest)
-            } else if let activity = durableSessions[record.activityId]?.activity() {
-                upsertActivity(activity, speedBps: 0)
-            }
-            return
-        }
-        var pending = record
-        pending.updatedAtMs = UInt64(Date().timeIntervalSince1970 * 1000)
-        pending.failureCode = code
-        pending.failureCategory = category
-        pending.failurePhase = .committing
-        pending.failureOrigin = .local
-        pending.userMessageKey = userMessageKey
-        pending.retryable = true
-        pending.recoveryAction = recoveryAction
-        pending.diagnosticMessage = diagnosticMessage
-        upsertActivity(pending, speedBps: 0)
-    }
-
-    private func retryReceivePublication(_ activityID: String) -> Bool {
-        guard var publication = receivePublications[activityID],
-              !publication.isPublishing,
-              publication.completedRecord != nil else { return false }
-        let storedTarget = ReceivePublicationStore.loadAll()[activityID]
-            ?? ReceivePublicationTarget(
-                destinationPath: publication.destinationDirectory.path,
-                bookmark: nil
-            )
-        guard setPublicationTarget(storedTarget, activityID: activityID),
-              let record = publicationActivity(activityID: activityID) else { return false }
-        publication.completedRecord = record
-        receivePublications[activityID] = publication
-        upsertActivity(record, speedBps: 0)
-        beginReceivePublication(record)
-        return true
-    }
-
-    private func cleanupReceiveStaging(activityID: String) {
-        guard let supportDirectory = FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first else { return }
-        let stagingDirectory = supportDirectory
-            .appendingPathComponent("envoix/receive-staging", isDirectory: true)
-            .appendingPathComponent(activityID, isDirectory: true)
-        try? FileManager.default.removeItem(at: stagingDirectory)
-    }
-
-    func diagnosticReport(for record: FfiTransferActivityRecord) -> String {
-        let snapshot = diagnosticsSnapshot(for: record.activityId)
-        return TransferDiagnostics.report(
-            for: record,
-            eventLog: snapshot.log,
-            transferEventLines: snapshot.events,
-        )
-    }
-
-    func remoteLogTarget(for record: FfiTransferActivityRecord) -> RemoteLogUpload.Target? {
-        guard record.mode == .room else { return nil }
-        guard let roomID = receive.roomID(for: record.activityId) ?? send.roomID(for: record.activityId) else {
-            return nil
-        }
-        let side: String
-        switch record.direction {
-        case .send: side = "send"
-        case .receive: side = "receive"
-        case .unknown: return nil
-        }
-        return RemoteLogUpload.Target(roomID: roomID, side: side)
-    }
-
-    func remoteDiagnosticReport(for record: FfiTransferActivityRecord) -> String {
-        let snapshot = diagnosticsSnapshot(for: record.activityId)
-        return TransferDiagnostics.remoteReport(
-            for: record,
-            eventLog: snapshot.log,
-            transferEventLines: snapshot.events,
-        )
-    }
-
-    func appDiagnosticReport() -> String {
-        let lines = activities.flatMap { record in
-            let activityID = record.activityId
-            let snapshot = diagnosticsSnapshot(for: activityID)
-            return ["[\(activityID)]"]
-                + snapshot.events
-                + snapshot.log
-        }
-        return TransferDiagnostics.appReport(activities: activities, eventLines: lines)
-    }
-
-    private func diagnosticsSnapshot(for activityID: String) -> (log: [String], events: [String]) {
-        let activityTimeline = activityMetrics[activityID]?.log ?? []
-        if receive.ownsActivity(activityID) {
-            return (
-                mergedActivityDiagnosticLog(
-                    activityTimeline: activityTimeline,
-                    observerLog: receive.eventLog
-                ),
-                receive.transferEvents.map(TransferDiagnostics.transferEventLine)
-            )
-        }
-        if send.ownsActivity(activityID) {
-            return (
-                mergedActivityDiagnosticLog(
-                    activityTimeline: activityTimeline,
-                    observerLog: send.eventLog
-                ),
-                send.transferEvents.map(TransferDiagnostics.transferEventLine)
-            )
-        }
-        return (
-            mergedActivityDiagnosticLog(
-                activityTimeline: activityTimeline,
-                observerLog: transferLogByActivityID[activityID] ?? []
-            ),
-            transferEventLinesByActivityID[activityID] ?? []
-        )
-    }
-
-    func snapshotDiagnostics(from viewModel: TransferViewModel, activityID: String) {
-        guard !activityID.isEmpty else { return }
-        transferLogByActivityID[activityID] = viewModel.eventLog
-        transferEventLinesByActivityID[activityID] = viewModel.transferEvents.map(TransferDiagnostics.transferEventLine)
-    }
-
-    private func speedBps(for activityID: String) -> Double {
-        if receive.ownsActivity(activityID) { return receive.bytesPerSec }
-        if send.ownsActivity(activityID) { return send.bytesPerSec }
-        return activityMetrics[activityID]?.speedBps ?? 0
-    }
-
-    private func upsertActivity(_ record: FfiTransferActivityRecord, speedBps: Double) {
-        guard !removedActivityIDs.contains(record.activityId) else { return }
+    fileprivate func upsert(_ record: TransferActivityRecord) {
         if let index = activities.firstIndex(where: { $0.activityId == record.activityId }) {
-            guard ActivityProjectionPolicy.shouldAccept(record, replacing: activities[index]) else { return }
             activities[index] = record
         } else {
-            activities.append(record)
+            activities.insert(record, at: 0)
         }
-        upsertMetrics(for: record, speedBps: speedBps)
-        activities.sort { lhs, rhs in lhs.updatedAtMs > rhs.updatedAtMs }
-        if activities.count > activityCap {
-            let previousIDs = Set(activities.map(\.activityId))
-            activities = ActivityProjectionPolicy.pruneTerminalHistory(activities, limit: activityCap)
-            let retainedIDs = Set(activities.map(\.activityId))
-            let removed = previousIDs.subtracting(retainedIDs)
-            for id in removed {
-                receive.forgetRoomID(for: id)
-                send.forgetRoomID(for: id)
-                manifestActivities.removeValue(forKey: id)
-                activityMetrics.removeValue(forKey: id)
-                transferEventLinesByActivityID.removeValue(forKey: id)
-                transferLogByActivityID.removeValue(forKey: id)
-            }
-        }
-    }
-
-    private func upsertMetrics(for record: FfiTransferActivityRecord, speedBps: Double) {
+        activities.sort { $0.updatedAt > $1.updatedAt }
+        if activities.count > 50 { activities.removeLast(activities.count - 50) }
         var metrics = activityMetrics[record.activityId] ?? ActivityMetrics()
-        let liveSpeed = record.state == .transferring ? speedBps : 0
-        metrics.speedBps = liveSpeed
-        metrics.etaSeconds = estimatedRemainingSeconds(
-            total: record.totalBytes,
-            transferred: record.bytesTransferred,
-            bytesPerSecond: liveSpeed,
-            isStable: liveSpeed > 0
-        )
-        metrics.avgBps = averageBps(for: record)
-        if liveSpeed > 0 {
-            metrics.peakBps = max(metrics.peakBps, liveSpeed)
-            metrics.speedHistory.append(liveSpeed)
-            if metrics.speedHistory.count > 90 {
-                metrics.speedHistory.removeFirst(metrics.speedHistory.count - 90)
-            }
+        if let owner = owner(of: record.activityId) {
+            metrics.speedBps = owner.bytesPerSec
+            metrics.etaSeconds = owner.etaSeconds
+            metrics.log = owner.eventLog
         }
-
-        let logKey = activityLogKey(for: record)
-        if logKey != metrics.lastLogKey {
-            metrics.lastLogKey = logKey
-            metrics.log.append(activityLogLine(for: record, speedBps: liveSpeed))
-            if metrics.log.count > 160 {
-                metrics.log.removeFirst(metrics.log.count - 160)
-            }
-        }
-
         activityMetrics[record.activityId] = metrics
     }
 
-    private func averageBps(for record: FfiTransferActivityRecord) -> Double {
-        guard record.bytesResumed == 0,
-              manifestActivities[record.activityId]?.entryResults.contains(where: {
-                  $0.status == .skippedIdentical
-              }) != true else { return 0 }
-        let endMs = record.completedAtMs > 0 ? record.completedAtMs : record.updatedAtMs
-        guard record.startedAtMs > 0, endMs > record.startedAtMs, record.bytesTransferred > 0 else { return 0 }
-        return Double(record.bytesTransferred) * 1000 / Double(endMs - record.startedAtMs)
-    }
-
-    private func activityLogKey(for record: FfiTransferActivityRecord) -> String {
-        switch record.state {
-        case .transferring:
-            let bucket: UInt64
-            if record.totalBytes > 0 {
-                bucket = min(20, record.bytesTransferred * 20 / record.totalBytes)
-            } else {
-                bucket = record.bytesTransferred / (10 * 1024 * 1024)
-            }
-            return "progress:\(bucket):\(record.dataPathKind):\(record.dataPathDetail)"
-        default:
-            return "\(record.state):\(record.dataPathKind):\(record.dataPathDetail):\(record.diagnosticMessage):\(record.bytesTransferred):\(record.totalBytes)"
-        }
-    }
-
-    private func activityLogLine(for record: FfiTransferActivityRecord, speedBps: Double) -> String {
-        let date = Date(timeIntervalSince1970: TimeInterval(record.updatedAtMs) / 1000)
-        let prefix = "[\(activityLogTimestamp.string(from: date))]"
-        let message: String
-        switch record.state {
-        case .queued:
-            message = "queued · \(record.direction)"
-        case .binding:
-            message = "preparing · \(record.mode)"
-        case .waitingForPeer:
-            message = "waiting for peer"
-        case .pairing:
-            message = record.diagnosticMessage.isEmpty ? "pairing" : record.diagnosticMessage
-        case .connecting:
-            message = record.dataPathKind == .none ? "connecting" : "connected · \(record.dataPathKind) \(record.dataPathDetail)"
-        case .transferring:
-            var parts = ["progress · \(byteString(record.bytesTransferred)) / \(byteString(record.totalBytes))"]
-            if speedBps > 0 { parts.append(rateString(speedBps)) }
-            message = parts.joined(separator: " · ")
-        case .verifying:
-            message = "verifying"
-        case .publishing:
-            message = record.diagnosticMessage.isEmpty ? "publishing" : record.diagnosticMessage
-        case .unconfirmed:
-            message = "delivery unconfirmed"
-        case .completed:
-            if isFullyResumedCompletion(record) {
-                message = record.direction == .send
-                    ? "completed · already at receiver · \(byteString(record.totalBytes))"
-                    : "completed · already present · \(byteString(record.totalBytes))"
-            } else {
-                message = "completed · \(byteString(record.bytesTransferred))"
-            }
-        case .failed:
-            message = record.diagnosticMessage.isEmpty ? "failed" : "failed · \(record.diagnosticMessage)"
-        case .paused:
-            message = "paused"
-        case .canceled:
-            message = "canceled"
-        case .unknown:
-            message = "unknown state"
-        }
-        return "\(prefix) \(message)"
+    private func owner(of activityID: String) -> TransferViewModel? {
+        if send.ownsActivity(activityID) { return send }
+        if receive.ownsActivity(activityID) { return receive }
+        return nil
     }
 }
 
-/// Drives one send or receive operation and exposes its state to SwiftUI.
-///
-/// All `@Published` mutations happen on the main thread: user actions are
-/// invoked from the UI, and core callbacks are marshaled to main by `Observer`.
+@MainActor
 final class TransferViewModel: ObservableObject {
-    private struct PreparedManifestV2Selection {
-        let job: FfiTransferJobV2
-        var sourcePaths: [String]
-        let stateDirectory: String
-        let sourceAccess: AnyObject?
-    }
-
-    private struct PendingManifestV2Send {
-        let job: FfiTransferJobV2
-        let settings: EnvoixRuntimeSettings
-        let request: FfiTransferRequest
-        let stateDirectory: String
-        let cancellation: FfiManifestV2Cancellation
-        let sourceAccess: AnyObject?
-    }
+    private static let activeSendSessionFileName = "active-send.json"
+    private static let activeReceiveSessionFileName = "active-receive.json"
 
     enum Phase: Equatable {
         case idle
-        case waiting          // receiver: endpoint up, invite shown, awaiting sender
+        case waiting
         case transferring
         case paused
         case completed(bytes: UInt64)
@@ -1342,20 +455,45 @@ final class TransferViewModel: ObservableObject {
         case failed(String)
     }
 
-    @Published private var fallbackPhase: Phase = .idle
-    @Published var invite: String = ""        // receiver only
-    @Published var fileName: String = ""
+    private struct PreparedSelection {
+        let job: FfiTransferJobV2
+        let jobID: String
+        var sourcePaths: [String]
+        let sessionStateDirectory: String
+        let sourceAccess: AnyObject?
+    }
+
+    private struct SendOperation {
+        let job: FfiTransferJobV2
+        let jobID: String
+        let sourcePaths: [String]
+        let settings: EnvoixRuntimeSettings
+        let request: FfiTransferRequest
+        let stateDirectory: String
+        let sourceAccess: AnyObject?
+    }
+
+    private struct ReceiveOperation {
+        let settings: EnvoixRuntimeSettings
+        let request: FfiTransferRequest
+        let stateDirectory: String
+        let targetDirectory: String
+        let destinationAccess: AnyObject?
+    }
+
+    @Published private(set) var phase: Phase = .idle
+    @Published var invite = ""
+    @Published var fileName = ""
     @Published var transferred: UInt64 = 0
     @Published var total: UInt64 = 0
-    @Published var statusText: String = ""
-    @Published var peerAddress: String = ""   // raw IP-bearing address, hidden by default
+    @Published var statusText = ""
+    @Published var peerAddress = ""
     @Published var eventLog: [String] = []
-    @Published var bytesPerSec: Double = 0    // rolling average, 0 until measurable
-    @Published var completedFileURL: URL?     // receiver only: where the file landed
+    @Published var bytesPerSec: Double = 0
+    @Published var completedFileURL: URL?
     @Published var completedItemURLs: [URL] = []
-    @Published private var fallbackFailure: FfiTransferFailure?
-    @Published var transferEvents: [FfiTransferEvent] = []
-    @Published var transferActivity: FfiTransferActivityRecord?
+    @Published private(set) var failure: FfiTransferFailure?
+    @Published private(set) var transferActivity: TransferActivityRecord?
     @Published private(set) var isPreparingManifest = false
     @Published private(set) var isManifestSelectionReady = false
     @Published private(set) var preparedManifestSourcePaths: [String] = []
@@ -1364,98 +502,32 @@ final class TransferViewModel: ObservableObject {
     @Published private(set) var pendingSourceSelections: [FfiSourceSelectionV2] = []
 
     weak var appModel: AppModel?
-
-    private var session: DurableEnvoixSession?
-    private var manifestSession: DurableEnvoixManifestSession?
-    private var manifestPreparationTask: Task<Void, Never>?
-    private var manifestV2Task: Task<Void, Never>?
-    private var manifestV2Cancellation: FfiManifestV2Cancellation?
-    private var pendingManifestV2Offer: FfiPendingManifestV2Receive?
-    private var pendingManifestV2TargetDirectory: String?
-    private var pendingManifestV2AvailableBytes: UInt64?
-    private var pendingManifestV2Send: PendingManifestV2Send?
-    private var preparedManifestV2Selection: PreparedManifestV2Selection?
-    private var manifestPreparationSourcePaths: [String] = []
-    private var destinationDir: String?       // receiver only
-    private var resourceAccess: AnyObject?    // keeps iOS Files permission alive
+    private var preparedSelection: PreparedSelection?
+    private var activeSend: SendOperation?
+    private var activeReceive: ReceiveOperation?
+    private var pendingReceive: FfiPendingManifestV2Receive?
+    private var cancellation: FfiManifestV2Cancellation?
+    private var task: Task<Void, Never>?
+    private var preparationTask: Task<Void, Never>?
+    private var resourceAccess: AnyObject?
     private var rate = RateTracker()
-    private var suppressNextFailure = false
-    private var logLastProgress: Date = .distantPast
-    private var configLogTimestamp: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm:ss"
-        return formatter
-    }()
-    private static let roomIDStoreKey = "envoix.activityRoomIDs"
-    private var displayLanguage = "en"
-    private var currentActivityID = ""
-    var activeActivityID: String { currentActivityID }
     fileprivate var operationID = UUID()
+    private var pausedByUser = false
+    private var displayLanguage = "en"
 
-    /// Setup failures can occur before the core creates a record. Once a
-    /// canonical Activity exists, it is the only lifecycle source of truth.
-    var phase: Phase {
-        guard let transferActivity else { return fallbackPhase }
-        return Self.presentationPhase(for: transferActivity, language: displayLanguage)
-    }
-
-    var failure: FfiTransferFailure? {
-        guard let transferActivity,
-              transferActivity.state == .failed
-                || transferActivity.state == .publishing && transferActivity.retryable else {
-            return fallbackFailure
+    #if os(iOS)
+    var protectedShareDraftID: UUID? {
+        if let id = (preparedSelection?.sourceAccess as? ShareDraftLease)?.id {
+            return id
         }
-        return Self.failure(from: transferActivity)
-    }
-
-    static func presentationPhase(
-        for record: FfiTransferActivityRecord,
-        language: String = "en"
-    ) -> Phase {
-        switch record.state {
-        case .queued, .binding, .waitingForPeer, .pairing, .connecting,
-                .verifying, .publishing, .unconfirmed:
-            return .waiting
-        case .transferring:
-            return .transferring
-        case .paused:
-            return .paused
-        case .completed:
-            return .completed(bytes: record.bytesTransferred)
-        case .canceled:
-            return .canceled
-        case .failed:
-            return .failed(friendlyFailure(Self.failure(from: record), language: language))
-        case .unknown:
-            return .failed(AppText.value(
-                "The transfer entered an unknown state. Copy diagnostics from Activity.",
-                "传输进入未知状态。请从活动页复制诊断信息。",
-                language: language
-            ))
+        if transferActivity?.state == .delivered || transferActivity?.state == .canceled {
+            return nil
         }
+        return (activeSend?.sourceAccess as? ShareDraftLease)?.id
     }
+    #endif
 
-    private static func failure(from record: FfiTransferActivityRecord) -> FfiTransferFailure {
-        FfiTransferFailure(
-            code: record.failureCode,
-            category: record.failureCategory,
-            phase: record.failurePhase,
-            origin: record.failureOrigin,
-            direction: record.direction,
-            transferId: record.transferId,
-            attemptId: record.attemptId,
-            retryable: record.retryable,
-            recoveryAction: record.recoveryAction,
-            userMessageKey: record.userMessageKey,
-            diagnosticMessage: record.diagnosticMessage
-        )
-    }
-
-    var progressFraction: Double {
-        total > 0 ? Double(transferred) / Double(total) : 0
-    }
-
-    /// Seconds left after the rolling estimator has seen enough real byte deltas.
+    var progressFraction: Double { total > 0 ? Double(transferred) / Double(total) : 0 }
     var etaSeconds: Double? {
         estimatedRemainingSeconds(
             total: total,
@@ -1464,7 +536,6 @@ final class TransferViewModel: ObservableObject {
             isStable: rate.isStable
         )
     }
-
     var isBusy: Bool {
         if isPreparingManifest { return true }
         switch phase {
@@ -1472,141 +543,216 @@ final class TransferViewModel: ObservableObject {
         default: return false
         }
     }
-
     var isFinalizing: Bool {
-        guard let activity = transferActivity else { return false }
-        return activity.state == .publishing
-            || activityActionAvailability(for: activity).isFinalizing
+        transferActivity.map {
+            $0.state == .saving ||
+                $0.state == .waitingForReceiverSave ||
+                $0.state == .finalizingDelivery
+        } ?? false
+    }
+    fileprivate var hasResumableOperation: Bool {
+        activeSend != nil || activeReceive != nil
     }
 
-    // MARK: User actions
-
-    /// Receive on the local network using a shared token (mDNS auto-discovery).
-    func startReceivingWithToken(outputDir: String, token: String, settings: EnvoixRuntimeSettings, destinationAccess: AnyObject? = nil, publishDestinationDir: String? = nil) {
-        startReceiving(
-            outputDir: outputDir,
-            publishDestinationDir: publishDestinationDir,
-            destinationAccess: destinationAccess,
-            settings: settings,
-            mode: .mdns,
-            token: token
-        )
-    }
-
-    /// Receive by pairing through a rendezvous room code.
-    func startReceivingWithRoom(outputDir: String, code: String, settings: EnvoixRuntimeSettings, destinationAccess: AnyObject? = nil, publishDestinationDir: String? = nil) {
-        startReceiving(
-            outputDir: outputDir,
-            publishDestinationDir: publishDestinationDir,
-            destinationAccess: destinationAccess,
-            settings: settings,
-            mode: .room,
-            code: code
-        )
-    }
-
-    /// Receive by publishing an invite the sender pastes/scans.
-    func startReceivingWithInvite(outputDir: String, settings: EnvoixRuntimeSettings, destinationAccess: AnyObject? = nil, publishDestinationDir: String? = nil) {
-        startReceiving(
-            outputDir: outputDir,
-            publishDestinationDir: publishDestinationDir,
-            destinationAccess: destinationAccess,
-            settings: settings,
-            mode: .showInvite
-        )
-    }
-
-    private func startReceiving(
-        outputDir: String,
-        publishDestinationDir: String?,
-        destinationAccess: AnyObject?,
-        settings: EnvoixRuntimeSettings,
-        mode: FfiTransferMode,
-        code: String = "",
-        token: String = ""
-    ) {
-        do {
-            let activityID = UUID().uuidString
-            let coreOutputDir = try receiveOutputDir(
-                activityID: activityID,
-                directOutputDir: outputDir,
-                requiresPublication: publishDestinationDir != nil
-            )
-            destinationDir = publishDestinationDir ?? outputDir
-            let request = makeRequest(
-                activityID: activityID,
-                direction: .receive,
-                mode: mode,
-                settings: settings,
-                outputDir: coreOutputDir,
-                code: code,
-                token: token,
-                publicationRequired: publishDestinationDir != nil
-            )
-            if let publishDestinationDir {
-                AppModel.shared.registerReceivePublication(
-                    activityID: activityID,
-                    destinationDirectory: URL(fileURLWithPath: publishDestinationDir, isDirectory: true),
-                    resourceAccess: destinationAccess
+    func prepareManifestSelection(selectedPaths: [String], sourceAccess: AnyObject? = nil) {
+        let paths = normalizedPaths(selectedPaths)
+        guard !paths.isEmpty,
+              preparedSelection?.sourcePaths != paths else { return }
+        preparationTask?.cancel()
+        if let old = preparedSelection?.job { Task { _ = try? await old.cancelJob() } }
+        preparedSelection = nil
+        preparedManifestSourcePaths = []
+        pendingSourceSelections = []
+        isManifestSelectionReady = false
+        isPreparingManifest = true
+        statusText = localized("Preparing selected items…", "正在准备所选项目…")
+        phase = .idle
+        failure = nil
+        let expected = UUID()
+        operationID = expected
+        preparationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let job = try await createTransferJobV2(
+                    storeDirectory: try jobStoreDirectory(),
+                    compressionPolicy: compressionPolicy
                 )
-            }
-            if mode == .room {
-                rememberRoomID(for: request.activityId, code: code)
-            }
-            let started = startManifestReceive(settings: settings, request: request)
-            guard started else {
-                forgetRoomID(for: activityID)
-                if publishDestinationDir != nil {
-                    AppModel.shared.abandonReceivePublication(activityID: activityID)
-                    try? FileManager.default.removeItem(atPath: coreOutputDir)
+                let snapshot = try await job.addLocalPaths(paths: paths)
+                guard expected == operationID else {
+                    _ = try? await job.cancelJob()
+                    return
                 }
-                return
+                preparedSelection = PreparedSelection(
+                    job: job,
+                    jobID: snapshot.jobId,
+                    sourcePaths: paths,
+                    sessionStateDirectory: try sessionStateDirectory(jobID: snapshot.jobId),
+                    sourceAccess: sourceAccess
+                )
+                applyPreparation(
+                    snapshot,
+                    paths: await projectedSourcePaths(job: job, snapshot: snapshot)
+                )
+            } catch {
+                guard expected == operationID else { return }
+                handleFailed(error.localizedDescription)
             }
-            retainResourceAccess(destinationAccess)
+            isPreparingManifest = false
+            preparationTask = nil
+        }
+    }
+
+    func restorePreparedManifestSelection() {
+        guard preparedSelection == nil, !isBusy else { return }
+        preparationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let store = try jobStoreDirectory()
+                guard let snapshot = try await listPreparingTransferJobsV2(storeDirectory: store)
+                    .max(by: { $0.updatedUnixMs < $1.updatedUnixMs }) else { return }
+                let job = try await restoreTransferJobV2(
+                    storeDirectory: store,
+                    jobId: snapshot.jobId
+                )
+                var paths: [String] = []
+                for selection in snapshot.selections {
+                    if let path = await job.sourcePathForPreview(itemId: selection.rootItemId) {
+                        paths.append(path)
+                    }
+                }
+                guard !paths.isEmpty else { return }
+                preparedSelection = PreparedSelection(
+                    job: job,
+                    jobID: snapshot.jobId,
+                    sourcePaths: paths,
+                    sessionStateDirectory: try sessionStateDirectory(jobID: snapshot.jobId),
+                    sourceAccess: nil
+                )
+                applyPreparation(
+                    snapshot,
+                    paths: await projectedSourcePaths(job: job, snapshot: snapshot)
+                )
+                statusText = localized("Prepared items restored", "已恢复准备内容")
+            } catch {
+                eventLog.append("restore preparation: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    func restoreActiveManifestSession(direction: FfiTransferDirection) {
+        guard transferActivity == nil, !isBusy else { return }
+        let stored: StoredAppleManifestSessionV2
+        let request: FfiTransferRequest
+        do {
+            guard let value = try storedManifestSession(direction: direction) else { return }
+            stored = value
+            request = try value.request.value()
+            guard request.direction == direction else {
+                throw RuntimeSettingsError("Stored transfer direction does not match its session slot.")
+            }
         } catch {
-            handleFailed(error.localizedDescription)
+            clearStoredManifestSession(direction: direction)
+            eventLog.append("discarded invalid saved session: \(error.localizedDescription)")
+            return
         }
-    }
 
-    /// Send on the local network using a shared token (mDNS auto-discovery).
-    func startSendingWithToken(filePath: String, token: String, settings: EnvoixRuntimeSettings, sourceAccess: AnyObject? = nil) {
-        destinationDir = nil
-        let request = makeRequest(direction: .send, mode: .mdns, settings: settings, filePath: filePath, token: token)
-        start(settings: settings, request: request)
-        retainResourceAccess(sourceAccess)
-    }
-
-    /// Send by pairing through a rendezvous room code.
-    func startSendingWithRoom(filePath: String, code: String, settings: EnvoixRuntimeSettings, sourceAccess: AnyObject? = nil) {
-        destinationDir = nil
-        let request = makeRequest(direction: .send, mode: .room, settings: settings, filePath: filePath, code: code)
-        rememberRoomID(for: request.activityId, code: code)
-        let started = start(settings: settings, request: request)
-        if !started {
-            forgetRoomID(for: request.activityId)
-        }
-        retainResourceAccess(sourceAccess)
-    }
-
-    /// Send to the peer encoded in an invite string.
-    func startSendingWithInvite(
-        filePath: String,
-        invite: String,
-        settings: EnvoixRuntimeSettings,
-        pathPolicy: FfiPathPolicy = .auto,
-        sourceAccess: AnyObject? = nil
-    ) {
-        destinationDir = nil
-        let request = makeRequest(
-            direction: .send,
-            mode: .invite,
-            settings: settings,
-            filePath: filePath,
-            invite: invite,
-            pathPolicy: pathPolicy
+        displayLanguage = stored.settings.language
+        operationID = UUID()
+        transferred = 0
+        total = stored.totalBytes
+        fileName = stored.itemCount == 1
+            ? localized("1 item", "1 个项目")
+            : localized("\(stored.itemCount) items", "\(stored.itemCount) 个项目")
+        transferActivity = TransferActivityRecord(
+            activityId: stored.activityID,
+            direction: direction,
+            mode: request.mode,
+            itemCount: stored.itemCount,
+            totalBytes: stored.totalBytes,
+            bytesTransferred: 0,
+            state: direction == .send ? .connecting : .waitingForPeer,
+            diagnosticMessage: localized("Restoring interrupted transfer", "正在恢复中断的传输"),
+            failure: nil,
+            savedPaths: [],
+            roomID: stored.roomID,
+            updatedAt: Date()
         )
-        start(settings: settings, request: request)
-        retainResourceAccess(sourceAccess)
+        phase = .waiting
+        statusText = localized("Restoring interrupted transfer", "正在恢复中断的传输")
+        if let transferActivity { appModel?.upsert(transferActivity) }
+
+        let expected = operationID
+        task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                if direction == .send {
+                    guard let jobID = stored.jobID else {
+                        throw RuntimeSettingsError("Stored sender session has no job identifier.")
+                    }
+                    let job = try await restoreTransferJobV2(
+                        storeDirectory: try jobStoreDirectory(),
+                        jobId: jobID
+                    )
+                    let sourceAccess = try restoreSourceAccess(stored)
+                    guard expected == operationID else { return }
+                    launchSend(SendOperation(
+                        job: job,
+                        jobID: jobID,
+                        sourcePaths: stored.sourcePaths,
+                        settings: stored.settings.value,
+                        request: request,
+                        stateDirectory: stored.stateDirectory,
+                        sourceAccess: sourceAccess
+                    ))
+                } else {
+                    guard let targetDirectory = stored.targetDirectory else {
+                        throw RuntimeSettingsError("Stored receiver session has no destination.")
+                    }
+                    let restored = try restoreDestinationAccess(
+                        bookmark: stored.destinationBookmark,
+                        fallbackPath: targetDirectory
+                    )
+                    guard expected == operationID else { return }
+                    launchReceive(ReceiveOperation(
+                        settings: stored.settings.value,
+                        request: request,
+                        stateDirectory: stored.stateDirectory,
+                        targetDirectory: restored.path,
+                        destinationAccess: restored.access
+                    ))
+                }
+            } catch {
+                guard expected == operationID else { return }
+                handleFailed(error.localizedDescription)
+            }
+        }
+    }
+
+    @discardableResult
+    func cancelManifestPreparation() -> Bool {
+        guard isPreparingManifest || preparedSelection != nil else { return false }
+        preparationTask?.cancel()
+        if let job = preparedSelection?.job { Task { _ = try? await job.cancelJob() } }
+        preparedSelection = nil
+        preparedManifestSourcePaths = []
+        pendingSourceSelections = []
+        isPreparingManifest = false
+        isManifestSelectionReady = false
+        phase = .canceled
+        statusText = localized("Canceled", "已取消")
+        return true
+    }
+
+    func approvePartialManifestSource(rootItemID: UInt64) {
+        resolveSource(rootItemID: rootItemID, decision: .approvePartial, path: nil)
+    }
+
+    func removeManifestSource(rootItemID: UInt64) {
+        resolveSource(rootItemID: rootItemID, decision: .removeSelection, path: nil)
+    }
+
+    func reauthorizeManifestSource(rootItemID: UInt64, path: String) {
+        resolveSource(rootItemID: rootItemID, decision: .reauthorize, path: path)
     }
 
     func startSendingManifestWithToken(
@@ -1615,11 +761,10 @@ final class TransferViewModel: ObservableObject {
         settings: EnvoixRuntimeSettings,
         sourceAccess: AnyObject? = nil
     ) {
-        let request = makeRequest(direction: .send, mode: .mdns, settings: settings, token: token)
-        prepareAndStartManifestSend(
-            settings: settings,
-            request: request,
+        startSend(
             selectedPaths: selectedPaths,
+            settings: settings,
+            request: request(direction: .send, mode: .mdns, settings: settings, token: token),
             sourceAccess: sourceAccess
         )
     }
@@ -1630,13 +775,12 @@ final class TransferViewModel: ObservableObject {
         settings: EnvoixRuntimeSettings,
         sourceAccess: AnyObject? = nil
     ) {
-        let request = makeRequest(direction: .send, mode: .room, settings: settings, code: code)
-        rememberRoomID(for: request.activityId, code: code)
-        prepareAndStartManifestSend(
-            settings: settings,
-            request: request,
+        startSend(
             selectedPaths: selectedPaths,
-            sourceAccess: sourceAccess
+            settings: settings,
+            request: request(direction: .send, mode: .room, settings: settings, code: code),
+            sourceAccess: sourceAccess,
+            roomCode: code
         )
     }
 
@@ -1647,916 +791,735 @@ final class TransferViewModel: ObservableObject {
         pathPolicy: FfiPathPolicy = .auto,
         sourceAccess: AnyObject? = nil
     ) {
-        let request = makeRequest(
-            direction: .send,
-            mode: .invite,
-            settings: settings,
-            invite: invite,
-            pathPolicy: pathPolicy
-        )
-        prepareAndStartManifestSend(
-            settings: settings,
-            request: request,
+        startSend(
             selectedPaths: selectedPaths,
+            settings: settings,
+            request: request(
+                direction: .send,
+                mode: .invite,
+                settings: settings,
+                invite: invite,
+                pathPolicy: pathPolicy
+            ),
             sourceAccess: sourceAccess
         )
     }
 
-    /// Starts local-only preparation as soon as native selection succeeds.
-    /// No rendezvous, peer metadata, Manifest offer, or payload is created
-    /// here; explicit Send remains the first job-specific network boundary.
-    func prepareManifestSelection(
-        selectedPaths: [String],
-        sourceAccess: AnyObject? = nil
+    func startReceivingWithToken(
+        outputDir: String,
+        token: String,
+        settings: EnvoixRuntimeSettings,
+        destinationAccess: AnyObject? = nil
     ) {
-        let paths = normalizedSourcePaths(selectedPaths)
-        guard !paths.isEmpty else { return }
-        if preparedManifestV2Selection?.sourcePaths == paths
-            || manifestPreparationSourcePaths == paths {
-            return
-        }
-
-        let previousJob = preparedManifestV2Selection?.job
-        manifestPreparationTask?.cancel()
-        manifestPreparationTask = nil
-        preparedManifestV2Selection = nil
-        pendingManifestV2Send = nil
-        pendingSourceSelections = []
-        preparedManifestSourcePaths = []
-        isManifestSelectionReady = false
-        isPreparingManifest = true
-        manifestPreparationSourcePaths = paths
-        fallbackFailure = nil
-        fallbackPhase = .idle
-        statusText = AppText.value(
-            "Preparing selected items…",
-            "正在准备所选项目…",
-            language: displayLanguage
+        startReceive(
+            targetDirectory: outputDir,
+            settings: settings,
+            request: request(direction: .receive, mode: .mdns, settings: settings, token: token),
+            destinationAccess: destinationAccess
         )
-        if let previousJob {
-            Task { _ = try? await previousJob.cancelJob() }
-        }
-
-        let expectedOperationID = UUID()
-        operationID = expectedOperationID
-        manifestPreparationTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            defer {
-                if self.operationID == expectedOperationID {
-                    self.manifestPreparationSourcePaths = []
-                }
-            }
-            do {
-                let job = try await createTransferJobV2(
-                    storeDirectory: try self.manifestV2JobStoreDirectory(),
-                    compressionPolicy: self.manifestV2CompressionPolicy
-                )
-                let snapshot = try await job.addLocalPaths(paths: paths)
-                guard self.operationID == expectedOperationID else {
-                    _ = try? await job.cancelJob()
-                    return
-                }
-                self.preparedManifestV2Selection = PreparedManifestV2Selection(
-                    job: job,
-                    sourcePaths: paths,
-                    stateDirectory: try self.manifestV2SessionStateDirectory(
-                        jobID: snapshot.jobId
-                    ),
-                    sourceAccess: sourceAccess
-                )
-                self.preparedManifestSourcePaths = paths
-                self.pendingSourceSelections = snapshot.selections.filter {
-                    $0.state == .needsDecision
-                }
-                self.isManifestSelectionReady = snapshot.state == .readyToSend
-                self.isPreparingManifest = false
-                self.manifestPreparationTask = nil
-                self.statusText = self.isManifestSelectionReady
-                    ? AppText.value("Ready to send", "已准备发送", language: self.displayLanguage)
-                    : AppText.value(
-                        "Some selected content needs your decision before sending.",
-                        "部分所选内容需要你决定后才能发送。",
-                        language: self.displayLanguage
-                    )
-            } catch {
-                guard self.operationID == expectedOperationID else { return }
-                self.manifestPreparationTask = nil
-                self.isPreparingManifest = false
-                self.isManifestSelectionReady = false
-                self.handleFailed(error.localizedDescription)
-            }
-        }
     }
 
-    func restorePreparedManifestSelection() {
-        guard preparedManifestV2Selection == nil, !isBusy else { return }
-        let expectedOperationID = UUID()
-        operationID = expectedOperationID
-        isPreparingManifest = true
-        manifestPreparationTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            defer {
-                self.manifestPreparationTask = nil
-                self.isPreparingManifest = false
-            }
-            do {
-                let storeDirectory = try self.manifestV2JobStoreDirectory()
-                guard let snapshot = try await listPreparingTransferJobsV2(
-                    storeDirectory: storeDirectory
-                ).max(by: { $0.updatedUnixMs < $1.updatedUnixMs }) else {
-                    return
-                }
-                let job = try await restoreTransferJobV2(
-                    storeDirectory: storeDirectory,
-                    jobId: snapshot.jobId
-                )
-                var paths: [String] = []
-                for selection in snapshot.selections {
-                    if let path = await job.sourcePathForPreview(itemId: selection.rootItemId),
-                       FileManager.default.fileExists(atPath: path) {
-                        paths.append(path)
-                    }
-                }
-                guard self.operationID == expectedOperationID, !paths.isEmpty else { return }
-                self.preparedManifestV2Selection = PreparedManifestV2Selection(
-                    job: job,
-                    sourcePaths: paths,
-                    stateDirectory: try self.manifestV2SessionStateDirectory(jobID: snapshot.jobId),
-                    sourceAccess: nil
-                )
-                self.preparedManifestSourcePaths = paths
-                self.pendingSourceSelections = snapshot.selections.filter {
-                    $0.state == .needsDecision
-                }
-                self.isManifestSelectionReady = snapshot.state == .readyToSend
-                self.statusText = self.isManifestSelectionReady
-                    ? AppText.value("Prepared items restored", "已恢复准备内容", language: self.displayLanguage)
-                    : AppText.value(
-                        "Restored items need your decision before sending.",
-                        "恢复的内容需要你决定后才能发送。",
-                        language: self.displayLanguage
-                    )
-            } catch {
-                guard self.operationID == expectedOperationID else { return }
-                self.handleFailed(error.localizedDescription)
-            }
-        }
+    func startReceivingWithRoom(
+        outputDir: String,
+        code: String,
+        settings: EnvoixRuntimeSettings,
+        destinationAccess: AnyObject? = nil
+    ) {
+        startReceive(
+            targetDirectory: outputDir,
+            settings: settings,
+            request: request(direction: .receive, mode: .room, settings: settings, code: code),
+            destinationAccess: destinationAccess,
+            roomCode: code
+        )
     }
 
-    /// Requests cancellation without detaching the observer. Activity owns
-    /// lifecycle controls after a transfer starts, so its terminal state must
-    /// still flow back from the core before this view model resets.
-    @discardableResult
-    func requestCancelActivity(_ activityID: String) -> Bool {
-        guard isBusy,
-              !isFinalizing,
-              !activityID.isEmpty,
-              activityID == currentActivityID else { return false }
-        suppressNextFailure = true
-        let accepted: Bool
-        if let manifestV2Cancellation {
-            manifestV2Cancellation.cancel()
-            accepted = true
-        } else {
-            accepted = manifestSession?.cancel() ?? session?.cancel() ?? false
-        }
-        if accepted {
-            bytesPerSec = 0
-            statusText = AppText.value("Cancelling…", "正在取消…", language: displayLanguage)
-        } else {
-            suppressNextFailure = false
-        }
-        return accepted
+    func startReceivingWithInvite(
+        outputDir: String,
+        settings: EnvoixRuntimeSettings,
+        destinationAccess: AnyObject? = nil
+    ) {
+        startReceive(
+            targetDirectory: outputDir,
+            settings: settings,
+            request: request(direction: .receive, mode: .showInvite, settings: settings),
+            destinationAccess: destinationAccess
+        )
     }
 
-    @discardableResult
-    func discardActivityForRemoval(_ activityID: String) -> Bool {
-        guard !activityID.isEmpty else { return false }
-        let discarded = manifestSession?.remove() ?? session?.remove() ?? false
-        if activityID == currentActivityID {
-            suppressNextFailure = true
-            operationID = UUID()
-            reset()
-            fallbackPhase = .canceled
-            statusText = AppText.value("Transfer removed", "传输已删除", language: displayLanguage)
-        }
-        return discarded
-    }
-
-    @discardableResult
-    func cancelManifestPreparation() -> Bool {
-        guard isPreparingManifest || preparedManifestV2Selection != nil else { return false }
-        let pendingJob = pendingManifestV2Send?.job ?? preparedManifestV2Selection?.job
-        manifestPreparationTask?.cancel()
-        manifestPreparationTask = nil
-        pendingManifestV2Send = nil
-        preparedManifestV2Selection = nil
-        manifestPreparationSourcePaths = []
-        pendingSourceSelections = []
-        preparedManifestSourcePaths = []
-        isPreparingManifest = false
-        isManifestSelectionReady = false
-        operationID = UUID()
-        forgetRoomID(for: currentActivityID)
-        resourceAccess = nil
-        fallbackPhase = .canceled
-        statusText = AppText.value("Canceled", "已取消", language: displayLanguage)
-        if let pendingJob {
-            Task { _ = try? await pendingJob.cancelJob() }
-        }
-        return true
-    }
-
-    /// Exceptional offers are the only receive path that requires an
-    /// additional confirmation. Ordinary authenticated offers continue
-    /// automatically after their destination plan is valid.
     @discardableResult
     func approveExceptionalTransfer() -> Bool {
         guard requiresExceptionalTransferApproval,
-              let pending = pendingManifestV2Offer,
-              let targetDirectory = pendingManifestV2TargetDirectory,
-              let availableBytes = pendingManifestV2AvailableBytes,
-              let appModel else { return false }
+              let pendingReceive,
+              let operation = activeReceive else { return false }
         requiresExceptionalTransferApproval = false
-        let observer = Observer(
-            self,
-            appModel: appModel,
-            operationID: operationID,
-            activityID: currentActivityID
-        )
-        let activityID = currentActivityID
-        manifestV2Task = Task { @MainActor [weak self] in
-            guard let self else { return }
-            do {
-                try await self.continueManifestV2Receive(
-                    pending: pending,
-                    targetDirectory: targetDirectory,
-                    availableBytes: availableBytes,
-                    approvedExceptionalTransfer: true,
-                    observer: observer
-                )
-            } catch {
-                guard self.currentActivityID == activityID else { return }
-                self.handleFailed(error.localizedDescription)
-            }
-        }
+        continueReceive(pendingReceive, operation: operation, exceptionalApproved: true)
         return true
     }
 
-    func approvePartialManifestSource(rootItemID: UInt64) {
-        resolveManifestV2Source(
-            rootItemID: rootItemID,
-            decision: .approvePartial,
-            reauthorizedPath: nil
-        )
+    @discardableResult
+    func pause() -> Bool {
+        guard isBusy, !isFinalizing else { return false }
+        pausedByUser = true
+        cancellation?.cancel()
+        phase = .paused
+        updateActivity(state: .paused, diagnostic: localized("Paused; progress is retained", "已暂停；进度已保留"))
+        return true
     }
 
-    func removeManifestSource(rootItemID: UInt64) {
-        resolveManifestV2Source(
-            rootItemID: rootItemID,
-            decision: .removeSelection,
-            reauthorizedPath: nil
-        )
-    }
-
-    func reauthorizeManifestSource(rootItemID: UInt64, path: String) {
-        resolveManifestV2Source(
-            rootItemID: rootItemID,
-            decision: .reauthorize,
-            reauthorizedPath: path
-        )
-    }
-
-    func listTransferActivities() -> [FfiTransferActivityRecord] {
-        if let manifestSession {
-            return [manifestSession.activity().activity]
+    @discardableResult
+    func resume() -> Bool {
+        let mayResume: Bool
+        switch phase {
+        case .paused:
+            mayResume = true
+        case .failed:
+            mayResume = failure?.retryable == true
+        default:
+            mayResume = false
         }
-        return session.map { [$0.activity()] } ?? []
+        guard mayResume else { return false }
+        guard hasResumableOperation else { return false }
+        pausedByUser = false
+        failure = nil
+        transferActivity?.failure = nil
+        if let activeSend {
+            launchSend(activeSend)
+            return true
+        }
+        if let activeReceive {
+            launchReceive(activeReceive)
+            return true
+        }
+        return false
+    }
+
+    @discardableResult
+    func cancel() -> Bool {
+        guard isBusy else { return false }
+        pausedByUser = false
+        cancellation?.cancel()
+        phase = .canceled
+        updateActivity(state: .canceled, diagnostic: localized("Canceled", "已取消"))
+        if let direction = transferActivity?.direction {
+            clearStoredManifestSession(direction: direction)
+        }
+        resourceAccess = nil
+        return true
+    }
+
+    func forgetActivity(_ activityID: String) {
+        guard ownsActivity(activityID) else { return }
+        if let direction = transferActivity?.direction {
+            clearStoredManifestSession(direction: direction)
+        }
+        transferActivity = nil
+        phase = .idle
+        activeSend = nil
+        activeReceive = nil
+        resourceAccess = nil
     }
 
     func ownsActivity(_ activityID: String) -> Bool {
-        !activityID.isEmpty && activityID == currentActivityID
+        transferActivity?.activityId == activityID
     }
 
-    func roomID(for activityID: String) -> String? {
-        Self.persistedRoomIDs()[activityID]
-    }
-
-    func forgetRoomID(for activityID: String) {
-        var roomIDs = Self.persistedRoomIDs()
-        roomIDs.removeValue(forKey: activityID)
-        Self.persistRoomIDs(roomIDs)
-    }
-
-    @discardableResult
-    func pauseActivity(_ activityID: String) -> Bool {
-        guard isBusy, !activityID.isEmpty, activityID == currentActivityID else { return false }
-        let paused = manifestSession?.pause() ?? session?.pause() ?? false
-        if paused {
-            bytesPerSec = 0
-            statusText = AppText.value("Pausing…", "正在暂停…", language: displayLanguage)
-        }
-        return paused
-    }
-
-    @discardableResult
-    func resumeActivity(_ activityID: String) -> Bool {
-        guard !activityID.isEmpty, activityID == currentActivityID else { return false }
-        let resumed = manifestSession?.resume() ?? session?.resume() ?? false
-        if resumed {
-            suppressNextFailure = false
-            statusText = AppText.value("Resuming…", "正在继续…", language: displayLanguage)
-        }
-        return resumed
-    }
-
-    @discardableResult
-    private func startManifestReceive(
-        settings: EnvoixRuntimeSettings,
-        request: FfiTransferRequest
-    ) -> Bool {
-        beginManifestOperation(settings: settings, request: request)
-        guard let appModel else {
-            fallbackPhase = .failed("The transfer service is unavailable.")
-            return false
-        }
-        let cancellation = FfiManifestV2Cancellation()
-        manifestV2Cancellation = cancellation
-        let observer = Observer(
-            self,
-            appModel: appModel,
-            operationID: operationID,
-            activityID: request.activityId
+    func handleFailed(_ reason: String) {
+        let projected = FfiTransferFailure(
+            code: .internalError,
+            category: .internal,
+            phase: .setup,
+            origin: .local,
+            direction: transferActivity?.direction ?? .send,
+            retryable: true,
+            recoveryAction: .retry,
+            userMessageKey: "transfer.internal_error",
+            diagnosticMessage: reason
         )
-        let targetDirectory = destinationDir ?? request.outputDir
-        retainResourceAccess(resourceAccess)
-        manifestV2Task = Task { @MainActor [weak self] in
-            guard let self else { return }
-            do {
-                let stateDirectory = try self.manifestV2StateDirectory(activityID: request.activityId)
-                let pending = try await receiveTransferOfferV2(
-                    settings: settings,
-                    request: request,
-                    stateDirectory: stateDirectory,
-                    cancellation: cancellation,
-                    observer: observer
-                )
-                guard self.currentActivityID == request.activityId else { return }
-                self.pendingManifestV2Offer = pending
-                let summary = pending.summary()
-                self.fileName = "\(summary.rootCount) items"
-                self.total = summary.totalPlaintextBytes
-                self.pendingOfferEntries = pending.listEntries(offset: 0, limit: 128).entries
-                let available = try self.allocatableBytes(at: targetDirectory)
-                let exceptional = summary.exceptionalOffer || summary.totalPlaintextBytes > available / 2
-                if exceptional {
-                    self.pendingManifestV2TargetDirectory = targetDirectory
-                    self.pendingManifestV2AvailableBytes = available
-                    self.requiresExceptionalTransferApproval = true
-                    self.statusText = AppText.value(
-                        "Large transfer ready. Confirm to begin receiving.",
-                        "大文件传输已就绪，请确认后开始接收。",
-                        language: self.displayLanguage
-                    )
-                    return
-                }
-                try await self.continueManifestV2Receive(
-                    pending: pending,
-                    targetDirectory: targetDirectory,
-                    availableBytes: available,
-                    approvedExceptionalTransfer: false,
-                    observer: observer
-                )
-            } catch {
-                guard self.currentActivityID == request.activityId else { return }
-                self.handleFailed(error.localizedDescription)
-            }
-        }
-        return true
+        handleTransferFailed(projected)
     }
 
-    private func prepareAndStartManifestSend(
+    fileprivate func handleInvite(_ value: String) {
+        invite = value
+        if value.contains("@") { peerAddress = value }
+        updateActivity(state: .waitingForPeer, diagnostic: localized("Waiting for sender", "等待发送方"))
+    }
+
+    fileprivate func handleStarted(itemCount: UInt32, totalBytes: UInt64) {
+        fileName = itemCount == 1 ? localized("1 item", "1 个项目") : localized("\(itemCount) items", "\(itemCount) 个项目")
+        total = totalBytes
+        transferActivity?.itemCount = itemCount
+        transferActivity?.totalBytes = totalBytes
+        updateActivity(state: .transferring, diagnostic: localized("Transferring", "正在传输"))
+    }
+
+    fileprivate func handlePhase(_ next: FfiManifestV2Phase) {
+        let state: TransferActivityState
+        let text: String
+        switch next {
+        case .pairing:
+            state = .pairing; text = localized("Pairing", "正在配对")
+        case .connecting:
+            state = .connecting; text = localized("Connecting", "正在连接")
+        case .transferring:
+            state = .transferring; text = localized("Transferring", "正在传输")
+        case .verifying:
+            state = .verifying; text = localized("Verifying received content", "正在校验接收内容")
+        case .saving:
+            state = .saving; text = localized("Saving to the selected location", "正在保存到所选位置")
+        case .waitingForReceiverSave:
+            state = .waitingForReceiverSave; text = localized("Waiting for receiver to finish saving", "等待接收方完成保存")
+        case .finalizingDelivery:
+            state = .finalizingDelivery; text = localized("Saved; finalizing delivery", "已保存，正在完成交付确认")
+        case .delivered:
+            state = .delivered; text = localized("Delivered", "已送达")
+        }
+        statusText = text
+        if state == .transferring { phase = .transferring }
+        else if state == .delivered { phase = .completed(bytes: total) }
+        else { phase = .waiting }
+        updateActivity(state: state, diagnostic: text)
+    }
+
+    fileprivate func handleProgress(_ bytes: UInt64, _ totalBytes: UInt64) {
+        transferred = bytes
+        total = totalBytes
+        bytesPerSec = rate.update(bytes: bytes)
+        transferActivity?.bytesTransferred = bytes
+        transferActivity?.totalBytes = totalBytes
+        transferActivity?.updatedAt = Date()
+        if transferActivity?.state == .transferring { appModel?.upsert(transferActivity!) }
+    }
+
+    fileprivate func handleCompleted(_ bytes: UInt64) {
+        transferred = bytes
+        total = max(total, bytes)
+        bytesPerSec = 0
+        phase = .completed(bytes: bytes)
+        statusText = localized("Delivered", "已送达")
+        updateActivity(state: .delivered, diagnostic: statusText)
+        if let direction = transferActivity?.direction {
+            clearStoredManifestSession(direction: direction)
+        }
+        #if os(iOS)
+        (activeSend?.sourceAccess as? ShareDraftLease)?.acknowledge()
+        #endif
+        resourceAccess = nil
+    }
+
+    fileprivate func handleTransferFailed(_ value: FfiTransferFailure) {
+        if pausedByUser { return }
+        failure = value
+        phase = .failed(friendlyFailure(value, language: displayLanguage))
+        statusText = friendlyFailure(value, language: displayLanguage)
+        transferActivity?.failure = value
+        updateActivity(state: .failed, diagnostic: value.diagnosticMessage)
+        resourceAccess = nil
+    }
+
+    fileprivate func handleDiagnostic(_ message: String) {
+        eventLog.append(message)
+        if eventLog.count > 240 { eventLog.removeFirst(eventLog.count - 240) }
+        transferActivity?.diagnosticMessage = message
+        transferActivity?.updatedAt = Date()
+        if let transferActivity { appModel?.upsert(transferActivity) }
+    }
+
+    private func startSend(
+        selectedPaths: [String],
         settings: EnvoixRuntimeSettings,
         request: FfiTransferRequest,
-        selectedPaths: [String],
-        sourceAccess: AnyObject?
+        sourceAccess: AnyObject?,
+        roomCode: String? = nil
     ) {
-        destinationDir = nil
-        let paths = normalizedSourcePaths(selectedPaths)
-        if let prepared = preparedManifestV2Selection,
-           prepared.sourcePaths == paths {
-            let sourceSelections = pendingSourceSelections
-            let selectionReady = isManifestSelectionReady
-            beginManifestOperation(settings: settings, request: request)
-            pendingSourceSelections = sourceSelections
-            isManifestSelectionReady = selectionReady
-            let cancellation = FfiManifestV2Cancellation()
-            manifestV2Cancellation = cancellation
-            let pending = PendingManifestV2Send(
-                job: prepared.job,
-                settings: settings,
-                request: request,
-                stateDirectory: prepared.stateDirectory,
-                cancellation: cancellation,
-                sourceAccess: prepared.sourceAccess ?? sourceAccess
-            )
-            pendingManifestV2Send = pending
-            if sourceSelections.isEmpty && selectionReady {
-                let expectedOperationID = operationID
-                manifestPreparationTask = Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    do {
-                        try await self.launchManifestV2Send(
-                            pending,
-                            operationID: expectedOperationID
-                        )
-                    } catch {
-                        guard self.operationID == expectedOperationID else { return }
-                        self.handleFailed(error.localizedDescription)
-                    }
-                }
-            } else {
-                isPreparingManifest = false
-                statusText = AppText.value(
-                    "Resolve selected-content warnings before sending.",
-                    "请先处理所选内容的警告，再发送。",
-                    language: displayLanguage
-                )
-            }
+        let paths = normalizedPaths(selectedPaths)
+        guard !paths.isEmpty else {
+            handleFailed(localized("Choose at least one file or folder", "请至少选择一个文件或文件夹"))
             return
         }
-
-        beginManifestOperation(settings: settings, request: request)
-        statusText = AppText.value("Preparing selected items…", "正在准备所选项目…", language: displayLanguage)
-        resourceAccess = sourceAccess
-        isPreparingManifest = true
-        let operationID = operationID
-        let cancellation = FfiManifestV2Cancellation()
-        manifestV2Cancellation = cancellation
-        manifestPreparationTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            do {
-                let stateDirectory = try self.manifestV2StateDirectory(activityID: request.activityId)
-                let job = try await createTransferJobV2(
-                    storeDirectory: stateDirectory + "/jobs",
-                    compressionPolicy: self.manifestV2CompressionPolicy
-                )
-                let snapshot = try await job.addLocalPaths(paths: paths)
-                let pending = PendingManifestV2Send(
-                    job: job,
+        displayLanguage = settings.language
+        beginActivity(direction: .send, mode: request.mode, roomCode: roomCode)
+        if preparedSelection?.sourcePaths != paths {
+            prepareManifestSelection(selectedPaths: paths, sourceAccess: sourceAccess)
+        }
+        guard let preparedSelection else {
+            task = Task { @MainActor [weak self] in
+                guard let self else { return }
+                while isPreparingManifest {
+                    try? await Task.sleep(nanoseconds: 50_000_000)
+                    if Task.isCancelled { return }
+                }
+                guard let preparedSelection, isManifestSelectionReady else { return }
+                launchSend(SendOperation(
+                    job: preparedSelection.job,
+                    jobID: preparedSelection.jobID,
+                    sourcePaths: preparedSelection.sourcePaths,
                     settings: settings,
                     request: request,
-                    stateDirectory: stateDirectory,
-                    cancellation: cancellation,
-                    sourceAccess: sourceAccess
-                )
-                if snapshot.state != .readyToSend {
-                    guard snapshot.state == .needsSourceDecision else {
-                        throw RuntimeSettingsError("Selected items could not be prepared for Send.")
-                    }
-                    self.pendingManifestV2Send = pending
-                    self.pendingSourceSelections = snapshot.selections.filter {
-                        $0.state == .needsDecision
-                    }
-                    self.manifestPreparationTask = nil
-                    self.statusText = AppText.value(
-                        "Some selected content needs your decision before sending.",
-                        "部分所选内容需要你决定后才能发送。",
-                        language: self.displayLanguage
-                    )
-                    return
-                }
-                try await self.launchManifestV2Send(pending, operationID: operationID)
-            } catch {
-                guard operationID == self.operationID else { return }
-                self.manifestPreparationTask = nil
-                self.isPreparingManifest = false
-                self.forgetRoomID(for: request.activityId)
-                self.resourceAccess = nil
-                self.handleFailed(error.localizedDescription)
+                    stateDirectory: preparedSelection.sessionStateDirectory,
+                    sourceAccess: sourceAccess ?? preparedSelection.sourceAccess
+                ))
             }
-        }
-    }
-
-    private func resolveManifestV2Source(
-        rootItemID: UInt64,
-        decision: FfiSourceDecisionV2,
-        reauthorizedPath: String?
-    ) {
-        guard let job = pendingManifestV2Send?.job ?? preparedManifestV2Selection?.job else {
             return
         }
-        let pending = pendingManifestV2Send
-        let expectedOperationID = operationID
-        manifestPreparationTask = Task { @MainActor [weak self] in
+        guard isManifestSelectionReady else {
+            statusText = localized("Resolve source warnings before sending", "请先处理来源警告")
+            return
+        }
+        launchSend(SendOperation(
+            job: preparedSelection.job,
+            jobID: preparedSelection.jobID,
+            sourcePaths: preparedSelection.sourcePaths,
+            settings: settings,
+            request: request,
+            stateDirectory: preparedSelection.sessionStateDirectory,
+            sourceAccess: sourceAccess ?? preparedSelection.sourceAccess
+        ))
+    }
+
+    private func launchSend(_ operation: SendOperation) {
+        activeSend = operation
+        activeReceive = nil
+        resourceAccess = operation.sourceAccess
+        let token = FfiManifestV2Cancellation()
+        cancellation = token
+        pausedByUser = false
+        phase = .waiting
+        updateActivity(state: .connecting, diagnostic: localized("Connecting", "正在连接"))
+        let observer = Observer(viewModel: self, operationID: operationID)
+        task = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                let previousPath = await job.sourcePathForPreview(itemId: rootItemID)
-                let snapshot = try await job.resolveSourceIssue(
-                    rootItemId: rootItemID,
-                    decision: decision,
-                    reauthorizedPath: reauthorizedPath
-                )
-                guard self.operationID == expectedOperationID else { return }
-                self.pendingSourceSelections = snapshot.selections.filter {
-                    $0.state == .needsDecision
+                #if os(iOS)
+                if let lease = operation.sourceAccess as? ShareDraftLease,
+                   let activityID = transferActivity?.activityId {
+                    try lease.bind(to: activityID)
                 }
-                if snapshot.state == .readyToSend {
-                    self.isManifestSelectionReady = true
-                    if let pending {
-                        try await self.launchManifestV2Send(
-                            pending,
-                            operationID: expectedOperationID
-                        )
-                    } else {
-                        self.updatePreparedSourcePaths(
-                            decision: decision,
-                            previousPath: previousPath,
-                            reauthorizedPath: reauthorizedPath
-                        )
-                        self.manifestPreparationTask = nil
-                        self.isPreparingManifest = false
-                        self.statusText = AppText.value(
-                            "Ready to send",
-                            "已准备发送",
-                            language: self.displayLanguage
-                        )
-                    }
-                } else if snapshot.state == .canceled {
-                    self.pendingManifestV2Send = nil
-                    self.preparedManifestV2Selection = nil
-                    self.preparedManifestSourcePaths = []
-                    self.isPreparingManifest = false
-                    self.isManifestSelectionReady = false
-                    self.fallbackPhase = .canceled
-                    self.statusText = AppText.value("Canceled", "已取消", language: self.displayLanguage)
-                } else {
-                    self.updatePreparedSourcePaths(
-                        decision: decision,
-                        previousPath: previousPath,
-                        reauthorizedPath: reauthorizedPath
-                    )
-                    self.isManifestSelectionReady = false
+                #endif
+                try persistActiveSend(operation)
+                let snapshot = await operation.job.snapshot()
+                if snapshot.state != .sealed {
+                    _ = try await operation.job.sealForSend()
+                    preparedSelection = nil
+                    preparedManifestSourcePaths = []
+                    pendingSourceSelections = []
+                    isManifestSelectionReady = false
                 }
-            } catch {
-                guard self.operationID == expectedOperationID else { return }
-                self.manifestPreparationTask = nil
-                self.handleFailed(error.localizedDescription)
-            }
-        }
-    }
-
-    private func updatePreparedSourcePaths(
-        decision: FfiSourceDecisionV2,
-        previousPath: String?,
-        reauthorizedPath: String?
-    ) {
-        guard var prepared = preparedManifestV2Selection else { return }
-        switch decision {
-        case .removeSelection:
-            if let previousPath {
-                prepared.sourcePaths.removeAll {
-                    URL(fileURLWithPath: $0).standardizedFileURL.path
-                        == URL(fileURLWithPath: previousPath).standardizedFileURL.path
-                }
-            }
-        case .reauthorize:
-            if let previousPath,
-               let reauthorizedPath,
-               let index = prepared.sourcePaths.firstIndex(where: {
-                   URL(fileURLWithPath: $0).standardizedFileURL.path
-                       == URL(fileURLWithPath: previousPath).standardizedFileURL.path
-               }) {
-                prepared.sourcePaths[index] = URL(fileURLWithPath: reauthorizedPath)
-                    .standardizedFileURL.path
-            }
-        case .approvePartial, .cancelJob:
-            break
-        }
-        preparedManifestV2Selection = prepared
-        preparedManifestSourcePaths = prepared.sourcePaths
-    }
-
-    private func normalizedSourcePaths(_ paths: [String]) -> [String] {
-        var seen = Set<String>()
-        return paths.compactMap { path in
-            guard !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                return nil
-            }
-            let normalized = URL(fileURLWithPath: path).standardizedFileURL.path
-            return seen.insert(normalized).inserted ? normalized : nil
-        }
-    }
-
-    private func launchManifestV2Send(
-        _ pending: PendingManifestV2Send,
-        operationID expectedOperationID: UUID
-    ) async throws {
-        _ = try await pending.job.sealForSend()
-        guard expectedOperationID == operationID,
-              pending.request.activityId == currentActivityID,
-              let appModel else { return }
-        manifestPreparationTask = nil
-        pendingManifestV2Send = nil
-        preparedManifestV2Selection = nil
-        pendingSourceSelections = []
-        preparedManifestSourcePaths = []
-        isPreparingManifest = false
-        isManifestSelectionReady = false
-        let observer = Observer(
-            self,
-            appModel: appModel,
-            operationID: expectedOperationID,
-            activityID: pending.request.activityId
-        )
-        manifestV2Task = Task { @MainActor [weak self] in
-            do {
                 _ = try await sendTransferJobV2(
-                    job: pending.job,
-                    settings: pending.settings,
-                    request: pending.request,
-                    stateDirectory: pending.stateDirectory,
-                    cancellation: pending.cancellation,
+                    job: operation.job,
+                    settings: operation.settings,
+                    request: operation.request,
+                    stateDirectory: operation.stateDirectory,
+                    cancellation: token,
                     observer: observer
                 )
             } catch {
-                guard let self,
-                      self.currentActivityID == pending.request.activityId else { return }
-                self.handleFailed(error.localizedDescription)
+                if !pausedByUser { handleFailed(error.localizedDescription) }
             }
         }
-        retainResourceAccess(pending.sourceAccess)
-        statusText = AppText.value("Connecting…", "正在连接…", language: displayLanguage)
     }
 
-    private func beginManifestOperation(
+    private func startReceive(
+        targetDirectory: String,
         settings: EnvoixRuntimeSettings,
-        request: FfiTransferRequest
+        request: FfiTransferRequest,
+        destinationAccess: AnyObject?,
+        roomCode: String? = nil
     ) {
-        manifestPreparationTask?.cancel()
-        manifestV2Task?.cancel()
-        manifestV2Cancellation?.cancel()
-        manifestPreparationTask = nil
-        manifestV2Task = nil
-        manifestV2Cancellation = nil
-        pendingManifestV2Offer = nil
-        pendingManifestV2TargetDirectory = nil
-        pendingManifestV2AvailableBytes = nil
-        pendingManifestV2Send = nil
-        requiresExceptionalTransferApproval = false
-        pendingOfferEntries = []
-        pendingSourceSelections = []
-        isPreparingManifest = false
-        suppressNextFailure = false
-        reset()
-        session = nil
-        manifestSession = nil
-        bindPresentation(to: request.activityId)
         displayLanguage = settings.language
-        operationID = UUID()
-        fallbackPhase = .waiting
-    }
-
-    /// Creates one independently durable session for the new Activity card.
-    @discardableResult
-    private func start(
-        settings: EnvoixRuntimeSettings,
-        request: FfiTransferRequest
-    ) -> Bool {
-        manifestPreparationTask?.cancel()
-        manifestPreparationTask = nil
-        isPreparingManifest = false
-        suppressNextFailure = false
-        reset()
-        session = nil
-        manifestSession = nil
-        bindPresentation(to: request.activityId)
-        displayLanguage = settings.language
-        operationID = UUID()
-        let operationID = operationID
-        fallbackPhase = .waiting
+        beginActivity(direction: .receive, mode: request.mode, roomCode: roomCode)
         do {
-            guard let appModel else {
-                throw RuntimeSettingsError("The transfer service is unavailable.")
-            }
-            let observer = Observer(
-                self,
-                appModel: appModel,
-                operationID: operationID,
-                activityID: request.activityId
-            )
-            let startedSession = try appModel.startDurableSession(
+            let operation = ReceiveOperation(
                 settings: settings,
                 request: request,
-                observer: observer
-            )
-            session = startedSession
-            handleTransferActivity(startedSession.activity())
-            return true
-        } catch {
-            fallbackPhase = .failed(friendlyError(error.localizedDescription, language: displayLanguage))
-            return false
-        }
-    }
-
-    private func retainResourceAccess(_ access: AnyObject?) {
-        if case .failed = phase {
-            resourceAccess = nil
-        } else {
-            resourceAccess = access
-            AppModel.shared.retainResourceAccess(access, for: currentActivityID)
-        }
-    }
-
-    private var manifestV2CompressionPolicy: FfiCompressionPolicyV2 {
-        switch UserDefaults.standard.string(forKey: "envoix.compressionPolicy") {
-        case "never": return .never
-        case "always": return .always
-        default: return .smart
-        }
-    }
-
-    private var manifestV2DestinationDecision: FfiDestinationDecisionV2 {
-        UserDefaults.standard.string(forKey: "envoix.destinationSaveMode") == "copy"
-            ? .copyAfterVerify
-            : .saveDirectly
-    }
-
-    private func manifestV2StateDirectory(activityID: String) throws -> String {
-        guard !activityID.isEmpty else {
-            throw RuntimeSettingsError("Could not create Manifest v2 state storage.")
-        }
-        let directory = try manifestV2RootDirectory()
-            .appendingPathComponent(activityID, isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: directory,
-            withIntermediateDirectories: true
-        )
-        return directory.path
-    }
-
-    private func manifestV2JobStoreDirectory() throws -> String {
-        let directory = try manifestV2RootDirectory()
-            .appendingPathComponent("jobs", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        return directory.path
-    }
-
-    private func manifestV2SessionStateDirectory(jobID: String) throws -> String {
-        guard !jobID.isEmpty else {
-            throw RuntimeSettingsError("Manifest v2 job identity is unavailable.")
-        }
-        let directory = try manifestV2RootDirectory()
-            .appendingPathComponent("sessions", isDirectory: true)
-            .appendingPathComponent(jobID, isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        return directory.path
-    }
-
-    private func manifestV2RootDirectory() throws -> URL {
-        guard let supportDirectory = FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first else {
-            throw RuntimeSettingsError("Could not create Manifest v2 state storage.")
-        }
-        let directory = supportDirectory
-            .appendingPathComponent("envoix/manifest-v2", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        return directory
-    }
-
-    private func allocatableBytes(at path: String) throws -> UInt64 {
-        let values = try URL(fileURLWithPath: path, isDirectory: true).resourceValues(
-            forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey]
-        )
-        if let available = values.volumeAvailableCapacityForImportantUsage, available >= 0 {
-            return UInt64(available)
-        }
-        if let available = values.volumeAvailableCapacity, available >= 0 {
-            return UInt64(available)
-        }
-        throw RuntimeSettingsError("The selected destination did not report available capacity.")
-    }
-
-    private func continueManifestV2Receive(
-        pending: FfiPendingManifestV2Receive,
-        targetDirectory: String,
-        availableBytes: UInt64,
-        approvedExceptionalTransfer: Bool,
-        observer: Observer
-    ) async throws {
-        let decision = manifestV2DestinationDecision
-        let copyStagingDirectory: String?
-        let stagingAvailableBytes: UInt64?
-        if decision == .copyAfterVerify {
-            let directory = try manifestV2RootDirectory()
-                .appendingPathComponent("copy-staging", isDirectory: true)
-                .appendingPathComponent(pending.summary().jobId, isDirectory: true)
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            copyStagingDirectory = directory.path
-            stagingAvailableBytes = try allocatableBytes(at: directory.path)
-        } else {
-            copyStagingDirectory = nil
-            stagingAvailableBytes = nil
-        }
-        let completion = try await pending.receive(
-            destination: FfiDestinationRequestV2(
+                stateDirectory: try receiveStateDirectory(activityID: transferActivity!.activityId),
                 targetDirectory: targetDirectory,
-                copyStagingDirectory: copyStagingDirectory,
-                decision: decision,
-                targetAllocatableBytes: availableBytes,
-                stagingAllocatableBytes: stagingAvailableBytes,
-                stableObjectIdentity: false,
-                exceptionalTransferApproved: approvedExceptionalTransfer
-            ),
-            observer: observer
-        )
-        completedItemURLs = completion.savedPaths.map {
-            URL(fileURLWithPath: $0, isDirectory: false)
-        }
-        completedFileURL = completedItemURLs.count == 1 ? completedItemURLs[0] : nil
-        pendingManifestV2Offer = nil
-        pendingManifestV2TargetDirectory = nil
-        pendingManifestV2AvailableBytes = nil
-        requiresExceptionalTransferApproval = false
-    }
-
-    private func rememberRoomID(for activityID: String, code: String) {
-        if let roomID = RemoteLogUpload.roomID(from: code) {
-            var roomIDs = Self.persistedRoomIDs()
-            roomIDs[activityID] = roomID
-            Self.persistRoomIDs(roomIDs)
+                destinationAccess: destinationAccess
+            )
+            activeReceive = operation
+            activeSend = nil
+            launchReceive(operation)
+        } catch {
+            handleFailed(error.localizedDescription)
         }
     }
 
-    private static func persistedRoomIDs() -> [String: String] {
-        UserDefaults.standard.dictionary(forKey: roomIDStoreKey) as? [String: String] ?? [:]
+    private func launchReceive(_ operation: ReceiveOperation) {
+        resourceAccess = operation.destinationAccess
+        let token = FfiManifestV2Cancellation()
+        cancellation = token
+        pausedByUser = false
+        phase = .waiting
+        updateActivity(state: .waitingForPeer, diagnostic: localized("Waiting for sender", "等待发送方"))
+        let observer = Observer(viewModel: self, operationID: operationID)
+        task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try persistActiveReceive(operation)
+                let pending = try await receiveTransferOfferV2(
+                    settings: operation.settings,
+                    request: operation.request,
+                    stateDirectory: operation.stateDirectory,
+                    cancellation: token,
+                    observer: observer
+                )
+                pendingReceive = pending
+                let summary = pending.summary()
+                pendingOfferEntries = pending.listEntries(offset: 0, limit: 512).entries
+                total = summary.totalPlaintextBytes
+                transferActivity?.itemCount = summary.fileCount + summary.directoryCount
+                transferActivity?.totalBytes = total
+                let available = try allocatableBytes(at: operation.targetDirectory)
+                let exceptional = summary.exceptionalOffer || total > available / 2
+                if exceptional {
+                    requiresExceptionalTransferApproval = true
+                    statusText = localized(
+                        "Review this unusually large transfer before receiving",
+                        "请先确认这个异常大的传输"
+                    )
+                    updateActivity(state: .waitingForPeer, diagnostic: statusText)
+                } else {
+                    continueReceive(pending, operation: operation, exceptionalApproved: false)
+                }
+            } catch {
+                if !pausedByUser { handleFailed(error.localizedDescription) }
+            }
+        }
     }
 
-    private static func persistRoomIDs(_ roomIDs: [String: String]) {
-        UserDefaults.standard.set(roomIDs, forKey: roomIDStoreKey)
+    private func continueReceive(
+        _ pending: FfiPendingManifestV2Receive,
+        operation: ReceiveOperation,
+        exceptionalApproved: Bool
+    ) {
+        let observer = Observer(viewModel: self, operationID: operationID)
+        task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let available = try allocatableBytes(at: operation.targetDirectory)
+                let decision = destinationDecision
+                let copyDirectory: String?
+                let copyAvailable: UInt64?
+                if decision == .copyAfterVerify {
+                    let directory = URL(fileURLWithPath: operation.targetDirectory, isDirectory: true)
+                        .appendingPathComponent(".envoix-copy-staging-v2", isDirectory: true)
+                    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                    copyDirectory = directory.path
+                    copyAvailable = try allocatableBytes(at: directory.path)
+                } else {
+                    copyDirectory = nil
+                    copyAvailable = nil
+                }
+                let completion = try await pending.receive(
+                    destination: FfiDestinationRequestV2(
+                        targetDirectory: operation.targetDirectory,
+                        copyStagingDirectory: copyDirectory,
+                        decision: decision,
+                        targetAllocatableBytes: available,
+                        stagingAllocatableBytes: copyAvailable,
+                        stableObjectIdentity: true,
+                        exceptionalTransferApproved: exceptionalApproved
+                    ),
+                    observer: observer
+                )
+                completedItemURLs = completion.savedPaths.map { URL(fileURLWithPath: $0) }
+                completedFileURL = completedItemURLs.count == 1 ? completedItemURLs[0] : nil
+                transferActivity?.savedPaths = completion.savedPaths
+                pendingReceive = nil
+                pendingOfferEntries = []
+                requiresExceptionalTransferApproval = false
+            } catch {
+                if !pausedByUser { handleFailed(error.localizedDescription) }
+            }
+        }
     }
 
-    private func makeRequest(
-        activityID: String = UUID().uuidString,
+    private func resolveSource(rootItemID: UInt64, decision: FfiSourceDecisionV2, path: String?) {
+        guard var selection = preparedSelection else { return }
+        isPreparingManifest = true
+        preparationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let previousPath = await selection.job.sourcePathForPreview(itemId: rootItemID)
+                let snapshot = try await selection.job.resolveSourceIssue(
+                    rootItemId: rootItemID,
+                    decision: decision,
+                    reauthorizedPath: path
+                )
+                if decision == .removeSelection {
+                    selection.sourcePaths.removeAll { $0 == previousPath }
+                } else if decision == .reauthorize,
+                          let previousPath,
+                          let path,
+                          let index = selection.sourcePaths.firstIndex(of: previousPath) {
+                    selection.sourcePaths[index] = path
+                }
+                preparedSelection = selection
+                applyPreparation(
+                    snapshot,
+                    paths: await projectedSourcePaths(job: selection.job, snapshot: snapshot)
+                )
+            } catch {
+                handleFailed(error.localizedDescription)
+            }
+            isPreparingManifest = false
+        }
+    }
+
+    private func applyPreparation(_ snapshot: FfiTransferJobSnapshotV2, paths: [String]) {
+        preparedManifestSourcePaths = paths
+        pendingSourceSelections = snapshot.selections.filter { $0.state == .needsDecision }
+        isManifestSelectionReady = snapshot.state == .readyToSend
+        statusText = isManifestSelectionReady
+            ? localized("Ready to send", "已准备发送")
+            : localized("Some items need your decision", "部分项目需要你的决定")
+    }
+
+    private func projectedSourcePaths(
+        job: FfiTransferJobV2,
+        snapshot: FfiTransferJobSnapshotV2
+    ) async -> [String] {
+        var paths: [String] = []
+        for selection in snapshot.selections {
+            if let path = await job.sourcePathForPreview(itemId: selection.rootItemId) {
+                paths.append(path)
+            }
+        }
+        return paths
+    }
+
+    private func beginActivity(
         direction: FfiTransferDirection,
         mode: FfiTransferMode,
-        settings: EnvoixRuntimeSettings,
-        filePath: String = "",
-        outputDir: String = "",
-        invite: String = "",
-        code: String = "",
-        token: String = "",
-        pathPolicy: FfiPathPolicy = .auto,
-        publicationRequired: Bool = false
-    ) -> FfiTransferRequest {
-        FfiTransferRequest(
+        roomCode: String?
+    ) {
+        clearStoredManifestSession(direction: direction)
+        task?.cancel()
+        cancellation?.cancel()
+        operationID = UUID()
+        let activityID = UUID().uuidString
+        transferActivity = TransferActivityRecord(
             activityId: activityID,
             direction: direction,
             mode: mode,
-            filePath: filePath,
-            outputDir: outputDir,
+            itemCount: 0,
+            totalBytes: 0,
+            bytesTransferred: 0,
+            state: direction == .send ? .preparing : .waitingForPeer,
+            diagnosticMessage: "",
+            failure: nil,
+            savedPaths: [],
+            roomID: roomCode.flatMap(RemoteLogUpload.roomID),
+            updatedAt: Date()
+        )
+        invite = ""
+        peerAddress = ""
+        transferred = 0
+        total = 0
+        failure = nil
+        completedFileURL = nil
+        completedItemURLs = []
+        pendingOfferEntries = []
+        requiresExceptionalTransferApproval = false
+        rate = RateTracker()
+        eventLog = []
+        phase = .waiting
+        if let transferActivity { appModel?.upsert(transferActivity) }
+    }
+
+    private func updateActivity(state: TransferActivityState, diagnostic: String) {
+        guard var record = transferActivity else { return }
+        record.state = state
+        record.totalBytes = total
+        record.bytesTransferred = transferred
+        record.diagnosticMessage = diagnostic
+        record.updatedAt = Date()
+        transferActivity = record
+        appModel?.upsert(record)
+    }
+
+    private func persistActiveSend(_ operation: SendOperation) throws {
+        guard let activity = transferActivity else {
+            throw RuntimeSettingsError("Cannot persist a sender session without an activity.")
+        }
+        let shareDraftID: UUID?
+        #if os(iOS)
+        shareDraftID = (operation.sourceAccess as? ShareDraftLease)?.id
+        #else
+        shareDraftID = nil
+        #endif
+        let bookmarks: [Data]
+        if shareDraftID == nil {
+            bookmarks = try operation.sourcePaths.map {
+                try makeSecurityScopedFolderBookmark(for: URL(fileURLWithPath: $0))
+            }
+        } else {
+            bookmarks = []
+        }
+        try storeManifestSession(StoredAppleManifestSessionV2(
+            schemaVersion: StoredAppleManifestSessionV2.schemaVersion,
+            activityID: activity.activityId,
+            jobID: operation.jobID,
+            stateDirectory: operation.stateDirectory,
+            targetDirectory: nil,
+            sourcePaths: operation.sourcePaths,
+            sourceBookmarks: bookmarks,
+            destinationBookmark: nil,
+            shareDraftID: shareDraftID,
+            settings: StoredRuntimeSettingsV2(operation.settings),
+            request: StoredTransferRequestV2(operation.request),
+            itemCount: activity.itemCount,
+            totalBytes: activity.totalBytes,
+            roomID: activity.roomID
+        ), direction: .send)
+    }
+
+    private func persistActiveReceive(_ operation: ReceiveOperation) throws {
+        guard let activity = transferActivity else {
+            throw RuntimeSettingsError("Cannot persist a receiver session without an activity.")
+        }
+        let destinationURL = URL(fileURLWithPath: operation.targetDirectory, isDirectory: true)
+        try storeManifestSession(StoredAppleManifestSessionV2(
+            schemaVersion: StoredAppleManifestSessionV2.schemaVersion,
+            activityID: activity.activityId,
+            jobID: nil,
+            stateDirectory: operation.stateDirectory,
+            targetDirectory: operation.targetDirectory,
+            sourcePaths: [],
+            sourceBookmarks: [],
+            destinationBookmark: try makeSecurityScopedFolderBookmark(for: destinationURL),
+            shareDraftID: nil,
+            settings: StoredRuntimeSettingsV2(operation.settings),
+            request: StoredTransferRequestV2(operation.request),
+            itemCount: activity.itemCount,
+            totalBytes: activity.totalBytes,
+            roomID: activity.roomID
+        ), direction: .receive)
+    }
+
+    private func storeManifestSession(
+        _ stored: StoredAppleManifestSessionV2,
+        direction: FfiTransferDirection
+    ) throws {
+        let data = try JSONEncoder().encode(stored)
+        try data.write(
+            to: manifestSessionURL(direction: direction),
+            options: [.atomic, .completeFileProtectionUnlessOpen]
+        )
+    }
+
+    private func storedManifestSession(
+        direction: FfiTransferDirection
+    ) throws -> StoredAppleManifestSessionV2? {
+        let url = try manifestSessionURL(direction: direction)
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let data = try Data(contentsOf: url)
+        let stored = try JSONDecoder().decode(StoredAppleManifestSessionV2.self, from: data)
+        guard stored.schemaVersion == StoredAppleManifestSessionV2.schemaVersion else {
+            throw RuntimeSettingsError("Stored transfer session schema is unsupported.")
+        }
+        return stored
+    }
+
+    private func clearStoredManifestSession(direction: FfiTransferDirection) {
+        guard let url = try? manifestSessionURL(direction: direction),
+              FileManager.default.fileExists(atPath: url.path) else { return }
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    private func manifestSessionURL(direction: FfiTransferDirection) throws -> URL {
+        let fileName = direction == .send
+            ? Self.activeSendSessionFileName
+            : Self.activeReceiveSessionFileName
+        return try manifestRootDirectory().appendingPathComponent(fileName, isDirectory: false)
+    }
+
+    private func restoreSourceAccess(_ stored: StoredAppleManifestSessionV2) throws -> AnyObject? {
+        #if os(iOS)
+        if let shareDraftID = stored.shareDraftID {
+            let store = try ShareDraftStore.live()
+            let draft = try store.load(id: shareDraftID)
+            let paths = draft.fileURLs.map { $0.standardizedFileURL.path }
+            guard paths == normalizedPaths(stored.sourcePaths) else {
+                throw RuntimeSettingsError("The saved Share draft no longer matches the sealed transfer job.")
+            }
+            return ShareDraftLease(id: shareDraftID, store: store)
+        }
+        #else
+        guard stored.shareDraftID == nil else {
+            throw RuntimeSettingsError("A Share draft cannot be restored on this platform.")
+        }
+        #endif
+
+        guard !stored.sourceBookmarks.isEmpty else {
+            guard stored.sourcePaths.allSatisfy({ FileManager.default.isReadableFile(atPath: $0) }) else {
+                throw RuntimeSettingsError("Source permission expired. Choose the source again.")
+            }
+            return nil
+        }
+        guard stored.sourceBookmarks.count == stored.sourcePaths.count else {
+            throw RuntimeSettingsError("Stored source permissions are incomplete.")
+        }
+        var accesses: [SecurityScopedResourceAccess] = []
+        for (bookmark, expectedPath) in zip(stored.sourceBookmarks, stored.sourcePaths) {
+            let url = try resolveSecurityScopedFolderBookmark(bookmark)
+            guard url.standardizedFileURL.path == URL(fileURLWithPath: expectedPath).standardizedFileURL.path else {
+                throw RuntimeSettingsError("A sealed source moved. Start a new transfer for its new location.")
+            }
+            let access = SecurityScopedResourceAccess(url: url)
+            guard access.isActive || FileManager.default.isReadableFile(atPath: url.path) else {
+                throw RuntimeSettingsError("Source permission expired. Choose the source again.")
+            }
+            accesses.append(access)
+        }
+        return NSArray(array: accesses)
+    }
+
+    private func restoreDestinationAccess(
+        bookmark: Data?,
+        fallbackPath: String
+    ) throws -> (path: String, access: AnyObject?) {
+        guard let bookmark else {
+            guard FileManager.default.isWritableFile(atPath: fallbackPath) else {
+                throw RuntimeSettingsError("Destination permission expired. Choose the destination again.")
+            }
+            return (fallbackPath, nil)
+        }
+        let url = try resolveSecurityScopedFolderBookmark(bookmark)
+        let access = SecurityScopedResourceAccess(url: url)
+        guard access.isActive || FileManager.default.isWritableFile(atPath: url.path) else {
+            throw RuntimeSettingsError("Destination permission expired. Choose the destination again.")
+        }
+        return (url.path, access)
+    }
+
+    private func request(
+        direction: FfiTransferDirection,
+        mode: FfiTransferMode,
+        settings: EnvoixRuntimeSettings,
+        invite: String = "",
+        code: String = "",
+        token: String = "",
+        pathPolicy: FfiPathPolicy = .auto
+    ) -> FfiTransferRequest {
+        let effectiveToken = direction == .receive
+            && token.isEmpty
+            && (mode == .showInvite || mode == .mdns)
+            ? UUID().uuidString
+            : token
+        return FfiTransferRequest(
+            direction: direction,
+            mode: mode,
             peerDescriptor: "",
             invite: invite,
             code: code,
-            token: token,
+            token: effectiveToken,
             broker: settings.serverUrl,
             relay: settings.relayUrl,
             configPath: settings.configPath,
             pathPolicy: pathPolicy,
-            resume: true,
-            publicationRequired: publicationRequired,
-            limits: FfiTransferLimits(
-                maxParallelTransfers: settings.concurrentTransfers ? 2 : 1,
-                maxParallelFiles: 1,
-                maxParallelChunksPerFile: 1,
-                speedLimitBps: 0
-            ),
             rendezvous: rendezvousPlan(for: mode)
         )
-    }
-
-    private func receiveOutputDir(
-        activityID: String,
-        directOutputDir: String,
-        requiresPublication: Bool
-    ) throws -> String {
-        guard requiresPublication else { return directOutputDir }
-        guard let supportDirectory = FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first else {
-            throw RuntimeSettingsError("Could not create the receive staging directory.")
-        }
-        let stagingDirectory = supportDirectory
-            .appendingPathComponent("envoix/receive-staging", isDirectory: true)
-            .appendingPathComponent(activityID, isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: stagingDirectory,
-            withIntermediateDirectories: true
-        )
-        return stagingDirectory.path
     }
 
     private func rendezvousPlan(for mode: FfiTransferMode) -> FfiRendezvousPlan {
@@ -2574,254 +1537,101 @@ final class TransferViewModel: ObservableObject {
         }
     }
 
-    // MARK: Core callbacks (already on main via Observer)
-
-    func handleInvite(_ invite: String) { self.invite = invite }
-
-    func handleTransferEvent(_ event: FfiTransferEvent) {
-        transferEvents.append(event)
-        if transferEvents.count > 240 {
-            transferEvents.removeFirst(transferEvents.count - 240)
+    private var compressionPolicy: FfiCompressionPolicyV2 {
+        switch UserDefaults.standard.string(forKey: "envoix.compressionPolicy") {
+        case "never": return .never
+        case "always": return .always
+        default: return .smart
         }
     }
 
-    /// Manifest V2 reports aggregate progress through structured events rather
-    /// than the legacy `onProgress` callback. Feed only those byte counters into
-    /// the estimator; canonical phase/state still comes from Activity snapshots.
-    func handleManifestTransferEvent(_ event: FfiTransferEvent) {
-        handleTransferEvent(event)
-        guard event.kind == .progress, event.totalBytes > 0 else { return }
-        handleProgress(event.bytesTransferred, event.totalBytes)
+    private var destinationDecision: FfiDestinationDecisionV2 {
+        UserDefaults.standard.string(forKey: "envoix.destinationSaveMode") == "copy"
+            ? .copyAfterVerify
+            : .saveDirectly
     }
 
-    func handleTransferActivity(
-        _ record: FfiTransferActivityRecord,
-        manifest: FfiManifestActivityRecord? = nil
-    ) {
-        transferActivity = record
-        if record.state == .completed,
-           record.direction == .receive,
-           !record.completedFilePath.isEmpty {
-            completedItemURLs = manifest.map(availableCompletedManifestItemURLs) ?? []
-            completedFileURL = manifest.flatMap(availableCompletedManifestURL)
-                ?? availableCompletedFileURL(
-                    path: record.completedFilePath,
-                    expectedBytes: record.bytesTransferred
-                )
-            if completedItemURLs.isEmpty, manifest == nil, let completedFileURL {
-                completedItemURLs = [completedFileURL]
-            }
-            if completedFileURL == nil {
-                statusText = AppText.value(
-                    "Transfer confirmed, but the saved file is not currently available.",
-                    "传输已确认，但当前保存位置中未找到该文件。",
-                    language: displayLanguage
-                )
-            }
-        }
-        if ActivityProjectionPolicy.isTerminal(record.state) {
-            resourceAccess = nil
-        }
-        if record.state == .canceled {
-            suppressNextFailure = false
-        }
-        syncPhase(with: record)
-        releasePresentationSlotIfPaused(record)
-        releasePresentationSlotIfTerminal(record)
+    private func jobStoreDirectory() throws -> String {
+        let directory = try manifestRootDirectory().appendingPathComponent("jobs", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory.path
     }
 
-    func handleManifestActivity(_ record: FfiManifestActivityRecord) {
-        guard record.activity.activityId == currentActivityID else { return }
-        fileName = record.activity.fileName
-        transferred = record.activity.bytesTransferred
-        total = record.activity.totalBytes
-        if !record.activity.invite.isEmpty {
-            invite = record.activity.invite
-        }
-        handleTransferActivity(record.activity, manifest: record)
+    private func sessionStateDirectory(jobID: String) throws -> String {
+        let directory = try manifestRootDirectory()
+            .appendingPathComponent("sessions", isDirectory: true)
+            .appendingPathComponent(jobID, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory.path
     }
 
-    func handleStarted(_ name: String, _ total: UInt64) {
-        appendLog("started · \(name) (\(byteString(total)))")
-        fileName = name
-        self.total = total
-        transferred = 0
-        rate.reset()
-        bytesPerSec = 0
-        if transferActivity == nil {
-            fallbackPhase = .transferring
+    private func receiveStateDirectory(activityID: String) throws -> String {
+        let directory = try manifestRootDirectory()
+            .appendingPathComponent("receives", isDirectory: true)
+            .appendingPathComponent(activityID, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory.path
+    }
+
+    private func manifestRootDirectory() throws -> URL {
+        guard let support = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first else { throw RuntimeSettingsError("Application Support is unavailable.") }
+        let directory = support.appendingPathComponent("envoix/manifest-v2", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
+    }
+
+    private func allocatableBytes(at path: String) throws -> UInt64 {
+        let values = try URL(fileURLWithPath: path, isDirectory: true).resourceValues(
+            forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey]
+        )
+        if let bytes = values.volumeAvailableCapacityForImportantUsage, bytes >= 0 {
+            return UInt64(bytes)
+        }
+        if let bytes = values.volumeAvailableCapacity, bytes >= 0 { return UInt64(bytes) }
+        throw RuntimeSettingsError("The selected destination did not report available capacity.")
+    }
+
+    private func normalizedPaths(_ paths: [String]) -> [String] {
+        var seen = Set<String>()
+        return paths.compactMap {
+            let path = URL(fileURLWithPath: $0).standardizedFileURL.path
+            return !path.isEmpty && seen.insert(path).inserted ? path : nil
         }
     }
 
-    func handleProgress(_ transferred: UInt64, _ total: UInt64) {
-        appendLog("progress · \(byteString(transferred)) / \(byteString(total))", throttle: true)
-        self.transferred = transferred
-        self.total = total
-        bytesPerSec = rate.record(transferred)
+    private func localized(_ english: String, _ chinese: String) -> String {
+        AppText.value(english, chinese, language: displayLanguage)
+    }
+}
+
+final class Observer: TransferObserver, @unchecked Sendable {
+    private weak var viewModel: TransferViewModel?
+    private let operationID: UUID
+
+    init(viewModel: TransferViewModel, operationID: UUID) {
+        self.viewModel = viewModel
+        self.operationID = operationID
     }
 
-    func handleCompleted(_ bytes: UInt64) {
-        appendLog("completed · \(byteString(bytes))")
-        transferred = bytes
-        total = max(total, bytes)
-        bytesPerSec = 0
-        if completedFileURL == nil, let dir = destinationDir, !fileName.isEmpty {
-            completedFileURL = availableCompletedFileURL(
-                path: URL(fileURLWithPath: dir).appendingPathComponent(fileName).path,
-                expectedBytes: bytes
-            )
-            if let completedFileURL {
-                completedItemURLs = [completedFileURL]
-            }
-        }
-        resourceAccess = nil
-        if transferActivity == nil {
-            fallbackPhase = .completed(bytes: bytes)
-        }
+    func onInviteReady(invite: String) { hop { $0.handleInvite(invite) } }
+    func onStarted(itemCount: UInt32, totalBytes: UInt64) {
+        hop { $0.handleStarted(itemCount: itemCount, totalBytes: totalBytes) }
     }
-
-    func handleTransferFailed(_ failure: FfiTransferFailure) {
-        appendLog("failed · \(failure.diagnosticMessage)")
-        if suppressNextFailure || transferActivity?.state == .canceled {
-            return
-        }
-        fallbackFailure = failure
-        resourceAccess = nil
-        if transferActivity == nil {
-            fallbackPhase = .failed(friendlyFailure(failure, language: displayLanguage))
-        }
+    func onPhase(phase: FfiManifestV2Phase) { hop { $0.handlePhase(phase) } }
+    func onProgress(transferred: UInt64, total: UInt64) {
+        hop { $0.handleProgress(transferred, total) }
     }
+    func onCompleted(bytes: UInt64) { hop { $0.handleCompleted(bytes) } }
+    func onTransferFailed(failure: FfiTransferFailure) { hop { $0.handleTransferFailed(failure) } }
+    func onDiagnostic(message: String) { hop { $0.handleDiagnostic(message) } }
 
-    func handleFailed(_ reason: String) {
-        appendLog("failed · \(reason)")
-        if suppressNextFailure || transferActivity?.state == .canceled {
-            suppressNextFailure = false
-            resourceAccess = nil
-            if transferActivity == nil {
-                fallbackPhase = .canceled
-            }
-            statusText = AppText.value("Canceled", "已取消", language: displayLanguage)
-            return
-        }
-        if let failure {
-            if transferActivity == nil {
-                fallbackPhase = .failed(friendlyFailure(failure, language: displayLanguage))
-            }
-            return
-        }
-        resourceAccess = nil
-        if transferActivity == nil {
-            fallbackPhase = .failed(friendlyError(reason, language: displayLanguage))
-        }
-    }
-
-    /// The core echoes the bound peer as `"address: <descriptor>"`, which
-    /// carries the real IP. Keep that out of the general status line and stash
-    /// it separately so the UI can gate it behind an explicit reveal.
-    func handleStatus(_ message: String) {
-        let prefix = "address: "
-        if message.hasPrefix(prefix) {
-            appendLog("address · \(message.dropFirst(prefix.count))")
-            peerAddress = String(message.dropFirst(prefix.count))
-        } else {
-            appendLog("status · \(message)")
-            statusText = message
-        }
-    }
-
-    private func appendLog(_ message: String, throttle: Bool = false) {
-        if throttle {
-            let now = Date()
-            if now.timeIntervalSince(logLastProgress) < 0.8 {
-                return
-            }
-            logLastProgress = now
-        }
-        eventLog.append("[\(configLogTimestamp.string(from: Date()))] \(message)")
-        if eventLog.count > 160 {
-            eventLog.removeFirst(eventLog.count - 160)
-        }
-    }
-
-    private func reset() {
-        invite = ""
-        fileName = ""
-        transferred = 0
-        total = 0
-        statusText = ""
-        peerAddress = ""
-        bytesPerSec = 0
-        completedFileURL = nil
-        completedItemURLs = []
-        fallbackFailure = nil
-        transferActivity = nil
-        isPreparingManifest = false
-        requiresExceptionalTransferApproval = false
-        pendingOfferEntries = []
-        pendingSourceSelections = []
-        resourceAccess = nil
-        eventLog.removeAll()
-        transferEvents.removeAll()
-        currentActivityID = ""
-        rate.reset()
-        fallbackPhase = .idle
-    }
-
-    func bindPresentation(to activityID: String) {
-        currentActivityID = activityID
-    }
-
-    private func releasePresentationSlotIfPaused(_ record: FfiTransferActivityRecord) {
-        guard record.state == .paused, record.activityId == currentActivityID else { return }
-        appModel?.snapshotDiagnostics(from: self, activityID: record.activityId)
-        operationID = UUID()
-        session = nil
-        manifestSession = nil
-        reset()
-    }
-
-    private func releasePresentationSlotIfTerminal(_ record: FfiTransferActivityRecord) {
-        guard ActivityProjectionPolicy.isTerminal(record.state),
-              record.activityId == currentActivityID else { return }
-        appModel?.snapshotDiagnostics(from: self, activityID: record.activityId)
-        operationID = UUID()
-        session = nil
-        manifestSession = nil
-        reset()
-    }
-
-    private func syncPhase(with record: FfiTransferActivityRecord) {
-        guard record.activityId == currentActivityID else { return }
-        switch record.state {
-        case .queued, .binding, .waitingForPeer, .pairing, .connecting:
-            break
-        case .verifying:
-            if isFinalizing {
-                bytesPerSec = 0
-                statusText = AppText.value("Confirming delivery", "正在确认送达", language: displayLanguage)
-            }
-        case .publishing:
-            bytesPerSec = 0
-            statusText = AppText.value("Saving to selected folder", "正在保存到所选文件夹", language: displayLanguage)
-        case .unconfirmed:
-            bytesPerSec = 0
-            statusText = AppText.value("Confirming delivery", "正在确认送达", language: displayLanguage)
-        case .transferring:
-            break
-        case .paused:
-            bytesPerSec = 0
-            statusText = AppText.value("Paused", "已暂停", language: displayLanguage)
-        case .canceled:
-            bytesPerSec = 0
-        case .completed:
-            bytesPerSec = 0
-            if isFullyResumedCompletion(record) {
-                statusText = record.direction == .send
-                    ? AppText.value("Receiver already has this file; no data was sent", "对方已有此文件，本次未发送数据", language: displayLanguage)
-                    : AppText.value("File already exists; no data was received", "文件已存在，本次未接收数据", language: displayLanguage)
-            }
-        case .failed, .unknown:
-            break
+    private func hop(_ body: @escaping @MainActor (TransferViewModel) -> Void) {
+        Task { @MainActor [weak viewModel, operationID] in
+            guard let viewModel, viewModel.operationID == operationID else { return }
+            body(viewModel)
         }
     }
 }
@@ -2832,253 +1642,82 @@ func estimatedRemainingSeconds(
     bytesPerSecond: Double,
     isStable: Bool
 ) -> Double? {
-    guard isStable,
-          total > transferred,
-          bytesPerSecond.isFinite,
-          bytesPerSecond > 0 else { return nil }
-    let seconds = Double(total - transferred) / bytesPerSecond
-    guard seconds.isFinite, seconds >= 0, seconds <= 7 * 24 * 60 * 60 else { return nil }
-    return seconds
+    guard isStable, total > transferred, bytesPerSecond > 0 else { return nil }
+    return Double(total - transferred) / bytesPerSecond
 }
 
-/// A short rolling window plus light smoothing. The first cumulative value is
-/// only a baseline, so resumed/skipped bytes are never reported as wire speed.
 struct RateTracker {
-    private struct Sample { let time: TimeInterval; let bytes: UInt64 }
-    private var samples: [Sample] = []
-    private var smoothedBytesPerSecond: Double = 0
-    private var positiveDeltaCount = 0
-    private let window: TimeInterval = 4
-    private let minimumObservationDuration: TimeInterval = 0.8
-    private let smoothingFactor = 0.35
-    private(set) var isStable = false
+    private var lastDate: Date?
+    private var lastBytes: UInt64 = 0
+    private(set) var samples = 0
+    private var smoothed = 0.0
 
-    mutating func reset() {
-        samples.removeAll()
-        smoothedBytesPerSecond = 0
-        positiveDeltaCount = 0
-        isStable = false
-    }
+    var isStable: Bool { samples >= 2 }
 
-    /// Records a cumulative byte count, returns the current bytes/sec estimate.
-    mutating func record(
-        _ bytes: UInt64,
-        at now: TimeInterval = ProcessInfo.processInfo.systemUptime
-    ) -> Double {
-        guard now.isFinite else { return 0 }
-        if let last = samples.last {
-            guard now > last.time, bytes >= last.bytes else {
-                if bytes < last.bytes || now < last.time {
-                    reset()
-                    samples.append(Sample(time: now, bytes: bytes))
-                } else if bytes > last.bytes {
-                    samples[samples.count - 1] = Sample(time: last.time, bytes: bytes)
-                }
-                return 0
-            }
-            if bytes > last.bytes {
-                positiveDeltaCount += 1
-            }
+    mutating func update(bytes: UInt64, now: Date = Date()) -> Double {
+        defer {
+            lastDate = now
+            lastBytes = bytes
         }
-        samples.append(Sample(time: now, bytes: bytes))
-        samples.removeAll { now - $0.time > window }
-        guard let first = samples.first, samples.count > 1 else { return 0 }
-        let dt = now - first.time
-        guard dt >= minimumObservationDuration, bytes > first.bytes else { return 0 }
-        let raw = Double(bytes - first.bytes) / dt
-        smoothedBytesPerSecond = smoothedBytesPerSecond > 0
-            ? smoothingFactor * raw + (1 - smoothingFactor) * smoothedBytesPerSecond
-            : raw
-        isStable = positiveDeltaCount >= 2
-        return isStable ? smoothedBytesPerSecond : 0
+        guard let lastDate, bytes >= lastBytes else { return smoothed }
+        let elapsed = now.timeIntervalSince(lastDate)
+        guard elapsed > 0.1 else { return smoothed }
+        let instantaneous = Double(bytes - lastBytes) / elapsed
+        smoothed = samples == 0 ? instantaneous : smoothed * 0.7 + instantaneous * 0.3
+        samples += 1
+        return smoothed
     }
 }
 
-/// Maps common raw failure strings to friendlier UI text; passes others through.
 func friendlyError(_ reason: String, language: String = "en") -> String {
-    let lower = reason.lowercased()
-    if lower.contains("timed out") || lower.contains("timeout") || lower.contains("deadline") {
-        return AppText.value(
-            "Couldn't reach the other device. Make sure both are on the same Wi-Fi network and the token matches.",
-            "无法连接另一台设备。请确认两台设备在同一 Wi-Fi，且口令匹配。",
-            language: language
-        )
-    }
-    if lower.contains("no peer") || lower.contains("not found") || lower.contains("no route") {
-        return AppText.value(
-            "No device found. Check that the other side is running and the token or invite is correct.",
-            "未发现设备。请确认另一端正在运行，并且口令或邀请信息正确。",
-            language: language
-        )
-    }
-    if lower.contains("expired") {
-        return AppText.value(
-            "This invite has expired. Ask the receiver to generate a new one.",
-            "此邀请已过期。请让接收方重新生成。",
-            language: language
-        )
-    }
-    if lower.contains("permission") || lower.contains("denied") {
-        return AppText.value(
-            "Access was denied. Check the destination folder permissions and local-network access.",
-            "访问被拒绝。请检查目标文件夹权限和本地网络访问权限。",
-            language: language
-        )
-    }
-    return reason
+    AppText.value("Transfer failed: \(reason)", "传输失败：\(reason)", language: language)
 }
 
 func friendlyFailure(_ failure: FfiTransferFailure, language: String = "en") -> String {
-    friendlyFailure(
-        code: failure.code,
-        diagnosticMessage: failure.diagnosticMessage,
-        language: language
-    )
+    friendlyFailure(code: failure.code, diagnosticMessage: failure.diagnosticMessage, language: language)
 }
 
-func friendlyFailure(code: FfiFailureCode, diagnosticMessage: String, language: String = "en") -> String {
+func friendlyFailure(
+    code: FfiFailureCode,
+    diagnosticMessage: String,
+    language: String = "en"
+) -> String {
     switch code {
-    case .userCanceled:
-        return AppText.value("Transfer canceled", "传输已取消", language: language)
-    case .peerCanceled:
-        return AppText.value("The other device canceled the transfer.", "另一台设备取消了传输。", language: language)
+    case .userCanceled, .senderCanceled:
+        return AppText.value("Transfer canceled.", "传输已取消。", language: language)
     case .networkLost:
-        return AppText.value("The connection was lost. Try again when both devices are online.", "连接已中断。请确认两台设备在线后重试。", language: language)
-    case .peerUnreachable:
-        return AppText.value("No device found. Check that the other side is running and the code or token is correct.", "未发现设备。请确认另一端正在运行，并且配对码或口令正确。", language: language)
+        return AppText.value("Connection lost. Resume to continue.", "连接已断开，可恢复继续。", language: language)
     case .authenticationFailed:
-        return AppText.value("Pairing failed. Check the code or token on both devices.", "配对失败。请检查两台设备上的配对码或口令。", language: language)
-    case .permissionDenied:
-        return AppText.value("Access was denied. Choose a folder again or check local-network permissions.", "访问被拒绝。请重新选择文件夹，或检查本地网络权限。", language: language)
-    case .diskFull:
-        return AppText.value("There is not enough space to save the file.", "没有足够空间保存文件。", language: language)
-    case .hashMismatch:
-        return AppText.value("The received file did not pass verification. Please retry the transfer.", "接收的文件未通过校验。请重新传输。", language: language)
-    case .protocolError:
-        return AppText.value("The two devices did not agree on the transfer protocol. Update both apps and try again.", "两台设备的传输协议不一致。请更新两端应用后重试。", language: language)
-    case .destinationConflict:
-        return AppText.value("The file could not be saved to the selected destination. Choose another folder and try again.", "文件无法保存到当前目标位置。请选择其他文件夹后重试。", language: language)
-    case .unsupportedFeature:
-        return AppText.value("This transfer mode is not supported by the other app version.", "另一端应用版本不支持此传输模式。", language: language)
-    case .timeout:
-        return AppText.value("The transfer timed out. Try again; a retry may resume from partial progress.", "传输超时。请重试，可能会从已有进度继续。", language: language)
-    case .internalError:
-        return AppText.value("An internal transfer error occurred. Try again or copy diagnostics from Activity.", "发生内部传输错误。请重试，或从活动页复制诊断信息。", language: language)
-    case .senderSourceUnavailable:
-        return AppText.value("A selected source is no longer available. Restore access and retry.", "所选内容已不可用。请恢复访问后重试。", language: language)
+        return AppText.value("Pairing authentication failed.", "配对认证失败。", language: language)
     case .senderPermissionLost:
-        return AppText.value("Access to a selected source expired. Select or authorize it again.", "所选内容的访问权限已失效。请重新选择或授权。", language: language)
-    case .senderSourceChanged:
-        return AppText.value("A selected source changed during preparation or transfer. Start it again to send one consistent version.", "所选内容在准备或传输期间发生变化。请重新开始，以发送同一个完整版本。", language: language)
-    case .senderItemRemoved, .senderCanceled:
-        return AppText.value("The sender removed or canceled this content.", "发送方已移除或取消此内容。", language: language)
-    case .protocolOrIntegrityFailure:
-        return AppText.value("The authenticated transfer data did not pass protocol or integrity checks.", "认证后的传输数据未通过协议或完整性校验。", language: language)
+        return AppText.value("Source permission expired. Choose the source again.", "来源权限已失效，请重新选择。", language: language)
+    case .senderSourceUnavailable, .senderItemRemoved:
+        return AppText.value("A selected source is unavailable.", "所选来源不可用。", language: language)
+    case .senderSourceChanged, .protocolOrIntegrityFailure:
+        return AppText.value("Content verification failed.", "内容校验失败。", language: language)
     case .receiverSpaceInsufficient:
-        return AppText.value("The selected destination does not have enough allocatable space.", "所选目标没有足够的可用空间。", language: language)
-    case .receiverDestinationDecisionRequired:
-        return AppText.value("Choose a supported save method or another destination before receiving.", "请在接收前选择受支持的保存方式或其他目标。", language: language)
-    case .receiverDestinationUnavailable:
-        return AppText.value("The selected destination or its recovery state is unavailable. Choose it again.", "所选目标或其恢复状态不可用。请重新选择。", language: language)
+        return AppText.value("The destination does not have enough space.", "目标位置空间不足。", language: language)
+    case .receiverDestinationDecisionRequired, .receiverDestinationUnavailable:
+        return AppText.value("Choose an available destination.", "请选择可用的目标位置。", language: language)
     case .receiverSaveFailed:
-        return AppText.value("The receiver could not durably save the verified content.", "接收端未能持久保存已校验的内容。", language: language)
+        return AppText.value("The receiver could not finish saving. Resume to reconcile it.", "接收端未能完成保存，请恢复以进行确认。", language: language)
     case .receiverReusedObjectLost:
-        return AppText.value("A file selected for local reuse changed or disappeared before completion.", "准备复用的本地文件在完成前发生变化或消失。", language: language)
+        return AppText.value(
+            "An existing destination item selected for reuse changed or disappeared. Restore it and resume, or start a new transfer.",
+            "接收端原定复用的已有项目已更改或消失。请恢复该项目后继续，或重新发起传输。",
+            language: language
+        )
     case .receiverFinalizationOutcomeUnknown:
-        return AppText.value("The receiver must reconcile an interrupted save before retrying.", "接收端需要先确认中断的保存结果，再重试。", language: language)
-    case .unknown:
-        return diagnosticMessage
-    }
-}
-
-/// Bridges core `TransferObserver` callbacks (delivered on Rust runtime threads)
-/// onto the main thread before touching the view model.
-final class Observer: TransferObserver, @unchecked Sendable {
-    private weak var viewModel: TransferViewModel?
-    private weak var appModel: AppModel?
-    private let operationID: UUID
-    private let activityID: String
-
-    init(
-        _ viewModel: TransferViewModel?,
-        appModel: AppModel,
-        operationID: UUID,
-        activityID: String
-    ) {
-        self.viewModel = viewModel
-        self.appModel = appModel
-        self.operationID = operationID
-        self.activityID = activityID
-    }
-
-    func onInviteReady(invite: String) { hop { $0.handleInvite(invite) } }
-    func onStarted(fileName: String, totalBytes: UInt64) { hop { $0.handleStarted(fileName, totalBytes) } }
-    func onProgress(transferred: UInt64, total: UInt64) { hop { $0.handleProgress(transferred, total) } }
-    func onCompleted(bytes: UInt64) { hop { $0.handleCompleted(bytes) } }
-    func onTransferFailed(failure: FfiTransferFailure) { hop { $0.handleTransferFailed(failure) } }
-    func onFailed(reason: String) { hop { $0.handleFailed(reason) } }
-    func onTransferEvent(event: FfiTransferEvent) {
-        DispatchQueue.main.async { [weak viewModel, weak appModel, operationID, activityID] in
-            appModel?.handleCoreEvent(event, activityID: activityID)
-            if let viewModel, viewModel.operationID == operationID {
-                viewModel.handleTransferEvent(event)
-            }
-        }
-    }
-
-    func onTransferActivity(record: FfiTransferActivityRecord) {
-        DispatchQueue.main.async { [weak viewModel, weak appModel, operationID] in
-            appModel?.handleCoreActivity(record)
-            if let viewModel, viewModel.operationID == operationID {
-                viewModel.handleTransferActivity(record)
-            }
-        }
-    }
-
-    func onStatus(message: String) {
-        DispatchQueue.main.async { [weak viewModel, weak appModel, operationID, activityID] in
-            appModel?.handleCoreStatus(message, activityID: activityID)
-            if let viewModel, viewModel.operationID == operationID {
-                viewModel.handleStatus(message)
-            }
-        }
-    }
-
-    private func hop(_ body: @escaping (TransferViewModel) -> Void) {
-        DispatchQueue.main.async { [weak viewModel, operationID] in
-            if let viewModel, viewModel.operationID == operationID { body(viewModel) }
-        }
-    }
-}
-
-/// Manifest snapshots own canonical Activity state; structured events are
-/// retained separately for diagnostics and never form a second state machine.
-final class AppleManifestObserver: ManifestTransferObserverV2, @unchecked Sendable {
-    private weak var viewModel: TransferViewModel?
-    private weak var appModel: AppModel?
-    private let activityID: String
-
-    init(viewModel: TransferViewModel?, appModel: AppModel, activityID: String) {
-        self.viewModel = viewModel
-        self.appModel = appModel
-        self.activityID = activityID
-    }
-
-    func onManifestEvent(event: FfiTransferEvent) {
-        DispatchQueue.main.async { [weak viewModel, weak appModel, activityID] in
-            appModel?.handleCoreEvent(event, activityID: activityID)
-            if let viewModel, viewModel.activeActivityID == activityID {
-                viewModel.handleManifestTransferEvent(event)
-            }
-        }
-    }
-
-    func onManifestActivity(record: FfiManifestActivityRecord) {
-        DispatchQueue.main.async { [weak viewModel, weak appModel, activityID] in
-            appModel?.handleManifestActivity(record)
-            if let viewModel, viewModel.activeActivityID == activityID {
-                viewModel.handleManifestActivity(record)
-            }
-        }
+        return AppText.value(
+            "The receiver cannot yet confirm the final save after an interruption. Resume to reconcile the destination.",
+            "中断后接收端暂时无法确认最终保存结果，请恢复传输以核对目标位置。",
+            language: language
+        )
+    case .unsupportedFeature:
+        return AppText.value("This transfer request is not supported.", "不支持此传输请求。", language: language)
+    case .internalError:
+        return diagnosticMessage.isEmpty
+            ? AppText.value("The transfer failed.", "传输失败。", language: language)
+            : diagnosticMessage
     }
 }

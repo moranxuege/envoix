@@ -107,8 +107,8 @@ struct TransferStatusView: View {
                     }
                     if viewModel.pendingOfferEntries.count > 12 {
                         Text(AppText.value(
-                            "More items are available in the paged inventory.",
-                            "其余项目可在分页清单中继续查看。",
+                            "Large inventories are summarized here; transfer still preserves the complete tree.",
+                            "此处仅摘要显示大型清单；传输仍会完整保留全部目录树。",
                             language: language
                         ))
                             .font(.footnote)
@@ -227,20 +227,7 @@ struct TransferStatusView: View {
     }
 
     private var currentDataPathText: String? {
-        guard let record = viewModel.transferActivity, record.dataPathKind != .none else { return nil }
-        let pathKind: String
-        switch record.dataPathKind {
-        case .direct:
-            pathKind = AppText.value("Direct", "直连", language: language)
-        case .relay:
-            pathKind = AppText.value("Relay", "中继", language: language)
-        case .other:
-            pathKind = AppText.value("Path", "路径", language: language)
-        case .none:
-            return nil
-        }
-        guard developerMode, !record.dataPathDetail.isEmpty else { return pathKind }
-        return "\(pathKind) · \(record.dataPathDetail)"
+        nil
     }
 
     @ViewBuilder private var logsCard: some View {
@@ -382,28 +369,18 @@ struct TransferStatusView: View {
     private func structuredFailureText(_ failure: FfiTransferFailure) -> (title: String, detail: String) {
         let title: String
         switch failure.code {
-        case .userCanceled, .peerCanceled:
+        case .userCanceled, .senderCanceled:
             title = AppText.value("Transfer canceled", "传输已取消", language: language)
-        case .networkLost, .peerUnreachable, .timeout:
+        case .networkLost:
             title = AppText.value("Connection failed", "连接失败", language: language)
         case .authenticationFailed:
             title = AppText.value("Pairing failed", "配对失败", language: language)
-        case .permissionDenied:
-            title = AppText.value("Permission needed", "需要权限", language: language)
-        case .diskFull:
-            title = AppText.value("Not enough space", "空间不足", language: language)
-        case .hashMismatch:
-            title = AppText.value("Verification failed", "校验失败", language: language)
-        case .protocolError:
-            title = AppText.value("Protocol mismatch", "协议不匹配", language: language)
-        case .destinationConflict:
-            title = AppText.value("Destination conflict", "目标位置冲突", language: language)
         case .unsupportedFeature:
             title = AppText.value("Update required", "需要更新", language: language)
-        case .internalError, .unknown:
+        case .internalError:
             title = AppText.value("Transfer failed", "传输失败", language: language)
         case .senderSourceUnavailable, .senderPermissionLost, .senderSourceChanged,
-             .senderItemRemoved, .senderCanceled:
+             .senderItemRemoved:
             title = AppText.value("Source unavailable", "发送内容不可用", language: language)
         case .protocolOrIntegrityFailure:
             title = AppText.value("Verification failed", "校验失败", language: language)

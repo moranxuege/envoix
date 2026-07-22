@@ -312,22 +312,40 @@ pub async fn receive_manifest_v2_offer(
     events: Arc<dyn EventSink>,
     cancel: &TransferCancelToken,
 ) -> Result<PendingManifestV2Receive, SessionError> {
-    let mut connection = tokio::select! {
-        result = bound_endpoint.accept_with_events(events.as_ref()) => result?,
-        () = cancel.cancelled() => return Err(interrupted_error(cancel)),
+    let mut authentication_failures = 0_u32;
+    let mut connection = loop {
+        let mut connection = tokio::select! {
+            result = bound_endpoint.accept_with_events(events.as_ref()) => result?,
+            () = cancel.cancelled() => return Err(interrupted_error(cancel)),
+        };
+        if connection.protocol() != TransferProtocol::ManifestV2 {
+            let _ = ManifestV2FrameConnection::close(&mut connection).await;
+            return Err(CoreError::Protocol(
+                "canonical receive endpoint negotiated a non-Manifest-v2 protocol".into(),
+            ));
+        }
+        connection.watch_path(events.clone());
+        match auth_bounded(authenticate_receiver(&mut connection, pairing), cancel).await {
+            Ok(()) => break connection,
+            Err(error) if cancel.is_cancelled() => {
+                let _ = ManifestV2FrameConnection::close(&mut connection).await;
+                return Err(error);
+            }
+            Err(error) => {
+                let _ = ManifestV2FrameConnection::close(&mut connection).await;
+                authentication_failures += 1;
+                events.on_event(envoix_transfer::TransferEvent::Diagnostic {
+                    message: format!(
+                        "rejected an unauthenticated peer ({authentication_failures}/{})",
+                        super::MAX_AUTH_FAILURES
+                    ),
+                });
+                if authentication_failures >= super::MAX_AUTH_FAILURES {
+                    return Err(CoreError::Crypto("too many failed pairing attempts".into()));
+                }
+            }
+        }
     };
-    if connection.protocol() != TransferProtocol::ManifestV2 {
-        let _ = ManifestV2FrameConnection::close(&mut connection).await;
-        return Err(CoreError::Protocol(
-            "canonical receive endpoint negotiated a non-Manifest-v2 protocol".into(),
-        ));
-    }
-    connection.watch_path(events.clone());
-    if let Err(error) = auth_bounded(authenticate_receiver(&mut connection, pairing), cancel).await
-    {
-        let _ = ManifestV2FrameConnection::close(&mut connection).await;
-        return Err(error);
-    }
     let (offer, resume_request) = match tokio::select! {
         result = connection.recv_manifest_v2_frame() => result.map_err(|error| CoreError::Protocol(error.to_string()))?,
         () = cancel.cancelled() => return Err(interrupted_error(cancel)),
@@ -455,9 +473,10 @@ async fn receive_after_offer(
             .map_err(session_receiver_data_error)?,
         );
         if resume_intent == Some(SenderResumeIntentV2::ContinueData) {
-            let provider = LocalDestinationProviderV2::new(plan.clone(), offer.manifest.clone())
-                .await
-                .map_err(session_destination_error)?;
+            let mut provider =
+                LocalDestinationProviderV2::new(plan.clone(), offer.manifest.clone())
+                    .await
+                    .map_err(session_destination_error)?;
             provider
                 .reconcile_resume(&mut ledger, &data_store)
                 .await

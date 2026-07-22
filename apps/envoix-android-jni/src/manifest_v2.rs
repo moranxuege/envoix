@@ -5,11 +5,13 @@ use std::sync::{Arc, Mutex, OnceLock};
 use async_trait::async_trait;
 use envoix_client::api::{
     CanonicalTransferJob, Client, CompressionPolicyV2, DestinationDecisionV2, DestinationRequestV2,
-    JobIdV2, JobLifecycle, LocalSourceOrigin, ManifestV2DataError, ManifestV2ProgressPhase,
-    ManifestV2ResultGate, ProviderSourceIssue, SavedEntryV2, SessionEventSink,
-    SessionTransferEvent, SourceDecision, SourceIssueKind, SourceItemId, SourceSelectionState,
-    TransferCancelToken, TransferJobStore, TransferOptions, local_allocatable_bytes,
-    parse_broker_addr, receive_manifest_v2_offer_via_room, send_manifest_v2_via_room,
+    EventSink, JobIdV2, JobLifecycle, LocalSourceOrigin, ManifestV2DataError,
+    ManifestV2ProgressPhase, ManifestV2ResultGate, PairingConfig, PendingManifestV2Receive,
+    ProviderSourceIssue, SavedEntryV2, SenderManifestV2SessionSummary, SourceDecision,
+    SourceIssueKind, SourceItemId, SourceSelectionState, TransferCancelToken, TransferEvent,
+    TransferJobStore, TransferOptions, local_allocatable_bytes, parse_broker_addr,
+    receive_manifest_v2_offer_enable_mdns, receive_manifest_v2_offer_via_room,
+    send_manifest_v2_enable_mdns, send_manifest_v2_via_room,
 };
 use envoix_error::CoreError;
 use envoix_protocol::manifest_v2::{ManifestEntryKindV2, ManifestV2};
@@ -19,6 +21,7 @@ use jni::sys::{jlong, jstring};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
+use tokio::task::JoinSet;
 
 use super::*;
 
@@ -68,6 +71,8 @@ struct StartParams {
     job_store_directory: String,
     #[serde(default)]
     job_id: Option<String>,
+    use_room: bool,
+    use_mdns: bool,
 }
 
 #[derive(Deserialize)]
@@ -148,23 +153,22 @@ impl AndroidEvents {
     }
 }
 
-impl SessionEventSink for AndroidEvents {
-    fn on_event(&self, event: SessionTransferEvent) {
+impl EventSink for AndroidEvents {
+    fn on_event(&self, event: TransferEvent) {
         match event {
-            SessionTransferEvent::Diagnostic { message } => {
+            TransferEvent::Diagnostic { message } => {
                 self.send(json!({"notice":"manifest_v2","kind":"diagnostic","message":message}));
             }
-            SessionTransferEvent::Pairing { step } => {
+            TransferEvent::Pairing { step } => {
                 self.send(json!({"notice":"manifest_v2","state":"connecting","pairing":format!("{step:?}")}));
             }
-            SessionTransferEvent::Connecting => {
+            TransferEvent::Connecting => {
                 self.send(json!({"notice":"manifest_v2","state":"connecting"}));
             }
-            SessionTransferEvent::Connected { path }
-            | SessionTransferEvent::PathChanged { path } => {
+            TransferEvent::Connected { path } | TransferEvent::PathChanged { path } => {
                 self.send(json!({"notice":"manifest_v2","kind":"path","path":path.to_string()}));
             }
-            SessionTransferEvent::Progress {
+            TransferEvent::Progress {
                 bytes_transferred,
                 total_bytes,
                 ..
@@ -174,7 +178,7 @@ impl SessionEventSink for AndroidEvents {
                 "bytes":bytes_transferred,
                 "total":total_bytes,
             })),
-            SessionTransferEvent::ManifestV2Phase { phase, .. } => {
+            TransferEvent::ManifestV2Phase { phase, .. } => {
                 let state = match phase {
                     ManifestV2ProgressPhase::Transferring if self.direction == "receive" => {
                         "receiving"
@@ -183,19 +187,10 @@ impl SessionEventSink for AndroidEvents {
                     ManifestV2ProgressPhase::Verifying => "verifying",
                     ManifestV2ProgressPhase::Saving => "saving",
                     ManifestV2ProgressPhase::WaitingForReceiverSave => "waiting_for_receiver_save",
-                    ManifestV2ProgressPhase::Received => "received",
+                    ManifestV2ProgressPhase::FinalizingDelivery => "finalizing_delivery",
                 };
                 self.send(json!({"notice":"manifest_v2","state":state}));
             }
-            // Manifest v2 has its own phase/progress facts. These variants
-            // belong to the removed single-file engine and are diagnostic only
-            // if an older session layer unexpectedly emits them.
-            SessionTransferEvent::Started { .. }
-            | SessionTransferEvent::Confirming { .. }
-            | SessionTransferEvent::HashStarted { .. }
-            | SessionTransferEvent::HashCompleted { .. }
-            | SessionTransferEvent::Completed { .. }
-            | SessionTransferEvent::Failed { .. } => {}
         }
     }
 }
@@ -634,8 +629,16 @@ async fn run_session(
     let mut options = TransferOptions::default();
     options.relay = (!params.relay.trim().is_empty()).then(|| params.relay.clone());
     let config = Client::default().session_config(&options);
-    let broker = parse_broker_addr(&params.broker, options.relay.as_deref())?;
-    let events: Arc<dyn SessionEventSink> = Arc::new(AndroidEvents {
+    if !params.use_room && !params.use_mdns {
+        return Err(CoreError::InvalidInput(
+            "at least one rendezvous route must be enabled".into(),
+        ));
+    }
+    let broker = params
+        .use_room
+        .then(|| parse_broker_addr(&params.broker, options.relay.as_deref()))
+        .transpose()?;
+    let events: Arc<dyn EventSink> = Arc::new(AndroidEvents {
         vm: vm.clone(),
         callback: callback.clone(),
         direction: if params.direction == "send" {
@@ -661,9 +664,10 @@ async fn run_session(
                 .await
                 .map_err(|error| CoreError::Storage(error.to_string()))?;
         }
-        send_manifest_v2_via_room(
+        send_with_enabled_routes(
             broker,
             &params.room,
+            params.use_mdns,
             &job,
             PathBuf::from(&params.state_directory),
             config,
@@ -679,10 +683,11 @@ async fn run_session(
         return Ok(());
     }
 
-    let pending = receive_manifest_v2_offer_via_room(
+    let pending = receive_from_enabled_routes(
         broker,
         &params.room,
-        envoix_client::BindAddrs::dual_stack(0),
+        params.use_room,
+        params.use_mdns,
         config,
         events,
         cancel,
@@ -708,6 +713,11 @@ async fn run_session(
         .lock()
         .map_err(|_| CoreError::Transfer("offer inventory registry unavailable".into()))?
         .insert(id, inventory);
+    let (decision_sender, decision_receiver) = oneshot::channel();
+    receive_decisions()
+        .lock()
+        .map_err(|_| CoreError::Transfer("receive decision registry unavailable".into()))?
+        .insert(id, decision_sender);
     let exceptional = manifest.totals.total_plaintext_bytes
         > envoix_client::api::AUTO_RECEIVE_PLAINTEXT_LIMIT_BYTES;
     emit(
@@ -725,11 +735,6 @@ async fn run_session(
         })
         .to_string(),
     );
-    let (decision_sender, decision_receiver) = oneshot::channel();
-    receive_decisions()
-        .lock()
-        .map_err(|_| CoreError::Transfer("receive decision registry unavailable".into()))?
-        .insert(id, decision_sender);
     let decision = tokio::select! {
         decision = decision_receiver => decision.map_err(|_| CoreError::Cancelled)?,
         () = cancel.cancelled() => return Err(CoreError::Cancelled),
@@ -780,6 +785,175 @@ async fn run_session(
         .to_string(),
     );
     Ok(())
+}
+
+async fn send_with_enabled_routes(
+    broker: Option<envoix_client::EndpointAddr>,
+    code: &str,
+    use_mdns: bool,
+    job: &CanonicalTransferJob,
+    state_directory: PathBuf,
+    config: envoix_client::api::SessionConfig,
+    events: Arc<dyn EventSink>,
+    cancel: &TransferCancelToken,
+) -> Result<SenderManifestV2SessionSummary, CoreError> {
+    let mut last_error = None;
+    if let Some(broker) = broker {
+        match send_manifest_v2_via_room(
+            broker,
+            code,
+            job,
+            state_directory.clone(),
+            config.clone(),
+            events.clone(),
+            cancel,
+        )
+        .await
+        {
+            Ok(summary) => return Ok(summary),
+            Err(error) if !cancel.is_cancelled() => {
+                events.on_event(TransferEvent::Diagnostic {
+                    message: format!("Room route failed; trying another enabled route: {error}"),
+                });
+                last_error = Some(error);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    if use_mdns {
+        let pairing = PairingConfig::spake2_shared_token(code.to_string())?;
+        match send_manifest_v2_enable_mdns(
+            job.clone(),
+            state_directory,
+            config,
+            &pairing,
+            events,
+            cancel.clone(),
+        )
+        .await
+        {
+            Ok(summary) => return Ok(summary),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error
+        .unwrap_or_else(|| CoreError::InvalidInput("no enabled send route is available".into())))
+}
+
+async fn receive_from_enabled_routes(
+    broker: Option<envoix_client::EndpointAddr>,
+    code: &str,
+    use_room: bool,
+    use_mdns: bool,
+    config: envoix_client::api::SessionConfig,
+    events: Arc<dyn EventSink>,
+    cancel: &TransferCancelToken,
+) -> Result<PendingManifestV2Receive, CoreError> {
+    if use_room && !use_mdns {
+        let broker = broker
+            .ok_or_else(|| CoreError::InvalidInput("Room rendezvous requires a broker".into()))?;
+        return receive_manifest_v2_offer_via_room(
+            broker,
+            code,
+            envoix_client::BindAddrs::dual_stack(0),
+            config,
+            events,
+            cancel,
+        )
+        .await;
+    }
+    if use_mdns && !use_room {
+        let pairing = PairingConfig::spake2_shared_token(code.to_string())?;
+        return receive_manifest_v2_offer_enable_mdns(
+            envoix_client::BindAddrs::dual_stack(0),
+            config,
+            &pairing,
+            events,
+            |_, _| {},
+            cancel,
+        )
+        .await;
+    }
+
+    let broker = broker
+        .ok_or_else(|| CoreError::InvalidInput("Room rendezvous requires a broker".into()))?;
+    let room_cancel = TransferCancelToken::new();
+    let mdns_cancel = TransferCancelToken::new();
+    let mut routes = JoinSet::new();
+    {
+        let code = code.to_string();
+        let config = config.clone();
+        let events = events.clone();
+        let route_cancel = room_cancel.clone();
+        routes.spawn(async move {
+            let result = receive_manifest_v2_offer_via_room(
+                broker,
+                &code,
+                envoix_client::BindAddrs::dual_stack(0),
+                config,
+                events,
+                &route_cancel,
+            )
+            .await;
+            (0_usize, result)
+        });
+    }
+    {
+        let pairing = PairingConfig::spake2_shared_token(code.to_string())?;
+        let events = events.clone();
+        let route_cancel = mdns_cancel.clone();
+        routes.spawn(async move {
+            let result = receive_manifest_v2_offer_enable_mdns(
+                envoix_client::BindAddrs::dual_stack(0),
+                config,
+                &pairing,
+                events,
+                |_, _| {},
+                &route_cancel,
+            )
+            .await;
+            (1_usize, result)
+        });
+    }
+
+    let mut last_error = None;
+    loop {
+        tokio::select! {
+            () = cancel.cancelled() => {
+                room_cancel.cancel();
+                mdns_cancel.cancel();
+                while routes.join_next().await.is_some() {}
+                return Err(CoreError::Cancelled);
+            }
+            joined = routes.join_next() => match joined {
+                Some(Ok((winner, Ok(pending)))) => {
+                    if winner == 0 { mdns_cancel.cancel(); } else { room_cancel.cancel(); }
+                    while routes.join_next().await.is_some() {}
+                    return Ok(pending);
+                }
+                Some(Ok((_, Err(error)))) => {
+                    events.on_event(TransferEvent::Diagnostic {
+                        message: format!("Receive route failed; keeping the other route active: {error}"),
+                    });
+                    last_error = Some(error);
+                    if routes.is_empty() { break; }
+                }
+                Some(Err(error)) => {
+                    last_error = Some(CoreError::Transfer(format!("receive route task failed: {error}")));
+                    if routes.is_empty() { break; }
+                }
+                None => break,
+            },
+            () = cancel.cancelled() => {
+                room_cancel.cancel();
+                mdns_cancel.cancel();
+                while routes.join_next().await.is_some() {}
+                return Err(CoreError::Cancelled);
+            }
+        }
+    }
+    Err(last_error
+        .unwrap_or_else(|| CoreError::InvalidInput("no enabled receive route is available".into())))
 }
 
 fn call_save_required(

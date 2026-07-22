@@ -6,23 +6,21 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
- * Pins the Kotlin [Status] enum against the core `State` wire strings. Mirrors
- * the Rust `every_state_serializes_to_its_wire_string` test — the two string
- * lists must stay identical, or a snapshot state fails to map and (previously)
- * silently froze the card.
+ * Pins the Kotlin [Status] enum against canonical Manifest-v2 phase strings.
  */
 class StatusMappingTest {
-    // The 11 wire strings the core `State` serializes to (serde snake_case).
     private val coreStates =
         listOf(
             "preparing",
-            "waiting",
             "connecting",
-            "verifying",
+            "awaiting_decision",
             "transferring",
-            "confirming",
+            "receiving",
+            "verifying",
+            "saving",
+            "waiting_for_receiver_save",
+            "finalizing_delivery",
             "paused",
-            "unconfirmed",
             "completed",
             "failed",
             "cancelled",

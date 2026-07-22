@@ -171,7 +171,9 @@ impl FfiTransferJobV2 {
         }
         let mut job = self.job.lock().await;
         for path in paths {
-            job.add_local_path(PathBuf::from(path)).await.map_err(op_err)?;
+            job.add_local_path(PathBuf::from(path))
+                .await
+                .map_err(op_err)?;
             self.store.save(&job).await.map_err(op_err)?;
         }
         job.prepare_all().await.map_err(op_err)?;
@@ -360,8 +362,8 @@ pub async fn create_transfer_job_v2(
         });
     }
     let store = TransferJobStore::new(PathBuf::from(store_directory));
-    let job = CanonicalTransferJob::new(core_compression_policy(compression_policy))
-        .map_err(op_err)?;
+    let job =
+        CanonicalTransferJob::new(core_compression_policy(compression_policy)).map_err(op_err)?;
     store.save(&job).await.map_err(op_err)?;
     Ok(Arc::new(FfiTransferJobV2 {
         job: Mutex::new(job),
@@ -381,13 +383,14 @@ pub async fn restore_transfer_job_v2(
     }
     let store = TransferJobStore::new(PathBuf::from(store_directory));
     let job_id = decode_job_id(&job_id)?;
-    let mut job = store
-        .load(job_id)
-        .await
-        .map_err(op_err)?
-        .ok_or_else(|| EnvoixError::Operation {
-            reason: "transfer job was not found".into(),
-        })?;
+    let mut job =
+        store
+            .load(job_id)
+            .await
+            .map_err(op_err)?
+            .ok_or_else(|| EnvoixError::Operation {
+                reason: "transfer job was not found".into(),
+            })?;
     store
         .reconcile_pending_cleanup(&mut job)
         .await

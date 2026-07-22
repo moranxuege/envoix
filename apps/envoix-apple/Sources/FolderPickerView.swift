@@ -79,6 +79,32 @@ struct FolderPickerSheet: View {
     }
 }
 
+struct MultiFolderPickerSheet: View {
+    let initialDirectoryURL: URL?
+    let onPick: ([URL]) -> Void
+    let onCancel: () -> Void
+
+    init(
+        initialDirectoryURL: URL? = nil,
+        onPick: @escaping ([URL]) -> Void,
+        onCancel: @escaping () -> Void
+    ) {
+        self.initialDirectoryURL = initialDirectoryURL
+        self.onPick = onPick
+        self.onCancel = onCancel
+    }
+
+    var body: some View {
+        DocumentPickerSheet(
+            contentTypes: [.folder],
+            allowsMultipleSelection: true,
+            initialDirectoryURL: initialDirectoryURL,
+            onPick: onPick,
+            onCancel: onCancel
+        )
+    }
+}
+
 struct FilePickerSheet: View {
     let initialDirectoryURL: URL?
     let onPick: ([URL]) -> Void
