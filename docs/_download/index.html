@@ -1,167 +1,656 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-CN">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Envoix 下载</title>
-    <style>
-        :root {
-            --bg: #0d0d0d;
-            --card: #1a1a1a;
-            --border: #2a2a2a;
-            --text: #e0e0e0;
-            --dim: #888;
-            --accent: #4da6ff;
-            --green: #4ecdc4;
-        }
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            background: var(--bg);
-            color: var(--text);
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            min-height: 100vh;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-        }
-        header {
-            text-align: center;
-            padding: 60px 20px 30px;
-        }
-        header h1 { font-size: 2.2rem; font-weight: 700; color: #fff; }
-        header p { color: var(--dim); margin-top: 8px; font-size: 0.95rem; }
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="下载 Envoix 图形客户端，或从源码安装跨平台命令行工具。">
+  <title>Envoix 下载</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #071116;
+      --surface: rgba(13, 28, 35, 0.9);
+      --surface-strong: #10252d;
+      --line: rgba(149, 196, 211, 0.17);
+      --line-strong: rgba(97, 210, 221, 0.42);
+      --text: #f3f8f8;
+      --muted: #9db0b5;
+      --faint: #6f858b;
+      --blue: #55a9ff;
+      --cyan: #61d2dd;
+      --green: #6fd7aa;
+      --amber: #f1c978;
+      --danger: #f0a28f;
+      --shadow: 0 28px 70px rgba(0, 0, 0, 0.26);
+      --radius-lg: 24px;
+      --radius-md: 16px;
+    }
 
-        .grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-            gap: 16px;
-            max-width: 920px;
-            width: 100%;
-            padding: 0 20px 60px;
-        }
-        .card {
-            background: var(--card);
-            border: 1px solid var(--border);
-            border-radius: 12px;
-            padding: 24px;
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
-        }
-        .card h3 { font-size: 1.1rem; color: #fff; }
-        .card .ver { font-size: 0.8rem; color: var(--dim); font-weight: 400; }
-        .card .desc { font-size: 0.85rem; color: var(--dim); flex: 1; }
-        .card a,
-        .card .unavailable {
-            display: inline-block;
-            background: var(--accent);
-            color: #fff;
-            text-decoration: none;
-            padding: 10px 18px;
-            border-radius: 8px;
-            font-size: 0.9rem;
-            font-weight: 600;
-            text-align: center;
-        }
-        .card a:hover { opacity: 0.85; }
-        .card .unavailable {
-            background: #333;
-            color: var(--dim);
-            cursor: not-allowed;
-        }
-        .download-options {
-            display: grid;
-            gap: 10px;
-        }
-        .download-option {
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 12px;
-        }
-        .download-option h4 {
-            color: #fff;
-            font-size: 0.9rem;
-            margin-bottom: 8px;
-        }
-        .download-option a { width: 100%; }
-        .download-option a.secondary {
-            background: transparent;
-            border: 1px solid var(--accent);
-            color: var(--accent);
-        }
-        .badge {
-            color: var(--green);
-            font-size: 0.72rem;
-            font-weight: 600;
-            margin-left: 6px;
-            text-transform: uppercase;
-        }
-        .download-option .warning {
-            color: var(--dim);
-            font-size: 0.75rem;
-            margin-top: 8px;
-        }
-        .card .note {
-            font-size: 0.78rem;
-            color: #666;
-            border-top: 1px solid var(--border);
-            padding-top: 8px;
-            margin-top: 4px;
-        }
-        footer {
-            padding: 20px;
-            color: var(--dim);
-            font-size: 0.8rem;
-            text-align: center;
-        }
-        footer a { color: var(--accent); }
-    </style>
+    * { box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      min-width: 0;
+      min-height: 100vh;
+      overflow-x: hidden;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 12% 8%, rgba(85, 169, 255, 0.16), transparent 34rem),
+        radial-gradient(circle at 92% 26%, rgba(97, 210, 221, 0.11), transparent 28rem),
+        linear-gradient(155deg, #071116 0%, #09181d 55%, #061015 100%);
+      font-family: "Avenir Next", "PingFang SC", "Microsoft YaHei", sans-serif;
+      line-height: 1.6;
+    }
+
+    body::before {
+      position: fixed;
+      inset: 0;
+      z-index: -1;
+      content: "";
+      opacity: 0.28;
+      background-image:
+        linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+      background-size: 44px 44px;
+      mask-image: linear-gradient(to bottom, black, transparent 76%);
+    }
+
+    a { color: inherit; }
+
+    a:focus-visible {
+      outline: 3px solid rgba(97, 210, 221, 0.72);
+      outline-offset: 3px;
+    }
+
+    .shell {
+      width: min(1120px, calc(100% - 40px));
+      margin: 0 auto;
+    }
+
+    .hero {
+      padding: 88px 0 52px;
+      display: grid;
+      grid-template-columns: minmax(0, 1.25fr) minmax(260px, 0.75fr);
+      gap: 44px;
+      align-items: end;
+    }
+
+    .eyebrow,
+    .section-kicker {
+      margin: 0 0 12px;
+      color: var(--cyan);
+      font-size: 0.75rem;
+      font-weight: 800;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+    }
+
+    h1,
+    h2,
+    h3,
+    p { margin-top: 0; }
+
+    h1 {
+      max-width: 760px;
+      margin-bottom: 20px;
+      font-size: clamp(2.65rem, 7vw, 5.6rem);
+      line-height: 0.98;
+      letter-spacing: -0.055em;
+    }
+
+    h1 span {
+      color: transparent;
+      background: linear-gradient(100deg, var(--blue), var(--cyan));
+      background-clip: text;
+      -webkit-background-clip: text;
+    }
+
+    .lede {
+      max-width: 660px;
+      margin-bottom: 0;
+      color: var(--muted);
+      font-size: clamp(1rem, 2vw, 1.18rem);
+    }
+
+    .hero-panel {
+      padding: 22px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-lg);
+      background: linear-gradient(145deg, rgba(18, 42, 51, 0.9), rgba(10, 25, 31, 0.8));
+      box-shadow: var(--shadow);
+    }
+
+    .hero-panel strong {
+      display: block;
+      margin-bottom: 12px;
+      font-size: 0.88rem;
+    }
+
+    .status-list {
+      display: grid;
+      gap: 10px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      color: var(--muted);
+      font-size: 0.83rem;
+    }
+
+    .status-list li {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      flex: 0 0 auto;
+      border-radius: 999px;
+      background: var(--green);
+      box-shadow: 0 0 18px rgba(111, 215, 170, 0.62);
+    }
+
+    .dot.waiting {
+      background: var(--amber);
+      box-shadow: 0 0 18px rgba(241, 201, 120, 0.46);
+    }
+
+    section { padding: 34px 0; }
+
+    .section-heading {
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      align-items: end;
+      margin-bottom: 22px;
+    }
+
+    h2 {
+      margin-bottom: 0;
+      font-size: clamp(1.65rem, 4vw, 2.45rem);
+      line-height: 1.08;
+      letter-spacing: -0.035em;
+    }
+
+    .section-note {
+      max-width: 480px;
+      margin-bottom: 0;
+      color: var(--muted);
+      font-size: 0.88rem;
+      text-align: right;
+    }
+
+    .client-grid {
+      display: grid;
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .card {
+      grid-column: span 4;
+      min-width: 0;
+      padding: 24px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-lg);
+      background:
+        linear-gradient(150deg, rgba(18, 40, 48, 0.95), rgba(9, 23, 29, 0.96));
+      box-shadow: 0 18px 48px rgba(0, 0, 0, 0.18);
+    }
+
+    .card-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      align-items: flex-start;
+      margin-bottom: 24px;
+    }
+
+    .platform-mark {
+      display: grid;
+      width: 46px;
+      height: 46px;
+      place-items: center;
+      flex: 0 0 auto;
+      border: 1px solid var(--line-strong);
+      border-radius: 14px;
+      color: var(--cyan);
+      background: rgba(97, 210, 221, 0.09);
+      font-size: 0.76rem;
+      font-weight: 900;
+      letter-spacing: 0.03em;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      min-height: 27px;
+      padding: 4px 9px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.025);
+      font-size: 0.68rem;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .tag.ready { color: var(--green); }
+    .tag.waiting { color: var(--amber); }
+
+    .card h3 {
+      margin-bottom: 6px;
+      font-size: 1.28rem;
+      letter-spacing: -0.02em;
+    }
+
+    .version {
+      margin-bottom: 14px;
+      color: var(--faint);
+      font-size: 0.78rem;
+      font-weight: 700;
+    }
+
+    .description {
+      min-height: 76px;
+      margin-bottom: 22px;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .button-stack {
+      display: grid;
+      gap: 9px;
+    }
+
+    .button {
+      display: inline-flex;
+      min-height: 46px;
+      align-items: center;
+      justify-content: center;
+      padding: 11px 15px;
+      border: 1px solid transparent;
+      border-radius: 12px;
+      color: #041317;
+      background: linear-gradient(100deg, var(--blue), var(--cyan));
+      font-size: 0.84rem;
+      font-weight: 850;
+      text-align: center;
+      text-decoration: none;
+      transition: transform 160ms ease, filter 160ms ease, border-color 160ms ease;
+    }
+
+    .button:hover {
+      transform: translateY(-2px);
+      filter: brightness(1.07);
+    }
+
+    .button.secondary {
+      color: var(--cyan);
+      border-color: var(--line-strong);
+      background: rgba(97, 210, 221, 0.06);
+    }
+
+    .button.disabled {
+      color: var(--faint);
+      border-color: var(--line);
+      background: rgba(255, 255, 255, 0.035);
+      cursor: not-allowed;
+    }
+
+    .microcopy {
+      margin: 14px 0 0;
+      color: var(--faint);
+      font-size: 0.73rem;
+    }
+
+    .android-options {
+      display: grid;
+      gap: 10px;
+    }
+
+    .android-option {
+      padding: 13px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.018);
+    }
+
+    .option-label {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 9px;
+      color: var(--muted);
+      font-size: 0.72rem;
+      font-weight: 800;
+    }
+
+    .option-label strong { color: var(--green); }
+    .option-label .experimental { color: var(--amber); }
+
+    .testflight-details {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 7px;
+      margin: 0 0 16px;
+      padding: 0;
+      list-style: none;
+      color: var(--muted);
+      font-size: 0.72rem;
+    }
+
+    .testflight-details li {
+      padding: 7px 9px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: rgba(255, 255, 255, 0.018);
+    }
+
+    .email {
+      display: block;
+      margin-top: 9px;
+      color: var(--cyan);
+      overflow-wrap: anywhere;
+      font-weight: 750;
+      text-decoration: none;
+    }
+
+    .cli-card {
+      display: grid;
+      grid-template-columns: minmax(250px, 0.76fr) minmax(0, 1.24fr);
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 28px;
+      background: linear-gradient(140deg, rgba(17, 39, 47, 0.96), rgba(7, 20, 25, 0.98));
+      box-shadow: var(--shadow);
+    }
+
+    .cli-copy {
+      padding: 34px;
+      border-right: 1px solid var(--line);
+    }
+
+    .cli-copy h3 {
+      margin-bottom: 12px;
+      font-size: 1.55rem;
+      letter-spacing: -0.03em;
+    }
+
+    .cli-copy p {
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .cli-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+      margin: 20px 0 24px;
+    }
+
+    .cli-link {
+      color: var(--cyan);
+      font-size: 0.84rem;
+      font-weight: 800;
+      text-decoration: none;
+    }
+
+    .terminal {
+      min-width: 0;
+      padding: 28px;
+      background:
+        linear-gradient(rgba(255, 255, 255, 0.018), rgba(255, 255, 255, 0)),
+        #050d11;
+    }
+
+    .terminal-bar {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 20px;
+    }
+
+    .terminal-bar span {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--faint);
+    }
+
+    .terminal-bar span:nth-child(2) { background: var(--amber); }
+    .terminal-bar span:nth-child(3) { background: var(--green); }
+
+    .command-group + .command-group { margin-top: 22px; }
+
+    .command-label {
+      margin-bottom: 7px;
+      color: var(--faint);
+      font-size: 0.68rem;
+      font-weight: 800;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    pre {
+      max-width: 100%;
+      margin: 0;
+      padding: 15px 16px;
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      color: #c7f4e2;
+      background: rgba(255, 255, 255, 0.025);
+      font: 0.78rem/1.72 "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      scrollbar-color: var(--line-strong) transparent;
+    }
+
+    .prompt { color: var(--cyan); }
+
+    footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      align-items: center;
+      margin-top: 48px;
+      padding: 30px 0 46px;
+      border-top: 1px solid var(--line);
+      color: var(--faint);
+      font-size: 0.76rem;
+    }
+
+    footer nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 18px;
+    }
+
+    footer a {
+      color: var(--muted);
+      font-weight: 750;
+      text-decoration: none;
+    }
+
+    @media (prefers-reduced-motion: no-preference) {
+      .hero > *,
+      .section-heading,
+      .card,
+      .cli-card {
+        animation: rise 520ms both;
+      }
+      .hero-panel { animation-delay: 80ms; }
+      .card:nth-child(2) { animation-delay: 70ms; }
+      .card:nth-child(3) { animation-delay: 140ms; }
+      .cli-card { animation-delay: 90ms; }
+      @keyframes rise {
+        from { opacity: 0; transform: translateY(14px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+    }
+
+    @media (max-width: 900px) {
+      .hero { grid-template-columns: 1fr; }
+      .hero-panel { max-width: 560px; }
+      .card { grid-column: span 6; }
+      .card:last-child { grid-column: 1 / -1; }
+      .description { min-height: auto; }
+      .cli-card { grid-template-columns: 1fr; }
+      .cli-copy { border-right: 0; border-bottom: 1px solid var(--line); }
+    }
+
+    @media (max-width: 620px) {
+      .shell { width: min(100% - 24px, 1120px); }
+      .hero { padding: 58px 0 30px; gap: 26px; }
+      h1 { font-size: clamp(2.5rem, 15vw, 4.2rem); }
+      section { padding: 26px 0; }
+      .section-heading { display: block; }
+      .section-note { margin-top: 10px; text-align: left; }
+      .card { grid-column: 1 / -1; padding: 20px; }
+      .testflight-details { grid-template-columns: 1fr; }
+      .cli-copy,
+      .terminal { padding: 22px 18px; }
+      footer { display: block; }
+      footer nav { margin-top: 12px; }
+    }
+  </style>
 </head>
 <body>
-    <header>
-        <h1>Envoix</h1>
-        <p>简单、安全的跨平台文件传输</p>
+  <main class="shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Envoix · v0.2.0</p>
+        <h1>把文件交给<br><span>离你最近的设备。</span></h1>
+        <p class="lede">选择图形客户端快速开始，或使用命令行把 Envoix 接入脚本与自动化工作流。</p>
+      </div>
+      <aside class="hero-panel" aria-label="发布状态">
+        <strong>当前发布状态</strong>
+        <ul class="status-list">
+          <li><span class="dot"></span>macOS 已签名并通过 Apple 公证</li>
+          <li><span class="dot"></span>Android 稳定版与实验版可下载</li>
+          <li><span class="dot waiting"></span>iOS TestFlight 采用申请邀请</li>
+        </ul>
+      </aside>
     </header>
 
-    <div class="grid">
-        <!-- macOS App -->
-        <div class="card">
-            <h3>🍎 macOS <span class="ver">v0.2.0</span></h3>
-            <p class="desc">已通过 Apple Developer ID 签名与公证，支持 Apple Silicon 和 Intel 芯片的 Mac。</p>
-            <a href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/Envoix-macOS-v0.2.0.zip">下载 macOS v0.2.0</a>
-            <p class="note">下载 ZIP 文件后解压，将 Envoix.app 拖入“应用程序”即可。</p>
+    <section id="clients" aria-labelledby="clients-title">
+      <div class="section-heading">
+        <div>
+          <p class="section-kicker">Graphical clients</p>
+          <h2 id="clients-title">图形客户端</h2>
         </div>
+        <p class="section-note">普通用户建议从这里开始。所有公开安装包都来自项目 GitHub Release。</p>
+      </div>
 
-        <!-- Android -->
-        <div class="card">
-            <h3>🤖 Android</h3>
-            <p class="desc">下载 APK 后即可在 Android 手机上手动安装。演示时建议使用稳定版。</p>
-            <div class="download-options">
-                <div class="download-option">
-                    <h4>v0.1.0 <span class="badge">推荐 · 稳定版</span></h4>
-                    <a href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/envoix-android.apk">下载 Android 稳定版</a>
-                </div>
-                <div class="download-option">
-                    <h4>v0.2.0 <span class="badge">实验版</span></h4>
-                    <a class="secondary" href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/envoix-android-v0.2.0.apk">下载 Android 实验版</a>
-                </div>
+      <div class="client-grid">
+        <article class="card">
+          <div class="card-top">
+            <span class="platform-mark">MAC</span>
+            <span class="tag ready">Signed &amp; notarized</span>
+          </div>
+          <h3>macOS</h3>
+          <p class="version">v0.2.0 · Universal App</p>
+          <p class="description">一个安装包同时支持 Apple Silicon 与 Intel Mac，已通过 Developer ID 签名和 Apple 公证。</p>
+          <a class="button" href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/Envoix-macOS-v0.2.0.zip">下载 macOS 版</a>
+          <p class="microcopy">解压 ZIP，将 Envoix.app 拖入“应用程序”。</p>
+        </article>
+
+        <article class="card">
+          <div class="card-top">
+            <span class="platform-mark">APK</span>
+            <span class="tag ready">Sideload</span>
+          </div>
+          <h3>Android</h3>
+          <p class="version">稳定版与实验版</p>
+          <p class="description">演示和日常试用优先选择稳定版；需要体验最新改动时再选择实验版。</p>
+          <div class="android-options">
+            <div class="android-option">
+              <div class="option-label"><span>v0.1.0</span><strong>推荐稳定版</strong></div>
+              <a class="button" href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/envoix-android.apk">下载稳定版 APK</a>
             </div>
-            <p class="note">两个版本均使用调试密钥签名，仅供演示和手动安装。安装前请允许浏览器或文件管理器“安装未知应用”。</p>
+            <div class="android-option">
+              <div class="option-label"><span>v0.2.0</span><span class="experimental">实验版</span></div>
+              <a class="button secondary" href="https://github.com/ECE4410J-NUUB/envoix/releases/latest/download/envoix-android-v0.2.0.apk">下载实验版 APK</a>
+            </div>
+          </div>
+          <p class="microcopy">当前 APK 使用调试密钥，仅供测试和手动安装。</p>
+        </article>
+
+        <article class="card">
+          <div class="card-top">
+            <span class="platform-mark">iOS</span>
+            <span class="tag waiting">TestFlight</span>
+          </div>
+          <h3>iPhone 与 iPad</h3>
+          <p class="version">v0.2.0 (1) · 申请邀请</p>
+          <p class="description">App Store Connect 团队成员可加入内部测试组；其他申请者将在外部测试开放后通过邮件邀请。</p>
+          <ul class="testflight-details" aria-label="申请时需要提供的信息">
+            <li>Apple Account 邮箱</li>
+            <li>设备型号</li>
+            <li>iOS / iPadOS 版本</li>
+            <li>测试目的</li>
+          </ul>
+          <a class="button secondary" href="mailto:moranxuege@outlook.com?subject=Envoix%20iOS%20TestFlight%20申请">发送测试申请</a>
+          <a class="email" href="mailto:moranxuege@outlook.com">moranxuege@outlook.com</a>
+          <p class="microcopy">发送申请不代表自动获得内部 App Store Connect 权限。</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="cli" aria-labelledby="cli-title">
+      <div class="section-heading">
+        <div>
+          <p class="section-kicker">Command line</p>
+          <h2 id="cli-title">Envoix CLI</h2>
+        </div>
+        <p class="section-note">适合开发者、服务器和自动化任务。当前从源码安装，不提供不存在的预编译下载链接。</p>
+      </div>
+
+      <div class="cli-card">
+        <div class="cli-copy">
+          <span class="platform-mark">CLI</span>
+          <h3>同一个传输核心，交给终端。</h3>
+          <p>命令名为 <strong>envoix</strong>，可在 macOS、Linux 和 Windows 上从源码构建。</p>
+          <div class="cli-meta">
+            <span class="tag ready">Rust 1.91+</span>
+            <span class="tag">macOS</span>
+            <span class="tag">Linux</span>
+            <span class="tag">Windows</span>
+          </div>
+          <a class="cli-link" href="https://github.com/ECE4410J-NUUB/envoix/tree/dev/apps/envoix-cli">查看 CLI 源码与文档 →</a>
         </div>
 
-        <!-- iOS / TestFlight -->
-        <div class="card">
-            <h3>📱 iOS<span class="ver">v0.2.0</span></h3>
-            <p class="desc">TestFlight 版本已经构建完成，公开邀请链接暂未开放。</p>
-            <span class="unavailable" aria-disabled="true">TestFlight 链接暂未公开</span>
-            <p class="note">邀请链接公开后，可通过 iPhone 上的 TestFlight 安装。</p>
+        <div class="terminal" aria-label="CLI 安装与使用示例">
+          <div class="terminal-bar" aria-hidden="true"><span></span><span></span><span></span></div>
+          <div class="command-group">
+            <div class="command-label">安装</div>
+            <pre><code><span class="prompt">$</span> git clone https://github.com/ECE4410J-NUUB/envoix.git
+<span class="prompt">$</span> cd envoix
+<span class="prompt">$</span> cargo install --path apps/envoix-cli
+<span class="prompt">$</span> envoix --help</code></pre>
+          </div>
+          <div class="command-group">
+            <div class="command-label">接收文件</div>
+            <pre><code><span class="prompt">$</span> envoix receive --auto --output ./received</code></pre>
+          </div>
+          <div class="command-group">
+            <div class="command-label">发送文件</div>
+            <pre><code><span class="prompt">$</span> envoix send --invite 'envoix:&lt;base64url&gt;' ./hello.txt</code></pre>
+          </div>
         </div>
-    </div>
+      </div>
+    </section>
 
     <footer>
-        <a href="https://github.com/ECE4410J-NUUB/envoix/releases">查看 GitHub 上的全部发布版本 →</a>
-        <br><br>
-        <span>v0.2.0 &mdash; ECE4410J</span>
+      <span>Envoix v0.2.0 · ECE4410J</span>
+      <nav aria-label="项目链接">
+        <a href="https://github.com/ECE4410J-NUUB/envoix">GitHub 仓库</a>
+        <a href="https://github.com/ECE4410J-NUUB/envoix/releases">全部发布版本</a>
+        <a href="mailto:moranxuege@outlook.com">联系维护者</a>
+      </nav>
     </footer>
+  </main>
 </body>
 </html>
