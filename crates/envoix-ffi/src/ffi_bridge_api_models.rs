@@ -151,6 +151,7 @@ pub enum FfiPairingStep {
     None,
     Joining,
     Matched,
+    Confirming,
     Exchanged,
 }
 

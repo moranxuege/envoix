@@ -5380,6 +5380,7 @@ public enum FfiPairingStep: Equatable, Hashable {
     case none
     case joining
     case matched
+    case confirming
     case exchanged
 
 
@@ -5408,7 +5409,9 @@ public struct FfiConverterTypeFfiPairingStep: FfiConverterRustBuffer {
 
         case 3: return .matched
 
-        case 4: return .exchanged
+        case 4: return .confirming
+
+        case 5: return .exchanged
 
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -5430,8 +5433,12 @@ public struct FfiConverterTypeFfiPairingStep: FfiConverterRustBuffer {
             writeInt(&buf, Int32(3))
 
 
-        case .exchanged:
+        case .confirming:
             writeInt(&buf, Int32(4))
+
+
+        case .exchanged:
+            writeInt(&buf, Int32(5))
 
         }
     }

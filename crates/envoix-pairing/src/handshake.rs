@@ -95,6 +95,25 @@ fn proof(key: &[u8], transcript: &[u8], label: &[u8]) -> blake3::Hash {
     h.finalize()
 }
 
+/// Derive a 6-digit Short Authentication String from the confirmed SPAKE2 key
+/// and the handshake transcript. Both peers compute the same value independently;
+/// neither value is ever sent over the wire. The user compares them and cancels
+/// if the codes don't match.
+pub fn pairing_sas(key: &[u8], start: &PakeStart, response: &PakeResponse) -> String {
+    let t = transcript(start, response);
+    let sas_key = blake3::derive_key("envoix-pairing-sas-v1", key);
+    let mut h = blake3::Hasher::new_keyed(&sas_key);
+    h.update(&t);
+    let hash = h.finalize();
+    let value = u32::from_le_bytes([
+        hash.as_bytes()[0],
+        hash.as_bytes()[1],
+        hash.as_bytes()[2],
+        hash.as_bytes()[3],
+    ]);
+    format!("{:06}", value % 1_000_000)
+}
+
 /// Constant-time check that `received` is the expected proof.
 fn verify(
     key: &[u8],

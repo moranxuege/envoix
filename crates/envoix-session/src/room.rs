@@ -81,6 +81,9 @@ where
         match tokio::time::timeout(EXCHANGE_TIMEOUT, drive_pairing(session, password, mine)).await {
             Ok(Ok(pairing)) => {
                 events.on_event(TransferEvent::Pairing {
+                    step: PairingStep::Confirming,
+                });
+                events.on_event(TransferEvent::Pairing {
                     step: PairingStep::Exchanged,
                 });
                 return Ok(pairing);

@@ -2016,6 +2016,7 @@ pub(crate) fn pairing_step_label(step: PairingStep) -> &'static str {
     match step {
         PairingStep::Joining => "joining room",
         PairingStep::Matched => "peer matched",
+        PairingStep::Confirming => "confirming code",
         PairingStep::Exchanged => "keys exchanged",
     }
 }
@@ -2080,6 +2081,7 @@ fn ffi_pairing_step(step: PairingStep) -> FfiPairingStep {
     match step {
         PairingStep::Joining => FfiPairingStep::Joining,
         PairingStep::Matched => FfiPairingStep::Matched,
+        PairingStep::Confirming => FfiPairingStep::Confirming,
         PairingStep::Exchanged => FfiPairingStep::Exchanged,
     }
 }

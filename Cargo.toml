@@ -15,8 +15,7 @@ members = [
     "crates/envoix-session",
     "crates/envoix-storage",
     "crates/envoix-transfer",
-    "crates/envoix-types",
-	"crates/envoix-ble-rendezvous"
+    "crates/envoix-types"
 ]
 resolver = "2"
 

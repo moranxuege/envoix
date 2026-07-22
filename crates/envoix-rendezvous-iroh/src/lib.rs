@@ -45,6 +45,10 @@ pub struct RoomPairing<T> {
     /// data-plane pairing (`envoix-auth` SPAKE2 over the iroh connection) can
     /// run unchanged - both peers derive the same one.
     pub token: String,
+    /// Six-digit SAS derived from the confirmed SPAKE2 key and handshake
+    /// transcript. Both peers compute the same value independently; it is
+    /// never sent over the wire. The UI displays it for user comparison.
+    pub sas: Option<String>,
 }
 
 /// Lets the broker wait for an iroh peer to close before dropping the relay.
@@ -351,7 +355,8 @@ where
     T: serde::Serialize + serde::de::DeserializeOwned,
 {
     use envoix_pairing::{
-        Confirm, PakeResponse, PakeStart, initiator_start, open_json, responder_respond, seal_json,
+        Confirm, PakeResponse, PakeStart, initiator_start, open_json, pairing_sas,
+        responder_respond, seal_json,
     };
 
     let BrokerSession {
@@ -361,7 +366,7 @@ where
         role,
     } = session;
 
-    let key = match role {
+    let (key, start, response) = match role {
         Role::Initiator => {
             let (pending, start) = initiator_start(password)?;
             write_framed(&mut send, &start).await?;
@@ -369,7 +374,8 @@ where
             let (confirming, confirm) = pending.finish(&response)?;
             write_framed(&mut send, &confirm).await?;
             let responder_confirm: Confirm = read_framed(&mut recv).await?;
-            confirming.verify(&responder_confirm)?
+            let key = confirming.verify(&responder_confirm)?;
+            (key, start, response)
         }
         Role::Responder => {
             let start: PakeStart = read_framed(&mut recv).await?;
@@ -378,9 +384,13 @@ where
             let initiator_confirm: Confirm = read_framed(&mut recv).await?;
             let (key, confirm) = confirming.verify(&initiator_confirm)?;
             write_framed(&mut send, &confirm).await?;
-            key
+            (key, start, response)
         }
     };
+
+    // Six-digit SAS derived from the confirmed key + transcript. Both peers
+    // compute the same value independently; neither value is sent over the wire.
+    let sas = pairing_sas(key.key(), &start, &response);
 
     // Bind each sealed descriptor to the sender's role (AEAD aad); we seal with
     // our role and open with the peer's, so a reflected ciphertext fails to open.
@@ -406,7 +416,11 @@ where
     .await;
     drop(connection);
 
-    Ok(RoomPairing { peer, token })
+    Ok(RoomPairing {
+        peer,
+        token,
+        sas: Some(sas),
+    })
 }
 
 /// Lowercase hex of `bytes`.

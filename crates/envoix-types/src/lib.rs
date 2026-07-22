@@ -54,6 +54,9 @@ pub enum PairingStep {
     Joining,
     /// The broker matched us with a partner; key exchange starting.
     Matched,
+    /// SPAKE2 completed; a 6-digit SAS is displayed for user comparison before
+    /// descriptors are exchanged. Both devices must show the same code.
+    Confirming,
     /// SPAKE2 completed and descriptors were exchanged.
     Exchanged,
 }
