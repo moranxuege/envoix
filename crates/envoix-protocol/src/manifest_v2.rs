@@ -108,7 +108,7 @@ pub enum SourceCompletenessV2 {
     UserApprovedPartial { omitted_entry_count: u64 },
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ManifestRootV2 {
     pub root_id: u32,
     pub root_entry_id: u32,
@@ -116,7 +116,19 @@ pub struct ManifestRootV2 {
     pub completeness: SourceCompletenessV2,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+impl std::fmt::Debug for ManifestRootV2 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ManifestRootV2")
+            .field("root_id", &self.root_id)
+            .field("root_entry_id", &self.root_entry_id)
+            .field("requested_name_bytes", &self.requested_name.len())
+            .field("completeness", &self.completeness)
+            .finish()
+    }
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ManifestEntryV2 {
     pub entry_id: u32,
     pub root_id: u32,
@@ -127,6 +139,27 @@ pub struct ManifestEntryV2 {
     pub content_digest: EntryContentDigestV2,
 }
 
+impl std::fmt::Debug for ManifestEntryV2 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ManifestEntryV2")
+            .field("entry_id", &self.entry_id)
+            .field("root_id", &self.root_id)
+            .field("parent_entry_id", &self.parent_entry_id)
+            .field("component_bytes", &self.component.len())
+            .field("kind", &self.kind)
+            .field("plaintext_size", &self.plaintext_size)
+            .field(
+                "content_digest",
+                &match self.content_digest {
+                    EntryContentDigestV2::Deferred => "deferred",
+                    EntryContentDigestV2::Known(_) => "known",
+                },
+            )
+            .finish()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ManifestTotalsV2 {
     pub file_count: u32,
@@ -134,7 +167,7 @@ pub struct ManifestTotalsV2 {
     pub total_plaintext_bytes: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ManifestV2 {
     pub job_id: JobIdV2,
     pub generation: u32,
@@ -145,10 +178,35 @@ pub struct ManifestV2 {
     pub totals: ManifestTotalsV2,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+impl std::fmt::Debug for ManifestV2 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ManifestV2")
+            .field("job_id", &self.job_id)
+            .field("generation", &self.generation)
+            .field("selection_revision", &self.selection_revision)
+            .field("compression_policy", &self.compression_policy)
+            .field("root_count", &self.roots.len())
+            .field("entry_count", &self.entries.len())
+            .field("totals", &self.totals)
+            .finish()
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
 pub struct ManifestOfferV2 {
     pub structural_digest: ContentDigestV2,
     pub manifest: ManifestV2,
+}
+
+impl std::fmt::Debug for ManifestOfferV2 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ManifestOfferV2")
+            .field("structural_digest", &self.structural_digest)
+            .field("manifest", &self.manifest)
+            .finish()
+    }
 }
 
 impl ManifestV2 {

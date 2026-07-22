@@ -16,17 +16,22 @@ use envoix_error::CoreError;
 pub use envoix_protocol::TransferProtocol;
 use envoix_protocol::{FrameConnection, PeerDescriptor};
 pub use envoix_transfer::{
-    AddSourceResult, CanonicalTransferJob, DEFAULT_CHUNK_SIZE, DEFAULT_INVENTORY_PAGE_SIZE,
-    EventSink, InventoryCursor, InventoryItem, InventoryPage, InventorySummary, JobLifecycle,
-    LocalSourceOrigin, MAX_CHUNK_SIZE, MAX_INVENTORY_PAGE_SIZE, MIN_CHUNK_SIZE, ManifestEventSink,
-    ManifestNoopEventSink, ManifestSendRequest, ManifestTransferEngine, ManifestTransferEvent,
-    ManifestTransferSummary, ManifestV2DataError, ManifestV2DataPlane, ManifestV2PayloadSink,
-    NoopEventSink, PEER_INTERRUPT_MESSAGE, PEER_PAUSE_MESSAGE, PreparedFileSource,
-    ReceiverDataPlaneLedgerV2, ReceiverDataPlaneStoreV2, ReceiverDataPlaneSummaryV2, SavedEntryV2,
-    SenderDataPlaneSummaryV2, SourceDecision, SourceIssue, SourceIssueKind, SourceItemId,
-    SourceSelectionInfo, SourceSelectionState, TransferCancelToken, TransferEngine, TransferEvent,
-    TransferJobError, TransferJobStore, TransferSummary, USER_INTERRUPT_MESSAGE,
-    USER_PAUSE_MESSAGE, discard_manifest_resume_state, validate_chunk_size,
+    AUTO_RECEIVE_PLAINTEXT_LIMIT_BYTES, AddSourceResult, CanonicalTransferJob, DEFAULT_CHUNK_SIZE,
+    DEFAULT_INVENTORY_PAGE_SIZE, DeliveryAuthorityErrorV2, DestinationDecisionV2,
+    DestinationModeV2, DestinationPlanErrorV2, DestinationPlanStoreV2, DestinationRequestV2,
+    DestinationWritePlanV2, EventSink, InventoryCursor, InventoryItem, InventoryPage,
+    InventorySummary, JobLifecycle, LocalDestinationProviderV2, LocalSourceOrigin, MAX_CHUNK_SIZE,
+    MAX_INVENTORY_PAGE_SIZE, MIN_CHUNK_SIZE, ManifestEventSink, ManifestNoopEventSink,
+    ManifestSendRequest, ManifestTransferEngine, ManifestTransferEvent, ManifestTransferSummary,
+    ManifestV2DataError, ManifestV2DataPlane, ManifestV2DeliveryAuthority, ManifestV2PayloadSink,
+    NoopEventSink, PEER_INTERRUPT_MESSAGE, PEER_PAUSE_MESSAGE, POST_SAVE_RESERVE_BYTES,
+    PreparedFileSource, ReceiverDataPlaneLedgerV2, ReceiverDataPlaneStoreV2,
+    ReceiverDataPlaneSummaryV2, ReceiverDeliveryRecordV2, ReceiverDeliveryStoreV2, SavedEntryV2,
+    SenderDataPlaneSummaryV2, SenderDeliveryRecordV2, SenderDeliveryStoreV2, SenderTransferPhaseV2,
+    SourceDecision, SourceIssue, SourceIssueKind, SourceItemId, SourceSelectionInfo,
+    SourceSelectionState, StorageDomainIdentityV2, TransferCancelToken, TransferEngine,
+    TransferEvent, TransferJobError, TransferJobStore, TransferSummary, USER_INTERRUPT_MESSAGE,
+    USER_PAUSE_MESSAGE, VerifiedEntryV2, discard_manifest_resume_state, validate_chunk_size,
 };
 pub use envoix_types::TransferDirection;
 // Re-exported so the client facade reaches rendezvous-code helpers through its

@@ -1,8 +1,22 @@
 //! File-transfer state machine.
 
+mod delivery_v2;
+mod destination_v2;
 mod job;
 mod manifest;
 mod manifest_v2_engine;
+mod persistence_v2;
+
+pub use destination_v2::{
+    AUTO_RECEIVE_PLAINTEXT_LIMIT_BYTES, DestinationDecisionV2, DestinationModeV2,
+    DestinationPlanErrorV2, DestinationPlanStoreV2, DestinationRequestV2, DestinationWritePlanV2,
+    LocalDestinationProviderV2, POST_SAVE_RESERVE_BYTES, StorageDomainIdentityV2,
+};
+
+pub use delivery_v2::{
+    DeliveryAuthorityErrorV2, ManifestV2DeliveryAuthority, ReceiverDeliveryRecordV2,
+    ReceiverDeliveryStoreV2, SenderDeliveryRecordV2, SenderDeliveryStoreV2, SenderTransferPhaseV2,
+};
 
 pub use job::{
     AddSourceResult, CanonicalTransferJob, DEFAULT_INVENTORY_PAGE_SIZE, InventoryCursor,
@@ -19,6 +33,7 @@ pub use manifest::{
 pub use manifest_v2_engine::{
     ManifestV2DataError, ManifestV2DataPlane, ManifestV2PayloadSink, ReceiverDataPlaneLedgerV2,
     ReceiverDataPlaneStoreV2, ReceiverDataPlaneSummaryV2, SavedEntryV2, SenderDataPlaneSummaryV2,
+    VerifiedEntryV2,
 };
 
 use std::io::SeekFrom;

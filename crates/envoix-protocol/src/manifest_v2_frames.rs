@@ -93,10 +93,20 @@ pub enum ManifestFailurePhaseV2 {
     Proof = 5,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RootPlanV2 {
     pub root_id: u32,
     pub planned_name: String,
+}
+
+impl fmt::Debug for RootPlanV2 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RootPlanV2")
+            .field("root_id", &self.root_id)
+            .field("planned_name_bytes", &self.planned_name.len())
+            .finish()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -106,7 +116,7 @@ pub struct EntryPlanV2 {
     pub next_plaintext_block: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ManifestAcceptV2 {
     pub identity: JobGenerationV2,
     pub manifest_digest: ContentDigestV2,
@@ -115,6 +125,21 @@ pub struct ManifestAcceptV2 {
     pub plan_revision: u32,
     pub root_plans: Vec<RootPlanV2>,
     pub entry_plans: Vec<EntryPlanV2>,
+}
+
+impl fmt::Debug for ManifestAcceptV2 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ManifestAcceptV2")
+            .field("identity", &self.identity)
+            .field("manifest_digest", &self.manifest_digest)
+            .field("accept_nonce", &"<redacted>")
+            .field("proof_capability", &self.proof_capability)
+            .field("plan_revision", &self.plan_revision)
+            .field("root_plan_count", &self.root_plans.len())
+            .field("entry_plan_count", &self.entry_plans.len())
+            .finish()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -138,7 +163,7 @@ pub struct EntryContentDigestFrameV2 {
     pub digest: ContentDigestV2,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct EntryBlockV2 {
     pub identity: JobGenerationV2,
     pub entry_id: u32,
@@ -146,6 +171,20 @@ pub struct EntryBlockV2 {
     pub plaintext_offset: u64,
     pub plaintext_length: u32,
     pub encoded_bytes: Vec<u8>,
+}
+
+impl fmt::Debug for EntryBlockV2 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EntryBlockV2")
+            .field("identity", &self.identity)
+            .field("entry_id", &self.entry_id)
+            .field("block_index", &self.block_index)
+            .field("plaintext_offset", &self.plaintext_offset)
+            .field("plaintext_length", &self.plaintext_length)
+            .field("encoded_length", &self.encoded_bytes.len())
+            .finish()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -157,7 +196,7 @@ pub struct EntryCompleteV2 {
     pub completion_choice: EntryCompletionChoiceV2,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct EntryResultV2 {
     pub identity: JobGenerationV2,
     pub entry_id: u32,
@@ -165,6 +204,23 @@ pub struct EntryResultV2 {
     pub final_size: u64,
     pub final_digest: Option<ContentDigestV2>,
     pub final_component_override: Option<String>,
+}
+
+impl fmt::Debug for EntryResultV2 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EntryResultV2")
+            .field("identity", &self.identity)
+            .field("entry_id", &self.entry_id)
+            .field("result", &self.result)
+            .field("final_size", &self.final_size)
+            .field("final_digest", &self.final_digest)
+            .field(
+                "final_component_override_bytes",
+                &self.final_component_override.as_ref().map(String::len),
+            )
+            .finish()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

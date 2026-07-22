@@ -20,7 +20,10 @@ use thiserror::Error;
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::{CanonicalTransferJob, PreparedFileSource, TransferJobError};
+use crate::{
+    CanonicalTransferJob, PreparedFileSource, SenderDeliveryRecordV2, SenderDeliveryStoreV2,
+    TransferJobError,
+};
 
 const RECEIVER_DATA_PLANE_SCHEMA_VERSION: u16 = 1;
 #[derive(Debug, Error)]
@@ -59,6 +62,8 @@ pub enum ManifestV2DataError {
     Transport(String),
     #[error("destination provider failed: {0}")]
     Destination(String),
+    #[error("delivery authority failed: {0}")]
+    Delivery(String),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
 }
@@ -71,8 +76,16 @@ impl From<CoreError> for ManifestV2DataError {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SavedEntryV2 {
+    pub entry_id: u32,
     pub result: EntryResultKindV2,
     pub final_component_override: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VerifiedEntryV2 {
+    pub entry_id: u32,
+    pub final_digest: Option<ContentDigestV2>,
+    pub completion_choice: EntryCompletionChoiceV2,
 }
 
 #[async_trait]
@@ -108,22 +121,16 @@ pub trait ManifestV2PayloadSink: Send {
         final_digest: ContentDigestV2,
     ) -> Result<(), ManifestV2DataError>;
 
-    async fn commit_verified(
-        &mut self,
-        entry: &ManifestEntryV2,
-        final_digest: ContentDigestV2,
-    ) -> Result<SavedEntryV2, ManifestV2DataError>;
+    async fn stage_directory(&mut self, entry: &ManifestEntryV2)
+    -> Result<(), ManifestV2DataError>;
 
-    async fn commit_reuse(
+    /// Finalizes every root only after all entry payloads are verified. The
+    /// returned dense result set is not sent until the caller durably records it.
+    async fn commit_job(
         &mut self,
-        entry: &ManifestEntryV2,
-        final_digest: ContentDigestV2,
-    ) -> Result<SavedEntryV2, ManifestV2DataError>;
-
-    async fn commit_directory(
-        &mut self,
-        entry: &ManifestEntryV2,
-    ) -> Result<SavedEntryV2, ManifestV2DataError>;
+        manifest: &ManifestV2,
+        verified_entries: &[VerifiedEntryV2],
+    ) -> Result<Vec<SavedEntryV2>, ManifestV2DataError>;
 
     async fn retire_payload(&mut self, entry: &ManifestEntryV2) -> Result<(), ManifestV2DataError>;
 }
@@ -151,6 +158,7 @@ pub struct ReceiverDataPlaneLedgerV2 {
     accept_body_digest: ContentDigestV2,
     entries: Vec<ReceiverEntryCheckpointV2>,
     sender_completion_set_digest: Option<ContentDigestV2>,
+    accept_committed_acknowledged: bool,
 }
 
 impl std::fmt::Debug for ReceiverDataPlaneLedgerV2 {
@@ -211,6 +219,7 @@ impl ReceiverDataPlaneLedgerV2 {
             accept_body_digest,
             entries,
             sender_completion_set_digest: None,
+            accept_committed_acknowledged: false,
         })
     }
 
@@ -220,6 +229,22 @@ impl ReceiverDataPlaneLedgerV2 {
 
     pub fn accept_body_digest(&self) -> ContentDigestV2 {
         self.accept_body_digest
+    }
+
+    pub fn accept_committed_acknowledged(&self) -> bool {
+        self.accept_committed_acknowledged
+    }
+
+    pub async fn commit_accept_ack(
+        &mut self,
+        ack: AcceptCommittedAckV2,
+        store: &ReceiverDataPlaneStoreV2,
+    ) -> Result<(), ManifestV2DataError> {
+        if ack.identity != self.identity || ack.accept_body_digest != self.accept_body_digest {
+            return Err(ManifestV2DataError::AcceptMismatch);
+        }
+        self.accept_committed_acknowledged = true;
+        store.save(self).await
     }
 
     pub fn validate(&self, manifest: &ManifestV2) -> Result<(), ManifestV2DataError> {
@@ -316,7 +341,7 @@ impl ReceiverDataPlaneStoreV2 {
         file.write_all(&bytes).await?;
         file.sync_all().await?;
         drop(file);
-        fs::rename(temporary_path, final_path).await?;
+        crate::persistence_v2::replace_file(temporary_path, final_path).await?;
         Ok(())
     }
 
@@ -366,6 +391,8 @@ pub struct ManifestV2DataPlane;
 impl ManifestV2DataPlane {
     pub async fn send<C>(
         job: &CanonicalTransferJob,
+        delivery_record: &mut SenderDeliveryRecordV2,
+        delivery_store: &SenderDeliveryStoreV2,
         connection: &mut C,
     ) -> Result<SenderDataPlaneSummaryV2, ManifestV2DataError>
     where
@@ -375,6 +402,13 @@ impl ManifestV2DataPlane {
         let offer = build_manifest_offer_v2(manifest.clone()).map_err(|error| {
             ManifestV2DataError::Codec(ManifestV2FrameCodecError::Offer(error.to_string()))
         })?;
+        delivery_record
+            .validate_offer(&offer)
+            .map_err(|error| ManifestV2DataError::Delivery(error.to_string()))?;
+        delivery_store
+            .save(delivery_record)
+            .await
+            .map_err(|error| ManifestV2DataError::Delivery(error.to_string()))?;
         connection
             .send_manifest_v2_frame(ManifestV2Frame::Offer(offer.clone()))
             .await?;
@@ -386,6 +420,13 @@ impl ManifestV2DataPlane {
         let accept_body_digest =
             canonical_manifest_v2_frame_body_digest(&ManifestV2Frame::Accept(accept.clone()))?;
         let identity = accept.identity;
+        delivery_record
+            .commit_accept(&accept, accept_body_digest)
+            .map_err(|error| ManifestV2DataError::Delivery(error.to_string()))?;
+        delivery_store
+            .save(delivery_record)
+            .await
+            .map_err(|error| ManifestV2DataError::Delivery(error.to_string()))?;
         connection
             .send_manifest_v2_frame(ManifestV2Frame::AcceptCommittedAck(AcceptCommittedAckV2 {
                 identity,
@@ -394,10 +435,10 @@ impl ManifestV2DataPlane {
             .await?;
 
         let mut completion_hasher = blake3::Hasher::new();
-        let mut entry_results = Vec::with_capacity(manifest.entries.len());
+        let mut completions = Vec::with_capacity(manifest.entries.len());
         for entry in &manifest.entries {
             let plan = accept.entry_plans[entry.entry_id as usize];
-            let (completion, result) = if entry.kind == ManifestEntryKindV2::Directory {
+            let completion = if entry.kind == ManifestEntryKindV2::Directory {
                 send_directory(connection, identity, entry).await?
             } else {
                 let source = job.source_for_sealed_entry(entry.entry_id)?;
@@ -412,8 +453,7 @@ impl ManifestV2DataPlane {
                 .await?
             };
             update_completion_set(&mut completion_hasher, completion)?;
-            validate_entry_result(entry, identity, completion, &result)?;
-            entry_results.push(result);
+            completions.push(completion);
         }
         let sender_completion_set_digest =
             ContentDigestV2(*completion_hasher.finalize().as_bytes());
@@ -423,12 +463,26 @@ impl ManifestV2DataPlane {
                 sender_completion_set_digest,
             }))
             .await?;
-        Ok(SenderDataPlaneSummaryV2 {
+        let mut entry_results = Vec::with_capacity(manifest.entries.len());
+        for (entry, completion) in manifest.entries.iter().zip(completions) {
+            let result = recv_entry_result(connection, identity, entry.entry_id).await?;
+            validate_entry_result(entry, identity, completion, &result)?;
+            entry_results.push(result);
+        }
+        let summary = SenderDataPlaneSummaryV2 {
             identity,
             accept_body_digest,
             sender_completion_set_digest,
             entry_results,
-        })
+        };
+        delivery_record
+            .commit_results(&summary)
+            .map_err(|error| ManifestV2DataError::Delivery(error.to_string()))?;
+        delivery_store
+            .save(delivery_record)
+            .await
+            .map_err(|error| ManifestV2DataError::Delivery(error.to_string()))?;
+        Ok(summary)
     }
 
     pub async fn receive<C, S>(
@@ -443,9 +497,13 @@ impl ManifestV2DataPlane {
         S: ManifestV2PayloadSink,
     {
         ledger.validate(&offer.manifest)?;
+        if !ledger.accept_committed_acknowledged {
+            return Err(ManifestV2DataError::InvalidLedger(
+                "AcceptCommittedAck is not durably recorded".into(),
+            ));
+        }
         let identity = ledger.identity;
         let mut completion_hasher = blake3::Hasher::new();
-        let mut entry_results = Vec::with_capacity(offer.manifest.entries.len());
         for entry in &offer.manifest.entries {
             let checkpoint_index = entry.entry_id as usize;
             let plan = ledger.accept.entry_plans[checkpoint_index];
@@ -465,7 +523,7 @@ impl ManifestV2DataPlane {
                 checkpoint.payload_retired = false;
             }
             store.save(ledger).await?;
-            let result = if entry.kind == ManifestEntryKindV2::Directory {
+            if entry.kind == ManifestEntryKindV2::Directory {
                 receive_directory(
                     entry,
                     identity,
@@ -475,7 +533,7 @@ impl ManifestV2DataPlane {
                     sink,
                     connection,
                 )
-                .await?
+                .await?;
             } else {
                 if plan.disposition == EntryDispositionV2::ReceivePayload {
                     sink.begin_entry(
@@ -494,13 +552,12 @@ impl ManifestV2DataPlane {
                     sink,
                     connection,
                 )
-                .await?
-            };
+                .await?;
+            }
             let completion = ledger.entries[checkpoint_index].completion.ok_or_else(|| {
                 ManifestV2DataError::InvalidLedger("entry completion missing".into())
             })?;
             update_completion_set(&mut completion_hasher, completion)?;
-            entry_results.push(result);
         }
         let sender_digest = match connection.recv_manifest_v2_frame().await? {
             ManifestV2Frame::JobComplete(complete) if complete.identity == identity => {
@@ -518,6 +575,61 @@ impl ManifestV2DataPlane {
         }
         ledger.sender_completion_set_digest = Some(sender_digest);
         store.save(ledger).await?;
+        let verified_entries = ledger
+            .entries
+            .iter()
+            .map(|checkpoint| {
+                let completion = checkpoint.completion.ok_or_else(|| {
+                    ManifestV2DataError::InvalidLedger("entry completion missing".into())
+                })?;
+                Ok(VerifiedEntryV2 {
+                    entry_id: checkpoint.entry_id,
+                    final_digest: (offer.manifest.entries[checkpoint.entry_id as usize].kind
+                        == ManifestEntryKindV2::RegularFile)
+                        .then_some(completion.final_digest),
+                    completion_choice: completion.completion_choice,
+                })
+            })
+            .collect::<Result<Vec<_>, ManifestV2DataError>>()?;
+        let saved_entries = sink.commit_job(&offer.manifest, &verified_entries).await?;
+        if saved_entries.len() != offer.manifest.entries.len() {
+            return Err(ManifestV2DataError::Destination(
+                "destination returned an incomplete result set".into(),
+            ));
+        }
+        let mut entry_results = Vec::with_capacity(saved_entries.len());
+        for (entry, (verified, saved)) in offer
+            .manifest
+            .entries
+            .iter()
+            .zip(verified_entries.iter().zip(saved_entries))
+        {
+            let expected_result = match verified.completion_choice {
+                EntryCompletionChoiceV2::PayloadComplete => EntryResultKindV2::Saved,
+                EntryCompletionChoiceV2::ReuseChosen => EntryResultKindV2::ReusedExisting,
+            };
+            if saved.entry_id != entry.entry_id || saved.result != expected_result {
+                return Err(ManifestV2DataError::Destination(
+                    "destination result set is noncanonical".into(),
+                ));
+            }
+            let result = EntryResultV2 {
+                identity,
+                entry_id: entry.entry_id,
+                result: saved.result,
+                final_size: entry.plaintext_size,
+                final_digest: verified.final_digest,
+                final_component_override: saved.final_component_override,
+            };
+            ledger.entries[entry.entry_id as usize].result = Some(result.clone());
+            entry_results.push(result);
+        }
+        store.save(ledger).await?;
+        for result in &entry_results {
+            connection
+                .send_manifest_v2_frame(ManifestV2Frame::EntryResult(result.clone()))
+                .await?;
+        }
         Ok(ReceiverDataPlaneSummaryV2 {
             identity,
             sender_completion_set_digest: sender_digest,
@@ -530,7 +642,7 @@ async fn send_directory<C>(
     connection: &mut C,
     identity: JobGenerationV2,
     entry: &ManifestEntryV2,
-) -> Result<(EntryCompleteV2, EntryResultV2), ManifestV2DataError>
+) -> Result<EntryCompleteV2, ManifestV2DataError>
 where
     C: ManifestV2FrameConnection,
 {
@@ -552,8 +664,7 @@ where
     connection
         .send_manifest_v2_frame(ManifestV2Frame::EntryComplete(completion))
         .await?;
-    let result = recv_entry_result(connection, identity, entry.entry_id).await?;
-    Ok((completion, result))
+    Ok(completion)
 }
 
 async fn send_file<C>(
@@ -563,7 +674,7 @@ async fn send_file<C>(
     plan: envoix_protocol::manifest_v2_frames::EntryPlanV2,
     source: PreparedFileSource,
     accept_body_digest: ContentDigestV2,
-) -> Result<(EntryCompleteV2, EntryResultV2), ManifestV2DataError>
+) -> Result<EntryCompleteV2, ManifestV2DataError>
 where
     C: ManifestV2FrameConnection,
 {
@@ -593,10 +704,7 @@ where
         connection
             .send_manifest_v2_frame(ManifestV2Frame::EntryComplete(completion))
             .await?;
-        return Ok((
-            completion,
-            recv_entry_result(connection, identity, entry.entry_id).await?,
-        ));
+        return Ok(completion);
     }
 
     let mut file = source.open().await?;
@@ -701,8 +809,7 @@ where
     connection
         .send_manifest_v2_frame(ManifestV2Frame::EntryComplete(completion))
         .await?;
-    let result = recv_entry_result(connection, identity, entry.entry_id).await?;
-    Ok((completion, result))
+    Ok(completion)
 }
 
 async fn send_late_digest_and_receive_status<C>(
@@ -817,7 +924,7 @@ async fn receive_directory<C, S>(
     store: &ReceiverDataPlaneStoreV2,
     sink: &mut S,
     connection: &mut C,
-) -> Result<EntryResultV2, ManifestV2DataError>
+) -> Result<(), ManifestV2DataError>
 where
     C: ManifestV2FrameConnection,
     S: ManifestV2PayloadSink,
@@ -838,27 +945,12 @@ where
     {
         return Err(ManifestV2DataError::FinalMismatch);
     }
-    let saved = sink.commit_directory(entry).await?;
-    if saved.result != EntryResultKindV2::Saved {
-        return Err(ManifestV2DataError::FinalMismatch);
-    }
-    let result = EntryResultV2 {
-        identity,
-        entry_id: entry.entry_id,
-        result: saved.result,
-        final_size: 0,
-        final_digest: None,
-        final_component_override: saved.final_component_override,
-    };
+    sink.stage_directory(entry).await?;
     let checkpoint = &mut ledger.entries[checkpoint_index];
     checkpoint.arbiter = EntryArbiterV2::PayloadCompleteChosen;
     checkpoint.completion = Some(completion);
-    checkpoint.result = Some(result.clone());
     store.save(ledger).await?;
-    connection
-        .send_manifest_v2_frame(ManifestV2Frame::EntryResult(result.clone()))
-        .await?;
-    Ok(result)
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -870,16 +962,19 @@ async fn receive_file<C, S>(
     store: &ReceiverDataPlaneStoreV2,
     sink: &mut S,
     connection: &mut C,
-) -> Result<EntryResultV2, ManifestV2DataError>
+) -> Result<(), ManifestV2DataError>
 where
     C: ManifestV2FrameConnection,
     S: ManifestV2PayloadSink,
 {
     let identity = ledger.identity;
     if plan.disposition == EntryDispositionV2::ReuseExisting {
-        ledger.entries[checkpoint_index]
+        let digest = ledger.entries[checkpoint_index]
             .content_digest
             .ok_or(ManifestV2DataError::ReuseUnavailable)?;
+        if !sink.try_choose_reuse(entry, digest).await? {
+            return Err(ManifestV2DataError::ReuseUnavailable);
+        }
         ledger.entries[checkpoint_index].arbiter = EntryArbiterV2::ReuseChosen;
         store.save(ledger).await?;
     }
@@ -949,7 +1044,6 @@ where
                     ledger,
                     store,
                     sink,
-                    connection,
                     completion.final_digest,
                 )
                 .await;
@@ -971,29 +1065,25 @@ where
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn receive_file_completion<C, S>(
+async fn receive_file_completion<S>(
     entry: &ManifestEntryV2,
     checkpoint_index: usize,
     ledger: &mut ReceiverDataPlaneLedgerV2,
     store: &ReceiverDataPlaneStoreV2,
     sink: &mut S,
-    connection: &mut C,
     final_digest: ContentDigestV2,
-) -> Result<EntryResultV2, ManifestV2DataError>
+) -> Result<(), ManifestV2DataError>
 where
-    C: ManifestV2FrameConnection,
     S: ManifestV2PayloadSink,
 {
     let completion = ledger.entries[checkpoint_index]
         .completion
         .ok_or_else(|| ManifestV2DataError::InvalidLedger("completion was not committed".into()))?;
-    let saved = match completion.completion_choice {
+    match completion.completion_choice {
         EntryCompletionChoiceV2::ReuseChosen => {
             if ledger.entries[checkpoint_index].arbiter != EntryArbiterV2::ReuseChosen {
                 return Err(ManifestV2DataError::ReuseUnavailable);
             }
-            sink.commit_reuse(entry, final_digest).await?
         }
         EntryCompletionChoiceV2::PayloadComplete => {
             if ledger.entries[checkpoint_index].arbiter != EntryArbiterV2::PayloadOpen
@@ -1008,30 +1098,11 @@ where
             }
             ledger.entries[checkpoint_index].arbiter = EntryArbiterV2::PayloadCompleteChosen;
             store.save(ledger).await?;
-            sink.commit_verified(entry, final_digest).await?
         }
-    };
-    let expected_result = match completion.completion_choice {
-        EntryCompletionChoiceV2::PayloadComplete => EntryResultKindV2::Saved,
-        EntryCompletionChoiceV2::ReuseChosen => EntryResultKindV2::ReusedExisting,
-    };
-    if saved.result != expected_result {
-        return Err(ManifestV2DataError::FinalMismatch);
     }
-    let result = EntryResultV2 {
-        identity: ledger.identity,
-        entry_id: entry.entry_id,
-        result: saved.result,
-        final_size: entry.plaintext_size,
-        final_digest: Some(final_digest),
-        final_component_override: saved.final_component_override,
-    };
-    ledger.entries[checkpoint_index].result = Some(result.clone());
+    ledger.entries[checkpoint_index].completion = Some(completion);
     store.save(ledger).await?;
-    connection
-        .send_manifest_v2_frame(ManifestV2Frame::EntryResult(result.clone()))
-        .await?;
-    Ok(result)
+    Ok(())
 }
 
 async fn retire_mismatch<S>(
