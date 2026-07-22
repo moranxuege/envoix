@@ -30,8 +30,10 @@ pub use envoix_session::{
     AddSourceResult, CandidateFilter, CanonicalTransferJob, DEFAULT_INVENTORY_PAGE_SIZE,
     InventoryCursor, InventoryItem, InventoryPage, InventorySummary, JobLifecycle,
     LocalSourceOrigin, MAX_INVENTORY_PAGE_SIZE, ManifestSendRequest, ManifestTransferSummary,
-    SessionTransferSummary, SourceDecision, SourceIssue, SourceIssueKind, SourceItemId,
-    SourceSelectionInfo, SourceSelectionState, TransferJobError, TransferJobStore,
+    ManifestV2DataError, ManifestV2DataPlane, ManifestV2PayloadSink, PreparedFileSource,
+    ReceiverDataPlaneLedgerV2, ReceiverDataPlaneStoreV2, ReceiverDataPlaneSummaryV2, SavedEntryV2,
+    SenderDataPlaneSummaryV2, SessionTransferSummary, SourceDecision, SourceIssue, SourceIssueKind,
+    SourceItemId, SourceSelectionInfo, SourceSelectionState, TransferJobError, TransferJobStore,
 };
 pub use envoix_types::{DataPath, PairingStep};
 pub use error::{

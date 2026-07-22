@@ -152,6 +152,47 @@ pub struct InventorySummary {
     pub warning_count: u32,
 }
 
+#[derive(Clone)]
+pub struct PreparedFileSource {
+    path: PathBuf,
+    fingerprint: SourceFingerprint,
+}
+
+impl fmt::Debug for PreparedFileSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreparedFileSource")
+            .field("path", &"<redacted>")
+            .finish()
+    }
+}
+
+impl PreparedFileSource {
+    pub async fn open(&self) -> Result<fs::File, TransferJobError> {
+        verify_source_fingerprint(&self.path, &self.fingerprint).await?;
+        Ok(fs::File::open(&self.path).await?)
+    }
+
+    pub async fn hash(&self) -> Result<ContentDigestV2, TransferJobError> {
+        let mut file = self.open().await?;
+        let mut hasher = blake3::Hasher::new();
+        let mut buffer = vec![0_u8; HASH_READ_BUFFER_BYTES];
+        loop {
+            let read = file.read(&mut buffer).await?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        verify_source_fingerprint(&self.path, &self.fingerprint).await?;
+        Ok(ContentDigestV2(*hasher.finalize().as_bytes()))
+    }
+
+    pub async fn verify_unchanged(&self) -> Result<(), TransferJobError> {
+        verify_source_fingerprint(&self.path, &self.fingerprint).await
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum TransferJobError {
     #[error("entropy source unavailable")]
@@ -822,6 +863,36 @@ impl CanonicalTransferJob {
             .iter()
             .find(|entry| entry.item_id == item_id)
             .and_then(|entry| entry.digest)
+    }
+
+    pub fn source_for_sealed_entry(
+        &self,
+        entry_id: u32,
+    ) -> Result<PreparedFileSource, TransferJobError> {
+        if self.lifecycle != JobLifecycle::Sealed {
+            return Err(TransferJobError::PreparationIncomplete);
+        }
+        let entry = self
+            .selections
+            .iter()
+            .flat_map(|selection| {
+                self.inventory
+                    .iter()
+                    .filter(move |entry| entry.root_item_id == selection.root_item_id)
+            })
+            .nth(entry_id as usize)
+            .ok_or(TransferJobError::UnknownItem(SourceItemId(entry_id as u64)))?;
+        if entry.kind != ManifestEntryKindV2::RegularFile {
+            return Err(TransferJobError::NotRegularFile);
+        }
+        let binding = self
+            .source_bindings
+            .get(&entry.item_id)
+            .ok_or(TransferJobError::UnknownItem(entry.item_id))?;
+        Ok(PreparedFileSource {
+            path: binding.path.clone(),
+            fingerprint: binding.fingerprint.clone(),
+        })
     }
 
     pub fn seal_for_send(&mut self) -> Result<&ManifestV2, TransferJobError> {
@@ -1526,10 +1597,15 @@ fn fingerprint(path: &Path, metadata: &std::fs::Metadata) -> SourceFingerprint {
 }
 
 async fn verify_fingerprint(binding: &LocalSourceBinding) -> Result<(), TransferJobError> {
-    let metadata = fs::symlink_metadata(&binding.path).await?;
-    if metadata.file_type().is_symlink()
-        || fingerprint(&binding.path, &metadata) != binding.fingerprint
-    {
+    verify_source_fingerprint(&binding.path, &binding.fingerprint).await
+}
+
+async fn verify_source_fingerprint(
+    path: &Path,
+    expected: &SourceFingerprint,
+) -> Result<(), TransferJobError> {
+    let metadata = fs::symlink_metadata(path).await?;
+    if metadata.file_type().is_symlink() || fingerprint(path, &metadata) != *expected {
         return Err(TransferJobError::SourceChanged);
     }
     Ok(())

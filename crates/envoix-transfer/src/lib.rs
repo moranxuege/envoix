@@ -2,17 +2,23 @@
 
 mod job;
 mod manifest;
+mod manifest_v2_engine;
 
 pub use job::{
     AddSourceResult, CanonicalTransferJob, DEFAULT_INVENTORY_PAGE_SIZE, InventoryCursor,
     InventoryItem, InventoryPage, InventorySummary, JobLifecycle, LocalSourceOrigin,
-    MAX_INVENTORY_PAGE_SIZE, SourceDecision, SourceIssue, SourceIssueKind, SourceItemId,
-    SourceSelectionInfo, SourceSelectionState, TransferJobError, TransferJobStore,
+    MAX_INVENTORY_PAGE_SIZE, PreparedFileSource, SourceDecision, SourceIssue, SourceIssueKind,
+    SourceItemId, SourceSelectionInfo, SourceSelectionState, TransferJobError, TransferJobStore,
 };
 
 pub use manifest::{
     ManifestEventSink, ManifestNoopEventSink, ManifestSendRequest, ManifestTransferEngine,
     ManifestTransferEvent, ManifestTransferSummary, discard_manifest_resume_state,
+};
+
+pub use manifest_v2_engine::{
+    ManifestV2DataError, ManifestV2DataPlane, ManifestV2PayloadSink, ReceiverDataPlaneLedgerV2,
+    ReceiverDataPlaneStoreV2, ReceiverDataPlaneSummaryV2, SavedEntryV2, SenderDataPlaneSummaryV2,
 };
 
 use std::io::SeekFrom;

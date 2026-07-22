@@ -64,6 +64,8 @@ pub enum TransferProtocol {
     SingleFileV1,
     /// Multi-file or directory transfer over `envoix/manifest/1`.
     ManifestV1,
+    /// Canonical single/multi-root transfer over `envoix/manifest/2`.
+    ManifestV2,
 }
 
 impl TransferProtocol {
@@ -72,6 +74,7 @@ impl TransferProtocol {
         match self {
             Self::SingleFileV1 => SINGLE_FILE_V1_ALPN,
             Self::ManifestV1 => MANIFEST_V1_ALPN,
+            Self::ManifestV2 => crate::manifest_v2::MANIFEST_V2_ALPN,
         }
     }
 
@@ -81,6 +84,7 @@ impl TransferProtocol {
         match alpn {
             SINGLE_FILE_V1_ALPN => Some(Self::SingleFileV1),
             MANIFEST_V1_ALPN => Some(Self::ManifestV1),
+            crate::manifest_v2::MANIFEST_V2_ALPN => Some(Self::ManifestV2),
             _ => None,
         }
     }

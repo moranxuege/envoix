@@ -2,10 +2,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use envoix_error::CoreError;
+use envoix_protocol::manifest_v2_frames::{ManifestV2Frame, ManifestV2FrameConnection};
 use envoix_protocol::{
     Frame, FrameConnection, ManifestFrame, ManifestFrameConnection, ManifestId, ProtocolError,
-    TransferProtocol, flush_frame_writer, read_frame, read_manifest_frame, write_chunk_frame,
-    write_frame, write_manifest_chunk_frame, write_manifest_frame,
+    TransferProtocol, flush_frame_writer, read_frame, read_manifest_frame, read_manifest_v2_frame,
+    write_chunk_frame, write_frame, write_manifest_chunk_frame, write_manifest_frame,
+    write_manifest_v2_frame,
 };
 use envoix_transfer::{EventSink, TransferEvent};
 use envoix_types::DataPath;
@@ -265,6 +267,43 @@ impl ManifestFrameConnection for IrohFrameConnection {
 
     async fn recv_manifest_frame(&mut self) -> Result<ManifestFrame, ProtocolError> {
         read_manifest_frame(&mut self.recv).await
+    }
+}
+
+#[async_trait::async_trait]
+impl ManifestV2FrameConnection for IrohFrameConnection {
+    async fn send_manifest_v2_frame(
+        &mut self,
+        frame: ManifestV2Frame,
+    ) -> Result<(), ProtocolError> {
+        write_manifest_v2_frame(&mut self.send, &frame).await?;
+        Ok(())
+    }
+
+    async fn recv_manifest_v2_frame(&mut self) -> Result<ManifestV2Frame, ProtocolError> {
+        read_manifest_v2_frame(&mut self.recv)
+            .await
+            .map_err(Into::into)
+    }
+
+    fn export_keying_material(
+        &self,
+        label: &[u8],
+        context: &[u8],
+    ) -> Result<[u8; 32], ProtocolError> {
+        let mut output = [0_u8; 32];
+        self.connection
+            .export_keying_material(&mut output, label, context)
+            .map_err(|_| CoreError::Transport("failed to export iroh keying material".into()))?;
+        Ok(output)
+    }
+
+    async fn close(&mut self) -> Result<(), ProtocolError> {
+        if self.send.finish().is_ok() {
+            let _ = tokio::time::timeout(STREAM_CLOSE_TIMEOUT, self.send.stopped()).await;
+        }
+        self.connection.close(VarInt::from_u32(0), b"done");
+        Ok(())
     }
 }
 

@@ -2,6 +2,11 @@
 
 pub mod manifest;
 pub mod manifest_v2;
+pub mod manifest_v2_frames;
+
+pub use manifest_v2_frames::{
+    ManifestV2FrameConnection, read_manifest_v2_frame, write_manifest_v2_frame,
+};
 
 pub use manifest::{
     MANIFEST_V1_ALPN, MANIFEST_V1_PROTOCOL_VERSION, MAX_MANIFEST_V1_COMPONENT_BYTES,

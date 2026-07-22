@@ -20,11 +20,13 @@ pub use envoix_transfer::{
     EventSink, InventoryCursor, InventoryItem, InventoryPage, InventorySummary, JobLifecycle,
     LocalSourceOrigin, MAX_CHUNK_SIZE, MAX_INVENTORY_PAGE_SIZE, MIN_CHUNK_SIZE, ManifestEventSink,
     ManifestNoopEventSink, ManifestSendRequest, ManifestTransferEngine, ManifestTransferEvent,
-    ManifestTransferSummary, NoopEventSink, PEER_INTERRUPT_MESSAGE, PEER_PAUSE_MESSAGE,
-    SourceDecision, SourceIssue, SourceIssueKind, SourceItemId, SourceSelectionInfo,
-    SourceSelectionState, TransferCancelToken, TransferEngine, TransferEvent, TransferJobError,
-    TransferJobStore, TransferSummary, USER_INTERRUPT_MESSAGE, USER_PAUSE_MESSAGE,
-    discard_manifest_resume_state, validate_chunk_size,
+    ManifestTransferSummary, ManifestV2DataError, ManifestV2DataPlane, ManifestV2PayloadSink,
+    NoopEventSink, PEER_INTERRUPT_MESSAGE, PEER_PAUSE_MESSAGE, PreparedFileSource,
+    ReceiverDataPlaneLedgerV2, ReceiverDataPlaneStoreV2, ReceiverDataPlaneSummaryV2, SavedEntryV2,
+    SenderDataPlaneSummaryV2, SourceDecision, SourceIssue, SourceIssueKind, SourceItemId,
+    SourceSelectionInfo, SourceSelectionState, TransferCancelToken, TransferEngine, TransferEvent,
+    TransferJobError, TransferJobStore, TransferSummary, USER_INTERRUPT_MESSAGE,
+    USER_PAUSE_MESSAGE, discard_manifest_resume_state, validate_chunk_size,
 };
 pub use envoix_types::TransferDirection;
 // Re-exported so the client facade reaches rendezvous-code helpers through its
@@ -877,6 +879,9 @@ async fn receive_negotiated_transfer(
             .receive_manifest_with_cancel(connection, output_dir, events, cancel)
             .await
             .map(SessionTransferSummary::Manifest),
+        TransferProtocol::ManifestV2 => Err(CoreError::Protocol(
+            "Manifest v2 requires the canonical destination session entry point".into(),
+        )),
     }
 }
 
