@@ -124,6 +124,17 @@ enum AppText {
     static func value(_ english: String, _ simplifiedChinese: String, language: String) -> String {
         language == "zh-Hans" ? simplifiedChinese : english
     }
+
+    static func localized(_ key: String, language: String) -> String {
+        let resourceLanguage = language == "zh-Hans" ? "zh-Hans" : "en"
+        guard
+            let path = Bundle.main.path(forResource: resourceLanguage, ofType: "lproj"),
+            let languageBundle = Bundle(path: path)
+        else {
+            return key
+        }
+        return languageBundle.localizedString(forKey: key, value: nil, table: "Localizable")
+    }
 }
 
 private struct AppLanguageKey: EnvironmentKey {

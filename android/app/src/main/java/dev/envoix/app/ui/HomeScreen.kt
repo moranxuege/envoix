@@ -1,12 +1,9 @@
 package dev.envoix.app.ui
 
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,18 +26,18 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Devices
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.MailOutline
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -85,6 +82,7 @@ import androidx.compose.ui.unit.sp
 import dev.envoix.app.Diagnostics
 import dev.envoix.app.Direction
 import dev.envoix.app.LogUpload
+import dev.envoix.app.R
 import dev.envoix.app.Room
 import dev.envoix.app.SettingsStore
 import dev.envoix.app.Status
@@ -114,7 +112,7 @@ fun HomeScreen(
     onShare: (Transfer) -> Unit,
 ) {
     val colors = Envoix.colors
-    var sheetOpen by remember { mutableStateOf(false) }
+    var sheetRole by remember { mutableStateOf<String?>(null) }
     val expanded = remember { mutableStateListOf<Long>() }
     val listState = rememberLazyListState()
     // A just-created transfer lands at the top (newest-first sort); bring it
@@ -124,7 +122,7 @@ fun HomeScreen(
         if (newestId >= 0) listState.animateScrollToItem(0)
     }
     LaunchedEffect(initialSharedUris) {
-        if (initialSharedUris.isNotEmpty()) sheetOpen = true
+        if (initialSharedUris.isNotEmpty()) sheetRole = "send"
     }
     val active =
         transfers.count { !it.status.isTerminal }
@@ -132,18 +130,6 @@ fun HomeScreen(
     Scaffold(
         modifier = Modifier.semantics { testTagsAsResourceId = true },
         containerColor = colors.bg,
-        floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = { sheetOpen = true },
-                modifier = Modifier.testTag("home_new_transfer"),
-                containerColor = colors.accent,
-                contentColor = androidx.compose.ui.graphics.Color.White,
-            ) {
-                Icon(Icons.Default.Add, contentDescription = null)
-                Spacer(Modifier.width(8.dp))
-                Text(appText("New transfer", "新建传输"), fontWeight = FontWeight.SemiBold)
-            }
-        },
     ) { inner ->
         Column(
             Modifier
@@ -152,14 +138,53 @@ fun HomeScreen(
                 .padding(horizontal = 20.dp),
         ) {
             Header(active, onOpenDiscovery, onOpenLogs, onOpenSettings)
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(18.dp))
+            Text(
+                appString(R.string.transfer_files_title),
+                color = colors.text,
+                fontSize = 28.sp,
+                fontWeight = FontWeight.ExtraBold,
+            )
+            Text(
+                appString(R.string.choose_device_action),
+                color = colors.muted,
+                fontSize = 14.sp,
+                modifier = Modifier.padding(top = 3.dp),
+            )
+            Spacer(Modifier.height(14.dp))
+            HomeActionCard(
+                title = appString(R.string.send_action_title),
+                subtitle = appString(R.string.send_action_subtitle),
+                icon = Icons.Default.Share,
+                testTag = "home_send",
+            ) {
+                sheetRole = "send"
+            }
+            Spacer(Modifier.height(10.dp))
+            HomeActionCard(
+                title = appString(R.string.receive_action_title),
+                subtitle = appString(R.string.receive_action_subtitle),
+                icon = Icons.Default.Download,
+                testTag = "home_receive",
+            ) {
+                sheetRole = "receive"
+            }
+            Spacer(Modifier.height(18.dp))
+            Text(
+                appString(R.string.activity_title),
+                color = colors.text,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.height(8.dp))
             if (transfers.isEmpty()) {
                 EmptyState()
             } else {
                 LazyColumn(
+                    modifier = Modifier.weight(1f),
                     state = listState,
                     verticalArrangement = Arrangement.spacedBy(12.dp),
-                    contentPadding = PaddingValues(top = 4.dp, bottom = 96.dp),
+                    contentPadding = PaddingValues(top = 4.dp, bottom = 24.dp),
                 ) {
                     items(transfers.sortedByDescending { it.id }, key = { it.id }) { t ->
                         TransferCard(
@@ -179,22 +204,23 @@ fun HomeScreen(
         }
     }
 
-    if (sheetOpen) {
+    sheetRole?.let { initialRole ->
         ModalBottomSheet(
             onDismissRequest = {
-                sheetOpen = false
+                sheetRole = null
             },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
             containerColor = colors.surface,
         ) {
             NewTransferSheet(
+                initialRole = initialRole,
                 initialSources = initialSharedUris,
                 onReceive = { c, b, r, qr, copyApproved ->
-                    sheetOpen = false
+                    sheetRole = null
                     onReceive(c, b, r, qr, copyApproved)
                 },
                 onSend = { c, b, r, jobId, qr ->
-                    sheetOpen = false
+                    sheetRole = null
                     onSharedUrisConsumed()
                     onSend(c, b, r, jobId, qr)
                 },
@@ -218,11 +244,28 @@ private fun Header(
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text("Envoix", color = colors.text, fontSize = 32.sp, fontWeight = FontWeight.ExtraBold)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier
+                    .size(42.dp)
+                    .clip(RoundedCornerShape(13.dp))
+                    .background(colors.accentSoft),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Default.MailOutline,
+                    contentDescription = null,
+                    tint = colors.accentStrong,
+                    modifier = Modifier.size(24.dp),
+                )
+            }
+            Spacer(Modifier.width(10.dp))
+            Text("Envoix", color = colors.text, fontSize = 26.sp, fontWeight = FontWeight.ExtraBold)
+        }
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (active > 0) {
                 Pill(
-                    text = appText("$active active", "$active 个进行中"),
+                    text = appString(R.string.active_transfer_count, active),
                     fg = colors.success,
                     bg = colors.successSoft,
                 )
@@ -230,7 +273,7 @@ private fun Header(
             }
             Icon(
                 Icons.Default.Devices,
-                contentDescription = appText("Nearby devices", "附近设备"),
+                contentDescription = appString(R.string.nearby_devices),
                 tint = colors.accent,
                 modifier =
                     Modifier
@@ -240,7 +283,7 @@ private fun Header(
                         .size(22.dp),
             )
             Text(
-                appText("Logs", "日志"),
+                appString(R.string.logs),
                 color = colors.accent,
                 fontWeight = FontWeight.Bold,
                 fontSize = 14.sp,
@@ -252,7 +295,7 @@ private fun Header(
             )
             Icon(
                 Icons.Default.Settings,
-                contentDescription = appText("Settings", "设置"),
+                contentDescription = appString(R.string.settings),
                 tint = colors.accent,
                 modifier =
                     Modifier
@@ -266,21 +309,65 @@ private fun Header(
 }
 
 @Composable
+private fun HomeActionCard(
+    title: String,
+    subtitle: String,
+    icon: ImageVector,
+    testTag: String,
+    onClick: () -> Unit,
+) {
+    val colors = Envoix.colors
+    Row(
+        Modifier
+            .testTag(testTag)
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(colors.surfaceRaised)
+            .border(1.dp, colors.line, RoundedCornerShape(16.dp))
+            .clickable(onClick = onClick)
+            .padding(14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier
+                .size(48.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(colors.accentSoft),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(icon, contentDescription = null, tint = colors.accentStrong, modifier = Modifier.size(24.dp))
+        }
+        Spacer(Modifier.width(13.dp))
+        Column(Modifier.weight(1f)) {
+            Text(title, color = colors.text, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+            Text(
+                subtitle,
+                color = colors.muted,
+                fontSize = 13.sp,
+                lineHeight = 18.sp,
+                modifier = Modifier.padding(top = 2.dp),
+            )
+        }
+        Text("›", color = colors.muted, fontSize = 26.sp)
+    }
+}
+
+@Composable
 private fun EmptyState() {
     val colors = Envoix.colors
-    Box(Modifier.fillMaxWidth().padding(top = 80.dp), contentAlignment = Alignment.Center) {
+    Box(Modifier.fillMaxWidth().padding(vertical = 24.dp), contentAlignment = Alignment.Center) {
         Text(
             appText(
-                "No transfers yet.\nTap “New transfer” to send or receive.",
-                "暂无传输。\n点击“新建传输”发送或接收文件。",
+                "No activity yet. Transfers will appear here.",
+                "暂无活动，传输任务会显示在这里。",
             ),
             color = colors.muted,
-            fontSize = 15.sp,
+            fontSize = 13.sp,
         )
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun TransferCard(
     t: Transfer,
@@ -300,7 +387,7 @@ private fun TransferCard(
     val dismissState =
         rememberSwipeToDismissBoxState(
             confirmValueChange = {
-                if (it == SwipeToDismissBoxValue.EndToStart) {
+                if (t.status.isTerminal && it == SwipeToDismissBoxValue.EndToStart) {
                     onRemove(t.id)
                     true
                 } else {
@@ -311,7 +398,7 @@ private fun TransferCard(
     SwipeToDismissBox(
         state = dismissState,
         enableDismissFromStartToEnd = false,
-        enableDismissFromEndToStart = true,
+        enableDismissFromEndToStart = t.status.isTerminal,
         backgroundContent = {
             Row(
                 Modifier
@@ -334,19 +421,7 @@ private fun TransferCard(
                 .clip(RoundedCornerShape(16.dp))
                 .background(if (cancelled) colors.line else colors.surface)
                 .border(1.dp, colors.line, RoundedCornerShape(16.dp))
-                .combinedClickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null, // the drawer expanding is feedback enough; the
-                    // default ripple fills the whole card, which looks heavy
-                    onClick = {
-                        if (t.status == Status.Completed && t.savedUri != null) {
-                            onOpen(t)
-                        } else {
-                            onToggleDetail(t.id)
-                        }
-                    },
-                    onLongClick = { onToggleDetail(t.id) },
-                ),
+                .clickable { onToggleDetail(t.id) },
         ) {
             if (t.status == Status.Connecting && t.qrPayload != null) {
                 WaitingBody(t, onCancel)

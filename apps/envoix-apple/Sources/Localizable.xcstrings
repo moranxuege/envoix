@@ -1,0 +1,72 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "activity.in_progress" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "In progress" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "进行中" } }
+      }
+    },
+    "activity.needs_attention" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Needs attention" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "需要处理" } }
+      }
+    },
+    "activity.recent" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Recent" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "最近记录" } }
+      }
+    },
+    "activity.remove_record" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Remove record" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "移除记录" } }
+      }
+    },
+    "home.choose_action" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Choose what this device will do." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "选择这台设备要执行的操作。" } }
+      }
+    },
+    "home.nearby" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Nearby devices" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "附近设备" } }
+      }
+    },
+    "home.receive.subtitle" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Choose where to save and wait for the sender." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "选择保存位置并等待发送方。" } }
+      }
+    },
+    "home.receive.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Receive" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "接收" } }
+      }
+    },
+    "home.send.subtitle" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Choose files, folders, or photos." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "选择文件、文件夹或照片。" } }
+      }
+    },
+    "home.send.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Send" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "发送" } }
+      }
+    },
+    "home.transfer.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Transfer files" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "传输文件" } }
+      }
+    }
+  },
+  "version" : "1.0"
+}

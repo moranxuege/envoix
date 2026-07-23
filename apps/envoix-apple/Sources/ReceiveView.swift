@@ -125,13 +125,8 @@ struct ReceiveView: View {
     private var scrollContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                #if os(iOS)
                 outputSection
                 connectionSection
-                #else
-                connectionSection
-                outputSection
-                #endif
                 #if os(macOS)
                 if !viewModel.peerAddress.isEmpty {
                     addressReveal

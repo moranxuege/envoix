@@ -15,6 +15,7 @@ struct TransferStageView: View {
     let onDelete: (String) -> Bool
 
     @Environment(\.appLanguage) private var language
+    @State private var expandedActivityIDs: Set<String> = []
 
     var body: some View {
         ScrollView {
@@ -39,38 +40,81 @@ struct TransferStageView: View {
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 48)
                 } else {
-                    ForEach(records) { record in
-                        activityCard(record)
-                    }
+                    activitySection(
+                        AppText.localized("activity.in_progress", language: language),
+                        records: records.filter { ActivityProjectionPolicy.isPending($0.state) }
+                    )
+                    activitySection(
+                        AppText.localized("activity.needs_attention", language: language),
+                        records: records.filter { $0.state == .failed }
+                    )
+                    activitySection(
+                        AppText.localized("activity.recent", language: language),
+                        records: records.filter {
+                            !ActivityProjectionPolicy.isPending($0.state) && $0.state != .failed
+                        }
+                    )
                 }
             }
             .padding(.vertical, 4)
         }
     }
 
+    @ViewBuilder
+    private func activitySection(_ title: String, records: [TransferActivityRecord]) -> some View {
+        if !records.isEmpty {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Theme.muted)
+                .padding(.top, 4)
+            ForEach(records) { record in
+                activityCard(record)
+            }
+        }
+    }
+
     private func activityCard(_ record: TransferActivityRecord) -> some View {
         let actions = activityActionAvailability(for: record)
         let metrics = metricsByActivityID[record.activityId] ?? ActivityMetrics()
+        let isExpanded = expandedActivityIDs.contains(record.activityId)
         return VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top) {
-                Image(systemName: icon(for: record.state))
-                    .font(.title2)
-                    .foregroundStyle(tint(for: record.state))
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(title(for: record))
-                        .font(.headline)
-                        .foregroundStyle(Theme.text)
-                    Text(stateText(record.state))
-                        .font(.subheadline)
-                        .foregroundStyle(Theme.muted)
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    if isExpanded {
+                        expandedActivityIDs.remove(record.activityId)
+                    } else {
+                        expandedActivityIDs.insert(record.activityId)
+                    }
                 }
-                Spacer()
-                Text(record.direction == .send
-                    ? AppText.value("Send", "发送", language: language)
-                    : AppText.value("Receive", "接收", language: language))
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(Theme.muted)
+            } label: {
+                HStack(alignment: .top, spacing: 11) {
+                    Image(systemName: icon(for: record))
+                        .font(.title2)
+                        .foregroundStyle(tint(for: record.state))
+                        .frame(width: 32)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(title(for: record))
+                            .font(.headline)
+                            .foregroundStyle(Theme.text)
+                        Text(stateText(record.state))
+                            .font(.subheadline)
+                            .foregroundStyle(Theme.muted)
+                    }
+                    Spacer()
+                    Text(record.direction == .send
+                        ? AppText.value("Send", "发送", language: language)
+                        : AppText.value("Receive", "接收", language: language))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Theme.muted)
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(Theme.muted)
+                        .padding(.top, 2)
+                }
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("activity_\(record.activityId)")
 
             if record.totalBytes > 0 {
                 ProgressView(
@@ -87,80 +131,104 @@ struct TransferStageView: View {
                 .foregroundStyle(Theme.muted)
             }
 
-            if !record.diagnosticMessage.isEmpty {
-                Text(record.diagnosticMessage)
-                    .font(.footnote)
-                    .foregroundStyle(record.state == .failed ? Theme.danger : Theme.muted)
-                    .textSelection(.enabled)
-            }
+            if isExpanded {
+                if !record.diagnosticMessage.isEmpty {
+                    Text(record.diagnosticMessage)
+                        .font(.footnote)
+                        .foregroundStyle(record.state == .failed ? Theme.danger : Theme.muted)
+                        .textSelection(.enabled)
+                }
 
-            if record.state == .delivered, !record.savedPaths.isEmpty {
-                VStack(alignment: .leading, spacing: 5) {
-                    ForEach(record.savedPaths.prefix(8), id: \.self) { path in
-                        Text(path)
-                            .font(.caption.monospaced())
-                            .lineLimit(1)
-                            .textSelection(.enabled)
+                if record.state == .delivered, !record.savedPaths.isEmpty {
+                    VStack(alignment: .leading, spacing: 5) {
+                        ForEach(record.savedPaths.prefix(8), id: \.self) { path in
+                            Text(path)
+                                .font(.caption.monospaced())
+                                .lineLimit(1)
+                                .textSelection(.enabled)
+                        }
                     }
                 }
-            }
 
-            HStack(spacing: 8) {
-                if actions.canPause {
-                    Button(AppText.value("Pause", "暂停", language: language)) {
-                        _ = onPause(record.activityId)
+                HStack(spacing: 8) {
+                    if actions.canPause {
+                        Button(AppText.value("Pause", "暂停", language: language)) {
+                            _ = onPause(record.activityId)
+                        }
                     }
-                }
-                if actions.canResume, onCanResume(record.activityId) {
-                    Button(AppText.value("Resume", "恢复", language: language)) {
-                        _ = onResume(record.activityId)
+                    if actions.canResume, onCanResume(record.activityId) {
+                        Button(AppText.value("Resume", "恢复", language: language)) {
+                            _ = onResume(record.activityId)
+                        }
                     }
-                }
-                if actions.canCancel {
-                    Button(AppText.value("Cancel", "取消", language: language), role: .destructive) {
-                        _ = onCancel(record.activityId)
+                    if actions.canCancel {
+                        Button(AppText.value("Cancel", "取消", language: language), role: .destructive) {
+                            _ = onCancel(record.activityId)
+                        }
                     }
-                }
-                Spacer()
-                Menu {
-                    Button(AppText.value("Copy diagnostics", "复制诊断信息", language: language)) {
-                        copyWithToast(
-                            onCopyDiagnostics(record),
-                            AppText.value("Diagnostics copied", "诊断信息已复制", language: language),
-                            language: language
-                        )
-                    }
-                    if let target = onRemoteLogTarget(record) {
-                        Button(AppText.value("Upload diagnostics", "上传诊断信息", language: language)) {
-                            Task {
-                                try? await RemoteLogUpload.upload(
-                                    server: UserDefaults.standard.string(forKey: "envoix.logServer") ?? defaultLogServer,
-                                    target: target,
-                                    body: onRemoteDiagnosticReport(record)
-                                )
+                    Spacer()
+                    Menu {
+                        Button(AppText.value("Copy diagnostics", "复制诊断信息", language: language)) {
+                            copyWithToast(
+                                onCopyDiagnostics(record),
+                                AppText.value("Diagnostics copied", "诊断信息已复制", language: language),
+                                language: language
+                            )
+                        }
+                        if let target = onRemoteLogTarget(record) {
+                            Button(AppText.value("Upload diagnostics", "上传诊断信息", language: language)) {
+                                Task {
+                                    try? await RemoteLogUpload.upload(
+                                        server: UserDefaults.standard.string(forKey: "envoix.logServer") ?? defaultLogServer,
+                                        target: target,
+                                        body: onRemoteDiagnosticReport(record)
+                                    )
+                                }
                             }
                         }
-                    }
-                    Button(AppText.value("Copy app diagnostics", "复制应用诊断信息", language: language)) {
-                        copyWithToast(
-                            onAppDiagnosticReport(),
-                            AppText.value("Diagnostics copied", "诊断信息已复制", language: language),
-                            language: language
-                        )
-                    }
-                    if actions.canDelete {
-                        Button(AppText.value("Delete", "删除", language: language), role: .destructive) {
-                            _ = onDelete(record.activityId)
+                        Button(AppText.value("Copy app diagnostics", "复制应用诊断信息", language: language)) {
+                            copyWithToast(
+                                onAppDiagnosticReport(),
+                                AppText.value("Diagnostics copied", "诊断信息已复制", language: language),
+                                language: language
+                            )
                         }
+                        if actions.canDelete {
+                            Button(AppText.localized("activity.remove_record", language: language), role: .destructive) {
+                                _ = onDelete(record.activityId)
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                            .frame(width: 32, height: 32)
+                            .contentShape(Rectangle())
                     }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
+                    .disabled(pendingRemovalIDs.contains(record.activityId))
                 }
-                .disabled(pendingRemovalIDs.contains(record.activityId))
+                .buttonStyle(.bordered)
+                .transition(.opacity.combined(with: .move(edge: .top)))
             }
-            .buttonStyle(.bordered)
         }
         .card(padding: 14)
+    }
+
+    private func icon(for record: TransferActivityRecord) -> String {
+        switch record.state {
+        case .delivered:
+            return "envelope.badge.fill"
+        case .failed:
+            return "exclamationmark.triangle.fill"
+        case .canceled:
+            return "xmark.circle.fill"
+        case .paused:
+            return "pause.circle.fill"
+        case .saving, .waitingForReceiverSave, .finalizingDelivery:
+            return "tray.and.arrow.down.fill"
+        case .waitingForPeer, .pairing, .connecting:
+            return "envelope"
+        default:
+            return record.direction == .send ? "paperplane.fill" : "envelope.open.fill"
+        }
     }
 
     private func title(for record: TransferActivityRecord) -> String {
@@ -184,17 +252,6 @@ struct TransferStageView: View {
         case .delivered: return AppText.value("Delivered", "已送达", language: language)
         case .failed: return AppText.value("Failed", "失败", language: language)
         case .canceled: return AppText.value("Canceled", "已取消", language: language)
-        }
-    }
-
-    private func icon(for state: TransferActivityState) -> String {
-        switch state {
-        case .delivered: return "checkmark.circle.fill"
-        case .failed: return "exclamationmark.triangle.fill"
-        case .canceled: return "xmark.circle.fill"
-        case .paused: return "pause.circle.fill"
-        case .saving, .waitingForReceiverSave, .finalizingDelivery: return "internaldrive.fill"
-        default: return "arrow.up.arrow.down.circle.fill"
         }
     }
 

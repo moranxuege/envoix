@@ -156,13 +156,8 @@ struct SendView: View {
     private var scrollContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                #if os(iOS)
                 fileSection
                 connectionSection
-                #else
-                connectionSection
-                fileSection
-                #endif
                 TransferStatusView(viewModel: viewModel)
             }
             .padding(.vertical, 12)

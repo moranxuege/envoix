@@ -37,8 +37,8 @@ private enum TransferRole: String, CaseIterable {
 
     func title(language: String) -> String {
         switch self {
-        case .send: return AppText.value("Send", "发送", language: language)
-        case .receive: return AppText.value("Receive", "接收", language: language)
+        case .send: return AppText.localized("home.send.title", language: language)
+        case .receive: return AppText.localized("home.receive.title", language: language)
         }
     }
 
@@ -144,7 +144,21 @@ struct ContentView: View {
                         .accessibilityIdentifier("open_activity")
                     }
 
-                    ToolbarItem(placement: .topBarTrailing) {
+                    ToolbarItemGroup(placement: .topBarTrailing) {
+                        NavigationLink {
+                            NearbyDiscoveryView(coordinator: nearbyCoordinator) { selection in
+                                nearbyPairingSelection = selection
+                                nearbyInboundInvite = nil
+                                nearbyPairingError = nil
+                                mobileSheet = .nearbyPairing
+                            }
+                        } label: {
+                            Image(systemName: "dot.radiowaves.left.and.right")
+                                .font(.body.weight(.semibold))
+                        }
+                        .accessibilityLabel(AppText.localized("home.nearby", language: language))
+                        .accessibilityIdentifier("home_nearby")
+
                         Button {
                             mobileSheet = .settings
                         } label: {
@@ -242,80 +256,40 @@ struct ContentView: View {
 
     private var mobileHome: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(AppText.value("Move something", "传点东西", language: language))
-                        .font(.largeTitle.bold())
-                        .foregroundStyle(Theme.text)
-                    Text(AppText.value(
-                        "Choose what this device will do. Either device may show a QR code; the other scans it.",
-                        "选择这台设备要发送还是接收。任意一台设备都可以显示二维码，由另一台扫描。",
-                        language: language
-                    ))
-                    .font(.body)
-                    .foregroundStyle(Theme.muted)
-                    .fixedSize(horizontal: false, vertical: true)
-                }
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 12) {
+                    Image(systemName: "envelope.fill")
+                        .font(.title2.weight(.semibold))
+                        .foregroundStyle(Theme.accentStrong)
+                        .frame(width: 48, height: 48)
+                        .background(Theme.accentSoft, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
 
-                NavigationLink {
-                    NearbyDiscoveryView(coordinator: nearbyCoordinator) { selection in
-                        nearbyPairingSelection = selection
-                        nearbyInboundInvite = nil
-                        nearbyPairingError = nil
-                        mobileSheet = .nearbyPairing
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(AppText.localized("home.transfer.title", language: language))
+                            .font(.title.bold())
+                            .foregroundStyle(Theme.text)
+                        Text(AppText.localized("home.choose_action", language: language))
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.muted)
                     }
-                } label: {
-                    mobileHomeActionLabel(
-                        systemImage: "dot.radiowaves.left.and.right",
-                        title: AppText.value("Find nearby devices", "发现附近设备", language: language),
-                        subtitle: AppText.value(
-                            "Discover Envoix devices over Bluetooth and the local network.",
-                            "通过蓝牙和局域网发现 Envoix 设备。",
-                            language: language
-                        ),
-                        chevron: "chevron.right"
-                    )
                 }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("home_nearby")
+                .padding(.bottom, 4)
 
                 mobileHomeAction(
                     sheet: .send,
                     role: .send,
-                    title: AppText.value("Send items", "发送项目", language: language),
-                    subtitle: AppText.value(
-                        "Choose files or folders, review the prepared list, then connect to the receiver.",
-                        "选择文件或文件夹并核对准备清单，然后连接接收设备。",
-                        language: language
-                    ),
+                    title: AppText.value("Send", "发送", language: language),
+                    subtitle: AppText.localized("home.send.subtitle", language: language),
                     identifier: "home_send"
                 )
 
                 mobileHomeAction(
                     sheet: .receive,
                     role: .receive,
-                    title: AppText.value("Receive items", "接收项目", language: language),
-                    subtitle: AppText.value(
-                        "Choose where to save, then review the authenticated incoming list while receiving.",
-                        "选择保存位置，并在接收时查看已经认证的项目清单。",
-                        language: language
-                    ),
+                    title: AppText.value("Receive", "接收", language: language),
+                    subtitle: AppText.localized("home.receive.subtitle", language: language),
                     identifier: "home_receive"
                 )
-
-                HStack(alignment: .top, spacing: 10) {
-                    Image(systemName: "arrow.triangle.2.circlepath")
-                        .foregroundStyle(Theme.accentStrong)
-                    Text(AppText.value(
-                        "The two devices choose opposite roles. It does not matter which one scans.",
-                        "两台设备选择相反角色即可，由哪一台扫码都可以。",
-                        language: language
-                    ))
-                    .font(.footnote)
-                    .foregroundStyle(Theme.muted)
-                    .fixedSize(horizontal: false, vertical: true)
-                }
-                .card(padding: 14)
 
                 #if DEBUG
                 if let openInUITestFixtureURL {
@@ -344,7 +318,7 @@ struct ContentView: View {
                 systemImage: role.icon,
                 title: title,
                 subtitle: subtitle,
-                chevron: "chevron.up"
+                chevron: "chevron.right"
             )
         }
         .buttonStyle(.plain)
@@ -357,16 +331,16 @@ struct ContentView: View {
         subtitle: String,
         chevron: String
     ) -> some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 13) {
             Image(systemName: systemImage)
-                .font(.title2.weight(.semibold))
+                .font(.title3.weight(.semibold))
                 .foregroundStyle(Theme.accentStrong)
-                .frame(width: 50, height: 50)
-                .background(Theme.accentSoft, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .frame(width: 46, height: 46)
+                .background(Theme.accentSoft, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
 
             VStack(alignment: .leading, spacing: 5) {
                 Text(title)
-                    .font(.title3.weight(.semibold))
+                    .font(.headline.weight(.semibold))
                     .foregroundStyle(Theme.text)
                 Text(subtitle)
                     .font(.subheadline)
@@ -379,15 +353,15 @@ struct ContentView: View {
                 .font(.caption.weight(.bold))
                 .foregroundStyle(Theme.muted)
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, minHeight: 96, alignment: .leading)
+        .padding(14)
+        .frame(maxWidth: .infinity, minHeight: 82, alignment: .leading)
         .background(Theme.surfaceRaised)
         .overlay(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
+            RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
                 .strokeBorder(Theme.line.opacity(0.72), lineWidth: 0.8)
         )
-        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous))
     }
 
     @ViewBuilder
