@@ -240,15 +240,12 @@ pub async fn send_manifest_v2_to_endpoint_addr(
         local_endpoint.close().await;
         return Err(error);
     }
+    let progress =
+        SessionManifestV2Progress::new(events.clone(), identity, TransferDirection::Send);
     let result = tokio::select! {
         result = async {
             let data_plane = match record.phase() {
                 SenderTransferPhaseV2::Offering | SenderTransferPhaseV2::Transferring => {
-                    let progress = SessionManifestV2Progress::new(
-                        events.clone(),
-                        identity,
-                        TransferDirection::Send,
-                    );
                     ManifestV2DataPlane::send(
                         job,
                         &mut record,
@@ -290,6 +287,7 @@ pub async fn send_manifest_v2_to_endpoint_addr(
             )
             .await
             .map_err(session_delivery_error)?;
+            progress.on_phase(ManifestV2ProgressPhase::FinalizingDelivery);
             let delivery_proof_digest = canonical_manifest_v2_frame_body_digest(
                 &ManifestV2Frame::DeliveryProof(proof),
             )
@@ -312,11 +310,28 @@ pub async fn receive_manifest_v2_offer(
     events: Arc<dyn EventSink>,
     cancel: &TransferCancelToken,
 ) -> Result<PendingManifestV2Receive, SessionError> {
+    let mut connection_failures = 0_u32;
     let mut authentication_failures = 0_u32;
     let mut connection = loop {
-        let mut connection = tokio::select! {
-            result = bound_endpoint.accept_with_events(events.as_ref()) => result?,
+        let accepted = tokio::select! {
+            result = bound_endpoint.accept_with_events(events.as_ref()) => result,
             () = cancel.cancelled() => return Err(interrupted_error(cancel)),
+        };
+        let mut connection = match accepted {
+            Ok(connection) => connection,
+            Err(error) => {
+                connection_failures += 1;
+                events.on_event(envoix_transfer::TransferEvent::Diagnostic {
+                    message: format!(
+                        "ignored a failed pre-authentication connection ({connection_failures}/{}): {error}",
+                        super::MAX_PRE_AUTH_CONNECTION_FAILURES
+                    ),
+                });
+                if connection_failures >= super::MAX_PRE_AUTH_CONNECTION_FAILURES {
+                    return Err(error);
+                }
+                continue;
+            }
         };
         if connection.protocol() != TransferProtocol::ManifestV2 {
             let _ = ManifestV2FrameConnection::close(&mut connection).await;
@@ -331,7 +346,7 @@ pub async fn receive_manifest_v2_offer(
                 let _ = ManifestV2FrameConnection::close(&mut connection).await;
                 return Err(error);
             }
-            Err(error) => {
+            Err(_error) => {
                 let _ = ManifestV2FrameConnection::close(&mut connection).await;
                 authentication_failures += 1;
                 events.on_event(envoix_transfer::TransferEvent::Diagnostic {

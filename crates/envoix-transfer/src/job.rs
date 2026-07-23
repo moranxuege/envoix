@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use unicode_normalization::UnicodeNormalization;
 
 const TRANSFER_JOB_SCHEMA_VERSION: u16 = 1;
 const FIRST_SELECTION_REVISION: u64 = 1;
@@ -531,6 +532,8 @@ impl CanonicalTransferJob {
         job_owned_staging: bool,
     ) -> Result<AddSourceResult, TransferJobError> {
         self.ensure_mutable()?;
+        let requested_name = canonical_component(&requested_name);
+        validate_component(&requested_name)?;
 
         let metadata = fs::symlink_metadata(&path).await;
         let (canonical_path, is_directory_hint, initial_issue) = match metadata {
@@ -1581,7 +1584,8 @@ async fn enumerate_local_selection(
             loop {
                 match directory.next_entry().await {
                     Ok(Some(child)) => {
-                        let Some(child_name) = child.file_name().to_str().map(str::to_owned) else {
+                        let Some(child_name) = child.file_name().to_str().map(canonical_component)
+                        else {
                             issues.push(PendingIssue {
                                 relative_components: relative_components.clone(),
                                 kind: SourceIssueKind::InvalidName,
@@ -1652,13 +1656,18 @@ fn stable_inventory_item_id(
 }
 
 fn source_name(path: &Path) -> Result<String, TransferJobError> {
-    let name = path
+    let name: String = path
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or(TransferJobError::InvalidComponent)?
-        .to_owned();
+        .nfc()
+        .collect();
     validate_component(&name)?;
     Ok(name)
+}
+
+fn canonical_component(component: &str) -> String {
+    component.nfc().collect()
 }
 
 fn validate_component(component: &str) -> Result<(), TransferJobError> {
@@ -1669,6 +1678,7 @@ fn validate_component(component: &str) -> Result<(), TransferJobError> {
         || component
             .chars()
             .any(|character| character.is_control() || matches!(character, '/' | '\\'))
+        || !unicode_normalization::is_nfc(component)
     {
         return Err(TransferJobError::InvalidComponent);
     }
@@ -1936,6 +1946,10 @@ impl TransferJobStore {
             .join(format!(".job-{}.tmp", encode_job_id(job_id)))
     }
 }
+
+#[cfg(test)]
+#[path = "job_tests.rs"]
+mod tests;
 
 fn encode_job_id(job_id: JobIdV2) -> String {
     encode_hex(&job_id.0)

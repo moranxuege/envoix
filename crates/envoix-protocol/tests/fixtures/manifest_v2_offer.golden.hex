@@ -1,16 +1,16 @@
-# ManifestOfferV2 envelope: magic, version=2, frame type=Offer, payload bytes=272
-454e5632 0002 0001 00000110
+# ManifestOfferV2 envelope: magic, version=2, frame type=Offer, payload bytes=281
+454e5632 0002 0001 00000119
 
 # BLAKE3-256 of the canonical Manifest body below
-63912d1b62c135fcba14a5bd804492d24128578a63deb473646cc522ff17ac3f
+727938abe4aa6ff971c1dcf8a7b3d369f971f75c712aed9be2e7255b7ccd947d
 
 # job_id="job-v2-fixture!!", generation=7, selection_revision=11, policy=Smart
 6a6f622d76322d666978747572652121 00000007 000000000000000b 02
 
 # Two roots. Each carries its requested top-level name. Root 0 is
-# UserApprovedPartial(omitted=2); root 1 is Complete.
+# UserApprovedPartial(inaccessible boundaries=1, omitted=2); root 1 is Complete.
 00000002
-00000000 00000000 00000006 50686f746f73 01 0000000000000002
+00000000 00000000 00000006 50686f746f73 01 0000000000000001 01 0000000000000002
 00000001 00000003 00000009 6e6f7465732e747874 00
 
 # Four canonical entries

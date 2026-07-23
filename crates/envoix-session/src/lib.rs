@@ -14,8 +14,8 @@ use std::time::Duration;
 
 pub use envoix_auth::{PairingConfig, authenticate_receiver, authenticate_sender};
 use envoix_error::CoreError;
+use envoix_protocol::PeerDescriptor;
 pub use envoix_protocol::TransferProtocol;
-use envoix_protocol::{FrameConnection, PeerDescriptor};
 pub use envoix_rendezvous_iroh::{generate_code, split_code};
 pub use envoix_transfer::{
     AUTO_RECEIVE_PLAINTEXT_LIMIT_BYTES, AddSourceResult, CanonicalTransferJob,
@@ -59,6 +59,7 @@ pub use room::{receive_manifest_v2_offer_via_room, send_manifest_v2_via_room};
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_AUTH_FAILURES: u32 = 50;
+const MAX_PRE_AUTH_CONNECTION_FAILURES: u32 = 8;
 const MDNS_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 const MDNS_CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
 

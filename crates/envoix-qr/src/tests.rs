@@ -181,19 +181,6 @@ fn peer_descriptor_on_empty_direct_addresses_returns_error() {
 // --- endpoint_addr / relay URLs ---
 
 #[test]
-fn missing_relay_urls_decodes_as_legacy_direct_only_payload() {
-    let payload = valid_payload(0);
-    let mut value = serde_json::to_value(&payload).unwrap();
-    value.as_object_mut().unwrap().remove("relay_urls");
-    let json = serde_json::to_vec(&value).unwrap();
-    let decoded =
-        QrInvitePayload::decode(&format!("envoix:{}", URL_SAFE_NO_PAD.encode(json))).unwrap();
-
-    decoded.validate(0).unwrap();
-    assert!(decoded.relay_urls.is_empty());
-}
-
-#[test]
 fn endpoint_addr_includes_relay_urls_when_present() {
     let payload = QrInvitePayload::new_with_relay_urls(
         TOKEN.into(),

@@ -10,10 +10,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use envoix_error::CoreError;
+use envoix_protocol::manifest_v2_frames::JobGenerationV2;
 use envoix_rendezvous_iroh::{
     JoinIntent, RoomPairing, build_endpoint_with_dns, drive_pairing, join_room_with_intent,
     split_code,
 };
+use envoix_transfer::{SenderDeliveryStoreV2, SenderTransferPhaseV2};
 use envoix_types::PairingStep;
 use iroh::{Endpoint, EndpointAddr, SecretKey};
 
@@ -228,17 +230,76 @@ pub async fn send_manifest_v2_via_room(
     let auth = PairingConfig::Spake2SharedToken {
         token: pairing.token,
     };
+    let first_attempt = send_manifest_v2_to_endpoint_addr(
+        pairing.peer.clone(),
+        job,
+        state_directory.clone(),
+        config.clone(),
+        &auth,
+        events.clone(),
+        cancel,
+    )
+    .await;
+    let error = match first_attempt {
+        Ok(summary) => return Ok(summary),
+        Err(error) => error,
+    };
+    let sender_phase = sender_delivery_phase(job, &state_directory).await;
+    if !should_retry_room_with_relay(&config, &error, sender_phase) {
+        return Err(error);
+    }
+    events.on_event(TransferEvent::Diagnostic {
+        message: "direct connection failed before the offer; retrying through the relay".into(),
+    });
+    let mut relay_config = config;
+    relay_config.relay_only = true;
     send_manifest_v2_to_endpoint_addr(
         pairing.peer,
         job,
         state_directory,
-        config,
+        relay_config,
         &auth,
         events,
         cancel,
     )
     .await
 }
+
+fn should_retry_room_with_relay(
+    config: &SessionConfig,
+    error: &SessionError,
+    sender_phase: Option<SenderTransferPhaseV2>,
+) -> bool {
+    !config.relay_only
+        && config.data_relay().is_some()
+        && sender_phase == Some(SenderTransferPhaseV2::Offering)
+        && (matches!(error, CoreError::Transport(_))
+            || matches!(
+                error,
+                CoreError::Protocol(message) if message == "authentication timed out"
+            ))
+}
+
+async fn sender_delivery_phase(
+    job: &CanonicalTransferJob,
+    state_directory: &std::path::Path,
+) -> Option<SenderTransferPhaseV2> {
+    let manifest = job.manifest()?;
+    let identity = JobGenerationV2 {
+        job_id: manifest.job_id,
+        generation: manifest.generation,
+    };
+    SenderDeliveryStoreV2::new(state_directory.join("sender-delivery"))
+        .load(identity)
+        .await
+        .ok()
+        .flatten()
+        .map(|record| record.phase())
+}
+
+#[cfg(test)]
+#[path = "room_tests.rs"]
+mod tests;
 
 async fn pair_room_sender(
     broker: EndpointAddr,

@@ -717,6 +717,9 @@ fn validate_component(component: &str) -> Result<(), ManifestV2ComponentViolatio
     {
         return Err(ManifestV2ComponentViolation::ControlOrSeparator);
     }
+    if !unicode_normalization::is_nfc(component) {
+        return Err(ManifestV2ComponentViolation::NonCanonicalUnicode);
+    }
     Ok(())
 }
 
@@ -811,6 +814,8 @@ pub enum ManifestV2ComponentViolation {
     ParentDirectory,
     #[error("component contains a control character or path separator")]
     ControlOrSeparator,
+    #[error("component is not Unicode NFC")]
+    NonCanonicalUnicode,
     #[error("component is {bytes} bytes; maximum is {maximum}")]
     TooLong { bytes: usize, maximum: usize },
 }
@@ -956,7 +961,8 @@ mod tests {
                     root_entry_id: 0,
                     requested_name: "Photos".into(),
                     completeness: SourceCompletenessV2::UserApprovedPartial {
-                        omitted_entry_count: 2,
+                        inaccessible_boundary_count: 1,
+                        omitted_entry_count: Some(2),
                     },
                 },
                 ManifestRootV2 {
@@ -1147,6 +1153,17 @@ mod tests {
             unsafe_component.validate(),
             Err(ManifestV2ValidationError::UnsafeComponent { .. })
         ));
+
+        let mut decomposed_unicode = sample_manifest();
+        decomposed_unicode.roots[0].requested_name = "re\u{301}sume\u{301}".into();
+        decomposed_unicode.entries[0].component = "re\u{301}sume\u{301}".into();
+        assert_eq!(
+            decomposed_unicode.validate(),
+            Err(ManifestV2ValidationError::UnsafeRootName {
+                root_id: 0,
+                violation: ManifestV2ComponentViolation::NonCanonicalUnicode,
+            })
+        );
 
         let mut duplicate = sample_manifest();
         duplicate.entries[1].component = "a.jpg".into();

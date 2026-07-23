@@ -408,7 +408,7 @@ fn print_invite(
     }
     .encode();
     eprintln!("invite: {invite}");
-    if let Ok(qr) = render_terminal_qr(&invite) {
+    if let Some(qr) = render_terminal_qr(&invite) {
         eprintln!("{qr}");
     }
 }

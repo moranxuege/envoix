@@ -1226,3 +1226,7 @@ impl From<ManifestV2FrameCodecError> for CoreError {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "manifest_v2_frames_tests.rs"]
+mod tests;

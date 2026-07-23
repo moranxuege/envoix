@@ -187,7 +187,7 @@ fn platform_dns_fallback_server() -> Option<SocketAddr> {
     None
 }
 
-#[cfg(any(target_os = "ios", target_os = "android", test))]
+#[cfg(any(target_os = "ios", target_os = "android"))]
 fn ipv4_addresses(addrs: impl IntoIterator<Item = SocketAddr>) -> Vec<Ipv4Addr> {
     let mut result = Vec::new();
     for ip in addrs.into_iter().filter_map(|addr| match addr.ip() {
@@ -201,7 +201,7 @@ fn ipv4_addresses(addrs: impl IntoIterator<Item = SocketAddr>) -> Vec<Ipv4Addr> 
     result
 }
 
-#[cfg(any(target_os = "ios", target_os = "android", test))]
+#[cfg(any(target_os = "ios", target_os = "android"))]
 fn ipv6_addresses(addrs: impl IntoIterator<Item = SocketAddr>) -> Vec<Ipv6Addr> {
     let mut result = Vec::new();
     for ip in addrs.into_iter().filter_map(|addr| match addr.ip() {
@@ -519,7 +519,12 @@ impl BoundEndpoint {
             .await
             .ok_or_else(|| CoreError::Transport("iroh endpoint closed".into()))?;
         events.on_event(TransferEvent::Diagnostic {
-            message: "accept incoming received; awaiting connection".to_string(),
+            message: format!(
+                "accept incoming received remote={:?} local={:?} validated={}; awaiting connection",
+                incoming.remote_addr(),
+                incoming.local_addr(),
+                incoming.remote_addr_validated(),
+            ),
         });
         let connection = incoming
             .await

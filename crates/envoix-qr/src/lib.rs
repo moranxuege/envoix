@@ -40,10 +40,8 @@ pub struct QrInvitePayload {
     pub token: String,
     /// Direct iroh endpoint descriptor the sender should dial.
     pub peer: PeerDescriptor,
-    /// Optional relay home URLs for the endpoint. Older clients ignore this
-    /// field and keep dialing direct addresses; newer clients combine it with
-    /// `peer` into a full iroh endpoint address for relay fallback.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Relay home URLs for the endpoint. The field is required by payload v2;
+    /// an empty array explicitly selects direct-only endpoint addressing.
     pub relay_urls: Vec<String>,
     /// Expiry as a Unix timestamp in seconds.  Senders reject payloads where
     /// `expires_at <= now`.

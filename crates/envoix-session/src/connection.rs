@@ -2,7 +2,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use envoix_error::CoreError;
-use envoix_protocol::manifest_v2_frames::{ManifestV2Frame, ManifestV2FrameConnection};
+use envoix_protocol::manifest_v2_frames::{
+    ManifestV2Frame, ManifestV2FrameCodecError, ManifestV2FrameConnection,
+};
 use envoix_protocol::{
     Frame, FrameConnection, ProtocolError, TransferProtocol, flush_frame_writer, read_frame,
     read_manifest_v2_frame, write_frame, write_manifest_v2_frame,
@@ -19,6 +21,13 @@ const STREAM_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 const PEER_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How often the background watcher samples the selected data path.
 const PATH_WATCH_INTERVAL: Duration = Duration::from_millis(500);
+
+fn manifest_v2_stream_error(error: ManifestV2FrameCodecError) -> ProtocolError {
+    match error {
+        ManifestV2FrameCodecError::Io(error) => CoreError::Transport(error.to_string()),
+        other => CoreError::Protocol(other.to_string()),
+    }
+}
 
 pub(crate) struct IrohFrameConnection {
     pub(crate) _local_endpoint: Endpoint,
@@ -175,14 +184,16 @@ impl ManifestV2FrameConnection for IrohFrameConnection {
         &mut self,
         frame: ManifestV2Frame,
     ) -> Result<(), ProtocolError> {
-        write_manifest_v2_frame(&mut self.send, &frame).await?;
+        write_manifest_v2_frame(&mut self.send, &frame)
+            .await
+            .map_err(manifest_v2_stream_error)?;
         Ok(())
     }
 
     async fn recv_manifest_v2_frame(&mut self) -> Result<ManifestV2Frame, ProtocolError> {
         read_manifest_v2_frame(&mut self.recv)
             .await
-            .map_err(Into::into)
+            .map_err(manifest_v2_stream_error)
     }
 
     fn export_keying_material(
@@ -211,5 +222,31 @@ impl Drop for IrohFrameConnection {
         // Stop the background path watcher when the connection goes away
         // (clean close or abrupt drop on interrupt).
         self.path_watcher.abort();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_v2_stream_io_is_a_transport_failure() {
+        let error = ManifestV2FrameCodecError::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "peer disconnected",
+        ));
+
+        assert!(matches!(
+            manifest_v2_stream_error(error),
+            CoreError::Transport(_)
+        ));
+    }
+
+    #[test]
+    fn manifest_v2_codec_failure_remains_a_protocol_failure() {
+        assert!(matches!(
+            manifest_v2_stream_error(ManifestV2FrameCodecError::BadMagic),
+            CoreError::Protocol(_)
+        ));
     }
 }

@@ -48,7 +48,8 @@ pub enum DestinationDecisionV2 {
 /// domain containing `path`. The provider must already have authorized and
 /// created the directory; an unknown result is never treated as unlimited.
 pub fn local_allocatable_bytes(path: &Path) -> Result<u64, DestinationPlanErrorV2> {
-    let stats = rustix::fs::statvfs(path)?;
+    let stats = rustix::fs::statvfs(path)
+        .map_err(|error| std::io::Error::from_raw_os_error(error.raw_os_error()))?;
     stats
         .f_bavail
         .checked_mul(stats.f_frsize)
@@ -229,9 +230,12 @@ impl DestinationWritePlanV2 {
         let mut reservations = Vec::with_capacity(offer.manifest.roots.len());
         for root in &offer.manifest.roots {
             let base = provider_safe_component(&root.requested_name);
+            let preserve_extension = offer.manifest.entries[root.root_entry_id as usize].kind
+                == ManifestEntryKindV2::RegularFile;
             let (planned_name, reservation) = reserve_keep_both_name(
                 &reservation_directory,
                 &base,
+                preserve_extension,
                 &mut occupied_names,
                 offer.manifest.job_id,
                 root.root_id,
@@ -952,6 +956,8 @@ impl LocalDestinationProviderV2 {
         let (planned_name, reservation) = reserve_keep_both_name(
             &reservation_directory,
             &provider_safe_component(&root.requested_name),
+            self.manifest.entries[root.root_entry_id as usize].kind
+                == ManifestEntryKindV2::RegularFile,
             &mut occupied_names,
             self.plan.job_id,
             root_id,
@@ -1400,7 +1406,11 @@ fn build_entry_paths(
             .ok_or(DestinationPlanErrorV2::InvalidEntryState)?;
         let safe = provider_safe_component(&entry.component);
         let siblings = occupied.entry(Some(parent_id)).or_default();
-        let final_name = allocate_in_memory_name(&safe, siblings)?;
+        let final_name = allocate_in_memory_name(
+            &safe,
+            entry.kind == ManifestEntryKindV2::RegularFile,
+            siblings,
+        )?;
         paths.push(parent.join(&final_name));
         overrides.push((final_name != entry.component).then_some(final_name));
     }
@@ -1463,6 +1473,7 @@ async fn discover_known_reuse_entries(
 async fn reserve_keep_both_name(
     reservation_directory: &Path,
     base: &str,
+    preserve_extension: bool,
     occupied: &mut HashSet<String>,
     job_id: JobIdV2,
     root_id: u32,
@@ -1471,7 +1482,7 @@ async fn reserve_keep_both_name(
         let candidate = if suffix == 0 {
             base.to_owned()
         } else {
-            component_with_suffix(base, suffix)
+            component_with_suffix(base, suffix, preserve_extension)
         };
         let key = name_equivalence_key(&candidate);
         if occupied.contains(&key) {
@@ -1501,13 +1512,14 @@ async fn reserve_keep_both_name(
 
 fn allocate_in_memory_name(
     base: &str,
+    preserve_extension: bool,
     occupied: &mut HashSet<String>,
 ) -> Result<String, DestinationPlanErrorV2> {
     for suffix in 0_u32..10_000 {
         let candidate = if suffix == 0 {
             base.to_owned()
         } else {
-            component_with_suffix(base, suffix)
+            component_with_suffix(base, suffix, preserve_extension)
         };
         if occupied.insert(name_equivalence_key(&candidate)) {
             return Ok(candidate);
@@ -1558,14 +1570,22 @@ fn provider_safe_component(component: &str) -> String {
     }
 }
 
-fn component_with_suffix(base: &str, suffix: u32) -> String {
+fn component_with_suffix(base: &str, suffix: u32, preserve_extension: bool) -> String {
     let suffix = format!(" ({suffix})");
-    let maximum_base_bytes = 255_usize.saturating_sub(suffix.len());
-    let mut end = base.len().min(maximum_base_bytes);
-    while !base.is_char_boundary(end) {
+    let extension_offset = preserve_extension
+        .then(|| base.rfind('.'))
+        .flatten()
+        .filter(|offset| *offset > 0);
+    let (stem, extension) = extension_offset
+        .map(|offset| base.split_at(offset))
+        .filter(|(_, extension)| extension.len() + suffix.len() <= 255)
+        .unwrap_or((base, ""));
+    let maximum_stem_bytes = 255_usize.saturating_sub(suffix.len() + extension.len());
+    let mut end = stem.len().min(maximum_stem_bytes);
+    while !stem.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}{}", &base[..end], suffix)
+    format!("{}{}{}", &stem[..end], suffix, extension)
 }
 
 fn name_equivalence_key(component: &str) -> String {
@@ -1641,10 +1661,10 @@ async fn object_identity(
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        return Ok(ObjectIdentityV2::Stable {
+        Ok(ObjectIdentityV2::Stable {
             volume: metadata.dev(),
             object: metadata.ino(),
-        });
+        })
     }
     #[cfg(target_os = "windows")]
     {
@@ -1657,10 +1677,16 @@ async fn object_identity(
                 object,
             });
         }
+        Ok(ObjectIdentityV2::ExactContent {
+            root_digest: exact_content,
+        })
     }
-    Ok(ObjectIdentityV2::ExactContent {
-        root_digest: exact_content,
-    })
+    #[cfg(not(any(unix, target_os = "windows")))]
+    {
+        Ok(ObjectIdentityV2::ExactContent {
+            root_digest: exact_content,
+        })
+    }
 }
 
 async fn verify_adopted_root(
@@ -1931,6 +1957,10 @@ async fn exclusive_rename_probe(directory: &Path) -> Result<bool, std::io::Error
 const fn exclusive_rename_supported() -> bool {
     true
 }
+
+#[cfg(test)]
+#[path = "destination_v2_tests.rs"]
+mod tests;
 
 #[cfg(not(any(
     target_os = "macos",

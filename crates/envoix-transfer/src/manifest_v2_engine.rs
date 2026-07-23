@@ -1836,6 +1836,10 @@ fn validate_block(
     Ok(())
 }
 
+#[cfg(test)]
+#[path = "manifest_v2_engine_tests.rs"]
+mod tests;
+
 async fn select_entry_encoding(
     source: &PreparedFileSource,
     policy: CompressionPolicyV2,

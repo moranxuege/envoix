@@ -6,6 +6,9 @@ mod job;
 mod manifest_v2_engine;
 mod persistence_v2;
 
+#[cfg(test)]
+mod test_support;
+
 pub use delivery_v2::{
     DeliveryAuthorityErrorV2, ManifestV2DeliveryAuthority, ReceiverDeliveryRecordV2,
     ReceiverDeliveryStoreV2, SenderDeliveryRecordV2, SenderDeliveryStoreV2, SenderTransferPhaseV2,

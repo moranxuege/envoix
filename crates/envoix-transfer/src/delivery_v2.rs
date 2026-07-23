@@ -13,7 +13,7 @@ use thiserror::Error;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
-use crate::{ManifestV2DataError, ReceiverDataPlaneSummaryV2, SenderDataPlaneSummaryV2};
+use crate::{ReceiverDataPlaneSummaryV2, SenderDataPlaneSummaryV2};
 
 const SENDER_DELIVERY_SCHEMA_VERSION: u16 = 2;
 const RECEIVER_DELIVERY_SCHEMA_VERSION: u16 = 1;
@@ -634,3 +634,7 @@ fn challenge_mac(
 fn encode_job_id(job_id: JobIdV2) -> String {
     job_id.0.iter().map(|byte| format!("{byte:02x}")).collect()
 }
+
+#[cfg(test)]
+#[path = "delivery_v2_tests.rs"]
+mod tests;
