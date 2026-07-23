@@ -22,7 +22,8 @@ use super::{
     EnvoixError, EnvoixRuntimeSettings, FfiFailureCategory, FfiFailureCode, FfiFailureOrigin,
     FfiFailurePhase, FfiManifestV2Phase, FfiRecoveryAction, FfiTransferDirection,
     FfiTransferFailure, FfiTransferJobV2, FfiTransferRequest, TransferObserver,
-    build_client_for_request, op_err, peer_sources_for_request, transfer_options_for_request,
+    build_client_for_request, on_ffi_runtime, op_err, peer_sources_for_request,
+    spawn_on_ffi_runtime, transfer_options_for_request,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -145,54 +146,58 @@ impl FfiPendingManifestV2Receive {
         destination: FfiDestinationRequestV2,
         observer: Arc<dyn TransferObserver>,
     ) -> Result<FfiManifestV2Completion, EnvoixError> {
-        let destination = core_destination_request(destination)?;
-        let pending = self
-            .pending
-            .lock()
-            .await
-            .take()
-            .ok_or_else(|| EnvoixError::Operation {
-                reason: "this authenticated offer has already been continued".into(),
-            })?;
-        observer.on_started(
-            u32::try_from(self.entries.len()).unwrap_or(u32::MAX),
-            self.summary.total_plaintext_bytes,
-        );
-        let summary = match pending
-            .receive(
-                destination,
-                self.state_directory.clone(),
-                &self.cancellation.token,
-            )
-            .await
-        {
-            Ok(summary) => summary,
-            Err(error) => {
-                report_v2_failure(
-                    observer.as_ref(),
-                    &error,
-                    FfiTransferDirection::Receive,
-                    FfiFailurePhase::Committing,
-                );
-                return Err(op_err(error));
-            }
-        };
-        observer.on_phase(FfiManifestV2Phase::Delivered);
-        observer.on_completed(self.summary.total_plaintext_bytes);
-        let saved_paths = summary
-            .destination_plan
-            .root_plans
-            .iter()
-            .filter_map(|root| summary.destination_plan.target_path_for_root(root.root_id))
-            .map(|path| path.to_string_lossy().into_owned())
-            .collect();
-        Ok(FfiManifestV2Completion {
-            job_id: self.summary.job_id.clone(),
-            entry_count: u32::try_from(summary.data_plane.entry_results.len()).unwrap_or(u32::MAX),
-            total_plaintext_bytes: self.summary.total_plaintext_bytes,
-            delivery_proof_digest: summary.delivery_proof_digest.0.to_vec(),
-            saved_paths,
+        on_ffi_runtime(async {
+            let destination = core_destination_request(destination)?;
+            let pending =
+                self.pending
+                    .lock()
+                    .await
+                    .take()
+                    .ok_or_else(|| EnvoixError::Operation {
+                        reason: "this authenticated offer has already been continued".into(),
+                    })?;
+            observer.on_started(
+                u32::try_from(self.entries.len()).unwrap_or(u32::MAX),
+                self.summary.total_plaintext_bytes,
+            );
+            let summary = match pending
+                .receive(
+                    destination,
+                    self.state_directory.clone(),
+                    &self.cancellation.token,
+                )
+                .await
+            {
+                Ok(summary) => summary,
+                Err(error) => {
+                    report_v2_failure(
+                        observer.as_ref(),
+                        &error,
+                        FfiTransferDirection::Receive,
+                        FfiFailurePhase::Committing,
+                    );
+                    return Err(op_err(error));
+                }
+            };
+            observer.on_phase(FfiManifestV2Phase::Delivered);
+            observer.on_completed(self.summary.total_plaintext_bytes);
+            let saved_paths = summary
+                .destination_plan
+                .root_plans
+                .iter()
+                .filter_map(|root| summary.destination_plan.target_path_for_root(root.root_id))
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect();
+            Ok(FfiManifestV2Completion {
+                job_id: self.summary.job_id.clone(),
+                entry_count: u32::try_from(summary.data_plane.entry_results.len())
+                    .unwrap_or(u32::MAX),
+                total_plaintext_bytes: self.summary.total_plaintext_bytes,
+                delivery_proof_digest: summary.delivery_proof_digest.0.to_vec(),
+                saved_paths,
+            })
         })
+        .await
     }
 
     pub fn cancel(&self) {
@@ -254,79 +259,82 @@ pub async fn send_transfer_job_v2(
     cancellation: Arc<FfiManifestV2Cancellation>,
     observer: Arc<dyn TransferObserver>,
 ) -> Result<FfiManifestV2Completion, EnvoixError> {
-    if request.direction != FfiTransferDirection::Send {
-        return Err(EnvoixError::Operation {
-            reason: "send_transfer_job_v2 requires a send request".into(),
-        });
-    }
-    let state_directory = required_directory(state_directory, "state_directory")?;
-    let job = job.clone_sealed_job().await?;
-    let manifest = job
-        .manifest()
-        .expect("clone_sealed_job guarantees a manifest")
-        .clone();
-    observer.on_started(
-        u32::try_from(manifest.entries.len()).unwrap_or(u32::MAX),
-        manifest.totals.total_plaintext_bytes,
-    );
-    let attempts = peer_sources_for_request(&settings, &request)?;
-    let mut last_error = None;
-    for attempt in attempts {
-        let options =
-            transfer_options_for_request(&settings, &request, attempt.path_policy_override)?;
-        let client = build_client_for_request(&settings, &request)?;
-        let config = client.session_config(&options);
-        let events: Arc<dyn EventSink> = Arc::new(NativeSessionEvents {
-            observer: observer.clone(),
-        });
-        let result = send_attempt(
-            &attempt.source,
-            &job,
-            state_directory.clone(),
-            config,
-            events,
-            &cancellation.token,
-            options.relay.as_deref(),
-        )
-        .await;
-        match result {
-            Ok(summary) => {
-                observer.on_phase(FfiManifestV2Phase::Delivered);
-                observer.on_completed(manifest.totals.total_plaintext_bytes);
-                return Ok(FfiManifestV2Completion {
-                    job_id: encode_job_id(manifest.job_id),
-                    entry_count: u32::try_from(summary.data_plane.entry_results.len())
-                        .unwrap_or(u32::MAX),
-                    total_plaintext_bytes: manifest.totals.total_plaintext_bytes,
-                    delivery_proof_digest: summary.delivery_proof_digest.0.to_vec(),
-                    saved_paths: Vec::new(),
-                });
-            }
-            Err(error) if !cancellation.token.is_cancelled() => {
-                observer.on_diagnostic(format!("route failed; trying next route: {error}"));
-                last_error = Some(error);
-            }
-            Err(error) => {
-                report_v2_failure(
-                    observer.as_ref(),
-                    &error,
-                    FfiTransferDirection::Send,
-                    FfiFailurePhase::Transferring,
-                );
-                return Err(op_err(error));
+    spawn_on_ffi_runtime(async move {
+        if request.direction != FfiTransferDirection::Send {
+            return Err(EnvoixError::Operation {
+                reason: "send_transfer_job_v2 requires a send request".into(),
+            });
+        }
+        let state_directory = required_directory(state_directory, "state_directory")?;
+        let job = job.clone_sealed_job().await?;
+        let manifest = job
+            .manifest()
+            .expect("clone_sealed_job guarantees a manifest")
+            .clone();
+        observer.on_started(
+            u32::try_from(manifest.entries.len()).unwrap_or(u32::MAX),
+            manifest.totals.total_plaintext_bytes,
+        );
+        let attempts = peer_sources_for_request(&settings, &request)?;
+        let mut last_error = None;
+        for attempt in attempts {
+            let options =
+                transfer_options_for_request(&settings, &request, attempt.path_policy_override)?;
+            let client = build_client_for_request(&settings, &request)?;
+            let config = client.session_config(&options);
+            let events: Arc<dyn EventSink> = Arc::new(NativeSessionEvents {
+                observer: observer.clone(),
+            });
+            let result = send_attempt(
+                &attempt.source,
+                &job,
+                state_directory.clone(),
+                config,
+                events,
+                &cancellation.token,
+                options.relay.as_deref(),
+            )
+            .await;
+            match result {
+                Ok(summary) => {
+                    observer.on_phase(FfiManifestV2Phase::Delivered);
+                    observer.on_completed(manifest.totals.total_plaintext_bytes);
+                    return Ok(FfiManifestV2Completion {
+                        job_id: encode_job_id(manifest.job_id),
+                        entry_count: u32::try_from(summary.data_plane.entry_results.len())
+                            .unwrap_or(u32::MAX),
+                        total_plaintext_bytes: manifest.totals.total_plaintext_bytes,
+                        delivery_proof_digest: summary.delivery_proof_digest.0.to_vec(),
+                        saved_paths: Vec::new(),
+                    });
+                }
+                Err(error) if !cancellation.token.is_cancelled() => {
+                    observer.on_diagnostic(format!("route failed; trying next route: {error}"));
+                    last_error = Some(error);
+                }
+                Err(error) => {
+                    report_v2_failure(
+                        observer.as_ref(),
+                        &error,
+                        FfiTransferDirection::Send,
+                        FfiFailurePhase::Transferring,
+                    );
+                    return Err(op_err(error));
+                }
             }
         }
-    }
-    let error = last_error.unwrap_or_else(|| {
-        SessionError::InvalidInput("no canonical send route is available".into())
-    });
-    report_v2_failure(
-        observer.as_ref(),
-        &error,
-        FfiTransferDirection::Send,
-        FfiFailurePhase::Connecting,
-    );
-    Err(op_err(error))
+        let error = last_error.unwrap_or_else(|| {
+            SessionError::InvalidInput("no canonical send route is available".into())
+        });
+        report_v2_failure(
+            observer.as_ref(),
+            &error,
+            FfiTransferDirection::Send,
+            FfiFailurePhase::Connecting,
+        );
+        Err(op_err(error))
+    })
+    .await
 }
 
 #[uniffi::export]
@@ -337,21 +345,24 @@ pub async fn receive_transfer_offer_v2(
     cancellation: Arc<FfiManifestV2Cancellation>,
     observer: Arc<dyn TransferObserver>,
 ) -> Result<Arc<FfiPendingManifestV2Receive>, EnvoixError> {
-    if request.direction != FfiTransferDirection::Receive {
-        return Err(EnvoixError::Operation {
-            reason: "receive_transfer_offer_v2 requires a receive request".into(),
-        });
-    }
-    let state_directory = required_directory(state_directory, "state_directory")?;
-    let attempts = peer_sources_for_request(&settings, &request)?;
-    receive_offer_from_attempts(
-        settings,
-        request,
-        attempts,
-        state_directory,
-        cancellation,
-        observer,
-    )
+    spawn_on_ffi_runtime(async move {
+        if request.direction != FfiTransferDirection::Receive {
+            return Err(EnvoixError::Operation {
+                reason: "receive_transfer_offer_v2 requires a receive request".into(),
+            });
+        }
+        let state_directory = required_directory(state_directory, "state_directory")?;
+        let attempts = peer_sources_for_request(&settings, &request)?;
+        receive_offer_from_attempts(
+            settings,
+            request,
+            attempts,
+            state_directory,
+            cancellation,
+            observer,
+        )
+        .await
+    })
     .await
 }
 

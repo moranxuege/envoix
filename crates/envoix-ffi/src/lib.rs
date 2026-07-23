@@ -1,6 +1,10 @@
 //! UniFFI bridge for the canonical Manifest v2 job and session APIs.
 
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
+use std::sync::OnceLock;
+use std::task::{Context, Poll};
 
 use envoix_client::PeerDescriptor;
 use envoix_client::api::{Client, Invite, PathPolicy, PeerSource, Role, TransferOptions};
@@ -18,6 +22,58 @@ const DEFAULT_RENDEZVOUS_BROKER: &str =
 const DEFAULT_RELAY_URL: &str = "https://envoix.chkxwlyh.us:8444";
 const INVITE_TTL_SECS: u64 = 300;
 const ENVOIX_FFI_API_VERSION: u32 = 4;
+
+static FFI_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+
+fn ffi_runtime() -> &'static tokio::runtime::Runtime {
+    FFI_RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .thread_name("envoix-ffi")
+            .build()
+            .expect("create Envoix FFI Tokio runtime")
+    })
+}
+
+/// UniFFI polls exported async functions on its own executor. Enter the owned
+/// Tokio runtime for every poll so Tokio filesystem, timer, and network
+/// resources are always created with a live reactor on Apple platforms.
+pub(crate) async fn on_ffi_runtime<F: Future>(future: F) -> F::Output {
+    RuntimeContextFuture {
+        inner: Box::pin(future),
+    }
+    .await
+}
+
+/// Runs an owned async operation as a Tokio task, rather than merely entering
+/// the runtime while an external executor polls it. Long-lived network futures
+/// need Tokio's task context as well as its reactor on Apple platforms.
+pub(crate) async fn spawn_on_ffi_runtime<F>(future: F) -> F::Output
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    match ffi_runtime().spawn(future).await {
+        Ok(output) => output,
+        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+        Err(error) => panic!("Envoix FFI runtime task was cancelled: {error}"),
+    }
+}
+
+struct RuntimeContextFuture<F: Future> {
+    inner: Pin<Box<F>>,
+}
+
+impl<F: Future> Unpin for RuntimeContextFuture<F> {}
+
+impl<F: Future> Future for RuntimeContextFuture<F> {
+    type Output = F::Output;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let _guard = ffi_runtime().enter();
+        self.get_mut().inner.as_mut().poll(context)
+    }
+}
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum EnvoixError {
@@ -321,11 +377,10 @@ pub(crate) fn transfer_options_for_request(
             reason: "relay-only routing requires a relay URL".into(),
         });
     }
-    Ok(TransferOptions {
-        relay,
-        path,
-        listen_addrs: None,
-    })
+    let mut options = TransferOptions::default();
+    options.relay = relay;
+    options.path = path;
+    Ok(options)
 }
 
 pub(crate) fn peer_sources_for_request(

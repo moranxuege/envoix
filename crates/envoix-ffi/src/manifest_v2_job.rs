@@ -10,7 +10,7 @@ use envoix_client::api::{
 };
 use tokio::sync::Mutex;
 
-use super::{EnvoixError, op_err};
+use super::{EnvoixError, on_ffi_runtime, op_err};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
 pub enum FfiCompressionPolicyV2 {
@@ -155,7 +155,8 @@ impl FfiTransferJobV2 {
 #[uniffi::export]
 impl FfiTransferJobV2 {
     pub async fn snapshot(&self) -> FfiTransferJobSnapshotV2 {
-        snapshot(&self.job.lock().await)
+        let job = self.job.lock().await;
+        snapshot(&job)
     }
 
     /// Adds any mixture of local files and folders, then starts local-only
@@ -164,21 +165,24 @@ impl FfiTransferJobV2 {
         &self,
         paths: Vec<String>,
     ) -> Result<FfiTransferJobSnapshotV2, EnvoixError> {
-        if paths.is_empty() || paths.iter().any(|path| path.trim().is_empty()) {
-            return Err(EnvoixError::Operation {
-                reason: "paths must contain at least one non-empty local path".into(),
-            });
-        }
-        let mut job = self.job.lock().await;
-        for path in paths {
-            job.add_local_path(PathBuf::from(path))
-                .await
-                .map_err(op_err)?;
+        on_ffi_runtime(async {
+            if paths.is_empty() || paths.iter().any(|path| path.trim().is_empty()) {
+                return Err(EnvoixError::Operation {
+                    reason: "paths must contain at least one non-empty local path".into(),
+                });
+            }
+            let mut job = self.job.lock().await;
+            for path in paths {
+                job.add_local_path(PathBuf::from(path))
+                    .await
+                    .map_err(op_err)?;
+                self.store.save(&job).await.map_err(op_err)?;
+            }
+            job.prepare_all().await.map_err(op_err)?;
             self.store.save(&job).await.map_err(op_err)?;
-        }
-        job.prepare_all().await.map_err(op_err)?;
-        self.store.save(&job).await.map_err(op_err)?;
-        Ok(snapshot(&job))
+            Ok(snapshot(&job))
+        })
+        .await
     }
 
     /// Imports Photos/Share/provider data into job-owned staging and prepares
@@ -189,28 +193,31 @@ impl FfiTransferJobV2 {
         requested_name: String,
         origin: FfiSourceOriginV2,
     ) -> Result<FfiTransferJobSnapshotV2, EnvoixError> {
-        if source_path.trim().is_empty() || requested_name.trim().is_empty() {
-            return Err(EnvoixError::Operation {
-                reason: "source_path and requested_name must not be empty".into(),
-            });
-        }
-        let mut job = self.job.lock().await;
-        let added = self
-            .store
-            .import_staged_file(
-                &mut job,
-                &PathBuf::from(source_path),
-                requested_name,
-                core_source_origin(origin),
-            )
-            .await
-            .map_err(op_err)?;
-        self.store.save(&job).await.map_err(op_err)?;
-        job.prepare_selection(added.root_item_id)
-            .await
-            .map_err(op_err)?;
-        self.store.save(&job).await.map_err(op_err)?;
-        Ok(snapshot(&job))
+        on_ffi_runtime(async {
+            if source_path.trim().is_empty() || requested_name.trim().is_empty() {
+                return Err(EnvoixError::Operation {
+                    reason: "source_path and requested_name must not be empty".into(),
+                });
+            }
+            let mut job = self.job.lock().await;
+            let added = self
+                .store
+                .import_staged_file(
+                    &mut job,
+                    &PathBuf::from(source_path),
+                    requested_name,
+                    core_source_origin(origin),
+                )
+                .await
+                .map_err(op_err)?;
+            self.store.save(&job).await.map_err(op_err)?;
+            job.prepare_selection(added.root_item_id)
+                .await
+                .map_err(op_err)?;
+            self.store.save(&job).await.map_err(op_err)?;
+            Ok(snapshot(&job))
+        })
+        .await
     }
 
     pub async fn resolve_source_issue(
@@ -219,77 +226,89 @@ impl FfiTransferJobV2 {
         decision: FfiSourceDecisionV2,
         reauthorized_path: Option<String>,
     ) -> Result<FfiTransferJobSnapshotV2, EnvoixError> {
-        let should_reprepare = decision == FfiSourceDecisionV2::Reauthorize;
-        let decision = match decision {
-            FfiSourceDecisionV2::Reauthorize => {
-                let path = reauthorized_path
-                    .filter(|path| !path.trim().is_empty())
-                    .ok_or_else(|| EnvoixError::Operation {
-                        reason: "reauthorized_path is required for Reauthorize".into(),
-                    })?;
-                SourceDecision::Reauthorize {
-                    local_path: PathBuf::from(path),
+        on_ffi_runtime(async {
+            let should_reprepare = decision == FfiSourceDecisionV2::Reauthorize;
+            let decision = match decision {
+                FfiSourceDecisionV2::Reauthorize => {
+                    let path = reauthorized_path
+                        .filter(|path| !path.trim().is_empty())
+                        .ok_or_else(|| EnvoixError::Operation {
+                            reason: "reauthorized_path is required for Reauthorize".into(),
+                        })?;
+                    SourceDecision::Reauthorize {
+                        local_path: PathBuf::from(path),
+                    }
                 }
-            }
-            FfiSourceDecisionV2::ApprovePartial => SourceDecision::ApprovePartial,
-            FfiSourceDecisionV2::RemoveSelection => SourceDecision::RemoveSelection,
-            FfiSourceDecisionV2::CancelJob => SourceDecision::CancelJob,
-        };
-        let mut job = self.job.lock().await;
-        self.store
-            .apply_source_decision(&mut job, SourceItemId(root_item_id), decision)
-            .await
-            .map_err(op_err)?;
-        if should_reprepare {
-            job.prepare_selection(SourceItemId(root_item_id))
+                FfiSourceDecisionV2::ApprovePartial => SourceDecision::ApprovePartial,
+                FfiSourceDecisionV2::RemoveSelection => SourceDecision::RemoveSelection,
+                FfiSourceDecisionV2::CancelJob => SourceDecision::CancelJob,
+            };
+            let mut job = self.job.lock().await;
+            self.store
+                .apply_source_decision(&mut job, SourceItemId(root_item_id), decision)
                 .await
                 .map_err(op_err)?;
-            self.store.save(&job).await.map_err(op_err)?;
-        }
-        Ok(snapshot(&job))
+            if should_reprepare {
+                job.prepare_selection(SourceItemId(root_item_id))
+                    .await
+                    .map_err(op_err)?;
+                self.store.save(&job).await.map_err(op_err)?;
+            }
+            Ok(snapshot(&job))
+        })
+        .await
     }
 
     pub async fn set_compression_policy(
         &self,
         policy: FfiCompressionPolicyV2,
     ) -> Result<FfiTransferJobSnapshotV2, EnvoixError> {
-        let mut job = self.job.lock().await;
-        job.set_compression_policy(core_compression_policy(policy))
-            .map_err(op_err)?;
-        self.store.save(&job).await.map_err(op_err)?;
-        Ok(snapshot(&job))
+        on_ffi_runtime(async {
+            let mut job = self.job.lock().await;
+            job.set_compression_policy(core_compression_policy(policy))
+                .map_err(op_err)?;
+            self.store.save(&job).await.map_err(op_err)?;
+            Ok(snapshot(&job))
+        })
+        .await
     }
 
     pub async fn cancel_job(&self) -> Result<FfiTransferJobSnapshotV2, EnvoixError> {
-        let mut job = self.job.lock().await;
-        job.cancel().map_err(op_err)?;
-        self.store.save(&job).await.map_err(op_err)?;
-        Ok(snapshot(&job))
+        on_ffi_runtime(async {
+            let mut job = self.job.lock().await;
+            job.cancel().map_err(op_err)?;
+            self.store.save(&job).await.map_err(op_err)?;
+            Ok(snapshot(&job))
+        })
+        .await
     }
 
     /// This explicit call is the Send boundary. It freezes the entry forest;
     /// the networking layer may consume the returned canonical offer afterwards.
     pub async fn seal_for_send(&self) -> Result<FfiManifestSealV2, EnvoixError> {
-        let mut job = self.job.lock().await;
-        job.seal_for_send().map_err(op_err)?;
-        self.store.save(&job).await.map_err(op_err)?;
-        let digest = job
-            .structural_digest()
-            .ok_or_else(|| EnvoixError::Operation {
-                reason: "sealed transfer job is missing its structural digest".into(),
-            })?;
-        let offer_bytes = job
-            .sealed_offer_bytes()
-            .ok_or_else(|| EnvoixError::Operation {
-                reason: "sealed transfer job is missing its canonical offer".into(),
-            })?
-            .to_vec();
-        Ok(FfiManifestSealV2 {
-            job_id: encode_job_id(job.job_id()),
-            selection_revision: job.selection_revision(),
-            structural_digest: digest.0.to_vec(),
-            offer_bytes,
+        on_ffi_runtime(async {
+            let mut job = self.job.lock().await;
+            job.seal_for_send().map_err(op_err)?;
+            self.store.save(&job).await.map_err(op_err)?;
+            let digest = job
+                .structural_digest()
+                .ok_or_else(|| EnvoixError::Operation {
+                    reason: "sealed transfer job is missing its structural digest".into(),
+                })?;
+            let offer_bytes = job
+                .sealed_offer_bytes()
+                .ok_or_else(|| EnvoixError::Operation {
+                    reason: "sealed transfer job is missing its canonical offer".into(),
+                })?
+                .to_vec();
+            Ok(FfiManifestSealV2 {
+                job_id: encode_job_id(job.job_id()),
+                selection_revision: job.selection_revision(),
+                structural_digest: digest.0.to_vec(),
+                offer_bytes,
+            })
         })
+        .await
     }
 
     pub async fn list_roots(&self) -> Vec<FfiInventoryItemV2> {
@@ -356,19 +375,22 @@ pub async fn create_transfer_job_v2(
     store_directory: String,
     compression_policy: FfiCompressionPolicyV2,
 ) -> Result<Arc<FfiTransferJobV2>, EnvoixError> {
-    if store_directory.trim().is_empty() {
-        return Err(EnvoixError::Operation {
-            reason: "store_directory must not be empty".into(),
-        });
-    }
-    let store = TransferJobStore::new(PathBuf::from(store_directory));
-    let job =
-        CanonicalTransferJob::new(core_compression_policy(compression_policy)).map_err(op_err)?;
-    store.save(&job).await.map_err(op_err)?;
-    Ok(Arc::new(FfiTransferJobV2 {
-        job: Mutex::new(job),
-        store,
-    }))
+    on_ffi_runtime(async move {
+        if store_directory.trim().is_empty() {
+            return Err(EnvoixError::Operation {
+                reason: "store_directory must not be empty".into(),
+            });
+        }
+        let store = TransferJobStore::new(PathBuf::from(store_directory));
+        let job = CanonicalTransferJob::new(core_compression_policy(compression_policy))
+            .map_err(op_err)?;
+        store.save(&job).await.map_err(op_err)?;
+        Ok(Arc::new(FfiTransferJobV2 {
+            job: Mutex::new(job),
+            store,
+        }))
+    })
+    .await
 }
 
 #[uniffi::export]
@@ -376,29 +398,32 @@ pub async fn restore_transfer_job_v2(
     store_directory: String,
     job_id: String,
 ) -> Result<Arc<FfiTransferJobV2>, EnvoixError> {
-    if store_directory.trim().is_empty() {
-        return Err(EnvoixError::Operation {
-            reason: "store_directory must not be empty".into(),
-        });
-    }
-    let store = TransferJobStore::new(PathBuf::from(store_directory));
-    let job_id = decode_job_id(&job_id)?;
-    let mut job =
+    on_ffi_runtime(async move {
+        if store_directory.trim().is_empty() {
+            return Err(EnvoixError::Operation {
+                reason: "store_directory must not be empty".into(),
+            });
+        }
+        let store = TransferJobStore::new(PathBuf::from(store_directory));
+        let job_id = decode_job_id(&job_id)?;
+        let mut job =
+            store
+                .load(job_id)
+                .await
+                .map_err(op_err)?
+                .ok_or_else(|| EnvoixError::Operation {
+                    reason: "transfer job was not found".into(),
+                })?;
         store
-            .load(job_id)
+            .reconcile_pending_cleanup(&mut job)
             .await
-            .map_err(op_err)?
-            .ok_or_else(|| EnvoixError::Operation {
-                reason: "transfer job was not found".into(),
-            })?;
-    store
-        .reconcile_pending_cleanup(&mut job)
-        .await
-        .map_err(op_err)?;
-    Ok(Arc::new(FfiTransferJobV2 {
-        job: Mutex::new(job),
-        store,
-    }))
+            .map_err(op_err)?;
+        Ok(Arc::new(FfiTransferJobV2 {
+            job: Mutex::new(job),
+            store,
+        }))
+    })
+    .await
 }
 
 /// Bounded durable index for native unsent-job restoration. Sealed/canceled
@@ -408,28 +433,31 @@ pub async fn restore_transfer_job_v2(
 pub async fn list_preparing_transfer_jobs_v2(
     store_directory: String,
 ) -> Result<Vec<FfiTransferJobSnapshotV2>, EnvoixError> {
-    if store_directory.trim().is_empty() {
-        return Err(EnvoixError::Operation {
-            reason: "store_directory must not be empty".into(),
-        });
-    }
-    let jobs = TransferJobStore::new(PathBuf::from(store_directory))
-        .load_all()
-        .await
-        .map_err(op_err)?;
-    Ok(jobs
-        .iter()
-        .filter(|job| {
-            !job.source_selections().is_empty()
-                && matches!(
-                    job.lifecycle(),
-                    JobLifecycle::Preparing
-                        | JobLifecycle::NeedsSourceDecision
-                        | JobLifecycle::ReadyToSend
-                )
-        })
-        .map(snapshot)
-        .collect())
+    on_ffi_runtime(async move {
+        if store_directory.trim().is_empty() {
+            return Err(EnvoixError::Operation {
+                reason: "store_directory must not be empty".into(),
+            });
+        }
+        let jobs = TransferJobStore::new(PathBuf::from(store_directory))
+            .load_all()
+            .await
+            .map_err(op_err)?;
+        Ok(jobs
+            .iter()
+            .filter(|job| {
+                !job.source_selections().is_empty()
+                    && matches!(
+                        job.lifecycle(),
+                        JobLifecycle::Preparing
+                            | JobLifecycle::NeedsSourceDecision
+                            | JobLifecycle::ReadyToSend
+                    )
+            })
+            .map(snapshot)
+            .collect())
+    })
+    .await
 }
 
 fn snapshot(job: &CanonicalTransferJob) -> FfiTransferJobSnapshotV2 {

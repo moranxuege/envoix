@@ -4,7 +4,10 @@
 from pathlib import Path
 import sys
 
-EXPECTED_CALLBACK_VTABLES = 5
+# Keep this explicit so a new callback interface cannot silently bypass the
+# reviewed Swift concurrency annotation below. Manifest v2 exposes only the
+# canonical TransferObserver callback interface.
+EXPECTED_CALLBACK_VTABLES = 1
 
 
 def replace_once(text: str, old: str, new: str, label: str) -> str:
