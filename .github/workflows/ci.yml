@@ -1,8 +1,9 @@
 name: ci
 
-# Enforce the checks that release.yml doesn't: rustfmt, clippy, and Android lint.
-# Runs on every push and PR so formatting / clippy / Compose-lint regressions are
-# caught before they can ship.
+# Gates for the envoix 0.2.0 clean rebuild: rustfmt, clippy, the workspace test
+# suite, and the xtask registry gates (identifier-check + arch-check). The old
+# Android tree lives frozen under legacy/ and is not linted here; an Android
+# lint job returns with the Flutter host at BN4.
 on:
   push:
     branches: ['**']
@@ -10,7 +11,7 @@ on:
 
 jobs:
   rust:
-    name: rust fmt + clippy
+    name: rust gates
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,25 +26,9 @@ jobs:
         run: cargo fmt --all -- --check
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
-
-  android-lint:
-    name: android lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-      - name: Install SDK components
-        run: sdkmanager --install "platforms;android-34" "build-tools;34.0.0"
-      # Lint only needs the Kotlin/resources, not the native .so, so skip the JNI build.
-      - name: Kotlin style
-        working-directory: android
-        run: ./gradlew :app:ktlintCheck --no-daemon --stacktrace
-      - name: Lint
-        working-directory: android
-        run: ./gradlew :app:lintDebug --no-daemon --stacktrace
+      - name: tests
+        run: cargo test --workspace
+      - name: identifier registry gate
+        run: cargo run -q -p xtask -- identifier-check
+      - name: architecture gate
+        run: cargo run -q -p xtask -- arch-check
