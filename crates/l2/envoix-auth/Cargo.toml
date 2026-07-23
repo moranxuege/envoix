@@ -7,3 +7,12 @@ license.workspace = true
 [package.metadata.envoix]
 layer = "L2"
 role = "library"
+
+[dependencies]
+blake3.workspace = true
+envoix-outcomes = { path = "../../l0/envoix-outcomes" }
+envoix-pairing = { path = "../../l1/envoix-pairing" }
+envoix-protocol = { path = "../../l1/envoix-protocol" }
+rand_core.workspace = true
+spake2.workspace = true
+zeroize.workspace = true
