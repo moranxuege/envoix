@@ -175,13 +175,22 @@ class ManifestV2CrossDeviceInstrumentedTest {
             collisionUri = publishFile(context, sentinel, fixture.roots.single().name, publicFolder)
         }
 
+        val platformWriter = ManifestV2DestinationWriter(context)
+        val localPublisher = LocalTestDestinationPublisher(localDestination)
         val callback =
             RecordingCallback(
+                plan = { request ->
+                    if (fixture.directoryCount > 0) {
+                        localPublisher.plan(request)
+                    } else {
+                        platformWriter.plan(request)
+                    }
+                },
                 save = { request ->
                     if (fixture.directoryCount > 0) {
-                        LocalTestDestinationPublisher(localDestination).save(request)
+                        localPublisher.save(request)
                     } else {
-                        ManifestV2DestinationWriter(context).save(request)
+                        platformWriter.save(request)
                     }
                 },
                 offer = { offer ->
@@ -256,7 +265,10 @@ class ManifestV2CrossDeviceInstrumentedTest {
             publishedUris.forEach { MediaStoreSaver.delete(context, it) }
             collisionUri?.let { MediaStoreSaver.delete(context, it) }
             callback.completed?.optString("job_id")?.takeIf(String::isNotBlank)?.let { jobId ->
-                File(context.filesDir, "manifest-v2/destination-save/$jobId.json").delete()
+                File(context.filesDir, "manifest-v2/destination-save")
+                    .listFiles()
+                    ?.filter { it.name.startsWith("$jobId-") }
+                    ?.forEach(File::delete)
             }
             Native.cancelManifestV2Session(sessionId)
             SettingsStore.update { originalSettings }
@@ -265,6 +277,7 @@ class ManifestV2CrossDeviceInstrumentedTest {
     }
 
     private class RecordingCallback(
+        private val plan: ((String) -> String)? = null,
         private val save: ((String) -> String)? = null,
         private val offer: ((JSONObject) -> Unit)? = null,
     ) : ManifestV2Callback {
@@ -297,6 +310,9 @@ class ManifestV2CrossDeviceInstrumentedTest {
 
         override fun onSaveRequired(requestJson: String): String =
             requireNotNull(save) { "sender unexpectedly requested a destination save" }(requestJson)
+
+        override fun onPlanRequired(requestJson: String): String =
+            requireNotNull(plan) { "sender unexpectedly requested a destination plan" }(requestJson)
 
         fun awaitTerminal(timeoutMs: Long) {
             assertTrue(
@@ -732,14 +748,37 @@ private sealed interface Payload {
 private class LocalTestDestinationPublisher(
     private val destination: File,
 ) {
+    private val plannedNames = mutableMapOf<Int, String>()
+
+    fun plan(requestJson: String): String {
+        val roots = JSONObject(requestJson).getJSONArray("roots")
+        val reply = JSONArray()
+        for (index in 0 until roots.length()) {
+            val root = roots.getJSONObject(index)
+            val name =
+                allocateName(
+                    root.getString("requested_name"),
+                    root.getString("kind") == "file",
+                    plannedNames.values.toSet(),
+                )
+            plannedNames[root.getInt("root_id")] = name
+            reply.put(
+                JSONObject()
+                    .put("root_id", root.getInt("root_id"))
+                    .put("planned_name", name),
+            )
+        }
+        return JSONObject().put("roots", reply).toString()
+    }
+
     fun save(requestJson: String): String {
         val roots = JSONObject(requestJson).getJSONArray("roots")
         val outcomes = JSONArray()
         for (index in 0 until roots.length()) {
             val root = roots.getJSONObject(index)
             val source = File(root.getString("local_path"))
-            val requestedName = root.getString("requested_name")
-            val finalName = allocateName(requestedName, source.isFile)
+            val finalName = root.getString("planned_name")
+            check(plannedNames[root.getInt("root_id")] == finalName)
             val target = File(destination, finalName)
             check(source.copyRecursively(target, overwrite = false))
             outcomes.put(
@@ -755,11 +794,12 @@ private class LocalTestDestinationPublisher(
     private fun allocateName(
         requestedName: String,
         preserveExtension: Boolean,
+        reserved: Set<String>,
     ): String =
         (0 until 10_000)
             .map { suffix ->
                 if (suffix == 0) requestedName else manifestV2KeepBothName(requestedName, suffix, preserveExtension)
-            }.first { !File(destination, it).exists() }
+            }.first { it !in reserved && !File(destination, it).exists() }
 }
 
 private fun sha256(input: java.io.InputStream): ByteArray {

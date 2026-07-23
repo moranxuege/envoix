@@ -1525,9 +1525,13 @@ where
 {
     let checkpoint = &mut ledger.entries[checkpoint_index];
     checkpoint.payload_retired = true;
+    checkpoint.arbiter = EntryArbiterV2::PayloadOpen;
     checkpoint.next_plaintext_block = 0;
     checkpoint.plaintext_bytes = 0;
-    checkpoint.content_digest = None;
+    checkpoint.content_digest = match entry.content_digest {
+        EntryContentDigestV2::Known(digest) => Some(digest),
+        EntryContentDigestV2::Deferred => None,
+    };
     checkpoint.completion = None;
     store.save(ledger).await?;
     sink.retire_payload(entry).await?;
@@ -1949,6 +1953,8 @@ fn validate_entry_result(
         || result.final_size != entry.plaintext_size
         || entry.kind == ManifestEntryKindV2::Directory && result.final_digest.is_some()
         || entry.kind == ManifestEntryKindV2::RegularFile && result.final_digest.is_none()
+        || entry.kind == ManifestEntryKindV2::RegularFile
+            && result.final_digest != Some(completion.final_digest)
     {
         return Err(ManifestV2DataError::FinalMismatch);
     }

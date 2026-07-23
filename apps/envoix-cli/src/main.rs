@@ -209,6 +209,7 @@ async fn receive(plan: TransferPlan, json: bool) -> CliResult<()> {
                 staging_allocatable_bytes: staging_available,
                 stable_object_identity: true,
                 exceptional_transfer_approved: plan.approve_large_transfer,
+                preplanned_root_names: None,
             },
             state_directory,
             &cancel,

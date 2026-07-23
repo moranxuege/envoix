@@ -474,6 +474,8 @@ impl CanonicalTransferJob {
                 "provider source must retain its platform origin".into(),
             ));
         }
+        let requested_name = canonical_component(&requested_name);
+        let provider_issues = canonical_provider_issues(provider_issues)?;
         validate_component(&requested_name)?;
         self.validate_provider_issues(&provider_issues)?;
         let added = self
@@ -502,6 +504,7 @@ impl CanonicalTransferJob {
                 "filesystem sources must use filesystem reauthorization".into(),
             ));
         }
+        let provider_issues = canonical_provider_issues(provider_issues)?;
         self.validate_provider_issues(&provider_issues)?;
         self.resolve_source_decision(root_item_id, SourceDecision::Reauthorize { local_path })?;
         self.prepare_selection(root_item_id).await?;
@@ -519,6 +522,7 @@ impl CanonicalTransferJob {
                 "staged source must retain its platform origin".into(),
             ));
         }
+        let requested_name = canonical_component(&requested_name);
         validate_component(&requested_name)?;
         self.add_local_source(path, requested_name, origin, true)
             .await
@@ -1615,6 +1619,7 @@ async fn enumerate_local_selection(
                     }
                 }
             }
+            remove_component_collisions(&mut children, &mut issues);
             children.sort_unstable_by(|left, right| left.1.cmp(&right.1));
             pending.extend(children.into_iter().rev());
         }
@@ -1627,6 +1632,31 @@ async fn enumerate_local_selection(
         issues,
         resolved_issues: Vec::new(),
     })
+}
+
+fn remove_component_collisions(
+    children: &mut Vec<(PathBuf, Vec<String>, Option<SourceItemId>)>,
+    issues: &mut Vec<PendingIssue>,
+) {
+    let mut seen_components = HashSet::new();
+    let mut collided_components = HashSet::new();
+    for (_, components, _) in children.iter() {
+        if !seen_components.insert(components.clone()) {
+            collided_components.insert(components.clone());
+        }
+    }
+    if collided_components.is_empty() {
+        return;
+    }
+    children.retain(|(_, components, _)| !collided_components.contains(components));
+    issues.extend(
+        collided_components
+            .into_iter()
+            .map(|relative_components| PendingIssue {
+                relative_components,
+                kind: SourceIssueKind::InvalidName,
+            }),
+    );
 }
 
 fn stable_inventory_item_id(
@@ -1668,6 +1698,18 @@ fn source_name(path: &Path) -> Result<String, TransferJobError> {
 
 fn canonical_component(component: &str) -> String {
     component.nfc().collect()
+}
+
+fn canonical_provider_issues(
+    mut issues: Vec<ProviderSourceIssue>,
+) -> Result<Vec<ProviderSourceIssue>, TransferJobError> {
+    for issue in &mut issues {
+        for component in &mut issue.relative_components {
+            *component = canonical_component(component);
+            validate_component(component)?;
+        }
+    }
+    Ok(issues)
 }
 
 fn validate_component(component: &str) -> Result<(), TransferJobError> {
@@ -1782,6 +1824,7 @@ impl TransferJobStore {
                 "staged import must retain its platform origin".into(),
             ));
         }
+        let requested_name = canonical_component(&requested_name);
         validate_component(&requested_name)?;
         let source_metadata = fs::symlink_metadata(source_path).await?;
         if source_metadata.file_type().is_symlink() || !source_metadata.is_file() {

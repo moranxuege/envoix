@@ -10,6 +10,7 @@ use std::path::Path;
 pub use envoix_protocol::manifest_v2::{
     CompressionPolicyV2, EntryContentDigestV2, JobIdV2, ManifestEntryKindV2,
 };
+pub use envoix_protocol::manifest_v2_frames::RootPlanV2;
 pub use envoix_session::*;
 
 pub use error::TransferError;

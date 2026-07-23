@@ -2,70 +2,157 @@ package dev.envoix.app
 
 import android.content.Context
 import android.net.Uri
+import android.system.Os
+import android.system.OsConstants
 import androidx.documentfile.provider.DocumentFile
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.FileOutputStream
 import java.net.URLConnection
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import java.util.Locale
 
-/** Saves verified private roots into the actual user destination. This object
- * is called by the native result gate, so returning is the receiver's durable
- * Saved boundary—not merely a background save request. */
+/**
+ * Owns Android's public destination plan and the post-verification save.
+ *
+ * Public root names are frozen and journaled before native sends Accept. Save
+ * therefore uses exact names only: a late collision fails the transfer instead
+ * of silently producing a second keep-both name.
+ */
 class ManifestV2DestinationWriter(
     private val context: Context,
 ) {
+    fun plan(requestJson: String): String {
+        val request = JSONObject(requestJson)
+        val jobId = request.getString("job_id")
+        val generation = request.getInt("generation")
+        val requestedRoots = request.getJSONArray("roots")
+        val journal = journalFile(jobId, generation)
+        journal.parentFile?.mkdirs()
+        val settings = SettingsStore.settings.value
+        val tree = destinationTree(settings.saveTreeUri)
+        val destinationId = destinationId(settings.saveTreeUri, settings.saveFolder)
+
+        loadJournal(journal)?.let { existing ->
+            validateJournalIdentity(existing, jobId, generation, destinationId, requestedRoots)
+            return planReply(existing.getJSONArray("roots")).toString()
+        }
+
+        val batchNames =
+            request.optJSONArray("reserved_names")
+                ?.let { names ->
+                    (0 until names.length()).mapTo(mutableSetOf()) { nameKey(names.getString(it)) }
+                } ?: mutableSetOf()
+        val roots = JSONArray()
+        for (index in 0 until requestedRoots.length()) {
+            val root = requestedRoots.getJSONObject(index)
+            val requestedName = root.getString("requested_name")
+            val isFile = root.getString("kind") == KIND_FILE
+            check(tree != null || isFile) {
+                "Choose a save folder before receiving one or more directories"
+            }
+            val plannedName =
+                if (tree != null) {
+                    allocateTreeName(tree, requestedName, isFile, batchNames)
+                } else {
+                    MediaStoreSaver.planDownloadName(
+                        context,
+                        requestedName,
+                        settings.saveFolder,
+                        batchNames,
+                    )
+                }
+            batchNames += nameKey(plannedName)
+            roots.put(
+                JSONObject()
+                    .put("root_id", root.getInt("root_id"))
+                    .put("requested_name", requestedName)
+                    .put("planned_name", plannedName)
+                    .put("kind", root.getString("kind"))
+                    .put("state", STATE_PLANNED),
+            )
+        }
+        val value = newJournal(jobId, generation, destinationId, STATE_PLANNED, roots)
+        writeJournal(journal, value)
+        return planReply(roots).toString()
+    }
+
     fun save(requestJson: String): String {
         val request = JSONObject(requestJson)
         val jobId = request.getString("job_id")
-        val roots = request.getJSONArray("roots")
-        val journal = File(context.filesDir, "manifest-v2/destination-save/$jobId.json")
-        journal.parentFile?.mkdirs()
-        val recovered = recoverJournal(journal, roots)
-        if (recovered.length() == roots.length()) {
-            writeJournal(journal, "committed", recovered, null)
-            return JSONObject().put("roots", recovered).toString()
-        }
-
+        val generation = request.getInt("generation")
+        val requestedRoots = request.getJSONArray("roots")
+        val journal = journalFile(jobId, generation)
+        val value = loadJournal(journal) ?: error("Public destination plan is missing")
         val settings = SettingsStore.settings.value
-        val tree =
-            settings.saveTreeUri.takeIf(String::isNotBlank)?.let {
-                DocumentFile.fromTreeUri(context, Uri.parse(it))
-                    ?: error("The selected save folder is unavailable")
-            }
-        val outcomes = recovered
-        val committedRootIds =
-            (0 until outcomes.length())
-                .map { outcomes.getJSONObject(it).getInt("root_id") }
-                .toMutableSet()
+        validateJournalIdentity(
+            value,
+            jobId,
+            generation,
+            destinationId(settings.saveTreeUri, settings.saveFolder),
+            requestedRoots,
+        )
+        val roots = value.getJSONArray("roots")
+        val tree = destinationTree(settings.saveTreeUri)
+
+        recoverInterruptedSave(value, roots, requestedRoots, tree, journal)
         for (index in 0 until roots.length()) {
-            val root = roots.getJSONObject(index)
-            val source = File(root.getString("local_path"))
+            val planned = roots.getJSONObject(index)
+            if (planned.getString("state") == STATE_COMMITTED) continue
+            val requested = requestedRoot(requestedRoots, planned.getInt("root_id"))
+            val source = File(requested.getString("local_path"))
             check(source.exists()) { "Verified staging root disappeared before save" }
-            val requestedName = root.getString("requested_name")
-            val rootId = root.getInt("root_id")
-            if (rootId in committedRootIds) continue
-            val outcome =
-                if (tree != null) {
-                    saveToTree(source, requestedName, tree, journal, outcomes, rootId)
-                } else {
-                    check(source.isFile) {
-                        "Choose a save folder before receiving one or more directories"
+            check(requested.getString("planned_name") == planned.getString("planned_name")) {
+                "Native save request changed the frozen public name"
+            }
+            val target =
+                createExactTarget(
+                    source,
+                    planned.getString("planned_name"),
+                    tree,
+                    settings.saveFolder,
+                    value,
+                    planned,
+                    journal,
+                )
+            try {
+                if (source.isDirectory) copyDirectory(source, target.document!!)
+                else MediaStoreSaver.copyInto(context, source, target.reserved).getOrThrow()
+                val outcome =
+                    if (target.document != null) {
+                        Outcome(target.document.name ?: target.plannedName, target.document.uri)
+                    } else {
+                        val published = MediaStoreSaver.commit(context, target.reserved).getOrThrow()
+                        check(published.displayName == target.plannedName) {
+                            "MediaStore changed the frozen public name"
+                        }
+                        Outcome(published.displayName, published.uri)
                     }
-                    saveFileToDownloads(source, requestedName, settings.saveFolder, journal, outcomes, rootId)
-                }
-            outcomes.put(
-                JSONObject()
-                    .put("root_id", rootId)
+                planned
+                    .put("state", STATE_COMMITTED)
                     .put("final_name", outcome.name)
-                    .put("uri", outcome.uri.toString()),
-            )
-            committedRootIds += rootId
-            writeJournal(journal, "committing", outcomes, null)
+                    .put("uri", outcome.uri.toString())
+                    .remove("media_store_pending")
+                value.put("state", if (allCommitted(roots)) STATE_COMMITTED else STATE_SAVING)
+                writeJournal(journal, value)
+            } catch (error: Throwable) {
+                target.delete(context)
+                planned.put("state", STATE_PLANNED)
+                planned.remove("uri")
+                planned.remove("media_store_pending")
+                value.put("state", STATE_SAVING)
+                writeJournal(journal, value)
+                throw IllegalStateException(
+                    "Could not save root ${planned.getInt("root_id")} using its accepted name",
+                    error,
+                )
+            }
         }
-        writeJournal(journal, "committed", outcomes, null)
-        return JSONObject().put("roots", outcomes).toString()
+        value.put("state", STATE_COMMITTED)
+        writeJournal(journal, value)
+        return committedReply(roots).toString()
     }
 
     private data class Outcome(
@@ -73,55 +160,126 @@ class ManifestV2DestinationWriter(
         val uri: Uri,
     )
 
-    private fun saveFileToDownloads(
-        source: File,
-        requestedName: String,
-        folder: String,
-        journal: File,
-        committedRoots: JSONArray,
-        rootId: Int,
-    ): Outcome {
-        val reserved =
-            MediaStoreSaver.reserve(context, requestedName, "", folder)
-                ?: error("Could not reserve a Downloads destination")
-        writeJournal(journal, "copying", committedRoots, reserved.uri.toString())
-        try {
-            MediaStoreSaver.copyInto(context, source, reserved).getOrThrow()
-            val committed = MediaStoreSaver.commit(context, reserved).getOrThrow()
-            return Outcome(committed.displayName, committed.uri)
-        } catch (error: Throwable) {
-            MediaStoreSaver.delete(context, reserved.uri)
-            throw IllegalStateException("Could not save root $rootId to Downloads", error)
+    private data class ExactTarget(
+        val plannedName: String,
+        val reserved: MediaStoreSaver.Reserved,
+        val document: DocumentFile?,
+    ) {
+        fun delete(context: Context) {
+            if (document != null) document.delete() else MediaStoreSaver.delete(context, reserved.uri)
         }
     }
 
-    private fun saveToTree(
+    private fun createExactTarget(
         source: File,
-        requestedName: String,
-        tree: DocumentFile,
+        plannedName: String,
+        tree: DocumentFile?,
+        folder: String,
+        journalValue: JSONObject,
+        rootValue: JSONObject,
         journal: File,
-        committedRoots: JSONArray,
-        rootId: Int,
-    ): Outcome {
-        val finalName = allocateName(tree, requestedName, source.isFile)
-        val target =
-            if (source.isDirectory) {
-                tree.createDirectory(finalName)
-            } else {
-                tree.createFile(mimeType(finalName), finalName)
-            } ?: error("Could not reserve destination for $finalName")
-        writeJournal(journal, "copying", committedRoots, target.uri.toString())
-        try {
-            if (source.isDirectory) {
-                copyDirectory(source, target)
-            } else {
-                copyFile(source, target)
+    ): ExactTarget {
+        rootValue
+            .put("state", STATE_CREATING)
+            .remove("uri")
+        journalValue.put("state", STATE_SAVING)
+        writeJournal(journal, journalValue)
+
+        if (tree != null) {
+            check(tree.findFile(plannedName) == null) {
+                "The destination namespace changed after this transfer was accepted"
             }
-            return Outcome(target.name ?: finalName, target.uri)
-        } catch (error: Throwable) {
-            target.delete()
-            throw IllegalStateException("Could not save root $rootId to the selected folder", error)
+            val document =
+                if (source.isDirectory) {
+                    tree.createDirectory(plannedName)
+                } else {
+                    tree.createFile(mimeType(plannedName), plannedName)
+                } ?: error("Could not create the accepted destination name")
+            check(document.name == plannedName) {
+                document.delete()
+                "The destination provider changed the accepted root name"
+            }
+            rootValue
+                .put("state", STATE_COPYING)
+                .put("uri", document.uri.toString())
+                .put("media_store_pending", false)
+            writeJournal(journal, journalValue)
+            return ExactTarget(
+                plannedName,
+                MediaStoreSaver.Reserved(document.uri, false, plannedName),
+                document,
+            )
         }
+
+        val reserved =
+            MediaStoreSaver.reserveDownloadExact(context, plannedName, folder)
+                ?: error("Could not reserve the accepted Downloads name")
+        rootValue
+            .put("state", STATE_COPYING)
+            .put("uri", reserved.uri.toString())
+            .put("media_store_pending", true)
+        writeJournal(journal, journalValue)
+        return ExactTarget(plannedName, reserved, null)
+    }
+
+    private fun recoverInterruptedSave(
+        journalValue: JSONObject,
+        plannedRoots: JSONArray,
+        requestedRoots: JSONArray,
+        tree: DocumentFile?,
+        journal: File,
+    ) {
+        for (index in 0 until plannedRoots.length()) {
+            val planned = plannedRoots.getJSONObject(index)
+            val requested = requestedRoot(requestedRoots, planned.getInt("root_id"))
+            val source = File(requested.getString("local_path"))
+            when (planned.getString("state")) {
+                STATE_COMMITTED -> {
+                    check(savedRootMatches(source, Uri.parse(planned.getString("uri")))) {
+                        "A previously committed Android destination changed"
+                    }
+                }
+                STATE_COPYING -> {
+                    val uri = Uri.parse(planned.getString("uri"))
+                    if (savedRootMatches(source, uri)) {
+                        val pending = planned.optBoolean("media_store_pending")
+                        if (pending) {
+                            val outcome =
+                                MediaStoreSaver
+                                    .commit(
+                                        context,
+                                        MediaStoreSaver.Reserved(
+                                            uri,
+                                            true,
+                                            planned.getString("planned_name"),
+                                        ),
+                                    ).getOrThrow()
+                            check(outcome.displayName == planned.getString("planned_name"))
+                        }
+                        planned
+                            .put("state", STATE_COMMITTED)
+                            .put("final_name", planned.getString("planned_name"))
+                            .remove("media_store_pending")
+                    } else {
+                        check(!destinationExists(uri) || MediaStoreSaver.delete(context, uri)) {
+                            "Could not remove an incomplete Android destination"
+                        }
+                        planned.put("state", STATE_PLANNED)
+                        planned.remove("uri")
+                        planned.remove("media_store_pending")
+                    }
+                }
+                STATE_CREATING -> {
+                    val exact = tree?.findFile(planned.getString("planned_name"))
+                    check(exact == null) {
+                        "The final save outcome is unknown; remove the incomplete item and resume"
+                    }
+                    planned.put("state", STATE_PLANNED)
+                }
+            }
+        }
+        journalValue.put("state", if (allCommitted(plannedRoots)) STATE_COMMITTED else STATE_SAVING)
+        writeJournal(journal, journalValue)
     }
 
     private fun copyDirectory(
@@ -151,70 +309,31 @@ class ManifestV2DestinationWriter(
         val output =
             context.contentResolver.openOutputStream(destination.uri, "wt")
                 ?: error("Destination cannot be opened")
-        source.inputStream().use { input ->
-            output.use { input.copyTo(it) }
-        }
+        source.inputStream().use { input -> output.use { input.copyTo(it) } }
     }
 
-    private fun allocateName(
+    private fun allocateTreeName(
         parent: DocumentFile,
         requested: String,
         preserveExtension: Boolean,
+        batchNames: Set<String>,
     ): String {
         for (suffix in 0 until MAX_NAME_ATTEMPTS) {
             val candidate =
-                if (suffix == 0) {
-                    requested
-                } else {
-                    manifestV2KeepBothName(requested, suffix, preserveExtension)
-                }
-            if (parent.findFile(candidate) == null) return candidate
+                if (suffix == 0) requested
+                else manifestV2KeepBothName(requested, suffix, preserveExtension)
+            if (nameKey(candidate) !in batchNames && parent.findFile(candidate) == null) return candidate
         }
         error("Could not allocate a non-conflicting destination name")
     }
 
-    private fun mimeType(name: String): String = URLConnection.guessContentTypeFromName(name) ?: "application/octet-stream"
-
-    private fun recoverJournal(
-        journal: File,
-        requestedRoots: JSONArray,
-    ): JSONArray {
-        val value = runCatching { JSONObject(journal.readText()) }.getOrNull() ?: return JSONArray()
-        value.optString("pending_uri").takeIf(String::isNotEmpty)?.let { encoded ->
-            val uri = Uri.parse(encoded)
-            check(!destinationExists(uri) || MediaStoreSaver.delete(context, uri)) {
-                "Could not remove an incomplete destination from the interrupted save"
-            }
-        }
-        val roots = value.optJSONArray("roots") ?: return JSONArray()
-        val requestedById =
-            (0 until requestedRoots.length()).associate { index ->
-                val root = requestedRoots.getJSONObject(index)
-                root.getInt("root_id") to root
-            }
-        val retained = JSONArray()
-        val retainedIds = mutableSetOf<Int>()
-        for (index in 0 until roots.length()) {
-            val root = roots.getJSONObject(index)
-            val rootId = root.getInt("root_id")
-            val requested = requestedById[rootId] ?: continue
-            if (retainedIds.add(rootId) && savedRootMatches(requested, root)) retained.put(root)
-        }
-        writeJournal(journal, "committing", retained, null)
-        return retained
-    }
-
     private fun savedRootMatches(
-        requested: JSONObject,
-        saved: JSONObject,
+        source: File,
+        uri: Uri,
     ): Boolean =
         runCatching {
-            val source = File(requested.getString("local_path"))
-            val uri = Uri.parse(saved.getString("uri"))
             if (source.isDirectory) {
-                val destination =
-                    DocumentFile.fromSingleUri(context, uri)
-                        ?: return@runCatching false
+                val destination = DocumentFile.fromSingleUri(context, uri) ?: return@runCatching false
                 directoryMatches(source, destination)
             } else {
                 source.isFile &&
@@ -234,9 +353,7 @@ class ManifestV2DestinationWriter(
         if (sourceChildren.size != destinationChildren.size) return false
         val destinationByName = destinationChildren.groupBy { it.name }
         return sourceChildren.all { child ->
-            val candidates = destinationByName[child.name]
-            if (candidates?.size != 1) return@all false
-            val target = candidates.single()
+            val target = destinationByName[child.name]?.singleOrNull() ?: return@all false
             if (child.isDirectory) {
                 directoryMatches(child, target)
             } else {
@@ -249,6 +366,141 @@ class ManifestV2DestinationWriter(
         }
     }
 
+    private fun validateJournalIdentity(
+        journal: JSONObject,
+        jobId: String,
+        generation: Int,
+        destinationId: String,
+        requestedRoots: JSONArray,
+    ) {
+        check(journal.getInt("schema_version") == JOURNAL_SCHEMA_VERSION)
+        check(journal.getString("job_id") == jobId && journal.getInt("generation") == generation)
+        check(journal.getString("destination_id") == destinationId) {
+            "The selected Android destination changed after this transfer was accepted"
+        }
+        val roots = journal.getJSONArray("roots")
+        check(roots.length() == requestedRoots.length())
+        for (index in 0 until roots.length()) {
+            val planned = roots.getJSONObject(index)
+            val requested = requestedRoot(requestedRoots, planned.getInt("root_id"))
+            requested.optString("requested_name").takeIf(String::isNotEmpty)?.let {
+                check(it == planned.getString("requested_name"))
+            }
+            requested.optString("planned_name").takeIf(String::isNotEmpty)?.let {
+                check(it == planned.getString("planned_name"))
+            }
+        }
+    }
+
+    private fun requestedRoot(
+        roots: JSONArray,
+        rootId: Int,
+    ): JSONObject =
+        (0 until roots.length())
+            .map { roots.getJSONObject(it) }
+            .singleOrNull { it.getInt("root_id") == rootId }
+            ?: error("Android destination request omitted root $rootId")
+
+    private fun destinationTree(encoded: String): DocumentFile? =
+        encoded.takeIf(String::isNotBlank)?.let {
+            DocumentFile.fromTreeUri(context, Uri.parse(it))
+                ?.takeIf(DocumentFile::canWrite)
+                ?: error("The selected save folder is unavailable")
+        }
+
+    private fun journalFile(
+        jobId: String,
+        generation: Int,
+    ): File = File(context.filesDir, "manifest-v2/destination-save/$jobId-$generation.json")
+
+    private fun loadJournal(file: File): JSONObject? {
+        if (!file.isFile) return null
+        return JSONObject(file.readText())
+    }
+
+    private fun writeJournal(
+        journal: File,
+        value: JSONObject,
+    ) {
+        val parent = requireNotNull(journal.parentFile)
+        parent.mkdirs()
+        val temporary = File(parent, "${journal.name}.tmp")
+        FileOutputStream(temporary).use { output ->
+            output.write(value.toString().toByteArray(Charsets.UTF_8))
+            output.fd.sync()
+        }
+        try {
+            Files.move(
+                temporary.toPath(),
+                journal.toPath(),
+                StandardCopyOption.REPLACE_EXISTING,
+                StandardCopyOption.ATOMIC_MOVE,
+            )
+        } catch (_: Throwable) {
+            Files.move(
+                temporary.toPath(),
+                journal.toPath(),
+                StandardCopyOption.REPLACE_EXISTING,
+            )
+        }
+        val descriptor = Os.open(parent.absolutePath, OsConstants.O_RDONLY, 0)
+        try {
+            Os.fsync(descriptor)
+        } finally {
+            Os.close(descriptor)
+        }
+    }
+
+    private fun newJournal(
+        jobId: String,
+        generation: Int,
+        destinationId: String,
+        state: String,
+        roots: JSONArray,
+    ): JSONObject =
+        JSONObject()
+            .put("schema_version", JOURNAL_SCHEMA_VERSION)
+            .put("job_id", jobId)
+            .put("generation", generation)
+            .put("destination_id", destinationId)
+            .put("state", state)
+            .put("roots", roots)
+
+    private fun planReply(roots: JSONArray): JSONObject =
+        JSONObject().put(
+            "roots",
+            JSONArray().apply {
+                for (index in 0 until roots.length()) {
+                    val root = roots.getJSONObject(index)
+                    put(
+                        JSONObject()
+                            .put("root_id", root.getInt("root_id"))
+                            .put("planned_name", root.getString("planned_name")),
+                    )
+                }
+            },
+        )
+
+    private fun committedReply(roots: JSONArray): JSONObject =
+        JSONObject().put(
+            "roots",
+            JSONArray().apply {
+                for (index in 0 until roots.length()) {
+                    val root = roots.getJSONObject(index)
+                    check(root.getString("state") == STATE_COMMITTED)
+                    put(
+                        JSONObject()
+                            .put("root_id", root.getInt("root_id"))
+                            .put("final_name", root.getString("final_name"))
+                            .put("uri", root.getString("uri")),
+                    )
+                }
+            },
+        )
+
+    private fun allCommitted(roots: JSONArray): Boolean =
+        (0 until roots.length()).all { roots.getJSONObject(it).getString("state") == STATE_COMMITTED }
+
     private fun destinationExists(uri: Uri): Boolean =
         if (DocumentFile.isDocumentUri(context, uri)) {
             DocumentFile.fromSingleUri(context, uri)?.exists() == true
@@ -256,34 +508,25 @@ class ManifestV2DestinationWriter(
             MediaStoreSaver.resolves(context, uri)
         }
 
-    private fun writeJournal(
-        journal: File,
-        state: String,
-        roots: JSONArray,
-        pendingUri: String?,
-    ) {
-        val value = JSONObject().put("state", state).put("roots", roots)
-        pendingUri?.let { value.put("pending_uri", it) }
-        val temporary = File(journal.parentFile, "${journal.name}.tmp")
-        temporary.writeText(value.toString())
-        runCatching {
-            Files.move(
-                temporary.toPath(),
-                journal.toPath(),
-                StandardCopyOption.REPLACE_EXISTING,
-                StandardCopyOption.ATOMIC_MOVE,
-            )
-        }.getOrElse {
-            Files.move(
-                temporary.toPath(),
-                journal.toPath(),
-                StandardCopyOption.REPLACE_EXISTING,
-            )
-        }
-    }
+    private fun mimeType(name: String): String =
+        URLConnection.guessContentTypeFromName(name) ?: "application/octet-stream"
+
+    private fun nameKey(name: String): String = name.lowercase(Locale.ROOT)
+
+    private fun destinationId(
+        treeUri: String,
+        folder: String,
+    ): String = if (treeUri.isNotBlank()) "tree:$treeUri" else "downloads:$folder"
 
     private companion object {
+        const val JOURNAL_SCHEMA_VERSION = 2
         const val MAX_NAME_ATTEMPTS = 10_000
+        const val KIND_FILE = "file"
+        const val STATE_PLANNED = "planned"
+        const val STATE_CREATING = "creating"
+        const val STATE_COPYING = "copying"
+        const val STATE_SAVING = "saving"
+        const val STATE_COMMITTED = "committed"
     }
 }
 

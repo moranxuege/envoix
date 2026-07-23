@@ -203,6 +203,11 @@ class TransferService : Service() {
             check(callbacks[id] === this) { "Manifest v2 attempt is no longer active" }
             return destinationWriter.save(requestJson)
         }
+
+        override fun onPlanRequired(requestJson: String): String {
+            check(callbacks[id] === this) { "Manifest v2 attempt is no longer active" }
+            return destinationWriter.plan(requestJson)
+        }
     }
 
     private fun onOffer(

@@ -749,6 +749,7 @@ fn core_destination_request(
         staging_allocatable_bytes: request.staging_allocatable_bytes,
         stable_object_identity: request.stable_object_identity,
         exceptional_transfer_approved: request.exceptional_transfer_approved,
+        preplanned_root_names: None,
     })
 }
 

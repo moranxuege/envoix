@@ -190,6 +190,7 @@ async fn compressed_data_plane_saves_before_returning_results() {
             staging_allocatable_bytes: None,
             stable_object_identity: true,
             exceptional_transfer_approved: false,
+            preplanned_root_names: None,
         },
     )
     .await
@@ -255,4 +256,34 @@ async fn compressed_data_plane_saves_before_returning_results() {
         receiver_progress.phases.lock().unwrap().last(),
         Some(&ManifestV2ProgressPhase::FinalizingDelivery)
     );
+}
+
+#[test]
+fn sender_rejects_a_result_digest_that_differs_from_entry_complete() {
+    let offer = offer();
+    let identity = JobGenerationV2 {
+        job_id: offer.manifest.job_id,
+        generation: offer.manifest.generation,
+    };
+    let entry = &offer.manifest.entries[0];
+    let completion = EntryCompleteV2 {
+        identity,
+        entry_id: entry.entry_id,
+        final_size: entry.plaintext_size,
+        final_digest: ContentDigestV2([0x11; 32]),
+        completion_choice: EntryCompletionChoiceV2::PayloadComplete,
+    };
+    let result = EntryResultV2 {
+        identity,
+        entry_id: entry.entry_id,
+        result: EntryResultKindV2::Saved,
+        final_size: entry.plaintext_size,
+        final_digest: Some(ContentDigestV2([0x22; 32])),
+        final_component_override: None,
+    };
+
+    assert!(matches!(
+        validate_entry_result(entry, identity, completion, &result),
+        Err(ManifestV2DataError::FinalMismatch)
+    ));
 }

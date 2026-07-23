@@ -229,3 +229,44 @@ async fn decomposed_filesystem_names_are_sealed_as_unicode_nfc() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn staged_provider_names_are_normalized_before_validation() {
+    let temporary = tempdir().unwrap();
+    let source = temporary.path().join("provider-source");
+    fs::write(&source, b"provider bytes").await.unwrap();
+    let store = TransferJobStore::new(temporary.path().join("jobs"));
+    let mut job = CanonicalTransferJob::new(CompressionPolicyV2::Never).unwrap();
+
+    store
+        .import_staged_file(
+            &mut job,
+            &source,
+            "re\u{301}sume\u{301}.txt".into(),
+            LocalSourceOrigin::ContentUriStaging,
+        )
+        .await
+        .unwrap();
+    job.prepare_all().await.unwrap();
+
+    assert_eq!(job.list_roots()[0].name, "résumé.txt");
+}
+
+#[test]
+fn canonical_sibling_name_collisions_become_a_source_issue() {
+    let canonical = vec!["résumé.txt".to_string()];
+    let mut children = vec![
+        (PathBuf::from("first"), canonical.clone(), None),
+        (PathBuf::from("second"), canonical.clone(), None),
+        (PathBuf::from("other"), vec!["other.txt".to_string()], None),
+    ];
+    let mut issues = Vec::new();
+
+    remove_component_collisions(&mut children, &mut issues);
+
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0].1, vec!["other.txt"]);
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].relative_components, canonical);
+    assert_eq!(issues[0].kind, SourceIssueKind::InvalidName);
+}

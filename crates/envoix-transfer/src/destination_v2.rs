@@ -27,7 +27,6 @@ use crate::{ManifestV2DataError, ManifestV2PayloadSink, SavedEntryV2, VerifiedEn
 pub const POST_SAVE_RESERVE_BYTES: u64 = 64 * 1024 * 1024;
 pub const AUTO_RECEIVE_PLAINTEXT_LIMIT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const COPY_BUFFER_BYTES: usize = 1024 * 1024;
-const MAX_FINALIZATION_NAME_REPLANS: u32 = 32;
 const LOCAL_SAVE_LEDGER_SCHEMA_VERSION: u16 = 1;
 static NEXT_RENAME_PROBE: AtomicU64 = AtomicU64::new(1);
 
@@ -72,6 +71,9 @@ pub struct DestinationRequestV2 {
     pub staging_allocatable_bytes: Option<u64>,
     pub stable_object_identity: bool,
     pub exceptional_transfer_approved: bool,
+    /// Platform providers may allocate public root names before Accept. When
+    /// supplied, the private staging plan must preserve them exactly.
+    pub preplanned_root_names: Option<Vec<RootPlanV2>>,
 }
 
 impl fmt::Debug for DestinationRequestV2 {
@@ -90,6 +92,10 @@ impl fmt::Debug for DestinationRequestV2 {
             .field(
                 "exceptional_transfer_approved",
                 &self.exceptional_transfer_approved,
+            )
+            .field(
+                "preplanned_root_name_count",
+                &self.preplanned_root_names.as_ref().map(Vec::len),
             )
             .finish()
     }
@@ -150,7 +156,7 @@ pub enum DestinationPlanErrorV2 {
     ReservationLost,
     #[error("an external object took the reserved destination name")]
     LateCollision,
-    #[error("destination namespace remained contended after bounded replanning")]
+    #[error("destination namespace changed after the accepted name plan")]
     DestinationContended,
     #[error("destination source object changed during reuse")]
     ReusedObjectLost,
@@ -228,24 +234,40 @@ impl DestinationWritePlanV2 {
         let mut occupied_names = destination_names(&request.target_directory).await?;
         let mut root_plans = Vec::with_capacity(offer.manifest.roots.len());
         let mut reservations = Vec::with_capacity(offer.manifest.roots.len());
-        for root in &offer.manifest.roots {
-            let base = provider_safe_component(&root.requested_name);
-            let preserve_extension = offer.manifest.entries[root.root_entry_id as usize].kind
-                == ManifestEntryKindV2::RegularFile;
-            let (planned_name, reservation) = reserve_keep_both_name(
-                &reservation_directory,
-                &base,
-                preserve_extension,
-                &mut occupied_names,
-                offer.manifest.job_id,
-                root.root_id,
-            )
-            .await?;
-            root_plans.push(RootPlanV2 {
-                root_id: root.root_id,
-                planned_name,
-            });
-            reservations.push(reservation);
+        if let Some(preplanned) = request.preplanned_root_names.take() {
+            validate_preplanned_roots(&offer.manifest, &preplanned)?;
+            for root in preplanned {
+                let reservation = reserve_exact_name(
+                    &reservation_directory,
+                    &root.planned_name,
+                    &mut occupied_names,
+                    offer.manifest.job_id,
+                    root.root_id,
+                )
+                .await?;
+                root_plans.push(root);
+                reservations.push(reservation);
+            }
+        } else {
+            for root in &offer.manifest.roots {
+                let base = provider_safe_component(&root.requested_name);
+                let preserve_extension = offer.manifest.entries[root.root_entry_id as usize].kind
+                    == ManifestEntryKindV2::RegularFile;
+                let (planned_name, reservation) = reserve_keep_both_name(
+                    &reservation_directory,
+                    &base,
+                    preserve_extension,
+                    &mut occupied_names,
+                    offer.manifest.job_id,
+                    root.root_id,
+                )
+                .await?;
+                root_plans.push(RootPlanV2 {
+                    root_id: root.root_id,
+                    planned_name,
+                });
+                reservations.push(reservation);
+            }
         }
         let reuse_entry_ids = discover_known_reuse_entries(
             offer,
@@ -303,6 +325,10 @@ impl DestinationWritePlanV2 {
             || self.storage_domain.stable_object_identity != request.stable_object_identity
             || !mode_matches
             || self.exceptional_transfer_approved && !request.exceptional_transfer_approved
+            || request
+                .preplanned_root_names
+                .as_ref()
+                .is_some_and(|roots| roots != &self.root_plans)
         {
             return Err(DestinationPlanErrorV2::InvalidEntryState);
         }
@@ -566,7 +592,6 @@ pub struct LocalDestinationProviderV2 {
     payloads: HashMap<u32, OpenPayload>,
     reuse_objects: HashMap<u32, ReuseObject>,
     save_ledger_path: PathBuf,
-    plan_store: DestinationPlanStoreV2,
     save_ledger: LocalSaveLedgerV2,
 }
 
@@ -696,7 +721,6 @@ impl LocalDestinationProviderV2 {
             payloads: HashMap::new(),
             reuse_objects: HashMap::new(),
             save_ledger_path,
-            plan_store,
             save_ledger,
         })
     }
@@ -943,45 +967,6 @@ impl LocalDestinationProviderV2 {
         }
     }
 
-    async fn replan_root_name(&mut self, root_id: u32) -> Result<(), DestinationPlanErrorV2> {
-        let index = root_id as usize;
-        let root = self
-            .manifest
-            .roots
-            .get(index)
-            .filter(|root| root.root_id == root_id)
-            .ok_or(DestinationPlanErrorV2::InvalidEntryState)?;
-        let mut occupied_names = destination_names(&self.plan.target_directory).await?;
-        let reservation_directory = self.plan.target_directory.join(".envoix-reservations-v2");
-        let (planned_name, reservation) = reserve_keep_both_name(
-            &reservation_directory,
-            &provider_safe_component(&root.requested_name),
-            self.manifest.entries[root.root_entry_id as usize].kind
-                == ManifestEntryKindV2::RegularFile,
-            &mut occupied_names,
-            self.plan.job_id,
-            root_id,
-        )
-        .await?;
-        let previous_reservation = self.plan.reservations[index].clone();
-        self.plan.plan_revision = self
-            .plan
-            .plan_revision
-            .checked_add(1)
-            .ok_or(DestinationPlanErrorV2::SpaceOverflow)?;
-        self.plan.root_plans[index].planned_name = planned_name.clone();
-        self.plan.reservations[index] = reservation;
-        self.plan_store.save(&self.plan).await?;
-        self.entry_overrides[root.root_entry_id as usize] =
-            (planned_name != root.requested_name).then_some(planned_name);
-        match fs::remove_file(previous_reservation).await {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-        Ok(())
-    }
-
     async fn save_effect_ledger(&self) -> Result<(), DestinationPlanErrorV2> {
         let parent = self
             .save_ledger_path
@@ -1220,68 +1205,58 @@ impl ManifestV2PayloadSink for LocalDestinationProviderV2 {
                         .await?;
                 }
             }
-            for replan_attempt in 0..=MAX_FINALIZATION_NAME_REPLANS {
-                let expected_object = self.current_intent_object(root.root_id)?;
-                let source = self.finalization_source_path(root.root_id);
-                let final_path = self
-                    .plan
-                    .target_path_for_root(root.root_id)
-                    .ok_or(DestinationPlanErrorV2::InvalidEntryState)?;
-                let outcome = if fs::try_exists(&source).await? {
-                    if object_identity(
-                        &source,
-                        expected_root_digest,
-                        self.plan.storage_domain.stable_object_identity,
-                    )
-                    .await?
-                        != expected_object
-                    {
-                        return Err(DestinationPlanErrorV2::InvalidEntryState.into());
-                    }
-                    self.finalize_root_source(root.root_id, &source).await
-                } else if fs::try_exists(&final_path).await? {
-                    verify_adopted_root(
-                        &final_path,
-                        &expected_object,
-                        manifest,
-                        verified_entries,
-                        root.root_id,
-                        &self.entry_overrides,
-                        self.plan.storage_domain.stable_object_identity,
-                    )
-                    .await
-                } else if self.plan.mode == DestinationModeV2::CopyAfterVerify {
-                    let source = self
-                        .prepare_finalization_source(root.root_id, verified_entries)
-                        .await?;
-                    sync_tree_directories(&source).await?;
-                    let expected_object = object_identity(
-                        &source,
-                        expected_root_digest,
-                        self.plan.storage_domain.stable_object_identity,
-                    )
-                    .await?;
-                    self.persist_new_save_intent(root.root_id, expected_object)
-                        .await?;
-                    self.finalize_root_source(root.root_id, &source).await
-                } else {
+            let expected_object = self.current_intent_object(root.root_id)?;
+            let source = self.finalization_source_path(root.root_id);
+            let final_path = self
+                .plan
+                .target_path_for_root(root.root_id)
+                .ok_or(DestinationPlanErrorV2::InvalidEntryState)?;
+            let outcome = if fs::try_exists(&source).await? {
+                if object_identity(
+                    &source,
+                    expected_root_digest,
+                    self.plan.storage_domain.stable_object_identity,
+                )
+                .await?
+                    != expected_object
+                {
                     return Err(DestinationPlanErrorV2::InvalidEntryState.into());
-                };
-                match outcome {
-                    Ok(()) => break,
-                    Err(DestinationPlanErrorV2::LateCollision)
-                        if replan_attempt < MAX_FINALIZATION_NAME_REPLANS =>
-                    {
-                        let expected_object = self.current_intent_object(root.root_id)?;
-                        self.replan_root_name(root.root_id).await?;
-                        self.persist_new_save_intent(root.root_id, expected_object)
-                            .await?;
-                    }
-                    Err(DestinationPlanErrorV2::LateCollision) => {
-                        return Err(DestinationPlanErrorV2::DestinationContended.into());
-                    }
-                    Err(error) => return Err(error.into()),
                 }
+                self.finalize_root_source(root.root_id, &source).await
+            } else if fs::try_exists(&final_path).await? {
+                verify_adopted_root(
+                    &final_path,
+                    &expected_object,
+                    manifest,
+                    verified_entries,
+                    root.root_id,
+                    &self.entry_overrides,
+                    self.plan.storage_domain.stable_object_identity,
+                )
+                .await
+            } else if self.plan.mode == DestinationModeV2::CopyAfterVerify {
+                let source = self
+                    .prepare_finalization_source(root.root_id, verified_entries)
+                    .await?;
+                sync_tree_directories(&source).await?;
+                let expected_object = object_identity(
+                    &source,
+                    expected_root_digest,
+                    self.plan.storage_domain.stable_object_identity,
+                )
+                .await?;
+                self.persist_new_save_intent(root.root_id, expected_object)
+                    .await?;
+                self.finalize_root_source(root.root_id, &source).await
+            } else {
+                return Err(DestinationPlanErrorV2::InvalidEntryState.into());
+            };
+            match outcome {
+                Ok(()) => {}
+                Err(DestinationPlanErrorV2::LateCollision) => {
+                    return Err(DestinationPlanErrorV2::DestinationContended.into());
+                }
+                Err(error) => return Err(error.into()),
             }
             let final_name = self.plan.root_plans[root.root_id as usize]
                 .planned_name
@@ -1508,6 +1483,56 @@ async fn reserve_keep_both_name(
         }
     }
     Err(DestinationPlanErrorV2::NameExhausted)
+}
+
+async fn reserve_exact_name(
+    reservation_directory: &Path,
+    planned_name: &str,
+    occupied: &mut HashSet<String>,
+    job_id: JobIdV2,
+    root_id: u32,
+) -> Result<PathBuf, DestinationPlanErrorV2> {
+    let key = name_equivalence_key(planned_name);
+    if occupied.contains(&key) {
+        return Err(DestinationPlanErrorV2::DestinationContended);
+    }
+    let reservation_key = blake3::hash(key.as_bytes()).to_hex().to_string();
+    let reservation = reservation_directory.join(format!("{reservation_key}.reservation"));
+    let mut file = match fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&reservation)
+        .await
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(DestinationPlanErrorV2::DestinationContended);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    file.write_all(format!("{}:{root_id}", encode_job_id(job_id)).as_bytes())
+        .await?;
+    file.sync_all().await?;
+    occupied.insert(key);
+    Ok(reservation)
+}
+
+fn validate_preplanned_roots(
+    manifest: &ManifestV2,
+    roots: &[RootPlanV2],
+) -> Result<(), DestinationPlanErrorV2> {
+    let mut names = HashSet::new();
+    if roots.len() != manifest.roots.len()
+        || roots.iter().enumerate().any(|(index, root)| {
+            root.root_id != index as u32
+                || root.planned_name.is_empty()
+                || provider_safe_component(&root.planned_name) != root.planned_name
+                || !names.insert(name_equivalence_key(&root.planned_name))
+        })
+    {
+        return Err(DestinationPlanErrorV2::InvalidEntryState);
+    }
+    Ok(())
 }
 
 fn allocate_in_memory_name(

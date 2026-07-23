@@ -6,6 +6,8 @@ package dev.envoix.app
 interface ManifestV2Callback {
     fun onEvent(json: String)
 
+    fun onPlanRequired(requestJson: String): String
+
     fun onSaveRequired(requestJson: String): String
 }
 

@@ -7,13 +7,13 @@ use envoix_client::api::{
     CanonicalTransferJob, Client, CompressionPolicyV2, DestinationDecisionV2, DestinationRequestV2,
     EventSink, JobIdV2, JobLifecycle, LocalSourceOrigin, ManifestV2DataError,
     ManifestV2ProgressPhase, ManifestV2ResultGate, PairingConfig, PendingManifestV2Receive,
-    ProviderSourceIssue, SavedEntryV2, SenderManifestV2SessionSummary, SourceDecision,
+    ProviderSourceIssue, RootPlanV2, SavedEntryV2, SenderManifestV2SessionSummary, SourceDecision,
     SourceIssueKind, SourceItemId, SourceSelectionState, TransferCancelToken, TransferEvent,
     TransferJobStore, TransferOptions, local_allocatable_bytes, parse_broker_addr,
     receive_manifest_v2_offer_enable_mdns, receive_manifest_v2_offer_via_room,
     send_manifest_v2_enable_mdns, send_manifest_v2_via_room,
 };
-use envoix_error::CoreError;
+use envoix_error::{CoreError, TransferCause};
 use envoix_protocol::manifest_v2::{ManifestEntryKindV2, ManifestV2};
 use jni::JNIEnv;
 use jni::objects::{GlobalRef, JClass, JObject, JString, JValue};
@@ -135,6 +135,19 @@ struct SaveReply {
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+struct PlannedRoot {
+    root_id: u32,
+    planned_name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlanReply {
+    roots: Vec<PlannedRoot>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct SavedRoot {
     root_id: u32,
     final_name: String,
@@ -199,6 +212,7 @@ struct AndroidResultGate {
     vm: Arc<JavaVM>,
     callback: Arc<GlobalRef>,
     target_directory: PathBuf,
+    public_roots: Vec<PlannedRoot>,
     committed: Mutex<Option<Vec<SavedRoot>>>,
 }
 
@@ -209,10 +223,20 @@ impl ManifestV2ResultGate for AndroidResultGate {
         manifest: &ManifestV2,
         saved_entries: &mut [SavedEntryV2],
     ) -> Result<(), ManifestV2DataError> {
+        let public_by_root = self
+            .public_roots
+            .iter()
+            .map(|root| (root.root_id, root))
+            .collect::<BTreeMap<_, _>>();
         let root_entries = manifest
             .roots
             .iter()
             .map(|root| {
+                let public = public_by_root.get(&root.root_id).ok_or_else(|| {
+                    ManifestV2DataError::DestinationContract(
+                        "Android public name plan omitted a root".into(),
+                    )
+                })?;
                 let result = saved_entries
                     .get(root.root_entry_id as usize)
                     .ok_or_else(|| {
@@ -228,10 +252,7 @@ impl ManifestV2ResultGate for AndroidResultGate {
                 Ok(json!({
                     "root_id": root.root_id,
                     "local_path": self.target_directory.join(private_name).to_string_lossy(),
-                    // The private destination may use an internal keep-both
-                    // name. The public destination owns the only user-visible
-                    // allocation and must start from the sealed root name.
-                    "requested_name": root.requested_name,
+                    "planned_name": public.planned_name,
                     "kind": match entry.kind {
                         ManifestEntryKindV2::RegularFile => "file",
                         ManifestEntryKindV2::Directory => "directory",
@@ -241,6 +262,7 @@ impl ManifestV2ResultGate for AndroidResultGate {
             .collect::<Result<Vec<_>, ManifestV2DataError>>()?;
         let request = json!({
             "job_id": encode_job_id(manifest.job_id),
+            "generation": manifest.generation,
             "roots": root_entries,
         })
         .to_string();
@@ -274,6 +296,11 @@ impl ManifestV2ResultGate for AndroidResultGate {
             if !valid_component(&saved.final_name) || saved.uri.trim().is_empty() {
                 return Err(ManifestV2DataError::DestinationContract(
                     "Android returned an invalid final name or URI".into(),
+                ));
+            }
+            if saved.final_name != public_by_root[&root.root_id].planned_name {
+                return Err(ManifestV2DataError::DestinationContract(
+                    "Android destination changed a frozen public name".into(),
                 ));
             }
             saved_entries[root.root_entry_id as usize].final_component_override =
@@ -743,10 +770,41 @@ async fn run_session(
     let actual_capacity = local_allocatable_bytes(&target_directory)
         .map_err(|error| CoreError::Storage(error.to_string()))?;
     let capacity = decision.target_allocatable_bytes.min(actual_capacity);
+    let plan_request = json!({
+        "job_id": encode_job_id(manifest.job_id),
+        "generation": manifest.generation,
+        "reserved_names": [".envoix-staging-v2", ".envoix-reservations-v2"],
+        "roots": manifest.roots.iter().map(|root| {
+            let entry = &manifest.entries[root.root_entry_id as usize];
+            json!({
+                "root_id": root.root_id,
+                "requested_name": root.requested_name,
+                "kind": match entry.kind {
+                    ManifestEntryKindV2::RegularFile => "file",
+                    ManifestEntryKindV2::Directory => "directory",
+                },
+            })
+        }).collect::<Vec<_>>(),
+    })
+    .to_string();
+    let public_plan =
+        call_plan_required(vm.as_ref(), callback.as_ref(), &plan_request).map_err(|error| {
+            CoreError::Cause {
+                cause: TransferCause::ReceiverDestinationUnavailable,
+                detail: error.to_string(),
+            }
+        })?;
+    let public_plan: PlanReply =
+        serde_json::from_str(&public_plan).map_err(|error| CoreError::Cause {
+            cause: TransferCause::ReceiverDestinationUnavailable,
+            detail: format!("Android destination plan reply is invalid: {error}"),
+        })?;
+    validate_public_plan(manifest, &public_plan.roots)?;
     let gate = AndroidResultGate {
         vm: vm.clone(),
         callback: callback.clone(),
         target_directory: target_directory.clone(),
+        public_roots: public_plan.roots.clone(),
         committed: Mutex::new(None),
     };
     let summary = pending
@@ -761,6 +819,16 @@ async fn run_session(
                 // adapter deliberately has no stable reusable object identity.
                 stable_object_identity: false,
                 exceptional_transfer_approved: decision.exceptional_transfer_approved,
+                preplanned_root_names: Some(
+                    public_plan
+                        .roots
+                        .iter()
+                        .map(|root| RootPlanV2 {
+                            root_id: root.root_id,
+                            planned_name: root.planned_name.clone(),
+                        })
+                        .collect(),
+                ),
             },
             PathBuf::from(&params.state_directory),
             &gate,
@@ -961,29 +1029,57 @@ fn call_save_required(
     callback: &GlobalRef,
     request: &str,
 ) -> Result<String, ManifestV2DataError> {
+    call_string_callback(vm, callback, "onSaveRequired", request)
+}
+
+fn call_plan_required(
+    vm: &JavaVM,
+    callback: &GlobalRef,
+    request: &str,
+) -> Result<String, ManifestV2DataError> {
+    call_string_callback(vm, callback, "onPlanRequired", request)
+}
+
+fn call_string_callback(
+    vm: &JavaVM,
+    callback: &GlobalRef,
+    method: &str,
+    request: &str,
+) -> Result<String, ManifestV2DataError> {
     let mut env = vm.attach_current_thread().map_err(|error| {
-        ManifestV2DataError::Internal(format!("attach Android save callback: {error}"))
+        ManifestV2DataError::Internal(format!("attach Android platform callback: {error}"))
     })?;
     let request = env.new_string(request).map_err(|error| {
-        ManifestV2DataError::Internal(format!("allocate Android save request: {error}"))
+        ManifestV2DataError::Internal(format!("allocate Android callback request: {error}"))
     })?;
     let request_object = JObject::from(request);
-    let result = env
-        .call_method(
-            callback.as_obj(),
-            "onSaveRequired",
-            "(Ljava/lang/String;)Ljava/lang/String;",
-            &[JValue::Object(&request_object)],
-        )
-        .and_then(|value| value.l())
-        .map_err(|error| {
+    let result = match env.call_method(
+        callback.as_obj(),
+        method,
+        "(Ljava/lang/String;)Ljava/lang/String;",
+        &[JValue::Object(&request_object)],
+    ) {
+        Ok(value) => value.l().map_err(|error| {
             ManifestV2DataError::DestinationContract(format!(
-                "Android save callback failed: {error}"
+                "Android platform callback returned an invalid value: {error}"
             ))
-        })?;
+        })?,
+        Err(error) => {
+            if env.exception_check().unwrap_or(false) {
+                env.exception_clear().map_err(|clear_error| {
+                    ManifestV2DataError::Internal(format!(
+                        "clear Android platform callback exception: {clear_error}"
+                    ))
+                })?;
+            }
+            return Err(ManifestV2DataError::DestinationContract(format!(
+                "Android platform callback failed: {error}"
+            )));
+        }
+    };
     if result.is_null() {
         return Err(ManifestV2DataError::DestinationContract(
-            "Android save callback returned null".into(),
+            "Android platform callback returned null".into(),
         ));
     }
     let result = JString::from(result);
@@ -991,9 +1087,26 @@ fn call_save_required(
         .map(|value| value.into())
         .map_err(|error| {
             ManifestV2DataError::DestinationContract(format!(
-                "read Android save callback result: {error}"
+                "read Android platform callback result: {error}"
             ))
         })
+}
+
+fn validate_public_plan(manifest: &ManifestV2, roots: &[PlannedRoot]) -> Result<(), CoreError> {
+    let mut names = std::collections::HashSet::new();
+    if roots.len() != manifest.roots.len()
+        || roots.iter().enumerate().any(|(index, root)| {
+            root.root_id != index as u32
+                || !valid_component(&root.planned_name)
+                || !names.insert(root.planned_name.to_lowercase())
+        })
+    {
+        return Err(CoreError::Cause {
+            cause: TransferCause::ReceiverDestinationUnavailable,
+            detail: "Android public destination returned an invalid root name plan".into(),
+        });
+    }
+    Ok(())
 }
 
 async fn load_job(store: &TransferJobStore, encoded: &str) -> Result<CanonicalTransferJob, String> {
