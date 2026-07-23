@@ -221,6 +221,9 @@ final class AppModel: ObservableObject {
     #endif
 
     private var cancellables = Set<AnyCancellable>()
+    #if os(macOS)
+    private var appLifetimeDestinationAccess: [String: SecurityScopedResourceAccess] = [:]
+    #endif
 
     private init() {
         receive.appModel = self
@@ -248,6 +251,13 @@ final class AppModel: ObservableObject {
     var hasExecutingActivity: Bool {
         activities.contains { ActivityExecutionPolicy.occupiesExecutionSlot($0.state) }
     }
+
+    #if os(macOS)
+    func retainDestinationAccessForAppLifetime(_ access: SecurityScopedResourceAccess?) {
+        guard let access else { return }
+        appLifetimeDestinationAccess[access.url.standardizedFileURL.path] = access
+    }
+    #endif
 
     @discardableResult
     func pauseActivity(_ activityID: String) -> Bool {
@@ -497,7 +507,10 @@ final class TransferViewModel: ObservableObject {
     @Published private(set) var isPreparingManifest = false
     @Published private(set) var isManifestSelectionReady = false
     @Published private(set) var preparedManifestSourcePaths: [String] = []
+    @Published private(set) var preparedInventorySummary: FfiInventorySummaryV2?
+    @Published private(set) var preparedInventoryRoots: [FfiInventoryItemV2] = []
     @Published private(set) var requiresExceptionalTransferApproval = false
+    @Published private(set) var pendingOfferSummary: FfiManifestOfferSummaryV2?
     @Published private(set) var pendingOfferEntries: [FfiManifestOfferEntryV2] = []
     @Published private(set) var pendingSourceSelections: [FfiSourceSelectionV2] = []
 
@@ -562,6 +575,8 @@ final class TransferViewModel: ObservableObject {
         if let old = preparedSelection?.job { Task { _ = try? await old.cancelJob() } }
         preparedSelection = nil
         preparedManifestSourcePaths = []
+        preparedInventorySummary = nil
+        preparedInventoryRoots = []
         pendingSourceSelections = []
         isManifestSelectionReady = false
         isPreparingManifest = true
@@ -591,7 +606,8 @@ final class TransferViewModel: ObservableObject {
                 )
                 applyPreparation(
                     snapshot,
-                    paths: await projectedSourcePaths(job: job, snapshot: snapshot)
+                    paths: await projectedSourcePaths(job: job, snapshot: snapshot),
+                    roots: await job.listRoots()
                 )
             } catch {
                 guard expected == operationID else { return }
@@ -630,7 +646,8 @@ final class TransferViewModel: ObservableObject {
                 )
                 applyPreparation(
                     snapshot,
-                    paths: await projectedSourcePaths(job: job, snapshot: snapshot)
+                    paths: await projectedSourcePaths(job: job, snapshot: snapshot),
+                    roots: await job.listRoots()
                 )
                 statusText = localized("Prepared items restored", "已恢复准备内容")
             } catch {
@@ -735,6 +752,8 @@ final class TransferViewModel: ObservableObject {
         if let job = preparedSelection?.job { Task { _ = try? await job.cancelJob() } }
         preparedSelection = nil
         preparedManifestSourcePaths = []
+        preparedInventorySummary = nil
+        preparedInventoryRoots = []
         pendingSourceSelections = []
         isPreparingManifest = false
         isManifestSelectionReady = false
@@ -1165,6 +1184,7 @@ final class TransferViewModel: ObservableObject {
                 )
                 pendingReceive = pending
                 let summary = pending.summary()
+                pendingOfferSummary = summary
                 pendingOfferEntries = pending.listEntries(offset: 0, limit: 512).entries
                 total = summary.totalPlaintextBytes
                 transferActivity?.itemCount = summary.fileCount + summary.directoryCount
@@ -1226,6 +1246,7 @@ final class TransferViewModel: ObservableObject {
                 completedFileURL = completedItemURLs.count == 1 ? completedItemURLs[0] : nil
                 transferActivity?.savedPaths = completion.savedPaths
                 pendingReceive = nil
+                pendingOfferSummary = nil
                 pendingOfferEntries = []
                 requiresExceptionalTransferApproval = false
             } catch {
@@ -1257,7 +1278,8 @@ final class TransferViewModel: ObservableObject {
                 preparedSelection = selection
                 applyPreparation(
                     snapshot,
-                    paths: await projectedSourcePaths(job: selection.job, snapshot: snapshot)
+                    paths: await projectedSourcePaths(job: selection.job, snapshot: snapshot),
+                    roots: await selection.job.listRoots()
                 )
             } catch {
                 handleFailed(error.localizedDescription)
@@ -1266,8 +1288,14 @@ final class TransferViewModel: ObservableObject {
         }
     }
 
-    private func applyPreparation(_ snapshot: FfiTransferJobSnapshotV2, paths: [String]) {
+    private func applyPreparation(
+        _ snapshot: FfiTransferJobSnapshotV2,
+        paths: [String],
+        roots: [FfiInventoryItemV2]
+    ) {
         preparedManifestSourcePaths = paths
+        preparedInventorySummary = snapshot.inventory
+        preparedInventoryRoots = roots
         pendingSourceSelections = snapshot.selections.filter { $0.state == .needsDecision }
         isManifestSelectionReady = snapshot.state == .readyToSend
         statusText = isManifestSelectionReady
@@ -1319,6 +1347,7 @@ final class TransferViewModel: ObservableObject {
         failure = nil
         completedFileURL = nil
         completedItemURLs = []
+        pendingOfferSummary = nil
         pendingOfferEntries = []
         requiresExceptionalTransferApproval = false
         rate = RateTracker()

@@ -486,6 +486,47 @@ func isRegularFileURL(_ url: URL) -> Bool {
     (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
 }
 
+func availableCompletedDirectoryURL(path: String) -> URL? {
+    let path = path.trimmed
+    guard !path.isEmpty else { return nil }
+    let url = URL(fileURLWithPath: path, isDirectory: true)
+    guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
+          values.isDirectory == true,
+          values.isSymbolicLink != true else {
+        return nil
+    }
+    return url
+}
+
+func availableReceivedDirectoryItemURLs(
+    directory: URL,
+    fileManager: FileManager = .default
+) -> [URL] {
+    guard availableCompletedDirectoryURL(path: directory.path) != nil,
+          let contents = try? fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey],
+            options: [.skipsHiddenFiles]
+          ) else {
+        return []
+    }
+    return contents.compactMap { url -> (url: URL, isDirectory: Bool)? in
+        guard let values = try? url.resourceValues(
+            forKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey]
+        ), values.isSymbolicLink != true else {
+            return nil
+        }
+        if values.isDirectory == true { return (url, true) }
+        if values.isRegularFile == true { return (url, false) }
+        return nil
+    }.sorted { lhs, rhs in
+        if lhs.isDirectory != rhs.isDirectory { return lhs.isDirectory }
+        return lhs.url.lastPathComponent.localizedStandardCompare(
+            rhs.url.lastPathComponent
+        ) == .orderedAscending
+    }.map(\.url)
+}
+
 func platformRevealTitle(language: String) -> String {
     #if os(macOS)
     return AppText.value("Reveal in Finder", "在 Finder 中显示", language: language)

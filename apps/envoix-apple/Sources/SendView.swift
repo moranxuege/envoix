@@ -163,9 +163,7 @@ struct SendView: View {
                 connectionSection
                 fileSection
                 #endif
-                #if os(macOS)
                 TransferStatusView(viewModel: viewModel)
-                #endif
             }
             .padding(.vertical, 12)
             #if os(iOS)
@@ -944,7 +942,7 @@ struct SendView: View {
     private var selectionTitle: String {
         switch selectedItems.count {
         case 0:
-            return AppText.value("Choose files or folder", "选择文件或文件夹", language: uiLanguage)
+            return AppText.value("Choose files or folders", "选择文件或文件夹", language: uiLanguage)
         case 1:
             return selectedItems[0].lastPathComponent
         default:

@@ -20,15 +20,24 @@ struct TransferStageView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 12) {
                 if records.isEmpty {
-                    ContentUnavailableView(
-                        AppText.value("No transfers yet", "暂无传输", language: language),
-                        systemImage: "arrow.up.arrow.down.circle",
-                        description: Text(AppText.value(
-                            "Prepared and active Manifest v2 jobs will appear here.",
-                            "准备中和活动中的 Manifest v2 任务会显示在这里。",
+                    VStack(spacing: 10) {
+                        Image(systemName: "arrow.up.arrow.down.circle")
+                            .font(.system(size: 36, weight: .medium))
+                            .foregroundStyle(Theme.muted)
+                        Text(AppText.value("No transfers yet", "暂无传输", language: language))
+                            .font(.headline)
+                            .foregroundStyle(Theme.text)
+                        Text(AppText.value(
+                            "Prepared and active transfers will appear here.",
+                            "准备中和活动中的传输会显示在这里。",
                             language: language
                         ))
-                    )
+                            .font(.subheadline)
+                            .foregroundStyle(Theme.muted)
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 48)
                 } else {
                     ForEach(records) { record in
                         activityCard(record)

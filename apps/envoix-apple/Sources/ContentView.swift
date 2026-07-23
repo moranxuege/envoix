@@ -202,9 +202,11 @@ struct ContentView: View {
             }
         }
         .onChange(of: model.receive.isBusy) { isBusy in
-            if isBusy, mobileSheet == .receive {
-                mobileSheet = nil
+            if isBusy {
                 nearbyPairingSelection = nil
+                if mobileSheet == .nearbyPairing {
+                    mobileSheet = .receive
+                }
             }
         }
         .onChange(of: nearbyCoordinator.state.incomingRendezvousOffer?.id) { _ in
@@ -282,8 +284,8 @@ struct ContentView: View {
                     role: .send,
                     title: AppText.value("Send items", "发送项目", language: language),
                     subtitle: AppText.value(
-                        "Choose files or a folder, then show your send QR or scan a receive QR.",
-                        "选择文件或文件夹，然后显示发送码或扫描接收码。",
+                        "Choose files or folders, review the prepared list, then connect to the receiver.",
+                        "选择文件或文件夹并核对准备清单，然后连接接收设备。",
                         language: language
                     ),
                     identifier: "home_send"
@@ -292,10 +294,10 @@ struct ContentView: View {
                 mobileHomeAction(
                     sheet: .receive,
                     role: .receive,
-                    title: AppText.value("Receive a file", "接收文件", language: language),
+                    title: AppText.value("Receive items", "接收项目", language: language),
                     subtitle: AppText.value(
-                        "Choose where to save, then show your receive QR or scan a send QR.",
-                        "确认保存位置，然后显示接收码或扫描发送码。",
+                        "Choose where to save, then review the authenticated incoming list while receiving.",
+                        "选择保存位置，并在接收时查看已经认证的项目清单。",
                         language: language
                     ),
                     identifier: "home_receive"

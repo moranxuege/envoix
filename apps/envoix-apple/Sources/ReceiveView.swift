@@ -138,9 +138,7 @@ struct ReceiveView: View {
                 }
                 #endif
 
-                #if os(macOS)
                 TransferStatusView(viewModel: viewModel)
-                #endif
             }
             .padding(.vertical, 12)
         }
@@ -248,6 +246,7 @@ struct ReceiveView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(viewModel.isBusy)
+                .accessibilityIdentifier("receive_destination_picker")
                 if hasCustomOutputDir {
                     Button {
                         resetOutputFolder()

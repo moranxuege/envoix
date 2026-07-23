@@ -84,12 +84,55 @@ struct TransferStatusView: View {
                 }
             }
 
+            if let summary = viewModel.preparedInventorySummary,
+               !viewModel.preparedInventoryRoots.isEmpty {
+                Divider().overlay(Theme.line)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(AppText.value("Prepared items", "已准备的项目", language: language))
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(Theme.text)
+                    Text(preparedInventorySummaryText(summary))
+                        .font(.footnote.monospacedDigit())
+                        .foregroundStyle(Theme.muted)
+                    ForEach(viewModel.preparedInventoryRoots.prefix(12), id: \.itemId) { item in
+                        HStack(spacing: 6) {
+                            Image(systemName: item.kind == .directory ? "folder" : "doc")
+                            Text(item.name)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Spacer(minLength: 8)
+                            if item.kind == .file {
+                                Text(byteString(item.plaintextSize))
+                                    .monospacedDigit()
+                            }
+                        }
+                        .font(.footnote)
+                        .foregroundStyle(item.hasWarning ? Theme.danger : Theme.muted)
+                    }
+                    if summary.rootCount > 12 {
+                        Text(AppText.value(
+                            "Additional selected roots are included in the same transfer.",
+                            "其余所选根项目也会包含在同一传输中。",
+                            language: language
+                        ))
+                            .font(.footnote)
+                            .foregroundStyle(Theme.muted)
+                    }
+                }
+                .accessibilityIdentifier("prepared_inventory")
+            }
+
             if !viewModel.pendingOfferEntries.isEmpty {
                 Divider().overlay(Theme.line)
                 VStack(alignment: .leading, spacing: 5) {
                     Text(AppText.value("Incoming items", "即将接收", language: language))
                         .font(.callout.weight(.semibold))
                         .foregroundStyle(Theme.text)
+                    if let summary = viewModel.pendingOfferSummary {
+                        Text(incomingInventorySummaryText(summary))
+                            .font(.footnote.monospacedDigit())
+                            .foregroundStyle(Theme.muted)
+                    }
                     ForEach(viewModel.pendingOfferEntries.prefix(12), id: \.entryId) { entry in
                         HStack(spacing: 6) {
                             Image(systemName: entry.kind == .directory ? "folder" : "doc")
@@ -115,6 +158,7 @@ struct TransferStatusView: View {
                             .foregroundStyle(Theme.muted)
                     }
                 }
+                .accessibilityIdentifier("incoming_inventory")
             }
 
             if !viewModel.pendingSourceSelections.isEmpty {
@@ -195,6 +239,28 @@ struct TransferStatusView: View {
             ReceivedItemsSheet(urls: presentation.urls)
         }
         #endif
+    }
+
+    private func preparedInventorySummaryText(_ summary: FfiInventorySummaryV2) -> String {
+        let base = AppText.value(
+            "\(summary.rootCount) roots · \(summary.fileCount) files · \(summary.directoryCount) folders · \(byteString(summary.totalPlaintextBytes))",
+            "\(summary.rootCount) 个根项目 · \(summary.fileCount) 个文件 · \(summary.directoryCount) 个文件夹 · \(byteString(summary.totalPlaintextBytes))",
+            language: language
+        )
+        guard summary.warningCount > 0 else { return base }
+        return base + AppText.value(
+            " · \(summary.warningCount) warnings",
+            " · \(summary.warningCount) 个警告",
+            language: language
+        )
+    }
+
+    private func incomingInventorySummaryText(_ summary: FfiManifestOfferSummaryV2) -> String {
+        AppText.value(
+            "\(summary.rootCount) roots · \(summary.fileCount) files · \(summary.directoryCount) folders · \(byteString(summary.totalPlaintextBytes))",
+            "\(summary.rootCount) 个根项目 · \(summary.fileCount) 个文件 · \(summary.directoryCount) 个文件夹 · \(byteString(summary.totalPlaintextBytes))",
+            language: language
+        )
     }
 
     private var transferProgressLine: some View {
