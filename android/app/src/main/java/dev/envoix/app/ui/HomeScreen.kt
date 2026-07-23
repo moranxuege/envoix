@@ -28,12 +28,12 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Devices
-import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
@@ -61,6 +61,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
@@ -72,6 +73,9 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -91,7 +95,7 @@ import dev.envoix.app.smoothedBps
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalComposeUiApi::class)
 @Composable
 fun HomeScreen(
     transfers: List<Transfer>,
@@ -126,16 +130,18 @@ fun HomeScreen(
         transfers.count { !it.status.isTerminal }
 
     Scaffold(
+        modifier = Modifier.semantics { testTagsAsResourceId = true },
         containerColor = colors.bg,
         floatingActionButton = {
             ExtendedFloatingActionButton(
                 onClick = { sheetOpen = true },
+                modifier = Modifier.testTag("home_new_transfer"),
                 containerColor = colors.accent,
                 contentColor = androidx.compose.ui.graphics.Color.White,
             ) {
                 Icon(Icons.Default.Add, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
-                Text("New transfer", fontWeight = FontWeight.SemiBold)
+                Text(appText("New transfer", "新建传输"), fontWeight = FontWeight.SemiBold)
             }
         },
     ) { inner ->
@@ -215,12 +221,16 @@ private fun Header(
         Text("Envoix", color = colors.text, fontSize = 32.sp, fontWeight = FontWeight.ExtraBold)
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (active > 0) {
-                Pill(text = "$active active", fg = colors.success, bg = colors.successSoft)
+                Pill(
+                    text = appText("$active active", "$active 个进行中"),
+                    fg = colors.success,
+                    bg = colors.successSoft,
+                )
                 Spacer(Modifier.width(8.dp))
             }
             Icon(
                 Icons.Default.Devices,
-                contentDescription = "Nearby devices",
+                contentDescription = appText("Nearby devices", "附近设备"),
                 tint = colors.accent,
                 modifier =
                     Modifier
@@ -230,7 +240,7 @@ private fun Header(
                         .size(22.dp),
             )
             Text(
-                "Logs",
+                appText("Logs", "日志"),
                 color = colors.accent,
                 fontWeight = FontWeight.Bold,
                 fontSize = 14.sp,
@@ -242,7 +252,7 @@ private fun Header(
             )
             Icon(
                 Icons.Default.Settings,
-                contentDescription = "Settings",
+                contentDescription = appText("Settings", "设置"),
                 tint = colors.accent,
                 modifier =
                     Modifier
@@ -260,7 +270,10 @@ private fun EmptyState() {
     val colors = Envoix.colors
     Box(Modifier.fillMaxWidth().padding(top = 80.dp), contentAlignment = Alignment.Center) {
         Text(
-            "No transfers yet.\nTap “New transfer” to send or receive.",
+            appText(
+                "No transfers yet.\nTap “New transfer” to send or receive.",
+                "暂无传输。\n点击“新建传输”发送或接收文件。",
+            ),
             color = colors.muted,
             fontSize = 15.sp,
         )
@@ -281,6 +294,7 @@ private fun TransferCard(
     onShare: (Transfer) -> Unit,
 ) {
     val colors = Envoix.colors
+    val language = LocalAppLanguage.current
     val failed = t.status == Status.Failed
     val cancelled = t.status == Status.Cancelled
     val dismissState =
@@ -310,7 +324,7 @@ private fun TransferCard(
             ) {
                 Icon(Icons.Default.Delete, null, tint = Color.White, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
-                Text("Remove", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                Text(appText("Remove", "移除"), color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
             }
         },
     ) {
@@ -324,7 +338,13 @@ private fun TransferCard(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null, // the drawer expanding is feedback enough; the
                     // default ripple fills the whole card, which looks heavy
-                    onClick = { if (t.status == Status.Completed && t.savedUri != null) onOpen(t) },
+                    onClick = {
+                        if (t.status == Status.Completed && t.savedUri != null) {
+                            onOpen(t)
+                        } else {
+                            onToggleDetail(t.id)
+                        }
+                    },
                     onLongClick = { onToggleDetail(t.id) },
                 ),
         ) {
@@ -335,7 +355,7 @@ private fun TransferCard(
                     Column(Modifier.weight(1f)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
-                                title(t),
+                                title(t, language),
                                 color = if (cancelled) colors.muted else colors.text,
                                 fontSize = 16.sp,
                                 fontWeight = FontWeight.Bold,
@@ -347,7 +367,7 @@ private fun TransferCard(
                             PathBadge(t)
                         }
                         Text(
-                            subtitle(t),
+                            subtitle(t, language),
                             color = colors.muted,
                             fontSize = 13.sp,
                             fontFamily = FontFamily.Monospace,
@@ -369,9 +389,20 @@ private fun TransferCard(
                         )
                         Spacer(Modifier.height(10.dp))
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Stat(speedText(t))
+                            Stat(speedText(t, language))
                             Stat(etaText(t))
                             Stat(sizeText(t))
+                        }
+                        if (t.status == Status.AwaitingDecision && t.rootCount > 0) {
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                appText(
+                                    "Tap to review the authenticated incoming list.",
+                                    "点击查看已认证的待接收清单。",
+                                ),
+                                color = colors.warning,
+                                fontSize = 12.sp,
+                            )
                         }
                         if (failed && t.error != null) {
                             Spacer(Modifier.height(6.dp))
@@ -418,7 +449,7 @@ private fun CardControls(
             Status.Failed, Status.Cancelled ->
                 CircleBtn(Icons.Default.Refresh, filled = true) { onPauseResume(t.id) }
             Status.Completed -> {
-                if (t.savedUri != null) CircleBtn(Icons.Default.OpenInNew, filled = false) { onOpen(t) }
+                if (t.savedUri != null) CircleBtn(Icons.AutoMirrored.Filled.OpenInNew, filled = false) { onOpen(t) }
                 if (t.savedUris.isNotEmpty()) CircleBtn(Icons.Default.Share, filled = false) { onShare(t) }
             }
         }
@@ -463,16 +494,26 @@ private fun WaitingBody(
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
             Column(Modifier.weight(1f)) {
                 Text(
-                    if (t.direction == Direction.Send) "Waiting to send" else "Waiting to receive",
+                    if (t.direction == Direction.Send) {
+                        appText("Waiting to send", "等待发送")
+                    } else {
+                        appText("Waiting to receive", "等待接收")
+                    },
                     color = colors.text,
                     fontSize = 16.sp,
                     fontWeight = FontWeight.Bold,
                 )
                 Text(
                     if (t.direction == Direction.Send) {
-                        "Sending ${t.fileName ?: "a file"}"
+                        appText(
+                            "Sending ${t.fileName ?: "a file"}",
+                            "准备发送 ${t.fileName ?: "文件"}",
+                        )
                     } else {
-                        "Saving to Downloads/${settings.saveFolder}"
+                        appText(
+                            "Saving to Downloads/${settings.saveFolder}",
+                            "将保存到 Downloads/${settings.saveFolder}",
+                        )
                     },
                     color = colors.muted,
                     fontSize = 13.sp,
@@ -503,7 +544,7 @@ private fun WaitingBody(
             Spacer(Modifier.width(8.dp))
             Icon(
                 Icons.Default.ContentCopy,
-                "Copy code",
+                appText("Copy code", "复制配对码"),
                 tint = colors.muted,
                 modifier =
                     Modifier
@@ -515,7 +556,7 @@ private fun WaitingBody(
         }
         Spacer(Modifier.height(2.dp))
         Text(
-            "Scan or enter this code",
+            appText("Scan or enter this code", "扫描或输入此配对码"),
             color = colors.muted,
             fontSize = 12.sp,
             modifier = Modifier.fillMaxWidth(),
@@ -539,14 +580,17 @@ private fun DetailDrawer(t: Transfer) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    "SPEED",
+                    appText("SPEED", "速度"),
                     color = colors.muted,
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 1.sp,
                 )
                 Text(
-                    "avg ${humanBps(avg)} · peak ${humanBps(peak)}",
+                    appText(
+                        "avg ${humanBps(avg)} · peak ${humanBps(peak)}",
+                        "平均 ${humanBps(avg)} · 峰值 ${humanBps(peak)}",
+                    ),
                     color = colors.muted,
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
@@ -555,24 +599,30 @@ private fun DetailDrawer(t: Transfer) {
             SpeedChart(t.speedHistory, t.avgBps)
         }
         Spacer(Modifier.height(4.dp))
-        DetailRow("Room", t.room)
-        if (t.pathAddr != null) DetailRow("Path", t.pathAddr)
-        DetailRow("Transferred", "${humanBytes(t.bytes)} / ${humanBytes(t.total)}")
+        DetailRow(appText("Room", "配对房间"), t.room)
+        if (t.pathAddr != null) DetailRow(appText("Path", "连接路径"), t.pathAddr)
+        DetailRow(appText("Transferred", "已传输"), "${humanBytes(t.bytes)} / ${humanBytes(t.total)}")
         if (t.rootCount > 0) {
             DetailRow(
-                "Inventory",
-                "${t.rootCount} roots · ${t.fileCount} files · ${t.directoryCount} folders",
+                appText("Inventory", "清单"),
+                appText(
+                    "${t.rootCount} roots · ${t.fileCount} files · ${t.directoryCount} folders",
+                    "${t.rootCount} 个根项目 · ${t.fileCount} 个文件 · ${t.directoryCount} 个文件夹",
+                ),
             )
-            DrawerLabel("Authenticated items")
+            DrawerLabel(appText("Authenticated items", "已认证项目"))
             t.inventoryPreview.take(20).forEach { entry ->
                 DetailRow(
-                    if (entry.directory) "Folder" else "File",
+                    if (entry.directory) appText("Folder", "文件夹") else appText("File", "文件"),
                     if (entry.directory) entry.name else "${entry.name} · ${humanBytes(entry.size)}",
                 )
             }
             if (t.inventoryPreview.size > 20 || t.inventoryHasMore) {
                 Text(
-                    "More items are available in bounded pages; only the first 20 are shown here.",
+                    appText(
+                        "More items are available in bounded pages; only the first 20 are shown here.",
+                        "还有更多项目可分页查看；此处仅显示前 20 项。",
+                    ),
                     color = colors.muted,
                     fontSize = 11.sp,
                 )
@@ -584,19 +634,23 @@ private fun DetailDrawer(t: Transfer) {
             val settings by SettingsStore.settings.collectAsState()
             val scope = rememberCoroutineScope()
             var upload by remember(t.id) { mutableStateOf("") }
+            val uploadLabel = appText("Upload", "上传")
+            val uploadingLabel = appText("Uploading…", "正在上传…")
+            val uploadedLabel = appText("Uploaded ✓", "已上传 ✓")
+            val uploadFailedLabel = appText("Failed", "失败")
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                DrawerLabel("This transfer's log")
+                DrawerLabel(appText("This transfer's log", "本次传输日志"))
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     if (settings.devMode && settings.logServer.isNotBlank()) {
-                        PillButton(upload.ifEmpty { "Upload" }) {
-                            upload = "Uploading…"
+                        PillButton(upload.ifEmpty { uploadLabel }) {
+                            upload = uploadingLabel
                             scope.launch {
                                 val ok =
                                     LogUpload.upload(
@@ -605,11 +659,11 @@ private fun DetailDrawer(t: Transfer) {
                                         if (t.direction == Direction.Send) "send" else "receive",
                                         Diagnostics.build(Diagnostics.Kind.Transfer, t.id),
                                     )
-                                upload = if (ok) "Uploaded ✓" else "Failed"
+                                upload = if (ok) uploadedLabel else uploadFailedLabel
                             }
                         }
                     }
-                    PillButton(if (copied) "Copied ✓" else "Copy") {
+                    PillButton(if (copied) appText("Copied ✓", "已复制 ✓") else appText("Copy", "复制")) {
                         // The full durable log via the one assembler (clip-capped).
                         runCatching {
                             clip.setText(
@@ -750,21 +804,22 @@ private fun PathBadge(t: Transfer) {
     val colors = Envoix.colors
     val (label, fg, bg) =
         when {
-            t.status == Status.Completed -> Triple("Done", colors.success, colors.successSoft)
-            t.status == Status.Failed -> Triple("Failed", colors.danger, colors.danger.copy(alpha = 0.12f))
-            t.status == Status.Cancelled -> Triple("Cancelled", colors.muted, colors.line.copy(alpha = 0.5f))
-            t.status == Status.Paused -> Triple("Paused", colors.warning, colors.warning.copy(alpha = 0.14f))
-            t.status == Status.Preparing -> Triple("Preparing", colors.accent, colors.accentSoft)
-            t.status == Status.AwaitingDecision -> Triple("Review", colors.warning, colors.warning.copy(alpha = 0.14f))
-            t.status == Status.Receiving -> Triple("Receiving", colors.accent, colors.accentSoft)
-            t.status == Status.Transferring -> Triple("Sending", colors.accent, colors.accentSoft)
-            t.status == Status.Verifying -> Triple("Verifying", colors.accent, colors.accentSoft)
-            t.status == Status.Saving -> Triple("Saving", colors.accent, colors.accentSoft)
-            t.status == Status.WaitingForReceiverSave -> Triple("Saving remotely", colors.accent, colors.accentSoft)
+            t.status == Status.Completed -> Triple(appText("Done", "已完成"), colors.success, colors.successSoft)
+            t.status == Status.Failed -> Triple(appText("Failed", "失败"), colors.danger, colors.danger.copy(alpha = 0.12f))
+            t.status == Status.Cancelled -> Triple(appText("Cancelled", "已取消"), colors.muted, colors.line.copy(alpha = 0.5f))
+            t.status == Status.Paused -> Triple(appText("Paused", "已暂停"), colors.warning, colors.warning.copy(alpha = 0.14f))
+            t.status == Status.Preparing -> Triple(appText("Preparing", "正在准备"), colors.accent, colors.accentSoft)
+            t.status == Status.AwaitingDecision -> Triple(appText("Review", "待确认"), colors.warning, colors.warning.copy(alpha = 0.14f))
+            t.status == Status.Receiving -> Triple(appText("Receiving", "正在接收"), colors.accent, colors.accentSoft)
+            t.status == Status.Transferring -> Triple(appText("Sending", "正在发送"), colors.accent, colors.accentSoft)
+            t.status == Status.Verifying -> Triple(appText("Verifying", "正在验证"), colors.accent, colors.accentSoft)
+            t.status == Status.Saving -> Triple(appText("Saving", "正在保存"), colors.accent, colors.accentSoft)
+            t.status == Status.WaitingForReceiverSave ->
+                Triple(appText("Saving remotely", "接收端正在保存"), colors.accent, colors.accentSoft)
             t.status == Status.FinalizingDelivery ->
-                Triple("Finalizing delivery", colors.accent, colors.accentSoft)
+                Triple(appText("Finalizing delivery", "正在确认送达"), colors.accent, colors.accentSoft)
             // pre-connection, path unknown: say what is HAPPENING, never "…"
-            else -> Triple("Pairing", colors.accent, colors.accentSoft)
+            else -> Triple(appText("Pairing", "正在配对"), colors.accent, colors.accentSoft)
         }
     Pill(label, fg, bg)
 }
@@ -795,17 +850,29 @@ private fun Stat(text: String) {
 
 // ---- formatting helpers ----
 
-private fun title(t: Transfer): String {
+private fun title(
+    t: Transfer,
+    language: String,
+): String {
     val arrow = if (t.direction == Direction.Send) "↑" else "↓"
-    val name = t.fileName ?: if (t.direction == Direction.Send) "file" else "incoming"
+    val name =
+        t.fileName ?: if (t.direction == Direction.Send) {
+            AppText.value("file", "文件", language)
+        } else {
+            AppText.value("incoming", "待接收项目", language)
+        }
     return "$arrow $name"
 }
 
-private fun subtitle(t: Transfer): String =
+private fun subtitle(
+    t: Transfer,
+    language: String,
+): String =
     when {
-        t.status == Status.Completed && t.savedUri != null -> "Saved to Downloads · tap to open"
+        t.status == Status.Completed && t.savedUri != null ->
+            AppText.value("Saved to Downloads · tap to open", "已保存到 Downloads · 点击打开", language)
         t.pathAddr != null -> t.pathAddr
-        else -> "room ${t.room}"
+        else -> AppText.value("room ${t.room}", "配对房间 ${t.room}", language)
     }
 
 private fun fraction(t: Transfer): Float {
@@ -814,22 +881,25 @@ private fun fraction(t: Transfer): Float {
     return (t.bytes.toFloat() / t.total.toFloat()).coerceIn(0f, 1f)
 }
 
-private fun speedText(t: Transfer): String {
+private fun speedText(
+    t: Transfer,
+    language: String,
+): String {
     if (t.status !in setOf(Status.Transferring, Status.Receiving) || t.speedBps <= 0) {
         return when (t.status) {
-            Status.Preparing -> "preparing"
-            Status.Connecting -> "connecting"
-            Status.AwaitingDecision -> "review required"
-            Status.Transferring -> "sending"
-            Status.Receiving -> "receiving"
-            Status.Verifying -> "verifying"
-            Status.Saving -> "saving"
-            Status.WaitingForReceiverSave -> "receiver saving"
-            Status.FinalizingDelivery -> "finalizing delivery"
-            Status.Completed -> "complete"
-            Status.Paused -> "paused"
-            Status.Failed -> "failed"
-            Status.Cancelled -> "cancelled"
+            Status.Preparing -> AppText.value("preparing", "正在准备", language)
+            Status.Connecting -> AppText.value("connecting", "正在连接", language)
+            Status.AwaitingDecision -> AppText.value("review required", "需要确认", language)
+            Status.Transferring -> AppText.value("sending", "正在发送", language)
+            Status.Receiving -> AppText.value("receiving", "正在接收", language)
+            Status.Verifying -> AppText.value("verifying", "正在验证", language)
+            Status.Saving -> AppText.value("saving", "正在保存", language)
+            Status.WaitingForReceiverSave -> AppText.value("receiver saving", "接收端正在保存", language)
+            Status.FinalizingDelivery -> AppText.value("finalizing delivery", "正在确认送达", language)
+            Status.Completed -> AppText.value("complete", "已完成", language)
+            Status.Paused -> AppText.value("paused", "已暂停", language)
+            Status.Failed -> AppText.value("failed", "失败", language)
+            Status.Cancelled -> AppText.value("cancelled", "已取消", language)
         }
     }
     val bps = smoothedBps(t)

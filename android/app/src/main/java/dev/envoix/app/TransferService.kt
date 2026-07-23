@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import dev.envoix.app.ui.AppText
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -45,7 +46,11 @@ class TransferService : Service() {
         super.onCreate()
         readSpecs().forEach { specs[it.id] = it }
         getSystemService(NotificationManager::class.java).createNotificationChannel(
-            NotificationChannel(CHANNEL, "Transfers", NotificationManager.IMPORTANCE_LOW),
+            NotificationChannel(
+                CHANNEL,
+                uiText("Transfers", "传输"),
+                NotificationManager.IMPORTANCE_LOW,
+            ),
         )
     }
 
@@ -65,10 +70,11 @@ class TransferService : Service() {
         when (intent?.action) {
             ACTION_START_SEND -> startNew(intent, Direction.Send)
             ACTION_START_RECEIVE -> startNew(intent, Direction.Receive)
-            ACTION_APPROVE_RECEIVE -> continueReceive(
-                intent.getLongExtra(EXTRA_ID, -1),
-                exceptionalApproved = true,
-            )
+            ACTION_APPROVE_RECEIVE ->
+                continueReceive(
+                    intent.getLongExtra(EXTRA_ID, -1),
+                    exceptionalApproved = true,
+                )
             ACTION_PAUSE -> pause(intent.getLongExtra(EXTRA_ID, -1))
             ACTION_RESUME -> resume(intent.getLongExtra(EXTRA_ID, -1))
             ACTION_CANCEL -> cancelTransfer(intent.getLongExtra(EXTRA_ID, -1))
@@ -104,19 +110,28 @@ class TransferService : Service() {
             )
         if (!useRoom && !useMdns) {
             TransferRepository.update(id) {
-                it.copy(status = Status.Failed, error = "Choose at least one available pairing route")
+                it.copy(
+                    status = Status.Failed,
+                    error = uiText("Choose at least one available pairing route", "请至少选择一种可用的配对方式"),
+                )
             }
             return
         }
         if (useRoom && broker.isBlank()) {
             TransferRepository.update(id) {
-                it.copy(status = Status.Failed, error = "Room pairing requires a rendezvous broker")
+                it.copy(
+                    status = Status.Failed,
+                    error = uiText("Room pairing requires a rendezvous broker", "配对房间需要配置会合服务器"),
+                )
             }
             return
         }
         if (direction == Direction.Send && spec.jobId.isNullOrBlank()) {
             TransferRepository.update(id) {
-                it.copy(status = Status.Failed, error = "Prepared transfer job is missing")
+                it.copy(
+                    status = Status.Failed,
+                    error = uiText("Prepared transfer job is missing", "缺少已准备的传输任务"),
+                )
             }
             return
         }
@@ -201,23 +216,29 @@ class TransferService : Service() {
                 JSONObject(Native.listManifestV2OfferEntries(callback.nativeId, 0, 128))
             }.getOrNull()
         val projectedEntries =
-            inventoryPage?.optJSONArray("entries")?.let { entries ->
-                (0 until entries.length()).map { index ->
-                    val entry = entries.getJSONObject(index)
-                    TransferInventoryEntry(
-                        entryId = entry.getInt("entry_id"),
-                        parentEntryId =
-                            entry.takeIf { it.has("parent_entry_id") && !it.isNull("parent_entry_id") }
-                                ?.getInt("parent_entry_id"),
-                        name = entry.getString("name"),
-                        directory = entry.getString("kind") == "directory",
-                        size = entry.getLong("plaintext_size"),
-                    )
-                }
-            }.orEmpty()
+            inventoryPage
+                ?.optJSONArray("entries")
+                ?.let { entries ->
+                    (0 until entries.length()).map { index ->
+                        val entry = entries.getJSONObject(index)
+                        TransferInventoryEntry(
+                            entryId = entry.getInt("entry_id"),
+                            parentEntryId =
+                                entry
+                                    .takeIf { it.has("parent_entry_id") && !it.isNull("parent_entry_id") }
+                                    ?.getInt("parent_entry_id"),
+                            name = entry.getString("name"),
+                            directory = entry.getString("kind") == "directory",
+                            size = entry.getLong("plaintext_size"),
+                        )
+                    }
+                }.orEmpty()
         val exceptional = offer.optBoolean("exceptional")
         val hasDirectories = offer.optInt("directory_count") > 0
-        val needsFolder = hasDirectories && SettingsStore.settings.value.saveTreeUri.isBlank()
+        val needsFolder =
+            hasDirectories &&
+                SettingsStore.settings.value.saveTreeUri
+                    .isBlank()
         TransferRepository.update(id) {
             it.copy(
                 status =
@@ -233,14 +254,26 @@ class TransferService : Service() {
                 total = offer.optLong("total"),
                 exceptionalOffer = exceptional,
                 inventoryPreview = projectedEntries,
-                inventoryHasMore = inventoryPage?.has("next_offset") == true &&
-                    !inventoryPage.isNull("next_offset"),
+                inventoryHasMore =
+                    inventoryPage?.has("next_offset") == true &&
+                        !inventoryPage.isNull("next_offset"),
                 error =
                     when {
-                        needsFolder -> "Choose a writable save folder before receiving directories."
+                        needsFolder ->
+                            uiText(
+                                "Choose a writable save folder before receiving directories.",
+                                "接收文件夹前，请先选择可写入的保存位置。",
+                            )
                         !spec.destinationCopyApproved ->
-                            "This Android destination requires private verification followed by an extra copy."
-                        exceptional -> "Review this unusually large transfer before continuing."
+                            uiText(
+                                "This Android destination requires private verification followed by an extra copy.",
+                                "此 Android 目标位置需要先在私有目录验证，再额外复制一次。",
+                            )
+                        exceptional ->
+                            uiText(
+                                "Review this unusually large transfer before continuing.",
+                                "此传输体积异常大，请确认后继续。",
+                            )
                         else -> null
                     },
                 log = addLog(it.log, "authenticated inventory received"),
@@ -258,9 +291,18 @@ class TransferService : Service() {
     ) {
         val spec = specs[id] ?: return
         val transfer = TransferRepository.transfers.value.firstOrNull { it.id == id } ?: return
-        if (transfer.directoryCount > 0 && SettingsStore.settings.value.saveTreeUri.isBlank()) {
+        if (transfer.directoryCount > 0 &&
+            SettingsStore.settings.value.saveTreeUri
+                .isBlank()
+        ) {
             TransferRepository.update(id) {
-                it.copy(error = "Choose a writable save folder in Settings, then continue.")
+                it.copy(
+                    error =
+                        uiText(
+                            "Choose a writable save folder in Settings, then continue.",
+                            "请先在设置中选择可写入的保存位置，然后继续。",
+                        ),
+                )
             }
             return
         }
@@ -368,7 +410,10 @@ class TransferService : Service() {
     private fun removeTransfer(id: Long) {
         callbacks.remove(id)?.let { Native.cancelManifestV2Session(it.nativeId) }
         val spec = specs.remove(id)
-        val jobId = spec?.jobId ?: TransferRepository.transfers.value.firstOrNull { it.id == id }?.jobId
+        val jobId =
+            spec?.jobId ?: TransferRepository.transfers.value
+                .firstOrNull { it.id == id }
+                ?.jobId
         // Only job-owned private/incomplete artifacts are discarded. Public
         // saved URIs returned by the result gate are never deleted here.
         receiveBase(id).deleteRecursively()
@@ -392,7 +437,16 @@ class TransferService : Service() {
             )
             TransferRepository.update(spec.id) {
                 it.copy(
-                    status = if (spec.holdState == "canceled") Status.Cancelled else if (spec.holdState == "paused") Status.Paused else Status.Connecting,
+                    status =
+                        if (spec.holdState ==
+                            "canceled"
+                        ) {
+                            Status.Cancelled
+                        } else if (spec.holdState == "paused") {
+                            Status.Paused
+                        } else {
+                            Status.Connecting
+                        },
                     jobId = spec.jobId,
                 )
             }
@@ -421,21 +475,68 @@ class TransferService : Service() {
         detail: String,
     ): String =
         when (cause) {
-            "sender_permission_lost" -> "The sender lost permission to read a selected item. Reauthorize it and retry."
-            "sender_source_changed" -> "A selected item changed after preparation. Review and send it again."
-            "receiver_space_insufficient" -> "The receiver does not have enough space for this transfer."
-            "receiver_destination_decision_required" -> "The receiver must choose or approve a save destination."
-            "receiver_destination_unavailable" -> "The selected receive destination is no longer available."
-            "receiver_save_failed" -> "The receiver could not save the verified files: $detail"
-            "receiver_reused_object_lost" -> "A destination item selected for reuse changed or disappeared. Restore it and resume, or start a new transfer."
-            "receiver_finalization_outcome_unknown" -> "The final save could not be confirmed after an interruption. Resume to reconcile the destination."
-            "protocol_or_integrity_failure" -> "Integrity verification failed; no unverified file was delivered."
-            "transport" -> "The connection was interrupted. Resume to continue from verified data."
+            "sender_permission_lost" ->
+                uiText(
+                    "The sender lost permission to read a selected item. Reauthorize it and retry.",
+                    "发送端已失去所选项目的读取权限。请重新授权后重试。",
+                )
+            "sender_source_changed" ->
+                uiText(
+                    "A selected item changed after preparation. Review and send it again.",
+                    "所选项目在准备完成后发生了变化。请检查并重新发送。",
+                )
+            "receiver_space_insufficient" ->
+                uiText(
+                    "The receiver does not have enough space for this transfer.",
+                    "接收端没有足够空间完成此次传输。",
+                )
+            "receiver_destination_decision_required" ->
+                uiText(
+                    "The receiver must choose or approve a save destination.",
+                    "接收端必须选择或确认保存位置。",
+                )
+            "receiver_destination_unavailable" ->
+                uiText(
+                    "The selected receive destination is no longer available.",
+                    "所选接收位置已不可用。",
+                )
+            "receiver_save_failed" ->
+                uiText(
+                    "The receiver could not save the verified files: $detail",
+                    "接收端无法保存已验证的文件：$detail",
+                )
+            "receiver_reused_object_lost" ->
+                uiText(
+                    "A destination item selected for reuse changed or disappeared. Restore it and resume, or start a new transfer.",
+                    "计划复用的目标项目已变化或消失。请恢复后继续，或重新开始传输。",
+                )
+            "receiver_finalization_outcome_unknown" ->
+                uiText(
+                    "The final save could not be confirmed after an interruption. Resume to reconcile the destination.",
+                    "中断后无法确认最终保存结果。请继续任务以核对目标位置。",
+                )
+            "protocol_or_integrity_failure" ->
+                uiText(
+                    "Integrity verification failed; no unverified file was delivered.",
+                    "完整性验证失败；未交付任何未经验证的文件。",
+                )
+            "transport" ->
+                uiText(
+                    "The connection was interrupted. Resume to continue from verified data.",
+                    "连接已中断。继续任务即可从已验证的数据恢复。",
+                )
             else -> detail
         }
 
+    private fun uiText(
+        english: String,
+        simplifiedChinese: String,
+    ): String = AppText.value(english, simplifiedChinese, SettingsStore.settings.value.language)
+
     private fun receiveBase(id: Long) = File(filesDir, "manifest-v2/receiver/$id")
+
     private fun receiveTarget(id: Long) = File(receiveBase(id), "final")
+
     private fun stateDirectory(id: Long) = File(receiveBase(id), "state")
 
     private fun ManifestSpec.paramsJson(context: Context): String =
@@ -485,7 +586,7 @@ class TransferService : Service() {
         if (!foreground) {
             startForeground(
                 NOTIFICATION_ID,
-                notification("Preparing transfer…"),
+                notification(uiText("Preparing transfer…", "正在准备传输…")),
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
             )
             foreground = true
@@ -495,7 +596,9 @@ class TransferService : Service() {
     private fun updateNotification() {
         if (!foreground) return
         val active = TransferRepository.transfers.value.filterNot { it.status.isTerminal }
-        val text = active.lastOrNull()?.let { statusLabel(it.status) } ?: "No active transfer"
+        val text =
+            active.lastOrNull()?.let { statusLabel(it.status) }
+                ?: uiText("No active transfer", "当前没有进行中的传输")
         getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(text))
     }
 
@@ -510,7 +613,8 @@ class TransferService : Service() {
     }
 
     private fun notification(text: String) =
-        NotificationCompat.Builder(this, CHANNEL)
+        NotificationCompat
+            .Builder(this, CHANNEL)
             .setSmallIcon(android.R.drawable.stat_sys_upload)
             .setContentTitle("Envoix")
             .setContentText(text)
@@ -527,19 +631,19 @@ class TransferService : Service() {
 
     private fun statusLabel(status: Status): String =
         when (status) {
-            Status.Preparing -> "Preparing files…"
-            Status.Connecting -> "Connecting…"
-            Status.AwaitingDecision -> "Waiting for your save decision"
-            Status.Transferring -> "Transferring files…"
-            Status.Receiving -> "Receiving files…"
-            Status.Verifying -> "Verifying…"
-            Status.Saving -> "Saving…"
-            Status.WaitingForReceiverSave -> "Waiting for receiver to save…"
-            Status.FinalizingDelivery -> "Saved; finalizing delivery…"
-            Status.Paused -> "Paused"
-            Status.Completed -> "Completed"
-            Status.Failed -> "Failed"
-            Status.Cancelled -> "Cancelled"
+            Status.Preparing -> uiText("Preparing files…", "正在准备文件…")
+            Status.Connecting -> uiText("Connecting…", "正在连接…")
+            Status.AwaitingDecision -> uiText("Waiting for your save decision", "等待确认保存方式")
+            Status.Transferring -> uiText("Transferring files…", "正在传输文件…")
+            Status.Receiving -> uiText("Receiving files…", "正在接收文件…")
+            Status.Verifying -> uiText("Verifying…", "正在验证…")
+            Status.Saving -> uiText("Saving…", "正在保存…")
+            Status.WaitingForReceiverSave -> uiText("Waiting for receiver to save…", "等待接收端保存…")
+            Status.FinalizingDelivery -> uiText("Saved; finalizing delivery…", "已保存，正在确认送达…")
+            Status.Paused -> uiText("Paused", "已暂停")
+            Status.Completed -> uiText("Completed", "已完成")
+            Status.Failed -> uiText("Failed", "失败")
+            Status.Cancelled -> uiText("Cancelled", "已取消")
         }
 
     companion object {
@@ -624,11 +728,31 @@ class TransferService : Service() {
             )
         }
 
-        fun approveReceive(context: Context, id: Long) = command(context, ACTION_APPROVE_RECEIVE, id)
-        fun pause(context: Context, id: Long) = command(context, ACTION_PAUSE, id)
-        fun resume(context: Context, id: Long) = command(context, ACTION_RESUME, id)
-        fun cancel(context: Context, id: Long) = command(context, ACTION_CANCEL, id)
-        fun remove(context: Context, id: Long) = command(context, ACTION_REMOVE, id)
+        fun approveReceive(
+            context: Context,
+            id: Long,
+        ) = command(context, ACTION_APPROVE_RECEIVE, id)
+
+        fun pause(
+            context: Context,
+            id: Long,
+        ) = command(context, ACTION_PAUSE, id)
+
+        fun resume(
+            context: Context,
+            id: Long,
+        ) = command(context, ACTION_RESUME, id)
+
+        fun cancel(
+            context: Context,
+            id: Long,
+        ) = command(context, ACTION_CANCEL, id)
+
+        fun remove(
+            context: Context,
+            id: Long,
+        ) = command(context, ACTION_REMOVE, id)
+
         fun restoreAll(context: Context) = command(context, ACTION_RESTORE, -1)
 
         private fun command(
@@ -644,8 +768,7 @@ class TransferService : Service() {
             )
         }
 
-        fun jobStoreDirectory(context: Context): File =
-            File(context.filesDir, "manifest-v2/jobs").apply { mkdirs() }
+        fun jobStoreDirectory(context: Context): File = File(context.filesDir, "manifest-v2/jobs").apply { mkdirs() }
 
         fun nextSessionIdFloor(context: Context): Long =
             runCatching {

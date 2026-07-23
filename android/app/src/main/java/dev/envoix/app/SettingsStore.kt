@@ -2,9 +2,11 @@ package dev.envoix.app
 
 import android.content.Context
 import android.content.SharedPreferences
+import dev.envoix.app.ui.AppText
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.util.Locale
 
 /**
  * Two layers, one flat holder:
@@ -14,11 +16,11 @@ import kotlinx.coroutines.flow.asStateFlow
  *    folder, default role); never sent to the core.
  */
 data class Settings(
+    val language: String = AppText.ENGLISH,
     // core connection defaults
     val broker: String = Endpoints.BROKER,
     val relay: String = Endpoints.RELAY,
-    // core config.toml (RuntimeConfig)
-    /** Per-stream QUIC flow-control window (e.g. `32MB`); empty = transport default (16MB). */
+    /** Core config.toml stream window (e.g. `32MB`); empty = transport default (16MB). */
     val dataStreamWindow: String = "",
     val candidatesAllow: List<String> = emptyList(),
     val candidatesDeny: List<String> = emptyList(),
@@ -54,6 +56,13 @@ object SettingsStore {
         prefs = context.getSharedPreferences("envoix.settings", Context.MODE_PRIVATE)
         _settings.value =
             Settings(
+                language =
+                    prefs.getString("language", null)
+                        ?: if (Locale.getDefault().language == "zh") {
+                            AppText.SIMPLIFIED_CHINESE
+                        } else {
+                            AppText.ENGLISH
+                        },
                 broker = prefs.getString("broker", Endpoints.BROKER)!!,
                 relay = prefs.getString("relay", Endpoints.RELAY)!!,
                 dataStreamWindow = prefs.getString("dataStreamWindow", "")!!,
@@ -84,6 +93,7 @@ object SettingsStore {
         val s = transform(_settings.value)
         prefs
             .edit()
+            .putString("language", s.language)
             .putString("broker", s.broker)
             .putString("relay", s.relay)
             .putString("dataStreamWindow", s.dataStreamWindow)

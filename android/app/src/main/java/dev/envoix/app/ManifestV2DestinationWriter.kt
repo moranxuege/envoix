@@ -103,7 +103,7 @@ class ManifestV2DestinationWriter(
         committedRoots: JSONArray,
         rootId: Int,
     ): Outcome {
-        val finalName = allocateName(tree, requestedName)
+        val finalName = allocateName(tree, requestedName, source.isFile)
         val target =
             if (source.isDirectory) {
                 tree.createDirectory(finalName)
@@ -148,8 +148,9 @@ class ManifestV2DestinationWriter(
         source: File,
         destination: DocumentFile,
     ) {
-        val output = context.contentResolver.openOutputStream(destination.uri, "wt")
-            ?: error("Destination cannot be opened")
+        val output =
+            context.contentResolver.openOutputStream(destination.uri, "wt")
+                ?: error("Destination cannot be opened")
         source.inputStream().use { input ->
             output.use { input.copyTo(it) }
         }
@@ -158,28 +159,21 @@ class ManifestV2DestinationWriter(
     private fun allocateName(
         parent: DocumentFile,
         requested: String,
+        preserveExtension: Boolean,
     ): String {
         for (suffix in 0 until MAX_NAME_ATTEMPTS) {
-            val candidate = if (suffix == 0) requested else keepBothName(requested, suffix)
+            val candidate =
+                if (suffix == 0) {
+                    requested
+                } else {
+                    manifestV2KeepBothName(requested, suffix, preserveExtension)
+                }
             if (parent.findFile(candidate) == null) return candidate
         }
         error("Could not allocate a non-conflicting destination name")
     }
 
-    private fun keepBothName(
-        name: String,
-        suffix: Int,
-    ): String {
-        val dot = name.lastIndexOf('.').takeIf { it > 0 }
-        return if (dot == null) {
-            "$name ($suffix)"
-        } else {
-            "${name.substring(0, dot)} ($suffix)${name.substring(dot)}"
-        }
-    }
-
-    private fun mimeType(name: String): String =
-        URLConnection.guessContentTypeFromName(name) ?: "application/octet-stream"
+    private fun mimeType(name: String): String = URLConnection.guessContentTypeFromName(name) ?: "application/octet-stream"
 
     private fun recoverJournal(
         journal: File,
@@ -194,8 +188,9 @@ class ManifestV2DestinationWriter(
         }
         val roots = value.optJSONArray("roots") ?: return JSONArray()
         val requestedById =
-            (0 until requestedRoots.length()).associateBy {
-                requestedRoots.getJSONObject(it).getInt("root_id")
+            (0 until requestedRoots.length()).associate { index ->
+                val root = requestedRoots.getJSONObject(index)
+                root.getInt("root_id") to root
             }
         val retained = JSONArray()
         val retainedIds = mutableSetOf<Int>()
@@ -217,13 +212,15 @@ class ManifestV2DestinationWriter(
             val source = File(requested.getString("local_path"))
             val uri = Uri.parse(saved.getString("uri"))
             if (source.isDirectory) {
-                val destination = DocumentFile.fromSingleUri(context, uri)
-                    ?: return@runCatching false
+                val destination =
+                    DocumentFile.fromSingleUri(context, uri)
+                        ?: return@runCatching false
                 directoryMatches(source, destination)
             } else {
-                source.isFile && source.inputStream().use(MediaStoreSaver::hash).matches(
-                    MediaStoreSaver.inspect(context, uri).getOrThrow(),
-                )
+                source.isFile &&
+                    source.inputStream().use(MediaStoreSaver::hash).matches(
+                        MediaStoreSaver.inspect(context, uri).getOrThrow(),
+                    )
             }
         }.getOrDefault(false)
 
@@ -243,7 +240,8 @@ class ManifestV2DestinationWriter(
             if (child.isDirectory) {
                 directoryMatches(child, target)
             } else {
-                child.isFile && target.isFile &&
+                child.isFile &&
+                    target.isFile &&
                     child.inputStream().use(MediaStoreSaver::hash).matches(
                         MediaStoreSaver.inspect(context, target.uri).getOrThrow(),
                     )
@@ -286,5 +284,18 @@ class ManifestV2DestinationWriter(
 
     private companion object {
         const val MAX_NAME_ATTEMPTS = 10_000
+    }
+}
+
+internal fun manifestV2KeepBothName(
+    name: String,
+    suffix: Int,
+    preserveExtension: Boolean,
+): String {
+    val dot = if (preserveExtension) name.lastIndexOf('.').takeIf { it > 0 } else null
+    return if (dot == null) {
+        "$name ($suffix)"
+    } else {
+        "${name.substring(0, dot)} ($suffix)${name.substring(dot)}"
     }
 }

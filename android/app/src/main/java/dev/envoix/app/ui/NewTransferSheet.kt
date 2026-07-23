@@ -22,8 +22,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronRight
-import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
@@ -38,11 +38,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -51,8 +55,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.envoix.app.InviteCodec
 import dev.envoix.app.ManifestV2Source
-import dev.envoix.app.ManifestV2StageResult
 import dev.envoix.app.ManifestV2SourceStager
+import dev.envoix.app.ManifestV2StageResult
 import dev.envoix.app.Native
 import dev.envoix.app.PreparedManifestV2Source
 import dev.envoix.app.SettingsStore
@@ -72,6 +76,7 @@ import org.json.JSONObject
  * code, then the role picker, the file/save path, and the start button. Scanning
  * fills the code and picks the opposite role, so both sides never share a role.
  */
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun NewTransferSheet(
     onReceive: (code: String, broker: String, relay: String, qrPayload: String?, copyApproved: Boolean) -> Unit,
@@ -84,6 +89,12 @@ fun NewTransferSheet(
     val colors = Envoix.colors
     val context = LocalContext.current
     val settings by SettingsStore.settings.collectAsState()
+    val language = LocalAppLanguage.current
+
+    fun text(
+        english: String,
+        simplifiedChinese: String,
+    ) = AppText.value(english, simplifiedChinese, language)
     val broker = settings.broker
     val relay = settings.relay
 
@@ -154,7 +165,11 @@ fun NewTransferSheet(
                         }
                     }
                 } catch (error: Throwable) {
-                    preparationError = error.message ?: "Could not prepare the selected source"
+                    preparationError =
+                        error.message ?: text(
+                            "Could not prepare the selected source",
+                            "无法准备所选内容",
+                        )
                 } finally {
                     preparingCount -= fresh.size
                 }
@@ -252,13 +267,19 @@ fun NewTransferSheet(
                             previous.rootItemId,
                         )
                     val index = preparedSources.indexOf(previous)
-                    check(index >= 0) { "Source selection changed while authorizing" }
+                    check(index >= 0) {
+                        text("Source selection changed while authorizing", "授权期间所选内容发生了变化")
+                    }
                     preparedSources[index] = replacement
                     previous.localRoot.parentFile?.deleteRecursively()
                     preparationSummary = parsed
                 } catch (error: Throwable) {
                     if (!committed) staged?.root?.parentFile?.deleteRecursively()
-                    preparationError = error.message ?: "Could not authorize the selected folder"
+                    preparationError =
+                        error.message ?: text(
+                            "Could not authorize the selected folder",
+                            "无法授权所选文件夹",
+                        )
                 } finally {
                     preparingCount -= 1
                 }
@@ -306,7 +327,11 @@ fun NewTransferSheet(
                             role = "send"
                         }
                     }.onFailure { error ->
-                        preparationError = error.message ?: "Could not restore prepared items"
+                        preparationError =
+                            error.message ?: text(
+                                "Could not restore prepared items",
+                                "无法恢复已准备的项目",
+                            )
                     }
             }
         }
@@ -343,19 +368,28 @@ fun NewTransferSheet(
             code.contains("-") &&
             when (role) {
                 "send" ->
-                    preparedSources.isNotEmpty() && preparingCount == 0 && preparedJobId != null &&
+                    preparedSources.isNotEmpty() &&
+                        preparingCount == 0 &&
+                        preparedJobId != null &&
                         preparedSources.all { it.issueCount == 0 || it.partialApproved }
                 else -> destinationCopyApproved
             }
 
     Column(
         Modifier
+            .semantics { testTagsAsResourceId = true }
+            .testTag("transfer_sheet")
             .fillMaxWidth()
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 20.dp)
             .padding(bottom = 28.dp),
     ) {
-        Text("New transfer", color = colors.text, fontSize = 21.sp, fontWeight = FontWeight.ExtraBold)
+        Text(
+            text("New transfer", "新建传输"),
+            color = colors.text,
+            fontSize = 21.sp,
+            fontWeight = FontWeight.ExtraBold,
+        )
         Spacer(Modifier.height(14.dp))
 
         nearbySelection?.let { selection ->
@@ -377,8 +411,12 @@ fun NewTransferSheet(
                 .border(1.dp, colors.line, RoundedCornerShape(12.dp))
                 .padding(3.dp),
         ) {
-            SegTab("Show QR", topMode == "show", Modifier.weight(1f)) { topMode = "show" }
-            SegTab("Scan QR", topMode == "scan", Modifier.weight(1f)) { topMode = "scan" }
+            SegTab(text("Show QR", "显示二维码"), topMode == "show", Modifier.weight(1f)) {
+                topMode = "show"
+            }
+            SegTab(text("Scan QR", "扫描二维码"), topMode == "scan", Modifier.weight(1f)) {
+                topMode = "scan"
+            }
         }
 
         Spacer(Modifier.height(14.dp))
@@ -387,11 +425,15 @@ fun NewTransferSheet(
                 InlineScanner(onScanned = ::applyScanned, modifier = Modifier.fillMaxWidth())
             } else if (joining) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("You'll join", color = colors.muted, fontSize = 13.sp)
+                    Text(text("You'll join", "即将加入"), color = colors.muted, fontSize = 13.sp)
                     Spacer(Modifier.height(6.dp))
                     Text(typed, color = colors.accent, fontSize = 18.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
                     Spacer(Modifier.height(6.dp))
-                    Text("clear the code below to show your own", color = colors.muted, fontSize = 11.sp)
+                    Text(
+                        text("clear the code below to show your own", "清空下方配对码即可显示自己的二维码"),
+                        color = colors.muted,
+                        fontSize = 11.sp,
+                    )
                 }
             } else if (generated != null) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -409,7 +451,7 @@ fun NewTransferSheet(
                         Spacer(Modifier.width(8.dp))
                         Icon(
                             Icons.Default.ContentCopy,
-                            "Copy code",
+                            text("Copy code", "复制配对码"),
                             tint = colors.muted,
                             modifier =
                                 Modifier
@@ -432,14 +474,20 @@ fun NewTransferSheet(
                 scannedBroker = null
                 scannedRelay = null
             },
-            placeholder = { Text("or enter a code to join…") },
+            placeholder = { Text(text("or enter a code to join…", "或输入配对码加入…")) },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
 
         // ---- role picker ----
         Spacer(Modifier.height(16.dp))
-        Text("I WANT TO", color = colors.muted, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+        Text(
+            text("I WANT TO", "我要"),
+            color = colors.muted,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 1.sp,
+        )
         Spacer(Modifier.height(6.dp))
         Row(
             Modifier
@@ -449,18 +497,34 @@ fun NewTransferSheet(
                 .border(1.dp, colors.line, RoundedCornerShape(12.dp))
                 .padding(3.dp),
         ) {
-            SegTab("Send", role == "send", Modifier.weight(1f)) { role = "send" }
-            SegTab("Receive", role == "receive", Modifier.weight(1f)) { role = "receive" }
+            SegTab(
+                text("Send", "发送"),
+                role == "send",
+                Modifier.weight(1f).testTag("transfer_role_send"),
+            ) { role = "send" }
+            SegTab(
+                text("Receive", "接收"),
+                role == "receive",
+                Modifier.weight(1f).testTag("transfer_role_receive"),
+            ) { role = "receive" }
         }
 
         // ---- canonical roots or receive destination ----
         Spacer(Modifier.height(14.dp))
         if (role == "send") {
-            PathRow("ADD FILES", "Choose one or more files…", placeholder = preparedSources.isEmpty()) {
+            PathRow(
+                text("ADD FILES", "添加文件"),
+                text("Choose one or more files…", "选择一个或多个文件…"),
+                placeholder = preparedSources.isEmpty(),
+            ) {
                 filePicker.launch(arrayOf("*/*"))
             }
             Spacer(Modifier.height(8.dp))
-            PathRow("ADD FOLDER", "Choose another folder…", placeholder = false) {
+            PathRow(
+                text("ADD FOLDER", "添加文件夹"),
+                text("Choose another folder…", "选择另一个文件夹…"),
+                placeholder = false,
+            ) {
                 sourceFolderPicker.launch(null)
             }
             preparedSources.forEach { prepared ->
@@ -478,10 +542,12 @@ fun NewTransferSheet(
                         )
                         Text(
                             when {
-                                prepared.partialApproved -> "Folder · accessible content only"
-                                prepared.issueCount > 0 -> "Folder · source decision required"
-                                prepared.source.directory -> "Folder"
-                                else -> "File"
+                                prepared.partialApproved ->
+                                    text("Folder · accessible content only", "文件夹 · 仅发送可访问内容")
+                                prepared.issueCount > 0 ->
+                                    text("Folder · source decision required", "文件夹 · 需要处理来源访问问题")
+                                prepared.source.directory -> text("Folder", "文件夹")
+                                else -> text("File", "文件")
                             },
                             color = if (prepared.issueCount > 0 && !prepared.partialApproved) colors.warning else colors.muted,
                             fontSize = 11.sp,
@@ -489,7 +555,7 @@ fun NewTransferSheet(
                     }
                     if (prepared.issueCount > 0 && !prepared.partialApproved) {
                         Text(
-                            "Authorize again",
+                            text("Authorize again", "重新授权"),
                             color = colors.accent,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
@@ -503,7 +569,7 @@ fun NewTransferSheet(
                         )
                         if (prepared.canApprovePartial) {
                             Text(
-                                "Send accessible",
+                                text("Send accessible", "发送可访问内容"),
                                 color = colors.accent,
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
@@ -517,7 +583,11 @@ fun NewTransferSheet(
                     }
                     Icon(
                         Icons.Default.Close,
-                        contentDescription = "Remove ${prepared.source.displayName}",
+                        contentDescription =
+                            text(
+                                "Remove ${prepared.source.displayName}",
+                                "移除 ${prepared.source.displayName}",
+                            ),
                         tint = colors.muted,
                         modifier =
                             Modifier
@@ -530,16 +600,24 @@ fun NewTransferSheet(
             }
             if (preparingCount > 0) {
                 Text(
-                    "Preparing $preparingCount selected source(s)…",
+                    text(
+                        "Preparing $preparingCount selected source(s)…",
+                        "正在准备 $preparingCount 个所选来源…",
+                    ),
                     color = colors.accent,
                     fontSize = 12.sp,
                     modifier = Modifier.padding(top = 8.dp),
                 )
             }
             preparationSummary?.takeIf { preparedSources.isNotEmpty() }?.let { summary ->
+                val files = summary.optInt("file_count")
+                val directories = summary.optInt("directory_count")
+                val size = dev.envoix.app.humanBytes(summary.optLong("total"))
                 Text(
-                    "${summary.optInt("file_count")} files · ${summary.optInt("directory_count")} folders · " +
-                        dev.envoix.app.humanBytes(summary.optLong("total")),
+                    text(
+                        "$files files · $directories folders · $size",
+                        "$files 个文件 · $directories 个文件夹 · $size",
+                    ),
                     color = colors.muted,
                     fontSize = 12.sp,
                     modifier = Modifier.padding(top = 8.dp),
@@ -554,7 +632,7 @@ fun NewTransferSheet(
                 )
             }
         } else {
-            PathRow("SAVE TO", SettingsStore.saveLabel(context), placeholder = false) {
+            PathRow(text("SAVE TO", "保存到"), SettingsStore.saveLabel(context), placeholder = false) {
                 saveFolderPicker.launch(SettingsStore.savePickerInitialUri())
             }
             Row(
@@ -571,9 +649,16 @@ fun NewTransferSheet(
                     onCheckedChange = { destinationCopyApproved = it },
                 )
                 Column(Modifier.padding(start = 8.dp)) {
-                    Text("Verify privately, then save", color = colors.text, fontSize = 14.sp)
                     Text(
-                        "Android SAF/MediaStore requires an additional copy after verification.",
+                        text("Verify privately, then save", "先在私有目录验证，再保存"),
+                        color = colors.text,
+                        fontSize = 14.sp,
+                    )
+                    Text(
+                        text(
+                            "Android SAF/MediaStore requires an additional copy after verification.",
+                            "Android SAF/MediaStore 需要在验证完成后额外复制一次。",
+                        ),
                         color = colors.muted,
                         fontSize = 11.sp,
                     )
@@ -585,6 +670,7 @@ fun NewTransferSheet(
         Spacer(Modifier.height(16.dp))
         Box(
             Modifier
+                .testTag("transfer_start")
                 .fillMaxWidth()
                 .height(52.dp)
                 .clip(RoundedCornerShape(14.dp))
@@ -620,9 +706,9 @@ fun NewTransferSheet(
         ) {
             Text(
                 when {
-                    rendezvousBusy -> "Delivering invite…"
-                    role == "send" -> "Send"
-                    else -> "Receive"
+                    rendezvousBusy -> text("Delivering invite…", "正在发送邀请…")
+                    role == "send" -> text("Send", "发送")
+                    else -> text("Receive", "接收")
                 },
                 color = Color.White,
                 fontWeight = FontWeight.Bold,
@@ -631,9 +717,16 @@ fun NewTransferSheet(
         }
     }
 }
+
 @Composable
 private fun NearbyPairingContext(selection: NearbyPairingSelection) {
     val colors = Envoix.colors
+    val language = LocalAppLanguage.current
+
+    fun text(
+        english: String,
+        simplifiedChinese: String,
+    ) = AppText.value(english, simplifiedChinese, language)
     val sourceText =
         selection.sources
             .sortedBy(DiscoverySource::ordinal)
@@ -652,20 +745,26 @@ private fun NearbyPairingContext(selection: NearbyPairingSelection) {
             .padding(14.dp),
     ) {
         Text(
-            selection.displayName ?: "Nearby Envoix device",
+            selection.displayName ?: text("Nearby Envoix device", "附近的 Envoix 设备"),
             color = colors.text,
             fontWeight = FontWeight.Bold,
             fontSize = 16.sp,
         )
         if (sourceText.isNotEmpty()) {
-            Text("Found over $sourceText", color = colors.muted, fontSize = 12.sp)
+            Text(text("Found over $sourceText", "通过 $sourceText 发现"), color = colors.muted, fontSize = 12.sp)
         }
         Spacer(Modifier.height(6.dp))
         Text(
             if (DiscoverySource.Bluetooth in selection.sources) {
-                "Experimental insecure BLE pairing: the invitation is sent without peer authentication. A nearby attacker may impersonate or relay this device."
+                text(
+                    "Experimental insecure BLE pairing: the invitation is sent without peer authentication. A nearby attacker may impersonate or relay this device.",
+                    "实验性非安全 BLE 配对：邀请未经对端身份认证。附近的攻击者可能冒充或中继此设备。",
+                )
             } else {
-                "This device is not currently reachable over BLE. Use QR or a typed Envoix code to continue."
+                text(
+                    "This device is not currently reachable over BLE. Use QR or a typed Envoix code to continue.",
+                    "当前无法通过 BLE 连接此设备。请使用二维码或输入 Envoix 配对码继续。",
+                )
             },
             color = colors.muted,
             fontSize = 12.sp,

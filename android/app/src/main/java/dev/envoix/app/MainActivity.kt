@@ -10,13 +10,16 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
-import androidx.core.content.IntentCompat
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import androidx.core.content.IntentCompat
+import dev.envoix.app.ui.AppText
 import dev.envoix.app.ui.DiscoveryScreen
 import dev.envoix.app.ui.EnvoixTheme
 import dev.envoix.app.ui.HomeScreen
+import dev.envoix.app.ui.LocalAppLanguage
 import dev.envoix.app.ui.LogScreen
 import dev.envoix.app.ui.SettingsScreen
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -38,47 +41,50 @@ class MainActivity : ComponentActivity() {
         TransferService.restoreAll(this)
         captureSharedUris(intent)
         setContent {
-            EnvoixTheme {
-                var screen by androidx.compose.runtime.remember {
-                    androidx.compose.runtime.mutableStateOf(Screen.Home)
-                }
-                if (screen != Screen.Home) BackHandler { screen = Screen.Home }
-                when (screen) {
-                    Screen.Discovery ->
-                        DiscoveryScreen(
-                            onBack = { screen = Screen.Home },
-                            onReceive = { c, b, r, qr, copyApproved ->
-                                screen = Screen.Home
-                                vm.startReceive(c, b, r, qr, copyApproved)
-                            },
-                            onSend = { c, b, r, jobId, qr ->
-                                screen = Screen.Home
-                                vm.startSend(c, jobId, b, r, qr)
-                            },
-                        )
-                    Screen.Logs -> LogScreen(onBack = { screen = Screen.Home })
-                    Screen.Settings -> SettingsScreen(onBack = { screen = Screen.Home })
-                    Screen.Home -> {
-                        val transfers by vm.transfers.collectAsState()
-                        val incomingShares by sharedUris.collectAsState()
-                        HomeScreen(
-                            transfers = transfers,
-                            initialSharedUris = incomingShares,
-                            onSharedUrisConsumed = { sharedUris.value = emptyList() },
-                            onReceive = { c, b, r, qr, copyApproved ->
-                                vm.startReceive(c, b, r, qr, copyApproved)
-                            },
-                            onSend = { c, b, r, jobId, qr -> vm.startSend(c, jobId, b, r, qr) },
-                            onPauseResume = { vm.pauseResume(it) },
-                            onApproveReceive = { vm.approveReceive(it) },
-                            onCancel = { vm.cancel(it) },
-                            onRemove = { vm.remove(it) },
-                            onOpenDiscovery = { screen = Screen.Discovery },
-                            onOpenLogs = { screen = Screen.Logs },
-                            onOpenSettings = { screen = Screen.Settings },
-                            onOpen = { openReceived(it) },
-                            onShare = { shareReceived(it) },
-                        )
+            val settings by SettingsStore.settings.collectAsState()
+            CompositionLocalProvider(LocalAppLanguage provides settings.language) {
+                EnvoixTheme {
+                    var screen by androidx.compose.runtime.remember {
+                        androidx.compose.runtime.mutableStateOf(Screen.Home)
+                    }
+                    if (screen != Screen.Home) BackHandler { screen = Screen.Home }
+                    when (screen) {
+                        Screen.Discovery ->
+                            DiscoveryScreen(
+                                onBack = { screen = Screen.Home },
+                                onReceive = { c, b, r, qr, copyApproved ->
+                                    screen = Screen.Home
+                                    vm.startReceive(c, b, r, qr, copyApproved)
+                                },
+                                onSend = { c, b, r, jobId, qr ->
+                                    screen = Screen.Home
+                                    vm.startSend(c, jobId, b, r, qr)
+                                },
+                            )
+                        Screen.Logs -> LogScreen(onBack = { screen = Screen.Home })
+                        Screen.Settings -> SettingsScreen(onBack = { screen = Screen.Home })
+                        Screen.Home -> {
+                            val transfers by vm.transfers.collectAsState()
+                            val incomingShares by sharedUris.collectAsState()
+                            HomeScreen(
+                                transfers = transfers,
+                                initialSharedUris = incomingShares,
+                                onSharedUrisConsumed = { sharedUris.value = emptyList() },
+                                onReceive = { c, b, r, qr, copyApproved ->
+                                    vm.startReceive(c, b, r, qr, copyApproved)
+                                },
+                                onSend = { c, b, r, jobId, qr -> vm.startSend(c, jobId, b, r, qr) },
+                                onPauseResume = { vm.pauseResume(it) },
+                                onApproveReceive = { vm.approveReceive(it) },
+                                onCancel = { vm.cancel(it) },
+                                onRemove = { vm.remove(it) },
+                                onOpenDiscovery = { screen = Screen.Discovery },
+                                onOpenLogs = { screen = Screen.Logs },
+                                onOpenSettings = { screen = Screen.Settings },
+                                onOpen = { openReceived(it) },
+                                onShare = { shareReceived(it) },
+                            )
+                        }
                     }
                 }
             }
@@ -112,7 +118,14 @@ class MainActivity : ComponentActivity() {
                 setDataAndType(uri, "*/*")
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
-        runCatching { startActivity(Intent.createChooser(view, "Open with")) }
+        runCatching {
+            startActivity(
+                Intent.createChooser(
+                    view,
+                    AppText.value("Open with", "打开方式", SettingsStore.settings.value.language),
+                ),
+            )
+        }
     }
 
     private fun shareReceived(t: Transfer) {
@@ -129,6 +142,13 @@ class MainActivity : ComponentActivity() {
             }
         share.type = "*/*"
         share.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        runCatching { startActivity(Intent.createChooser(share, "Share received items")) }
+        runCatching {
+            startActivity(
+                Intent.createChooser(
+                    share,
+                    AppText.value("Share received items", "分享已接收项目", SettingsStore.settings.value.language),
+                ),
+            )
+        }
     }
 }

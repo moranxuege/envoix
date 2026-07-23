@@ -146,8 +146,9 @@ object ManifestV2SourceStager {
         val sources =
             (0 until selections.length()).mapNotNull { index ->
                 val selection = selections.getJSONObject(index)
-                val localPath = selection.optString("local_path").takeIf(String::isNotBlank)
-                    ?: return@mapNotNull null
+                val localPath =
+                    selection.optString("local_path").takeIf(String::isNotBlank)
+                        ?: return@mapNotNull null
                 val root = File(localPath)
                 if (!root.exists()) return@mapNotNull null
                 val source =
@@ -248,8 +249,9 @@ object ManifestV2SourceStager {
         destination: File,
     ) {
         destination.parentFile?.mkdirs()
-        val input = context.contentResolver.openInputStream(source)
-            ?: error("Selected item cannot be opened")
+        val input =
+            context.contentResolver.openInputStream(source)
+                ?: error("Selected item cannot be opened")
         input.use { from ->
             FileOutputStream(destination).use { to ->
                 from.copyTo(to)
@@ -271,8 +273,12 @@ object ManifestV2SourceStager {
     }
 
     private fun validComponent(value: String): Boolean =
-        value.isNotBlank() && value != "." && value != ".." &&
-            '/' !in value && '\\' !in value && '\u0000' !in value
+        value.isNotBlank() &&
+            value != "." &&
+            value != ".." &&
+            '/' !in value &&
+            '\\' !in value &&
+            '\u0000' !in value
 
     private fun canApprovePartial(issues: JSONArray): Boolean =
         (0 until issues.length()).none { index ->

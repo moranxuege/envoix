@@ -96,15 +96,21 @@ fun SettingsScreen(onBack: () -> Unit) {
         ) {
             Icon(
                 Icons.AutoMirrored.Filled.ArrowBack,
-                contentDescription = "Back",
+                contentDescription = appText("Back", "返回"),
                 tint = colors.accent,
                 modifier = Modifier.clip(CircleShape).clickable(onClick = onBack).padding(6.dp),
             )
             Spacer(Modifier.width(8.dp))
-            Text("Settings", color = colors.text, fontSize = 26.sp, fontWeight = FontWeight.ExtraBold)
+            Text(appText("Settings", "设置"), color = colors.text, fontSize = 26.sp, fontWeight = FontWeight.ExtraBold)
         }
 
-        SectionLabel("BASIC")
+        SectionLabel(appText("BASIC", "基本"))
+        LabeledControl(appText("Language", "语言")) {
+            LanguageToggle(settings.language) {
+                SettingsStore.update { current -> current.copy(language = it) }
+            }
+        }
+        Spacer(Modifier.height(18.dp))
         FolderPickerRow(
             label = SettingsStore.saveLabel(context),
             custom = settings.saveTreeUri.isNotBlank(),
@@ -112,13 +118,13 @@ fun SettingsScreen(onBack: () -> Unit) {
             onReset = { SettingsStore.setSaveTree(context, null) },
         )
         Spacer(Modifier.height(18.dp))
-        LabeledControl("Default role for a new code") {
+        LabeledControl(appText("Default role for a new code", "新配对码的默认角色")) {
             RoleToggle(settings.defaultRole) { SettingsStore.update { s -> s.copy(defaultRole = it) } }
         }
         Spacer(Modifier.height(18.dp))
         Column {
             Text(
-                "COMPRESSION",
+                appText("COMPRESSION", "压缩"),
                 color = colors.muted,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
@@ -131,21 +137,25 @@ fun SettingsScreen(onBack: () -> Unit) {
         }
         Spacer(Modifier.height(18.dp))
         ToggleRow(
-            title = "Avoid Tailscale addresses",
-            subtitle = "Don't advertise your 100.x Tailscale IP, so transfers take the real WAN or relay path.",
+            title = appText("Avoid Tailscale addresses", "避开 Tailscale 地址"),
+            subtitle =
+                appText(
+                    "Don't advertise your 100.x Tailscale IP, so transfers take the real WAN or relay path.",
+                    "不公布 100.x Tailscale IP，使传输使用真实广域网或中继路径。",
+                ),
             checked = SettingsStore.avoidsTailscale(settings),
         ) { SettingsStore.setAvoidTailscale(it) }
 
         Spacer(Modifier.height(18.dp))
         ToggleRow(
-            title = "Internet pairing",
-            subtitle = "Pair through the rendezvous broker — works anywhere.",
+            title = appText("Internet pairing", "互联网配对"),
+            subtitle = appText("Pair through the rendezvous broker — works anywhere.", "通过会合服务器配对，可在任意网络使用。"),
             checked = settings.useRoom,
         ) { SettingsStore.update { s -> s.copy(useRoom = it) } }
         Spacer(Modifier.height(18.dp))
         ToggleRow(
-            title = "Local Wi-Fi pairing (mDNS)",
-            subtitle = "Also try nearby devices on the same Wi-Fi — works with no internet.",
+            title = appText("Local Wi-Fi pairing (mDNS)", "局域网 Wi-Fi 配对（mDNS）"),
+            subtitle = appText("Also try nearby devices on the same Wi-Fi — works with no internet.", "同时发现同一 Wi-Fi 下的附近设备，无需互联网。"),
             checked = settings.useMdns,
         ) { SettingsStore.update { s -> s.copy(useMdns = it) } }
 
@@ -153,51 +163,55 @@ fun SettingsScreen(onBack: () -> Unit) {
         AdvancedHeader(showAdvanced) { showAdvanced = !showAdvanced }
         if (showAdvanced) {
             Spacer(Modifier.height(16.dp))
-            SectionLabel("SERVERS")
-            Field("Broker · rendezvous", broker) {
+            SectionLabel(appText("SERVERS", "服务器"))
+            Field(appText("Broker · rendezvous", "会合服务器"), broker) {
                 broker = it
                 SettingsStore.update { s -> s.copy(broker = it) }
             }
             Spacer(Modifier.height(12.dp))
-            Field("Relay · data path", relay) {
+            Field(appText("Relay · data path", "中继服务器 · 数据路径"), relay) {
                 relay = it
                 SettingsStore.update { s -> s.copy(relay = it) }
             }
             Spacer(Modifier.height(12.dp))
-            Field("Log server · diagnostics", logServer) {
+            Field(appText("Log server · diagnostics", "日志服务器 · 诊断"), logServer) {
                 logServer = it
                 SettingsStore.update { s -> s.copy(logServer = it) }
             }
 
             Spacer(Modifier.height(22.dp))
             SectionLabel("CONFIG.TOML")
-            Field("Data stream window · e.g. 32MB (default 16MB)", dataStreamWindow) {
+            Field(appText("Data stream window · e.g. 32MB (default 16MB)", "数据流窗口 · 例如 32MB（默认 16MB）"), dataStreamWindow) {
                 dataStreamWindow = it
                 SettingsStore.update { s -> s.copy(dataStreamWindow = it) }
             }
             Spacer(Modifier.height(12.dp))
-            MultilineField("Candidate allow · one CIDR per line", allowText) {
+            MultilineField(appText("Candidate allow · one CIDR per line", "允许的候选地址 · 每行一个 CIDR"), allowText) {
                 allowText = it
                 SettingsStore.update { s -> s.copy(candidatesAllow = cidrLines(it)) }
             }
             Spacer(Modifier.height(12.dp))
-            MultilineField("Candidate deny · one CIDR per line", denyText) {
+            MultilineField(appText("Candidate deny · one CIDR per line", "拒绝的候选地址 · 每行一个 CIDR"), denyText) {
                 denyText = it
                 SettingsStore.update { s -> s.copy(candidatesDeny = cidrLines(it)) }
             }
 
             Spacer(Modifier.height(22.dp))
-            SectionLabel("DEVELOPER")
+            SectionLabel(appText("DEVELOPER", "开发者"))
             ToggleRow(
-                title = "Developer mode",
-                subtitle = "Reveal diagnostics — verbose logging (and, later, log upload).",
+                title = appText("Developer mode", "开发者模式"),
+                subtitle = appText("Reveal diagnostics — verbose logging (and, later, log upload).", "显示诊断信息、详细日志及后续的日志上传功能。"),
                 checked = settings.devMode,
             ) { SettingsStore.update { s -> s.copy(devMode = it) } }
             if (settings.devMode) {
                 Spacer(Modifier.height(16.dp))
                 ToggleRow(
-                    title = "Verbose logging (-vv)",
-                    subtitle = "Also capture iroh internals: path selection, hole-punching. High volume.",
+                    title = appText("Verbose logging (-vv)", "详细日志（-vv）"),
+                    subtitle =
+                        appText(
+                            "Also capture iroh internals: path selection, hole-punching. High volume.",
+                            "同时记录 iroh 内部信息：路径选择与打洞。日志量较大。",
+                        ),
                     checked = settings.verboseLog,
                 ) {
                     SettingsStore.update { s -> s.copy(verboseLog = it) }
@@ -205,14 +219,38 @@ fun SettingsScreen(onBack: () -> Unit) {
                 }
                 Spacer(Modifier.height(12.dp))
                 ToggleRow(
-                    title = "Trace iroh internals (-vvv)",
-                    subtitle = "Deepest: iroh path/QUIC state machine at trace. Very high volume — for chasing a crash.",
+                    title = appText("Trace iroh internals (-vvv)", "跟踪 iroh 内部状态（-vvv）"),
+                    subtitle =
+                        appText(
+                            "Deepest: iroh path/QUIC state machine at trace. Very high volume — for chasing a crash.",
+                            "最详细地跟踪 iroh 路径与 QUIC 状态机。日志量极大，仅用于排查崩溃。",
+                        ),
                     checked = settings.traceIroh,
                 ) {
                     SettingsStore.update { s -> s.copy(traceIroh = it) }
                     SettingsStore.applyLogLevel()
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun LanguageToggle(
+    language: String,
+    onChange: (String) -> Unit,
+) {
+    val colors = Envoix.colors
+    Row(
+        Modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(colors.bg)
+            .border(1.dp, colors.line, RoundedCornerShape(10.dp))
+            .padding(3.dp),
+    ) {
+        RoleSeg("EN", language == AppText.ENGLISH) { onChange(AppText.ENGLISH) }
+        RoleSeg("中文", language == AppText.SIMPLIFIED_CHINESE) {
+            onChange(AppText.SIMPLIFIED_CHINESE)
         }
     }
 }
@@ -240,7 +278,7 @@ private fun FolderPickerRow(
 ) {
     val colors = Envoix.colors
     Text(
-        "SAVE RECEIVED FILES TO",
+        appText("SAVE RECEIVED FILES TO", "接收文件保存到"),
         color = colors.muted,
         fontSize = 11.sp,
         fontWeight = FontWeight.Bold,
@@ -267,12 +305,12 @@ private fun FolderPickerRow(
             modifier = Modifier.weight(1f, fill = false),
         )
         Spacer(Modifier.width(10.dp))
-        Text("Change", color = colors.accent, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        Text(appText("Change", "更改"), color = colors.accent, fontSize = 13.sp, fontWeight = FontWeight.Bold)
     }
     if (custom) {
         Spacer(Modifier.height(6.dp))
         Text(
-            "Reset to Downloads",
+            appText("Reset to Downloads", "恢复为 Downloads"),
             color = colors.accent,
             fontSize = 12.sp,
             modifier =
@@ -350,8 +388,8 @@ private fun RoleToggle(
             .border(1.dp, colors.line, RoundedCornerShape(10.dp))
             .padding(3.dp),
     ) {
-        RoleSeg("Send", role == "send") { onChange("send") }
-        RoleSeg("Receive", role == "receive") { onChange("receive") }
+        RoleSeg(appText("Send", "发送"), role == "send") { onChange("send") }
+        RoleSeg(appText("Receive", "接收"), role == "receive") { onChange("receive") }
     }
 }
 
@@ -370,9 +408,9 @@ private fun CompressionToggle(
             .padding(3.dp),
         horizontalArrangement = Arrangement.SpaceEvenly,
     ) {
-        RoleSeg("Never", policy == "never") { onChange("never") }
-        RoleSeg("Always", policy == "always") { onChange("always") }
-        RoleSeg("Smart", policy == "smart") { onChange("smart") }
+        RoleSeg(appText("Never", "从不"), policy == "never") { onChange("never") }
+        RoleSeg(appText("Always", "始终"), policy == "always") { onChange("always") }
+        RoleSeg(appText("Smart", "智能"), policy == "smart") { onChange("smart") }
     }
 }
 
@@ -413,11 +451,11 @@ private fun AdvancedHeader(
             .padding(vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text("Advanced", color = colors.text, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+        Text(appText("Advanced", "高级"), color = colors.text, fontSize = 16.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.weight(1f))
         Icon(
             if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-            contentDescription = if (expanded) "Collapse" else "Expand",
+            contentDescription = if (expanded) appText("Collapse", "收起") else appText("Expand", "展开"),
             tint = colors.muted,
         )
     }

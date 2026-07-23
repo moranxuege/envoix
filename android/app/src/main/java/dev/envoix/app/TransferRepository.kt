@@ -98,8 +98,7 @@ object TransferRepository {
 
     /** Attempts that still own active native work and therefore require the
      * foreground service. Paused records remain durable without a worker. */
-    fun activeCount(): Int =
-        _transfers.value.count { !it.status.isTerminal && it.status != Status.Paused }
+    fun activeCount(): Int = _transfers.value.count { !it.status.isTerminal && it.status != Status.Paused }
 }
 
 /** Deployed Envoix broker + relay defaults (overridable in Settings later). */
@@ -110,5 +109,4 @@ object Endpoints {
 
     /** Per-room log-collection + diagnostic log endpoint on the rdz box (TLS). */
     const val LOG_SERVER = "https://rdz.chkxwlyh.us:8460"
-
 }
