@@ -53,8 +53,8 @@ name = "test"
 [environment.test.rendezvous]
 host = "rdz.test.envoix.chkxwlyh.us"
 port = 9445
-node_id = "TBD_PROVISION_TEST_RENDEZVOUS_NODE_ID"
-provisioning_status = "tbd"
+node_id = "26117638e1bc254b31fa343e55db98313279a5a689f9e66a04a731ad62ad0501"
+provisioning_status = "provisioned"
 
 [environment.test.relay]
 scheme = "https"
