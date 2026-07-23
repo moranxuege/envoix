@@ -18,8 +18,8 @@ pub use handshake::{
     initiator_start, responder_respond,
 };
 pub use message::{
-    Confirmation, MessageKind, PairingMessage, PakeResponse, PakeStart, SealedDescriptor,
-    WIRE_HEADER_LEN, decode_message, encode_message,
+    Confirmation, MAX_MESSAGE_BODY, MessageKind, PairingMessage, PakeResponse, PakeStart,
+    SealedDescriptor, WIRE_HEADER_LEN, decode_message, encode_message,
 };
 pub use random::{EntropyError, EntropySource, SystemEntropy};
 pub use secret::{DataPlaneToken, PairingCode};

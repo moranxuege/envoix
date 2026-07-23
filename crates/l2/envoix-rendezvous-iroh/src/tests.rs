@@ -1,5 +1,5 @@
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::{
@@ -50,10 +50,13 @@ async fn rendezvous_iroh_loopback() {
         )
         .unwrap(),
     ));
+    let outcomes = Arc::new(Mutex::new(Vec::new()));
+    let observed = outcomes.clone();
     let server_task = tokio::spawn(serve_endpoint(
         server,
         registry,
         IrohServerConfig::new(Duration::from_secs(2), 16).unwrap(),
+        move |result| observed.lock().unwrap().push(result.clone()),
     ));
 
     let client_a = bind_endpoint(endpoint_config()).await.unwrap();
@@ -93,6 +96,9 @@ async fn rendezvous_iroh_loopback() {
     closed_b.unwrap();
     server_shutdown.close().await;
     server_task.await.unwrap().unwrap();
+    let outcomes = outcomes.lock().unwrap();
+    assert_eq!(outcomes.len(), 2);
+    assert!(outcomes.iter().all(Result::is_ok));
 }
 
 #[test]

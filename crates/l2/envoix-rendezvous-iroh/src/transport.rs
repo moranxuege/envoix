@@ -8,6 +8,7 @@ use envoix_rendezvous::{CloseWaiter, PeerConn, Role, RoomRegistry};
 use iroh::endpoint::{BindOpts, Connection, Incoming, RecvStream, SendStream, VarInt, presets};
 use iroh::{Endpoint, EndpointAddr, RelayMap, RelayMode};
 use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 use tokio::time::timeout;
 
 use crate::{
@@ -58,18 +59,38 @@ pub async fn serve_endpoint(
     endpoint: Endpoint,
     registry: Arc<RoomRegistry>,
     config: IrohServerConfig,
+    observe: impl Fn(&Result<(), IrohRendezvousError>) + Send + Sync + 'static,
 ) -> Result<(), IrohRendezvousError> {
     let permits = Arc::new(Semaphore::new(config.connection_limit()));
-    while let Some(incoming) = endpoint.accept().await {
-        let Ok(permit) = permits.clone().try_acquire_owned() else {
-            drop(incoming);
-            continue;
-        };
-        let registry = registry.clone();
-        tokio::spawn(async move {
-            let _permit = permit;
-            let _ = serve_incoming(incoming, registry, config).await;
-        });
+    let observe = Arc::new(observe);
+    let mut tasks = JoinSet::new();
+    loop {
+        tokio::select! {
+            incoming = endpoint.accept() => {
+                let Some(incoming) = incoming else {
+                    break;
+                };
+                let Ok(permit) = permits.clone().try_acquire_owned() else {
+                    drop(incoming);
+                    continue;
+                };
+                let registry = registry.clone();
+                let observe = observe.clone();
+                tasks.spawn(async move {
+                    let _permit = permit;
+                    let result = serve_incoming(incoming, registry, config).await;
+                    observe(&result);
+                });
+            }
+            completed = tasks.join_next(), if !tasks.is_empty() => {
+                completed
+                    .expect("guarded by a non-empty task set")
+                    .map_err(|_| IrohRendezvousError::ConnectionTaskFailed)?;
+            }
+        }
+    }
+    while let Some(completed) = tasks.join_next().await {
+        completed.map_err(|_| IrohRendezvousError::ConnectionTaskFailed)?;
     }
     Ok(())
 }

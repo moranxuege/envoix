@@ -7,3 +7,18 @@ license.workspace = true
 [package.metadata.envoix]
 layer = "L7"
 role = "composition-root"
+
+[dependencies]
+clap.workspace = true
+envoix-rendezvous = { path = "../../crates/l2/envoix-rendezvous" }
+envoix-rendezvous-iroh = { path = "../../crates/l2/envoix-rendezvous-iroh" }
+iroh.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+envoix-invite = { path = "../../crates/l1/envoix-invite" }
+envoix-pairing = { path = "../../crates/l1/envoix-pairing" }
+tempfile.workspace = true
+toml.workspace = true

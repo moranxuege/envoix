@@ -53,6 +53,7 @@ pub enum IrohRendezvousError {
     Deadline { wait: IrohWait },
     Transport { operation: IrohOperation },
     Core(RendezvousError),
+    ConnectionTaskFailed,
 }
 
 impl IrohRendezvousError {
@@ -65,6 +66,7 @@ impl IrohRendezvousError {
             } => OutcomeCode::NetworkUnreachable,
             Self::Transport { .. } => OutcomeCode::PeerLost,
             Self::Core(error) => error.outcome_code(),
+            Self::ConnectionTaskFailed => OutcomeCode::Internal,
         }
     }
 }
@@ -76,6 +78,7 @@ impl fmt::Display for IrohRendezvousError {
             Self::Deadline { wait } => write!(formatter, "{wait} deadline exceeded"),
             Self::Transport { operation } => write!(formatter, "failed to {operation}"),
             Self::Core(error) => error.fmt(formatter),
+            Self::ConnectionTaskFailed => formatter.write_str("rendezvous connection task failed"),
         }
     }
 }
