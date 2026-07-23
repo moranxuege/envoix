@@ -12,6 +12,7 @@ struct TransferStageView: View {
     let onCanResume: (String) -> Bool
     let onResume: (String) -> Bool
     let onCancel: (String) -> Bool
+    let onApprove: (String) -> Bool
     let onDelete: (String) -> Bool
 
     @Environment(\.appLanguage) private var language
@@ -75,6 +76,7 @@ struct TransferStageView: View {
 
     private func activityCard(_ record: TransferActivityRecord) -> some View {
         let actions = activityActionAvailability(for: record)
+        let progress = TransferPresentationPolicy.progress(for: record.state)
         let metrics = metricsByActivityID[record.activityId] ?? ActivityMetrics()
         let isExpanded = expandedActivityIDs.contains(record.activityId)
         return VStack(alignment: .leading, spacing: 12) {
@@ -96,7 +98,7 @@ struct TransferStageView: View {
                         Text(title(for: record))
                             .font(.headline)
                             .foregroundStyle(Theme.text)
-                        Text(stateText(record.state))
+                        Text(stateText(record))
                             .font(.subheadline)
                             .foregroundStyle(Theme.muted)
                     }
@@ -116,16 +118,20 @@ struct TransferStageView: View {
             .buttonStyle(.plain)
             .accessibilityIdentifier("activity_\(record.activityId)")
 
-            if record.totalBytes > 0 {
+            if progress != .hidden, record.totalBytes > 0 {
                 ProgressView(
-                    value: Double(record.bytesTransferred),
+                    value: Double(progress == .complete ? record.totalBytes : record.bytesTransferred),
                     total: Double(record.totalBytes)
                 )
                 HStack {
                     Text("\(byteString(record.bytesTransferred)) / \(byteString(record.totalBytes))")
                     Spacer()
-                    if metrics.speedBps > 0 { Text(rateString(metrics.speedBps)) }
-                    if let eta = metrics.etaSeconds { Text(etaString(eta)) }
+                    if progress == .active, metrics.speedBps > 0 {
+                        Text(rateString(metrics.speedBps))
+                    }
+                    if progress == .active, let eta = metrics.etaSeconds {
+                        Text(etaString(eta))
+                    }
                 }
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(Theme.muted)
@@ -151,6 +157,12 @@ struct TransferStageView: View {
                 }
 
                 HStack(spacing: 8) {
+                    if actions.canApprove {
+                        Button(AppText.value("Accept", "接收", language: language)) {
+                            _ = onApprove(record.activityId)
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
                     if actions.canPause {
                         Button(AppText.value("Pause", "暂停", language: language)) {
                             _ = onPause(record.activityId)
@@ -226,6 +238,8 @@ struct TransferStageView: View {
             return "tray.and.arrow.down.fill"
         case .waitingForPeer, .pairing, .connecting:
             return "envelope"
+        case .awaitingDecision:
+            return "checklist"
         default:
             return record.direction == .send ? "paperplane.fill" : "envelope.open.fill"
         }
@@ -233,17 +247,26 @@ struct TransferStageView: View {
 
     private func title(for record: TransferActivityRecord) -> String {
         let count = Int(record.itemCount)
+        if count == 0 {
+            return record.direction == .send
+                ? AppText.value("Outgoing transfer", "待发送内容", language: language)
+                : AppText.value("Incoming transfer", "待接收内容", language: language)
+        }
         if count == 1 { return AppText.value("1 item", "1 个项目", language: language) }
         return AppText.value("\(count) items", "\(count) 个项目", language: language)
     }
 
-    private func stateText(_ state: TransferActivityState) -> String {
-        switch state {
+    private func stateText(_ record: TransferActivityRecord) -> String {
+        switch record.state {
         case .preparing: return AppText.value("Preparing locally", "正在本地准备", language: language)
         case .waitingForPeer: return AppText.value("Waiting for peer", "正在等待对端", language: language)
         case .pairing: return AppText.value("Pairing", "正在配对", language: language)
         case .connecting: return AppText.value("Connecting", "正在连接", language: language)
-        case .transferring: return AppText.value("Transferring", "正在传输", language: language)
+        case .awaitingDecision: return AppText.value("Waiting for your decision", "等待你的确认", language: language)
+        case .transferring:
+            return record.direction == .send
+                ? AppText.value("Sending", "正在发送", language: language)
+                : AppText.value("Receiving", "正在接收", language: language)
         case .verifying: return AppText.value("Verifying", "正在校验", language: language)
         case .saving: return AppText.value("Saving to destination", "正在保存到目标位置", language: language)
         case .waitingForReceiverSave: return AppText.value("Waiting for receiver to save", "等待接收方完成保存", language: language)
@@ -260,6 +283,7 @@ struct TransferStageView: View {
         case .delivered: return Theme.success
         case .failed: return Theme.danger
         case .canceled: return Theme.muted
+        case .awaitingDecision, .paused: return Theme.warning
         default: return Theme.accentStrong
         }
     }

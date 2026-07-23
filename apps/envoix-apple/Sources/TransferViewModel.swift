@@ -5,9 +5,6 @@ import Foundation
 struct ActivityMetrics {
     var speedBps: Double = 0
     var etaSeconds: Double?
-    var avgBps: Double = 0
-    var peakBps: Double = 0
-    var speedHistory: [Double] = []
     var log: [String] = []
 }
 
@@ -16,6 +13,7 @@ enum TransferActivityState: Equatable {
     case waitingForPeer
     case pairing
     case connecting
+    case awaitingDecision
     case transferring
     case verifying
     case saving
@@ -283,6 +281,11 @@ final class AppModel: ObservableObject {
     }
 
     @discardableResult
+    func approveActivity(_ activityID: String) -> Bool {
+        owner(of: activityID)?.approveExceptionalTransfer() ?? false
+    }
+
+    @discardableResult
     func removeActivity(_ activityID: String) -> Bool {
         guard let record = activities.first(where: { $0.activityId == activityID }),
               !ActivityProjectionPolicy.isPending(record.state) else { return false }
@@ -455,16 +458,6 @@ final class TransferViewModel: ObservableObject {
     private static let activeSendSessionFileName = "active-send.json"
     private static let activeReceiveSessionFileName = "active-receive.json"
 
-    enum Phase: Equatable {
-        case idle
-        case waiting
-        case transferring
-        case paused
-        case completed(bytes: UInt64)
-        case canceled
-        case failed(String)
-    }
-
     private struct PreparedSelection {
         let job: FfiTransferJobV2
         let jobID: String
@@ -491,7 +484,9 @@ final class TransferViewModel: ObservableObject {
         let destinationAccess: AnyObject?
     }
 
-    @Published private(set) var phase: Phase = .idle
+    /// The one lifecycle state rendered by setup, Activity, and menu-bar
+    /// surfaces. `nil` means there is no active or terminal transfer to show.
+    @Published private(set) var presentationState: TransferActivityState?
     @Published var invite = ""
     @Published var fileName = ""
     @Published var transferred: UInt64 = 0
@@ -524,6 +519,9 @@ final class TransferViewModel: ObservableObject {
     private var preparationTask: Task<Void, Never>?
     private var resourceAccess: AnyObject?
     private var rate = RateTracker()
+    private var observedTransferred: UInt64 = 0
+    private var observedTotal: UInt64 = 0
+    private var lastProgressPublishAt = Date.distantPast
     fileprivate var operationID = UUID()
     private var pausedByUser = false
     private var displayLanguage = "en"
@@ -551,17 +549,10 @@ final class TransferViewModel: ObservableObject {
     }
     var isBusy: Bool {
         if isPreparingManifest { return true }
-        switch phase {
-        case .waiting, .transferring, .paused: return true
-        default: return false
-        }
+        return presentationState.map(ActivityProjectionPolicy.isPending) ?? false
     }
     var isFinalizing: Bool {
-        transferActivity.map {
-            $0.state == .saving ||
-                $0.state == .waitingForReceiverSave ||
-                $0.state == .finalizingDelivery
-        } ?? false
+        presentationState.map(TransferPresentationPolicy.isFinalizing) ?? false
     }
     fileprivate var hasResumableOperation: Bool {
         activeSend != nil || activeReceive != nil
@@ -581,7 +572,7 @@ final class TransferViewModel: ObservableObject {
         isManifestSelectionReady = false
         isPreparingManifest = true
         statusText = localized("Preparing selected items…", "正在准备所选项目…")
-        phase = .idle
+        presentationState = .preparing
         failure = nil
         let expected = UUID()
         operationID = expected
@@ -694,7 +685,7 @@ final class TransferViewModel: ObservableObject {
             roomID: stored.roomID,
             updatedAt: Date()
         )
-        phase = .waiting
+        presentationState = transferActivity?.state
         statusText = localized("Restoring interrupted transfer", "正在恢复中断的传输")
         if let transferActivity { appModel?.upsert(transferActivity) }
 
@@ -757,8 +748,13 @@ final class TransferViewModel: ObservableObject {
         pendingSourceSelections = []
         isPreparingManifest = false
         isManifestSelectionReady = false
-        phase = .canceled
         statusText = localized("Canceled", "已取消")
+        if transferActivity == nil {
+            presentationState = .canceled
+        } else {
+            operationID = UUID()
+            updateActivity(state: .canceled, diagnostic: statusText)
+        }
         return true
     }
 
@@ -868,7 +864,8 @@ final class TransferViewModel: ObservableObject {
 
     @discardableResult
     func approveExceptionalTransfer() -> Bool {
-        guard requiresExceptionalTransferApproval,
+        guard presentationState == .awaitingDecision,
+              requiresExceptionalTransferApproval,
               let pendingReceive,
               let operation = activeReceive else { return false }
         requiresExceptionalTransferApproval = false
@@ -878,10 +875,16 @@ final class TransferViewModel: ObservableObject {
 
     @discardableResult
     func pause() -> Bool {
-        guard isBusy, !isFinalizing else { return false }
+        guard let state = presentationState,
+              TransferPresentationPolicy.actions(for: state, failure: failure).canPause else {
+            return false
+        }
         pausedByUser = true
         cancellation?.cancel()
-        phase = .paused
+        operationID = UUID()
+        publishObservedProgress()
+        pendingReceive = nil
+        presentationState = .paused
         updateActivity(state: .paused, diagnostic: localized("Paused; progress is retained", "已暂停；进度已保留"))
         return true
     }
@@ -889,10 +892,10 @@ final class TransferViewModel: ObservableObject {
     @discardableResult
     func resume() -> Bool {
         let mayResume: Bool
-        switch phase {
-        case .paused:
+        switch presentationState {
+        case .paused?:
             mayResume = true
-        case .failed:
+        case .failed?:
             mayResume = failure?.retryable == true
         default:
             mayResume = false
@@ -902,6 +905,9 @@ final class TransferViewModel: ObservableObject {
         pausedByUser = false
         failure = nil
         transferActivity?.failure = nil
+        operationID = UUID()
+        rate = RateTracker()
+        presentationState = nil
         if let activeSend {
             launchSend(activeSend)
             return true
@@ -915,10 +921,17 @@ final class TransferViewModel: ObservableObject {
 
     @discardableResult
     func cancel() -> Bool {
-        guard isBusy else { return false }
+        guard let state = presentationState,
+              TransferPresentationPolicy.actions(for: state, failure: failure).canCancel else {
+            return false
+        }
         pausedByUser = false
         cancellation?.cancel()
-        phase = .canceled
+        operationID = UUID()
+        publishObservedProgress()
+        pendingReceive = nil
+        requiresExceptionalTransferApproval = false
+        presentationState = .canceled
         updateActivity(state: .canceled, diagnostic: localized("Canceled", "已取消"))
         if let direction = transferActivity?.direction {
             clearStoredManifestSession(direction: direction)
@@ -933,7 +946,7 @@ final class TransferViewModel: ObservableObject {
             clearStoredManifestSession(direction: direction)
         }
         transferActivity = nil
-        phase = .idle
+        presentationState = nil
         activeSend = nil
         activeReceive = nil
         resourceAccess = nil
@@ -944,14 +957,15 @@ final class TransferViewModel: ObservableObject {
     }
 
     func handleFailed(_ reason: String) {
+        guard failure == nil, presentationState != .canceled, !pausedByUser else { return }
         let projected = FfiTransferFailure(
             code: .internalError,
             category: .internal,
             phase: .setup,
             origin: .local,
             direction: transferActivity?.direction ?? .send,
-            retryable: true,
-            recoveryAction: .retry,
+            retryable: false,
+            recoveryAction: .none,
             userMessageKey: "transfer.internal_error",
             diagnosticMessage: reason
         )
@@ -993,28 +1007,31 @@ final class TransferViewModel: ObservableObject {
         case .delivered:
             state = .delivered; text = localized("Delivered", "已送达")
         }
+        if TransferPresentationPolicy.progress(for: state) == .complete {
+            observedTransferred = max(max(observedTransferred, observedTotal), total)
+            observedTotal = max(max(observedTotal, total), observedTransferred)
+            publishObservedProgress()
+            bytesPerSec = 0
+        }
         statusText = text
-        if state == .transferring { phase = .transferring }
-        else if state == .delivered { phase = .completed(bytes: total) }
-        else { phase = .waiting }
         updateActivity(state: state, diagnostic: text)
     }
 
     fileprivate func handleProgress(_ bytes: UInt64, _ totalBytes: UInt64) {
-        transferred = bytes
-        total = totalBytes
-        bytesPerSec = rate.update(bytes: bytes)
-        transferActivity?.bytesTransferred = bytes
-        transferActivity?.totalBytes = totalBytes
-        transferActivity?.updatedAt = Date()
-        if transferActivity?.state == .transferring { appModel?.upsert(transferActivity!) }
+        observedTransferred = max(observedTransferred, bytes)
+        observedTotal = max(max(observedTotal, totalBytes), observedTransferred)
+        let now = Date()
+        let complete = observedTotal > 0 && observedTransferred >= observedTotal
+        guard complete || now.timeIntervalSince(lastProgressPublishAt) >= 0.2 else { return }
+        publishObservedProgress(now: now)
     }
 
     fileprivate func handleCompleted(_ bytes: UInt64) {
-        transferred = bytes
+        transferred = max(transferred, bytes)
         total = max(total, bytes)
+        observedTransferred = transferred
+        observedTotal = total
         bytesPerSec = 0
-        phase = .completed(bytes: bytes)
         statusText = localized("Delivered", "已送达")
         updateActivity(state: .delivered, diagnostic: statusText)
         if let direction = transferActivity?.direction {
@@ -1028,11 +1045,17 @@ final class TransferViewModel: ObservableObject {
 
     fileprivate func handleTransferFailed(_ value: FfiTransferFailure) {
         if pausedByUser { return }
+        publishObservedProgress()
+        pendingReceive = nil
+        requiresExceptionalTransferApproval = false
         failure = value
-        phase = .failed(friendlyFailure(value, language: displayLanguage))
         statusText = friendlyFailure(value, language: displayLanguage)
         transferActivity?.failure = value
-        updateActivity(state: .failed, diagnostic: value.diagnosticMessage)
+        if value.code == .userCanceled || value.code == .senderCanceled {
+            updateActivity(state: .canceled, diagnostic: value.diagnosticMessage)
+        } else {
+            updateActivity(state: .failed, diagnostic: value.diagnosticMessage)
+        }
         resourceAccess = nil
     }
 
@@ -1103,8 +1126,11 @@ final class TransferViewModel: ObservableObject {
         let token = FfiManifestV2Cancellation()
         cancellation = token
         pausedByUser = false
-        phase = .waiting
-        updateActivity(state: .connecting, diagnostic: localized("Connecting", "正在连接"))
+        if operation.request.mode == .room {
+            updateActivity(state: .waitingForPeer, diagnostic: localized("Waiting for peer", "正在等待对端"))
+        } else {
+            updateActivity(state: .connecting, diagnostic: localized("Connecting", "正在连接"))
+        }
         let observer = Observer(viewModel: self, operationID: operationID)
         task = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -1168,7 +1194,6 @@ final class TransferViewModel: ObservableObject {
         let token = FfiManifestV2Cancellation()
         cancellation = token
         pausedByUser = false
-        phase = .waiting
         updateActivity(state: .waitingForPeer, diagnostic: localized("Waiting for sender", "等待发送方"))
         let observer = Observer(viewModel: self, operationID: operationID)
         task = Task { @MainActor [weak self] in
@@ -1197,7 +1222,7 @@ final class TransferViewModel: ObservableObject {
                         "Review this unusually large transfer before receiving",
                         "请先确认这个异常大的传输"
                     )
-                    updateActivity(state: .waitingForPeer, diagnostic: statusText)
+                    updateActivity(state: .awaitingDecision, diagnostic: statusText)
                 } else {
                     continueReceive(pending, operation: operation, exceptionalApproved: false)
                 }
@@ -1301,6 +1326,9 @@ final class TransferViewModel: ObservableObject {
         statusText = isManifestSelectionReady
             ? localized("Ready to send", "已准备发送")
             : localized("Some items need your decision", "部分项目需要你的决定")
+        if transferActivity == nil {
+            presentationState = nil
+        }
     }
 
     private func projectedSourcePaths(
@@ -1344,6 +1372,9 @@ final class TransferViewModel: ObservableObject {
         peerAddress = ""
         transferred = 0
         total = 0
+        observedTransferred = 0
+        observedTotal = 0
+        lastProgressPublishAt = .distantPast
         failure = nil
         completedFileURL = nil
         completedItemURLs = []
@@ -1352,17 +1383,36 @@ final class TransferViewModel: ObservableObject {
         requiresExceptionalTransferApproval = false
         rate = RateTracker()
         eventLog = []
-        phase = .waiting
+        presentationState = transferActivity?.state
         if let transferActivity { appModel?.upsert(transferActivity) }
     }
 
     private func updateActivity(state: TransferActivityState, diagnostic: String) {
+        if let current = presentationState,
+           TransferPresentationPolicy.isTerminal(current),
+           current != state {
+            return
+        }
+        presentationState = state
         guard var record = transferActivity else { return }
         record.state = state
         record.totalBytes = total
         record.bytesTransferred = transferred
         record.diagnosticMessage = diagnostic
         record.updatedAt = Date()
+        transferActivity = record
+        appModel?.upsert(record)
+    }
+
+    private func publishObservedProgress(now: Date = Date()) {
+        transferred = max(transferred, observedTransferred)
+        total = max(max(total, observedTotal), transferred)
+        bytesPerSec = rate.update(bytes: transferred, now: now)
+        lastProgressPublishAt = now
+        guard var record = transferActivity else { return }
+        record.bytesTransferred = transferred
+        record.totalBytes = total
+        record.updatedAt = now
         transferActivity = record
         appModel?.upsert(record)
     }

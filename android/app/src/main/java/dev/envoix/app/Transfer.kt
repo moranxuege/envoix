@@ -15,23 +15,40 @@ enum class Status(
     val wire: String,
 ) {
     Preparing("preparing"),
+    WaitingForPeer("waiting_for_peer"),
+    Pairing("pairing"),
     Connecting("connecting"),
     AwaitingDecision("awaiting_decision"),
     Transferring("transferring"),
-    Receiving("receiving"),
     Verifying("verifying"),
     Saving("saving"),
     WaitingForReceiverSave("waiting_for_receiver_save"),
     FinalizingDelivery("finalizing_delivery"),
     Paused("paused"),
-    Completed("completed"),
+    Delivered("delivered"),
     Failed("failed"),
-    Cancelled("cancelled"),
+    Canceled("canceled"),
     ;
 
     companion object {
         /** Canonical phase wire string to native UI state. */
         fun fromWire(wire: String): Status? = entries.firstOrNull { it.wire == wire }
+    }
+}
+
+enum class RecoveryAction(
+    val wire: String,
+) {
+    Retry("retry"),
+    Resume("resume"),
+    ChooseFolder("choose_folder"),
+    OpenSettings("open_settings"),
+    RePair("re_pair"),
+    None("none"),
+    ;
+
+    companion object {
+        fun fromWire(wire: String): RecoveryAction = entries.firstOrNull { it.wire == wire } ?: None
     }
 }
 
@@ -70,6 +87,8 @@ data class Transfer(
     val savedName: String? = null,
     /** Stable machine cause; never reconstructed from [error]. */
     val failureCause: String? = null,
+    val retryable: Boolean = false,
+    val recoveryAction: RecoveryAction = RecoveryAction.None,
     /** For an initiated session, the invite payload to show as a QR while waiting
      *  for a peer to pair (null when we joined someone else's code). */
     val qrPayload: String? = null,
@@ -80,25 +99,7 @@ data class Transfer(
 )
 
 val Status.isTerminal: Boolean
-    // Exhaustive (no `else`) so a new Status must be classified here too.
-    get() =
-        when (this) {
-            Status.Completed,
-            Status.Failed,
-            Status.Cancelled,
-            -> true
-            Status.Preparing,
-            Status.Connecting,
-            Status.AwaitingDecision,
-            Status.Transferring,
-            Status.Receiving,
-            Status.Verifying,
-            Status.Saving,
-            Status.WaitingForReceiverSave,
-            Status.FinalizingDelivery,
-            Status.Paused,
-            -> false
-        }
+    get() = TransferPresentationPolicy.isTerminal(this)
 
 /** Human-readable byte count shared by every transfer surface. */
 fun humanBytes(n: Long): String =
@@ -109,7 +110,7 @@ fun humanBytes(n: Long): String =
         else -> "%.2f GB".format(n / 1073741824.0)
     }
 
-/** Trailing-window average of the 250 ms-sampled rate (~3 s): the headline
+/** Trailing-window average of the ~200 ms-published rate (~2.4 s): the headline
  *  speed/ETA smoothing policy, kept beside the model (not in a composable). */
 fun smoothedBps(t: Transfer): Double {
     val window = t.speedHistory.takeLast(12)

@@ -15,6 +15,7 @@ use envoix_client::api::{
     send_manifest_v2_manual, send_manifest_v2_to_endpoint_addr, send_manifest_v2_via_room,
 };
 use envoix_qr::{QrInvitePayload, generate_token};
+use envoix_types::PairingStep;
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
@@ -214,7 +215,9 @@ impl EventSink for NativeSessionEvents {
         match event {
             TransferEvent::Diagnostic { message } => self.observer.on_diagnostic(message),
             TransferEvent::Pairing { step } => {
-                self.observer.on_phase(FfiManifestV2Phase::Pairing);
+                if let Some(phase) = pairing_phase(step) {
+                    self.observer.on_phase(phase);
+                }
                 self.observer.on_diagnostic(format!("pairing: {step:?}"));
             }
             TransferEvent::Connecting => {
@@ -247,6 +250,13 @@ impl EventSink for NativeSessionEvents {
                 }
             }),
         }
+    }
+}
+
+fn pairing_phase(step: PairingStep) -> Option<FfiManifestV2Phase> {
+    match step {
+        PairingStep::Joining => None,
+        PairingStep::Matched | PairingStep::Exchanged => Some(FfiManifestV2Phase::Pairing),
     }
 }
 
@@ -834,7 +844,7 @@ fn report_v2_failure(
             fallback_phase,
             FfiFailureOrigin::Local,
             true,
-            FfiRecoveryAction::Retry,
+            io_failure_recovery(direction),
             if direction == FfiTransferDirection::Receive {
                 "transfer.receiver_save_failed"
             } else {
@@ -871,6 +881,14 @@ fn report_v2_failure(
         user_message_key: message_key.into(),
         diagnostic_message: error.to_string(),
     });
+}
+
+fn io_failure_recovery(direction: FfiTransferDirection) -> FfiRecoveryAction {
+    if direction == FfiTransferDirection::Receive {
+        FfiRecoveryAction::Resume
+    } else {
+        FfiRecoveryAction::Retry
+    }
 }
 
 #[allow(clippy::type_complexity)]
@@ -1000,4 +1018,34 @@ fn manifest_v2_cause_projection(
 
 fn op_err_core(error: impl std::fmt::Display) -> SessionError {
     SessionError::InvalidInput(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn room_joining_keeps_the_platform_waiting_state() {
+        assert_eq!(pairing_phase(PairingStep::Joining), None);
+        assert_eq!(
+            pairing_phase(PairingStep::Matched),
+            Some(FfiManifestV2Phase::Pairing)
+        );
+        assert_eq!(
+            pairing_phase(PairingStep::Exchanged),
+            Some(FfiManifestV2Phase::Pairing)
+        );
+    }
+
+    #[test]
+    fn generic_io_recovery_matches_platform_resume_semantics() {
+        assert_eq!(
+            io_failure_recovery(FfiTransferDirection::Receive),
+            FfiRecoveryAction::Resume
+        );
+        assert_eq!(
+            io_failure_recovery(FfiTransferDirection::Send),
+            FfiRecoveryAction::Retry
+        );
+    }
 }

@@ -6,29 +6,32 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
- * Pins the Kotlin [Status] enum against canonical Manifest-v2 phase strings.
+ * Pins the Kotlin [Status] enum against the canonical UI lifecycle strings.
  */
 class StatusMappingTest {
-    private val coreStates =
+    private val canonicalStates =
         listOf(
             "preparing",
+            "waiting_for_peer",
+            "pairing",
             "connecting",
             "awaiting_decision",
             "transferring",
-            "receiving",
             "verifying",
             "saving",
             "waiting_for_receiver_save",
             "finalizing_delivery",
             "paused",
-            "completed",
+            "delivered",
             "failed",
-            "cancelled",
+            "canceled",
         )
 
     @Test
-    fun every_core_wire_string_maps_to_a_status() {
-        for (w in coreStates) assertNotNull("'$w' must map to a Status", Status.fromWire(w))
+    fun every_canonical_wire_string_maps_to_a_status() {
+        for (wire in canonicalStates) {
+            assertNotNull("'$wire' must map to a Status", Status.fromWire(wire))
+        }
     }
 
     @Test
@@ -43,7 +46,7 @@ class StatusMappingTest {
     }
 
     @Test
-    fun kotlin_covers_exactly_the_core_states() {
-        assertEquals(coreStates.toSet(), Status.entries.map { it.wire }.toSet())
+    fun kotlin_covers_exactly_the_canonical_states() {
+        assertEquals(canonicalStates.toSet(), Status.entries.map { it.wire }.toSet())
     }
 }

@@ -417,6 +417,7 @@ struct ContentView: View {
                 onCanResume: model.canResumeActivity,
                 onResume: model.resumeActivity,
                 onCancel: model.cancelActivity,
+                onApprove: model.approveActivity,
                 onDelete: model.removeActivity
             )
         case .settings:
@@ -717,16 +718,26 @@ struct ContentView: View {
 
     private func mobileActivityTitle(_ record: TransferActivityRecord) -> String {
         switch record.state {
-        case .preparing, .waitingForPeer:
+        case .preparing:
+            return AppText.value("Preparing", "正在准备", language: language)
+        case .waitingForPeer:
             return AppText.value("Waiting to connect", "等待连接", language: language)
         case .pairing, .connecting:
             return AppText.value("Connecting", "正在连接", language: language)
+        case .awaitingDecision:
+            return AppText.value("Review incoming transfer", "确认接收内容", language: language)
         case .transferring:
             return record.direction == .send
                 ? AppText.value("Sending", "正在发送", language: language)
                 : AppText.value("Receiving", "正在接收", language: language)
-        case .verifying, .saving, .waitingForReceiverSave, .finalizingDelivery:
+        case .verifying:
+            return AppText.value("Verifying", "正在校验", language: language)
+        case .saving:
             return AppText.value("Saving", "正在保存", language: language)
+        case .waitingForReceiverSave:
+            return AppText.value("Waiting for receiver to save", "等待接收方保存", language: language)
+        case .finalizingDelivery:
+            return AppText.value("Finalizing delivery", "正在确认送达", language: language)
         case .paused:
             return AppText.value("Transfer paused", "传输已暂停", language: language)
         case .delivered:
@@ -739,19 +750,30 @@ struct ContentView: View {
     }
 
     private func mobileActivitySubtitle(_ record: TransferActivityRecord) -> String {
-        let name = AppText.value(
-            "\(record.itemCount) items",
-            "\(record.itemCount) 个项目",
-            language: language
-        )
+        let name: String
+        if record.itemCount == 0 {
+            name = record.direction == .send
+                ? AppText.value("Outgoing transfer", "待发送内容", language: language)
+                : AppText.value("Incoming transfer", "待接收内容", language: language)
+        } else {
+            name = AppText.value(
+                "\(record.itemCount) items",
+                "\(record.itemCount) 个项目",
+                language: language
+            )
+        }
         guard record.totalBytes > 0 else { return name }
-        let percent = min(100, Int(Double(record.bytesTransferred) / Double(record.totalBytes) * 100))
+        let progress = TransferPresentationPolicy.progress(for: record.state)
+        let percent = progress == .complete
+            ? 100
+            : min(100, Int(Double(record.bytesTransferred) / Double(record.totalBytes) * 100))
         return "\(name) · \(percent)%"
     }
 
     private func mobileActivityIcon(_ record: TransferActivityRecord) -> String {
         switch record.state {
         case .paused: return "pause.fill"
+        case .awaitingDecision: return "checklist"
         case .verifying, .saving, .waitingForReceiverSave, .finalizingDelivery: return "tray.and.arrow.down.fill"
         default: return record.direction == .send ? "arrow.up" : "arrow.down"
         }
@@ -860,6 +882,7 @@ struct ContentView: View {
                 onCanResume: model.canResumeActivity,
                 onResume: model.resumeActivity,
                 onCancel: model.cancelActivity,
+                onApprove: model.approveActivity,
                 onDelete: model.removeActivity
             )
         case .settings:
@@ -925,11 +948,12 @@ struct ContentView: View {
     }
 
     private func kind(for viewModel: TransferViewModel) -> StatusPill.Kind {
-        switch viewModel.phase {
-        case .completed: return .success
-        case .failed: return .error
-        case .waiting, .transferring, .paused: return .warning
-        case .idle, .canceled: return .neutral
+        switch viewModel.presentationState {
+        case .delivered?: return .success
+        case .failed?: return .error
+        case .awaitingDecision?, .paused?: return .warning
+        case nil, .canceled?: return .neutral
+        default: return .warning
         }
     }
 
@@ -945,8 +969,7 @@ struct ContentView: View {
     }
 
     private func isFailed(_ viewModel: TransferViewModel) -> Bool {
-        if case .failed = viewModel.phase { return true }
-        return false
+        viewModel.presentationState == .failed
     }
 }
 
@@ -1065,7 +1088,6 @@ private struct TransferSetupStageView: View {
     }
 
     private func isIdle(_ viewModel: TransferViewModel) -> Bool {
-        if case .idle = viewModel.phase { return true }
-        return false
+        viewModel.presentationState == nil
     }
 }

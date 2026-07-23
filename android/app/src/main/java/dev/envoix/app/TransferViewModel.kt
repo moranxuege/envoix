@@ -40,20 +40,20 @@ class TransferViewModel(
 
     fun approveReceive(id: Long) = TransferService.approveReceive(getApplication(), id)
 
-    /** Remove a transfer from the list, cancelling it first if it's still active. */
+    /** Remove a terminal transfer and its private artifacts from the list. */
     fun remove(id: Long) {
-        // D2, the one true abandon: the service tears the session down and
-        // discards the partial + checkpoint state.
+        // The service validates the terminal state before discarding private
+        // session artifacts and the persisted transfer record.
         TransferService.remove(getApplication(), id)
     }
 
     /** Pause a running transfer, or resume/retry a paused/failed one. */
     fun pauseResume(id: Long) {
         val t = TransferRepository.transfers.value.find { it.id == id } ?: return
-        if (t.status == Status.Paused || t.status == Status.Failed || t.status == Status.Cancelled) {
-            TransferService.resume(getApplication(), id)
-        } else {
-            TransferService.pause(getApplication(), id)
+        val actions = TransferPresentationPolicy.actions(t)
+        when {
+            actions.canResume -> TransferService.resume(getApplication(), id)
+            actions.canPause -> TransferService.pause(getApplication(), id)
         }
     }
 }

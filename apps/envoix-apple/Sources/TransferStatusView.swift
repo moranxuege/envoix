@@ -24,10 +24,7 @@ struct TransferStatusView: View {
     }
 
     private var showsStatus: Bool {
-        switch viewModel.phase {
-        case .idle: return !viewModel.statusText.isEmpty
-        default: return true
-        }
+        viewModel.presentationState != nil || !viewModel.statusText.isEmpty
     }
 
     private var statusCard: some View {
@@ -57,30 +54,22 @@ struct TransferStatusView: View {
                 Spacer(minLength: 8)
             }
 
-            switch viewModel.phase {
-            case .idle, .waiting, .canceled, .failed:
-                EmptyView()
-            case .paused:
-                if viewModel.total > 0 {
+            if let state = viewModel.presentationState {
+                let progress = TransferPresentationPolicy.progress(for: state)
+                if progress != .hidden, viewModel.total > 0 {
+                    ProgressBar(value: progress == .complete ? 1 : viewModel.progressFraction)
                     transferProgressLine
                 }
-                if let path = currentDataPathText {
+                if progress == .active || progress == .retained,
+                   let path = currentDataPathText {
                     pathLine(path)
                 }
-            case .transferring:
-                ProgressBar(value: viewModel.progressFraction)
-                transferProgressLine
-                if let path = currentDataPathText {
-                    pathLine(path)
-                }
-            case .completed(let bytes):
-                Text(byteString(bytes))
-                    .font(.body.monospacedDigit())
-                    .foregroundStyle(Theme.muted)
-                if !viewModel.completedItemURLs.isEmpty {
-                    completedFileControls(viewModel.completedItemURLs)
-                } else if let url = viewModel.completedFileURL, isRegularFileURL(url) {
-                    completedFileControls([url])
+                if state == .delivered {
+                    if !viewModel.completedItemURLs.isEmpty {
+                        completedFileControls(viewModel.completedItemURLs)
+                    } else if let url = viewModel.completedFileURL, isRegularFileURL(url) {
+                        completedFileControls([url])
+                    }
                 }
             }
 
@@ -266,11 +255,11 @@ struct TransferStatusView: View {
     private var transferProgressLine: some View {
         HStack(spacing: 6) {
             Text("\(byteString(viewModel.transferred)) / \(byteString(viewModel.total))")
-            if viewModel.bytesPerSec > 0 {
+            if viewModel.presentationState == .transferring, viewModel.bytesPerSec > 0 {
                 Text("·")
                 Text(rateString(viewModel.bytesPerSec))
             }
-            if let eta = viewModel.etaSeconds {
+            if viewModel.presentationState == .transferring, let eta = viewModel.etaSeconds {
                 Text("·")
                 Text(etaString(eta))
             }
@@ -339,90 +328,128 @@ struct TransferStatusView: View {
     }
 
     private var titleText: String {
-        switch viewModel.phase {
-        case .idle:
-            return AppText.value("Status", "状态", language: language)
-        case .waiting:
+        switch viewModel.presentationState {
+        case nil:
+            return AppText.value("Selection status", "选择状态", language: language)
+        case .preparing?:
+            return AppText.value("Preparing locally", "正在本地准备", language: language)
+        case .waitingForPeer?:
             return AppText.value("Waiting for the other device", "正在等待另一台设备", language: language)
-        case .transferring:
-            return viewModel.fileName.isEmpty ? AppText.value("Transferring", "正在传输", language: language) : viewModel.fileName
-        case .paused:
+        case .pairing?:
+            return AppText.value("Pairing devices", "正在配对设备", language: language)
+        case .connecting?:
+            return AppText.value("Connecting", "正在连接", language: language)
+        case .awaitingDecision?:
+            return AppText.value("Review incoming transfer", "确认接收内容", language: language)
+        case .transferring?:
+            if !viewModel.fileName.isEmpty { return viewModel.fileName }
+            return viewModel.transferActivity?.direction == .send
+                ? AppText.value("Sending", "正在发送", language: language)
+                : AppText.value("Receiving", "正在接收", language: language)
+        case .verifying?:
+            return AppText.value("Verifying", "正在校验", language: language)
+        case .saving?:
+            return AppText.value("Saving", "正在保存", language: language)
+        case .waitingForReceiverSave?:
+            return AppText.value("Waiting for receiver to save", "等待接收方完成保存", language: language)
+        case .finalizingDelivery?:
+            return AppText.value("Finalizing delivery", "正在完成交付确认", language: language)
+        case .paused?:
             return AppText.value("Transfer paused", "传输已暂停", language: language)
-        case .completed:
-            return AppText.value("Transfer completed", "传输完成", language: language)
-        case .canceled:
+        case .delivered?:
+            return AppText.value("Delivered", "已送达", language: language)
+        case .canceled?:
             return AppText.value("Transfer canceled", "传输已取消", language: language)
-        case .failed(let reason):
-            return failureText(reason: reason).title
+        case .failed?:
+            return failureText(reason: viewModel.statusText).title
         }
     }
 
     private var detailText: String? {
-        switch viewModel.phase {
-        case .idle:
+        if viewModel.presentationState == .failed {
+            return failureText(reason: viewModel.statusText).detail
+        }
+        switch viewModel.presentationState {
+        case nil:
             return viewModel.statusText.isEmpty ? nil : viewModel.statusText
-        case .waiting:
+        case .preparing?:
+            return AppText.value("Reading and validating the selected items.", "正在读取并验证所选项目。", language: language)
+        case .waitingForPeer?:
+            return AppText.value("Keep this window open until the peer connects.", "请保持此窗口打开，直到对方连接。", language: language)
+        case .pairing?, .connecting?:
+            return AppText.value("Keep both devices awake while the connection is established.", "建立连接时请保持两台设备唤醒。", language: language)
+        case .awaitingDecision?:
             return viewModel.statusText.isEmpty
-                ? AppText.value("Keep this window open until the peer connects.", "请保持此窗口打开，直到对方连接。", language: language)
+                ? AppText.value("Review the authenticated inventory before accepting.", "接收前请确认已认证的内容清单。", language: language)
                 : viewModel.statusText
-        case .transferring:
-            return AppText.value("Keep both devices awake until the transfer finishes.", "请保持两台设备唤醒，直到传输完成。", language: language)
-        case .paused:
-            return AppText.value("Resume or delete this transfer from Activity.", "请在活动页继续或删除此传输。", language: language)
-        case .completed:
-            return viewModel.statusText.isEmpty ? AppText.value("The file is ready.", "文件已准备好。", language: language) : viewModel.statusText
-        case .canceled:
+        case .transferring?:
+            return AppText.value("Keep both devices awake until payload transfer finishes.", "请保持两台设备唤醒，直到内容传输完成。", language: language)
+        case .verifying?:
+            return AppText.value("Checking received content before publication.", "发布前正在校验接收内容。", language: language)
+        case .saving?, .waitingForReceiverSave?, .finalizingDelivery?:
+            return AppText.value("Payload is complete; delivery is still being finalized.", "内容传输已完成，正在完成最终交付。", language: language)
+        case .paused?:
+            return AppText.value("Resume or remove this transfer from Activity.", "请在活动页继续或移除此传输。", language: language)
+        case .delivered?:
+            return viewModel.transferActivity?.direction == .receive
+                ? AppText.value("The received content is ready.", "接收内容已准备就绪。", language: language)
+                : AppText.value("The receiver confirmed the saved content.", "接收方已确认内容保存完成。", language: language)
+        case .canceled?:
             return AppText.value("Ready to start another transfer.", "可以开始新的传输。", language: language)
-        case .failed(let reason):
-            return failureText(reason: reason).detail
+        case .failed?:
+            return viewModel.statusText.isEmpty ? nil : viewModel.statusText
         }
     }
 
     private var stepText: String? {
         let text = viewModel.statusText.trimmed
         guard !text.isEmpty else { return nil }
-        if case .failed = viewModel.phase {
+        if viewModel.presentationState == .failed {
             return AppText.value("Last step: \(text)", "上一步：\(text)", language: language)
         }
         return nil
     }
 
     private var iconName: String {
-        switch viewModel.phase {
-        case .idle: return "info.circle"
-        case .waiting: return "antenna.radiowaves.left.and.right"
-        case .transferring: return "arrow.up.arrow.down.circle"
-        case .paused: return "pause.circle"
-        case .completed: return "checkmark.circle.fill"
-        case .canceled: return "xmark.circle"
-        case .failed: return "exclamationmark.triangle.fill"
+        switch viewModel.presentationState {
+        case nil: return "info.circle"
+        case .preparing?: return "doc.badge.gearshape"
+        case .waitingForPeer?: return "antenna.radiowaves.left.and.right"
+        case .pairing?: return "person.2"
+        case .connecting?: return "link"
+        case .awaitingDecision?: return "checklist"
+        case .transferring?: return "arrow.up.arrow.down.circle"
+        case .verifying?: return "checkmark.shield"
+        case .saving?, .waitingForReceiverSave?, .finalizingDelivery?: return "tray.and.arrow.down"
+        case .paused?: return "pause.circle"
+        case .delivered?: return "checkmark.circle.fill"
+        case .canceled?: return "xmark.circle"
+        case .failed?: return "exclamationmark.triangle.fill"
         }
     }
 
     private var tint: Color {
-        switch viewModel.phase {
-        case .idle: return Theme.muted
-        case .waiting, .transferring, .paused: return Theme.warning
-        case .completed: return Theme.success
-        case .canceled: return Theme.muted
-        case .failed: return Theme.danger
+        switch viewModel.presentationState {
+        case nil: return Theme.muted
+        case .awaitingDecision?, .paused?: return Theme.warning
+        case .delivered?: return Theme.success
+        case .canceled?: return Theme.muted
+        case .failed?: return Theme.danger
+        default: return Theme.accentStrong
         }
     }
 
     private var backgroundTint: Color {
-        switch viewModel.phase {
-        case .failed: return Theme.dangerSoft.opacity(0.55)
-        case .waiting, .transferring, .paused: return Theme.warning.opacity(0.06)
-        case .completed: return Theme.success.opacity(0.06)
-        case .idle, .canceled: return Theme.surface
+        switch viewModel.presentationState {
+        case .failed?: return Theme.dangerSoft.opacity(0.55)
+        case .awaitingDecision?, .paused?: return Theme.warning.opacity(0.06)
+        case .delivered?: return Theme.success.opacity(0.06)
+        default: return Theme.surface
         }
     }
 
     private var borderOpacity: Double {
-        switch viewModel.phase {
-        case .idle: return 0.25
-        default: return 0.35
-        }
+        viewModel.presentationState == nil ? 0.25 : 0.35
     }
 
     private func failureText(reason: String) -> (title: String, detail: String) {

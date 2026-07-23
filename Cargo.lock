@@ -981,6 +981,7 @@ dependencies = [
  "envoix-client",
  "envoix-error",
  "envoix-protocol",
+ "envoix-types",
  "jni 0.21.1",
  "ndk-context",
  "serde",

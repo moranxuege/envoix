@@ -32,6 +32,7 @@ class TransferService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val callbacks = ConcurrentHashMap<Long, ManifestCallback>()
     private val specs = ConcurrentHashMap<Long, ManifestSpec>()
+    private val progressTrackers = ConcurrentHashMap<Long, TransferProgressTracker>()
     private val destinationWriter by lazy { ManifestV2DestinationWriter(this) }
     private val nextNativeAttemptId = AtomicLong(1)
     private val clock =
@@ -57,6 +58,7 @@ class TransferService : Service() {
     override fun onDestroy() {
         val activeAttempts = callbacks.values.map(ManifestCallback::nativeId)
         callbacks.clear()
+        progressTrackers.clear()
         activeAttempts.forEach(Native::cancelManifestV2Session)
         scope.cancel()
         super.onDestroy()
@@ -70,11 +72,7 @@ class TransferService : Service() {
         when (intent?.action) {
             ACTION_START_SEND -> startNew(intent, Direction.Send)
             ACTION_START_RECEIVE -> startNew(intent, Direction.Receive)
-            ACTION_APPROVE_RECEIVE ->
-                continueReceive(
-                    intent.getLongExtra(EXTRA_ID, -1),
-                    exceptionalApproved = true,
-                )
+            ACTION_APPROVE_RECEIVE -> approveReceive(intent.getLongExtra(EXTRA_ID, -1))
             ACTION_PAUSE -> pause(intent.getLongExtra(EXTRA_ID, -1))
             ACTION_RESUME -> resume(intent.getLongExtra(EXTRA_ID, -1))
             ACTION_CANCEL -> cancelTransfer(intent.getLongExtra(EXTRA_ID, -1))
@@ -139,7 +137,7 @@ class TransferService : Service() {
         persistSpecs()
         TransferRepository.update(id) {
             it.copy(
-                status = Status.Connecting,
+                status = if (spec.qrPayload == null) Status.Pairing else Status.WaitingForPeer,
                 qrPayload = spec.qrPayload,
                 jobId = spec.jobId,
                 log = addLog(it.log, "canonical Manifest v2 session started"),
@@ -150,6 +148,11 @@ class TransferService : Service() {
 
     private fun startNative(spec: ManifestSpec) {
         enterForeground()
+        val initialBytes =
+            TransferRepository.transfers.value
+                .firstOrNull { it.id == spec.id }
+                ?.bytes ?: 0
+        progressTrackers[spec.id] = TransferProgressTracker(initialBytes)
         val callback = ManifestCallback(spec.id, nextNativeAttemptId.getAndIncrement())
         callbacks[spec.id] = callback
         Native.startManifestV2Session(callback.nativeId, spec.paramsJson(this), callback)
@@ -166,10 +169,20 @@ class TransferService : Service() {
             if (event.optString("notice") != "manifest_v2") return
             when (event.optString("kind")) {
                 "progress" -> {
-                    TransferRepository.update(id) {
-                        it.copy(bytes = event.optLong("bytes"), total = event.optLong("total"))
-                    }
-                    updateNotification()
+                    progressTrackers[id]
+                        ?.update(event.optLong("bytes"), event.optLong("total"))
+                        ?.let { progress ->
+                            TransferRepository.update(id) {
+                                it.copy(
+                                    bytes = maxOf(it.bytes, progress.bytes),
+                                    total = maxOf(it.total, progress.total),
+                                    speedBps = progress.speedBps,
+                                    avgBps = progress.avgBps,
+                                    speedHistory = progress.speedHistory,
+                                )
+                            }
+                            updateNotification()
+                        }
                     return
                 }
                 "diagnostic" -> {
@@ -185,10 +198,11 @@ class TransferService : Service() {
                 }
             }
             when (event.optString("state")) {
+                "waiting_for_peer" -> setState(id, Status.WaitingForPeer, "waiting for peer")
+                "pairing" -> setState(id, Status.Pairing, "pairing with peer")
                 "connecting" -> setState(id, Status.Connecting, "connecting to peer")
                 "offer" -> onOffer(id, event, this)
                 "transferring" -> setState(id, Status.Transferring, "transferring files")
-                "receiving" -> setState(id, Status.Receiving, "receiving files")
                 "verifying" -> setState(id, Status.Verifying, "verifying received content")
                 "saving" -> setState(id, Status.Saving, "saving to selected destination")
                 "waiting_for_receiver_save" ->
@@ -250,7 +264,7 @@ class TransferService : Service() {
                     if (exceptional || needsFolder || !spec.destinationCopyApproved) {
                         Status.AwaitingDecision
                     } else {
-                        Status.Receiving
+                        Status.Transferring
                     },
                 jobId = offer.optString("job_id"),
                 rootCount = offer.optInt("root_count"),
@@ -329,8 +343,14 @@ class TransferService : Service() {
         } else {
             specs[id] = spec.copy(destinationCopyApproved = true)
             persistSpecs()
-            setState(id, Status.Receiving, "destination decision committed")
+            setState(id, Status.Transferring, "destination decision committed")
         }
+    }
+
+    private fun approveReceive(id: Long) {
+        val transfer = TransferRepository.transfers.value.firstOrNull { it.id == id } ?: return
+        if (!TransferPresentationPolicy.actions(transfer).canApprove) return
+        continueReceive(id, exceptionalApproved = true)
     }
 
     private fun onCompleted(
@@ -343,7 +363,7 @@ class TransferService : Service() {
         val names = (0 until roots.length()).map { roots.getJSONObject(it).getString("final_name") }
         TransferRepository.update(id) {
             it.copy(
-                status = Status.Completed,
+                status = Status.Delivered,
                 bytes = it.total,
                 savedUri = uris.firstOrNull(),
                 savedUris = uris,
@@ -353,6 +373,7 @@ class TransferService : Service() {
             )
         }
         callbacks.remove(id, callback)
+        progressTrackers.remove(id)
         specs.remove(id)
         persistSpecs()
         leaveForegroundIfIdle()
@@ -365,26 +386,35 @@ class TransferService : Service() {
     ) {
         val cause = event.optString("cause", "transfer")
         val detail = event.optString("detail", "Transfer failed")
+        val canceled = cause == "user_canceled" || cause == "sender_canceled"
+        val retryable = !canceled && event.optBoolean("retryable", false)
+        val recoveryAction =
+            if (canceled) {
+                RecoveryAction.None
+            } else {
+                RecoveryAction.fromWire(event.optString("recovery_action"))
+            }
         TransferRepository.update(id) {
             it.copy(
-                status =
-                    if (cause == "user_canceled" || cause == "sender_canceled") {
-                        Status.Cancelled
-                    } else {
-                        Status.Failed
-                    },
+                status = if (canceled) Status.Canceled else Status.Failed,
                 failureCause = cause,
+                retryable = retryable,
+                recoveryAction = recoveryAction,
                 error = explainFailure(cause, detail),
                 log = addLog(it.log, "$cause · $detail"),
             )
         }
         callbacks.remove(id, callback)
+        progressTrackers.remove(id)
         leaveForegroundIfIdle()
     }
 
     private fun pause(id: Long) {
         if (id < 0) return
+        val transfer = TransferRepository.transfers.value.firstOrNull { it.id == id } ?: return
+        if (!TransferPresentationPolicy.actions(transfer).canPause) return
         callbacks.remove(id)?.let { Native.cancelManifestV2Session(it.nativeId) }
+        progressTrackers.remove(id)
         specs[id]?.let { specs[id] = it.copy(holdState = "paused") }
         persistSpecs()
         TransferRepository.update(id) {
@@ -394,26 +424,46 @@ class TransferService : Service() {
     }
 
     private fun resume(id: Long) {
+        val transfer = TransferRepository.transfers.value.firstOrNull { it.id == id } ?: return
+        if (!TransferPresentationPolicy.actions(transfer).canResume) return
         val spec = specs[id]?.copy(holdState = null) ?: return
         if (callbacks.containsKey(id)) return
         specs[id] = spec
         persistSpecs()
-        TransferRepository.update(id) { it.copy(status = Status.Connecting, error = null) }
+        TransferRepository.update(id) {
+            it.copy(
+                status = if (spec.qrPayload == null) Status.Pairing else Status.WaitingForPeer,
+                error = null,
+                failureCause = null,
+                retryable = false,
+                recoveryAction = RecoveryAction.None,
+                attempt = it.attempt + 1,
+                speedBps = 0.0,
+                avgBps = 0.0,
+                speedHistory = emptyList(),
+            )
+        }
         startNative(spec)
     }
 
     private fun cancelTransfer(id: Long) {
+        val transfer = TransferRepository.transfers.value.firstOrNull { it.id == id } ?: return
+        if (!TransferPresentationPolicy.actions(transfer).canCancel) return
         callbacks.remove(id)?.let { Native.cancelManifestV2Session(it.nativeId) }
+        progressTrackers.remove(id)
         specs[id]?.let { specs[id] = it.copy(holdState = "canceled") }
         persistSpecs()
         TransferRepository.update(id) {
-            if (it.status.isTerminal) it else it.copy(status = Status.Cancelled, error = null)
+            if (it.status.isTerminal) it else it.copy(status = Status.Canceled, error = null)
         }
         leaveForegroundIfIdle()
     }
 
     private fun removeTransfer(id: Long) {
+        val transfer = TransferRepository.transfers.value.firstOrNull { it.id == id } ?: return
+        if (!TransferPresentationPolicy.actions(transfer).canRemove) return
         callbacks.remove(id)?.let { Native.cancelManifestV2Session(it.nativeId) }
+        progressTrackers.remove(id)
         val spec = specs.remove(id)
         val jobId =
             spec?.jobId ?: TransferRepository.transfers.value
@@ -446,11 +496,11 @@ class TransferService : Service() {
                         if (spec.holdState ==
                             "canceled"
                         ) {
-                            Status.Cancelled
+                            Status.Canceled
                         } else if (spec.holdState == "paused") {
                             Status.Paused
                         } else {
-                            Status.Connecting
+                            if (spec.qrPayload == null) Status.Pairing else Status.WaitingForPeer
                         },
                     jobId = spec.jobId,
                 )
@@ -465,7 +515,23 @@ class TransferService : Service() {
         log: String,
     ) {
         TransferRepository.update(id) {
-            it.copy(status = status, error = null, log = addLog(it.log, log))
+            if (it.status.isTerminal && it.status != status) {
+                it
+            } else {
+                val payloadComplete =
+                    status == Status.Verifying ||
+                        status == Status.Saving ||
+                        status == Status.WaitingForReceiverSave ||
+                        status == Status.FinalizingDelivery ||
+                        status == Status.Delivered
+                it.copy(
+                    status = status,
+                    bytes = if (payloadComplete) maxOf(it.bytes, it.total) else it.bytes,
+                    speedBps = if (status == Status.Transferring) it.speedBps else 0.0,
+                    error = null,
+                    log = addLog(it.log, log),
+                )
+            }
         }
         updateNotification()
     }
@@ -524,6 +590,11 @@ class TransferService : Service() {
                 uiText(
                     "Integrity verification failed; no unverified file was delivered.",
                     "完整性验证失败；未交付任何未经验证的文件。",
+                )
+            "authentication_failed" ->
+                uiText(
+                    "The peer could not be authenticated. Pair the devices again.",
+                    "无法验证对端身份。请重新配对设备。",
                 )
             "transport" ->
                 uiText(
@@ -637,18 +708,19 @@ class TransferService : Service() {
     private fun statusLabel(status: Status): String =
         when (status) {
             Status.Preparing -> uiText("Preparing files…", "正在准备文件…")
+            Status.WaitingForPeer -> uiText("Waiting for peer…", "正在等待对端…")
+            Status.Pairing -> uiText("Pairing…", "正在配对…")
             Status.Connecting -> uiText("Connecting…", "正在连接…")
             Status.AwaitingDecision -> uiText("Waiting for your save decision", "等待确认保存方式")
             Status.Transferring -> uiText("Transferring files…", "正在传输文件…")
-            Status.Receiving -> uiText("Receiving files…", "正在接收文件…")
             Status.Verifying -> uiText("Verifying…", "正在验证…")
             Status.Saving -> uiText("Saving…", "正在保存…")
             Status.WaitingForReceiverSave -> uiText("Waiting for receiver to save…", "等待接收端保存…")
             Status.FinalizingDelivery -> uiText("Saved; finalizing delivery…", "已保存，正在确认送达…")
             Status.Paused -> uiText("Paused", "已暂停")
-            Status.Completed -> uiText("Completed", "已完成")
+            Status.Delivered -> uiText("Delivered", "已送达")
             Status.Failed -> uiText("Failed", "失败")
-            Status.Cancelled -> uiText("Cancelled", "已取消")
+            Status.Canceled -> uiText("Canceled", "已取消")
         }
 
     companion object {

@@ -15,6 +15,7 @@ use envoix_client::api::{
 };
 use envoix_error::{CoreError, TransferCause};
 use envoix_protocol::manifest_v2::{ManifestEntryKindV2, ManifestV2};
+use envoix_types::PairingStep;
 use jni::JNIEnv;
 use jni::objects::{GlobalRef, JClass, JObject, JString, JValue};
 use jni::sys::{jlong, jstring};
@@ -157,7 +158,6 @@ struct SavedRoot {
 struct AndroidEvents {
     vm: Arc<JavaVM>,
     callback: Arc<GlobalRef>,
-    direction: &'static str,
 }
 
 impl AndroidEvents {
@@ -173,7 +173,11 @@ impl EventSink for AndroidEvents {
                 self.send(json!({"notice":"manifest_v2","kind":"diagnostic","message":message}));
             }
             TransferEvent::Pairing { step } => {
-                self.send(json!({"notice":"manifest_v2","state":"connecting","pairing":format!("{step:?}")}));
+                self.send(json!({
+                    "notice":"manifest_v2",
+                    "state":pairing_state(step),
+                    "pairing":format!("{step:?}"),
+                }));
             }
             TransferEvent::Connecting => {
                 self.send(json!({"notice":"manifest_v2","state":"connecting"}));
@@ -193,9 +197,6 @@ impl EventSink for AndroidEvents {
             })),
             TransferEvent::ManifestV2Phase { phase, .. } => {
                 let state = match phase {
-                    ManifestV2ProgressPhase::Transferring if self.direction == "receive" => {
-                        "receiving"
-                    }
                     ManifestV2ProgressPhase::Transferring => "transferring",
                     ManifestV2ProgressPhase::Verifying => "verifying",
                     ManifestV2ProgressPhase::Saving => "saving",
@@ -205,6 +206,13 @@ impl EventSink for AndroidEvents {
                 self.send(json!({"notice":"manifest_v2","state":state}));
             }
         }
+    }
+}
+
+fn pairing_state(step: PairingStep) -> &'static str {
+    match step {
+        PairingStep::Joining => "waiting_for_peer",
+        PairingStep::Matched | PairingStep::Exchanged => "pairing",
     }
 }
 
@@ -544,15 +552,17 @@ pub extern "system" fn Java_dev_envoix_app_Native_startManifestV2Session(
     runtime().spawn(async move {
         let result = run_session(id, &params, vm.clone(), callback.clone(), &token).await;
         if let Err(error) = result {
-            let (code, detail) = error_fact(&error);
+            let fact = error_fact(&error, &params.direction);
             emit(
                 vm.as_ref(),
                 callback.as_ref(),
                 &json!({
                     "notice":"manifest_v2",
                     "state":"failed",
-                    "cause":code,
-                    "detail":detail,
+                    "cause":fact.cause,
+                    "detail":fact.detail,
+                    "retryable":fact.retryable,
+                    "recovery_action":fact.recovery_action,
                 })
                 .to_string(),
             );
@@ -668,11 +678,6 @@ async fn run_session(
     let events: Arc<dyn EventSink> = Arc::new(AndroidEvents {
         vm: vm.clone(),
         callback: callback.clone(),
-        direction: if params.direction == "send" {
-            "send"
-        } else {
-            "receive"
-        },
     });
     if params.direction == "send" {
         let job_id = params
@@ -1238,18 +1243,52 @@ fn valid_component(value: &str) -> bool {
         && !value.contains('\0')
 }
 
-fn error_fact(error: &CoreError) -> (&'static str, String) {
-    match error {
+struct FailureFact {
+    cause: &'static str,
+    detail: String,
+    retryable: bool,
+    recovery_action: &'static str,
+}
+
+fn error_fact(error: &CoreError, direction: &str) -> FailureFact {
+    let (cause, detail) = match error {
         CoreError::Cause { cause, detail } => (cause.code(), detail.clone()),
         CoreError::Cancelled => ("user_canceled", "operation cancelled".into()),
-        CoreError::InvalidInput(detail) => ("invalid_input", detail.clone()),
-        CoreError::Io(detail) => ("io", detail.clone()),
-        CoreError::Protocol(detail) => ("protocol_or_integrity_failure", detail.clone()),
+        CoreError::InvalidInput(detail) => ("unsupported_feature", detail.clone()),
         CoreError::Transport(detail) => ("transport", detail.clone()),
-        CoreError::Crypto(detail) => ("protocol_or_integrity_failure", detail.clone()),
-        CoreError::Storage(detail) => ("receiver_save_failed", detail.clone()),
+        CoreError::Protocol(detail) => ("protocol_or_integrity_failure", detail.clone()),
+        CoreError::Crypto(detail) => ("authentication_failed", detail.clone()),
+        CoreError::Io(detail) | CoreError::Storage(detail) if direction == "send" => {
+            ("sender_source_unavailable", detail.clone())
+        }
+        CoreError::Io(detail) | CoreError::Storage(detail) => {
+            ("receiver_save_failed", detail.clone())
+        }
         CoreError::Discovery(detail) => ("discovery", detail.clone()),
         CoreError::Transfer(detail) => ("transfer", detail.clone()),
+    };
+    let (retryable, recovery_action) = failure_recovery(cause);
+    FailureFact {
+        cause,
+        detail,
+        retryable,
+        recovery_action,
+    }
+}
+
+fn failure_recovery(cause: &str) -> (bool, &'static str) {
+    match cause {
+        "transport" | "discovery" => (true, "resume"),
+        "authentication_failed" => (true, "re_pair"),
+        "sender_source_unavailable" | "sender_source_changed" | "transfer" => (true, "retry"),
+        "sender_permission_lost" => (true, "open_settings"),
+        "receiver_space_insufficient"
+        | "receiver_destination_decision_required"
+        | "receiver_destination_unavailable" => (true, "choose_folder"),
+        "receiver_save_failed"
+        | "receiver_reused_object_lost"
+        | "receiver_finalization_outcome_unknown" => (true, "resume"),
+        _ => (false, "none"),
     }
 }
 
@@ -1265,9 +1304,88 @@ fn emit_failed_manifest(
         &json!({
             "notice":"manifest_v2",
             "state":"failed",
-            "cause":"invalid_input",
+            "cause":"unsupported_feature",
             "detail":format!("{context}: {error}"),
+            "retryable":false,
+            "recovery_action":"none",
         })
         .to_string(),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generic_failures_match_the_apple_recovery_contract() {
+        let cases = [
+            (
+                CoreError::Transport("offline".into()),
+                "send",
+                "transport",
+                true,
+                "resume",
+            ),
+            (
+                CoreError::Crypto("bad key".into()),
+                "receive",
+                "authentication_failed",
+                true,
+                "re_pair",
+            ),
+            (
+                CoreError::Io("source gone".into()),
+                "send",
+                "sender_source_unavailable",
+                true,
+                "retry",
+            ),
+            (
+                CoreError::Io("write failed".into()),
+                "receive",
+                "receiver_save_failed",
+                true,
+                "resume",
+            ),
+            (
+                CoreError::Protocol("bad digest".into()),
+                "receive",
+                "protocol_or_integrity_failure",
+                false,
+                "none",
+            ),
+        ];
+
+        for (error, direction, cause, retryable, recovery_action) in cases {
+            let fact = error_fact(&error, direction);
+            assert_eq!(fact.cause, cause);
+            assert_eq!(fact.retryable, retryable);
+            assert_eq!(fact.recovery_action, recovery_action);
+        }
+    }
+
+    #[test]
+    fn stable_manifest_causes_keep_their_recovery_action() {
+        assert_eq!(
+            failure_recovery("sender_permission_lost"),
+            (true, "open_settings")
+        );
+        assert_eq!(
+            failure_recovery("receiver_space_insufficient"),
+            (true, "choose_folder")
+        );
+        assert_eq!(failure_recovery("sender_item_removed"), (false, "none"));
+        assert_eq!(
+            failure_recovery("protocol_or_integrity_failure"),
+            (false, "none")
+        );
+    }
+
+    #[test]
+    fn room_joining_is_waiting_until_a_peer_is_matched() {
+        assert_eq!(pairing_state(PairingStep::Joining), "waiting_for_peer");
+        assert_eq!(pairing_state(PairingStep::Matched), "pairing");
+        assert_eq!(pairing_state(PairingStep::Exchanged), "pairing");
+    }
 }

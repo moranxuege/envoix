@@ -26,29 +26,6 @@ let deprecatedLogServers: Set<String> = [
     "http://envoix.chkxwlyh.us:8460",
 ]
 
-struct ActivityActionAvailability: Equatable {
-    let canPause: Bool
-    let canResume: Bool
-    let canCancel: Bool
-    let canDelete: Bool
-    let isFinalizing: Bool
-}
-
-/// Single lifecycle-to-UI action policy. SwiftUI must not infer buttons from
-/// presentation state independently of the canonical transfer snapshot.
-func activityActionAvailability(for record: TransferActivityRecord) -> ActivityActionAvailability {
-    let isFinalizing = record.state == .saving ||
-        record.state == .waitingForReceiverSave ||
-        record.state == .finalizingDelivery
-    return ActivityActionAvailability(
-        canPause: ActivityProjectionPolicy.isPending(record.state) && !isFinalizing && record.state != .paused,
-        canResume: record.state == .paused || (record.state == .failed && record.failure?.retryable == true),
-        canCancel: ActivityProjectionPolicy.isPending(record.state) && !isFinalizing,
-        canDelete: !ActivityProjectionPolicy.isPending(record.state),
-        isFinalizing: isFinalizing
-    )
-}
-
 let expectedCoreFFIAPIVersion: UInt32 = 4
 let appDebugBuildLabel = "Debug build 2026.07.08.19"
 
