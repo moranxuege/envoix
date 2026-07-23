@@ -1,0 +1,134 @@
+use std::collections::{HashMap, HashSet};
+
+use envoix_types::{AttemptGen, RecordId};
+
+use crate::{AdmittedDutyResult, Duty, DutyProvenance, DutyResult};
+
+/// Result of registering a duty against the ledger's current generation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Registration {
+    Registered,
+    NoCurrentGeneration,
+    StaleGeneration,
+    FutureGeneration,
+    AlreadyOutstanding,
+    AlreadyDischarged,
+}
+
+/// Result of changing the authoritative current generation for a card.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GenerationUpdate {
+    Initialized,
+    Advanced,
+    Unchanged,
+    RejectedRegression,
+}
+
+/// Classification applied before an adapter result can reach product state.
+#[derive(Debug, Eq, PartialEq)]
+pub enum Admission {
+    Fresh(AdmittedDutyResult),
+    Stale,
+    Duplicate,
+    Unknown,
+}
+
+/// Reference implementation of duty registration and result admission.
+#[derive(Debug, Default)]
+pub struct DutyLedger {
+    current_generations: HashMap<RecordId, AttemptGen>,
+    outstanding: HashMap<DutyProvenance, Duty>,
+    discharged: HashSet<DutyProvenance>,
+}
+
+impl DutyLedger {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn current_generation(&self, card: RecordId) -> Option<AttemptGen> {
+        self.current_generations.get(&card).copied()
+    }
+
+    /// Establishes or monotonically advances the card's current generation.
+    ///
+    /// The caller owns generation authority; registering a duty never changes
+    /// it implicitly.
+    pub fn advance_generation(
+        &mut self,
+        card: RecordId,
+        generation: AttemptGen,
+    ) -> GenerationUpdate {
+        match self.current_generations.get(&card).copied() {
+            None => {
+                self.current_generations.insert(card, generation);
+                GenerationUpdate::Initialized
+            }
+            Some(current) if generation < current => GenerationUpdate::RejectedRegression,
+            Some(current) if generation == current => GenerationUpdate::Unchanged,
+            Some(_) => {
+                self.current_generations.insert(card, generation);
+                self.outstanding.retain(|provenance, _| {
+                    provenance.card != card || provenance.generation >= generation
+                });
+                self.discharged.retain(|provenance| {
+                    provenance.card != card || provenance.generation >= generation
+                });
+                GenerationUpdate::Advanced
+            }
+        }
+    }
+
+    /// Records a duty only when it belongs to the card's current generation.
+    pub fn register(&mut self, duty: Duty) -> Registration {
+        let provenance = duty.provenance;
+        let Some(current) = self.current_generations.get(&provenance.card).copied() else {
+            return Registration::NoCurrentGeneration;
+        };
+
+        if provenance.generation < current {
+            return Registration::StaleGeneration;
+        }
+        if provenance.generation > current {
+            return Registration::FutureGeneration;
+        }
+        if self.discharged.contains(&provenance) {
+            return Registration::AlreadyDischarged;
+        }
+        if self.outstanding.contains_key(&provenance) {
+            return Registration::AlreadyOutstanding;
+        }
+
+        self.outstanding.insert(provenance, duty);
+        Registration::Registered
+    }
+
+    /// Admits an exact, current, outstanding result once and discharges it.
+    pub fn admit(&mut self, result: DutyResult) -> Admission {
+        let provenance = result.provenance;
+        let Some(current) = self.current_generations.get(&provenance.card).copied() else {
+            return Admission::Unknown;
+        };
+
+        if provenance.generation < current {
+            return Admission::Stale;
+        }
+        if self.discharged.contains(&provenance) {
+            return Admission::Duplicate;
+        }
+
+        let Some(duty) = self.outstanding.remove(&provenance) else {
+            return Admission::Unknown;
+        };
+        self.discharged.insert(provenance);
+
+        Admission::Fresh(AdmittedDutyResult {
+            duty,
+            outcome: result.outcome,
+        })
+    }
+
+    pub fn outstanding_len(&self) -> usize {
+        self.outstanding.len()
+    }
+}

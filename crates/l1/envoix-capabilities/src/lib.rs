@@ -1,1 +1,12 @@
-//! envoix-capabilities (L1 library) — envoix 0.2.0 placeholder; filled in a later build step.
+//! Typed platform duties and provenance-based result admission.
+
+#![forbid(unsafe_code)]
+
+mod ledger;
+mod model;
+
+pub use ledger::{Admission, DutyLedger, GenerationUpdate, Registration};
+pub use model::{AdmittedDutyResult, Duty, DutyKind, DutyProvenance, DutyResult};
+
+#[cfg(test)]
+mod tests;
