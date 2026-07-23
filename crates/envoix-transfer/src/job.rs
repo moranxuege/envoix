@@ -553,21 +553,21 @@ impl CanonicalTransferJob {
             Err(error) => (None, None, Some(issue_kind(&error))),
         };
 
-        if let Some(canonical_path) = canonical_path.as_ref() {
-            if let Some(existing) = self.selections.iter().find(|selection| {
+        if let Some(canonical_path) = canonical_path.as_ref()
+            && let Some(existing) = self.selections.iter().find(|selection| {
                 selection.canonical_path.as_ref() == Some(canonical_path)
                     || selection.is_directory_hint == Some(true)
                         && selection
                             .canonical_path
                             .as_ref()
                             .is_some_and(|root| canonical_path.starts_with(root))
-            }) {
-                return Ok(AddSourceResult {
-                    root_item_id: existing.root_item_id,
-                    folded_into_existing_selection: true,
-                    removed_covered_roots: Vec::new(),
-                });
-            }
+            })
+        {
+            return Ok(AddSourceResult {
+                root_item_id: existing.root_item_id,
+                folded_into_existing_selection: true,
+                removed_covered_roots: Vec::new(),
+            });
         }
         let covers_existing_root = is_directory_hint == Some(true)
             && canonical_path.as_ref().is_some_and(|root| {

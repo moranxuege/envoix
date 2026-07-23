@@ -1012,6 +1012,7 @@ impl ManifestV2PayloadSink for LocalDestinationProviderV2 {
             .min(entry.plaintext_size);
         let mut file = fs::OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&path)

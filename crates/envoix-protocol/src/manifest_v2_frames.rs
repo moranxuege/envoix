@@ -540,9 +540,7 @@ fn encode_payload(
     output: &mut Vec<u8>,
 ) -> Result<ManifestV2FrameType, ManifestV2FrameCodecError> {
     match frame {
-        ManifestV2Frame::Offer(_) => {
-            return Err(ManifestV2FrameCodecError::UnexpectedOfferPayload);
-        }
+        ManifestV2Frame::Offer(_) => Err(ManifestV2FrameCodecError::UnexpectedOfferPayload),
         ManifestV2Frame::Accept(value) => {
             identity(output, value.identity)?;
             if value.proof_capability.0 == [0; DIGEST_BYTES] || value.plan_revision == 0 {

@@ -721,10 +721,12 @@ impl ManifestV2DataPlane {
                     plan,
                     source,
                     manifest.compression_policy,
-                    &mut completed_plaintext_bytes,
-                    total_plaintext_bytes,
-                    progress,
-                    resumed_entry_bytes,
+                    FileTransferProgress {
+                        completed_plaintext_bytes: &mut completed_plaintext_bytes,
+                        total_plaintext_bytes,
+                        sink: progress,
+                        resumed_entry_bytes,
+                    },
                 )
                 .await?
             };
@@ -1017,6 +1019,13 @@ where
     Ok(completion)
 }
 
+struct FileTransferProgress<'a> {
+    completed_plaintext_bytes: &'a mut u64,
+    total_plaintext_bytes: u64,
+    sink: &'a dyn ManifestV2ProgressSink,
+    resumed_entry_bytes: u64,
+}
+
 async fn send_file<C>(
     connection: &mut C,
     identity: JobGenerationV2,
@@ -1024,10 +1033,7 @@ async fn send_file<C>(
     plan: envoix_protocol::manifest_v2_frames::EntryPlanV2,
     source: PreparedFileSource,
     compression_policy: CompressionPolicyV2,
-    completed_plaintext_bytes: &mut u64,
-    total_plaintext_bytes: u64,
-    progress: &dyn ManifestV2ProgressSink,
-    resumed_entry_bytes: u64,
+    progress: FileTransferProgress<'_>,
 ) -> Result<EntryCompleteV2, ManifestV2DataError>
 where
     C: ManifestV2FrameConnection,
@@ -1059,10 +1065,18 @@ where
         connection
             .send_manifest_v2_frame(ManifestV2Frame::EntryComplete(completion))
             .await?;
-        *completed_plaintext_bytes = completed_plaintext_bytes
-            .checked_add(entry.plaintext_size.saturating_sub(resumed_entry_bytes))
+        *progress.completed_plaintext_bytes = progress
+            .completed_plaintext_bytes
+            .checked_add(
+                entry
+                    .plaintext_size
+                    .saturating_sub(progress.resumed_entry_bytes),
+            )
             .ok_or(ManifestV2DataError::ArithmeticOverflow)?;
-        progress.on_progress(*completed_plaintext_bytes, total_plaintext_bytes);
+        progress.sink.on_progress(
+            *progress.completed_plaintext_bytes,
+            progress.total_plaintext_bytes,
+        );
         return Ok(completion);
     }
 
@@ -1108,10 +1122,14 @@ where
             if let Some(frame) = response {
                 handle_sender_control(frame, identity)?;
             }
-            *completed_plaintext_bytes = completed_plaintext_bytes
+            *progress.completed_plaintext_bytes = progress
+                .completed_plaintext_bytes
                 .checked_add(length as u64)
                 .ok_or(ManifestV2DataError::ArithmeticOverflow)?;
-            progress.on_progress(*completed_plaintext_bytes, total_plaintext_bytes);
+            progress.sink.on_progress(
+                *progress.completed_plaintext_bytes,
+                progress.total_plaintext_bytes,
+            );
         }
         block_index = block_index
             .checked_add(1)
@@ -1123,15 +1141,19 @@ where
 
     let final_digest = if reuse_chosen {
         source.verify_unchanged().await?;
-        let entry_progress = resumed_entry_bytes.max(plaintext_offset).max(
+        let entry_progress = progress.resumed_entry_bytes.max(plaintext_offset).max(
             plan.next_plaintext_block
                 .saturating_mul(block_bytes as u64)
                 .min(entry.plaintext_size),
         );
-        *completed_plaintext_bytes = completed_plaintext_bytes
+        *progress.completed_plaintext_bytes = progress
+            .completed_plaintext_bytes
             .checked_add(entry.plaintext_size.saturating_sub(entry_progress))
             .ok_or(ManifestV2DataError::ArithmeticOverflow)?;
-        progress.on_progress(*completed_plaintext_bytes, total_plaintext_bytes);
+        progress.sink.on_progress(
+            *progress.completed_plaintext_bytes,
+            progress.total_plaintext_bytes,
+        );
         late_digest.ok_or(ManifestV2DataError::DigestConflict)?
     } else {
         let payload_digest = ContentDigestV2(*payload_hasher.finalize().as_bytes());

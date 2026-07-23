@@ -41,7 +41,8 @@ class ManifestV2DestinationWriter(
         }
 
         val batchNames =
-            request.optJSONArray("reserved_names")
+            request
+                .optJSONArray("reserved_names")
                 ?.let { names ->
                     (0 until names.length()).mapTo(mutableSetOf()) { nameKey(names.getString(it)) }
                 } ?: mutableSetOf()
@@ -118,8 +119,11 @@ class ManifestV2DestinationWriter(
                     journal,
                 )
             try {
-                if (source.isDirectory) copyDirectory(source, target.document!!)
-                else MediaStoreSaver.copyInto(context, source, target.reserved).getOrThrow()
+                if (source.isDirectory) {
+                    copyDirectory(source, target.document!!)
+                } else {
+                    MediaStoreSaver.copyInto(context, source, target.reserved).getOrThrow()
+                }
                 val outcome =
                     if (target.document != null) {
                         Outcome(target.document.name ?: target.plannedName, target.document.uri)
@@ -320,8 +324,11 @@ class ManifestV2DestinationWriter(
     ): String {
         for (suffix in 0 until MAX_NAME_ATTEMPTS) {
             val candidate =
-                if (suffix == 0) requested
-                else manifestV2KeepBothName(requested, suffix, preserveExtension)
+                if (suffix == 0) {
+                    requested
+                } else {
+                    manifestV2KeepBothName(requested, suffix, preserveExtension)
+                }
             if (nameKey(candidate) !in batchNames && parent.findFile(candidate) == null) return candidate
         }
         error("Could not allocate a non-conflicting destination name")
@@ -403,7 +410,8 @@ class ManifestV2DestinationWriter(
 
     private fun destinationTree(encoded: String): DocumentFile? =
         encoded.takeIf(String::isNotBlank)?.let {
-            DocumentFile.fromTreeUri(context, Uri.parse(it))
+            DocumentFile
+                .fromTreeUri(context, Uri.parse(it))
                 ?.takeIf(DocumentFile::canWrite)
                 ?: error("The selected save folder is unavailable")
         }
@@ -508,8 +516,7 @@ class ManifestV2DestinationWriter(
             MediaStoreSaver.resolves(context, uri)
         }
 
-    private fun mimeType(name: String): String =
-        URLConnection.guessContentTypeFromName(name) ?: "application/octet-stream"
+    private fun mimeType(name: String): String = URLConnection.guessContentTypeFromName(name) ?: "application/octet-stream"
 
     private fun nameKey(name: String): String = name.lowercase(Locale.ROOT)
 

@@ -54,12 +54,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.envoix.app.InviteCodec
-import dev.envoix.app.R
 import dev.envoix.app.ManifestV2Source
 import dev.envoix.app.ManifestV2SourceStager
 import dev.envoix.app.ManifestV2StageResult
 import dev.envoix.app.Native
 import dev.envoix.app.PreparedManifestV2Source
+import dev.envoix.app.R
 import dev.envoix.app.SettingsStore
 import dev.envoix.app.TransferService
 import dev.envoix.app.discovery.DiscoverySource
@@ -615,7 +615,13 @@ fun NewTransferSheet(
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Text(text("You'll join", "即将加入"), color = colors.muted, fontSize = 13.sp)
                             Spacer(Modifier.height(6.dp))
-                            Text(typed, color = colors.accent, fontSize = 18.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                            Text(
+                                typed,
+                                color = colors.accent,
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace,
+                            )
                             Spacer(Modifier.height(6.dp))
                             Text(
                                 text("clear the code below to show your own", "清空下方配对码即可显示自己的二维码"),

@@ -692,9 +692,11 @@ async fn run_session(
                 .map_err(|error| CoreError::Storage(error.to_string()))?;
         }
         send_with_enabled_routes(
-            broker,
-            &params.room,
-            params.use_mdns,
+            EnabledSendRoutes {
+                broker,
+                code: &params.room,
+                use_mdns: params.use_mdns,
+            },
             &job,
             PathBuf::from(&params.state_directory),
             config,
@@ -855,10 +857,14 @@ async fn run_session(
     Ok(())
 }
 
-async fn send_with_enabled_routes(
+struct EnabledSendRoutes<'a> {
     broker: Option<envoix_client::EndpointAddr>,
-    code: &str,
+    code: &'a str,
     use_mdns: bool,
+}
+
+async fn send_with_enabled_routes(
+    routes: EnabledSendRoutes<'_>,
     job: &CanonicalTransferJob,
     state_directory: PathBuf,
     config: envoix_client::api::SessionConfig,
@@ -866,10 +872,10 @@ async fn send_with_enabled_routes(
     cancel: &TransferCancelToken,
 ) -> Result<SenderManifestV2SessionSummary, CoreError> {
     let mut last_error = None;
-    if let Some(broker) = broker {
+    if let Some(broker) = routes.broker {
         match send_manifest_v2_via_room(
             broker,
-            code,
+            routes.code,
             job,
             state_directory.clone(),
             config.clone(),
@@ -888,8 +894,8 @@ async fn send_with_enabled_routes(
             Err(error) => return Err(error),
         }
     }
-    if use_mdns {
-        let pairing = PairingConfig::spake2_shared_token(code.to_string())?;
+    if routes.use_mdns {
+        let pairing = PairingConfig::spake2_shared_token(routes.code.to_string())?;
         match send_manifest_v2_enable_mdns(
             job.clone(),
             state_directory,

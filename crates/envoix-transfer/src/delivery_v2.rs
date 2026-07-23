@@ -286,7 +286,7 @@ impl ReceiverDeliveryRecordV2 {
             return Err(DeliveryAuthorityErrorV2::IdentityMismatch);
         }
         let result_set_digest = result_set_digest(&summary.entry_results)?;
-        Ok(Self {
+        Self {
             schema_version: RECEIVER_DELIVERY_SCHEMA_VERSION,
             identity: accept.identity,
             manifest_digest: offer.structural_digest,
@@ -295,7 +295,7 @@ impl ReceiverDeliveryRecordV2 {
             proof_capability: accept.proof_capability,
             delivery_proof: None,
         }
-        .validated()?)
+        .validated()
     }
 
     pub fn delivery_proof(&self) -> Option<DeliveryProofV2> {
@@ -315,8 +315,8 @@ impl ReceiverDeliveryRecordV2 {
         {
             return Err(DeliveryAuthorityErrorV2::InvalidRecord);
         }
-        if let Some(proof) = self.delivery_proof {
-            if proof.identity != self.identity
+        if let Some(proof) = self.delivery_proof
+            && (proof.identity != self.identity
                 || proof.manifest_digest != self.manifest_digest
                 || proof.result_set_digest != self.result_set_digest
                 || proof.proof_mac
@@ -326,10 +326,9 @@ impl ReceiverDeliveryRecordV2 {
                         proof.manifest_digest,
                         proof.result_set_digest,
                         proof.proof_nonce,
-                    )
-            {
-                return Err(DeliveryAuthorityErrorV2::InvalidRecord);
-            }
+                    ))
+        {
+            return Err(DeliveryAuthorityErrorV2::InvalidRecord);
         }
         Ok(())
     }
