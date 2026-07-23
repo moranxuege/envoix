@@ -65,6 +65,7 @@ toml = "0.8"
 uniffi = "0.31"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+unicode-normalization = "0.1"
 zstd = "0.13"
 
 [patch.crates-io]

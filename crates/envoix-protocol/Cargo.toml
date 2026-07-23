@@ -13,6 +13,7 @@ num_enum.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+unicode-normalization.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
