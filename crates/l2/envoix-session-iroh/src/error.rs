@@ -41,6 +41,7 @@ pub enum SessionError {
     PeerClosed,
     VersionMismatch,
     MalformedEnvelope,
+    PayloadTooLarge { declared: usize, maximum: usize },
     OperationFailed { operation: SessionOperation },
 }
 
@@ -54,9 +55,10 @@ impl SessionError {
             Self::OperationFailed {
                 operation: SessionOperation::Bind | SessionOperation::Connect,
             } => OutcomeCode::NetworkUnreachable,
-            Self::InvalidConfig(_) | Self::MalformedEnvelope | Self::OperationFailed { .. } => {
-                OutcomeCode::Internal
-            }
+            Self::InvalidConfig(_)
+            | Self::MalformedEnvelope
+            | Self::PayloadTooLarge { .. }
+            | Self::OperationFailed { .. } => OutcomeCode::Internal,
         }
     }
 
@@ -74,6 +76,10 @@ impl fmt::Display for SessionError {
             Self::PeerClosed => formatter.write_str("session peer closed"),
             Self::VersionMismatch => formatter.write_str("session wire version is unsupported"),
             Self::MalformedEnvelope => formatter.write_str("session frame envelope is invalid"),
+            Self::PayloadTooLarge { declared, maximum } => write!(
+                formatter,
+                "session payload length {declared} exceeds phase maximum {maximum}"
+            ),
             Self::OperationFailed { operation } => write!(formatter, "failed to {operation}"),
         }
     }

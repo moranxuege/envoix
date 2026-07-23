@@ -6,10 +6,14 @@ use envoix_attempt_api::{
     CommitOperationResult, OpenResult, RetirementAck, RetirementAckResult, RetirementIntent,
     RetirementRequestResult, TerminalResolutionResult,
 };
-use envoix_auth::{self, AuthError, ExportedKeyingMaterial, MonotonicMillis as AuthMillis};
+use envoix_auth::{
+    self, AuthError, ExportedKeyingMaterial, MAX_AUTH_PAYLOAD, MonotonicMillis as AuthMillis,
+};
 use envoix_outcomes::{OutcomeCode, Phase};
-use envoix_pairing::{DataPlaneToken, SystemEntropy};
-use envoix_protocol::{Abort, Frame, ProtocolReason, ResumeMode, decode_frame, encode_frame};
+use envoix_pairing::{DataPlaneToken, EntropySource};
+use envoix_protocol::{
+    Abort, Frame, MAX_FRAME_SIZE, ProtocolReason, ResumeMode, decode_frame, encode_frame,
+};
 use envoix_session_iroh::{
     AuthFailureBudget, CloseOrdering, IrohListener, PathObservation, SessionCancellation,
     SessionError, SessionLink, SessionTimeouts,
@@ -149,17 +153,19 @@ impl Drop for AttemptHandle {
     }
 }
 
-pub fn spawn_sender<L, S>(
+pub fn spawn_sender<L, S, E>(
     plan: AttemptPlan,
     spec: AttemptTransferSpec,
     token: DataPlaneToken,
     source: S,
     mut link: L,
     supervisor: SharedAttemptSupervisor,
+    entropy: E,
 ) -> Result<AttemptHandle, AttemptError>
 where
     L: SessionLink + 'static,
     S: SourceReader + Send + 'static,
+    E: EntropySource + Send + 'static,
 {
     if plan.direction != Direction::Send {
         return Err(AttemptError::WrongDirection);
@@ -182,6 +188,7 @@ where
             token,
             source,
             Box::new(link),
+            entropy,
             supervisor,
             events_sender,
             stop_receiver,
@@ -198,17 +205,19 @@ where
     })
 }
 
-pub fn spawn_receiver<L, S>(
+pub fn spawn_receiver<L, S, E>(
     plan: AttemptPlan,
     spec: AttemptTransferSpec,
     token: DataPlaneToken,
     sink: S,
     mut link: L,
     supervisor: SharedAttemptSupervisor,
+    entropy: E,
 ) -> Result<AttemptHandle, AttemptError>
 where
     L: SessionLink + 'static,
     S: StagingSink + Send + 'static,
+    E: EntropySource + Send + 'static,
 {
     if plan.direction != Direction::Receive {
         return Err(AttemptError::WrongDirection);
@@ -231,6 +240,7 @@ where
             token,
             sink,
             Box::new(link),
+            entropy,
             supervisor,
             events_sender,
             stop_receiver,
@@ -247,7 +257,8 @@ where
     })
 }
 
-pub fn spawn_iroh_receiver<S>(
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_iroh_receiver<S, E>(
     plan: AttemptPlan,
     spec: AttemptTransferSpec,
     token: DataPlaneToken,
@@ -255,9 +266,11 @@ pub fn spawn_iroh_receiver<S>(
     listener: IrohListener,
     auth_failures: AuthFailureBudget,
     supervisor: SharedAttemptSupervisor,
+    entropy: E,
 ) -> Result<AttemptHandle, AttemptError>
 where
     S: StagingSink + Send + 'static,
+    E: EntropySource + Send + 'static,
 {
     if plan.direction != Direction::Receive {
         return Err(AttemptError::WrongDirection);
@@ -281,6 +294,7 @@ where
             sink,
             listener,
             auth_failures,
+            entropy,
             supervisor,
             events_sender,
             paths_sender,
@@ -314,45 +328,58 @@ fn open_attempt(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn execute_sender<S: SourceReader + Send + 'static>(
+async fn execute_sender<S, E>(
     plan: AttemptPlan,
     spec: AttemptTransferSpec,
     token: DataPlaneToken,
     mut source: S,
     mut link: Box<dyn SessionLink>,
+    mut entropy: E,
     supervisor: SharedAttemptSupervisor,
     events: mpsc::UnboundedSender<AttemptEvent>,
     mut stop: mpsc::UnboundedReceiver<RetirementIntent>,
     retirement_changed: Arc<Notify>,
-) -> Result<RetirementAck, AttemptError> {
+) -> Result<RetirementAck, AttemptError>
+where
+    S: SourceReader + Send + 'static,
+    E: EntropySource + Send + 'static,
+{
     let clock = AttemptClock::new();
     emit(
         &events,
         plan.stamp,
         AttemptEventKind::Phase(Phase::Authenticating),
     );
-    let terminal =
-        match authenticate_sender(&mut *link, &token, &clock, spec.timeouts, &mut stop).await {
-            Ok(()) => {
-                emit(
-                    &events,
-                    plan.stamp,
-                    AttemptEventKind::Phase(Phase::Transferring),
-                );
-                transfer_sender(
-                    plan,
-                    &spec,
-                    &mut source,
-                    &mut *link,
-                    &clock,
-                    &supervisor,
-                    &events,
-                    &mut stop,
-                )
-                .await
-            }
-            Err(terminal) => terminal,
-        };
+    let terminal = match authenticate_sender(
+        &mut *link,
+        &token,
+        &clock,
+        spec.timeouts,
+        &mut stop,
+        &mut entropy,
+    )
+    .await
+    {
+        Ok(()) => {
+            emit(
+                &events,
+                plan.stamp,
+                AttemptEventKind::Phase(Phase::Transferring),
+            );
+            transfer_sender(
+                plan,
+                &spec,
+                &mut source,
+                &mut *link,
+                &clock,
+                &supervisor,
+                &events,
+                &mut stop,
+            )
+            .await
+        }
+        Err(terminal) => terminal,
+    };
     finish_attempt(
         plan.stamp,
         terminal,
@@ -369,45 +396,58 @@ async fn execute_sender<S: SourceReader + Send + 'static>(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn execute_receiver<S: StagingSink + Send + 'static>(
+async fn execute_receiver<S, E>(
     plan: AttemptPlan,
     spec: AttemptTransferSpec,
     token: DataPlaneToken,
     mut sink: S,
     mut link: Box<dyn SessionLink>,
+    mut entropy: E,
     supervisor: SharedAttemptSupervisor,
     events: mpsc::UnboundedSender<AttemptEvent>,
     mut stop: mpsc::UnboundedReceiver<RetirementIntent>,
     retirement_changed: Arc<Notify>,
-) -> Result<RetirementAck, AttemptError> {
+) -> Result<RetirementAck, AttemptError>
+where
+    S: StagingSink + Send + 'static,
+    E: EntropySource + Send + 'static,
+{
     let clock = AttemptClock::new();
     emit(
         &events,
         plan.stamp,
         AttemptEventKind::Phase(Phase::Authenticating),
     );
-    let terminal =
-        match authenticate_receiver(&mut *link, &token, &clock, spec.timeouts, &mut stop).await {
-            Ok(()) => {
-                emit(
-                    &events,
-                    plan.stamp,
-                    AttemptEventKind::Phase(Phase::Transferring),
-                );
-                transfer_receiver(
-                    plan,
-                    &spec,
-                    &mut sink,
-                    &mut *link,
-                    &clock,
-                    &supervisor,
-                    &events,
-                    &mut stop,
-                )
-                .await
-            }
-            Err(terminal) => terminal,
-        };
+    let terminal = match authenticate_receiver(
+        &mut *link,
+        &token,
+        &clock,
+        spec.timeouts,
+        &mut stop,
+        &mut entropy,
+    )
+    .await
+    {
+        Ok(()) => {
+            emit(
+                &events,
+                plan.stamp,
+                AttemptEventKind::Phase(Phase::Transferring),
+            );
+            transfer_receiver(
+                plan,
+                &spec,
+                &mut sink,
+                &mut *link,
+                &clock,
+                &supervisor,
+                &events,
+                &mut stop,
+            )
+            .await
+        }
+        Err(terminal) => terminal,
+    };
     finish_attempt(
         plan.stamp,
         terminal,
@@ -424,19 +464,24 @@ async fn execute_receiver<S: StagingSink + Send + 'static>(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn execute_iroh_receiver<S: StagingSink + Send + 'static>(
+async fn execute_iroh_receiver<S, E>(
     plan: AttemptPlan,
     spec: AttemptTransferSpec,
     token: DataPlaneToken,
     mut sink: S,
     listener: IrohListener,
     mut auth_failures: AuthFailureBudget,
+    mut entropy: E,
     supervisor: SharedAttemptSupervisor,
     events: mpsc::UnboundedSender<AttemptEvent>,
     paths: mpsc::UnboundedSender<PathObservation>,
     mut stop: mpsc::UnboundedReceiver<RetirementIntent>,
     retirement_changed: Arc<Notify>,
-) -> Result<RetirementAck, AttemptError> {
+) -> Result<RetirementAck, AttemptError>
+where
+    S: StagingSink + Send + 'static,
+    E: EntropySource + Send + 'static,
+{
     let clock = AttemptClock::new();
     let cancellation = SessionCancellation::new();
     emit(
@@ -492,7 +537,15 @@ async fn execute_iroh_receiver<S: StagingSink + Send + 'static>(
             }
         };
         let mut candidate = candidate;
-        match authenticate_receiver(&mut candidate, &token, &clock, spec.timeouts, &mut stop).await
+        match authenticate_receiver(
+            &mut candidate,
+            &token,
+            &clock,
+            spec.timeouts,
+            &mut stop,
+            &mut entropy,
+        )
+        .await
         {
             Ok(()) => {
                 let listener = listener.take().expect("listener is present");
@@ -589,11 +642,11 @@ async fn authenticate_sender(
     clock: &AttemptClock,
     timeouts: AttemptTimeouts,
     stop: &mut mpsc::UnboundedReceiver<RetirementIntent>,
+    entropy: &mut impl EntropySource,
 ) -> Result<(), Terminal> {
     let binding = channel_binding(link).map_err(Terminal::from_error)?;
     let deadline = auth_deadline(clock, timeouts.authentication());
-    let mut entropy = SystemEntropy;
-    let (await_response, start) = envoix_auth::sender_start(token, binding, deadline, &mut entropy)
+    let (await_response, start) = envoix_auth::sender_start(token, binding, deadline, entropy)
         .map_err(|error| Terminal::from_error(AttemptError::Authentication(error)))?;
     if let Err(exit) =
         send_interruptible(link, &start, stop, clock.remaining(deadline.instant().0)).await
@@ -601,27 +654,33 @@ async fn authenticate_sender(
         return Err(auth_wait_terminal(await_response.cancel(), exit));
     }
 
-    let response =
-        match receive_interruptible(link, stop, clock.remaining(deadline.instant().0)).await {
-            Ok(packet) => packet,
-            Err(WaitExit::Stop(intent)) => {
-                let _ = await_response.cancel();
-                return Err(Terminal::retired(intent));
-            }
-            Err(WaitExit::Timeout) => {
-                let error = expired_auth(await_response.deadline_exceeded(AuthMillis(u64::MAX)));
-                return Err(Terminal::from_auth(error));
-            }
-            Err(WaitExit::Session(SessionError::PeerClosed)) => {
-                return Err(Terminal::from_auth(await_response.peer_closed()));
-            }
-            Err(WaitExit::Session(error)) => {
-                return Err(Terminal::from_error(AttemptError::Session(error)));
-            }
-            Err(WaitExit::Protocol) => {
-                return Err(Terminal::from_error(AttemptError::ProtocolEnvelope));
-            }
-        };
+    let response = match receive_interruptible(
+        link,
+        MAX_AUTH_PAYLOAD,
+        stop,
+        clock.remaining(deadline.instant().0),
+    )
+    .await
+    {
+        Ok(packet) => packet,
+        Err(WaitExit::Stop(intent)) => {
+            let _ = await_response.cancel();
+            return Err(Terminal::retired(intent));
+        }
+        Err(WaitExit::Timeout) => {
+            let error = expired_auth(await_response.deadline_exceeded(AuthMillis(u64::MAX)));
+            return Err(Terminal::from_auth(error));
+        }
+        Err(WaitExit::Session(SessionError::PeerClosed)) => {
+            return Err(Terminal::from_auth(await_response.peer_closed()));
+        }
+        Err(WaitExit::Session(error)) => {
+            return Err(Terminal::from_error(AttemptError::Session(error)));
+        }
+        Err(WaitExit::Protocol) => {
+            return Err(Terminal::from_error(AttemptError::ProtocolEnvelope));
+        }
+    };
     let (await_confirm, confirmation) = await_response
         .receive_response(&response, clock.auth_now())
         .map_err(Terminal::from_auth)?;
@@ -636,27 +695,33 @@ async fn authenticate_sender(
         return Err(auth_wait_terminal(await_confirm.cancel(), exit));
     }
 
-    let confirmation =
-        match receive_interruptible(link, stop, clock.remaining(deadline.instant().0)).await {
-            Ok(packet) => packet,
-            Err(WaitExit::Stop(intent)) => {
-                let _ = await_confirm.cancel();
-                return Err(Terminal::retired(intent));
-            }
-            Err(WaitExit::Timeout) => {
-                let error = expired_auth(await_confirm.deadline_exceeded(AuthMillis(u64::MAX)));
-                return Err(Terminal::from_auth(error));
-            }
-            Err(WaitExit::Session(SessionError::PeerClosed)) => {
-                return Err(Terminal::from_auth(await_confirm.peer_closed()));
-            }
-            Err(WaitExit::Session(error)) => {
-                return Err(Terminal::from_error(AttemptError::Session(error)));
-            }
-            Err(WaitExit::Protocol) => {
-                return Err(Terminal::from_error(AttemptError::ProtocolEnvelope));
-            }
-        };
+    let confirmation = match receive_interruptible(
+        link,
+        MAX_AUTH_PAYLOAD,
+        stop,
+        clock.remaining(deadline.instant().0),
+    )
+    .await
+    {
+        Ok(packet) => packet,
+        Err(WaitExit::Stop(intent)) => {
+            let _ = await_confirm.cancel();
+            return Err(Terminal::retired(intent));
+        }
+        Err(WaitExit::Timeout) => {
+            let error = expired_auth(await_confirm.deadline_exceeded(AuthMillis(u64::MAX)));
+            return Err(Terminal::from_auth(error));
+        }
+        Err(WaitExit::Session(SessionError::PeerClosed)) => {
+            return Err(Terminal::from_auth(await_confirm.peer_closed()));
+        }
+        Err(WaitExit::Session(error)) => {
+            return Err(Terminal::from_error(AttemptError::Session(error)));
+        }
+        Err(WaitExit::Protocol) => {
+            return Err(Terminal::from_error(AttemptError::ProtocolEnvelope));
+        }
+    };
     await_confirm
         .receive_confirmation(&confirmation, clock.auth_now())
         .map(|_| ())
@@ -669,11 +734,18 @@ async fn authenticate_receiver(
     clock: &AttemptClock,
     timeouts: AttemptTimeouts,
     stop: &mut mpsc::UnboundedReceiver<RetirementIntent>,
+    entropy: &mut impl EntropySource,
 ) -> Result<(), Terminal> {
     let binding = channel_binding(link).map_err(Terminal::from_error)?;
     let deadline = auth_deadline(clock, timeouts.authentication());
     let await_start = envoix_auth::receiver_wait(binding, deadline);
-    let start = match receive_interruptible(link, stop, clock.remaining(deadline.instant().0)).await
+    let start = match receive_interruptible(
+        link,
+        MAX_AUTH_PAYLOAD,
+        stop,
+        clock.remaining(deadline.instant().0),
+    )
+    .await
     {
         Ok(packet) => packet,
         Err(WaitExit::Stop(intent)) => {
@@ -694,9 +766,8 @@ async fn authenticate_receiver(
             return Err(Terminal::from_error(AttemptError::ProtocolEnvelope));
         }
     };
-    let mut entropy = SystemEntropy;
     let (await_confirm, response) = await_start
-        .receive_start(&start, clock.auth_now(), token, &mut entropy)
+        .receive_start(&start, clock.auth_now(), token, entropy)
         .map_err(Terminal::from_auth)?;
     if let Err(exit) =
         send_interruptible(link, &response, stop, clock.remaining(deadline.instant().0)).await
@@ -704,27 +775,33 @@ async fn authenticate_receiver(
         return Err(auth_wait_terminal(await_confirm.cancel(), exit));
     }
 
-    let confirmation =
-        match receive_interruptible(link, stop, clock.remaining(deadline.instant().0)).await {
-            Ok(packet) => packet,
-            Err(WaitExit::Stop(intent)) => {
-                let _ = await_confirm.cancel();
-                return Err(Terminal::retired(intent));
-            }
-            Err(WaitExit::Timeout) => {
-                let error = expired_auth(await_confirm.deadline_exceeded(AuthMillis(u64::MAX)));
-                return Err(Terminal::from_auth(error));
-            }
-            Err(WaitExit::Session(SessionError::PeerClosed)) => {
-                return Err(Terminal::from_auth(await_confirm.peer_closed()));
-            }
-            Err(WaitExit::Session(error)) => {
-                return Err(Terminal::from_error(AttemptError::Session(error)));
-            }
-            Err(WaitExit::Protocol) => {
-                return Err(Terminal::from_error(AttemptError::ProtocolEnvelope));
-            }
-        };
+    let confirmation = match receive_interruptible(
+        link,
+        MAX_AUTH_PAYLOAD,
+        stop,
+        clock.remaining(deadline.instant().0),
+    )
+    .await
+    {
+        Ok(packet) => packet,
+        Err(WaitExit::Stop(intent)) => {
+            let _ = await_confirm.cancel();
+            return Err(Terminal::retired(intent));
+        }
+        Err(WaitExit::Timeout) => {
+            let error = expired_auth(await_confirm.deadline_exceeded(AuthMillis(u64::MAX)));
+            return Err(Terminal::from_auth(error));
+        }
+        Err(WaitExit::Session(SessionError::PeerClosed)) => {
+            return Err(Terminal::from_auth(await_confirm.peer_closed()));
+        }
+        Err(WaitExit::Session(error)) => {
+            return Err(Terminal::from_error(AttemptError::Session(error)));
+        }
+        Err(WaitExit::Protocol) => {
+            return Err(Terminal::from_error(AttemptError::ProtocolEnvelope));
+        }
+    };
     let (_, response) = await_confirm
         .receive_confirmation(&confirmation, clock.auth_now())
         .map_err(Terminal::from_auth)?;
@@ -766,8 +843,13 @@ async fn transfer_sender(
     {
         return sender_wait_exit(await_ready, exit, clock);
     }
-    let ready = match receive_interruptible(link, stop, clock.remaining(ready_deadline.instant().0))
-        .await
+    let ready = match receive_interruptible(
+        link,
+        MAX_FRAME_SIZE,
+        stop,
+        clock.remaining(ready_deadline.instant().0),
+    )
+    .await
     {
         Ok(packet) => match decode_frame(&packet, await_ready.ingress_state()) {
             Ok(frame) => frame,
@@ -791,15 +873,20 @@ async fn transfer_sender(
     {
         return sender_wait_exit(await_resume, exit, clock);
     }
-    let resume =
-        match receive_interruptible(link, stop, clock.remaining(resume_deadline.instant().0)).await
-        {
-            Ok(packet) => match decode_frame(&packet, await_resume.ingress_state()) {
-                Ok(frame) => frame,
-                Err(_) => return Terminal::protocol_violation(plan),
-            },
-            Err(exit) => return sender_wait_exit(await_resume, exit, clock),
-        };
+    let resume = match receive_interruptible(
+        link,
+        MAX_FRAME_SIZE,
+        stop,
+        clock.remaining(resume_deadline.instant().0),
+    )
+    .await
+    {
+        Ok(packet) => match decode_frame(&packet, await_resume.ingress_state()) {
+            Ok(frame) => frame,
+            Err(_) => return Terminal::protocol_violation(plan),
+        },
+        Err(exit) => return sender_wait_exit(await_resume, exit, clock),
+    };
     if !resume_matches_plan(&resume, plan) {
         return Terminal::protocol_violation(plan);
     }
@@ -850,6 +937,7 @@ async fn transfer_sender(
                 }
                 let ack = match receive_interruptible(
                     link,
+                    MAX_FRAME_SIZE,
                     stop,
                     clock.remaining(ack_deadline.instant().0),
                 )
@@ -921,8 +1009,13 @@ async fn transfer_receiver(
         Ok(state) => state,
         Err(error) => return Terminal::from_transfer_error(error),
     };
-    let hello = match receive_interruptible(link, stop, clock.remaining(hello_deadline.instant().0))
-        .await
+    let hello = match receive_interruptible(
+        link,
+        MAX_FRAME_SIZE,
+        stop,
+        clock.remaining(hello_deadline.instant().0),
+    )
+    .await
     {
         Ok(packet) => match decode_frame(&packet, await_hello.ingress_state()) {
             Ok(frame) => frame,
@@ -946,15 +1039,20 @@ async fn transfer_receiver(
     {
         return receiver_wait_exit(await_header, exit, clock);
     }
-    let header =
-        match receive_interruptible(link, stop, clock.remaining(header_deadline.instant().0)).await
-        {
-            Ok(packet) => match decode_frame(&packet, await_header.ingress_state()) {
-                Ok(frame) => frame,
-                Err(_) => return Terminal::protocol_violation(plan),
-            },
-            Err(exit) => return receiver_wait_exit(await_header, exit, clock),
-        };
+    let header = match receive_interruptible(
+        link,
+        MAX_FRAME_SIZE,
+        stop,
+        clock.remaining(header_deadline.instant().0),
+    )
+    .await
+    {
+        Ok(packet) => match decode_frame(&packet, await_header.ingress_state()) {
+            Ok(frame) => frame,
+            Err(_) => return Terminal::protocol_violation(plan),
+        },
+        Err(exit) => return receiver_wait_exit(await_header, exit, clock),
+    };
     let data_deadline = transfer_deadline(clock, spec.timeouts.transfer_idle());
     let (mut receiving, resume) = match await_header.receive_header(
         header,
@@ -980,6 +1078,7 @@ async fn transfer_receiver(
     loop {
         let packet = match receive_interruptible(
             link,
+            MAX_FRAME_SIZE,
             stop,
             clock.remaining(receiving.deadline().instant().0),
         )
@@ -1269,6 +1368,7 @@ async fn send_interruptible(
 
 async fn receive_interruptible(
     link: &mut dyn SessionLink,
+    maximum_payload: usize,
     stop: &mut mpsc::UnboundedReceiver<RetirementIntent>,
     wait: Duration,
 ) -> Result<Vec<u8>, WaitExit> {
@@ -1278,7 +1378,7 @@ async fn receive_interruptible(
             Some(intent) => Err(WaitExit::Stop(intent)),
             None => Err(WaitExit::Stop(RetirementIntent::Cancel)),
         },
-        result = timeout(wait, link.receive_packet()) => {
+        result = timeout(wait, link.receive_packet(maximum_payload)) => {
             result.map_err(|_| WaitExit::Timeout)?.map_err(WaitExit::Session)
         }
     }

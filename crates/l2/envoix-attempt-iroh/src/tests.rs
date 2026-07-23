@@ -11,7 +11,8 @@ use envoix_attempt_api::{
 };
 use envoix_outcomes::OutcomeCode;
 use envoix_pairing::{
-    DataPlaneToken, PairingCode, SystemEntropy, initiator_start, responder_respond,
+    DataPlaneToken, EntropyError, EntropySource, PairingCode, SystemEntropy, initiator_start,
+    responder_respond,
 };
 use envoix_protocol::{ContentHash, FrameKind};
 use envoix_session_iroh::{
@@ -30,6 +31,26 @@ use crate::{
     AttemptTimeouts, AttemptTransferSpec, SharedAttemptSupervisor, spawn_iroh_receiver,
     spawn_receiver, spawn_sender,
 };
+
+struct TestEntropy {
+    next: u8,
+}
+
+impl TestEntropy {
+    const fn new(seed: u8) -> Self {
+        Self { next: seed }
+    }
+}
+
+impl EntropySource for TestEntropy {
+    fn fill(&mut self, destination: &mut [u8]) -> Result<(), EntropyError> {
+        for byte in destination {
+            *byte = self.next;
+            self.next = self.next.wrapping_add(1);
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone)]
 struct MemorySource {
@@ -196,7 +217,7 @@ impl SessionLink for MemoryLink {
             .map_err(|_| SessionError::PeerClosed)
     }
 
-    async fn receive_packet(&mut self) -> Result<Vec<u8>, SessionError> {
+    async fn receive_packet(&mut self, _maximum_payload: usize) -> Result<Vec<u8>, SessionError> {
         self.receiver.recv().await.ok_or(SessionError::PeerClosed)
     }
 
@@ -397,6 +418,7 @@ async fn attempt_iroh_generation_and_retirement() {
         source.clone(),
         first_links.sender,
         sender_supervisor.clone(),
+        TestEntropy::new(0x10),
     )
     .unwrap();
     let mut first_receiver = spawn_receiver(
@@ -406,6 +428,7 @@ async fn attempt_iroh_generation_and_retirement() {
         sink.clone(),
         first_links.receiver,
         receiver_supervisor.clone(),
+        TestEntropy::new(0x80),
     )
     .unwrap();
     assert_eq!(first_sender.open_result(), OpenResult::Opened);
@@ -451,6 +474,7 @@ async fn attempt_iroh_generation_and_retirement() {
         source,
         second_links.sender,
         sender_supervisor.clone(),
+        TestEntropy::new(0x20),
     )
     .unwrap();
     let mut second_receiver = spawn_receiver(
@@ -460,6 +484,7 @@ async fn attempt_iroh_generation_and_retirement() {
         sink.clone(),
         second_links.receiver,
         receiver_supervisor.clone(),
+        TestEntropy::new(0x90),
     )
     .unwrap();
     assert_eq!(second_sender.open_result(), OpenResult::Superseded);
@@ -556,6 +581,7 @@ async fn failed_attempt_stays_terminal_until_finalize() {
         },
         links.sender,
         supervisor,
+        TestEntropy::new(0x30),
     )
     .unwrap();
     loop {
@@ -598,6 +624,7 @@ async fn iroh_receiver_retries_a_failed_pairing() {
         listener,
         AuthFailureBudget::new(2).unwrap(),
         receiver_supervisor,
+        TestEntropy::new(0xa0),
     )
     .unwrap();
 
@@ -618,6 +645,7 @@ async fn iroh_receiver_retries_a_failed_pairing() {
         },
         bad_link,
         sender_supervisor.clone(),
+        TestEntropy::new(0x40),
     )
     .unwrap();
     let rejected_outcome = terminal_outcome(&mut bad_sender).await;
@@ -646,6 +674,7 @@ async fn iroh_receiver_retries_a_failed_pairing() {
         },
         good_link,
         sender_supervisor,
+        TestEntropy::new(0x50),
     )
     .unwrap();
     let (sender_outcome, receiver_outcome) = tokio::join!(

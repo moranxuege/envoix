@@ -15,6 +15,18 @@ const DEADLINE: Deadline = Deadline::at(MonotonicMillis(1_000));
 const BEFORE_DEADLINE: MonotonicMillis = MonotonicMillis(999);
 const AT_DEADLINE: MonotonicMillis = MonotonicMillis(1_000);
 
+#[test]
+fn auth_domain_tracks_data_wire_dialect() {
+    let domain = std::str::from_utf8(crate::identifiers::SPAKE2_DOMAIN)
+        .expect("registered auth domain is UTF-8");
+    let expected_suffix = format!("/v{}", envoix_protocol::identifiers::DATA_WIRE_VERSION);
+
+    assert!(
+        domain.ends_with(&expected_suffix),
+        "a data-wire version bump must also bump the auth domain"
+    );
+}
+
 macro_rules! assert_wait_closure {
     ($state:expr) => {{
         assert!(matches!(

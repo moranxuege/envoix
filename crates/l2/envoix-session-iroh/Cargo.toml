@@ -19,5 +19,6 @@ tokio.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+envoix-auth = { path = "../envoix-auth" }
 envoix-protocol = { path = "../../l1/envoix-protocol" }
 envoix-types = { path = "../../l0/envoix-types" }

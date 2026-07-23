@@ -1,7 +1,11 @@
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::time::Duration;
 
-use envoix_protocol::{CompleteAck, Frame, Hello, IngressState, Ready, decode_frame, encode_frame};
+use envoix_auth::{AUTH_WIRE_ID, MAX_AUTH_PAYLOAD};
+use envoix_protocol::identifiers::{DATA_MAGIC, DATA_WIRE_VERSION};
+use envoix_protocol::{
+    CompleteAck, Frame, Hello, IngressState, MAX_FRAME_SIZE, Ready, decode_frame, encode_frame,
+};
 use envoix_types::TransferId;
 
 use crate::{
@@ -56,7 +60,7 @@ async fn session_iroh_loopback_link() {
     let hello = encode_frame(&Frame::Hello(Hello)).unwrap();
     client.send_packet(&hello).await.unwrap();
     let mut server = server.await.unwrap();
-    let received = server.receive_packet().await.unwrap();
+    let received = server.receive_packet(MAX_FRAME_SIZE).await.unwrap();
     assert_eq!(
         decode_frame(&received, IngressState::AwaitHello).unwrap(),
         Frame::Hello(Hello)
@@ -70,7 +74,7 @@ async fn session_iroh_loopback_link() {
 
     let ready = encode_frame(&Frame::Ready(Ready)).unwrap();
     server.send_packet(&ready).await.unwrap();
-    let received = client.receive_packet().await.unwrap();
+    let received = client.receive_packet(MAX_FRAME_SIZE).await.unwrap();
     assert_eq!(
         decode_frame(&received, IngressState::AwaitReady).unwrap(),
         Frame::Ready(Ready)
@@ -93,7 +97,7 @@ async fn session_iroh_loopback_link() {
     }))
     .unwrap();
     server.send_packet(&ack).await.unwrap();
-    let received = client.receive_packet().await.unwrap();
+    let received = client.receive_packet(MAX_FRAME_SIZE).await.unwrap();
     assert_eq!(
         decode_frame(&received, IngressState::AwaitCompleteAck).unwrap(),
         Frame::CompleteAck(CompleteAck {
@@ -103,6 +107,57 @@ async fn session_iroh_loopback_link() {
 
     let (server_close, client_close) = tokio::join!(
         server.close(CloseOrdering::AwaitPeer, timeouts()),
+        client.close(CloseOrdering::Active, timeouts())
+    );
+    server_close.unwrap();
+    client_close.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn receive_bound_rejects_oversized_auth_header_before_body_read() {
+    let cancellation = SessionCancellation::new();
+    let listener = IrohListener::bind(loopback_config(), &cancellation, timeouts())
+        .await
+        .unwrap();
+    let target = listener.addr();
+    let server_cancel = cancellation.clone();
+    let server = tokio::spawn(async move {
+        let candidate = listener
+            .accept_candidate(&server_cancel, timeouts())
+            .await
+            .unwrap();
+        listener.promote(candidate)
+    });
+    let mut client = dial(loopback_config(), target, &cancellation, timeouts())
+        .await
+        .unwrap();
+
+    let declared = MAX_AUTH_PAYLOAD + 1;
+    let mut header = [0_u8; envoix_protocol::HEADER_LEN];
+    header[..4].copy_from_slice(DATA_MAGIC);
+    header[4..6].copy_from_slice(&DATA_WIRE_VERSION.to_be_bytes());
+    header[6] = AUTH_WIRE_ID;
+    header[8..12].copy_from_slice(&(declared as u32).to_be_bytes());
+    client.send_packet(&header).await.unwrap();
+
+    let mut server = server.await.unwrap();
+    let error = tokio::time::timeout(
+        Duration::from_secs(1),
+        server.receive_packet(MAX_AUTH_PAYLOAD),
+    )
+    .await
+    .expect("phase bound must reject from the header without waiting for a body")
+    .unwrap_err();
+    assert_eq!(
+        error,
+        crate::SessionError::PayloadTooLarge {
+            declared,
+            maximum: MAX_AUTH_PAYLOAD,
+        }
+    );
+
+    let (server_close, client_close) = tokio::join!(
+        server.close(CloseOrdering::Active, timeouts()),
         client.close(CloseOrdering::Active, timeouts())
     );
     server_close.unwrap();

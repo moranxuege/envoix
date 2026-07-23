@@ -89,7 +89,7 @@ impl Default for SessionCancellation {
 #[async_trait]
 pub trait SessionLink: Send {
     async fn send_packet(&mut self, packet: &[u8]) -> Result<(), SessionError>;
-    async fn receive_packet(&mut self) -> Result<Vec<u8>, SessionError>;
+    async fn receive_packet(&mut self, maximum_payload: usize) -> Result<Vec<u8>, SessionError>;
 
     fn export_keying_material(
         &self,
@@ -308,7 +308,7 @@ impl SessionLink for IrohSessionLink {
             .map_err(|_| SessionError::operation(SessionOperation::WriteFrame))
     }
 
-    async fn receive_packet(&mut self) -> Result<Vec<u8>, SessionError> {
+    async fn receive_packet(&mut self, maximum_payload: usize) -> Result<Vec<u8>, SessionError> {
         let mut header = [0_u8; HEADER_LEN];
         self.recv
             .read_exact(&mut header)
@@ -318,6 +318,13 @@ impl SessionLink for IrohSessionLink {
             DecodeError::UnsupportedVersion { .. } => SessionError::VersionMismatch,
             _ => SessionError::MalformedEnvelope,
         })?;
+        let payload_len = total - HEADER_LEN;
+        if payload_len > maximum_payload {
+            return Err(SessionError::PayloadTooLarge {
+                declared: payload_len,
+                maximum: maximum_payload,
+            });
+        }
         let mut packet = vec![0_u8; total];
         packet[..HEADER_LEN].copy_from_slice(&header);
         self.recv

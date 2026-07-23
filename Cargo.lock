@@ -895,6 +895,26 @@ dependencies = [
 [[package]]
 name = "envoix-cli"
 version = "0.2.0"
+dependencies = [
+ "blake3",
+ "envoix-attempt-api",
+ "envoix-attempt-iroh",
+ "envoix-invite",
+ "envoix-outcomes",
+ "envoix-pairing",
+ "envoix-protocol",
+ "envoix-rendezvous",
+ "envoix-rendezvous-iroh",
+ "envoix-server",
+ "envoix-session-iroh",
+ "envoix-transfer",
+ "envoix-types",
+ "iroh",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "envoix-config"
@@ -1015,6 +1035,7 @@ name = "envoix-session-iroh"
 version = "0.2.0"
 dependencies = [
  "async-trait",
+ "envoix-auth",
  "envoix-outcomes",
  "envoix-protocol",
  "envoix-types",
