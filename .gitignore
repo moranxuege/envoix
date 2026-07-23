@@ -15,6 +15,7 @@ __pycache__/
 /apps/envoix-apple/*.xcodeproj
 /apps/envoix-apple/build*/
 /apps/envoix-apple/*.zip
+*.xctestrun
 
 # cargo-swift generated Swift package (binary xcframework)
 /crates/envoix-ffi/EnvoixCore/
