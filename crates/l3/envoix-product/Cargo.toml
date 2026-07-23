@@ -7,3 +7,12 @@ license.workspace = true
 [package.metadata.envoix]
 layer = "L3"
 role = "library"
+
+[dependencies]
+envoix-attempt-api = { path = "../../l1/envoix-attempt-api" }
+envoix-capabilities = { path = "../../l1/envoix-capabilities" }
+envoix-outcomes = { path = "../../l0/envoix-outcomes" }
+envoix-types = { path = "../../l0/envoix-types" }
+getrandom.workspace = true
+serde.workspace = true
+serde_json.workspace = true

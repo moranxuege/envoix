@@ -980,6 +980,15 @@ version = "0.2.0"
 [[package]]
 name = "envoix-product"
 version = "0.2.0"
+dependencies = [
+ "envoix-attempt-api",
+ "envoix-capabilities",
+ "envoix-outcomes",
+ "envoix-types",
+ "getrandom 0.3.4",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "envoix-protocol"
