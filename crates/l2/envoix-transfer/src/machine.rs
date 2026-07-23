@@ -1,0 +1,1218 @@
+use blake3::Hasher;
+use envoix_protocol::{
+    Abort, Chunk, Complete, CompleteAck, ContentHash, FileHeader, Frame, FrameKind, Hello,
+    IngressState, MAX_CHUNK_SIZE, ProtocolReason, Ready, ResumeMode, ResumeStatus,
+};
+use envoix_types::{ByteCount, OfferedName, TransferId};
+
+use crate::{
+    MachineFailure, ProtocolViolation, ResumeFact, SourceReader, StagingSink, StorageFault,
+    TransferError,
+};
+
+pub const CHECKPOINT_INTERVAL: u64 = 8 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct MonotonicMillis(pub u64);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Deadline(MonotonicMillis);
+
+impl Deadline {
+    pub const fn at(time: MonotonicMillis) -> Self {
+        Self(time)
+    }
+
+    pub const fn instant(self) -> MonotonicMillis {
+        self.0
+    }
+
+    fn elapsed(self, now: MonotonicMillis) -> bool {
+        now >= self.0
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SenderRequest {
+    transfer_id: TransferId,
+    offered_name: OfferedName,
+    file_size: ByteCount,
+    chunk_size: ByteCount,
+    resume: ResumeMode,
+}
+
+impl SenderRequest {
+    pub fn new(
+        transfer_id: TransferId,
+        offered_name: OfferedName,
+        file_size: ByteCount,
+        chunk_size: ByteCount,
+        resume: ResumeMode,
+    ) -> Result<Self, TransferError> {
+        validate_chunk_size(chunk_size.get()).map_err(TransferError::Protocol)?;
+        Ok(Self {
+            transfer_id,
+            offered_name,
+            file_size,
+            chunk_size,
+            resume,
+        })
+    }
+
+    pub const fn transfer_id(&self) -> TransferId {
+        self.transfer_id
+    }
+
+    pub const fn file_size(&self) -> ByteCount {
+        self.file_size
+    }
+
+    pub const fn chunk_size(&self) -> ByteCount {
+        self.chunk_size
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClaimedComplete {
+    pub file_size: ByteCount,
+    pub file_hash: ContentHash,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SenderProgress {
+    pub bytes_sent: ByteCount,
+    pub file_size: ByteCount,
+    pub resumed_bytes: ByteCount,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReceiverProgress {
+    pub bytes_staged: ByteCount,
+    pub file_size: ByteCount,
+    pub resumed_bytes: ByteCount,
+}
+
+struct Wait<S> {
+    state: S,
+    deadline: Deadline,
+}
+
+impl<S> Wait<S> {
+    fn new(state: S, deadline: Deadline) -> Self {
+        Self { state, deadline }
+    }
+
+    fn into_live(self, now: MonotonicMillis) -> Result<S, MachineFailure> {
+        if self.deadline.elapsed(now) {
+            Err(MachineFailure::terminal(TransferError::Timeout))
+        } else {
+            Ok(self.state)
+        }
+    }
+}
+
+trait WaitIdentity {
+    fn transfer_id(&self) -> Option<TransferId>;
+}
+
+macro_rules! bounded_wait {
+    ($name:ident, $state:ident) => {
+        pub struct $name(Wait<$state>);
+
+        impl $name {
+            pub const fn deadline(&self) -> Deadline {
+                self.0.deadline
+            }
+
+            pub fn deadline_exceeded(self, now: MonotonicMillis) -> Result<Self, MachineFailure> {
+                if self.0.deadline.elapsed(now) {
+                    Err(MachineFailure::terminal(TransferError::Timeout))
+                } else {
+                    Ok(self)
+                }
+            }
+
+            pub fn peer_closed(self) -> MachineFailure {
+                MachineFailure::terminal(TransferError::PeerClosed)
+            }
+
+            pub fn cancelled(self) -> MachineFailure {
+                MachineFailure::for_local(
+                    TransferError::Cancelled,
+                    self.0.state.transfer_id(),
+                    ProtocolReason::Cancelled,
+                )
+            }
+
+            pub fn paused(self) -> MachineFailure {
+                MachineFailure::for_local(
+                    TransferError::Paused,
+                    self.0.state.transfer_id(),
+                    ProtocolReason::Paused,
+                )
+            }
+        }
+    };
+}
+
+struct SenderReadyState {
+    request: SenderRequest,
+}
+
+impl WaitIdentity for SenderReadyState {
+    fn transfer_id(&self) -> Option<TransferId> {
+        Some(self.request.transfer_id)
+    }
+}
+
+struct SenderResumeState {
+    request: SenderRequest,
+}
+
+impl WaitIdentity for SenderResumeState {
+    fn transfer_id(&self) -> Option<TransferId> {
+        Some(self.request.transfer_id)
+    }
+}
+
+struct SenderAckState {
+    completed: SenderCompleted,
+}
+
+impl WaitIdentity for SenderAckState {
+    fn transfer_id(&self) -> Option<TransferId> {
+        Some(self.completed.transfer_id)
+    }
+}
+
+struct ReceiverHelloState {
+    chunk_size: ByteCount,
+}
+
+impl WaitIdentity for ReceiverHelloState {
+    fn transfer_id(&self) -> Option<TransferId> {
+        None
+    }
+}
+
+struct ReceiverHeaderState {
+    chunk_size: ByteCount,
+}
+
+impl WaitIdentity for ReceiverHeaderState {
+    fn transfer_id(&self) -> Option<TransferId> {
+        None
+    }
+}
+
+bounded_wait!(SenderAwaitReady, SenderReadyState);
+bounded_wait!(SenderAwaitResume, SenderResumeState);
+bounded_wait!(SenderAwaitAck, SenderAckState);
+bounded_wait!(ReceiverAwaitHello, ReceiverHelloState);
+bounded_wait!(ReceiverAwaitHeader, ReceiverHeaderState);
+
+pub fn sender_start(request: SenderRequest, ready_deadline: Deadline) -> (SenderAwaitReady, Frame) {
+    (
+        SenderAwaitReady(Wait::new(SenderReadyState { request }, ready_deadline)),
+        Frame::Hello(Hello),
+    )
+}
+
+pub fn receiver_start(
+    chunk_size: ByteCount,
+    hello_deadline: Deadline,
+) -> Result<ReceiverAwaitHello, TransferError> {
+    validate_chunk_size(chunk_size.get()).map_err(TransferError::Protocol)?;
+    Ok(ReceiverAwaitHello(Wait::new(
+        ReceiverHelloState { chunk_size },
+        hello_deadline,
+    )))
+}
+
+impl SenderAwaitReady {
+    pub const fn ingress_state(&self) -> IngressState {
+        IngressState::AwaitReady
+    }
+
+    pub fn receive_ready(
+        self,
+        frame: Frame,
+        now: MonotonicMillis,
+        resume_deadline: Deadline,
+    ) -> Result<(SenderAwaitResume, Frame), MachineFailure> {
+        let state = self.0.into_live(now)?;
+        match frame {
+            Frame::Ready(_) => {
+                let header = FileHeader {
+                    transfer_id: state.request.transfer_id,
+                    offered_name: state.request.offered_name.clone(),
+                    file_size: state.request.file_size,
+                    chunk_size: state.request.chunk_size,
+                    resume: state.request.resume,
+                };
+                Ok((
+                    SenderAwaitResume(Wait::new(
+                        SenderResumeState {
+                            request: state.request,
+                        },
+                        resume_deadline,
+                    )),
+                    Frame::FileHeader(header),
+                ))
+            }
+            Frame::Abort(abort) => Err(peer_abort(abort)),
+            other => Err(protocol_failure(
+                state.request.transfer_id,
+                IngressState::AwaitReady,
+                other.kind(),
+            )),
+        }
+    }
+}
+
+impl SenderAwaitResume {
+    pub const fn ingress_state(&self) -> IngressState {
+        IngressState::AwaitResumeStatus
+    }
+
+    pub fn receive_resume(
+        self,
+        frame: Frame,
+        now: MonotonicMillis,
+        ack_deadline: Deadline,
+        source: &mut impl SourceReader,
+    ) -> Result<SenderSending, MachineFailure> {
+        let state = self.0.into_live(now)?;
+        let status = match frame {
+            Frame::ResumeStatus(status) => status,
+            Frame::Abort(abort) => return Err(peer_abort(abort)),
+            other => {
+                return Err(protocol_failure(
+                    state.request.transfer_id,
+                    IngressState::AwaitResumeStatus,
+                    other.kind(),
+                ));
+            }
+        };
+        validate_resume_status(&state.request, &status)
+            .map_err(|error| MachineFailure::from_engine_error(error, state.request.transfer_id))?;
+
+        let mut hasher = Box::new(Hasher::new());
+        let mut offset = 0;
+        let mut index = 0;
+        if status.bytes_received.get() > 0 {
+            let expected_hash = status.prefix_hash.ok_or_else(|| {
+                MachineFailure::from_engine_error(
+                    TransferError::Protocol(ProtocolViolation::MissingPrefixHash),
+                    state.request.transfer_id,
+                )
+            })?;
+            hash_source_prefix(
+                source,
+                status.bytes_received.get(),
+                state.request.chunk_size.get() as usize,
+                &mut hasher,
+            )
+            .map_err(|error| MachineFailure::from_engine_error(error, state.request.transfer_id))?;
+            if content_hash(&hasher) == expected_hash {
+                offset = status.bytes_received.get();
+                index = status.next_chunk_index;
+            } else {
+                hasher = Box::new(Hasher::new());
+            }
+        }
+
+        Ok(SenderSending {
+            request: state.request,
+            offset,
+            index,
+            resumed_bytes: offset,
+            hasher,
+            ack_deadline,
+        })
+    }
+}
+
+pub struct SenderSending {
+    request: SenderRequest,
+    offset: u64,
+    index: u64,
+    resumed_bytes: u64,
+    hasher: Box<Hasher>,
+    ack_deadline: Deadline,
+}
+
+impl SenderSending {
+    pub const fn progress(&self) -> SenderProgress {
+        SenderProgress {
+            bytes_sent: ByteCount::new(self.offset),
+            file_size: self.request.file_size,
+            resumed_bytes: ByteCount::new(self.resumed_bytes),
+        }
+    }
+
+    pub fn next_frame(
+        mut self,
+        source: &mut impl SourceReader,
+    ) -> Result<SenderStep, MachineFailure> {
+        if self.offset == self.request.file_size.get() {
+            let file_hash = content_hash(&self.hasher);
+            let completed = SenderCompleted {
+                transfer_id: self.request.transfer_id,
+                file_size: self.request.file_size,
+                file_hash,
+            };
+            let frame = Frame::Complete(Complete {
+                transfer_id: self.request.transfer_id,
+                file_hash,
+            });
+            return Ok(SenderStep::Complete {
+                state: SenderAwaitAck(Wait::new(SenderAckState { completed }, self.ack_deadline)),
+                frame,
+            });
+        }
+
+        let remaining = self.request.file_size.get() - self.offset;
+        let chunk_len = remaining.min(self.request.chunk_size.get()) as usize;
+        let mut bytes = vec![0_u8; chunk_len];
+        read_source_exact(
+            source,
+            self.offset,
+            &mut bytes,
+            self.request.file_size.get(),
+        )
+        .map_err(|error| MachineFailure::from_engine_error(error, self.request.transfer_id))?;
+        self.hasher.update(&bytes);
+        let frame = Frame::Chunk(Chunk {
+            transfer_id: self.request.transfer_id,
+            index: self.index,
+            offset: ByteCount::new(self.offset),
+            bytes,
+        });
+        self.offset += chunk_len as u64;
+        self.index += 1;
+        let progress = self.progress();
+        Ok(SenderStep::Chunk {
+            state: self,
+            frame,
+            progress,
+        })
+    }
+
+    pub fn peer_closed(self) -> MachineFailure {
+        MachineFailure::terminal(TransferError::PeerClosed)
+    }
+
+    pub fn cancelled(self) -> MachineFailure {
+        MachineFailure::for_local(
+            TransferError::Cancelled,
+            Some(self.request.transfer_id),
+            ProtocolReason::Cancelled,
+        )
+    }
+
+    pub fn paused(self) -> MachineFailure {
+        MachineFailure::for_local(
+            TransferError::Paused,
+            Some(self.request.transfer_id),
+            ProtocolReason::Paused,
+        )
+    }
+}
+
+pub enum SenderStep {
+    Chunk {
+        state: SenderSending,
+        frame: Frame,
+        progress: SenderProgress,
+    },
+    Complete {
+        state: SenderAwaitAck,
+        frame: Frame,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SenderCompleted {
+    pub transfer_id: TransferId,
+    pub file_size: ByteCount,
+    pub file_hash: ContentHash,
+}
+
+impl SenderAwaitAck {
+    pub const fn ingress_state(&self) -> IngressState {
+        IngressState::AwaitCompleteAck
+    }
+
+    pub fn receive_ack(
+        self,
+        frame: Frame,
+        now: MonotonicMillis,
+    ) -> Result<SenderCompleted, MachineFailure> {
+        let state = self.0.into_live(now)?;
+        match frame {
+            Frame::CompleteAck(ack) if ack.transfer_id == state.completed.transfer_id => {
+                Ok(state.completed)
+            }
+            Frame::CompleteAck(_) => Err(MachineFailure::from_engine_error(
+                TransferError::Protocol(ProtocolViolation::TransferIdMismatch),
+                state.completed.transfer_id,
+            )),
+            Frame::Abort(abort) => Err(peer_abort(abort)),
+            other => Err(protocol_failure(
+                state.completed.transfer_id,
+                IngressState::AwaitCompleteAck,
+                other.kind(),
+            )),
+        }
+    }
+}
+
+impl ReceiverAwaitHello {
+    pub const fn ingress_state(&self) -> IngressState {
+        IngressState::AwaitHello
+    }
+
+    pub fn receive_hello(
+        self,
+        frame: Frame,
+        now: MonotonicMillis,
+        header_deadline: Deadline,
+    ) -> Result<(ReceiverAwaitHeader, Frame), MachineFailure> {
+        let state = self.0.into_live(now)?;
+        match frame {
+            Frame::Hello(_) => Ok((
+                ReceiverAwaitHeader(Wait::new(
+                    ReceiverHeaderState {
+                        chunk_size: state.chunk_size,
+                    },
+                    header_deadline,
+                )),
+                Frame::Ready(Ready),
+            )),
+            Frame::Abort(abort) => Err(peer_abort(abort)),
+            other => Err(MachineFailure::for_local(
+                TransferError::Protocol(ProtocolViolation::UnexpectedFrame {
+                    state: IngressState::AwaitHello,
+                    actual: other.kind(),
+                }),
+                None,
+                ProtocolReason::ProtocolViolation,
+            )),
+        }
+    }
+}
+
+impl ReceiverAwaitHeader {
+    pub const fn ingress_state(&self) -> IngressState {
+        IngressState::AwaitFileHeader
+    }
+
+    pub fn receive_header(
+        self,
+        frame: Frame,
+        now: MonotonicMillis,
+        data_deadline: Deadline,
+        claim: Option<ClaimedComplete>,
+        sink: &mut impl StagingSink,
+    ) -> Result<(ReceiverReceiving, Frame), MachineFailure> {
+        let state = self.0.into_live(now)?;
+        let header = match frame {
+            Frame::FileHeader(header) => header,
+            Frame::Abort(abort) => return Err(peer_abort(abort)),
+            other => {
+                return Err(MachineFailure::for_local(
+                    TransferError::Protocol(ProtocolViolation::UnexpectedFrame {
+                        state: IngressState::AwaitFileHeader,
+                        actual: other.kind(),
+                    }),
+                    None,
+                    ProtocolReason::ProtocolViolation,
+                ));
+            }
+        };
+        validate_header(&header, state.chunk_size)
+            .map_err(|error| MachineFailure::from_engine_error(error, header.transfer_id))?;
+
+        let claim = if matches!(header.resume, ResumeMode::Allowed) {
+            claim
+        } else {
+            None
+        };
+        let (mode, resume_fact, hasher, prefix_hash) = match claim {
+            Some(claim) => {
+                if claim.file_size != header.file_size {
+                    return Err(MachineFailure::from_engine_error(
+                        TransferError::IntegrityMismatch,
+                        header.transfer_id,
+                    ));
+                }
+                let fact = ResumeFact {
+                    bytes_staged: claim.file_size,
+                    next_chunk_index: validated_next_index(
+                        claim.file_size.get(),
+                        header.chunk_size.get(),
+                    ),
+                };
+                (
+                    ReceiveMode::Claim(claim),
+                    fact,
+                    Box::new(Hasher::new()),
+                    claim.file_hash,
+                )
+            }
+            None => {
+                let prepared = prepare_staging(&header, sink)?;
+                (
+                    ReceiveMode::Staging,
+                    prepared.fact,
+                    prepared.hasher,
+                    prepared.prefix_hash,
+                )
+            }
+        };
+
+        let status = ResumeStatus {
+            transfer_id: header.transfer_id,
+            next_chunk_index: resume_fact.next_chunk_index,
+            bytes_received: resume_fact.bytes_staged,
+            prefix_hash: Some(prefix_hash),
+        };
+        let receiving = ReceiverReceiving {
+            header,
+            mode,
+            expected_offset: resume_fact.bytes_staged.get(),
+            expected_index: resume_fact.next_chunk_index,
+            resumed_bytes: resume_fact.bytes_staged.get(),
+            last_checkpoint: resume_fact.bytes_staged.get(),
+            hasher,
+            deadline: data_deadline,
+        };
+        Ok((receiving, Frame::ResumeStatus(status)))
+    }
+}
+
+enum ReceiveMode {
+    Staging,
+    Claim(ClaimedComplete),
+}
+
+pub struct ReceiverReceiving {
+    header: FileHeader,
+    mode: ReceiveMode,
+    expected_offset: u64,
+    expected_index: u64,
+    resumed_bytes: u64,
+    last_checkpoint: u64,
+    hasher: Box<Hasher>,
+    deadline: Deadline,
+}
+
+impl ReceiverReceiving {
+    pub const fn ingress_state(&self) -> IngressState {
+        IngressState::ReceivingData
+    }
+
+    pub const fn deadline(&self) -> Deadline {
+        self.deadline
+    }
+
+    pub const fn progress(&self) -> ReceiverProgress {
+        ReceiverProgress {
+            bytes_staged: ByteCount::new(self.expected_offset),
+            file_size: self.header.file_size,
+            resumed_bytes: ByteCount::new(self.resumed_bytes),
+        }
+    }
+
+    pub fn receive(
+        self,
+        frame: Frame,
+        now: MonotonicMillis,
+        next_deadline: Deadline,
+        sink: &mut impl StagingSink,
+    ) -> Result<ReceiverStep, MachineFailure> {
+        if self.deadline.elapsed(now) {
+            self.best_effort_checkpoint(sink);
+            return Err(MachineFailure::terminal(TransferError::Timeout));
+        }
+        if let Frame::Abort(abort) = frame {
+            self.best_effort_checkpoint(sink);
+            return Err(peer_abort(abort));
+        }
+
+        match self.mode {
+            ReceiveMode::Claim(claim) => self.receive_claim(frame, claim),
+            ReceiveMode::Staging => match frame {
+                Frame::Chunk(chunk) => self.receive_chunk(chunk, next_deadline, sink),
+                Frame::Complete(complete) => self.receive_complete(complete, sink),
+                other => {
+                    self.best_effort_checkpoint(sink);
+                    Err(protocol_failure(
+                        self.header.transfer_id,
+                        IngressState::ReceivingData,
+                        other.kind(),
+                    ))
+                }
+            },
+        }
+    }
+
+    pub fn deadline_exceeded(
+        self,
+        now: MonotonicMillis,
+        sink: &mut impl StagingSink,
+    ) -> Result<Self, MachineFailure> {
+        if self.deadline.elapsed(now) {
+            self.best_effort_checkpoint(sink);
+            Err(MachineFailure::terminal(TransferError::Timeout))
+        } else {
+            Ok(self)
+        }
+    }
+
+    pub fn peer_closed(self, sink: &mut impl StagingSink) -> MachineFailure {
+        self.best_effort_checkpoint(sink);
+        MachineFailure::terminal(TransferError::PeerClosed)
+    }
+
+    pub fn cancelled(self, sink: &mut impl StagingSink) -> MachineFailure {
+        self.best_effort_checkpoint(sink);
+        MachineFailure::for_local(
+            TransferError::Cancelled,
+            Some(self.header.transfer_id),
+            ProtocolReason::Cancelled,
+        )
+    }
+
+    pub fn paused(self, sink: &mut impl StagingSink) -> MachineFailure {
+        self.best_effort_checkpoint(sink);
+        MachineFailure::for_local(
+            TransferError::Paused,
+            Some(self.header.transfer_id),
+            ProtocolReason::Paused,
+        )
+    }
+
+    fn receive_claim(
+        self,
+        frame: Frame,
+        claim: ClaimedComplete,
+    ) -> Result<ReceiverStep, MachineFailure> {
+        match frame {
+            Frame::Complete(complete) => {
+                validate_transfer_id(self.header.transfer_id, complete.transfer_id)?;
+                if complete.file_hash != claim.file_hash {
+                    return Err(MachineFailure::from_engine_error(
+                        TransferError::IntegrityMismatch,
+                        self.header.transfer_id,
+                    ));
+                }
+                Ok(ReceiverStep::Complete(ReceiverCompleted::new(
+                    self.header.transfer_id,
+                    self.header.file_size,
+                    claim.file_hash,
+                    true,
+                )))
+            }
+            Frame::Chunk(chunk) => {
+                validate_transfer_id(self.header.transfer_id, chunk.transfer_id)?;
+                Err(MachineFailure::from_engine_error(
+                    TransferError::IntegrityMismatch,
+                    self.header.transfer_id,
+                ))
+            }
+            other => Err(protocol_failure(
+                self.header.transfer_id,
+                IngressState::ReceivingData,
+                other.kind(),
+            )),
+        }
+    }
+
+    fn receive_chunk(
+        mut self,
+        chunk: Chunk,
+        next_deadline: Deadline,
+        sink: &mut impl StagingSink,
+    ) -> Result<ReceiverStep, MachineFailure> {
+        if self.expected_offset > 0 && chunk.index == 0 && chunk.offset.get() == 0 {
+            self.reset_staging(sink)?;
+        }
+        validate_chunk(
+            &self.header,
+            &chunk,
+            self.expected_index,
+            self.expected_offset,
+        )
+        .map_err(|error| {
+            self.best_effort_checkpoint(sink);
+            MachineFailure::from_engine_error(error, self.header.transfer_id)
+        })?;
+
+        if let Err(fault) = sink.append(
+            self.header.transfer_id,
+            ByteCount::new(self.expected_offset),
+            &chunk.bytes,
+        ) {
+            self.best_effort_checkpoint(sink);
+            return Err(MachineFailure::from_engine_error(
+                TransferError::Storage(fault),
+                self.header.transfer_id,
+            ));
+        }
+        self.hasher.update(&chunk.bytes);
+        self.expected_offset += chunk.bytes.len() as u64;
+        self.expected_index += 1;
+
+        if self.expected_offset.saturating_sub(self.last_checkpoint) >= CHECKPOINT_INTERVAL {
+            let fact = self.resume_fact();
+            if let Err(fault) = sink.checkpoint(self.header.transfer_id, fact) {
+                return Err(MachineFailure::from_engine_error(
+                    TransferError::Storage(fault),
+                    self.header.transfer_id,
+                ));
+            }
+            self.last_checkpoint = self.expected_offset;
+        }
+        self.deadline = next_deadline;
+        let progress = self.progress();
+        Ok(ReceiverStep::Continue {
+            state: self,
+            progress,
+        })
+    }
+
+    fn receive_complete(
+        self,
+        complete: Complete,
+        sink: &mut impl StagingSink,
+    ) -> Result<ReceiverStep, MachineFailure> {
+        validate_transfer_id(self.header.transfer_id, complete.transfer_id)?;
+        if self.expected_offset != self.header.file_size.get() {
+            self.best_effort_checkpoint(sink);
+            return Err(MachineFailure::from_engine_error(
+                TransferError::Protocol(ProtocolViolation::CompleteBeforeEnd {
+                    received: self.expected_offset,
+                    expected: self.header.file_size.get(),
+                }),
+                self.header.transfer_id,
+            ));
+        }
+        let actual_hash = content_hash(&self.hasher);
+        if actual_hash != complete.file_hash {
+            self.best_effort_checkpoint(sink);
+            return Err(MachineFailure::from_engine_error(
+                TransferError::IntegrityMismatch,
+                self.header.transfer_id,
+            ));
+        }
+
+        sink.checkpoint(self.header.transfer_id, self.resume_fact())
+            .map_err(|fault| {
+                MachineFailure::from_engine_error(
+                    TransferError::Storage(fault),
+                    self.header.transfer_id,
+                )
+            })?;
+        sink.seal(self.header.transfer_id, self.header.file_size, actual_hash)
+            .map_err(|fault| {
+                MachineFailure::from_engine_error(
+                    TransferError::Storage(fault),
+                    self.header.transfer_id,
+                )
+            })?;
+
+        Ok(ReceiverStep::Complete(ReceiverCompleted::new(
+            self.header.transfer_id,
+            self.header.file_size,
+            actual_hash,
+            false,
+        )))
+    }
+
+    fn reset_staging(&mut self, sink: &mut impl StagingSink) -> Result<(), MachineFailure> {
+        sink.truncate(self.header.transfer_id, ByteCount::new(0))
+            .map_err(|fault| {
+                MachineFailure::from_engine_error(
+                    TransferError::Storage(fault),
+                    self.header.transfer_id,
+                )
+            })?;
+        let fact = ResumeFact {
+            bytes_staged: ByteCount::new(0),
+            next_chunk_index: 0,
+        };
+        sink.checkpoint(self.header.transfer_id, fact)
+            .map_err(|fault| {
+                MachineFailure::from_engine_error(
+                    TransferError::Storage(fault),
+                    self.header.transfer_id,
+                )
+            })?;
+        self.expected_offset = 0;
+        self.expected_index = 0;
+        self.resumed_bytes = 0;
+        self.last_checkpoint = 0;
+        *self.hasher = Hasher::new();
+        Ok(())
+    }
+
+    fn resume_fact(&self) -> ResumeFact {
+        ResumeFact {
+            bytes_staged: ByteCount::new(self.expected_offset),
+            next_chunk_index: self.expected_index,
+        }
+    }
+
+    fn best_effort_checkpoint(&self, sink: &mut impl StagingSink) {
+        if matches!(self.mode, ReceiveMode::Staging) {
+            let _ = sink.checkpoint(self.header.transfer_id, self.resume_fact());
+        }
+    }
+}
+
+pub enum ReceiverStep {
+    Continue {
+        state: ReceiverReceiving,
+        progress: ReceiverProgress,
+    },
+    Complete(ReceiverCompleted),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReceiverCompleted {
+    pub transfer_id: TransferId,
+    pub file_size: ByteCount,
+    pub file_hash: ContentHash,
+    pub claimed_existing: bool,
+}
+
+impl ReceiverCompleted {
+    const fn new(
+        transfer_id: TransferId,
+        file_size: ByteCount,
+        file_hash: ContentHash,
+        claimed_existing: bool,
+    ) -> Self {
+        Self {
+            transfer_id,
+            file_size,
+            file_hash,
+            claimed_existing,
+        }
+    }
+
+    /// The file is already durable; delivery of this acknowledgement is best-effort.
+    pub const fn acknowledgement(self) -> Frame {
+        Frame::CompleteAck(CompleteAck {
+            transfer_id: self.transfer_id,
+        })
+    }
+}
+
+struct PreparedStaging {
+    fact: ResumeFact,
+    hasher: Box<Hasher>,
+    prefix_hash: ContentHash,
+}
+
+fn prepare_staging(
+    header: &FileHeader,
+    sink: &mut impl StagingSink,
+) -> Result<PreparedStaging, MachineFailure> {
+    if matches!(header.resume, ResumeMode::Disabled) {
+        return fresh_staging(header, sink);
+    }
+
+    let Some(fact) = sink.load_resume(header.transfer_id).map_err(|fault| {
+        MachineFailure::from_engine_error(TransferError::Storage(fault), header.transfer_id)
+    })?
+    else {
+        return fresh_staging(header, sink);
+    };
+    validate_resume_fact(header, fact)
+        .map_err(|error| MachineFailure::from_engine_error(error, header.transfer_id))?;
+
+    let mut hasher = Box::new(Hasher::new());
+    let complete = hash_staged_prefix(
+        sink,
+        header.transfer_id,
+        fact.bytes_staged.get(),
+        header.chunk_size.get() as usize,
+        &mut hasher,
+    )
+    .map_err(|fault| {
+        MachineFailure::from_engine_error(TransferError::Storage(fault), header.transfer_id)
+    })?;
+    if !complete {
+        return fresh_staging(header, sink);
+    }
+
+    // Discard bytes appended after the last durable checkpoint.
+    sink.truncate(header.transfer_id, fact.bytes_staged)
+        .map_err(|fault| {
+            MachineFailure::from_engine_error(TransferError::Storage(fault), header.transfer_id)
+        })?;
+    Ok(PreparedStaging {
+        fact,
+        prefix_hash: content_hash(&hasher),
+        hasher,
+    })
+}
+
+fn fresh_staging(
+    header: &FileHeader,
+    sink: &mut impl StagingSink,
+) -> Result<PreparedStaging, MachineFailure> {
+    sink.truncate(header.transfer_id, ByteCount::new(0))
+        .map_err(|fault| {
+            MachineFailure::from_engine_error(TransferError::Storage(fault), header.transfer_id)
+        })?;
+    let fact = ResumeFact {
+        bytes_staged: ByteCount::new(0),
+        next_chunk_index: 0,
+    };
+    sink.checkpoint(header.transfer_id, fact).map_err(|fault| {
+        MachineFailure::from_engine_error(TransferError::Storage(fault), header.transfer_id)
+    })?;
+    let hasher = Box::new(Hasher::new());
+    Ok(PreparedStaging {
+        fact,
+        prefix_hash: content_hash(&hasher),
+        hasher,
+    })
+}
+
+fn validate_header(
+    header: &FileHeader,
+    receiver_chunk_size: ByteCount,
+) -> Result<(), TransferError> {
+    validate_chunk_size(receiver_chunk_size.get()).map_err(TransferError::Protocol)?;
+    validate_chunk_size(header.chunk_size.get()).map_err(TransferError::Protocol)?;
+    if header.chunk_size != receiver_chunk_size {
+        return Err(TransferError::Protocol(
+            ProtocolViolation::ChunkSizeMismatch {
+                sender: header.chunk_size.get(),
+                receiver: receiver_chunk_size.get(),
+            },
+        ));
+    }
+    Ok(())
+}
+
+fn validate_resume_status(
+    request: &SenderRequest,
+    status: &ResumeStatus,
+) -> Result<(), TransferError> {
+    if status.transfer_id != request.transfer_id {
+        return Err(TransferError::Protocol(
+            ProtocolViolation::TransferIdMismatch,
+        ));
+    }
+    if status.bytes_received.get() > request.file_size.get() {
+        return Err(TransferError::Protocol(
+            ProtocolViolation::ResumeOffsetExceedsFile {
+                offset: status.bytes_received.get(),
+                file_size: request.file_size.get(),
+            },
+        ));
+    }
+    if matches!(request.resume, ResumeMode::Disabled) && status.bytes_received.get() > 0 {
+        return Err(TransferError::Protocol(
+            ProtocolViolation::ResumeNotAllowed {
+                offset: status.bytes_received.get(),
+            },
+        ));
+    }
+    let expected = validated_next_index(status.bytes_received.get(), request.chunk_size.get());
+    if status.next_chunk_index != expected {
+        return Err(TransferError::Protocol(
+            ProtocolViolation::ResumeIndexInconsistent {
+                actual: status.next_chunk_index,
+                expected,
+            },
+        ));
+    }
+    Ok(())
+}
+
+fn validate_resume_fact(header: &FileHeader, fact: ResumeFact) -> Result<(), TransferError> {
+    if fact.bytes_staged.get() > header.file_size.get() {
+        return Err(TransferError::Protocol(
+            ProtocolViolation::ResumeOffsetExceedsFile {
+                offset: fact.bytes_staged.get(),
+                file_size: header.file_size.get(),
+            },
+        ));
+    }
+    let expected = validated_next_index(fact.bytes_staged.get(), header.chunk_size.get());
+    if fact.next_chunk_index != expected {
+        return Err(TransferError::Protocol(
+            ProtocolViolation::ResumeIndexInconsistent {
+                actual: fact.next_chunk_index,
+                expected,
+            },
+        ));
+    }
+    Ok(())
+}
+
+fn validate_chunk(
+    header: &FileHeader,
+    chunk: &Chunk,
+    expected_index: u64,
+    expected_offset: u64,
+) -> Result<(), TransferError> {
+    if chunk.transfer_id != header.transfer_id {
+        return Err(TransferError::Protocol(
+            ProtocolViolation::TransferIdMismatch,
+        ));
+    }
+    if chunk.index != expected_index {
+        return Err(TransferError::Protocol(ProtocolViolation::ChunkIndex {
+            actual: chunk.index,
+            expected: expected_index,
+        }));
+    }
+    if chunk.offset.get() != expected_offset {
+        return Err(TransferError::Protocol(ProtocolViolation::ChunkOffset {
+            actual: chunk.offset.get(),
+            expected: expected_offset,
+        }));
+    }
+    let remaining = header.file_size.get().saturating_sub(expected_offset);
+    let expected_len = remaining.min(header.chunk_size.get()) as usize;
+    if expected_len == 0 || chunk.bytes.is_empty() || chunk.bytes.len() != expected_len {
+        return Err(TransferError::Protocol(ProtocolViolation::ChunkLength {
+            actual: chunk.bytes.len(),
+            expected: expected_len,
+        }));
+    }
+    Ok(())
+}
+
+fn validate_chunk_size(chunk_size: u64) -> Result<(), ProtocolViolation> {
+    if chunk_size == 0 || chunk_size > MAX_CHUNK_SIZE as u64 {
+        Err(ProtocolViolation::InvalidChunkSize {
+            actual: chunk_size,
+            maximum: MAX_CHUNK_SIZE,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_transfer_id(expected: TransferId, actual: TransferId) -> Result<(), MachineFailure> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(MachineFailure::from_engine_error(
+            TransferError::Protocol(ProtocolViolation::TransferIdMismatch),
+            expected,
+        ))
+    }
+}
+
+fn hash_source_prefix(
+    source: &mut impl SourceReader,
+    bytes_to_hash: u64,
+    buffer_size: usize,
+    hasher: &mut Hasher,
+) -> Result<(), TransferError> {
+    let mut offset = 0;
+    let mut buffer = vec![0_u8; buffer_size.max(1)];
+    while offset < bytes_to_hash {
+        let count = (bytes_to_hash - offset).min(buffer.len() as u64) as usize;
+        read_source_exact(source, offset, &mut buffer[..count], bytes_to_hash)?;
+        hasher.update(&buffer[..count]);
+        offset += count as u64;
+    }
+    Ok(())
+}
+
+fn read_source_exact(
+    source: &mut impl SourceReader,
+    start_offset: u64,
+    destination: &mut [u8],
+    expected_end: u64,
+) -> Result<(), TransferError> {
+    let mut filled = 0;
+    while filled < destination.len() {
+        let offset = start_offset + filled as u64;
+        let read = source
+            .read_at(ByteCount::new(offset), &mut destination[filled..])
+            .map_err(TransferError::Storage)?;
+        if read == 0 {
+            return Err(TransferError::UnexpectedSourceEnd {
+                offset,
+                expected: expected_end,
+            });
+        }
+        if read > destination.len() - filled {
+            return Err(TransferError::Storage(StorageFault::new(
+                crate::StorageOperation::ReadSource,
+            )));
+        }
+        filled += read;
+    }
+    Ok(())
+}
+
+fn hash_staged_prefix(
+    sink: &mut impl StagingSink,
+    transfer_id: TransferId,
+    bytes_to_hash: u64,
+    buffer_size: usize,
+    hasher: &mut Hasher,
+) -> Result<bool, StorageFault> {
+    let mut offset = 0;
+    let mut buffer = vec![0_u8; buffer_size.max(1)];
+    while offset < bytes_to_hash {
+        let count = (bytes_to_hash - offset).min(buffer.len() as u64) as usize;
+        let read = sink.read_staged(transfer_id, ByteCount::new(offset), &mut buffer[..count])?;
+        if read == 0 {
+            return Ok(false);
+        }
+        if read > count {
+            return Err(StorageFault::new(crate::StorageOperation::ReadStaging));
+        }
+        hasher.update(&buffer[..read]);
+        offset += read as u64;
+    }
+    Ok(true)
+}
+
+fn content_hash(hasher: &Hasher) -> ContentHash {
+    ContentHash::from_bytes(*hasher.finalize().as_bytes())
+}
+
+fn protocol_failure(
+    transfer_id: TransferId,
+    state: IngressState,
+    actual: FrameKind,
+) -> MachineFailure {
+    MachineFailure::from_engine_error(
+        TransferError::Protocol(ProtocolViolation::UnexpectedFrame { state, actual }),
+        transfer_id,
+    )
+}
+
+fn peer_abort(abort: Abort) -> MachineFailure {
+    MachineFailure::terminal(TransferError::PeerAborted(abort.reason))
+}
+
+pub const fn next_chunk_index(bytes_received: u64, chunk_size: u64) -> Option<u64> {
+    if chunk_size == 0 {
+        None
+    } else if bytes_received == 0 {
+        Some(0)
+    } else {
+        Some(bytes_received.div_ceil(chunk_size))
+    }
+}
+
+fn validated_next_index(bytes_received: u64, chunk_size: u64) -> u64 {
+    next_chunk_index(bytes_received, chunk_size)
+        .expect("chunk size is validated before calculating an index")
+}
