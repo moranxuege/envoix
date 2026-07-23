@@ -876,10 +876,22 @@ dependencies = [
 [[package]]
 name = "envoix-rendezvous"
 version = "0.2.0"
+dependencies = [
+ "envoix-invite",
+ "envoix-outcomes",
+ "tokio",
+]
 
 [[package]]
 name = "envoix-rendezvous-iroh"
 version = "0.2.0"
+dependencies = [
+ "envoix-invite",
+ "envoix-outcomes",
+ "envoix-rendezvous",
+ "iroh",
+ "tokio",
+]
 
 [[package]]
 name = "envoix-runtime"

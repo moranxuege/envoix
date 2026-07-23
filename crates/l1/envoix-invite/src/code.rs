@@ -52,7 +52,10 @@ impl RoomCode {
     }
 
     pub fn namespaced_key(&self) -> NamespacedRoomKey {
-        NamespacedRoomKey(format!("{ROOM_CODE_NAMESPACE_PREFIX}{}", self.0))
+        let nameplate = self.0.split('-').next().unwrap_or("");
+        // The word entropy is the SPAKE2 password. Only the semi-public
+        // nameplate may cross the broker boundary.
+        NamespacedRoomKey(format!("{ROOM_CODE_NAMESPACE_PREFIX}{nameplate}"))
     }
 }
 
@@ -66,6 +69,17 @@ impl fmt::Debug for RoomCode {
 pub struct NamespacedRoomKey(String);
 
 impl NamespacedRoomKey {
+    pub fn parse(key: impl Into<String>) -> Result<Self, InviteError> {
+        let key = key.into();
+        let Some(nameplate) = key.strip_prefix(ROOM_CODE_NAMESPACE_PREFIX) else {
+            return Err(InviteError::InvalidField(crate::InviteField::Code));
+        };
+        if !is_six_digits(nameplate) {
+            return Err(InviteError::InvalidField(crate::InviteField::Code));
+        }
+        Ok(Self(key))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }

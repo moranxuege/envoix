@@ -685,6 +685,9 @@ fn allowed_internal_edge(
                         "envoix-auth" | "envoix-transfer" | "envoix-session-iroh"
                     )
                     && dependency_layer == "L2")
+                || (package == "envoix-rendezvous-iroh"
+                    && dependency == "envoix-rendezvous"
+                    && dependency_layer == "L2")
         }
         "L3" => matches!(dependency_layer, "L0" | "L1"),
         "L4" => {
@@ -1000,6 +1003,28 @@ mod tests {
             "envoix-session-iroh",
             "L2",
             "envoix-auth",
+            "L2"
+        ));
+    }
+
+    #[test]
+    fn rendezvous_iroh_l2_adapter_edge_is_targeted() {
+        assert!(allowed_internal_edge(
+            "envoix-rendezvous-iroh",
+            "L2",
+            "envoix-rendezvous",
+            "L2"
+        ));
+        assert!(!allowed_internal_edge(
+            "envoix-rendezvous",
+            "L2",
+            "envoix-rendezvous-iroh",
+            "L2"
+        ));
+        assert!(!allowed_internal_edge(
+            "envoix-rendezvous-iroh",
+            "L2",
+            "envoix-transfer",
             "L2"
         ));
     }

@@ -7,3 +7,8 @@ license.workspace = true
 [package.metadata.envoix]
 layer = "L2"
 role = "library"
+
+[dependencies]
+envoix-invite = { path = "../../l1/envoix-invite" }
+envoix-outcomes = { path = "../../l0/envoix-outcomes" }
+tokio.workspace = true

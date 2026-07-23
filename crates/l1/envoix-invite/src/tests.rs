@@ -73,7 +73,7 @@ fn invite_v1_conformance() {
     );
     assert_eq!(
         generated.namespaced_key().as_str(),
-        format!("{ROOM_CODE_NAMESPACE_PREFIX}{}", generated.as_str())
+        format!("{ROOM_CODE_NAMESPACE_PREFIX}000042")
     );
 }
 
@@ -229,9 +229,24 @@ fn room_codes_and_invites_redact_the_pairing_secret() {
     let invite = Invite::new(CODE, BROKER, RELAY, Role::Send).unwrap();
     let room_key = invite.code().namespaced_key();
 
+    assert_eq!(
+        room_key.as_str(),
+        format!("{ROOM_CODE_NAMESPACE_PREFIX}123456")
+    );
+    assert!(!room_key.as_str().contains("amber"));
+    assert!(!room_key.as_str().contains("comet"));
     assert!(!format!("{:?}", invite.code()).contains(CODE));
     assert!(!format!("{invite:?}").contains(CODE));
     assert!(!format!("{room_key:?}").contains(CODE));
+
+    assert_eq!(
+        crate::NamespacedRoomKey::parse(room_key.as_str())
+            .unwrap()
+            .as_str(),
+        room_key.as_str()
+    );
+    assert!(crate::NamespacedRoomKey::parse("v2:123456-amber-comet").is_err());
+    assert!(crate::NamespacedRoomKey::parse("123456").is_err());
 }
 
 fn encoded_json(json: &str) -> String {
