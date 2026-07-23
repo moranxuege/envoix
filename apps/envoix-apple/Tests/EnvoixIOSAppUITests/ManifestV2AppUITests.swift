@@ -26,14 +26,42 @@ final class ManifestV2AppUITests: XCTestCase {
         )
     }
 
-    private func launch(language: String, locale: String) {
+    func testNearbySendHandoffKeepsEverySourcePickerUsable() {
+        launch(
+            language: "en",
+            locale: "en_US",
+            extraArguments: ["--ui-testing-discovery-fixtures"]
+        )
+
+        element("transfer_home").assertExists()
+        button("home_nearby").tap()
+        element("nearby_screen").assertExists()
+        button("nearby_peer_card").tap()
+        element("nearby_pairing_context").assertExists()
+        button("nearby_pairing_send").tap()
+
+        element("send_content_scroll").assertExists()
+        element("nearby_transfer_context").assertExists()
+        XCTAssertFalse(element("nearby_invite_delivery_progress").exists)
+
+        assertPickerCanOpen(from: "send_photo_picker")
+        assertPickerCanOpen(from: "send_file_picker")
+        assertPickerCanOpen(from: "send_folder_picker", dismissWith: "Open")
+        element("send_selection_summary").assertExists()
+    }
+
+    private func launch(
+        language: String,
+        locale: String,
+        extraArguments: [String] = []
+    ) {
         app = XCUIApplication()
         app.launchArguments = [
             "--ui-testing",
             "-envoix.language", language,
             "-AppleLanguages", "(\(language))",
             "-AppleLocale", locale,
-        ]
+        ] + extraArguments
         app.launch()
     }
 
@@ -54,7 +82,8 @@ final class ManifestV2AppUITests: XCTestCase {
         folderPicker.assertExists()
         XCTAssertEqual(folderPicker.label, expectedFolderLabel)
         element("send_selection_limit").assertExists()
-        XCTAssertFalse(element("send_start_button").isEnabled)
+        // A prepared draft is intentionally restored across launches.
+        element("send_start_button").assertExists()
 
         button("mobile_sheet_done").tap()
         element("transfer_home").assertExists()
@@ -66,6 +95,22 @@ final class ManifestV2AppUITests: XCTestCase {
         pairingGuidance.assertExists()
         XCTAssertEqual(pairingGuidance.label, expectedPairingGuidance)
         element("receive_start_button").assertExists()
+    }
+
+    private func assertPickerCanOpen(
+        from identifier: String,
+        dismissWith dismissalLabel: String = "Cancel"
+    ) {
+        let source = button(identifier)
+        source.assertExists()
+        XCTAssertTrue(source.isEnabled)
+        XCTAssertTrue(source.isHittable)
+        source.tap()
+
+        let dismissal = app.buttons[dismissalLabel].firstMatch
+        dismissal.assertExists()
+        dismissal.tap()
+        element("nearby_transfer_context").assertExists()
     }
 
     private func element(_ identifier: String) -> XCUIElement {

@@ -2,7 +2,7 @@
 
 Status: **Android and iOS foreground discovery complete; unauthenticated BLE invitation handoff physically verified from Android to iPhone**
 
-Last reviewed: 2026-07-19
+Last reviewed: 2026-07-24
 
 This document freezes the nearby-discovery contract and its experimental handoff
 into the existing Envoix pairing flow. Discovery metadata and the current BLE
@@ -22,12 +22,13 @@ The Android and iOS apps have an independent **Nearby devices** page that:
 - stops all discovery work when the page is hidden or the app leaves the
   foreground.
 
-Selecting a BLE peer opens an explicitly experimental pairing context. After
-the user chooses a local send or receive role, the app creates the existing
-Envoix invitation, writes it to the selected peer over BLE GATT, and starts the
-existing SPAKE2, Direct/Relay, and transfer state machines. The receiving app
-shows the remote role and requires a confirmation before entering the opposite
-role. No second transfer protocol is introduced.
+Selecting a BLE peer opens an explicitly experimental pairing context. The
+selected context remains attached to one transfer-setup surface while the user
+chooses a role and prepares the send source or receive destination. Only the
+final **Start** action writes an outbound Envoix invitation to the selected peer
+over BLE GATT and starts the existing SPAKE2, Direct/Relay, and transfer state
+machines. The receiving app shows the remote role and requires a confirmation
+before entering the opposite role. No second transfer protocol is introduced.
 
 The current BLE carrier is useful only for completing the product flow. It is
 not a secure replacement for QR, NFC, or a compared short code: the SPAKE2
@@ -153,7 +154,8 @@ invitation, password, peer key, Bluetooth address, or network address.
 
 The service, scanner, advertisement, peripheral map, and partial frame buffers
 exist only while the discovery page is active. An invitation is sent only after
-the user taps a BLE-observed card, chooses a role, and confirms the action.
+the user taps a BLE-observed card, chooses a role, prepares the transfer
+details, and taps the final **Start** action.
 
 ## 6. Merge and lifecycle rules
 
@@ -202,8 +204,17 @@ The experimental BLE handoff additionally verifies that:
   endpoint, credential, or long-term identity;
 - tapping a BLE-observed card opens an unauthenticated-channel warning before
   role selection;
+- Apple and Android keep the selected nearby context attached to one stable
+  transfer setup instead of dismissing and immediately presenting a second
+  setup surface;
+- Photos, Files, and Folder selection remain usable after a nearby sender
+  handoff, and receive-destination authorization occurs before invitation
+  delivery;
 - the selected side creates and fragments the existing full invitation, while
   the receiving side decodes it and asks the user to confirm the opposite role;
+- only the final Start action may deliver an outbound BLE invitation, with one
+  delivery in flight and late or duplicate completions unable to create a
+  second Activity;
 - the selected-device context is cleared when the flow is dismissed or started;
 - no invitation or password appears in advertisements or logs; and
 - after handoff, both sides use the unchanged SPAKE2 and Direct/Relay transfer
@@ -211,7 +222,10 @@ The experimental BLE handoff additionally verifies that:
 
 Automated protocol tests, Android `ktlintCheck`/JVM tests/`assembleDebug`, Apple
 hosted tests, an Apple simulator UI regression, and an Apple physical-device
-build passed on 2026-07-19.
+build passed on 2026-07-19. On 2026-07-24, hosted tests additionally covered
+single-flight invitation delivery, failure retry, cancellation, and duplicate
+callback suppression; the simulator opened Photos, Files, and Folder from the
+same nearby sender setup and retained the selected folder.
 
 The same-day physical GATT gate then passed 1/1 on Android model `25060RK16C`
 and an iPhone 15 Pro Max:

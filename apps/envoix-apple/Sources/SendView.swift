@@ -56,7 +56,10 @@ struct SendView: View {
     @State private var selectedSourceAccess: AnyObject?
     @State private var selectedPendingSelectionID: UUID?
     @State private var didApplyInitialPairingInput = false
+    @StateObject private var nearbyInviteDelivery = NearbyInviteDeliveryController()
     private let initialPairingInput: String?
+    private let nearbySelection: NearbyPairingSelection?
+    private let nearbyInviteOffer: NearbyInviteOffer?
     private let onInitialPairingInputConsumed: (() -> Void)?
     private let onSwitchToReceive: ((String, SendSelectionSnapshot) -> Void)?
     #if os(iOS)
@@ -74,11 +77,15 @@ struct SendView: View {
         initialFileAccess: AnyObject? = nil,
         initialPendingSelectionID: UUID? = nil,
         initialPairingInput: String? = nil,
+        nearbySelection: NearbyPairingSelection? = nil,
+        nearbyInviteOffer: NearbyInviteOffer? = nil,
         onInitialPairingInputConsumed: (() -> Void)? = nil,
         onSwitchToReceive: ((String, SendSelectionSnapshot) -> Void)? = nil
     ) {
         self.viewModel = viewModel
         self.initialPairingInput = initialPairingInput
+        self.nearbySelection = nearbySelection
+        self.nearbyInviteOffer = nearbyInviteOffer
         self.onInitialPairingInputConsumed = onInitialPairingInputConsumed
         self.onSwitchToReceive = onSwitchToReceive
         _mode = State(initialValue: initialMode)
@@ -137,7 +144,10 @@ struct SendView: View {
         .onChange(of: viewModel.preparedManifestSourcePaths) { paths in
             adoptPreparedManifestPaths(paths)
         }
-        .onDisappear(perform: cancelPhotoImport)
+        .onDisappear {
+            cancelPhotoImport()
+            cancelNearbyInviteDelivery()
+        }
         #else
         VStack(spacing: 0) {
             scrollContent
@@ -156,6 +166,16 @@ struct SendView: View {
     private var scrollContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                #if os(iOS)
+                if let nearbySelection {
+                    NearbyTransferContextView(
+                        selection: nearbySelection,
+                        deliversInvitationOnStart: nearbyInviteOffer != nil,
+                        isDelivering: nearbyInviteDelivery.isDelivering,
+                        error: nearbyInviteDelivery.error
+                    )
+                }
+                #endif
                 fileSection
                 connectionSection
                 TransferStatusView(viewModel: viewModel)
@@ -386,7 +406,9 @@ struct SendView: View {
                 primaryLabel,
                 systemImage: viewModel.isPreparingManifest
                     ? "xmark"
-                    : (viewModel.isBusy ? "list.bullet.rectangle" : "paperplane")
+                    : (viewModel.isBusy
+                        ? "list.bullet.rectangle"
+                        : (nearbyInviteDelivery.isDelivering ? "dot.radiowaves.left.and.right" : "paperplane"))
             )
                 .frame(maxWidth: .infinity, minHeight: 44)
                 .contentShape(Rectangle())
@@ -395,7 +417,12 @@ struct SendView: View {
         .buttonStyle(PrimaryActionButtonStyle())
         .disabled(
             !viewModel.isPreparingManifest
-                && (viewModel.isBusy || viewModel.isFinalizing || isPhotoImporting || !canSend || concurrencyBlocked)
+                && (viewModel.isBusy
+                    || viewModel.isFinalizing
+                    || nearbyInviteDelivery.isDelivering
+                    || isPhotoImporting
+                    || !canSend
+                    || concurrencyBlocked)
         )
         .accessibilityIdentifier("send_start_button")
     }
@@ -858,18 +885,18 @@ struct SendView: View {
         }
     }
 
-    private func activeSendRoomCode() throws -> String {
+    private func activeSendPairingInvite() throws -> FfiPairingInvite {
         if let invite = pairingInvite {
             let code = invite.code.trimmed
             if !code.isEmpty {
                 updateRoomQRCode(for: invite.payload)
-                return code
+                return invite
             }
         }
         let invite = try makePairingInvite(role: .send, broker: serverURL, relay: relayURL)
         pairingInvite = invite
         updateRoomQRCode(for: invite.payload)
-        return invite.code
+        return invite
     }
 
     private func updateRoomQRCode(for payload: String) {
@@ -893,6 +920,9 @@ struct SendView: View {
     private var primaryLabel: String {
         if viewModel.isPreparingManifest {
             return AppText.value("Cancel Preparation", "取消准备", language: uiLanguage)
+        }
+        if nearbyInviteDelivery.isDelivering {
+            return AppText.value("Delivering Invitation…", "正在发送邀请码…", language: uiLanguage)
         }
         if viewModel.isBusy { return AppText.value("Managed in Activity", "请在活动中管理", language: uiLanguage) }
         return AppText.value("Send", "发送", language: uiLanguage)
@@ -1309,6 +1339,10 @@ struct SendView: View {
         )
     }
 
+    private func cancelNearbyInviteDelivery() {
+        nearbyInviteDelivery.cancel()
+    }
+
     private func primaryButtonAction() {
         if viewModel.isPreparingManifest {
             _ = viewModel.cancelManifestPreparation()
@@ -1318,7 +1352,9 @@ struct SendView: View {
     }
 
     private func primaryAction() {
-        guard !viewModel.isBusy, !viewModel.isFinalizing else { return }
+        guard !viewModel.isBusy,
+              !viewModel.isFinalizing,
+              !nearbyInviteDelivery.isDelivering else { return }
         guard !selectedItems.isEmpty else { return }
         do {
             let settings = try RuntimeSettingsProvider.make(
@@ -1335,10 +1371,16 @@ struct SendView: View {
                 let input = roomCode.trimmed
                 let lowercasedInput = input.lowercased()
                 if input.isEmpty {
-                    startRoomSend(
-                        code: try activeSendRoomCode(),
-                        settings: settings
-                    )
+                    let pairingInvite = try activeSendPairingInvite()
+                    nearbyInviteDelivery.deliver(
+                        invite: pairingInvite.payload,
+                        using: nearbyInviteOffer
+                    ) {
+                        startRoomSend(
+                            code: pairingInvite.code,
+                            settings: settings
+                        )
+                    }
                 } else if lowercasedInput.hasPrefix("envoix:")
                     && !lowercasedInput.hasPrefix("envoix://pair/") {
                     invite = input

@@ -51,14 +51,16 @@ private enum TransferRole: String, CaseIterable {
 }
 
 private enum MobileSheet: String, Identifiable {
-    case send, receive, nearbyPairing, activity, settings
+    case transfer, activity, settings
 
     var id: String { rawValue }
 }
 
-struct ContentView: View {
-    private static let roleSwitchPresentationDelay: TimeInterval = 0.2
+private enum MobileTransferRoute {
+    case send, receive, nearbyPairing
+}
 
+struct ContentView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("envoix.appearance") private var appearance: Appearance = .system
@@ -72,16 +74,14 @@ struct ContentView: View {
         #endif
         return nil
     }()
+    @State private var mobileTransferRoute: MobileTransferRoute = .send
     @State private var preservedSendSelection = SendSelectionSnapshot()
     @State private var pendingSendPairingInput: String?
     @State private var pendingReceivePairingInput: String?
     @State private var nearbyPairingSelection: NearbyPairingSelection?
     #if os(iOS)
-    @AppStorage("envoix.serverURL") private var nearbyServerURL = ""
-    @AppStorage("envoix.relayURL") private var nearbyRelayURL = ""
     @StateObject private var nearbyCoordinator = NearbyDiscoveryCoordinator()
     @State private var nearbyInboundInvite: String?
-    @State private var nearbyPairingBusy = false
     @State private var nearbyPairingError: String?
     #endif
     #if DEBUG
@@ -150,7 +150,7 @@ struct ContentView: View {
                                 nearbyPairingSelection = selection
                                 nearbyInboundInvite = nil
                                 nearbyPairingError = nil
-                                mobileSheet = .nearbyPairing
+                                showMobileTransfer(.nearbyPairing)
                             }
                         } label: {
                             Image(systemName: "dot.radiowaves.left.and.right")
@@ -174,7 +174,7 @@ struct ContentView: View {
             mobileActivityCapsule
                 .padding(.bottom, 8)
         }
-        .sheet(item: $mobileSheet) { sheet in
+        .sheet(item: $mobileSheet, onDismiss: resetNearbyHandoffAfterDismissal) { sheet in
             NavigationStack {
                 mobileSheetContent(sheet)
                     .padding(.horizontal, 16)
@@ -200,9 +200,12 @@ struct ContentView: View {
             .presentationDetents([.large])
         }
         .onChange(of: model.send.isBusy) { isBusy in
-            if isBusy, !model.send.isPreparingManifest, mobileSheet == .send {
+            if isBusy,
+               !model.send.isPreparingManifest,
+               mobileSheet == .transfer,
+               mobileTransferRoute == .send {
+                clearNearbyHandoff()
                 mobileSheet = nil
-                nearbyPairingSelection = nil
             } else if !isBusy {
                 presentPendingSendSelection()
             }
@@ -211,15 +214,18 @@ struct ContentView: View {
             if activityID != nil {
                 preservedSendSelection = SendSelectionSnapshot()
             }
-            if activityID != nil, mobileSheet == .send {
+            if activityID != nil,
+               mobileSheet == .transfer,
+               mobileTransferRoute == .send {
+                clearNearbyHandoff()
                 mobileSheet = nil
             }
         }
         .onChange(of: model.receive.isBusy) { isBusy in
             if isBusy {
-                nearbyPairingSelection = nil
-                if mobileSheet == .nearbyPairing {
-                    mobileSheet = .receive
+                clearNearbyHandoff()
+                if mobileSheet == .transfer, mobileTransferRoute == .nearbyPairing {
+                    mobileTransferRoute = .receive
                 }
             }
         }
@@ -276,7 +282,6 @@ struct ContentView: View {
                 .padding(.bottom, 4)
 
                 mobileHomeAction(
-                    sheet: .send,
                     role: .send,
                     title: AppText.value("Send", "发送", language: language),
                     subtitle: AppText.localized("home.send.subtitle", language: language),
@@ -284,7 +289,6 @@ struct ContentView: View {
                 )
 
                 mobileHomeAction(
-                    sheet: .receive,
                     role: .receive,
                     title: AppText.value("Receive", "接收", language: language),
                     subtitle: AppText.localized("home.receive.subtitle", language: language),
@@ -305,14 +309,13 @@ struct ContentView: View {
     }
 
     private func mobileHomeAction(
-        sheet: MobileSheet,
         role: TransferRole,
         title: String,
         subtitle: String,
         identifier: String
     ) -> some View {
         Button {
-            mobileSheet = sheet
+            showMobileTransfer(role == .send ? .send : .receive)
         } label: {
             mobileHomeActionLabel(
                 systemImage: role.icon,
@@ -367,43 +370,8 @@ struct ContentView: View {
     @ViewBuilder
     private func mobileSheetContent(_ sheet: MobileSheet) -> some View {
         switch sheet {
-        case .send:
-            SendView(
-                viewModel: model.send,
-                initialFiles: preservedSendSelection.items.isEmpty
-                    ? model.pendingSendSelection?.fileURLs ?? []
-                    : preservedSendSelection.items,
-                initialFileAccess: preservedSendSelection.items.isEmpty
-                    ? model.pendingSendSelection?.sourceAccess
-                    : preservedSendSelection.sourceAccess,
-                initialPendingSelectionID: preservedSendSelection.items.isEmpty
-                    ? model.pendingSendSelection?.id
-                    : preservedSendSelection.pendingSelectionID,
-                initialPairingInput: pendingSendPairingInput,
-                onInitialPairingInputConsumed: { pendingSendPairingInput = nil },
-                onSwitchToReceive: switchMobileToReceive
-            )
-        case .receive:
-            ReceiveView(
-                viewModel: model.receive,
-                initialPairingInput: pendingReceivePairingInput,
-                onInitialPairingInputConsumed: { pendingReceivePairingInput = nil },
-                onSwitchToSend: switchMobileToSend
-            )
-        case .nearbyPairing:
-            if let nearbyPairingSelection {
-                NearbyPairingView(
-                    selection: nearbyPairingSelection,
-                    sendEnabled: nearbyAllowedRole != .receive,
-                    receiveEnabled: nearbyAllowedRole != .send,
-                    isBusy: nearbyPairingBusy,
-                    error: nearbyPairingError,
-                    onSend: { beginNearbyPairing(role: .send) },
-                    onReceive: { beginNearbyPairing(role: .receive) }
-                )
-            } else {
-                EmptyView()
-            }
+        case .transfer:
+            mobileTransferContent
         case .activity:
             TransferStageView(
                 records: model.activities,
@@ -425,11 +393,62 @@ struct ContentView: View {
         }
     }
 
+    @ViewBuilder
+    private var mobileTransferContent: some View {
+        switch mobileTransferRoute {
+        case .send:
+            SendView(
+                viewModel: model.send,
+                initialFiles: preservedSendSelection.items.isEmpty
+                    ? model.pendingSendSelection?.fileURLs ?? []
+                    : preservedSendSelection.items,
+                initialFileAccess: preservedSendSelection.items.isEmpty
+                    ? model.pendingSendSelection?.sourceAccess
+                    : preservedSendSelection.sourceAccess,
+                initialPendingSelectionID: preservedSendSelection.items.isEmpty
+                    ? model.pendingSendSelection?.id
+                    : preservedSendSelection.pendingSelectionID,
+                initialPairingInput: pendingSendPairingInput,
+                nearbySelection: nearbyPairingSelection,
+                nearbyInviteOffer: nearbyInviteOffer,
+                onInitialPairingInputConsumed: { pendingSendPairingInput = nil },
+                onSwitchToReceive: switchMobileToReceive
+            )
+        case .receive:
+            ReceiveView(
+                viewModel: model.receive,
+                initialPairingInput: pendingReceivePairingInput,
+                nearbySelection: nearbyPairingSelection,
+                nearbyInviteOffer: nearbyInviteOffer,
+                onInitialPairingInputConsumed: { pendingReceivePairingInput = nil },
+                onSwitchToSend: switchMobileToSend
+            )
+        case .nearbyPairing:
+            if let nearbyPairingSelection {
+                NearbyPairingView(
+                    selection: nearbyPairingSelection,
+                    sendEnabled: nearbyAllowedRole != .receive,
+                    receiveEnabled: nearbyAllowedRole != .send,
+                    isBusy: false,
+                    error: nearbyPairingError,
+                    onSend: { beginNearbyPairing(role: .send) },
+                    onReceive: { beginNearbyPairing(role: .receive) }
+                )
+            } else {
+                EmptyView()
+            }
+        }
+    }
+
     private func mobileSheetTitle(_ sheet: MobileSheet) -> String {
         switch sheet {
-        case .send: return AppText.value("Send", "发送", language: language)
-        case .receive: return AppText.value("Receive", "接收", language: language)
-        case .nearbyPairing: return AppText.value("Experimental BLE pairing", "实验性蓝牙配对", language: language)
+        case .transfer:
+            switch mobileTransferRoute {
+            case .send: return AppText.value("Send", "发送", language: language)
+            case .receive: return AppText.value("Receive", "接收", language: language)
+            case .nearbyPairing:
+                return AppText.value("Experimental BLE pairing", "实验性蓝牙配对", language: language)
+            }
         case .activity: return AppText.value("Activity", "活动", language: language)
         case .settings: return AppText.value("Settings", "设置", language: language)
         }
@@ -438,27 +457,54 @@ struct ContentView: View {
     private func switchMobileToReceive(_ input: String, selection: SendSelectionSnapshot) {
         preservedSendSelection = selection
         pendingReceivePairingInput = input
-        replaceMobileSheet(with: .receive)
+        showMobileTransfer(.receive)
     }
 
     private func switchMobileToSend(_ input: String) {
         pendingSendPairingInput = input
-        replaceMobileSheet(with: .send)
+        showMobileTransfer(.send)
     }
 
-    private func replaceMobileSheet(with sheet: MobileSheet) {
-        mobileSheet = nil
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.roleSwitchPresentationDelay) {
-            mobileSheet = sheet
-        }
+    private func showMobileTransfer(_ route: MobileTransferRoute) {
+        mobileTransferRoute = route
+        mobileSheet = .transfer
     }
 
     private func dismissMobileSheet() {
         mobileSheet = nil
+        resetNearbyHandoffAfterDismissal()
+    }
+
+    private func resetNearbyHandoffAfterDismissal() {
+        if nearbyPairingSelection != nil {
+            nearbyCoordinator.restart()
+        }
+        clearNearbyHandoff()
+    }
+
+    private func clearNearbyHandoff() {
         nearbyPairingSelection = nil
         nearbyInboundInvite = nil
-        nearbyPairingBusy = false
         nearbyPairingError = nil
+    }
+
+    private var nearbyInviteOffer: NearbyInviteOffer? {
+        guard nearbyInboundInvite == nil,
+              let selection = nearbyPairingSelection,
+              selection.sources.contains(.bluetooth) else {
+            return nil
+        }
+        return NearbyInviteOffer { invite, completion in
+            nearbyCoordinator.offerInvite(
+                peerKey: selection.discoveryPeerKey,
+                invite: invite
+            ) { error in
+                if error == nil {
+                    nearbyCoordinator.stop()
+                }
+                completion(error)
+            }
+        }
     }
 
     private var nearbyAllowedRole: FfiInviteRole? {
@@ -491,11 +537,11 @@ struct ContentView: View {
         )
         nearbyInboundInvite = offer.invite
         nearbyPairingError = nil
-        mobileSheet = .nearbyPairing
+        showMobileTransfer(.nearbyPairing)
     }
 
     private func beginNearbyPairing(role: FfiInviteRole) {
-        guard !nearbyPairingBusy, let selection = nearbyPairingSelection else { return }
+        guard let selection = nearbyPairingSelection else { return }
         if let inbound = nearbyInboundInvite {
             guard nearbyAllowedRole == role else {
                 nearbyPairingError = AppText.value(
@@ -505,14 +551,13 @@ struct ContentView: View {
                 )
                 return
             }
-            nearbyInboundInvite = nil
             nearbyCoordinator.stop()
             if role == .send {
                 pendingSendPairingInput = inbound
-                replaceMobileSheet(with: .send)
+                showMobileTransfer(.send)
             } else {
                 pendingReceivePairingInput = inbound
-                replaceMobileSheet(with: .receive)
+                showMobileTransfer(.receive)
             }
             return
         }
@@ -525,34 +570,11 @@ struct ContentView: View {
             )
             return
         }
-        do {
-            let invite = try makePairingInvite(
-                role: role,
-                broker: nearbyServerURL,
-                relay: nearbyRelayURL
-            )
-            nearbyPairingBusy = true
-            nearbyPairingError = nil
-            nearbyCoordinator.offerInvite(
-                peerKey: selection.discoveryPeerKey,
-                invite: invite.payload
-            ) { error in
-                nearbyPairingBusy = false
-                if let error {
-                    nearbyPairingError = error
-                    return
-                }
-                nearbyCoordinator.stop()
-                if role == .send {
-                    pendingSendPairingInput = invite.code
-                    replaceMobileSheet(with: .send)
-                } else {
-                    pendingReceivePairingInput = invite.code
-                    replaceMobileSheet(with: .receive)
-                }
-            }
-        } catch {
-            nearbyPairingError = error.localizedDescription
+        nearbyPairingError = nil
+        if role == .send {
+            showMobileTransfer(.send)
+        } else {
+            showMobileTransfer(.receive)
         }
     }
 
@@ -566,7 +588,7 @@ struct ContentView: View {
         do {
             switch try model.importOpenedSendFile(url) {
             case .imported:
-                mobileSheet = .send
+                showMobileTransfer(.send)
             case .queued:
                 ToastCenter.shared.show(AppText.value(
                     "The file is ready and will open after the current send finishes.",
@@ -583,7 +605,7 @@ struct ContentView: View {
 
     private func presentPendingSendSelection() {
         if !model.send.isBusy, model.pendingSendSelection != nil {
-            mobileSheet = .send
+            showMobileTransfer(.send)
             return
         }
         presentSharedDraft(preferredID: nil)
@@ -653,7 +675,7 @@ struct ContentView: View {
         do {
             switch try model.importSharedSendDraft(preferredID: preferredID) {
             case .imported:
-                mobileSheet = .send
+                showMobileTransfer(.send)
             case .noPendingDraft:
                 break
             case .sendBusy:
