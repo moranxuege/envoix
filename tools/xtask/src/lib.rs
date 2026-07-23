@@ -677,7 +677,15 @@ fn allowed_internal_edge(
     match layer {
         "L0" => false,
         "L1" => dependency_layer == "L0",
-        "L2" => matches!(dependency_layer, "L0" | "L1"),
+        "L2" => {
+            matches!(dependency_layer, "L0" | "L1")
+                || (package == "envoix-attempt-iroh"
+                    && matches!(
+                        dependency,
+                        "envoix-auth" | "envoix-transfer" | "envoix-session-iroh"
+                    )
+                    && dependency_layer == "L2")
+        }
         "L3" => matches!(dependency_layer, "L0" | "L1"),
         "L4" => {
             matches!(dependency_layer, "L0" | "L1" | "L3")
@@ -970,6 +978,30 @@ mod tests {
             comparison: comparison.map(str::to_string),
             values: vec![value.into()],
         }
+    }
+
+    #[test]
+    fn attempt_iroh_l2_composition_edges_are_targeted() {
+        for dependency in ["envoix-auth", "envoix-transfer", "envoix-session-iroh"] {
+            assert!(allowed_internal_edge(
+                "envoix-attempt-iroh",
+                "L2",
+                dependency,
+                "L2"
+            ));
+        }
+        assert!(!allowed_internal_edge(
+            "envoix-attempt-iroh",
+            "L2",
+            "envoix-storage-local",
+            "L2"
+        ));
+        assert!(!allowed_internal_edge(
+            "envoix-session-iroh",
+            "L2",
+            "envoix-auth",
+            "L2"
+        ));
     }
 
     /// The gate has teeth: a fresh value equal to a legacy value in the same

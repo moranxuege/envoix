@@ -1,1 +1,15 @@
-//! envoix-attempt-iroh (L2 library) — envoix 0.2.0 placeholder; filled in a later build step.
+//! One authenticated, generation-stamped transfer attempt over a session link.
+
+#![forbid(unsafe_code)]
+
+mod error;
+mod executor;
+
+pub use error::AttemptError;
+pub use executor::{
+    AttemptControl, AttemptHandle, AttemptTimeouts, AttemptTransferSpec, SharedAttemptSupervisor,
+    spawn_iroh_receiver, spawn_receiver, spawn_sender,
+};
+
+#[cfg(test)]
+mod tests;

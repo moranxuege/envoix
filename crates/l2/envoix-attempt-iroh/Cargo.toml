@@ -7,3 +7,18 @@ license.workspace = true
 [package.metadata.envoix]
 layer = "L2"
 role = "library"
+
+[dependencies]
+async-trait.workspace = true
+envoix-attempt-api = { path = "../../l1/envoix-attempt-api" }
+envoix-auth = { path = "../envoix-auth" }
+envoix-outcomes = { path = "../../l0/envoix-outcomes" }
+envoix-pairing = { path = "../../l1/envoix-pairing" }
+envoix-protocol = { path = "../../l1/envoix-protocol" }
+envoix-session-iroh = { path = "../envoix-session-iroh" }
+envoix-transfer = { path = "../envoix-transfer" }
+envoix-types = { path = "../../l0/envoix-types" }
+tokio.workspace = true
+
+[dev-dependencies]
+blake3.workspace = true

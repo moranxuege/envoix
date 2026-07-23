@@ -10,8 +10,8 @@ pub use model::{
     RetirementAck, RetirementIntent,
 };
 pub use supervisor::{
-    AttemptSupervisor, CommitPointResult, EventAdmission, OpenResult, RetirementAckResult,
-    RetirementRequestResult,
+    AttemptSupervisor, CommitOperationResult, CommitPointResult, EventAdmission, OpenResult,
+    RetirementAckResult, RetirementRequestResult, TerminalResolutionResult,
 };
 
 #[cfg(test)]

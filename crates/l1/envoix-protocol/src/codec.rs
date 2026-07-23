@@ -252,6 +252,32 @@ pub fn encode_frame(frame: &Frame) -> Result<Vec<u8>, EncodeError> {
     Ok(encoded)
 }
 
+/// Returns the complete encoded length declared by a common ENVX frame header.
+///
+/// Authentication and transfer codecs share this envelope. Stream adapters use
+/// this helper to bound the payload read without duplicating codec-owned layout.
+pub fn encoded_frame_len(header: &[u8; HEADER_LEN]) -> Result<usize, DecodeError> {
+    let magic = [header[0], header[1], header[2], header[3]];
+    if &magic != DATA_MAGIC {
+        return Err(DecodeError::WrongMagic { actual: magic });
+    }
+    let version = u16::from_be_bytes([header[4], header[5]]);
+    if version != DATA_WIRE_VERSION {
+        return Err(DecodeError::UnsupportedVersion { actual: version });
+    }
+    if header[7] != 0 {
+        return Err(DecodeError::NonZeroReservedByte { actual: header[7] });
+    }
+    let payload_len = u32::from_be_bytes([header[8], header[9], header[10], header[11]]) as usize;
+    if payload_len > MAX_FRAME_SIZE {
+        return Err(DecodeError::FrameTooLarge {
+            declared: payload_len,
+            maximum: MAX_FRAME_SIZE,
+        });
+    }
+    Ok(HEADER_LEN + payload_len)
+}
+
 pub fn decode_frame(input: &[u8], state: IngressState) -> Result<Frame, DecodeError> {
     if input.len() < HEADER_LEN {
         return Err(DecodeError::TruncatedHeader {

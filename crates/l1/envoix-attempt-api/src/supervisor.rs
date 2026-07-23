@@ -46,6 +46,27 @@ pub enum CommitPointResult {
 }
 
 #[derive(Debug, Eq, PartialEq)]
+pub enum CommitOperationResult<T, E> {
+    Crossed(T),
+    OperationFailed(E),
+    AlreadyCrossed,
+    RetirementWon,
+    Stale,
+    Unknown,
+    Retired,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TerminalResolutionResult {
+    Recorded,
+    AlreadyRecorded,
+    CommitAlreadyCrossed,
+    Stale,
+    Unknown,
+    Retired,
+}
+
+#[derive(Debug, Eq, PartialEq)]
 pub enum RetirementAckResult {
     Acknowledged(RetirementAck),
     NotRequested,
@@ -125,6 +146,12 @@ impl AttemptSupervisor {
             | (Some(RetirementState::FinalizePending), RetirementIntent::Finalize) => {
                 RetirementRequestResult::AlreadyRequested
             }
+            (_, _) if slot.terminal.is_some() => {
+                slot.retirement = Some(RetirementState::Resolved(
+                    slot.terminal.unwrap_or(OutcomeCode::Internal),
+                ));
+                RetirementRequestResult::Requested
+            }
             (_, RetirementIntent::Finalize) if slot.commit_crossed => {
                 slot.retirement = Some(RetirementState::Resolved(OutcomeCode::Completed));
                 RetirementRequestResult::Requested
@@ -170,6 +197,72 @@ impl AttemptSupervisor {
             slot.retirement = Some(RetirementState::Resolved(OutcomeCode::Completed));
         }
         CommitPointResult::Crossed
+    }
+
+    /// Runs a fallible irreversible operation and records commit only if it succeeds.
+    ///
+    /// The caller must keep all retirement requests serialized through this
+    /// supervisor. The operation runs while the supervisor is exclusively borrowed,
+    /// so retirement cannot win between the irreversible effect and its commit fact.
+    pub fn cross_commit_point_with<T, E>(
+        &mut self,
+        stamp: AttemptStamp,
+        operation: impl FnOnce() -> Result<T, E>,
+    ) -> CommitOperationResult<T, E> {
+        let slot = match self.slot_mut(stamp) {
+            Ok(slot) => slot,
+            Err(StampMismatch::Stale) => return CommitOperationResult::Stale,
+            Err(StampMismatch::Unknown) => return CommitOperationResult::Unknown,
+        };
+        if slot.quiesced {
+            return CommitOperationResult::Retired;
+        }
+        if slot.commit_crossed {
+            return CommitOperationResult::AlreadyCrossed;
+        }
+        if matches!(slot.retirement, Some(RetirementState::Resolved(_))) {
+            return CommitOperationResult::RetirementWon;
+        }
+
+        let value = match operation() {
+            Ok(value) => value,
+            Err(error) => return CommitOperationResult::OperationFailed(error),
+        };
+        slot.commit_crossed = true;
+        if matches!(slot.retirement, Some(RetirementState::FinalizePending)) {
+            slot.retirement = Some(RetirementState::Resolved(OutcomeCode::Completed));
+        }
+        CommitOperationResult::Crossed(value)
+    }
+
+    /// Records a terminal outcome for an attempt that did not cross commit.
+    ///
+    /// This makes a pending or later `Finalize` request acknowledgeable without
+    /// falsely translating a mechanism failure into a cancel or pause.
+    pub fn resolve_terminal(
+        &mut self,
+        stamp: AttemptStamp,
+        outcome: OutcomeCode,
+    ) -> TerminalResolutionResult {
+        let slot = match self.slot_mut(stamp) {
+            Ok(slot) => slot,
+            Err(StampMismatch::Stale) => return TerminalResolutionResult::Stale,
+            Err(StampMismatch::Unknown) => return TerminalResolutionResult::Unknown,
+        };
+        if slot.quiesced {
+            return TerminalResolutionResult::Retired;
+        }
+        if slot.commit_crossed {
+            return TerminalResolutionResult::CommitAlreadyCrossed;
+        }
+        if slot.terminal.is_some() {
+            return TerminalResolutionResult::AlreadyRecorded;
+        }
+        slot.terminal = Some(outcome);
+        if matches!(slot.retirement, Some(RetirementState::FinalizePending)) {
+            slot.retirement = Some(RetirementState::Resolved(outcome));
+        }
+        TerminalResolutionResult::Recorded
     }
 
     /// Called by the executor only after it has stopped and released resources.
@@ -228,6 +321,7 @@ impl AttemptSupervisor {
 struct AttemptSlot {
     plan: AttemptPlan,
     commit_crossed: bool,
+    terminal: Option<OutcomeCode>,
     retirement: Option<RetirementState>,
     quiesced: bool,
 }
@@ -237,6 +331,7 @@ impl AttemptSlot {
         Self {
             plan,
             commit_crossed: false,
+            terminal: None,
             retirement: None,
             quiesced: false,
         }

@@ -218,12 +218,12 @@ fn drive(
                 sender = state;
                 receiver = match receiver.receive(frame, NOW, DEADLINE, sink)? {
                     ReceiverStep::Continue { state, .. } => state,
-                    ReceiverStep::Complete(_) => panic!("chunk completed transfer"),
+                    ReceiverStep::ReadyToCommit(_) => panic!("chunk completed transfer"),
                 };
             }
             SenderStep::Complete { state, frame } => {
                 let completed = match receiver.receive(frame, NOW, DEADLINE, sink)? {
-                    ReceiverStep::Complete(completed) => completed,
+                    ReceiverStep::ReadyToCommit(ready) => ready.commit(sink)?,
                     ReceiverStep::Continue { .. } => panic!("complete frame did not complete"),
                 };
                 let sender = state.receive_ack(completed.acknowledgement(), NOW)?;
@@ -360,11 +360,12 @@ fn claim_complete_redelivers_ack_without_chunks() {
     let SenderStep::Complete { state, frame } = sender.next_frame(&mut source).unwrap() else {
         panic!("claim-complete sent a chunk");
     };
-    let ReceiverStep::Complete(completed) =
+    let ReceiverStep::ReadyToCommit(ready) =
         receiver.receive(frame, NOW, DEADLINE, &mut sink).unwrap()
     else {
         panic!("claim-complete did not complete");
     };
+    let completed = ready.commit(&mut sink).unwrap();
     assert!(completed.claimed_existing);
     let _lost_ack = state;
 
@@ -536,11 +537,16 @@ fn completion_order_and_strict_ack() {
                 receiver = continue_receiver(receiver, frame, &mut sink);
             }
             SenderStep::Complete { state, frame } => {
-                let ReceiverStep::Complete(completed) =
+                let ReceiverStep::ReadyToCommit(ready) =
                     receiver.receive(frame, NOW, DEADLINE, &mut sink).unwrap()
                 else {
                     panic!("receiver did not complete");
                 };
+                assert!(
+                    !sink.sealed.contains_key(&id),
+                    "verification must not seal before the attempt commit gate"
+                );
+                let completed = ready.commit(&mut sink).unwrap();
                 break (state, completed);
             }
         }
@@ -667,7 +673,7 @@ fn continue_receiver(
 ) -> ReceiverReceiving {
     match receiver.receive(frame, NOW, DEADLINE, sink).unwrap() {
         ReceiverStep::Continue { state, .. } => state,
-        ReceiverStep::Complete(_) => panic!("expected receiving state"),
+        ReceiverStep::ReadyToCommit(_) => panic!("expected receiving state"),
     }
 }
 

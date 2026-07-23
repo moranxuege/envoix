@@ -2,7 +2,7 @@ use envoix_outcomes::OutcomeCode;
 use envoix_protocol::{
     Abort, Chunk, Complete, CompleteAck, ContentHash, DecodeError, EncodeError, Field, FileHeader,
     Frame, FrameKind, Hello, IngressState, MAX_CHUNK_SIZE, MAX_FRAME_SIZE, MAX_OFFERED_NAME_SIZE,
-    ProtocolReason, Ready, ResumeMode, ResumeStatus, decode_frame, encode_frame,
+    ProtocolReason, Ready, ResumeMode, ResumeStatus, decode_frame, encode_frame, encoded_frame_len,
 };
 use envoix_types::{ByteCount, OfferedName, TransferId};
 
@@ -65,6 +65,21 @@ const ABORT_WITH_ID_FIXTURE: &[u8] = &[
 
 fn transfer_id() -> TransferId {
     TransferId::from_bytes(TRANSFER_ID_BYTES)
+}
+
+#[test]
+fn common_header_reports_a_bounded_total_length() {
+    let encoded = encode_frame(&Frame::Hello(Hello)).unwrap();
+    let header: &[u8; envoix_protocol::HEADER_LEN] =
+        encoded[..envoix_protocol::HEADER_LEN].try_into().unwrap();
+    assert_eq!(encoded_frame_len(header).unwrap(), encoded.len());
+
+    let mut oversized = *header;
+    oversized[8..12].copy_from_slice(&((MAX_FRAME_SIZE as u32) + 1).to_be_bytes());
+    assert!(matches!(
+        encoded_frame_len(&oversized),
+        Err(DecodeError::FrameTooLarge { .. })
+    ));
 }
 
 fn fixtures() -> Vec<(Frame, IngressState, &'static [u8])> {

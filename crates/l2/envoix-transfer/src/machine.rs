@@ -708,7 +708,7 @@ impl ReceiverReceiving {
                         self.header.transfer_id,
                     ));
                 }
-                Ok(ReceiverStep::Complete(ReceiverCompleted::new(
+                Ok(ReceiverStep::ReadyToCommit(ReceiverReadyToCommit::new(
                     self.header.transfer_id,
                     self.header.file_size,
                     claim.file_hash,
@@ -815,15 +815,7 @@ impl ReceiverReceiving {
                     self.header.transfer_id,
                 )
             })?;
-        sink.seal(self.header.transfer_id, self.header.file_size, actual_hash)
-            .map_err(|fault| {
-                MachineFailure::from_engine_error(
-                    TransferError::Storage(fault),
-                    self.header.transfer_id,
-                )
-            })?;
-
-        Ok(ReceiverStep::Complete(ReceiverCompleted::new(
+        Ok(ReceiverStep::ReadyToCommit(ReceiverReadyToCommit::new(
             self.header.transfer_id,
             self.header.file_size,
             actual_hash,
@@ -877,7 +869,70 @@ pub enum ReceiverStep {
         state: ReceiverReceiving,
         progress: ReceiverProgress,
     },
-    Complete(ReceiverCompleted),
+    /// The payload and hash are verified, but the irreversible seal has not run.
+    ReadyToCommit(ReceiverReadyToCommit),
+}
+
+pub struct ReceiverReadyToCommit {
+    completed: ReceiverCompleted,
+}
+
+impl ReceiverReadyToCommit {
+    const fn new(
+        transfer_id: TransferId,
+        file_size: ByteCount,
+        file_hash: ContentHash,
+        claimed_existing: bool,
+    ) -> Self {
+        Self {
+            completed: ReceiverCompleted::new(transfer_id, file_size, file_hash, claimed_existing),
+        }
+    }
+
+    pub const fn transfer_id(&self) -> TransferId {
+        self.completed.transfer_id
+    }
+
+    pub const fn claimed_existing(&self) -> bool {
+        self.completed.claimed_existing
+    }
+
+    /// Crosses the receiver's irreversible storage boundary.
+    ///
+    /// The attempt executor must arbitrate retirement immediately before this
+    /// synchronous call and send no completion acknowledgement unless it succeeds.
+    pub fn commit(self, sink: &mut impl StagingSink) -> Result<ReceiverCompleted, MachineFailure> {
+        if !self.completed.claimed_existing {
+            sink.seal(
+                self.completed.transfer_id,
+                self.completed.file_size,
+                self.completed.file_hash,
+            )
+            .map_err(|fault| {
+                MachineFailure::from_engine_error(
+                    TransferError::Storage(fault),
+                    self.completed.transfer_id,
+                )
+            })?;
+        }
+        Ok(self.completed)
+    }
+
+    pub fn cancelled(self) -> MachineFailure {
+        MachineFailure::for_local(
+            TransferError::Cancelled,
+            Some(self.completed.transfer_id),
+            ProtocolReason::Cancelled,
+        )
+    }
+
+    pub fn paused(self) -> MachineFailure {
+        MachineFailure::for_local(
+            TransferError::Paused,
+            Some(self.completed.transfer_id),
+            ProtocolReason::Paused,
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

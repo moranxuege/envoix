@@ -3,8 +3,9 @@ use envoix_types::{ArtifactId, AttemptGen, ByteCount, Direction, RecordId, Trans
 
 use crate::{
     AttemptEvent, AttemptEventKind, AttemptPlan, AttemptStamp, AttemptSupervisor,
-    CommitPointResult, EventAdmission, OpenResult, ResumeIntent, RetirementAckResult,
-    RetirementIntent, RetirementRequestResult,
+    CommitOperationResult, CommitPointResult, EventAdmission, OpenResult, ResumeIntent,
+    RetirementAck, RetirementAckResult, RetirementIntent, RetirementRequestResult,
+    TerminalResolutionResult,
 };
 
 fn stamp(card: u64, generation: u32) -> AttemptStamp {
@@ -171,6 +172,71 @@ fn terminal_event_alone_does_not_claim_quiescence() {
     assert_eq!(
         supervisor.acknowledge_retirement(plan.stamp),
         RetirementAckResult::NotRequested
+    );
+}
+
+#[test]
+fn failed_attempt_resolves_only_through_finalize() {
+    let mut supervisor = AttemptSupervisor::new();
+    let plan = plan(6, 1);
+    supervisor.open(plan);
+
+    assert_eq!(
+        supervisor.resolve_terminal(plan.stamp, OutcomeCode::PeerLost),
+        crate::TerminalResolutionResult::Recorded
+    );
+    assert!(!supervisor.is_quiesced(plan.stamp));
+    assert_eq!(
+        supervisor.acknowledge_retirement(plan.stamp),
+        RetirementAckResult::NotRequested
+    );
+    assert_eq!(
+        supervisor.request_retirement(plan.stamp, RetirementIntent::Finalize),
+        RetirementRequestResult::Requested
+    );
+    let ack = acknowledged(supervisor.acknowledge_retirement(plan.stamp));
+    assert_eq!(ack.outcome(), OutcomeCode::PeerLost);
+}
+
+#[test]
+fn failed_commit_operation_does_not_cross_the_commit_point() {
+    let plan = plan(1, 1);
+    let mut supervisor = AttemptSupervisor::new();
+    assert_eq!(supervisor.open(plan), OpenResult::Opened);
+
+    assert_eq!(
+        supervisor.cross_commit_point_with(plan.stamp, || Err::<(), _>("seal failed")),
+        CommitOperationResult::OperationFailed("seal failed")
+    );
+    assert_eq!(
+        supervisor.request_retirement(plan.stamp, RetirementIntent::Cancel),
+        RetirementRequestResult::Requested
+    );
+    assert_eq!(
+        supervisor.cross_commit_point_with(plan.stamp, || Ok::<_, ()>(())),
+        CommitOperationResult::RetirementWon
+    );
+}
+
+#[test]
+fn retirement_after_terminal_preserves_the_terminal_outcome() {
+    let plan = plan(1, 1);
+    let mut supervisor = AttemptSupervisor::new();
+    assert_eq!(supervisor.open(plan), OpenResult::Opened);
+    assert_eq!(
+        supervisor.resolve_terminal(plan.stamp, OutcomeCode::PeerLost),
+        TerminalResolutionResult::Recorded
+    );
+    assert_eq!(
+        supervisor.request_retirement(plan.stamp, RetirementIntent::Cancel),
+        RetirementRequestResult::Requested
+    );
+    assert_eq!(
+        supervisor.acknowledge_retirement(plan.stamp),
+        RetirementAckResult::Acknowledged(RetirementAck {
+            stamp: plan.stamp,
+            outcome: OutcomeCode::PeerLost,
+        })
     );
 }
 

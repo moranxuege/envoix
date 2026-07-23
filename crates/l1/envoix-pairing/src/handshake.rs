@@ -92,6 +92,11 @@ impl Paired {
         &self.data_token
     }
 
+    /// Transfers the derived data-plane credential to the attempt executor.
+    pub fn into_data_token(self) -> DataPlaneToken {
+        self.data_token
+    }
+
     pub fn seal_descriptor(
         &mut self,
         descriptor: &DescriptorPayload,

@@ -7,3 +7,17 @@ license.workspace = true
 [package.metadata.envoix]
 layer = "L2"
 role = "library"
+
+[dependencies]
+async-trait.workspace = true
+envoix-outcomes = { path = "../../l0/envoix-outcomes" }
+envoix-protocol = { path = "../../l1/envoix-protocol" }
+iroh.workspace = true
+n0-future.workspace = true
+noq-proto.workspace = true
+tokio.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+envoix-protocol = { path = "../../l1/envoix-protocol" }
+envoix-types = { path = "../../l0/envoix-types" }
