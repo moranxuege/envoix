@@ -174,6 +174,37 @@ targets:
         DEVELOPMENT_TEAM: 6638TTB2SF
         TEST_TARGET_NAME: Envoix-iOS
 
+  Envoix-macOSUITests:
+    # Host cross-device tests in the production macOS app so the Rust core
+    # uses the same network and filesystem environment as the shipped client.
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "13.0"
+    sources:
+      - Tests/EnvoixIOSUITests/ManifestV2PhysicalTransferTests.swift
+    dependencies:
+      - target: Envoix
+      - package: EnvoixCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app.macos.uitests
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: Envoix
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Envoix.app/Contents/MacOS/Envoix"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGNING_REQUIRED: NO
+        OTHER_LDFLAGS:
+          - "-framework"
+          - "SystemConfiguration"
+          - "-framework"
+          - "Security"
+          - "-framework"
+          - "SecurityFoundation"
+          - "-framework"
+          - "CoreWLAN"
+
 schemes:
   Envoix:
     build:
@@ -214,3 +245,14 @@ schemes:
       gatherCoverageData: false
       targets:
         - Envoix-iOSAppUITests
+
+  Envoix-macOS-Hosted:
+    build:
+      targets:
+        Envoix: all
+        Envoix-macOSUITests: [test]
+    test:
+      config: Debug
+      gatherCoverageData: false
+      targets:
+        - Envoix-macOSUITests
