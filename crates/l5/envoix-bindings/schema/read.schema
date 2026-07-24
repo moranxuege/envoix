@@ -1,1 +1,409 @@
+# envoix generated read contract — the single source every generated read
+# binding (Rust/Dart/Kotlin/Swift) derives from. The identifier catalog
+# extracts the schema id from the `id` key; regenerate artifacts with
+# `ENVOIX_BINDINGS_REGEN=1 cargo test -p envoix-bindings generated_artifacts`.
+#
+# Scalar vocabulary (closed — the parser rejects anything else):
+#   u16 / u32 / u63   bounded unsigned integers (u63 fits every signed 64-bit)
+#   hex16/hex32/hex64 fixed-length lowercase hex identifiers/fingerprints
+#   hexv(N)           even-length lowercase hex, at most N characters
+#   str(N)            UTF-8 text of at most N bytes
+#   ascii(N)          printable ASCII of at most N bytes
+#   option(T)         nullable field (the key is always present)
+#   list(T, N)        at most N elements
+# There is deliberately no bytes/blob type and no handle/path/URI type, so bulk
+# payload bytes and OS handles cannot be represented in a read frame.
+
 id = "envoix/binding/read/1"
+root = "ReadFrame"
+
+[limits]
+max_frame_bytes = 1048576
+
+# ---- closed vocabularies mirrored from L0/L3/L4 public types ----
+
+[[decl]]
+kind = "enum"
+name = "DirectionView"
+variants = ["send", "receive"]
+
+[[decl]]
+kind = "enum"
+name = "PhaseView"
+variants = [
+  "preparing",
+  "pairing",
+  "authenticating",
+  "transferring",
+  "confirming",
+  "publishing",
+  "restoring",
+]
+
+[[decl]]
+kind = "enum"
+name = "OutcomeCodeView"
+variants = [
+  "completed",
+  "cancelled",
+  "paused",
+  "peer_lost",
+  "timeout",
+  "unauthenticated",
+  "version_mismatch",
+  "storage_fault",
+  "publish_failed",
+  "source_unreadable",
+  "network_unreachable",
+  "internal",
+]
+
+[[decl]]
+kind = "enum"
+name = "RetryabilityView"
+variants = ["retryable", "terminal", "needs_user"]
+
+[[decl]]
+kind = "enum"
+name = "RecoveryView"
+variants = ["re_pick_source", "retry_later", "reconnect_peer"]
+
+[[decl]]
+kind = "enum"
+name = "PauseOriginView"
+variants = ["local", "peer", "lost"]
+
+[[decl]]
+kind = "enum"
+name = "WorkerKindView"
+variants = ["attempt", "staging"]
+
+[[decl]]
+kind = "enum"
+name = "RetirementIntentView"
+variants = ["pause", "cancel", "finalize"]
+
+[[decl]]
+kind = "enum"
+name = "DutyKindView"
+variants = [
+  "source_handle",
+  "grant",
+  "staging",
+  "publication",
+  "courier",
+  "foreground",
+  "notification",
+  "lock",
+  "open_share",
+]
+
+[[decl]]
+kind = "enum"
+name = "CapabilityActionView"
+variants = ["post_receipt"]
+
+[[decl]]
+kind = "enum"
+name = "RedactedIdKindView"
+variants = ["record", "transfer", "artifact", "request"]
+
+[[decl]]
+kind = "enum"
+name = "LosslessKindView"
+variants = ["terminal", "capability_duty"]
+
+[[decl]]
+kind = "enum"
+name = "SubscribeRejectionView"
+variants = ["unknown_card", "runtime_stopped", "epoch_exhausted"]
+
+# ---- typed outcome (display is the bounded L0 safe-display projection) ----
+
+[[decl]]
+kind = "struct"
+name = "OutcomeView"
+fields = [
+  { name = "code", type = "OutcomeCodeView" },
+  { name = "phase", type = "PhaseView" },
+  { name = "retry", type = "RetryabilityView" },
+  { name = "recovery", type = "option(RecoveryView)" },
+  { name = "display", type = "str(160)" },
+]
+
+# ---- card state, quiescence, identity ----
+
+[[decl]]
+kind = "struct"
+name = "PausedView"
+fields = [{ name = "origin", type = "PauseOriginView" }]
+
+[[decl]]
+kind = "union"
+name = "ProductStateView"
+variants = [
+  { name = "preparing" },
+  { name = "waiting" },
+  { name = "connecting" },
+  { name = "verifying" },
+  { name = "transferring" },
+  { name = "confirming" },
+  { name = "paused", payload = "PausedView" },
+  { name = "unconfirmed" },
+  { name = "completed" },
+  { name = "failed" },
+  { name = "cancelled" },
+]
+
+[[decl]]
+kind = "struct"
+name = "RunningView"
+fields = [{ name = "worker", type = "WorkerKindView" }]
+
+[[decl]]
+kind = "struct"
+name = "RetiringView"
+fields = [
+  { name = "worker", type = "WorkerKindView" },
+  { name = "intent", type = "RetirementIntentView" },
+]
+
+[[decl]]
+kind = "union"
+name = "QuiescenceView"
+variants = [
+  { name = "running", payload = "RunningView" },
+  { name = "retiring", payload = "RetiringView" },
+  { name = "quiescent" },
+]
+
+[[decl]]
+kind = "struct"
+name = "IdentityView"
+fields = [
+  { name = "card", type = "hex16" },
+  { name = "transfer", type = "hex32" },
+  { name = "artifact", type = "hex32" },
+]
+
+[[decl]]
+kind = "struct"
+name = "CardView"
+fields = [
+  { name = "identity", type = "IdentityView" },
+  { name = "direction", type = "DirectionView" },
+  { name = "offered_name", type = "str(255)" },
+  { name = "total", type = "u63" },
+  { name = "state", type = "ProductStateView" },
+  { name = "quiescence", type = "QuiescenceView" },
+  { name = "generation", type = "u32" },
+  { name = "phase", type = "PhaseView" },
+  { name = "bytes", type = "u63" },
+  { name = "bytes_resumed", type = "u63" },
+  { name = "outcome", type = "option(OutcomeView)" },
+]
+
+# ---- capability duties ----
+
+[[decl]]
+kind = "struct"
+name = "DutyProvenanceView"
+fields = [
+  { name = "card", type = "hex16" },
+  { name = "generation", type = "u32" },
+  { name = "request", type = "hex32" },
+]
+
+[[decl]]
+kind = "struct"
+name = "DutyView"
+fields = [
+  { name = "provenance", type = "DutyProvenanceView" },
+  { name = "kind", type = "DutyKindView" },
+]
+
+[[decl]]
+kind = "struct"
+name = "DutyFrameView"
+fields = [
+  { name = "duty", type = "DutyView" },
+  { name = "action", type = "CapabilityActionView" },
+]
+
+# ---- the per-epoch card stream ----
+
+[[decl]]
+kind = "union"
+name = "CardUpdateKindView"
+variants = [
+  { name = "snapshot", payload = "CardView" },
+  { name = "progress", payload = "CardView" },
+  { name = "state", payload = "CardView" },
+  { name = "terminal", payload = "CardView" },
+  { name = "capability_duty", payload = "DutyFrameView" },
+]
+
+[[decl]]
+kind = "struct"
+name = "CardUpdateView"
+fields = [
+  { name = "epoch", type = "u63" },
+  { name = "card", type = "hex16" },
+  { name = "kind", type = "CardUpdateKindView" },
+]
+
+[[decl]]
+kind = "struct"
+name = "LagView"
+fields = [
+  { name = "epoch", type = "u63" },
+  { name = "card", type = "hex16" },
+  { name = "missed", type = "LosslessKindView" },
+]
+
+[[decl]]
+kind = "struct"
+name = "ClosedView"
+fields = [
+  { name = "epoch", type = "u63" },
+  { name = "card", type = "hex16" },
+]
+
+[[decl]]
+kind = "struct"
+name = "SubscribeRejectedView"
+fields = [
+  { name = "card", type = "hex16" },
+  { name = "reason", type = "SubscribeRejectionView" },
+]
+
+# ---- the redacted evidence timeline ----
+
+[[decl]]
+kind = "struct"
+name = "SessionKeyView"
+fields = [
+  { name = "card", type = "hex16" },
+  { name = "generation", type = "u32" },
+]
+
+[[decl]]
+kind = "struct"
+name = "EvidenceProgressView"
+fields = [
+  { name = "transferred", type = "u63" },
+  { name = "total", type = "u63" },
+]
+
+[[decl]]
+kind = "struct"
+name = "RedactedIdView"
+fields = [{ name = "kind", type = "RedactedIdKindView" }]
+
+[[decl]]
+kind = "union"
+name = "EvidenceValueView"
+variants = [
+  { name = "phase", payload = "PhaseView" },
+  { name = "progress", payload = "EvidenceProgressView" },
+  { name = "outcome", payload = "OutcomeView" },
+  { name = "identifier", payload = "RedactedIdView" },
+]
+
+[[decl]]
+kind = "struct"
+name = "DegradedView"
+fields = [{ name = "dropped_events", type = "u63" }]
+
+[[decl]]
+kind = "union"
+name = "DiagnosticsStatusView"
+variants = [
+  { name = "complete" },
+  { name = "degraded", payload = "DegradedView" },
+]
+
+[[decl]]
+kind = "struct"
+name = "TimelineEntryView"
+fields = [
+  { name = "sequence", type = "u63" },
+  { name = "value", type = "EvidenceValueView" },
+]
+
+[[decl]]
+kind = "struct"
+name = "EvidenceTimelineView"
+fields = [
+  { name = "session", type = "SessionKeyView" },
+  { name = "status", type = "DiagnosticsStatusView" },
+  { name = "entries", type = "list(TimelineEntryView, 1024)" },
+]
+
+# ---- descriptive build/trust metadata ----
+
+[[decl]]
+kind = "struct"
+name = "ProtocolManifestView"
+fields = [
+  { name = "set_id", type = "ascii(64)" },
+  { name = "data_alpn", type = "hexv(64)" },
+  { name = "data_magic", type = "hexv(32)" },
+  { name = "data_wire_version", type = "u16" },
+]
+
+[[decl]]
+kind = "struct"
+name = "AbiSchemaManifestView"
+fields = [
+  { name = "read_binding_schema_id", type = "ascii(64)" },
+  { name = "evidence_rust_abi_id", type = "ascii(64)" },
+  { name = "evidence_timeline_schema_id", type = "ascii(64)" },
+  { name = "mailbox_receipt_schema_id", type = "ascii(64)" },
+  { name = "operation_envelope_schema_id", type = "ascii(64)" },
+]
+
+[[decl]]
+kind = "struct"
+name = "TrustRootSha256View"
+fields = [{ name = "fingerprint", type = "hex64" }]
+
+[[decl]]
+kind = "union"
+name = "TrustRootView"
+variants = [
+  { name = "unprovisioned" },
+  { name = "sha256", payload = "TrustRootSha256View" },
+]
+
+[[decl]]
+kind = "struct"
+name = "BuildManifestView"
+fields = [
+  { name = "package_version", type = "ascii(32)" },
+  { name = "protocol", type = "ProtocolManifestView" },
+  { name = "abi_schema", type = "AbiSchemaManifestView" },
+  { name = "trust_root", type = "TrustRootView" },
+]
+
+# ---- the frame envelope ----
+
+[[decl]]
+kind = "union"
+name = "ReadBody"
+variants = [
+  { name = "card_update", payload = "CardUpdateView" },
+  { name = "lag", payload = "LagView" },
+  { name = "closed", payload = "ClosedView" },
+  { name = "subscribe_rejected", payload = "SubscribeRejectedView" },
+  { name = "evidence", payload = "EvidenceTimelineView" },
+  { name = "build_manifest", payload = "BuildManifestView" },
+]
+
+[[decl]]
+kind = "struct"
+name = "ReadFrame"
+fields = [
+  { name = "schema", type = "ascii(64)" },
+  { name = "body", type = "ReadBody" },
+]

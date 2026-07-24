@@ -52,7 +52,16 @@ mod runtime;
 mod subscription;
 
 pub use config::RuntimeConfig;
+// Façade completeness: the L3/L1 types that cross this crate's public API
+// (through `CardUpdateKind` and `TransferRecord`) are re-exported so L5 can
+// consume them without a direct lower-layer dependency.
+pub use envoix_attempt_api::RetirementIntent;
+pub use envoix_capabilities::{Duty, DutyKind, DutyProvenance};
 pub use envoix_evidence::{EvidenceSink, EvidenceSinkError};
+pub use envoix_product::{
+    CapabilityAction, PauseOrigin, ProductIdentity, ProductState, Quiescence, TransferRecord,
+    WorkerKind,
+};
 pub use error::{AcquireError, CommandError};
 pub use port::{
     AttemptExecution, AttemptExecutor, ExecutorSignal, SessionProvider, StopHandle, StopToken,

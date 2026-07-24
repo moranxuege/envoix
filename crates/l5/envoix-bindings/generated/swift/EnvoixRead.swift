@@ -1,0 +1,1110 @@
+// @generated from schema/read.schema by envoix-bindings. Do not edit;
+// regenerate with `ENVOIX_BINDINGS_REGEN=1 cargo test -p envoix-bindings generated_artifacts`.
+// Known platform caveats: JSON `-0` may decode as integer 0 here while the
+// Rust reference codec rejects it (benign: every field with a positive
+// minimum still fails its range check). Unpaired-surrogate escapes need no
+// explicit scan in this artifact: a Swift `String` cannot hold them, so
+// `JSONSerialization` never produces one.
+
+import Foundation
+
+public let readSchemaId = "envoix/binding/read/1"
+public let readMaxFrameBytes = 1048576
+private let u63Max: Int64 = 9_223_372_036_854_775_807
+
+public enum ReadErrorKind {
+    case frameTooLarge
+    case malformedJson
+    case unknownSchema
+    case shape
+    case unknownField
+    case unknownVariant
+    case range
+    case bound
+}
+
+/// Typed codec failure carrying only static schema context.
+public struct ReadContractError: Error, Equatable {
+    public let kind: ReadErrorKind
+    public let context: String
+}
+
+public enum DirectionView: String, Equatable {
+    case send = "send"
+    case receive = "receive"
+}
+
+public enum PhaseView: String, Equatable {
+    case preparing = "preparing"
+    case pairing = "pairing"
+    case authenticating = "authenticating"
+    case transferring = "transferring"
+    case confirming = "confirming"
+    case publishing = "publishing"
+    case restoring = "restoring"
+}
+
+public enum OutcomeCodeView: String, Equatable {
+    case completed = "completed"
+    case cancelled = "cancelled"
+    case paused = "paused"
+    case peerLost = "peer_lost"
+    case timeout = "timeout"
+    case unauthenticated = "unauthenticated"
+    case versionMismatch = "version_mismatch"
+    case storageFault = "storage_fault"
+    case publishFailed = "publish_failed"
+    case sourceUnreadable = "source_unreadable"
+    case networkUnreachable = "network_unreachable"
+    case `internal` = "internal"
+}
+
+public enum RetryabilityView: String, Equatable {
+    case retryable = "retryable"
+    case terminal = "terminal"
+    case needsUser = "needs_user"
+}
+
+public enum RecoveryView: String, Equatable {
+    case rePickSource = "re_pick_source"
+    case retryLater = "retry_later"
+    case reconnectPeer = "reconnect_peer"
+}
+
+public enum PauseOriginView: String, Equatable {
+    case local = "local"
+    case peer = "peer"
+    case lost = "lost"
+}
+
+public enum WorkerKindView: String, Equatable {
+    case attempt = "attempt"
+    case staging = "staging"
+}
+
+public enum RetirementIntentView: String, Equatable {
+    case pause = "pause"
+    case cancel = "cancel"
+    case finalize = "finalize"
+}
+
+public enum DutyKindView: String, Equatable {
+    case sourceHandle = "source_handle"
+    case grant = "grant"
+    case staging = "staging"
+    case publication = "publication"
+    case courier = "courier"
+    case foreground = "foreground"
+    case notification = "notification"
+    case lock = "lock"
+    case openShare = "open_share"
+}
+
+public enum CapabilityActionView: String, Equatable {
+    case postReceipt = "post_receipt"
+}
+
+public enum RedactedIdKindView: String, Equatable {
+    case record = "record"
+    case transfer = "transfer"
+    case artifact = "artifact"
+    case request = "request"
+}
+
+public enum LosslessKindView: String, Equatable {
+    case terminal = "terminal"
+    case capabilityDuty = "capability_duty"
+}
+
+public enum SubscribeRejectionView: String, Equatable {
+    case unknownCard = "unknown_card"
+    case runtimeStopped = "runtime_stopped"
+    case epochExhausted = "epoch_exhausted"
+}
+
+public struct OutcomeView: Equatable {
+    public let code: OutcomeCodeView
+    public let phase: PhaseView
+    public let retry: RetryabilityView
+    public let recovery: RecoveryView?
+    public let display: String
+}
+
+public struct PausedView: Equatable {
+    public let origin: PauseOriginView
+}
+
+public enum ProductStateView: Equatable {
+    case preparing
+    case waiting
+    case connecting
+    case verifying
+    case transferring
+    case confirming
+    case paused(PausedView)
+    case unconfirmed
+    case completed
+    case failed
+    case cancelled
+}
+
+public struct RunningView: Equatable {
+    public let worker: WorkerKindView
+}
+
+public struct RetiringView: Equatable {
+    public let worker: WorkerKindView
+    public let intent: RetirementIntentView
+}
+
+public enum QuiescenceView: Equatable {
+    case running(RunningView)
+    case retiring(RetiringView)
+    case quiescent
+}
+
+public struct IdentityView: Equatable {
+    public let card: String
+    public let transfer: String
+    public let artifact: String
+}
+
+public struct CardView: Equatable {
+    public let identity: IdentityView
+    public let direction: DirectionView
+    public let offeredName: String
+    public let total: Int64
+    public let state: ProductStateView
+    public let quiescence: QuiescenceView
+    public let generation: Int64
+    public let phase: PhaseView
+    public let bytes: Int64
+    public let bytesResumed: Int64
+    public let outcome: OutcomeView?
+}
+
+public struct DutyProvenanceView: Equatable {
+    public let card: String
+    public let generation: Int64
+    public let request: String
+}
+
+public struct DutyView: Equatable {
+    public let provenance: DutyProvenanceView
+    public let kind: DutyKindView
+}
+
+public struct DutyFrameView: Equatable {
+    public let duty: DutyView
+    public let action: CapabilityActionView
+}
+
+public enum CardUpdateKindView: Equatable {
+    case snapshot(CardView)
+    case progress(CardView)
+    case state(CardView)
+    case terminal(CardView)
+    case capabilityDuty(DutyFrameView)
+}
+
+public struct CardUpdateView: Equatable {
+    public let epoch: Int64
+    public let card: String
+    public let kind: CardUpdateKindView
+}
+
+public struct LagView: Equatable {
+    public let epoch: Int64
+    public let card: String
+    public let missed: LosslessKindView
+}
+
+public struct ClosedView: Equatable {
+    public let epoch: Int64
+    public let card: String
+}
+
+public struct SubscribeRejectedView: Equatable {
+    public let card: String
+    public let reason: SubscribeRejectionView
+}
+
+public struct SessionKeyView: Equatable {
+    public let card: String
+    public let generation: Int64
+}
+
+public struct EvidenceProgressView: Equatable {
+    public let transferred: Int64
+    public let total: Int64
+}
+
+public struct RedactedIdView: Equatable {
+    public let kind: RedactedIdKindView
+}
+
+public enum EvidenceValueView: Equatable {
+    case phase(PhaseView)
+    case progress(EvidenceProgressView)
+    case outcome(OutcomeView)
+    case identifier(RedactedIdView)
+}
+
+public struct DegradedView: Equatable {
+    public let droppedEvents: Int64
+}
+
+public enum DiagnosticsStatusView: Equatable {
+    case complete
+    case degraded(DegradedView)
+}
+
+public struct TimelineEntryView: Equatable {
+    public let sequence: Int64
+    public let value: EvidenceValueView
+}
+
+public struct EvidenceTimelineView: Equatable {
+    public let session: SessionKeyView
+    public let status: DiagnosticsStatusView
+    public let entries: [TimelineEntryView]
+}
+
+public struct ProtocolManifestView: Equatable {
+    public let setId: String
+    public let dataAlpn: String
+    public let dataMagic: String
+    public let dataWireVersion: Int64
+}
+
+public struct AbiSchemaManifestView: Equatable {
+    public let readBindingSchemaId: String
+    public let evidenceRustAbiId: String
+    public let evidenceTimelineSchemaId: String
+    public let mailboxReceiptSchemaId: String
+    public let operationEnvelopeSchemaId: String
+}
+
+public struct TrustRootSha256View: Equatable {
+    public let fingerprint: String
+}
+
+public enum TrustRootView: Equatable {
+    case unprovisioned
+    case sha256(TrustRootSha256View)
+}
+
+public struct BuildManifestView: Equatable {
+    public let packageVersion: String
+    public let `protocol`: ProtocolManifestView
+    public let abiSchema: AbiSchemaManifestView
+    public let trustRoot: TrustRootView
+}
+
+public enum ReadBody: Equatable {
+    case cardUpdate(CardUpdateView)
+    case lag(LagView)
+    case closed(ClosedView)
+    case subscribeRejected(SubscribeRejectedView)
+    case evidence(EvidenceTimelineView)
+    case buildManifest(BuildManifestView)
+}
+
+public struct ReadFrame: Equatable {
+    public let body: ReadBody
+}
+
+public enum GateDecision {
+    case deliver
+    case dropStale
+    case contractBreach
+}
+
+/// Client-side admission for the per-epoch card stream: one gate per
+/// attachment. Frames from another epoch are stale; every epoch starts
+/// with a snapshot; a lag or close ends the epoch permanently.
+public struct EpochGate {
+    private let epoch: Int64
+    private var sawSnapshot = false
+    private var dead = false
+
+    public init(attach epoch: Int64) {
+        self.epoch = epoch
+    }
+
+    public mutating func admit(_ frame: ReadFrame) -> GateDecision {
+        switch frame.body {
+        case .cardUpdate(let update):
+            if update.epoch != epoch || dead {
+                return .dropStale
+            }
+            if case .snapshot = update.kind {
+                if sawSnapshot {
+                    return .contractBreach
+                }
+                sawSnapshot = true
+                return .deliver
+            }
+            return sawSnapshot ? .deliver : .contractBreach
+        case .lag(let lag):
+            return terminate(lag.epoch)
+        case .closed(let closed):
+            return terminate(closed.epoch)
+        default:
+            return .deliver
+        }
+    }
+
+    private mutating func terminate(_ frameEpoch: Int64) -> GateDecision {
+        if frameEpoch == epoch && !dead {
+            dead = true
+            return .deliver
+        }
+        return .dropStale
+    }
+}
+
+public enum EnvoixReadCodec {
+    /// Decodes and validates one frame. Every failure is a typed
+    /// `ReadContractError`; no input, however hostile, misparses.
+    public static func decode(_ data: Data) throws -> ReadFrame {
+        if data.count > readMaxFrameBytes {
+            throw ReadContractError(kind: .frameTooLarge, context: "ReadFrame")
+        }
+        let parsed: Any
+        do {
+            parsed = try JSONSerialization.jsonObject(with: data)
+        } catch {
+            throw ReadContractError(kind: .malformedJson, context: "ReadFrame")
+        }
+        let map = try object(parsed, "ReadFrame")
+        guard let schema = map["schema"] as? String else {
+            throw ReadContractError(kind: .shape, context: "ReadFrame.schema")
+        }
+        guard schema == readSchemaId else {
+            throw ReadContractError(kind: .unknownSchema, context: "ReadFrame")
+        }
+        return try decodeReadFrame(parsed, "ReadFrame")
+    }
+
+    private static func object(_ value: Any?, _ context: String) throws -> [String: Any] {
+        guard let map = value as? [String: Any] else {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        return map
+    }
+
+    private static func knownKeys(_ map: [String: Any], _ allowed: Set<String>, _ context: String) throws {
+        for key in map.keys where !allowed.contains(key) {
+            throw ReadContractError(kind: .unknownField, context: context)
+        }
+    }
+
+    private static func field(_ map: [String: Any], _ key: String, _ context: String) throws -> Any? {
+        guard let value = map[key] else {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        return value is NSNull ? nil : value
+    }
+
+    private static func integer(_ value: Any?, _ max: Int64, _ context: String) throws -> Int64 {
+        guard let number = value as? NSNumber else {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        let objCType = String(cString: number.objCType)
+        if objCType == "c" || objCType == "B" || objCType == "d" || objCType == "f" {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        let wide = number.int64Value
+        guard wide >= 0, wide <= max else {
+            throw ReadContractError(kind: .range, context: context)
+        }
+        return wide
+    }
+
+    private static func hexChars(_ text: String) -> Bool {
+        for scalar in text.unicodeScalars {
+            let digit = (scalar.value >= 0x30 && scalar.value <= 0x39)
+                || (scalar.value >= 0x61 && scalar.value <= 0x66)
+            if !digit {
+                return false
+            }
+        }
+        return true
+    }
+
+    private static func hexFixed(_ value: Any?, _ chars: Int, _ context: String) throws -> String {
+        guard let text = value as? String else {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        guard text.utf8.count == chars, hexChars(text) else {
+            throw ReadContractError(kind: .bound, context: context)
+        }
+        return text
+    }
+
+    private static func hexVariable(_ value: Any?, _ maxChars: Int, _ context: String) throws -> String {
+        guard let text = value as? String else {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        let length = text.utf8.count
+        let valid = length > 0 && length % 2 == 0 && length <= maxChars && hexChars(text)
+        guard valid else {
+            throw ReadContractError(kind: .bound, context: context)
+        }
+        return text
+    }
+
+    private static func utf8Bounded(_ value: Any?, _ maxBytes: Int, _ context: String) throws -> String {
+        guard let text = value as? String else {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        guard text.utf8.count <= maxBytes else {
+            throw ReadContractError(kind: .bound, context: context)
+        }
+        return text
+    }
+
+    private static func asciiBounded(_ value: Any?, _ maxBytes: Int, _ context: String) throws -> String {
+        guard let text = value as? String else {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        let valid = text.utf8.count <= maxBytes
+            && text.unicodeScalars.allSatisfy { $0.value >= 0x20 && $0.value <= 0x7e }
+        guard valid else {
+            throw ReadContractError(kind: .bound, context: context)
+        }
+        return text
+    }
+
+    private static func decodeList<T>(
+        _ value: Any?,
+        _ maxLen: Int,
+        _ context: String,
+        _ decodeElement: (Any?, String) throws -> T
+    ) throws -> [T] {
+        guard let items = value as? [Any] else {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        if items.count > maxLen {
+            throw ReadContractError(kind: .bound, context: context)
+        }
+        return try items.map { try decodeElement($0 is NSNull ? nil : $0, context) }
+    }
+
+    private static func payload(_ map: [String: Any], _ context: String) throws -> Any {
+        guard let value = map["value"], !(value is NSNull) else {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        return value
+    }
+
+    private static func unitPayload(_ map: [String: Any], _ context: String) throws {
+        if let value = map["value"], !(value is NSNull) {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+    }
+
+    private static func decodeDirectionView(_ value: Any?, _ context: String) throws -> DirectionView {
+        guard let text = value as? String else {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        guard let decoded = DirectionView(rawValue: text) else {
+            throw ReadContractError(kind: .unknownVariant, context: context)
+        }
+        return decoded
+    }
+
+    private static func decodePhaseView(_ value: Any?, _ context: String) throws -> PhaseView {
+        guard let text = value as? String else {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        guard let decoded = PhaseView(rawValue: text) else {
+            throw ReadContractError(kind: .unknownVariant, context: context)
+        }
+        return decoded
+    }
+
+    private static func decodeOutcomeCodeView(_ value: Any?, _ context: String) throws -> OutcomeCodeView {
+        guard let text = value as? String else {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        guard let decoded = OutcomeCodeView(rawValue: text) else {
+            throw ReadContractError(kind: .unknownVariant, context: context)
+        }
+        return decoded
+    }
+
+    private static func decodeRetryabilityView(_ value: Any?, _ context: String) throws -> RetryabilityView {
+        guard let text = value as? String else {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        guard let decoded = RetryabilityView(rawValue: text) else {
+            throw ReadContractError(kind: .unknownVariant, context: context)
+        }
+        return decoded
+    }
+
+    private static func decodeRecoveryView(_ value: Any?, _ context: String) throws -> RecoveryView {
+        guard let text = value as? String else {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        guard let decoded = RecoveryView(rawValue: text) else {
+            throw ReadContractError(kind: .unknownVariant, context: context)
+        }
+        return decoded
+    }
+
+    private static func decodePauseOriginView(_ value: Any?, _ context: String) throws -> PauseOriginView {
+        guard let text = value as? String else {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        guard let decoded = PauseOriginView(rawValue: text) else {
+            throw ReadContractError(kind: .unknownVariant, context: context)
+        }
+        return decoded
+    }
+
+    private static func decodeWorkerKindView(_ value: Any?, _ context: String) throws -> WorkerKindView {
+        guard let text = value as? String else {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        guard let decoded = WorkerKindView(rawValue: text) else {
+            throw ReadContractError(kind: .unknownVariant, context: context)
+        }
+        return decoded
+    }
+
+    private static func decodeRetirementIntentView(_ value: Any?, _ context: String) throws -> RetirementIntentView {
+        guard let text = value as? String else {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        guard let decoded = RetirementIntentView(rawValue: text) else {
+            throw ReadContractError(kind: .unknownVariant, context: context)
+        }
+        return decoded
+    }
+
+    private static func decodeDutyKindView(_ value: Any?, _ context: String) throws -> DutyKindView {
+        guard let text = value as? String else {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        guard let decoded = DutyKindView(rawValue: text) else {
+            throw ReadContractError(kind: .unknownVariant, context: context)
+        }
+        return decoded
+    }
+
+    private static func decodeCapabilityActionView(_ value: Any?, _ context: String) throws -> CapabilityActionView {
+        guard let text = value as? String else {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        guard let decoded = CapabilityActionView(rawValue: text) else {
+            throw ReadContractError(kind: .unknownVariant, context: context)
+        }
+        return decoded
+    }
+
+    private static func decodeRedactedIdKindView(_ value: Any?, _ context: String) throws -> RedactedIdKindView {
+        guard let text = value as? String else {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        guard let decoded = RedactedIdKindView(rawValue: text) else {
+            throw ReadContractError(kind: .unknownVariant, context: context)
+        }
+        return decoded
+    }
+
+    private static func decodeLosslessKindView(_ value: Any?, _ context: String) throws -> LosslessKindView {
+        guard let text = value as? String else {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        guard let decoded = LosslessKindView(rawValue: text) else {
+            throw ReadContractError(kind: .unknownVariant, context: context)
+        }
+        return decoded
+    }
+
+    private static func decodeSubscribeRejectionView(_ value: Any?, _ context: String) throws -> SubscribeRejectionView {
+        guard let text = value as? String else {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        guard let decoded = SubscribeRejectionView(rawValue: text) else {
+            throw ReadContractError(kind: .unknownVariant, context: context)
+        }
+        return decoded
+    }
+
+    private static func decodeOutcomeView(_ value: Any?, _ context: String) throws -> OutcomeView {
+        let map = try object(value, context)
+        try knownKeys(map, ["code", "phase", "retry", "recovery", "display"], context)
+        let code = try decodeOutcomeCodeView(try field(map, "code", "OutcomeView.code"), "OutcomeView.code")
+        let phase = try decodePhaseView(try field(map, "phase", "OutcomeView.phase"), "OutcomeView.phase")
+        let retry = try decodeRetryabilityView(try field(map, "retry", "OutcomeView.retry"), "OutcomeView.retry")
+        let recovery: RecoveryView?
+        if let present = try field(map, "recovery", "OutcomeView.recovery") {
+            recovery = try decodeRecoveryView(present, "OutcomeView.recovery")
+        } else {
+            recovery = nil
+        }
+        let display = try utf8Bounded(try field(map, "display", "OutcomeView.display"), 160, "OutcomeView.display")
+        return OutcomeView(
+            code: code,
+            phase: phase,
+            retry: retry,
+            recovery: recovery,
+            display: display
+        )
+    }
+
+    private static func decodePausedView(_ value: Any?, _ context: String) throws -> PausedView {
+        let map = try object(value, context)
+        try knownKeys(map, ["origin"], context)
+        let origin = try decodePauseOriginView(try field(map, "origin", "PausedView.origin"), "PausedView.origin")
+        return PausedView(
+            origin: origin
+        )
+    }
+
+    private static func decodeProductStateView(_ value: Any?, _ context: String) throws -> ProductStateView {
+        let map = try object(value, context)
+        try knownKeys(map, ["kind", "value"], context)
+        guard let kind = try field(map, "kind", context) as? String else {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        switch kind {
+        case "preparing":
+            try unitPayload(map, "ProductStateView.preparing")
+            return .preparing
+        case "waiting":
+            try unitPayload(map, "ProductStateView.waiting")
+            return .waiting
+        case "connecting":
+            try unitPayload(map, "ProductStateView.connecting")
+            return .connecting
+        case "verifying":
+            try unitPayload(map, "ProductStateView.verifying")
+            return .verifying
+        case "transferring":
+            try unitPayload(map, "ProductStateView.transferring")
+            return .transferring
+        case "confirming":
+            try unitPayload(map, "ProductStateView.confirming")
+            return .confirming
+        case "paused":
+            return .paused(try decodePausedView(payload(map, "ProductStateView.paused"), "ProductStateView.paused"))
+        case "unconfirmed":
+            try unitPayload(map, "ProductStateView.unconfirmed")
+            return .unconfirmed
+        case "completed":
+            try unitPayload(map, "ProductStateView.completed")
+            return .completed
+        case "failed":
+            try unitPayload(map, "ProductStateView.failed")
+            return .failed
+        case "cancelled":
+            try unitPayload(map, "ProductStateView.cancelled")
+            return .cancelled
+        default:
+            throw ReadContractError(kind: .unknownVariant, context: context)
+        }
+    }
+
+    private static func decodeRunningView(_ value: Any?, _ context: String) throws -> RunningView {
+        let map = try object(value, context)
+        try knownKeys(map, ["worker"], context)
+        let worker = try decodeWorkerKindView(try field(map, "worker", "RunningView.worker"), "RunningView.worker")
+        return RunningView(
+            worker: worker
+        )
+    }
+
+    private static func decodeRetiringView(_ value: Any?, _ context: String) throws -> RetiringView {
+        let map = try object(value, context)
+        try knownKeys(map, ["worker", "intent"], context)
+        let worker = try decodeWorkerKindView(try field(map, "worker", "RetiringView.worker"), "RetiringView.worker")
+        let intent = try decodeRetirementIntentView(try field(map, "intent", "RetiringView.intent"), "RetiringView.intent")
+        return RetiringView(
+            worker: worker,
+            intent: intent
+        )
+    }
+
+    private static func decodeQuiescenceView(_ value: Any?, _ context: String) throws -> QuiescenceView {
+        let map = try object(value, context)
+        try knownKeys(map, ["kind", "value"], context)
+        guard let kind = try field(map, "kind", context) as? String else {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        switch kind {
+        case "running":
+            return .running(try decodeRunningView(payload(map, "QuiescenceView.running"), "QuiescenceView.running"))
+        case "retiring":
+            return .retiring(try decodeRetiringView(payload(map, "QuiescenceView.retiring"), "QuiescenceView.retiring"))
+        case "quiescent":
+            try unitPayload(map, "QuiescenceView.quiescent")
+            return .quiescent
+        default:
+            throw ReadContractError(kind: .unknownVariant, context: context)
+        }
+    }
+
+    private static func decodeIdentityView(_ value: Any?, _ context: String) throws -> IdentityView {
+        let map = try object(value, context)
+        try knownKeys(map, ["card", "transfer", "artifact"], context)
+        let card = try hexFixed(try field(map, "card", "IdentityView.card"), 16, "IdentityView.card")
+        let transfer = try hexFixed(try field(map, "transfer", "IdentityView.transfer"), 32, "IdentityView.transfer")
+        let artifact = try hexFixed(try field(map, "artifact", "IdentityView.artifact"), 32, "IdentityView.artifact")
+        return IdentityView(
+            card: card,
+            transfer: transfer,
+            artifact: artifact
+        )
+    }
+
+    private static func decodeCardView(_ value: Any?, _ context: String) throws -> CardView {
+        let map = try object(value, context)
+        try knownKeys(map, ["identity", "direction", "offered_name", "total", "state", "quiescence", "generation", "phase", "bytes", "bytes_resumed", "outcome"], context)
+        let identity = try decodeIdentityView(try field(map, "identity", "CardView.identity"), "CardView.identity")
+        let direction = try decodeDirectionView(try field(map, "direction", "CardView.direction"), "CardView.direction")
+        let offeredName = try utf8Bounded(try field(map, "offered_name", "CardView.offered_name"), 255, "CardView.offered_name")
+        let total = try integer(try field(map, "total", "CardView.total"), u63Max, "CardView.total")
+        let state = try decodeProductStateView(try field(map, "state", "CardView.state"), "CardView.state")
+        let quiescence = try decodeQuiescenceView(try field(map, "quiescence", "CardView.quiescence"), "CardView.quiescence")
+        let generation = try integer(try field(map, "generation", "CardView.generation"), 4294967295, "CardView.generation")
+        let phase = try decodePhaseView(try field(map, "phase", "CardView.phase"), "CardView.phase")
+        let bytes = try integer(try field(map, "bytes", "CardView.bytes"), u63Max, "CardView.bytes")
+        let bytesResumed = try integer(try field(map, "bytes_resumed", "CardView.bytes_resumed"), u63Max, "CardView.bytes_resumed")
+        let outcome: OutcomeView?
+        if let present = try field(map, "outcome", "CardView.outcome") {
+            outcome = try decodeOutcomeView(present, "CardView.outcome")
+        } else {
+            outcome = nil
+        }
+        return CardView(
+            identity: identity,
+            direction: direction,
+            offeredName: offeredName,
+            total: total,
+            state: state,
+            quiescence: quiescence,
+            generation: generation,
+            phase: phase,
+            bytes: bytes,
+            bytesResumed: bytesResumed,
+            outcome: outcome
+        )
+    }
+
+    private static func decodeDutyProvenanceView(_ value: Any?, _ context: String) throws -> DutyProvenanceView {
+        let map = try object(value, context)
+        try knownKeys(map, ["card", "generation", "request"], context)
+        let card = try hexFixed(try field(map, "card", "DutyProvenanceView.card"), 16, "DutyProvenanceView.card")
+        let generation = try integer(try field(map, "generation", "DutyProvenanceView.generation"), 4294967295, "DutyProvenanceView.generation")
+        let request = try hexFixed(try field(map, "request", "DutyProvenanceView.request"), 32, "DutyProvenanceView.request")
+        return DutyProvenanceView(
+            card: card,
+            generation: generation,
+            request: request
+        )
+    }
+
+    private static func decodeDutyView(_ value: Any?, _ context: String) throws -> DutyView {
+        let map = try object(value, context)
+        try knownKeys(map, ["provenance", "kind"], context)
+        let provenance = try decodeDutyProvenanceView(try field(map, "provenance", "DutyView.provenance"), "DutyView.provenance")
+        let kind = try decodeDutyKindView(try field(map, "kind", "DutyView.kind"), "DutyView.kind")
+        return DutyView(
+            provenance: provenance,
+            kind: kind
+        )
+    }
+
+    private static func decodeDutyFrameView(_ value: Any?, _ context: String) throws -> DutyFrameView {
+        let map = try object(value, context)
+        try knownKeys(map, ["duty", "action"], context)
+        let duty = try decodeDutyView(try field(map, "duty", "DutyFrameView.duty"), "DutyFrameView.duty")
+        let action = try decodeCapabilityActionView(try field(map, "action", "DutyFrameView.action"), "DutyFrameView.action")
+        return DutyFrameView(
+            duty: duty,
+            action: action
+        )
+    }
+
+    private static func decodeCardUpdateKindView(_ value: Any?, _ context: String) throws -> CardUpdateKindView {
+        let map = try object(value, context)
+        try knownKeys(map, ["kind", "value"], context)
+        guard let kind = try field(map, "kind", context) as? String else {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        switch kind {
+        case "snapshot":
+            return .snapshot(try decodeCardView(payload(map, "CardUpdateKindView.snapshot"), "CardUpdateKindView.snapshot"))
+        case "progress":
+            return .progress(try decodeCardView(payload(map, "CardUpdateKindView.progress"), "CardUpdateKindView.progress"))
+        case "state":
+            return .state(try decodeCardView(payload(map, "CardUpdateKindView.state"), "CardUpdateKindView.state"))
+        case "terminal":
+            return .terminal(try decodeCardView(payload(map, "CardUpdateKindView.terminal"), "CardUpdateKindView.terminal"))
+        case "capability_duty":
+            return .capabilityDuty(try decodeDutyFrameView(payload(map, "CardUpdateKindView.capability_duty"), "CardUpdateKindView.capability_duty"))
+        default:
+            throw ReadContractError(kind: .unknownVariant, context: context)
+        }
+    }
+
+    private static func decodeCardUpdateView(_ value: Any?, _ context: String) throws -> CardUpdateView {
+        let map = try object(value, context)
+        try knownKeys(map, ["epoch", "card", "kind"], context)
+        let epoch = try integer(try field(map, "epoch", "CardUpdateView.epoch"), u63Max, "CardUpdateView.epoch")
+        let card = try hexFixed(try field(map, "card", "CardUpdateView.card"), 16, "CardUpdateView.card")
+        let kind = try decodeCardUpdateKindView(try field(map, "kind", "CardUpdateView.kind"), "CardUpdateView.kind")
+        return CardUpdateView(
+            epoch: epoch,
+            card: card,
+            kind: kind
+        )
+    }
+
+    private static func decodeLagView(_ value: Any?, _ context: String) throws -> LagView {
+        let map = try object(value, context)
+        try knownKeys(map, ["epoch", "card", "missed"], context)
+        let epoch = try integer(try field(map, "epoch", "LagView.epoch"), u63Max, "LagView.epoch")
+        let card = try hexFixed(try field(map, "card", "LagView.card"), 16, "LagView.card")
+        let missed = try decodeLosslessKindView(try field(map, "missed", "LagView.missed"), "LagView.missed")
+        return LagView(
+            epoch: epoch,
+            card: card,
+            missed: missed
+        )
+    }
+
+    private static func decodeClosedView(_ value: Any?, _ context: String) throws -> ClosedView {
+        let map = try object(value, context)
+        try knownKeys(map, ["epoch", "card"], context)
+        let epoch = try integer(try field(map, "epoch", "ClosedView.epoch"), u63Max, "ClosedView.epoch")
+        let card = try hexFixed(try field(map, "card", "ClosedView.card"), 16, "ClosedView.card")
+        return ClosedView(
+            epoch: epoch,
+            card: card
+        )
+    }
+
+    private static func decodeSubscribeRejectedView(_ value: Any?, _ context: String) throws -> SubscribeRejectedView {
+        let map = try object(value, context)
+        try knownKeys(map, ["card", "reason"], context)
+        let card = try hexFixed(try field(map, "card", "SubscribeRejectedView.card"), 16, "SubscribeRejectedView.card")
+        let reason = try decodeSubscribeRejectionView(try field(map, "reason", "SubscribeRejectedView.reason"), "SubscribeRejectedView.reason")
+        return SubscribeRejectedView(
+            card: card,
+            reason: reason
+        )
+    }
+
+    private static func decodeSessionKeyView(_ value: Any?, _ context: String) throws -> SessionKeyView {
+        let map = try object(value, context)
+        try knownKeys(map, ["card", "generation"], context)
+        let card = try hexFixed(try field(map, "card", "SessionKeyView.card"), 16, "SessionKeyView.card")
+        let generation = try integer(try field(map, "generation", "SessionKeyView.generation"), 4294967295, "SessionKeyView.generation")
+        return SessionKeyView(
+            card: card,
+            generation: generation
+        )
+    }
+
+    private static func decodeEvidenceProgressView(_ value: Any?, _ context: String) throws -> EvidenceProgressView {
+        let map = try object(value, context)
+        try knownKeys(map, ["transferred", "total"], context)
+        let transferred = try integer(try field(map, "transferred", "EvidenceProgressView.transferred"), u63Max, "EvidenceProgressView.transferred")
+        let total = try integer(try field(map, "total", "EvidenceProgressView.total"), u63Max, "EvidenceProgressView.total")
+        return EvidenceProgressView(
+            transferred: transferred,
+            total: total
+        )
+    }
+
+    private static func decodeRedactedIdView(_ value: Any?, _ context: String) throws -> RedactedIdView {
+        let map = try object(value, context)
+        try knownKeys(map, ["kind"], context)
+        let kind = try decodeRedactedIdKindView(try field(map, "kind", "RedactedIdView.kind"), "RedactedIdView.kind")
+        return RedactedIdView(
+            kind: kind
+        )
+    }
+
+    private static func decodeEvidenceValueView(_ value: Any?, _ context: String) throws -> EvidenceValueView {
+        let map = try object(value, context)
+        try knownKeys(map, ["kind", "value"], context)
+        guard let kind = try field(map, "kind", context) as? String else {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        switch kind {
+        case "phase":
+            return .phase(try decodePhaseView(payload(map, "EvidenceValueView.phase"), "EvidenceValueView.phase"))
+        case "progress":
+            return .progress(try decodeEvidenceProgressView(payload(map, "EvidenceValueView.progress"), "EvidenceValueView.progress"))
+        case "outcome":
+            return .outcome(try decodeOutcomeView(payload(map, "EvidenceValueView.outcome"), "EvidenceValueView.outcome"))
+        case "identifier":
+            return .identifier(try decodeRedactedIdView(payload(map, "EvidenceValueView.identifier"), "EvidenceValueView.identifier"))
+        default:
+            throw ReadContractError(kind: .unknownVariant, context: context)
+        }
+    }
+
+    private static func decodeDegradedView(_ value: Any?, _ context: String) throws -> DegradedView {
+        let map = try object(value, context)
+        try knownKeys(map, ["dropped_events"], context)
+        let droppedEvents = try integer(try field(map, "dropped_events", "DegradedView.dropped_events"), u63Max, "DegradedView.dropped_events")
+        return DegradedView(
+            droppedEvents: droppedEvents
+        )
+    }
+
+    private static func decodeDiagnosticsStatusView(_ value: Any?, _ context: String) throws -> DiagnosticsStatusView {
+        let map = try object(value, context)
+        try knownKeys(map, ["kind", "value"], context)
+        guard let kind = try field(map, "kind", context) as? String else {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        switch kind {
+        case "complete":
+            try unitPayload(map, "DiagnosticsStatusView.complete")
+            return .complete
+        case "degraded":
+            return .degraded(try decodeDegradedView(payload(map, "DiagnosticsStatusView.degraded"), "DiagnosticsStatusView.degraded"))
+        default:
+            throw ReadContractError(kind: .unknownVariant, context: context)
+        }
+    }
+
+    private static func decodeTimelineEntryView(_ value: Any?, _ context: String) throws -> TimelineEntryView {
+        let map = try object(value, context)
+        try knownKeys(map, ["sequence", "value"], context)
+        let sequence = try integer(try field(map, "sequence", "TimelineEntryView.sequence"), u63Max, "TimelineEntryView.sequence")
+        let value = try decodeEvidenceValueView(try field(map, "value", "TimelineEntryView.value"), "TimelineEntryView.value")
+        return TimelineEntryView(
+            sequence: sequence,
+            value: value
+        )
+    }
+
+    private static func decodeEvidenceTimelineView(_ value: Any?, _ context: String) throws -> EvidenceTimelineView {
+        let map = try object(value, context)
+        try knownKeys(map, ["session", "status", "entries"], context)
+        let session = try decodeSessionKeyView(try field(map, "session", "EvidenceTimelineView.session"), "EvidenceTimelineView.session")
+        let status = try decodeDiagnosticsStatusView(try field(map, "status", "EvidenceTimelineView.status"), "EvidenceTimelineView.status")
+        let entries = try decodeList(try field(map, "entries", "EvidenceTimelineView.entries"), 1024, "EvidenceTimelineView.entries", decodeTimelineEntryView)
+        return EvidenceTimelineView(
+            session: session,
+            status: status,
+            entries: entries
+        )
+    }
+
+    private static func decodeProtocolManifestView(_ value: Any?, _ context: String) throws -> ProtocolManifestView {
+        let map = try object(value, context)
+        try knownKeys(map, ["set_id", "data_alpn", "data_magic", "data_wire_version"], context)
+        let setId = try asciiBounded(try field(map, "set_id", "ProtocolManifestView.set_id"), 64, "ProtocolManifestView.set_id")
+        let dataAlpn = try hexVariable(try field(map, "data_alpn", "ProtocolManifestView.data_alpn"), 64, "ProtocolManifestView.data_alpn")
+        let dataMagic = try hexVariable(try field(map, "data_magic", "ProtocolManifestView.data_magic"), 32, "ProtocolManifestView.data_magic")
+        let dataWireVersion = try integer(try field(map, "data_wire_version", "ProtocolManifestView.data_wire_version"), 65535, "ProtocolManifestView.data_wire_version")
+        return ProtocolManifestView(
+            setId: setId,
+            dataAlpn: dataAlpn,
+            dataMagic: dataMagic,
+            dataWireVersion: dataWireVersion
+        )
+    }
+
+    private static func decodeAbiSchemaManifestView(_ value: Any?, _ context: String) throws -> AbiSchemaManifestView {
+        let map = try object(value, context)
+        try knownKeys(map, ["read_binding_schema_id", "evidence_rust_abi_id", "evidence_timeline_schema_id", "mailbox_receipt_schema_id", "operation_envelope_schema_id"], context)
+        let readBindingSchemaId = try asciiBounded(try field(map, "read_binding_schema_id", "AbiSchemaManifestView.read_binding_schema_id"), 64, "AbiSchemaManifestView.read_binding_schema_id")
+        let evidenceRustAbiId = try asciiBounded(try field(map, "evidence_rust_abi_id", "AbiSchemaManifestView.evidence_rust_abi_id"), 64, "AbiSchemaManifestView.evidence_rust_abi_id")
+        let evidenceTimelineSchemaId = try asciiBounded(try field(map, "evidence_timeline_schema_id", "AbiSchemaManifestView.evidence_timeline_schema_id"), 64, "AbiSchemaManifestView.evidence_timeline_schema_id")
+        let mailboxReceiptSchemaId = try asciiBounded(try field(map, "mailbox_receipt_schema_id", "AbiSchemaManifestView.mailbox_receipt_schema_id"), 64, "AbiSchemaManifestView.mailbox_receipt_schema_id")
+        let operationEnvelopeSchemaId = try asciiBounded(try field(map, "operation_envelope_schema_id", "AbiSchemaManifestView.operation_envelope_schema_id"), 64, "AbiSchemaManifestView.operation_envelope_schema_id")
+        return AbiSchemaManifestView(
+            readBindingSchemaId: readBindingSchemaId,
+            evidenceRustAbiId: evidenceRustAbiId,
+            evidenceTimelineSchemaId: evidenceTimelineSchemaId,
+            mailboxReceiptSchemaId: mailboxReceiptSchemaId,
+            operationEnvelopeSchemaId: operationEnvelopeSchemaId
+        )
+    }
+
+    private static func decodeTrustRootSha256View(_ value: Any?, _ context: String) throws -> TrustRootSha256View {
+        let map = try object(value, context)
+        try knownKeys(map, ["fingerprint"], context)
+        let fingerprint = try hexFixed(try field(map, "fingerprint", "TrustRootSha256View.fingerprint"), 64, "TrustRootSha256View.fingerprint")
+        return TrustRootSha256View(
+            fingerprint: fingerprint
+        )
+    }
+
+    private static func decodeTrustRootView(_ value: Any?, _ context: String) throws -> TrustRootView {
+        let map = try object(value, context)
+        try knownKeys(map, ["kind", "value"], context)
+        guard let kind = try field(map, "kind", context) as? String else {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        switch kind {
+        case "unprovisioned":
+            try unitPayload(map, "TrustRootView.unprovisioned")
+            return .unprovisioned
+        case "sha256":
+            return .sha256(try decodeTrustRootSha256View(payload(map, "TrustRootView.sha256"), "TrustRootView.sha256"))
+        default:
+            throw ReadContractError(kind: .unknownVariant, context: context)
+        }
+    }
+
+    private static func decodeBuildManifestView(_ value: Any?, _ context: String) throws -> BuildManifestView {
+        let map = try object(value, context)
+        try knownKeys(map, ["package_version", "protocol", "abi_schema", "trust_root"], context)
+        let packageVersion = try asciiBounded(try field(map, "package_version", "BuildManifestView.package_version"), 32, "BuildManifestView.package_version")
+        let `protocol` = try decodeProtocolManifestView(try field(map, "protocol", "BuildManifestView.protocol"), "BuildManifestView.protocol")
+        let abiSchema = try decodeAbiSchemaManifestView(try field(map, "abi_schema", "BuildManifestView.abi_schema"), "BuildManifestView.abi_schema")
+        let trustRoot = try decodeTrustRootView(try field(map, "trust_root", "BuildManifestView.trust_root"), "BuildManifestView.trust_root")
+        return BuildManifestView(
+            packageVersion: packageVersion,
+            `protocol`: `protocol`,
+            abiSchema: abiSchema,
+            trustRoot: trustRoot
+        )
+    }
+
+    private static func decodeReadBody(_ value: Any?, _ context: String) throws -> ReadBody {
+        let map = try object(value, context)
+        try knownKeys(map, ["kind", "value"], context)
+        guard let kind = try field(map, "kind", context) as? String else {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        switch kind {
+        case "card_update":
+            return .cardUpdate(try decodeCardUpdateView(payload(map, "ReadBody.card_update"), "ReadBody.card_update"))
+        case "lag":
+            return .lag(try decodeLagView(payload(map, "ReadBody.lag"), "ReadBody.lag"))
+        case "closed":
+            return .closed(try decodeClosedView(payload(map, "ReadBody.closed"), "ReadBody.closed"))
+        case "subscribe_rejected":
+            return .subscribeRejected(try decodeSubscribeRejectedView(payload(map, "ReadBody.subscribe_rejected"), "ReadBody.subscribe_rejected"))
+        case "evidence":
+            return .evidence(try decodeEvidenceTimelineView(payload(map, "ReadBody.evidence"), "ReadBody.evidence"))
+        case "build_manifest":
+            return .buildManifest(try decodeBuildManifestView(payload(map, "ReadBody.build_manifest"), "ReadBody.build_manifest"))
+        default:
+            throw ReadContractError(kind: .unknownVariant, context: context)
+        }
+    }
+
+    private static func decodeReadFrame(_ value: Any?, _ context: String) throws -> ReadFrame {
+        let map = try object(value, context)
+        try knownKeys(map, ["schema", "body"], context)
+        let body = try decodeReadBody(try field(map, "body", "ReadFrame.body"), "ReadFrame.body")
+        return ReadFrame(
+            body: body
+        )
+    }
+}
