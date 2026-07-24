@@ -219,6 +219,33 @@ fn product_mints_all_identity_before_the_first_attempt() {
 }
 
 #[test]
+fn receiver_adopts_authenticated_transfer_identity_and_mints_local_identity() {
+    let transfer = TransferId::from_bytes([0xa1; 16]);
+    let artifact = ArtifactId::from_bytes([0xb2; 16]);
+    let (record, effects) = TransferRecord::create_with_identity(
+        NewTransfer {
+            direction: Direction::Receive,
+            offered_name: OfferedName::from_untrusted("authenticated.zip"),
+            total: ByteCount::new(321),
+            source: SourceDecision::Ready,
+        },
+        transfer,
+        artifact,
+        &mut DeterministicEntropy::default(),
+    )
+    .expect("local identity minting succeeds");
+
+    let plan = start_plan(&effects);
+    assert_eq!(record.identity.transfer, transfer);
+    assert_eq!(record.identity.artifact, artifact);
+    assert_ne!(record.identity.card.get(), 0);
+    assert_ne!(record.generation.get(), 0);
+    assert_eq!(plan.stamp, record.stamp());
+    assert_eq!(plan.transfer, transfer);
+    assert_eq!(plan.artifact, artifact);
+}
+
+#[test]
 fn source_precedence_is_owned_by_product_policy() {
     assert_eq!(resolve_source(true, None), SourceDecision::Ready);
     assert_eq!(

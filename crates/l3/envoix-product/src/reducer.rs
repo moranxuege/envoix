@@ -4,7 +4,7 @@ use envoix_attempt_api::{
 };
 use envoix_capabilities::{AdmittedDutyResult, Duty, DutyKind, DutyProvenance};
 use envoix_outcomes::{Outcome, OutcomeCode, Phase, Recovery, Retryability, SafeDisplay};
-use envoix_types::{ByteCount, Direction};
+use envoix_types::{ArtifactId, ByteCount, Direction, TransferId};
 
 use crate::identity::next_generation;
 use crate::{
@@ -18,7 +18,29 @@ impl TransferRecord {
         transfer: NewTransfer,
         identities: &mut impl IdentitySource,
     ) -> Result<(Self, Vec<ProductEffect>), IdentityError> {
-        let (identity, generation, receipt_request) = ProductIdentity::mint(identities)?;
+        Self::create_with_minted_identity(transfer, ProductIdentity::mint(identities)?)
+    }
+
+    pub fn create_with_identity(
+        transfer: NewTransfer,
+        transfer_id: TransferId,
+        artifact_id: ArtifactId,
+        identities: &mut impl IdentitySource,
+    ) -> Result<(Self, Vec<ProductEffect>), IdentityError> {
+        Self::create_with_minted_identity(
+            transfer,
+            ProductIdentity::adopt(identities, transfer_id, artifact_id)?,
+        )
+    }
+
+    fn create_with_minted_identity(
+        transfer: NewTransfer,
+        (identity, generation, receipt_request): (
+            ProductIdentity,
+            envoix_types::AttemptGen,
+            envoix_types::RequestId,
+        ),
+    ) -> Result<(Self, Vec<ProductEffect>), IdentityError> {
         let (state, quiescence, phase, facts, source_recoverable, outcome) = match transfer.source {
             SourceDecision::Ready => (
                 ProductState::Connecting,

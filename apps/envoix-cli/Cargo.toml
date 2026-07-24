@@ -16,14 +16,19 @@ path = "src/main.rs"
 blake3.workspace = true
 envoix-attempt-api = { path = "../../crates/l1/envoix-attempt-api" }
 envoix-attempt-iroh = { path = "../../crates/l2/envoix-attempt-iroh" }
+envoix-capabilities = { path = "../../crates/l1/envoix-capabilities" }
 envoix-invite = { path = "../../crates/l1/envoix-invite" }
+envoix-operation-store = { path = "../../crates/l2/envoix-operation-store" }
 envoix-outcomes = { path = "../../crates/l0/envoix-outcomes" }
 envoix-pairing = { path = "../../crates/l1/envoix-pairing" }
+envoix-product = { path = "../../crates/l3/envoix-product" }
 envoix-protocol = { path = "../../crates/l1/envoix-protocol" }
 envoix-rendezvous = { path = "../../crates/l2/envoix-rendezvous" }
 envoix-rendezvous-iroh = { path = "../../crates/l2/envoix-rendezvous-iroh" }
 envoix-server = { path = "../envoix-server" }
 envoix-session-iroh = { path = "../../crates/l2/envoix-session-iroh" }
+envoix-storage-api = { path = "../../crates/l1/envoix-storage-api" }
+envoix-storage-local = { path = "../../crates/l2/envoix-storage-local" }
 envoix-transfer = { path = "../../crates/l2/envoix-transfer" }
 envoix-types = { path = "../../crates/l0/envoix-types" }
 iroh.workspace = true

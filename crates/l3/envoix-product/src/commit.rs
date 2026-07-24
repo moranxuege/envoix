@@ -1,6 +1,8 @@
 use std::fmt;
 use std::num::NonZeroUsize;
 
+use envoix_types::{ArtifactId, TransferId};
+
 use crate::{
     IdentityError, IdentitySource, NewTransfer, ProductEffect, ProductInput, ProductState,
     Quiescence, RecordCodecError, TransferRecord, WorkerKind, encode_record,
@@ -84,6 +86,21 @@ impl<S: RecordStore> CommittedSession<S> {
         max_commit_attempts: NonZeroUsize,
     ) -> Result<(Self, ApplyOutcome), IdentityError> {
         let (record, effects) = TransferRecord::create(transfer, identities)?;
+        let mut session = Self::from_record(record, store, max_commit_attempts);
+        let outcome = session.finish_reduction(effects, true, None, false)?;
+        Ok((session, outcome))
+    }
+
+    pub fn create_with_identity(
+        transfer: NewTransfer,
+        transfer_id: TransferId,
+        artifact_id: ArtifactId,
+        identities: &mut impl IdentitySource,
+        store: S,
+        max_commit_attempts: NonZeroUsize,
+    ) -> Result<(Self, ApplyOutcome), IdentityError> {
+        let (record, effects) =
+            TransferRecord::create_with_identity(transfer, transfer_id, artifact_id, identities)?;
         let mut session = Self::from_record(record, store, max_commit_attempts);
         let outcome = session.finish_reduction(effects, true, None, false)?;
         Ok((session, outcome))

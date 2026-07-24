@@ -49,6 +49,24 @@ impl ProductIdentity {
         let card = RecordId::new(mint_nonzero_u64(source)?);
         let transfer = TransferId::from_bytes(mint_nonzero_128(source)?);
         let artifact = ArtifactId::from_bytes(mint_nonzero_128(source)?);
+        Self::mint_local(source, card, transfer, artifact)
+    }
+
+    pub(crate) fn adopt(
+        source: &mut impl IdentitySource,
+        transfer: TransferId,
+        artifact: ArtifactId,
+    ) -> Result<(Self, AttemptGen, RequestId), IdentityError> {
+        let card = RecordId::new(mint_nonzero_u64(source)?);
+        Self::mint_local(source, card, transfer, artifact)
+    }
+
+    fn mint_local(
+        source: &mut impl IdentitySource,
+        card: RecordId,
+        transfer: TransferId,
+        artifact: ArtifactId,
+    ) -> Result<(Self, AttemptGen, RequestId), IdentityError> {
         let receipt_request = RequestId::from_bytes(mint_nonzero_128(source)?);
 
         let mut generation = [0; 4];

@@ -6,7 +6,7 @@ use envoix_attempt_api::{
     RetirementRequestResult, TerminalResolutionResult,
 };
 use envoix_outcomes::{OutcomeCode, Phase};
-use envoix_types::{ByteCount, Direction, OfferedName};
+use envoix_types::{ArtifactId, ByteCount, Direction, OfferedName, TransferId};
 
 use crate::{
     CapabilityAction, CommitError, CommitFailure, CommitStatus, CommittedSession, IdentityError,
@@ -180,6 +180,30 @@ fn staging_completes_through_the_commit_barrier() {
             .iter()
             .any(|effect| matches!(effect, ProductEffect::StartAttempt { .. }))
     );
+}
+
+#[test]
+fn adopted_identity_creation_crosses_the_commit_barrier() {
+    let transfer_id = TransferId::from_bytes([0xc3; 16]);
+    let artifact_id = ArtifactId::from_bytes([0xd4; 16]);
+    let (session, outcome) = CommittedSession::create_with_identity(
+        transfer(Direction::Receive),
+        transfer_id,
+        artifact_id,
+        &mut DeterministicEntropy::default(),
+        MemoryStore::default(),
+        attempts(1),
+    )
+    .unwrap();
+
+    assert_eq!(outcome.commit, CommitStatus::Committed { attempts: 1 });
+    assert_eq!(session.record().identity.transfer, transfer_id);
+    assert_eq!(session.record().identity.artifact, artifact_id);
+    assert!(matches!(
+        outcome.released_after_commit.as_slice(),
+        [ProductEffect::StartAttempt { plan }]
+            if plan.transfer == transfer_id && plan.artifact == artifact_id
+    ));
 }
 
 fn admitted_event(record: &crate::TransferRecord, kind: AttemptEventKind) -> ProductInput {
