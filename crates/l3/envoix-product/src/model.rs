@@ -119,6 +119,7 @@ pub enum ProductCommand {
 #[derive(Debug, Eq, PartialEq)]
 pub enum ProductInput {
     Command(ProductCommand),
+    /// Reconciles a durable record after process-owned workers were torn down.
     Restore,
     StageProgress {
         stamp: AttemptStamp,

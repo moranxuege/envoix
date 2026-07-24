@@ -3,7 +3,7 @@ use std::num::NonZeroUsize;
 
 use crate::{
     IdentityError, IdentitySource, NewTransfer, ProductEffect, ProductInput, ProductState,
-    RecordCodecError, TransferRecord, encode_record,
+    Quiescence, RecordCodecError, TransferRecord, WorkerKind, encode_record,
 };
 
 /// Persists one card-scoped product record body.
@@ -85,7 +85,7 @@ impl<S: RecordStore> CommittedSession<S> {
     ) -> Result<(Self, ApplyOutcome), IdentityError> {
         let (record, effects) = TransferRecord::create(transfer, identities)?;
         let mut session = Self::from_record(record, store, max_commit_attempts);
-        let outcome = session.finish_reduction(effects, true, None)?;
+        let outcome = session.finish_reduction(effects, true, None, false)?;
         Ok((session, outcome))
     }
 
@@ -132,9 +132,16 @@ impl<S: RecordStore> CommittedSession<S> {
 
     pub fn apply(&mut self, input: ProductInput) -> Result<ApplyOutcome, IdentityError> {
         let before = self.record.clone();
+        let worker_gone_proven = !before.quiescence.is_quiescent()
+            && matches!(
+                &input,
+                ProductInput::Restore
+                    | ProductInput::AttemptRetired(_)
+                    | ProductInput::StagingRetired { .. }
+            );
         let effects = self.record.reduce(input)?;
         let durable_change = self.record != before;
-        self.finish_reduction(effects, durable_change, Some(before))
+        self.finish_reduction(effects, durable_change, Some(before), worker_gone_proven)
     }
 
     fn finish_reduction(
@@ -142,6 +149,7 @@ impl<S: RecordStore> CommittedSession<S> {
         effects: Vec<ProductEffect>,
         durable_change: bool,
         committed_before: Option<TransferRecord>,
+        worker_gone_proven: bool,
     ) -> Result<ApplyOutcome, IdentityError> {
         let (released_immediately, staged) = partition_effects(effects);
         if !durable_change && staged.is_empty() {
@@ -156,6 +164,8 @@ impl<S: RecordStore> CommittedSession<S> {
                     committed_before,
                     0,
                     CommitFailure::Encode(error),
+                    worker_gone_proven,
+                    staged,
                 );
             }
         };
@@ -184,6 +194,8 @@ impl<S: RecordStore> CommittedSession<S> {
             committed_before,
             self.max_commit_attempts.get(),
             last_failure.expect("a nonzero failed attempt bound records an error"),
+            worker_gone_proven,
+            staged,
         )
     }
 
@@ -193,14 +205,48 @@ impl<S: RecordStore> CommittedSession<S> {
         committed_before: Option<TransferRecord>,
         attempts: usize,
         failure: CommitFailure,
+        worker_gone_proven: bool,
+        staged: Vec<ProductEffect>,
     ) -> Result<ApplyOutcome, IdentityError> {
-        let tentative_cleanup = self.record.reduce(ProductInput::StorageFailed)?;
+        // The failed barrier never released this start, so C7 cannot have
+        // admitted the tentative worker and there is nothing to retire.
+        let attempt_start_unreleased = staged
+            .iter()
+            .any(|effect| matches!(effect, ProductEffect::StartAttempt { .. }));
+        if attempt_start_unreleased
+            && self.record.quiescence
+                == (Quiescence::Running {
+                    worker: WorkerKind::Attempt,
+                })
+        {
+            self.record.quiescence = Quiescence::Quiescent;
+        }
+        let monotone_completion = worker_gone_proven
+            && matches!(
+                self.record.state,
+                ProductState::Completed | ProductState::Unconfirmed
+            );
+        let tentative_cleanup = if monotone_completion {
+            Vec::new()
+        } else {
+            self.record.reduce(ProductInput::StorageFailed)?
+        };
         let (tentative_immediate, _dropped_post_commit) = partition_effects(tentative_cleanup);
         extend_unique(&mut released_immediately, tentative_immediate);
 
-        if let Some(committed_before) = committed_before {
+        if !monotone_completion && let Some(committed_before) = committed_before {
             self.record = committed_before;
-            let escalation = self.record.reduce(ProductInput::StorageFailed)?;
+            let mut escalation = self.record.reduce(ProductInput::StorageFailed)?;
+            if worker_gone_proven {
+                // Product decisions roll back; external lease release does not.
+                self.record.quiescence = Quiescence::Quiescent;
+                escalation.retain(|effect| {
+                    !matches!(
+                        effect,
+                        ProductEffect::RetireAttempt { .. } | ProductEffect::RetireStaging { .. }
+                    )
+                });
+            }
             let (escalation_immediate, _dropped_post_commit) = partition_effects(escalation);
             extend_unique(&mut released_immediately, escalation_immediate);
         }
@@ -213,9 +259,21 @@ impl<S: RecordStore> CommittedSession<S> {
                 .is_ok()
         });
 
+        // Ordinary escalation drops every staged post-commit effect (their
+        // authorizing state was rolled back / replaced with a storage fault). But
+        // a monotone-completion record is RETAINED unchanged, so if its
+        // best-effort write succeeds that same write authorizes its post-commit
+        // effect (e.g. the receive receipt) — dropping it would strand a durably
+        // completed transfer with no receipt until an unrelated later restart.
+        let released_after_commit = if monotone_completion && failed_state_persisted {
+            staged
+        } else {
+            Vec::new()
+        };
+
         Ok(self.outcome(
             released_immediately,
-            Vec::new(),
+            released_after_commit,
             CommitStatus::Escalated {
                 attempts,
                 failure,

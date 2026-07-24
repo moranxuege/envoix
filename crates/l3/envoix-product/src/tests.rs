@@ -1001,6 +1001,36 @@ fn receipt_verified_during_confirming_completes_and_stops_the_wait() {
 }
 
 #[test]
+fn receipt_verified_completion_survives_cancelled_retirement_ack() {
+    let mut record = confirming_send();
+    let stamp = record.stamp();
+    record
+        .reduce(ProductInput::ReceiptVerified { stamp })
+        .unwrap();
+    assert_eq!(record.state, ProductState::Completed);
+    assert!(record.quiescence.is_retiring());
+
+    let effects = record
+        .reduce(ProductInput::AttemptRetired(retirement_ack(
+            &record,
+            RetirementIntent::Cancel,
+            false,
+        )))
+        .unwrap();
+
+    assert_eq!(record.state, ProductState::Completed);
+    assert_eq!(record.quiescence, crate::Quiescence::Quiescent);
+    assert_eq!(record.bytes, record.total);
+    assert!(!effects.iter().any(|effect| matches!(
+        effect,
+        ProductEffect::StorageIntent {
+            action: StorageAction::DiscardPartial,
+            ..
+        }
+    )));
+}
+
+#[test]
 fn peer_pause_and_lost_connection_classify_as_paused() {
     let mut peer_paused = transfer(Direction::Receive);
     peer_paused
@@ -1205,26 +1235,20 @@ fn restore_derives_state_from_durable_facts() {
     let stamp = confirming.stamp();
     let effects = confirming.reduce(ProductInput::Restore).unwrap();
     assert_eq!(confirming.state, ProductState::Unconfirmed);
-    // Restore asks the (now-defunct) attempt to retire AND starts the mailbox
-    // poll: the in-band confirmation is abandoned for the durable proof channel.
-    assert_eq!(
-        effects,
-        vec![
-            ProductEffect::RetireAttempt {
-                stamp,
-                intent: RetirementIntent::Cancel,
-            },
-            ProductEffect::StartMailboxPoll { stamp },
-        ]
-    );
+    assert_eq!(confirming.quiescence, crate::Quiescence::Quiescent);
+    // Process teardown proves the attempt is gone; restore only needs to resume
+    // the durable proof channel.
+    assert_eq!(effects, vec![ProductEffect::StartMailboxPoll { stamp }]);
 
     let mut active = transfer(Direction::Receive);
     active.reduce(ProductInput::Restore).unwrap();
     assert_eq!(active.state, ProductState::Paused(PauseOrigin::Lost));
+    assert_eq!(active.quiescence, crate::Quiescence::Quiescent);
 
     let mut preparing = preparing(Direction::Send, false);
     preparing.reduce(ProductInput::Restore).unwrap();
     assert_eq!(preparing.state, ProductState::Failed);
+    assert_eq!(preparing.quiescence, crate::Quiescence::Quiescent);
     assert_eq!(
         preparing
             .outcome
@@ -1243,9 +1267,201 @@ fn restore_derives_state_from_durable_facts() {
     let phase = completed.phase;
     completed.reduce(ProductInput::Restore).unwrap();
     assert_eq!(completed.state, ProductState::Completed);
+    assert_eq!(completed.quiescence, crate::Quiescence::Quiescent);
     assert_eq!(
         completed.phase, phase,
         "restore preserves terminal evidence"
+    );
+}
+
+#[test]
+fn restore_reconciles_a_durable_retiring_cancel_without_discarding() {
+    let mut record = transfer(Direction::Receive);
+    let bytes = record.bytes;
+    record
+        .reduce(ProductInput::Command(ProductCommand::Cancel))
+        .unwrap();
+    assert_eq!(record.state, ProductState::Cancelled);
+    assert!(record.quiescence.is_retiring());
+
+    let encoded = encode_record(&record).unwrap();
+    let RecordDecode::Loaded(mut restored) = decode_record(&encoded).unwrap() else {
+        panic!("current product record must load");
+    };
+    let effects = restored.reduce(ProductInput::Restore).unwrap();
+
+    assert!(effects.is_empty());
+    assert_eq!(restored.state, ProductState::Paused(PauseOrigin::Lost));
+    assert_eq!(restored.quiescence, crate::Quiescence::Quiescent);
+    assert_eq!(restored.bytes, bytes);
+    assert_eq!(
+        restored.allowed_commands(),
+        vec![
+            ProductCommand::Resume,
+            ProductCommand::Cancel,
+            ProductCommand::Remove,
+        ]
+    );
+}
+
+#[test]
+fn staging_handoff_state_round_trips_through_the_codec() {
+    // Topology F1: `StageComplete` leaves the card `Preparing + source_ready +
+    // Retiring(Staging, Finalize)` until `StagingRetired`. The commit barrier must
+    // persist that durable handoff, so it MUST encode/decode — but ANY other
+    // `Preparing + source_ready` is still invalid.
+    let mut record = preparing(Direction::Send, true);
+    let stamp = record.stamp();
+    record
+        .reduce(ProductInput::StageComplete {
+            stamp,
+            total: ByteCount::new(90),
+        })
+        .unwrap();
+    assert_eq!(record.state, ProductState::Preparing);
+    assert!(record.facts.source_ready);
+    assert!(matches!(
+        record.quiescence,
+        crate::Quiescence::Retiring {
+            worker: crate::WorkerKind::Staging,
+            ..
+        }
+    ));
+
+    let encoded = encode_record(&record).expect("the staging handoff must be encodable");
+    let RecordDecode::Loaded(decoded) = decode_record(&encoded).expect("and decodable") else {
+        panic!("the staging handoff must load");
+    };
+    assert_eq!(decoded, record);
+
+    // The same state without the staging retirement is still rejected.
+    let mut bogus = record.clone();
+    bogus.quiescence = crate::Quiescence::Quiescent;
+    assert!(
+        encode_record(&bogus).is_err(),
+        "a ready source outside the handoff must not be Preparing"
+    );
+    // Only the Finalize handoff is valid; a Cancel-intent staging retirement in a
+    // Preparing + source_ready record is not reducer-reachable and must not decode
+    // (else restore would turn a cancelled staging into a StartAttempt).
+    let mut cancel_handoff = record.clone();
+    cancel_handoff.quiescence = crate::Quiescence::Retiring {
+        worker: crate::WorkerKind::Staging,
+        intent: RetirementIntent::Cancel,
+    };
+    assert!(encode_record(&cancel_handoff).is_err());
+}
+
+#[test]
+fn admitted_progress_is_monotone_within_a_generation() {
+    // An untrusted executor event must not move the bar — and thus the next
+    // ResumeFrom offset — backward, which would make a valid larger durable peer
+    // prefix look like a protocol violation on resume.
+    let mut record = transfer(Direction::Send);
+    record
+        .reduce(event(
+            &record,
+            AttemptEventKind::Progress {
+                transferred: ByteCount::new(80),
+            },
+        ))
+        .unwrap();
+    assert_eq!(record.bytes, ByteCount::new(80));
+    record
+        .reduce(event(
+            &record,
+            AttemptEventKind::Progress {
+                transferred: ByteCount::new(20),
+            },
+        ))
+        .unwrap();
+    assert_eq!(
+        record.bytes,
+        ByteCount::new(80),
+        "backward progress ignored"
+    );
+
+    record
+        .reduce(ProductInput::Command(ProductCommand::Pause))
+        .unwrap();
+    quiesce(&mut record, RetirementIntent::Pause);
+    let effects = record
+        .reduce(ProductInput::Command(ProductCommand::Resume))
+        .unwrap();
+    assert_eq!(
+        start_plan(&effects).resume,
+        ResumeIntent::ResumeFrom {
+            offset: ByteCount::new(80)
+        }
+    );
+}
+
+#[test]
+fn restore_does_not_affirm_an_ambiguous_pause() {
+    // A pause requested while an attempt was live may have LOST to a crossed
+    // commit and actually completed. Restore must not affirm it as a clean local
+    // pause: a fully-sent send goes to the mailbox; otherwise Paused(Lost).
+    let mut receive = transfer(Direction::Receive);
+    receive
+        .reduce(ProductInput::Command(ProductCommand::Pause))
+        .unwrap();
+    let encoded = encode_record(&receive).unwrap();
+    let RecordDecode::Loaded(mut restored) = decode_record(&encoded).unwrap() else {
+        panic!("paused record must load");
+    };
+    assert!(restored.reduce(ProductInput::Restore).unwrap().is_empty());
+    assert_eq!(restored.state, ProductState::Paused(PauseOrigin::Lost));
+    assert_eq!(restored.quiescence, crate::Quiescence::Quiescent);
+
+    // A send that had already sent Complete instead defers to the mailbox proof.
+    let mut send = confirming_send();
+    send.reduce(ProductInput::Command(ProductCommand::Pause))
+        .unwrap();
+    assert!(send.facts.complete_sent);
+    let effects = send.reduce(ProductInput::Restore).unwrap();
+    assert_eq!(send.state, ProductState::Unconfirmed);
+    assert_eq!(send.quiescence, crate::Quiescence::Quiescent);
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, ProductEffect::StartMailboxPoll { .. }))
+    );
+}
+
+#[test]
+fn restore_reissues_the_tombstone_for_a_removed_record() {
+    // Topology F2: a crash after committing a removal but before dispatching the
+    // `TombstoneCard` leaves a `remove_requested + Quiescent` record. Restore must
+    // re-issue the tombstone idempotently, not leave a command-less zombie.
+    let mut record = transfer(Direction::Send);
+    record
+        .reduce(ProductInput::Command(ProductCommand::Pause))
+        .unwrap();
+    quiesce(&mut record, RetirementIntent::Pause);
+    let removed = record
+        .reduce(ProductInput::Command(ProductCommand::Remove))
+        .unwrap();
+    assert!(record.facts.remove_requested);
+    assert!(removed.iter().any(|e| matches!(
+        e,
+        ProductEffect::StorageIntent {
+            action: StorageAction::TombstoneCard,
+            ..
+        }
+    )));
+    assert!(record.allowed_commands().is_empty());
+
+    // The tombstone effect was lost to a crash; restore re-issues it.
+    let replay = record.reduce(ProductInput::Restore).unwrap();
+    assert!(
+        replay.iter().any(|e| matches!(
+            e,
+            ProductEffect::StorageIntent {
+                action: StorageAction::TombstoneCard,
+                ..
+            }
+        )),
+        "restore re-issues the tombstone for an extant removed record"
     );
 }
 
@@ -1396,7 +1612,7 @@ fn random_interleavings_hold_invariants() {
             } else {
                 stale_stamp(&record)
             };
-            let input = match (seed >> 33) as usize % 14 {
+            let input = match (seed >> 33) as usize % 16 {
                 0 => ProductInput::Command(ProductCommand::Pause),
                 1 => ProductInput::Command(ProductCommand::Cancel),
                 2 => ProductInput::Command(ProductCommand::Resume),
@@ -1425,6 +1641,12 @@ fn random_interleavings_hold_invariants() {
                 ),
                 12 => ProductInput::AttemptEnded { stamp },
                 13 => ProductInput::StorageFailed,
+                14 => ProductInput::AttemptRetired(retirement_ack(
+                    &record,
+                    RetirementIntent::Cancel,
+                    false,
+                )),
+                15 => ProductInput::StagingRetired { stamp },
                 _ => unreachable!(),
             };
             record.reduce(input).unwrap();

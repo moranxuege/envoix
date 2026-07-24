@@ -127,7 +127,10 @@ impl TransferRecord {
         if self.facts.remove_requested
             && !matches!(
                 &input,
-                ProductInput::AttemptRetired(_) | ProductInput::StagingRetired { .. }
+                ProductInput::Restore
+                    | ProductInput::AttemptRetired(_)
+                    | ProductInput::StagingRetired { .. }
+                    | ProductInput::StorageFailed
             )
         {
             return Ok(Vec::new());
@@ -341,49 +344,116 @@ impl TransferRecord {
     }
 
     fn on_restore(&mut self) -> Vec<ProductEffect> {
-        match self.state {
-            ProductState::Confirming if self.facts.complete_sent => {
-                let stamp = self.stamp();
-                self.state = ProductState::Unconfirmed;
-                self.outcome = Some(outcome_for(OutcomeCode::PeerLost, Phase::Confirming));
-                self.request_attempt_retirement(RetirementIntent::Cancel);
-                vec![
-                    ProductEffect::RetireAttempt {
-                        stamp,
-                        intent: RetirementIntent::Cancel,
-                    },
-                    ProductEffect::StartMailboxPoll { stamp },
-                ]
+        let previous_quiescence = self.quiescence;
+        if !previous_quiescence.is_quiescent() {
+            // Restore is delivered only after the process-owned worker domain has
+            // been torn down. That boundary proves leases and handles are gone,
+            // but says nothing about a cancel-vs-commit race.
+            self.quiescence = Quiescence::Quiescent;
+        }
+        if self.facts.remove_requested {
+            // An extant `remove_requested` record is itself evidence the tombstone
+            // has not been observed to complete — a crash could have dropped the
+            // post-commit `TombstoneCard`. Restore re-issues it idempotently
+            // regardless of prior quiescence, so a removed card is never a zombie
+            // that no command can clear. (Durable at-least-once replay across the
+            // whole run is the P4 outbox's job; this closes the restore hole.)
+            return vec![self.tombstone_card()];
+        }
+
+        let ambiguous_attempt_cancel = matches!(
+            previous_quiescence,
+            Quiescence::Retiring {
+                worker: WorkerKind::Attempt,
+                intent: RetirementIntent::Cancel,
             }
-            state if state.is_active() => {
-                let stamp = self.stamp();
+        ) && self.state == ProductState::Cancelled;
+        // A pause requested while an attempt was live is equally ambiguous: it may
+        // have LOST to a crossed commit and actually completed. Restore must not
+        // affirm it as a clean local pause that then resumes as a fresh
+        // generation — treat it like the cancel case.
+        let ambiguous_attempt_pause = matches!(
+            previous_quiescence,
+            Quiescence::Retiring {
+                worker: WorkerKind::Attempt,
+                intent: RetirementIntent::Pause,
+            }
+        ) && matches!(self.state, ProductState::Paused(_));
+        match self.state {
+            ProductState::Completed => {
+                if self.direction == Direction::Receive && !self.facts.proof_delivered {
+                    vec![self.post_receipt()]
+                } else {
+                    Vec::new()
+                }
+            }
+            ProductState::Cancelled
+                if ambiguous_attempt_cancel
+                    && self.direction == Direction::Send
+                    && self.facts.complete_sent =>
+            {
+                self.state = ProductState::Unconfirmed;
+                self.phase = Phase::Confirming;
+                self.outcome = Some(outcome_for(OutcomeCode::PeerLost, Phase::Confirming));
+                vec![ProductEffect::StartMailboxPoll {
+                    stamp: self.stamp(),
+                }]
+            }
+            ProductState::Cancelled if ambiguous_attempt_cancel => {
                 self.state = ProductState::Paused(PauseOrigin::Lost);
                 self.phase = Phase::Restoring;
                 self.outcome = Some(outcome_for(OutcomeCode::PeerLost, Phase::Restoring));
-                self.request_attempt_retirement(RetirementIntent::Cancel);
-                vec![ProductEffect::RetireAttempt {
-                    stamp,
-                    intent: RetirementIntent::Cancel,
+                Vec::new()
+            }
+            ProductState::Paused(_)
+                if ambiguous_attempt_pause
+                    && self.direction == Direction::Send
+                    && self.facts.complete_sent =>
+            {
+                self.state = ProductState::Unconfirmed;
+                self.phase = Phase::Confirming;
+                self.outcome = Some(outcome_for(OutcomeCode::PeerLost, Phase::Confirming));
+                vec![ProductEffect::StartMailboxPoll {
+                    stamp: self.stamp(),
                 }]
             }
-            ProductState::Preparing if !self.facts.source_ready && !self.source_recoverable => {
-                let stamp = self.stamp();
+            ProductState::Paused(_) if ambiguous_attempt_pause => {
+                self.state = ProductState::Paused(PauseOrigin::Lost);
+                self.phase = Phase::Restoring;
+                self.outcome = Some(outcome_for(OutcomeCode::PeerLost, Phase::Restoring));
+                Vec::new()
+            }
+            ProductState::Confirming if self.facts.complete_sent => {
+                self.state = ProductState::Unconfirmed;
+                self.outcome = Some(outcome_for(OutcomeCode::PeerLost, Phase::Confirming));
+                vec![ProductEffect::StartMailboxPoll {
+                    stamp: self.stamp(),
+                }]
+            }
+            state if state.is_active() => {
+                self.state = ProductState::Paused(PauseOrigin::Lost);
+                self.phase = Phase::Restoring;
+                self.outcome = Some(outcome_for(OutcomeCode::PeerLost, Phase::Restoring));
+                Vec::new()
+            }
+            ProductState::Preparing if self.facts.source_ready => {
+                self.clear_progress();
+                self.state = ProductState::Connecting;
+                self.phase = Phase::Pairing;
+                self.quiescence = Quiescence::Running {
+                    worker: WorkerKind::Attempt,
+                };
+                vec![self.start_attempt(false)]
+            }
+            ProductState::Preparing => {
                 self.state = ProductState::Failed;
                 self.phase = Phase::Restoring;
-                self.outcome = Some(source_failure(false, Phase::Restoring));
-                self.request_staging_retirement(RetirementIntent::Cancel);
-                vec![ProductEffect::RetireStaging { stamp }]
+                self.outcome = Some(source_failure(self.source_recoverable, Phase::Restoring));
+                Vec::new()
             }
             ProductState::Unconfirmed => vec![ProductEffect::StartMailboxPoll {
                 stamp: self.stamp(),
             }],
-            ProductState::Completed
-                if self.quiescence.is_quiescent()
-                    && self.direction == Direction::Receive
-                    && !self.facts.proof_delivered =>
-            {
-                vec![self.post_receipt()]
-            }
             _ => Vec::new(),
         }
     }
@@ -399,6 +469,7 @@ impl TransferRecord {
                 != (Quiescence::Running {
                     worker: WorkerKind::Staging,
                 })
+            || transferred.get() < self.bytes.get()
             || (self.total.get() != 0 && transferred.get() > self.total.get())
         {
             return Vec::new();
@@ -528,7 +599,12 @@ impl TransferRecord {
     }
 
     fn on_progress(&mut self, transferred: ByteCount) -> Vec<ProductEffect> {
+        // Progress is monotone within a generation: an untrusted executor event
+        // must not move the bar (and therefore the next `ResumeFrom` offset)
+        // backward, which would make a valid larger durable peer prefix look like
+        // a protocol violation on resume.
         if self.state != ProductState::Transferring
+            || transferred.get() < self.bytes.get()
             || (self.total.get() != 0 && transferred.get() > self.total.get())
         {
             return Vec::new();
@@ -735,13 +811,16 @@ impl TransferRecord {
         {
             return Vec::new();
         }
-        // An Unconfirmed card is awaiting its receipt through the MAILBOX poll —
-        // that is the authority now, not the abandoned in-band attempt. The ack
-        // proves the attempt released its lease (Quiescent, so a resume may now
-        // safely open a fresh generation), but only a Completed outcome may
-        // finalize the card: a Cancelled/PeerLost/Timeout ack must NOT discard or
-        // fail a send that was in fact delivered and is still pending confirmation.
-        if self.state == ProductState::Unconfirmed && outcome != OutcomeCode::Completed {
+        // Completion evidence and the mailbox proof channel are monotone product
+        // authorities. A non-completed transport ack only proves lease release;
+        // it cannot overturn either a proven completion or a send still awaiting
+        // its receipt.
+        if outcome != OutcomeCode::Completed
+            && matches!(
+                self.state,
+                ProductState::Completed | ProductState::Unconfirmed
+            )
+        {
             return Vec::new();
         }
         self.adopt_retired_outcome(outcome, intent)

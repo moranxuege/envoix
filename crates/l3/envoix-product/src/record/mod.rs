@@ -1,6 +1,8 @@
 use std::fmt;
 
-use crate::{ProductState, TransferRecord};
+use envoix_attempt_api::RetirementIntent;
+
+use crate::{ProductState, Quiescence, TransferRecord, WorkerKind};
 
 pub mod identifiers;
 
@@ -154,7 +156,21 @@ fn validate_record(record: &TransferRecord) -> Result<(), RecordCodecError> {
             RecordInvariant::ProgressExceedsTotal,
         ));
     }
-    if record.facts.source_ready && record.state == ProductState::Preparing {
+    // A `Preparing` card with a ready source is normally invalid — EXCEPT the
+    // staging-retirement handoff window: `StageComplete` sets `source_ready` and
+    // moves the worker to `Retiring(Staging, Finalize)` but stays `Preparing`
+    // until `StagingRetired` launches the first attempt. That durable intermediate
+    // state must round-trip; any OTHER `Preparing + source_ready` is still invalid.
+    if record.facts.source_ready
+        && record.state == ProductState::Preparing
+        && !matches!(
+            record.quiescence,
+            Quiescence::Retiring {
+                worker: WorkerKind::Staging,
+                intent: RetirementIntent::Finalize,
+            }
+        )
+    {
         return Err(RecordCodecError::InvalidRecord(
             RecordInvariant::ReadySourceIsPreparing,
         ));

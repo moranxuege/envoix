@@ -99,6 +99,23 @@ impl RecordStore for AmbiguousFirstWriteStore {
     }
 }
 
+#[derive(Default)]
+struct FailAtCallStore {
+    fail_on: usize,
+    calls: usize,
+}
+
+impl RecordStore for FailAtCallStore {
+    fn commit(&mut self, _encoded: &[u8]) -> Result<(), CommitError> {
+        self.calls += 1;
+        if self.calls == self.fail_on {
+            Err(CommitError)
+        } else {
+            Ok(())
+        }
+    }
+}
+
 fn attempts(value: usize) -> NonZeroUsize {
     NonZeroUsize::new(value).expect("test attempt bound is nonzero")
 }
@@ -110,6 +127,59 @@ fn transfer(direction: Direction) -> NewTransfer {
         total: ByteCount::new(100),
         source: SourceDecision::Ready,
     }
+}
+
+fn staged_transfer(direction: Direction) -> NewTransfer {
+    NewTransfer {
+        direction,
+        offered_name: OfferedName::from_untrusted("barrier.bin"),
+        total: ByteCount::new(100),
+        source: SourceDecision::Stage { recoverable: true },
+    }
+}
+
+#[test]
+fn staging_completes_through_the_commit_barrier() {
+    // Topology F1: the composed staging path (`StageComplete` → `Preparing +
+    // source_ready + Retiring(Staging)`) must commit through the REAL store; the
+    // codec previously rejected the handoff, forcing a spurious `StorageFault`
+    // and never reaching `StartAttempt`.
+    let (mut session, create_outcome) = CommittedSession::create(
+        staged_transfer(Direction::Send),
+        &mut DeterministicEntropy::default(),
+        MemoryStore::default(),
+        attempts(1),
+    )
+    .unwrap();
+    assert!(create_outcome.commit.authorizing_commit_succeeded());
+
+    let stamp = session.record().stamp();
+    let staged = session
+        .apply(ProductInput::StageComplete {
+            stamp,
+            total: ByteCount::new(90),
+        })
+        .unwrap();
+    assert!(
+        matches!(staged.commit, CommitStatus::Committed { .. }),
+        "the staging handoff must commit, not escalate: {:?}",
+        staged.commit
+    );
+    assert_eq!(session.record().state, ProductState::Preparing);
+    assert!(session.record().facts.source_ready);
+
+    // `StagingRetired` then launches the first attempt through the barrier.
+    let launched = session
+        .apply(ProductInput::StagingRetired { stamp })
+        .unwrap();
+    assert!(matches!(launched.commit, CommitStatus::Committed { .. }));
+    assert_eq!(session.record().state, ProductState::Connecting);
+    assert!(
+        launched
+            .released_after_commit
+            .iter()
+            .any(|effect| matches!(effect, ProductEffect::StartAttempt { .. }))
+    );
 }
 
 fn admitted_event(record: &crate::TransferRecord, kind: AttemptEventKind) -> ProductInput {
@@ -179,6 +249,79 @@ fn cancelled_finalize_ack(record: &crate::TransferRecord) -> RetirementAck {
         panic!("cancelled retirement must be acknowledgeable");
     };
     ack
+}
+
+fn completed_finalize_ack(record: &crate::TransferRecord) -> RetirementAck {
+    let plan = AttemptPlan {
+        stamp: record.stamp(),
+        direction: record.direction,
+        transfer: record.identity.transfer,
+        artifact: record.identity.artifact,
+        resume: ResumeIntent::Fresh,
+    };
+    let mut supervisor = AttemptSupervisor::new();
+    assert_eq!(supervisor.open(plan), OpenResult::Opened);
+    assert_eq!(
+        supervisor.resolve_terminal(plan.stamp, OutcomeCode::Completed),
+        TerminalResolutionResult::Recorded
+    );
+    assert_eq!(
+        supervisor.request_retirement(plan.stamp, RetirementIntent::Finalize),
+        RetirementRequestResult::Requested
+    );
+    let RetirementAckResult::Acknowledged(ack) = supervisor.acknowledge_retirement(plan.stamp)
+    else {
+        panic!("completed retirement must be acknowledgeable");
+    };
+    ack
+}
+
+#[test]
+fn escalation_releases_the_receipt_when_the_failed_state_write_succeeds() {
+    // Topology #3: a completed receive whose ack authorizing-commit fails once but
+    // whose best-effort failed-state write SUCCEEDS must still release its
+    // PostReceipt — the retained, durably-written Completed record authorizes it.
+    // (create = commit 1, terminal = commit 2, ack authorizing = 3 [fails],
+    // best-effort = 4 [succeeds].)
+    let (mut session, _) = CommittedSession::create(
+        transfer(Direction::Receive),
+        &mut DeterministicEntropy::default(),
+        FailAtCallStore {
+            fail_on: 3,
+            calls: 0,
+        },
+        attempts(1),
+    )
+    .unwrap();
+    session
+        .apply(admitted_event(
+            session.record(),
+            AttemptEventKind::Terminal(OutcomeCode::Completed),
+        ))
+        .unwrap();
+    assert_eq!(session.record().state, ProductState::Completed);
+
+    let ack = completed_finalize_ack(session.record());
+    let outcome = session.apply(ProductInput::AttemptRetired(ack)).unwrap();
+
+    assert!(matches!(
+        outcome.commit,
+        CommitStatus::Escalated {
+            failed_state_persisted: true,
+            ..
+        }
+    ));
+    assert_eq!(session.record().state, ProductState::Completed);
+    assert!(
+        outcome.released_after_commit.iter().any(|effect| matches!(
+            effect,
+            ProductEffect::CapabilityDuty {
+                action: CapabilityAction::PostReceipt,
+                ..
+            }
+        )),
+        "the receipt duty is released once its Completed record is durably written"
+    );
 }
 
 #[test]
@@ -367,6 +510,79 @@ fn never_committed_mixed_batch_drops_destructive_storage_intent() {
 }
 
 #[test]
+fn consumed_retirement_ack_survives_a_failed_authorizing_commit() {
+    let (mut session, created) = CommittedSession::create(
+        transfer(Direction::Send),
+        &mut DeterministicEntropy::default(),
+        FailThenStore {
+            failures_remaining: 0,
+            calls: 0,
+            revisions: Vec::new(),
+        },
+        attempts(1),
+    )
+    .unwrap();
+    let plan = created
+        .released_after_commit
+        .iter()
+        .find_map(|effect| match effect {
+            ProductEffect::StartAttempt { plan } => Some(*plan),
+            _ => None,
+        })
+        .expect("created attempt plan");
+    let mut supervisor = AttemptSupervisor::new();
+    assert_eq!(supervisor.open(plan), OpenResult::Opened);
+
+    session
+        .apply(ProductInput::Command(ProductCommand::Pause))
+        .unwrap();
+    assert_eq!(
+        supervisor.request_retirement(plan.stamp, RetirementIntent::Pause),
+        RetirementRequestResult::Requested
+    );
+    let RetirementAckResult::Acknowledged(ack) = supervisor.acknowledge_retirement(plan.stamp)
+    else {
+        panic!("paused attempt must acknowledge retirement");
+    };
+
+    session.store_mut().failures_remaining = 1;
+    let outcome = session.apply(ProductInput::AttemptRetired(ack)).unwrap();
+
+    assert!(matches!(
+        outcome.commit,
+        CommitStatus::Escalated {
+            attempts: 1,
+            failed_state_persisted: true,
+            ..
+        }
+    ));
+    assert_eq!(session.record().state, ProductState::Failed);
+    assert_eq!(session.record().quiescence, crate::Quiescence::Quiescent);
+    assert_eq!(
+        session
+            .record()
+            .outcome
+            .as_ref()
+            .map(|outcome| outcome.code),
+        Some(OutcomeCode::StorageFault)
+    );
+    assert_eq!(
+        supervisor.acknowledge_retirement(plan.stamp),
+        RetirementAckResult::AlreadyAcknowledged
+    );
+    assert_eq!(
+        session.record().allowed_commands(),
+        vec![ProductCommand::Resume, ProductCommand::Remove]
+    );
+    assert!(matches!(
+        decode_record(session.store().revisions.last().unwrap()).unwrap(),
+        RecordDecode::Loaded(record)
+            if record.state == ProductState::Failed
+                && record.quiescence == crate::Quiescence::Quiescent
+    ));
+}
+
+#[test]
 fn uncommitted_completion_rolls_back_before_visible_storage_failure() {
     let (mut session, _) = CommittedSession::create(
         transfer(Direction::Receive),
@@ -543,7 +759,7 @@ fn ambiguous_retry_is_idempotent_and_releases_once() {
 }
 
 #[test]
-fn escalation_makes_one_best_effort_failed_state_commit() {
+fn create_time_commit_failure_does_not_retire_an_unopened_attempt() {
     let (session, outcome) = CommittedSession::create(
         transfer(Direction::Send),
         &mut DeterministicEntropy::default(),
@@ -564,12 +780,24 @@ fn escalation_makes_one_best_effort_failed_state_commit() {
             failed_state_persisted: true,
         }
     );
+    assert!(outcome.released_immediately.is_empty());
     assert!(outcome.released_after_commit.is_empty());
+    assert_eq!(session.record().quiescence, crate::Quiescence::Quiescent);
+    assert_eq!(
+        session.record().allowed_commands(),
+        vec![ProductCommand::Resume, ProductCommand::Remove]
+    );
+    let mut supervisor = AttemptSupervisor::new();
+    assert_eq!(
+        supervisor.request_retirement(session.record().stamp(), RetirementIntent::Cancel),
+        RetirementRequestResult::Unknown
+    );
     assert_eq!(session.store().calls, 3);
     assert!(matches!(
         decode_record(&session.store().revisions[0]).unwrap(),
         RecordDecode::Loaded(record)
             if record.state == ProductState::Failed
+                && record.quiescence == crate::Quiescence::Quiescent
                 && record
                     .outcome
                     .as_ref()
