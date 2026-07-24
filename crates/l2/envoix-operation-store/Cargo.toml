@@ -7,3 +7,14 @@ license.workspace = true
 [package.metadata.envoix]
 layer = "L2"
 role = "library"
+
+[dependencies]
+envoix-capabilities = { path = "../../l1/envoix-capabilities" }
+envoix-storage-api = { path = "../../l1/envoix-storage-api" }
+envoix-types = { path = "../../l0/envoix-types" }
+serde.workspace = true
+
+[dev-dependencies]
+envoix-outcomes = { path = "../../l0/envoix-outcomes" }
+envoix-storage-local = { path = "../envoix-storage-local" }
+tempfile.workspace = true

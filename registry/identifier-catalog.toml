@@ -265,6 +265,13 @@ collision_scope = "storage-envelope-schema"
 extract = "rust-const:OPERATION_ENVELOPE_SCHEMA_ID"
 
 [[identifier]]
+key = "storage.operation_store_state_schema_id"
+owner = "crate:envoix-operation-store"
+owner_path = "crates/l2/envoix-operation-store/src/identifiers.rs"
+collision_scope = "durable-operation-store-schema"
+extract = "rust-const:OPERATION_STORE_STATE_SCHEMA_ID"
+
+[[identifier]]
 key = "binding.read_schema_id"
 owner = "schema:envoix-bindings"
 owner_path = "crates/l5/envoix-bindings/schema/read.schema"

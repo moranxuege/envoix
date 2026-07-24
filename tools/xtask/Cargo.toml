@@ -16,6 +16,7 @@ toml = "0.8"
 envoix-auth = { path = "../../crates/l2/envoix-auth" }
 envoix-evidence = { path = "../../crates/l4/envoix-evidence" }
 envoix-invite = { path = "../../crates/l1/envoix-invite" }
+envoix-operation-store = { path = "../../crates/l2/envoix-operation-store" }
 envoix-pairing = { path = "../../crates/l1/envoix-pairing" }
 envoix-platform-android = { path = "../../crates/l6/envoix-platform-android" }
 envoix-platform-apple = { path = "../../crates/l6/envoix-platform-apple" }

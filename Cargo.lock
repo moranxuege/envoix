@@ -941,6 +941,15 @@ dependencies = [
 [[package]]
 name = "envoix-operation-store"
 version = "0.2.0"
+dependencies = [
+ "envoix-capabilities",
+ "envoix-outcomes",
+ "envoix-storage-api",
+ "envoix-storage-local",
+ "envoix-types",
+ "serde",
+ "tempfile",
+]
 
 [[package]]
 name = "envoix-outcomes"
@@ -4525,6 +4534,7 @@ dependencies = [
  "envoix-auth",
  "envoix-evidence",
  "envoix-invite",
+ "envoix-operation-store",
  "envoix-pairing",
  "envoix-platform-android",
  "envoix-platform-apple",

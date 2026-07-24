@@ -283,6 +283,7 @@ fn extract_compiled_owner(entry: &CatalogIdentifier) -> CheckResult<Extraction> 
     use envoix_auth::identifiers as auth;
     use envoix_evidence::identifiers as evidence;
     use envoix_invite::identifiers as invite;
+    use envoix_operation_store::identifiers as operation_store;
     use envoix_pairing::identifiers as pairing;
     use envoix_platform_apple::identifiers as apple;
     use envoix_platform_local::identifiers as local;
@@ -376,6 +377,9 @@ fn extract_compiled_owner(entry: &CatalogIdentifier) -> CheckResult<Extraction> 
         }
         ("crate:envoix-storage-api", "rust-const:OPERATION_ENVELOPE_SCHEMA_ID") => {
             one(storage::OPERATION_ENVELOPE_SCHEMA_ID)
+        }
+        ("crate:envoix-operation-store", "rust-const:OPERATION_STORE_STATE_SCHEMA_ID") => {
+            one(operation_store::OPERATION_STORE_STATE_SCHEMA_ID)
         }
         ("crate:envoix-platform-android", "rust-function:internal_action_identifiers") => {
             return Ok(Extraction::Pending(
