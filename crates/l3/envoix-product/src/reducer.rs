@@ -562,15 +562,14 @@ impl TransferRecord {
         }
         self.state = ProductState::Unconfirmed;
         self.outcome = Some(outcome_for(OutcomeCode::Timeout, Phase::Confirming));
-        // The in-band confirmation is ABANDONED; the mailbox poll is now the sole
-        // proof channel. The attempt is asked to close (RetireAttempt), but the
-        // card goes Quiescent immediately so that ack is a clean-close, NOT a
-        // state authority: a Cancel-retirement ack would otherwise linearize to
-        // `Cancelled` and DISCARD a send that was in fact delivered but whose
-        // receipt is still pending in the mailbox. The send has already fully
-        // transmitted (complete_sent), so there is no partial to protect and only
-        // a read-lease to release — proactive quiescence is safe here.
-        self.quiescence = Quiescence::Quiescent;
+        // Abandon the in-band confirmation for the mailbox poll and ask the
+        // attempt to retire. The card stays RETIRING until the ack: its
+        // quiescence must MIRROR the executor's `quiesced` (C7 rejects opening a
+        // fresh generation while this one is still live — a Quiescent-without-ack
+        // here would let a resume stall on `PreviousAttemptLive`). The
+        // delivered-send-not-discarded guarantee lives in `on_attempt_retired`,
+        // which refuses to let a non-Completed ack overturn an Unconfirmed card.
+        self.request_attempt_retirement(RetirementIntent::Cancel);
         vec![
             ProductEffect::RetireAttempt {
                 stamp,
@@ -734,6 +733,15 @@ impl TransferRecord {
         if self.state == ProductState::Failed
             && self.outcome.as_ref().map(|outcome| outcome.code) == Some(OutcomeCode::StorageFault)
         {
+            return Vec::new();
+        }
+        // An Unconfirmed card is awaiting its receipt through the MAILBOX poll —
+        // that is the authority now, not the abandoned in-band attempt. The ack
+        // proves the attempt released its lease (Quiescent, so a resume may now
+        // safely open a fresh generation), but only a Completed outcome may
+        // finalize the card: a Cancelled/PeerLost/Timeout ack must NOT discard or
+        // fail a send that was in fact delivered and is still pending confirmation.
+        if self.state == ProductState::Unconfirmed && outcome != OutcomeCode::Completed {
             return Vec::new();
         }
         self.adopt_retired_outcome(outcome, intent)

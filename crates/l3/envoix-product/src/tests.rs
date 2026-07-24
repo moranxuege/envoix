@@ -903,6 +903,77 @@ fn confirm_timeout_escalates_proactively_and_stale_timers_are_ignored() {
 }
 
 #[test]
+fn confirm_timeout_stays_retiring_and_never_discards_a_delivered_send() {
+    // A confirm-timeout hands authority to the mailbox but keeps the card
+    // RETIRING until the attempt's ack: its quiescence must mirror the
+    // executor's (C7 forbids opening a fresh generation while this one is live).
+    let mut record = confirming_send();
+    let stamp = record.stamp();
+    record
+        .reduce(ProductInput::ConfirmTimeout { stamp })
+        .unwrap();
+    assert_eq!(record.state, ProductState::Unconfirmed);
+    assert!(
+        record.quiescence.is_retiring(),
+        "not at rest until the attempt retires — else a resume would race C7"
+    );
+
+    // Resume BEFORE the ack is inert: no fresh generation can open yet.
+    assert!(
+        record
+            .reduce(ProductInput::Command(ProductCommand::Resume))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(record.state, ProductState::Unconfirmed);
+
+    // The attempt retires with a Cancelled outcome (its RetireAttempt took
+    // effect). The send WAS transmitted — the mailbox is the authority — so the
+    // ack must NOT discard it: the card stays Unconfirmed, and only now quiesces.
+    let released = quiesce(&mut record, RetirementIntent::Cancel);
+    assert_eq!(record.state, ProductState::Unconfirmed);
+    assert_eq!(record.quiescence, crate::Quiescence::Quiescent);
+    assert!(
+        !released.iter().any(|e| matches!(
+            e,
+            ProductEffect::StorageIntent {
+                action: StorageAction::DiscardPartial,
+                ..
+            }
+        )),
+        "a delivered-but-unconfirmed send is never discarded by its retirement ack"
+    );
+
+    // The mailbox then confirms → Completed.
+    record
+        .reduce(ProductInput::ReceiptVerified {
+            stamp: record.stamp(),
+        })
+        .unwrap();
+    assert_eq!(record.state, ProductState::Completed);
+}
+
+#[test]
+fn confirm_timeout_ack_that_crossed_commit_completes_the_send() {
+    // If the CompleteAck actually landed (the retirement linearizes to
+    // Completed), the ack finalizes the send rather than leaving it Unconfirmed.
+    let mut record = confirming_send();
+    let stamp = record.stamp();
+    record
+        .reduce(ProductInput::ConfirmTimeout { stamp })
+        .unwrap();
+    record
+        .reduce(ProductInput::AttemptRetired(retirement_ack(
+            &record,
+            RetirementIntent::Cancel,
+            true,
+        )))
+        .unwrap();
+    assert_eq!(record.state, ProductState::Completed);
+    assert_eq!(record.quiescence, crate::Quiescence::Quiescent);
+}
+
+#[test]
 fn receipt_verified_during_confirming_completes_and_stops_the_wait() {
     let mut record = confirming_send();
     let stamp = record.stamp();
