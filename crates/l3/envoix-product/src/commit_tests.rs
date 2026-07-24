@@ -325,6 +325,66 @@ fn escalation_releases_the_receipt_when_the_failed_state_write_succeeds() {
 }
 
 #[test]
+fn restore_replay_survives_a_failed_authorizing_commit() {
+    // A Restore that replays an undelivered receive receipt must still release it
+    // when the authorizing commit fails once but the best-effort write of the
+    // UNCHANGED Completed record succeeds — the durable record still authorizes
+    // the receipt (keying the release on `monotone_completion`/`worker_gone_proven`
+    // alone would strand it, since a restore of a quiescent card is neither).
+    let (mut setup, _) = CommittedSession::create(
+        transfer(Direction::Receive),
+        &mut DeterministicEntropy::default(),
+        MemoryStore::default(),
+        attempts(1),
+    )
+    .unwrap();
+    setup
+        .apply(admitted_event(
+            setup.record(),
+            AttemptEventKind::Terminal(OutcomeCode::Completed),
+        ))
+        .unwrap();
+    setup
+        .apply(ProductInput::AttemptRetired(completed_finalize_ack(
+            setup.record(),
+        )))
+        .unwrap();
+    assert_eq!(setup.record().state, ProductState::Completed);
+    assert!(!setup.record().facts.proof_delivered);
+    let (record, _) = setup.into_parts();
+
+    // The receipt was never confirmed; a restart re-issues it, but the authorizing
+    // commit fails once before the best-effort write succeeds.
+    let mut session = CommittedSession::from_record(
+        record,
+        FailAtCallStore {
+            fail_on: 1,
+            calls: 0,
+        },
+        attempts(1),
+    );
+    let outcome = session.apply(ProductInput::Restore).unwrap();
+
+    assert!(matches!(
+        outcome.commit,
+        CommitStatus::Escalated {
+            failed_state_persisted: true,
+            ..
+        }
+    ));
+    assert!(
+        outcome.released_after_commit.iter().any(|effect| matches!(
+            effect,
+            ProductEffect::CapabilityDuty {
+                action: CapabilityAction::PostReceipt,
+                ..
+            }
+        )),
+        "the replayed receipt is released once its unchanged record is durably written"
+    );
+}
+
+#[test]
 fn failed_revision_dispatches_no_effect() {
     let (failed, outcome) = CommittedSession::create(
         transfer(Direction::Send),

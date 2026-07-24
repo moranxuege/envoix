@@ -490,6 +490,12 @@ impl TransferRecord {
         }
         self.facts.source_ready = true;
         self.total = total;
+        // The completion total is authoritative for the staged artifact, so the
+        // staged byte count IS that total — clamp progress to it. Otherwise an
+        // over-reported earlier `StageProgress` could leave `bytes > total`, a
+        // state the record codec rejects (the reducer must never author a record
+        // its own codec refuses).
+        self.bytes = total;
         self.outcome = None;
         self.request_staging_retirement(RetirementIntent::Finalize);
         vec![ProductEffect::RetireStaging { stamp }]

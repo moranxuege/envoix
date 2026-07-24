@@ -208,6 +208,13 @@ impl<S: RecordStore> CommittedSession<S> {
         worker_gone_proven: bool,
         staged: Vec<ProductEffect>,
     ) -> Result<ApplyOutcome, IdentityError> {
+        // The record that AUTHORIZES the staged post-commit effects, captured
+        // before any escalation mutation. If escalation leaves it unchanged and
+        // the best-effort write then persists exactly it, those effects are still
+        // authorized and must be released (a receipt/tombstone replayed by
+        // Restore, or a retained monotone completion); if escalation instead
+        // rolled it back or downgraded it to a storage fault, they stay dropped.
+        let authorizing_record = self.record.clone();
         // The failed barrier never released this start, so C7 cannot have
         // admitted the tentative worker and there is nothing to retire.
         let attempt_start_unreleased = staged
@@ -259,13 +266,14 @@ impl<S: RecordStore> CommittedSession<S> {
                 .is_ok()
         });
 
-        // Ordinary escalation drops every staged post-commit effect (their
-        // authorizing state was rolled back / replaced with a storage fault). But
-        // a monotone-completion record is RETAINED unchanged, so if its
-        // best-effort write succeeds that same write authorizes its post-commit
-        // effect (e.g. the receive receipt) — dropping it would strand a durably
-        // completed transfer with no receipt until an unrelated later restart.
-        let released_after_commit = if monotone_completion && failed_state_persisted {
+        // Release the staged post-commit effects iff the best-effort write
+        // persisted EXACTLY the record that authorized them (nothing rolled them
+        // back or downgraded to a storage fault). This covers both a retained
+        // monotone completion AND a Restore-replayed receipt/tombstone on an
+        // unchanged durable record — keying on `monotone_completion` alone would
+        // strand the latter (a restore of an already-quiescent card is not
+        // `worker_gone_proven`).
+        let released_after_commit = if failed_state_persisted && self.record == authorizing_record {
             staged
         } else {
             Vec::new()

@@ -1353,6 +1353,37 @@ fn staging_handoff_state_round_trips_through_the_codec() {
 }
 
 #[test]
+fn stage_complete_clamps_progress_to_the_authoritative_total() {
+    // A completion total smaller than an over-reported prior StageProgress must
+    // not leave bytes > total — a state the record codec rejects. The reducer
+    // must never author a record its own codec refuses.
+    let mut record = preparing(Direction::Send, true);
+    let stamp = record.stamp();
+    record
+        .reduce(ProductInput::StageProgress {
+            stamp,
+            transferred: ByteCount::new(80),
+        })
+        .unwrap();
+    record
+        .reduce(ProductInput::StageComplete {
+            stamp,
+            total: ByteCount::new(50),
+        })
+        .unwrap();
+    assert_eq!(record.total, ByteCount::new(50));
+    assert_eq!(
+        record.bytes,
+        ByteCount::new(50),
+        "progress is clamped to the authoritative completion total"
+    );
+    assert!(
+        encode_record(&record).is_ok(),
+        "the reduced staging record must be encodable by its own codec"
+    );
+}
+
+#[test]
 fn admitted_progress_is_monotone_within_a_generation() {
     // An untrusted executor event must not move the bar — and thus the next
     // ResumeFrom offset — backward, which would make a valid larger durable peer
