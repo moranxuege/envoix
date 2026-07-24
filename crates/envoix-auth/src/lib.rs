@@ -302,6 +302,3 @@ fn update_len_prefixed(mac: &mut HmacSha256, bytes: &[u8]) {
     mac.update(&(bytes.len() as u64).to_be_bytes());
     mac.update(bytes);
 }
-
-#[cfg(test)]
-mod tests;

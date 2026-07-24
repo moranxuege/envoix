@@ -101,8 +101,7 @@ object TransferLogs {
         seq.remove(id)
     }
 
-    /** Keep the newest [KEEP] cards (each has up to two files, plus any legacy
-     *  single-file `transfer-<id>.log` from before the split). */
+    /** Keep the newest [KEEP] cards, each with timeline and raw trace files. */
     private fun gc() {
         val files = dir.listFiles { f -> f.name.startsWith("transfer-") } ?: return
         files

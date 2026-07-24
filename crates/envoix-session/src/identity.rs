@@ -60,7 +60,7 @@ struct IdentityFile {
 async fn load_or_create_identity(path: &Path) -> AnyResult<SecretKey> {
     if fs::try_exists(path)
         .await
-        .with_context(|| format!("failed to check identity file {}", path.display()))?
+        .context("failed to check persistent identity file")?
     {
         return read_identity(path).await;
     }
@@ -75,18 +75,18 @@ async fn load_or_create_identity(path: &Path) -> AnyResult<SecretKey> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .await
-            .with_context(|| format!("failed to create identity directory {}", parent.display()))?;
+            .context("failed to create persistent identity directory")?;
     }
     write_new_identity_file(path, &text)
         .await
-        .with_context(|| format!("failed to create identity file {}", path.display()))?;
+        .context("failed to create persistent identity file")?;
     Ok(secret_key)
 }
 
 async fn read_identity(path: &Path) -> AnyResult<SecretKey> {
     let text = fs::read(path)
         .await
-        .with_context(|| format!("failed to read identity file {}", path.display()))?;
+        .context("failed to read persistent identity file")?;
     let file: IdentityFile =
         serde_json::from_slice(&text).context("identity file is not valid JSON")?;
     if file.version != IDENTITY_FILE_VERSION {

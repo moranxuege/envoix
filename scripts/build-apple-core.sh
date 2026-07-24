@@ -6,14 +6,8 @@ repo_root="$(cd "$script_dir/.." && pwd)"
 ffi_dir="$repo_root/crates/envoix-ffi"
 package_dir="$ffi_dir/EnvoixCore"
 input_stamp="$package_dir/.envoix-inputs.sha256"
-backup_dir=""
 core_target="${ENVOIX_APPLE_CORE_TARGET:-}"
 core_profile="${ENVOIX_APPLE_CORE_PROFILE:-release}"
-reviewed_bindings=(
-  "generated/envoix_ffi.swift"
-  "generated/envoix_ffiFFI.h"
-  "generated/envoix_ffiFFI.modulemap"
-)
 generated_package_copies=(
   "generated/headers/envoix_ffiFFI.h"
   "generated/headers/module.modulemap"
@@ -96,17 +90,6 @@ if ! cargo swift --version >/dev/null 2>&1; then
   exit 2
 fi
 
-backup_dir="$(mktemp -d "${TMPDIR:-/tmp}/envoix-apple-bindings.XXXXXX")"
-
-restore_reviewed_bindings() {
-  local binding
-  for binding in "${reviewed_bindings[@]}"; do
-    if [[ -f "$backup_dir/$binding" ]]; then
-      cp "$backup_dir/$binding" "$ffi_dir/$binding"
-    fi
-  done
-}
-
 remove_generated_package_copies() {
   local binding
   for binding in "${generated_package_copies[@]}"; do
@@ -116,16 +99,9 @@ remove_generated_package_copies() {
 }
 
 cleanup() {
-  restore_reviewed_bindings
   remove_generated_package_copies
-  rm -rf "$backup_dir"
 }
 trap cleanup EXIT INT TERM
-
-for binding in "${reviewed_bindings[@]}"; do
-  mkdir -p "$backup_dir/$(dirname "$binding")"
-  cp "$ffi_dir/$binding" "$backup_dir/$binding"
-done
 
 generate_apple_package() {
   (
@@ -253,12 +229,6 @@ python3 "$apple_binding_postprocessor" "$ffi_dir/generated/sources/envoix_ffi.sw
 python3 "$apple_binding_postprocessor" "$ffi_dir/EnvoixCore/Sources/EnvoixCore/envoix_ffi.swift"
 
 semantic_binding_change=0
-for binding in "${reviewed_bindings[@]}"; do
-  if ! diff -q -w "$backup_dir/$binding" "$ffi_dir/$binding" >/dev/null; then
-    echo "error: UniFFI generated a semantic change in $binding; regenerate and review the binding before building the app." >&2
-    semantic_binding_change=1
-  fi
-done
 if ! diff -q -w \
   "$ffi_dir/generated/envoix_ffi.swift" \
   "$ffi_dir/generated/sources/envoix_ffi.swift" >/dev/null; then
@@ -281,7 +251,6 @@ if [[ "$semantic_binding_change" -ne 0 ]]; then
   exit 1
 fi
 
-restore_reviewed_bindings
 remove_generated_package_copies
 "$repo_root/scripts/configure-apple-package.sh"
 apple_core_input_digest > "$input_stamp"

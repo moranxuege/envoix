@@ -13,10 +13,10 @@ struct ReceiveView: View {
     @AppStorage("envoix.language") private var language = "en"
     @AppStorage("envoix.serverURL") private var serverURL = ""
     @AppStorage("envoix.relayURL") private var relayURL = ""
-    @AppStorage("envoix.configChunkSize") private var configChunkSize = ""
     @AppStorage("envoix.candidatesAllow") private var candidatesAllow = ""
     @AppStorage("envoix.candidatesDeny") private var candidatesDeny = ""
     @AppStorage("envoix.speedLimit") private var speedLimit = 40
+    @AppStorage("envoix.destinationSaveMode") private var destinationSaveMode = "direct"
     @State private var mode: PairingMode = .room
     @State private var roomCode = newRoomCode()
     @State private var joinRoomCode = ""
@@ -125,22 +125,15 @@ struct ReceiveView: View {
     private var scrollContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                #if os(iOS)
                 outputSection
                 connectionSection
-                #else
-                connectionSection
-                outputSection
-                #endif
                 #if os(macOS)
                 if !viewModel.peerAddress.isEmpty {
                     addressReveal
                 }
                 #endif
 
-                #if os(macOS)
                 TransferStatusView(viewModel: viewModel)
-                #endif
             }
             .padding(.vertical, 12)
         }
@@ -248,6 +241,7 @@ struct ReceiveView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(viewModel.isBusy)
+                .accessibilityIdentifier("receive_destination_picker")
                 if hasCustomOutputDir {
                     Button {
                         resetOutputFolder()
@@ -280,6 +274,32 @@ struct ReceiveView: View {
                 .disabled(viewModel.isBusy)
             }
             #endif
+
+            Divider().overlay(Theme.line.opacity(0.5))
+            Text(AppText.value("Save method", "保存方式", language: uiLanguage))
+                .font(.body.weight(.semibold))
+                .foregroundStyle(Theme.text)
+            Picker("Save method", selection: $destinationSaveMode) {
+                Text(AppText.value("Save directly", "直接保存", language: uiLanguage)).tag("direct")
+                Text(AppText.value("Verify, then copy", "校验后复制", language: uiLanguage)).tag("copy")
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .disabled(viewModel.isBusy)
+            Text(destinationSaveMode == "copy"
+                 ? AppText.value(
+                    "Uses additional temporary space and saving time for destinations that cannot safely finalize the same object.",
+                    "适用于无法安全原地完成保存的目标；会额外占用临时空间和保存时间。",
+                    language: uiLanguage
+                 )
+                 : AppText.value(
+                    "Writes once on the selected storage and reveals the verified object when ready.",
+                    "在所选存储上只写入一次，校验完成后直接显示文件。",
+                    language: uiLanguage
+                 ))
+                .font(.footnote)
+                .foregroundStyle(Theme.muted)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .card(padding: 14)
     }
@@ -843,7 +863,6 @@ struct ReceiveView: View {
                 language: language,
                 serverURL: serverURL,
                 relayURL: relayURL,
-                configChunkSize: configChunkSize,
                 candidatesAllow: candidatesAllow,
                 candidatesDeny: candidatesDeny,
                 speedLimit: speedLimit
@@ -852,8 +871,7 @@ struct ReceiveView: View {
                 outputDir: prepared.url.path,
                 token: token.trimmed,
                 settings: settings,
-                destinationAccess: prepared.access,
-                publishDestinationDir: prepared.publishDestinationDir
+                destinationAccess: prepared.access
             )
         } catch {
             viewModel.handleFailed(error.localizedDescription)
@@ -869,7 +887,6 @@ struct ReceiveView: View {
                 language: language,
                 serverURL: serverURL,
                 relayURL: relayURL,
-                configChunkSize: configChunkSize,
                 candidatesAllow: candidatesAllow,
                 candidatesDeny: candidatesDeny,
                 speedLimit: speedLimit
@@ -878,8 +895,7 @@ struct ReceiveView: View {
                 outputDir: prepared.url.path,
                 code: code,
                 settings: settings,
-                destinationAccess: prepared.access,
-                publishDestinationDir: prepared.publishDestinationDir
+                destinationAccess: prepared.access
             )
             prepareNextRoomAfterStart()
         } catch {
@@ -907,7 +923,6 @@ struct ReceiveView: View {
                 language: language,
                 serverURL: serverURL,
                 relayURL: relayURL,
-                configChunkSize: configChunkSize,
                 candidatesAllow: candidatesAllow,
                 candidatesDeny: candidatesDeny,
                 speedLimit: speedLimit
@@ -915,8 +930,7 @@ struct ReceiveView: View {
             viewModel.startReceivingWithInvite(
                 outputDir: prepared.url.path,
                 settings: settings,
-                destinationAccess: prepared.access,
-                publishDestinationDir: prepared.publishDestinationDir
+                destinationAccess: prepared.access
             )
         } catch {
             viewModel.handleFailed(error.localizedDescription)
@@ -982,11 +996,7 @@ struct ReceiveView: View {
     }
     #endif
 
-    private func prepareOutputDir() throws -> (
-        url: URL,
-        access: AnyObject?,
-        publishDestinationDir: String?
-    ) {
+    private func prepareOutputDir() throws -> (url: URL, access: AnyObject?) {
         guard let url = outputDir else {
             #if os(iOS)
             if hasCustomOutputDir {
@@ -1042,14 +1052,10 @@ struct ReceiveView: View {
             ))
         }
         #if os(iOS)
-        if !hasCustomOutputDir {
-            try removeOrphanedDirectReceiveReceipts(in: url)
-        }
-        return (url, access, hasCustomOutputDir ? url.path : nil)
+        return (url, access)
         #else
         model.retainDestinationAccessForAppLifetime(scopedAccess)
-        try removeOrphanedDirectReceiveReceipts(in: url)
-        return (url, access, nil)
+        return (url, access)
         #endif
     }
 

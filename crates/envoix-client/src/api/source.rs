@@ -3,9 +3,7 @@
 use envoix_protocol::PeerDescriptor;
 use serde::Serialize;
 
-/// The rendezvous mode of a transfer - the [`PeerSource`] variant kind,
-/// exposed on the event stream so a transfer's setup is reconstructable
-/// from its events alone.
+/// The rendezvous mode selected for a Manifest v2 session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransferMode {
@@ -28,14 +26,13 @@ pub enum TransferMode {
 /// Consumer variants ([`Manual`](Self::Manual), [`Invite`](Self::Invite)) hold
 /// the peer's address and dial it. Producer variants
 /// ([`ShowManual`](Self::ShowManual), [`ShowInvite`](Self::ShowInvite)) listen
-/// and advertise their own address through a
-/// [`TransferEvent::Advertised`](super::TransferEvent::Advertised) event for
-/// the user to hand to the peer. [`Mdns`](Self::Mdns) discovers or advertises
+/// and advertise their own address through the caller-provided callback.
+/// [`Mdns`](Self::Mdns) discovers or advertises
 /// on the local network; [`Room`](Self::Room) pairs both sides through a
 /// rendezvous broker with a short code.
 ///
 /// The design makes every variant valid for both sending and receiving; the
-/// current wire protocol still ties the dialer to the file sender, so today
+/// current wire protocol still ties the dialer to the job sender, so today
 /// consumer variants work for `send`, producer variants for `receive`, and
 /// `Mdns`/`Room` for both. Unsupported combinations fail fast with
 /// `InvalidInput` before any network activity.

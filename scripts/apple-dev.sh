@@ -72,7 +72,7 @@ Environment:
   ENVOIX_IOS_DEVICE_DESTINATION Required by ios-device-build
   ENVOIX_XCRESULT_PATH          Optional milestone-only .xcresult output path
   ENVOIX_BUILD_CACHE_MIN_FREE_GIB
-                                Hard free-space minimum (default: 64)
+                                Hard free-space minimum (default: 32)
   ENVOIX_BUILD_CACHE_TARGET_FREE_GIB
                                 Auto-clean target (default: 96)
   ENVOIX_APPLE_FORCE_PROJECT_REBUILD

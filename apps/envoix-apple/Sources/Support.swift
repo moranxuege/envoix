@@ -26,38 +26,7 @@ let deprecatedLogServers: Set<String> = [
     "http://envoix.chkxwlyh.us:8460",
 ]
 
-struct ActivityActionAvailability: Equatable {
-    let canPause: Bool
-    let canResume: Bool
-    let canCancel: Bool
-    let canDelete: Bool
-    let isFinalizing: Bool
-}
-
-/// Single lifecycle-to-UI action policy. SwiftUI must not infer buttons from
-/// presentation state independently of the canonical transfer snapshot.
-func activityActionAvailability(for record: FfiTransferActivityRecord) -> ActivityActionAvailability {
-    let actions = transferActivityActions(record: record)
-    return ActivityActionAvailability(
-        canPause: actions.canPause,
-        canResume: actions.canResume,
-        canCancel: actions.canCancel,
-        canDelete: actions.canDelete,
-        isFinalizing: actions.isFinalizing
-    )
-}
-
-/// True when this attempt completed entirely from bytes already present at
-/// the destination. `bytesTransferred` is the verified total, while
-/// `bytesResumed` identifies how much of that total crossed no wire this time.
-func isFullyResumedCompletion(_ record: FfiTransferActivityRecord) -> Bool {
-    record.state == .completed
-        && record.totalBytes > 0
-        && record.bytesTransferred >= record.totalBytes
-        && record.bytesResumed >= record.totalBytes
-}
-
-let expectedCoreFFIAPIVersion: UInt32 = 3
+let expectedCoreFFIAPIVersion: UInt32 = 4
 let appDebugBuildLabel = "Debug build 2026.07.08.19"
 
 /// Generates a short, memorable, easy-to-type pairing token of the form
@@ -76,8 +45,8 @@ func friendlyToken() -> String {
 /// How two peers find and authenticate each other.
 enum PairingMode: Hashable {
     case room    // Android-compatible QR/code, broker-assisted pairing
-    case invite  // legacy direct invite link, kept for compatibility
-    case token   // compatibility-only shared token; no longer exposed in Apple UI
+    case invite  // direct endpoint invite
+    case token   // shared-token mDNS route; not exposed in the primary Apple UI
 }
 
 extension String {
@@ -90,7 +59,6 @@ enum RuntimeSettingsProvider {
         language: String,
         serverURL: String,
         relayURL: String,
-        configChunkSize: String,
         candidatesAllow: String = "",
         candidatesDeny: String = "",
         speedLimit: Int
@@ -100,7 +68,6 @@ enum RuntimeSettingsProvider {
         }
 
         let configPath = try resolveConfigPath(
-            chunkSize: configChunkSize,
             candidatesAllow: candidatesAllow,
             candidatesDeny: candidatesDeny
         )
@@ -133,6 +100,17 @@ struct RuntimeSettingsError: LocalizedError {
 enum AppText {
     static func value(_ english: String, _ simplifiedChinese: String, language: String) -> String {
         language == "zh-Hans" ? simplifiedChinese : english
+    }
+
+    static func localized(_ key: String, language: String) -> String {
+        let resourceLanguage = language == "zh-Hans" ? "zh-Hans" : "en"
+        guard
+            let path = Bundle.main.path(forResource: resourceLanguage, ofType: "lproj"),
+            let languageBundle = Bundle(path: path)
+        else {
+            return key
+        }
+        return languageBundle.localizedString(forKey: key, value: nil, table: "Localizable")
     }
 }
 
@@ -496,6 +474,47 @@ func isRegularFileURL(_ url: URL) -> Bool {
     (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
 }
 
+func availableCompletedDirectoryURL(path: String) -> URL? {
+    let path = path.trimmed
+    guard !path.isEmpty else { return nil }
+    let url = URL(fileURLWithPath: path, isDirectory: true)
+    guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
+          values.isDirectory == true,
+          values.isSymbolicLink != true else {
+        return nil
+    }
+    return url
+}
+
+func availableReceivedDirectoryItemURLs(
+    directory: URL,
+    fileManager: FileManager = .default
+) -> [URL] {
+    guard availableCompletedDirectoryURL(path: directory.path) != nil,
+          let contents = try? fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey],
+            options: [.skipsHiddenFiles]
+          ) else {
+        return []
+    }
+    return contents.compactMap { url -> (url: URL, isDirectory: Bool)? in
+        guard let values = try? url.resourceValues(
+            forKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey]
+        ), values.isSymbolicLink != true else {
+            return nil
+        }
+        if values.isDirectory == true { return (url, true) }
+        if values.isRegularFile == true { return (url, false) }
+        return nil
+    }.sorted { lhs, rhs in
+        if lhs.isDirectory != rhs.isDirectory { return lhs.isDirectory }
+        return lhs.url.lastPathComponent.localizedStandardCompare(
+            rhs.url.lastPathComponent
+        ) == .orderedAscending
+    }.map(\.url)
+}
+
 func platformRevealTitle(language: String) -> String {
     #if os(macOS)
     return AppText.value("Reveal in Finder", "在 Finder 中显示", language: language)
@@ -624,14 +643,12 @@ func byteString(_ bytes: UInt64) -> String {
 private let runtimeConfigFileName = "envoix-runtime-config.toml"
 
 func resolveConfigPath(
-    chunkSize: String,
     candidatesAllow: String = "",
     candidatesDeny: String = ""
 ) throws -> String {
-    let chunkSize = chunkSize.trimmed
     let allow = configListLines(candidatesAllow)
     let deny = configListLines(candidatesDeny)
-    if chunkSize.isEmpty && allow.isEmpty && deny.isEmpty {
+    if allow.isEmpty && deny.isEmpty {
         return ""
     }
 
@@ -646,9 +663,6 @@ func resolveConfigPath(
     try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
     let configFile = configDir.appendingPathComponent(runtimeConfigFileName)
     var lines: [String] = []
-    if !chunkSize.isEmpty {
-        lines.append("chunk_size = \"\(tomlEscaped(chunkSize))\"")
-    }
     if !allow.isEmpty || !deny.isEmpty {
         lines.append("[candidates]")
         if !allow.isEmpty {
@@ -690,309 +704,4 @@ func etaString(_ seconds: Double) -> String {
     let (h, m, sec) = (s / 3600, (s % 3600) / 60, s % 60)
     if h > 0 { return String(format: "ETA %d:%02d:%02d", h, m, sec) }
     return String(format: "ETA %d:%02d", m, sec)
-}
-
-/// Builds a compact, bounded diagnostic report for a transfer and its snapshots.
-struct TransferDiagnostics {
-    static let clipboardMaxBytes = 256 * 1024
-    static let uploadMaxBytes = RemoteLogUpload.bodyMaxBytes
-    #if os(macOS)
-    static let appIdentifier = "envoix-macos"
-    #else
-    static let appIdentifier = "envoix-ios"
-    #endif
-    private static let headerMaxBytes = 2048
-    private static let failureMaxBytes = 48 * 1024
-    private static let eventLinesMaxBytes = 80 * 1024
-    private static let eventLogMaxBytes = 96 * 1024
-
-    static func report(
-        for record: FfiTransferActivityRecord,
-        eventLog: [String] = [],
-        transferEventLines: [String] = [],
-        budget: Int = clipboardMaxBytes,
-        includeSensitiveFields: Bool = true
-    ) -> String {
-        var remaining = budget
-        var lines: [String] = []
-
-        append(
-            section: section("header", headerText(for: record)),
-            cap: headerMaxBytes,
-            into: &lines,
-            remaining: &remaining
-        )
-
-        if hasFailureMetadata(record) {
-            append(
-                section: section("failure", failureText(for: record)),
-                cap: failureMaxBytes,
-                into: &lines,
-                remaining: &remaining
-            )
-        }
-
-        append(
-            section: section("activity", activityText(for: record, includeSensitiveFields: includeSensitiveFields)),
-            cap: remaining,
-            into: &lines,
-            remaining: &remaining
-        )
-
-        append(
-            section: section("transfer_events", transferEventLines.joined(separator: "\n")),
-            cap: eventLinesMaxBytes,
-            into: &lines,
-            remaining: &remaining
-        )
-
-        append(
-            section: section("activity_log", eventLog.joined(separator: "\n")),
-            cap: eventLogMaxBytes,
-            into: &lines,
-            remaining: &remaining
-        )
-
-        return lines.joined(separator: "\n")
-    }
-
-    /// Remote reports are larger than clipboard copies but never contain pairing secrets.
-    static func remoteReport(
-        for record: FfiTransferActivityRecord,
-        eventLog: [String] = [],
-        transferEventLines: [String] = []
-    ) -> String {
-        report(
-            for: record,
-            eventLog: eventLog,
-            transferEventLines: transferEventLines,
-            budget: uploadMaxBytes,
-            includeSensitiveFields: false
-        )
-    }
-
-    /// App-level report used before a Room exists and for cross-transfer diagnosis.
-    static func appReport(
-        activities: [FfiTransferActivityRecord],
-        eventLines: [String] = []
-    ) -> String {
-        var remaining = uploadMaxBytes
-        var lines: [String] = []
-        append(
-            section: section("header", ([
-                "app=\(appIdentifier)",
-                "version=\(appVersion)",
-                "build=\(appBuild)",
-                "generated=\(isoDate())",
-                "activity_count=\(activities.count)",
-            ] + runtimeIdentityLines).joined(separator: "\n")),
-            cap: headerMaxBytes,
-            into: &lines,
-            remaining: &remaining
-        )
-
-        let activitySnapshots = activities.map { record in
-            var sections = ["[activity \(record.activityId)]", activityText(for: record, includeSensitiveFields: false)]
-            if hasFailureMetadata(record) {
-                sections.append(failureText(for: record))
-            }
-            return sections.joined(separator: "\n")
-        }.joined(separator: "\n\n")
-        append(
-            section: section("activities", activitySnapshots),
-            cap: remaining,
-            into: &lines,
-            remaining: &remaining
-        )
-
-        append(
-            section: section("activity_events", eventLines.joined(separator: "\n")),
-            cap: remaining,
-            into: &lines,
-            remaining: &remaining
-        )
-
-        return lines.joined(separator: "\n")
-    }
-
-    static func transferEventLine(_ event: FfiTransferEvent) -> String {
-        let date = formatTime(event.tsMs)
-        var parts = [
-            "[\(date)]",
-            "\(event.kind)",
-            "\(event.direction)",
-            "\(event.mode)",
-            "\(event.pairingStep)",
-        ]
-        let file = event.fileName.isEmpty ? "unknown" : event.fileName
-        parts.append("file=\(file)")
-        parts.append("bytes=\(event.bytesTransferred)/\(event.totalBytes)")
-        if event.bytesResumed > 0 {
-            parts.append("resumed=\(event.bytesResumed)")
-        }
-        if !event.dataPathDetail.isEmpty {
-            parts.append("path=\(event.dataPathKind) \(event.dataPathDetail)")
-        }
-        if !event.diagnosticMessage.isEmpty {
-            parts.append("message=\(event.diagnosticMessage)")
-        }
-        return parts.joined(separator: " · ")
-    }
-
-    private static func append(
-        section: String,
-        cap: Int,
-        into report: inout [String],
-        remaining: inout Int
-    ) {
-        guard cap > 0 else { return }
-        let allowed = min(cap, remaining)
-        if allowed <= 0 { return }
-        let piece = tail(section, maxBytes: allowed)
-        guard !piece.isEmpty else { return }
-        if piece.utf8.count > remaining { return }
-        report.append(piece)
-        remaining -= piece.utf8.count
-        if remaining > 0 { remaining -= 1 }
-    }
-
-    private static func section(_ title: String, _ body: String) -> String {
-        if body.isEmpty { return "[\(title)]\n(empty)" }
-        return "[\(title)]\n\(body)"
-    }
-
-    private static func headerText(for record: FfiTransferActivityRecord) -> String {
-        ([
-            "app=\(appIdentifier)",
-            "version=\(appVersion)",
-            "build=\(appBuild)",
-            "record_id=\(record.activityId)",
-            "attempt_id=\(record.attemptId)",
-            "generated=\(isoDate())",
-        ] + runtimeIdentityLines).joined(separator: "\n")
-    }
-
-    private static func failureText(for record: FfiTransferActivityRecord) -> String {
-        [
-            "failure_code=\(record.failureCode)",
-            "failure_category=\(record.failureCategory)",
-            "failure_phase=\(record.failurePhase)",
-            "failure_origin=\(record.failureOrigin)",
-            "user_message_key=\(record.userMessageKey)",
-            "retryable=\(record.retryable)",
-            "recovery_action=\(record.recoveryAction)",
-            "diagnostic_message=\(record.diagnosticMessage)",
-        ].joined(separator: "\n")
-    }
-
-    private static func activityText(
-        for record: FfiTransferActivityRecord,
-        includeSensitiveFields: Bool
-    ) -> String {
-        [
-            "activity_id=\(record.activityId)",
-            "attempt_id=\(record.attemptId)",
-            "state=\(record.state)",
-            "direction=\(record.direction)",
-            "mode=\(record.mode)",
-            "created_at=\(formatTime(record.createdAtMs))",
-            "updated_at=\(formatTime(record.updatedAtMs))",
-            "started_at=\(formatTime(record.startedAtMs))",
-            "completed_at=\(formatTime(record.completedAtMs))",
-            "transfer_id=\(record.transferId)",
-            "file_name=\(record.fileName)",
-            "bytes=\(record.bytesTransferred)/\(record.totalBytes)",
-            "resumed_bytes=\(record.bytesResumed)",
-            "invite=\(sensitiveValue(record.invite, include: includeSensitiveFields))",
-            "token=\(sensitiveValue(record.token, include: includeSensitiveFields))",
-            "peer=\(sensitiveValue(record.peerDescriptor, include: includeSensitiveFields))",
-            "data_path=\(record.dataPathKind) \(record.dataPathDetail)",
-            "limits=\(record.limits)",
-            "completed_file_path=\(sensitiveValue(record.completedFilePath, include: includeSensitiveFields))",
-            "diagnostic_message=\(record.diagnosticMessage)",
-        ].joined(separator: "\n")
-    }
-
-    private static func hasFailureMetadata(_ record: FfiTransferActivityRecord) -> Bool {
-        record.state == .failed
-            || record.state == .unconfirmed
-            || record.failureCode != .unknown
-            || record.failureCategory != .unknown
-            || !record.userMessageKey.isEmpty
-            || record.recoveryAction != .none
-    }
-
-    private static func sensitiveValue(_ value: String, include: Bool) -> String {
-        guard !value.isEmpty else { return "" }
-        return include ? value : "[redacted]"
-    }
-
-    private static var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
-    }
-
-    private static var appBuild: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "dev"
-    }
-
-    private static var runtimeIdentityLines: [String] {
-        let core = envoixCoreInfo()
-        return [
-            "core_version=\(core.coreVersion)",
-            "core_ffi_api=\(core.ffiApiVersion)",
-            "core_capabilities=\(core.capabilities.sorted().joined(separator: ","))",
-            "executable_sha256=\(executableFingerprint)",
-            "runtime_code_file=\(runtimeCodeURL?.lastPathComponent ?? "unavailable")",
-            "runtime_code_sha256=\(fileFingerprint(runtimeCodeURL))",
-        ]
-    }
-
-    private static let executableFingerprint = fileFingerprint(Bundle.main.executableURL)
-
-    private static let runtimeCodeURL: URL? = {
-        guard let executableURL = Bundle.main.executableURL else { return nil }
-        let debugDylibURL = executableURL
-            .deletingLastPathComponent()
-            .appendingPathComponent("\(executableURL.lastPathComponent).debug.dylib")
-        if FileManager.default.isReadableFile(atPath: debugDylibURL.path) {
-            return debugDylibURL
-        }
-        return executableURL
-    }()
-
-    private static func fileFingerprint(_ url: URL?) -> String {
-        guard let url, let handle = try? FileHandle(forReadingFrom: url) else {
-            return "unavailable"
-        }
-        defer { try? handle.close() }
-        var hasher = SHA256()
-        while true {
-            let data = handle.readData(ofLength: 1024 * 1024)
-            if data.isEmpty { break }
-            hasher.update(data: data)
-        }
-        return hasher.finalize().prefix(12).map { String(format: "%02x", $0) }.joined()
-    }
-
-    private static func formatTime(_ ms: UInt64) -> String {
-        guard ms > 0 else { return "0" }
-        let date = Date(timeIntervalSince1970: TimeInterval(ms) / 1000)
-        let formatter = ISO8601DateFormatter()
-        return formatter.string(from: date)
-    }
-
-    private static func isoDate() -> String {
-        ISO8601DateFormatter().string(from: Date())
-    }
-
-    private static func tail(_ text: String, maxBytes: Int) -> String {
-        let bytes = Array(text.utf8)
-        if bytes.count <= maxBytes { return text }
-        let head = "[… trimmed — last \(maxBytes / 1024) KB]\n"
-        let headBytes = Array(head.utf8)
-        let remaining = max(0, maxBytes - headBytes.count)
-        if remaining == 0 { return head }
-        let tailBytes = bytes.suffix(remaining)
-        return head + String(decoding: tailBytes, as: UTF8.self)
-    }
 }

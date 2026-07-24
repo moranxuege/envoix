@@ -1,6 +1,5 @@
 package dev.envoix.app.ui
 
-import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -62,8 +61,8 @@ import dev.envoix.app.discovery.ProviderStatus
 @Composable
 internal fun DiscoveryScreen(
     onBack: () -> Unit,
-    onReceive: (code: String, broker: String, relay: String, qrPayload: String?) -> Unit,
-    onSend: (code: String, broker: String, relay: String, file: Uri, qrPayload: String?) -> Unit,
+    onReceive: (code: String, broker: String, relay: String, qrPayload: String?, copyApproved: Boolean) -> Unit,
+    onSend: (code: String, broker: String, relay: String, jobId: String, qrPayload: String?) -> Unit,
     discoveryViewModel: DiscoveryViewModel = viewModel(),
 ) {
     val colors = Envoix.colors
@@ -123,14 +122,17 @@ internal fun DiscoveryScreen(
         ) {
             item {
                 Text(
-                    "Visible as ${state.localName}",
+                    appText("Visible as ${state.localName}", "本机显示为 ${state.localName}"),
                     color = colors.text,
                     fontWeight = FontWeight.SemiBold,
                     fontSize = 16.sp,
                 )
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "Experimental BLE pairing is unauthenticated. A nearby attacker may impersonate or relay a device.",
+                    appText(
+                        "Experimental BLE pairing is unauthenticated. A nearby attacker may impersonate or relay a device.",
+                        "实验性 BLE 配对本身不验证身份。附近的攻击者可能冒充设备或中继连接。",
+                    ),
                     color = colors.muted,
                     fontSize = 13.sp,
                     lineHeight = 18.sp,
@@ -147,14 +149,14 @@ internal fun DiscoveryScreen(
                             permissionLauncher.launch(DiscoveryPermissions.bluetoothRuntimePermissions())
                         },
                     ) {
-                        Text("Grant Bluetooth access")
+                        Text(appText("Grant Bluetooth access", "授予蓝牙权限"))
                     }
                 }
             }
 
             item {
                 Text(
-                    "NEARBY DEVICES",
+                    appText("NEARBY DEVICES", "附近设备"),
                     color = colors.muted,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
@@ -166,7 +168,11 @@ internal fun DiscoveryScreen(
             if (state.peers.isEmpty()) {
                 item {
                     Text(
-                        if (state.active) "Searching for Envoix devices…" else "Discovery is paused.",
+                        if (state.active) {
+                            appText("Searching for Envoix devices…", "正在搜索 Envoix 设备…")
+                        } else {
+                            appText("Discovery is paused.", "设备发现已暂停。")
+                        },
                         color = colors.muted,
                         fontSize = 15.sp,
                         modifier = Modifier.padding(vertical = 24.dp),
@@ -187,7 +193,10 @@ internal fun DiscoveryScreen(
 
             item {
                 Text(
-                    "BLE sends the Envoix invitation only after you tap Start. It does not prove that the selected device is the intended peer.",
+                    appText(
+                        "BLE sends the Envoix invitation only after you tap Start. It does not prove that the selected device is the intended peer.",
+                        "只有点击开始后，BLE 才会发送 Envoix 邀请；BLE 本身不能证明所选设备就是预期的对端。",
+                    ),
                     color = colors.muted,
                     fontSize = 12.sp,
                     lineHeight = 17.sp,
@@ -217,15 +226,15 @@ internal fun DiscoveryScreen(
                     } else {
                         null
                     },
-                onReceive = { code, broker, relay, qrPayload ->
+                onReceive = { code, broker, relay, qrPayload, copyApproved ->
                     pairingSelection = null
                     initialPairingInput = null
-                    onReceive(code, broker, relay, qrPayload)
+                    onReceive(code, broker, relay, qrPayload, copyApproved)
                 },
-                onSend = { code, broker, relay, file, qrPayload ->
+                onSend = { code, broker, relay, jobId, qrPayload ->
                     pairingSelection = null
                     initialPairingInput = null
-                    onSend(code, broker, relay, file, qrPayload)
+                    onSend(code, broker, relay, jobId, qrPayload)
                 },
             )
         }
@@ -244,13 +253,13 @@ private fun DiscoveryHeader(
     ) {
         Icon(
             Icons.AutoMirrored.Filled.ArrowBack,
-            contentDescription = "Back",
+            contentDescription = appText("Back", "返回"),
             tint = colors.accent,
             modifier = Modifier.clip(CircleShape).clickable(onClick = onBack).padding(6.dp),
         )
         Spacer(Modifier.width(8.dp))
         Text(
-            "Nearby devices",
+            appText("Nearby devices", "附近设备"),
             color = colors.text,
             fontSize = 26.sp,
             fontWeight = FontWeight.ExtraBold,
@@ -258,7 +267,7 @@ private fun DiscoveryHeader(
         )
         Icon(
             Icons.Default.Refresh,
-            contentDescription = "Restart discovery",
+            contentDescription = appText("Restart discovery", "重新发现设备"),
             tint = colors.accent,
             modifier =
                 Modifier
@@ -296,7 +305,7 @@ private fun ProviderStatusRow(status: ProviderStatus) {
         Column(Modifier.weight(1f)) {
             Text(status.source.title(), color = colors.text, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
             Text(
-                status.detail,
+                status.availability.detail(),
                 color = colors.muted,
                 fontSize = 12.sp,
                 maxLines = 2,
@@ -347,7 +356,7 @@ private fun PeerCard(
             .padding(15.dp),
     ) {
         Text(
-            peer.displayName ?: "Nearby Envoix device",
+            peer.displayName ?: appText("Nearby Envoix device", "附近的 Envoix 设备"),
             color = colors.text,
             fontWeight = FontWeight.Bold,
             fontSize = 16.sp,
@@ -362,7 +371,11 @@ private fun PeerCard(
         Spacer(Modifier.height(7.dp))
         val ageSeconds = ((nowMs - peer.lastSeenAtMs).coerceAtLeast(0) / 1_000)
         Text(
-            if (ageSeconds == 0L) "Seen just now" else "Seen ${ageSeconds}s ago",
+            if (ageSeconds == 0L) {
+                appText("Seen just now", "刚刚发现")
+            } else {
+                appText("Seen ${ageSeconds}s ago", "$ageSeconds 秒前发现")
+            },
             color = colors.muted,
             fontSize = 12.sp,
         )
@@ -381,10 +394,11 @@ private fun SourcePill(source: DiscoverySource) {
     )
 }
 
+@Composable
 private fun DiscoverySource.title(): String =
     when (this) {
         DiscoverySource.Bluetooth -> "Bluetooth LE"
-        DiscoverySource.Mdns -> "mDNS / local network"
+        DiscoverySource.Mdns -> appText("mDNS / local network", "mDNS / 局域网")
         DiscoverySource.WifiAware -> "Wi-Fi Aware"
     }
 
@@ -395,9 +409,32 @@ private fun DiscoverySource.shortTitle(): String =
         DiscoverySource.WifiAware -> "Aware"
     }
 
+@Composable
 private fun ProviderAvailability.label(): String =
     when (this) {
-        ProviderAvailability.PermissionRequired -> "Permission"
-        ProviderAvailability.TemporarilyUnavailable -> "Unavailable"
-        else -> name
+        ProviderAvailability.Stopped -> appText("Stopped", "已停止")
+        ProviderAvailability.Starting -> appText("Starting", "正在启动")
+        ProviderAvailability.Ready -> appText("Ready", "可用")
+        ProviderAvailability.Degraded -> appText("Limited", "受限")
+        ProviderAvailability.PermissionRequired -> appText("Permission", "需要权限")
+        ProviderAvailability.Disabled -> appText("Disabled", "未开启")
+        ProviderAvailability.Unsupported -> appText("Unsupported", "不支持")
+        ProviderAvailability.TemporarilyUnavailable -> appText("Unavailable", "暂不可用")
+        ProviderAvailability.Reserved -> appText("Reserved", "暂未开放")
+        ProviderAvailability.Error -> appText("Error", "错误")
+    }
+
+@Composable
+private fun ProviderAvailability.detail(): String =
+    when (this) {
+        ProviderAvailability.Stopped -> appText("Discovery is stopped", "设备发现已停止")
+        ProviderAvailability.Starting -> appText("Starting discovery", "正在启动设备发现")
+        ProviderAvailability.Ready -> appText("Scanning and visible to nearby devices", "正在扫描，附近设备可发现本机")
+        ProviderAvailability.Degraded -> appText("Discovery is only partially available", "设备发现功能当前受限")
+        ProviderAvailability.PermissionRequired -> appText("Permission is required to discover devices", "需要授权后才能发现设备")
+        ProviderAvailability.Disabled -> appText("Turn this connection method on to use it", "请开启此连接方式后再使用")
+        ProviderAvailability.Unsupported -> appText("This device does not support this method", "此设备不支持该连接方式")
+        ProviderAvailability.TemporarilyUnavailable -> appText("Discovery is temporarily unavailable", "设备发现暂时不可用")
+        ProviderAvailability.Reserved -> appText("Reserved for a future version", "将在后续版本中开放")
+        ProviderAvailability.Error -> appText("Discovery could not start", "设备发现无法启动")
     }

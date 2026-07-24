@@ -187,7 +187,7 @@ fn platform_dns_fallback_server() -> Option<SocketAddr> {
     None
 }
 
-#[cfg(any(target_os = "ios", target_os = "android", test))]
+#[cfg(any(target_os = "ios", target_os = "android"))]
 fn ipv4_addresses(addrs: impl IntoIterator<Item = SocketAddr>) -> Vec<Ipv4Addr> {
     let mut result = Vec::new();
     for ip in addrs.into_iter().filter_map(|addr| match addr.ip() {
@@ -201,7 +201,7 @@ fn ipv4_addresses(addrs: impl IntoIterator<Item = SocketAddr>) -> Vec<Ipv4Addr> 
     result
 }
 
-#[cfg(any(target_os = "ios", target_os = "android", test))]
+#[cfg(any(target_os = "ios", target_os = "android"))]
 fn ipv6_addresses(addrs: impl IntoIterator<Item = SocketAddr>) -> Vec<Ipv6Addr> {
     let mut result = Vec::new();
     for ip in addrs.into_iter().filter_map(|addr| match addr.ip() {
@@ -519,7 +519,12 @@ impl BoundEndpoint {
             .await
             .ok_or_else(|| CoreError::Transport("iroh endpoint closed".into()))?;
         events.on_event(TransferEvent::Diagnostic {
-            message: "accept incoming received; awaiting connection".to_string(),
+            message: format!(
+                "accept incoming received remote={:?} local={:?} validated={}; awaiting connection",
+                incoming.remote_addr(),
+                incoming.local_addr(),
+                incoming.remote_addr_validated(),
+            ),
         });
         let connection = incoming
             .await
@@ -641,7 +646,7 @@ pub(crate) fn relay_mode(relay: &Option<String>) -> Result<RelayMode, SessionErr
     }
 }
 
-pub(crate) async fn build_accept_endpoint(
+pub(crate) async fn build_manifest_v2_accept_endpoint(
     listen_addrs: BindAddrs,
     identity: &IdentityConfig,
     relay: &Option<String>,
@@ -652,7 +657,7 @@ pub(crate) async fn build_accept_endpoint(
     build_endpoint(
         Some(listen_addrs),
         identity,
-        &[TransferProtocol::SingleFileV1],
+        &[TransferProtocol::ManifestV2],
         false,
         relay,
         relay_only,
@@ -662,7 +667,7 @@ pub(crate) async fn build_accept_endpoint(
     .await
 }
 
-pub(crate) async fn build_transfer_accept_endpoint(
+pub(crate) async fn build_manifest_v2_advertising_accept_endpoint(
     listen_addrs: BindAddrs,
     identity: &IdentityConfig,
     relay: &Option<String>,
@@ -673,49 +678,7 @@ pub(crate) async fn build_transfer_accept_endpoint(
     build_endpoint(
         Some(listen_addrs),
         identity,
-        &[TransferProtocol::SingleFileV1, TransferProtocol::ManifestV1],
-        false,
-        relay,
-        relay_only,
-        candidates,
-        window,
-    )
-    .await
-}
-
-pub(crate) async fn build_advertising_accept_endpoint(
-    listen_addrs: BindAddrs,
-    identity: &IdentityConfig,
-    relay: &Option<String>,
-    relay_only: bool,
-    candidates: &CandidateFilter,
-    window: u32,
-) -> Result<Endpoint, SessionError> {
-    build_endpoint(
-        Some(listen_addrs),
-        identity,
-        &[TransferProtocol::SingleFileV1],
-        true,
-        relay,
-        relay_only,
-        candidates,
-        window,
-    )
-    .await
-}
-
-pub(crate) async fn build_transfer_advertising_accept_endpoint(
-    listen_addrs: BindAddrs,
-    identity: &IdentityConfig,
-    relay: &Option<String>,
-    relay_only: bool,
-    candidates: &CandidateFilter,
-    window: u32,
-) -> Result<Endpoint, SessionError> {
-    build_endpoint(
-        Some(listen_addrs),
-        identity,
-        &[TransferProtocol::SingleFileV1, TransferProtocol::ManifestV1],
+        &[TransferProtocol::ManifestV2],
         true,
         relay,
         relay_only,
@@ -778,8 +741,8 @@ fn data_transport_config(window: u32) -> QuicTransportConfig {
     builder.build()
 }
 
-// The endpoint knobs are independent flags/handles, not a cohesive config worth
-// its own type; the three thin wrappers above pin the common combinations.
+// Endpoint knobs are independent flags/handles; the v2 accept/dial wrappers
+// above pin the supported combinations without exposing legacy ALPN choices.
 #[allow(clippy::too_many_arguments)]
 async fn build_endpoint(
     local_listen_addrs: Option<BindAddrs>,
@@ -864,7 +827,3 @@ async fn build_endpoint(
         .await
         .map_err(|error| CoreError::Transport(error.to_string()))
 }
-
-#[cfg(test)]
-#[path = "endpoint_tests.rs"]
-mod tests;

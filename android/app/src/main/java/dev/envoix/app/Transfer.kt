@@ -2,33 +2,53 @@ package dev.envoix.app
 
 enum class Direction { Send, Receive }
 
-/**
- * Card status. Each variant carries the exact `wire` string the Rust `State`
- * enum serializes to (serde snake_case, `envoix-client/src/api/machine.rs`) —
- * the wire string is the single source, so [fromWire] can't silently drift from
- * the enum. A Rust rename breaks the Rust serialization test; an unmapped state
- * is surfaced by [fromWire] returning null (never a silent card freeze).
- */
+data class TransferInventoryEntry(
+    val entryId: Int,
+    val parentEntryId: Int?,
+    val name: String,
+    val directory: Boolean,
+    val size: Long,
+)
+
+/** Native projection of canonical Manifest-v2 session phases. */
 enum class Status(
     val wire: String,
 ) {
     Preparing("preparing"),
-    Waiting("waiting"),
+    WaitingForPeer("waiting_for_peer"),
+    Pairing("pairing"),
     Connecting("connecting"),
-    Verifying("verifying"),
+    AwaitingDecision("awaiting_decision"),
     Transferring("transferring"),
-    Confirming("confirming"),
+    Verifying("verifying"),
+    Saving("saving"),
+    WaitingForReceiverSave("waiting_for_receiver_save"),
+    FinalizingDelivery("finalizing_delivery"),
     Paused("paused"),
-    Completed("completed"),
-    Unconfirmed("unconfirmed"),
+    Delivered("delivered"),
     Failed("failed"),
-    Cancelled("cancelled"),
+    Canceled("canceled"),
     ;
 
     companion object {
-        /** The core `State` wire string → Status, or null if this build has no
-         *  mapping for it (the Rust enum gained a state we don't know). */
+        /** Canonical phase wire string to native UI state. */
         fun fromWire(wire: String): Status? = entries.firstOrNull { it.wire == wire }
+    }
+}
+
+enum class RecoveryAction(
+    val wire: String,
+) {
+    Retry("retry"),
+    Resume("resume"),
+    ChooseFolder("choose_folder"),
+    OpenSettings("open_settings"),
+    RePair("re_pair"),
+    None("none"),
+    ;
+
+    companion object {
+        fun fromWire(wire: String): RecoveryAction = entries.firstOrNull { it.wire == wire } ?: None
     }
 }
 
@@ -38,13 +58,18 @@ data class Transfer(
     val direction: Direction,
     val room: String,
     val fileName: String? = null,
-    /** Machine attempt number (resume bumps it). */
+    /** Stable canonical Manifest-v2 job identity. */
+    val jobId: String? = null,
+    val rootCount: Int = 0,
+    val fileCount: Int = 0,
+    val directoryCount: Int = 0,
+    val exceptionalOffer: Boolean = false,
+    /** Bounded authenticated offer projection; the native ledger retains the
+     * complete inventory and exposes additional pages on demand. */
+    val inventoryPreview: List<TransferInventoryEntry> = emptyList(),
+    val inventoryHasMore: Boolean = false,
+    /** Local attempt number (resume bumps it). */
     val attempt: Int = 1,
-    /** Receiver: the confirmation duty is discharged (receipt on the rdz). */
-    val proofDelivered: Boolean = false,
-    /** Core transfer id (from Started) — keys the rdz receipt mailbox. */
-    val transferId: String? = null,
-    val pathType: String? = null,
     val pathAddr: String? = null,
     val bytes: Long = 0,
     val total: Long = 0,
@@ -56,20 +81,14 @@ data class Transfer(
     val error: String? = null,
     /** Where a received file ended up (a `content://` in Downloads), for opening. */
     val savedUri: String? = null,
-    /** The name the received file was actually published under — may differ from
+    val savedUris: List<String> = emptyList(),
+    /** The name the received file was actually saved under — may differ from
      *  [fileName] (the transfer identity) after a collision bump, e.g. "photo (1).jpg". */
-    val publishedName: String? = null,
-    /** Public-artifact evidence captured while copying the verified staging file. */
-    val publishedSize: Long? = null,
-    val publishedSha256: String? = null,
-    /** The public artifact was deleted, changed, or cannot be proven to match.
-     *  Its private receipt must never be served while this is true. */
-    val publicationInvalid: Boolean = false,
-    /** A received file that finished transferring but could not be published to
-     *  public storage (a non-collision publish failure). The bytes are safe in
-     *  staging and a retry re-drives; surfaced so the user isn't left thinking it
-     *  silently vanished. */
-    val publishFailed: Boolean = false,
+    val savedName: String? = null,
+    /** Stable machine cause; never reconstructed from [error]. */
+    val failureCause: String? = null,
+    val retryable: Boolean = false,
+    val recoveryAction: RecoveryAction = RecoveryAction.None,
     /** For an initiated session, the invite payload to show as a QR while waiting
      *  for a peer to pair (null when we joined someone else's code). */
     val qrPayload: String? = null,
@@ -80,25 +99,9 @@ data class Transfer(
 )
 
 val Status.isTerminal: Boolean
-    // Exhaustive (no `else`) so a new Status must be classified here too.
-    get() =
-        when (this) {
-            Status.Completed,
-            Status.Unconfirmed,
-            Status.Failed,
-            Status.Cancelled,
-            -> true
-            Status.Preparing,
-            Status.Waiting,
-            Status.Connecting,
-            Status.Verifying,
-            Status.Transferring,
-            Status.Confirming,
-            Status.Paused,
-            -> false
-        }
+    get() = TransferPresentationPolicy.isTerminal(this)
 
-/** Human-readable byte count (the ONE implementation - was duplicated). */
+/** Human-readable byte count shared by every transfer surface. */
 fun humanBytes(n: Long): String =
     when {
         n < 1024 -> "$n B"
@@ -107,7 +110,7 @@ fun humanBytes(n: Long): String =
         else -> "%.2f GB".format(n / 1073741824.0)
     }
 
-/** Trailing-window average of the 250 ms-sampled rate (~3 s): the headline
+/** Trailing-window average of the ~200 ms-published rate (~2.4 s): the headline
  *  speed/ETA smoothing policy, kept beside the model (not in a composable). */
 fun smoothedBps(t: Transfer): Double {
     val window = t.speedHistory.takeLast(12)

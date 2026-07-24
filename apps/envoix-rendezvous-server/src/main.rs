@@ -15,7 +15,6 @@ use envoix_rendezvous_iroh::{PeerLocator, build_endpoint, relay_mode_from_url, s
 
 mod geoip;
 mod logs;
-mod receipts;
 
 #[derive(Parser)]
 #[command(
@@ -71,7 +70,7 @@ struct Cli {
     /// for a trusted/private deployment; never use for broad rollout.
     #[arg(long)]
     unsafe_open_log_view: bool,
-    /// TLS certificate chain (PEM) for the log/receipt endpoint. With
+    /// TLS certificate chain (PEM) for the log endpoint. With
     /// `--tls-key`, `--log-bind` serves HTTPS instead of plain HTTP. The PEM
     /// pair is re-read periodically, so ACME renewals that replace the files
     /// take effect without a restart (live rooms survive).
@@ -80,9 +79,6 @@ struct Cli {
     /// TLS private key (PEM); see `--tls-cert`.
     #[arg(long, requires = "tls_cert")]
     tls_key: Option<PathBuf>,
-    /// How long (seconds) mailbox completion receipts are kept.
-    #[arg(long, default_value_t = 7 * 24 * 3600)]
-    receipt_ttl: u64,
 }
 
 /// How server logs are rendered.
@@ -104,9 +100,6 @@ async fn main() -> Result<()> {
     // Shared per-room log store: fed by the capture layer below, served by the
     // optional HTTP endpoint.
     let log_store = Arc::new(logs::RoomLogs::new(Duration::from_secs(cli.log_ttl)));
-    let receipt_store = Arc::new(receipts::ReceiptStore::new(Duration::from_secs(
-        cli.receipt_ttl,
-    )));
 
     // Include the broker crate (`envoix_rendezvous`) at info, not just the iroh
     // wiring - otherwise pairings/expiries (its target) fall to the global warn
@@ -200,8 +193,7 @@ async fn main() -> Result<()> {
                 logs::ViewAuth::Closed
             }
         };
-        let router = logs::router(log_store.clone(), view_auth)
-            .merge(receipts::router(receipt_store.clone()));
+        let router = logs::router(log_store.clone(), view_auth);
         if let (Some(cert), Some(key)) = (cli.tls_cert, cli.tls_key) {
             let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert, &key)
                 .await

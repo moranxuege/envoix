@@ -82,6 +82,46 @@ object MediaStoreSaver {
             ?.let { reserveInTree(context, displayName, Uri.parse(it)) }
             ?: reserveInDownloads(context, displayName, folder)
 
+    /** Plan one exact Downloads name without creating a row. */
+    fun planDownloadName(
+        context: Context,
+        displayName: String,
+        folder: String,
+        reservedKeys: Set<String>,
+    ): String {
+        val occupied =
+            downloadNames(context, downloadRelativePath(folder))
+                .mapTo(mutableSetOf()) { it.lowercase(java.util.Locale.ROOT) }
+                .apply { addAll(reservedKeys) }
+        return nameSequence(displayName)
+            .take(NAME_ATTEMPTS)
+            .firstOrNull { it.lowercase(java.util.Locale.ROOT) !in occupied }
+            ?: error("Could not allocate a non-conflicting Downloads name")
+    }
+
+    /** Reserve the already accepted Downloads name exactly. */
+    fun reserveDownloadExact(
+        context: Context,
+        displayName: String,
+        folder: String,
+    ): Reserved? {
+        val uri =
+            context.contentResolver.insert(
+                MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, displayName)
+                    put(MediaStore.Downloads.MIME_TYPE, mimeTypeFor(displayName))
+                    put(MediaStore.Downloads.RELATIVE_PATH, downloadRelativePath(folder))
+                    put(MediaStore.Downloads.IS_PENDING, 1)
+                },
+            ) ?: return null
+        if (queryDisplayName(context, uri) != displayName) {
+            delete(context, uri)
+            return null
+        }
+        return Reserved(uri, mediaStorePending = true, displayName = displayName)
+    }
+
     /** Copy [source] into a reserved target. Returns the failure cause (a
      *  typed result, not a bare Boolean) so `platform.publish.failed` can carry
      *  a real reason instead of a swallowed exception. */
@@ -100,7 +140,7 @@ object MediaStoreSaver {
         }
 
     /** Hash the current public bytes. Used only by crash recovery and manual
-     *  receipt re-verification, both exceptional paths. */
+     *  delivery-proof reconciliation, both exceptional paths. */
     fun inspect(
         context: Context,
         uri: Uri,
@@ -164,20 +204,7 @@ object MediaStoreSaver {
         return PublicationEvidence(size, digest.digest().joinToString("") { "%02x".format(it) })
     }
 
-    /**
-     * Make a reserved target visible after a successful copy, resolving a name
-     * collision by bumping the pending row's DISPLAY_NAME and retrying: the
-     * un-pend is where MediaStore finalizes `_data`, so a colliding name throws
-     * UNIQUE(files._data) here. Uniqueness is proven by a *successful* commit,
-     * never assumed — a pre-query can't see pending/orphaned rows.
-     *
-     * Only a UNIQUE violation is retried. Any other error (IO, provider dead), or
-     * an update that affected 0 rows (the row vanished), fails immediately so the
-     * caller keeps staging instead of deleting bytes it never published. SAF
-     * targets are already visible → returned as-is.
-     *
-     * Returns the URI and the name it actually landed under.
-     */
+    /** Make a reserved target visible using its accepted name exactly. */
     fun commit(
         context: Context,
         target: Reserved,
@@ -185,71 +212,26 @@ object MediaStoreSaver {
         if (!target.mediaStorePending) {
             return Result.success(PublishOutcome(target.uri, target.displayName))
         }
-        val resolver = context.contentResolver
-        for ((attempt, candidate) in nameSequence(target.displayName).take(NAME_ATTEMPTS).withIndex()) {
-            // The reserved row already carries the first candidate; later ones
-            // need a rename (still pending, no `_data` yet) before the un-pend.
-            if (attempt > 0) {
-                val renamed =
-                    runCatching {
-                        resolver.update(
-                            target.uri,
-                            ContentValues().apply { put(MediaStore.Downloads.DISPLAY_NAME, candidate) },
-                            null,
-                            null,
-                        )
-                    }
-                when {
-                    renamed.isFailure && isUniqueViolation(renamed.exceptionOrNull()) -> continue
-                    renamed.isFailure -> return Result.failure(renamed.exceptionOrNull()!!)
-                    renamed.getOrThrow() != 1 -> return Result.failure(rowVanished("rename", renamed.getOrThrow()))
-                }
+        val unpended =
+            runCatching {
+                context.contentResolver.update(
+                    target.uri,
+                    ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) },
+                    null,
+                    null,
+                )
             }
-            val unpended =
-                runCatching {
-                    resolver.update(
-                        target.uri,
-                        ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) },
-                        null,
-                        null,
-                    )
-                }
-            when {
-                unpended.isSuccess && unpended.getOrThrow() == 1 -> {
-                    val actual =
-                        queryDisplayName(context, target.uri)
-                            ?: return Result.failure(IllegalStateException("published row has no display name"))
-                    if (actual == candidate) return Result.success(PublishOutcome(target.uri, candidate))
-
-                    // Some MediaStore providers silently append " (1)" after
-                    // the extension during insert/un-pend. Rename the row back
-                    // to our already extension-safe candidate and verify what
-                    // the provider actually committed.
-                    val corrected =
-                        runCatching {
-                            resolver.update(
-                                target.uri,
-                                ContentValues().apply { put(MediaStore.Downloads.DISPLAY_NAME, candidate) },
-                                null,
-                                null,
-                            )
-                        }
-                    when {
-                        corrected.isFailure && isUniqueViolation(corrected.exceptionOrNull()) -> continue
-                        corrected.isFailure -> return Result.failure(corrected.exceptionOrNull()!!)
-                        corrected.getOrThrow() != 1 ->
-                            return Result.failure(rowVanished("correct name", corrected.getOrThrow()))
-                        queryDisplayName(context, target.uri) == candidate ->
-                            return Result.success(PublishOutcome(target.uri, candidate))
-                        else -> return Result.failure(IllegalStateException("provider changed published display name"))
-                    }
-                }
-                unpended.isSuccess -> return Result.failure(rowVanished("un-pend", unpended.getOrThrow()))
-                isUniqueViolation(unpended.exceptionOrNull()) -> continue
-                else -> return Result.failure(unpended.exceptionOrNull()!!)
-            }
+        if (unpended.isFailure) return Result.failure(unpended.exceptionOrNull()!!)
+        if (unpended.getOrThrow() != 1) {
+            return Result.failure(rowVanished("un-pend", unpended.getOrThrow()))
         }
-        return Result.failure(IllegalStateException("publish exhausted $NAME_ATTEMPTS candidate names"))
+        val actual =
+            queryDisplayName(context, target.uri)
+                ?: return Result.failure(IllegalStateException("published row has no display name"))
+        if (actual != target.displayName) {
+            return Result.failure(IllegalStateException("provider changed the accepted display name"))
+        }
+        return Result.success(PublishOutcome(target.uri, actual))
     }
 
     /** Delete a target by URI (recovery: drop a half-written candidate). A

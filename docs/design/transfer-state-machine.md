@@ -1,5 +1,9 @@
 # Transfer state machine (design)
 
+> Historical pre-Manifest-v2 design. Its durable-session API, publication
+> terminology, and activity snapshot types are not part of the current product
+> contract. See `manifest-v2-goal0-contract.md` for the implemented lifecycle.
+
 Roadmap item #4 of `architecture-review-2026-07.md`. Status: IMPLEMENTED in the
 shared durable mobile path; repeated Android↔iPhone physical verification is
 still pending.
@@ -238,8 +242,8 @@ DurableEnvoixSession:
   publicationSucceeded(pathOrUri) · remove()
 ```
 
-The callback emits canonical `FfiTransferActivityRecord` snapshots with a
-monotonic sequence. Raw events remain diagnostics only.
+The historical callback emitted canonical activity snapshots with a monotonic
+sequence. Raw events remained diagnostics only.
 
 ## Testing
 

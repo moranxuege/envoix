@@ -1,6 +1,5 @@
 package dev.envoix.app
 
-import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -8,249 +7,61 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.net.Uri
 import android.os.IBinder
-import android.provider.OpenableColumns
 import androidx.core.app.NotificationCompat
+import dev.envoix.app.ui.AppText
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
-/** Params needed to (re)create a transfer session (also carries UI extras). */
-internal data class Spec(
-    val direction: String,
-    val room: String,
-    val path: String,
-    val broker: String,
-    val relay: String,
-    val chunkSize: String,
-    val dataStreamWindow: String,
-    val candidatesAllow: String,
-    val candidatesDeny: String,
-    /** Invite payload to advertise as a QR while waiting (initiated sessions only). */
-    val qrPayload: String?,
-    /** Rendezvous modes to attempt, in order Room → mDNS. */
-    val useRoom: Boolean,
-    val useMdns: Boolean,
-    /** Receipt-mailbox endpoint frozen at creation; persisted in the record's
-     *  context so confirmation survives later edits to the setting. */
-    val receiptServer: String = "",
-    /** Staging send only: the content:// source to copy into [path], and
-     *  whether a durable read grant was taken (so restore knows if it can
-     *  re-stage). Both ride platform_extras, so they survive restarts. */
-    val sourceUri: String? = null,
-    val sourceRecoverable: Boolean = false,
-) {
-    fun dir(): Direction = if (direction == "send") Direction.Send else Direction.Receive
-
-    /** The session params JSON for [Native.createSession]. `resume` false for a
-     *  user-initiated NEW transfer (fresh semantics); true when re-creating a
-     *  session that should honor partials/receipts. */
-    fun paramsJson(resume: Boolean): String =
-        JSONObject()
-            .apply {
-                put("direction", direction)
-                put("code", room)
-                put("broker", broker)
-                put("relay", relay)
-                put("path", path)
-                put("chunk_size", chunkSize)
-                put("data_stream_window", dataStreamWindow)
-                put("candidates_allow", candidatesAllow)
-                put("candidates_deny", candidatesDeny)
-                put("use_room", useRoom)
-                put("use_mdns", useMdns)
-                put("resume", resume)
-                put("receipt_server", receiptServer)
-                val extras = org.json.JSONObject()
-                qrPayload?.let { extras.put("qr", it) }
-                sourceUri?.let {
-                    extras.put("source_uri", it)
-                    extras.put("source_recoverable", sourceRecoverable)
-                }
-                if (extras.length() > 0) put("platform_extras", extras)
-            }.toString()
-}
-
-/**
- * Foreground service that owns transfer sessions. Since the state machine
- * moved into the Rust core (envoix-client machine + driver), this service no
- * longer interprets events: it forwards user intents to the session, renders
- * the snapshot stream into [TransferRepository], acts as the mailbox courier
- * (dumb HTTP GET/POST — the driver seals, verifies, and decides), and keeps
- * the Android-only side effects: notifications, MediaStore publish, multicast.
- */
+/** Android projection of the canonical Manifest-v2 session. This service owns
+ * foreground lifetime and platform save effects only; it does not select an
+ * engine or reproduce the Rust reducer. */
 class TransferService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-
-    /** Publish journaling/recovery and the staging worker pool, extracted
-     *  whole; the service delegates, they call back into [transferScope]. */
-    private val publishJournal = PublishJournal(this)
-    private val stagingExecutor = StagingExecutor(this)
-
-    /** One scope per card: staging copy, session collector, and courier calls
-     *  all run inside it, so Remove fences a card's ENTIRE async surface with
-     *  a single cancel (no hidden session can start after, no receipt retry
-     *  survives). Parented to the service scope - teardown cancels all. */
-    private val transferScopes = HashMap<Long, CoroutineScope>()
-
-    @Synchronized
-    internal fun transferScope(id: Long): CoroutineScope =
-        transferScopes.getOrPut(id) {
-            CoroutineScope(scope.coroutineContext + SupervisorJob(scope.coroutineContext[Job]))
-        }
-
-    @Synchronized
-    private fun cancelTransferScope(id: Long) {
-        transferScopes.remove(id)?.cancel()
-    }
-
-    /** Collector jobs per transfer id (live Rust session ⇔ live job). */
-    private val jobs = java.util.concurrent.ConcurrentHashMap<Long, Job>()
-
-    /** Last applied snapshot seq per id: out-of-order snapshots are dropped. */
-    private val lastSeq = java.util.concurrent.ConcurrentHashMap<Long, Long>()
-
-    /** Pump generation currently owning each card (stamped into every JNI
-     *  notice). The active collector claims it on its first notice; anything
-     *  else is a stale pump from a torn-down session for the same id and is
-     *  dropped - the fence is explicit, not an artifact of flow mechanics. */
-    private val generations = HashMap<Long, Long>()
-
-    /** True when [notice] belongs to the card's current pump (claiming it if
-     *  the card is unclaimed). */
-    @Synchronized
-    private fun ownsCard(
-        id: Long,
-        notice: JSONObject,
-    ): Boolean {
-        val gen = notice.optLong("gen", 0L)
-        if (gen <= 0L) return true // pre-generation core: let it through
-        val current = generations[id]
-        if (current == null) {
-            generations[id] = gen
-            return true
-        }
-        return gen == current
-    }
-
-    /** Foreground is platform STATE, reconciled against the snapshot stream -
-     *  not a history edge. (The old active->resting latch never fired for a
-     *  card born terminal, e.g. a sync launch failure: the service stayed
-     *  foreground with a stale ongoing notification.) */
-    private var isForeground = false
-
-    /** Cards currently holding a multicast ref (the lock is ref-counted). */
-    private val multicastHolders = HashSet<Long>()
-
-    /** The multicast lock derives from the OBSERVED state, not the launch
-     *  path: held exactly while an mDNS-capable card is active (it disables
-     *  radio multicast filtering - battery). Restore reconciles automatically:
-     *  the first restored snapshot flows through here like any other. */
-    @Synchronized
-    private fun renderMulticast(
-        id: Long,
-        spec: Spec,
-        status: Status,
-    ) {
-        val want = spec.useMdns && isActive(status)
-        val holds = id in multicastHolders
-        if (want && !holds) {
-            runCatching { multicastLock.acquire() }
-            multicastHolders.add(id)
-        } else if (!want && holds) {
-            multicastHolders.remove(id)
-            runCatching { multicastLock.release() }
-        }
-    }
-
-    /** Safety release when a collector dies without a resting snapshot. */
-    @Synchronized
-    private fun releaseMulticast(id: Long) {
-        if (multicastHolders.remove(id)) runCatching { multicastLock.release() }
-    }
-
-    /** Held while an mDNS-enabled session runs; Android gates multicast behind it. */
-    private val multicastLock by lazy {
-        (getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager)
-            .createMulticastLock("envoix-mdns")
-            .apply { setReferenceCounted(true) }
-    }
-
-    /** True when the active network actually reaches the internet (not just a
-     *  captive portal). Room pairing needs the broker, so skip it when this is
-     *  false — otherwise Room just retries an unreachable broker forever, and the
-     *  mDNS fallback never gets a turn. */
-    private fun hasInternet(): Boolean {
-        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
-        val caps = cm.activeNetwork?.let { cm.getNetworkCapabilities(it) } ?: return false
-        return caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
-            caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED)
-    }
+    private val callbacks = ConcurrentHashMap<Long, ManifestCallback>()
+    private val specs = ConcurrentHashMap<Long, ManifestSpec>()
+    private val progressTrackers = ConcurrentHashMap<Long, TransferProgressTracker>()
+    private val destinationWriter by lazy { ManifestV2DestinationWriter(this) }
+    private val nextNativeAttemptId = AtomicLong(1)
+    private val clock =
+        DateTimeFormatter
+            .ofPattern("HH:mm:ss")
+            .withZone(ZoneId.systemDefault())
+    private var foreground = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
-        val mgr = getSystemService(NotificationManager::class.java)
-        mgr.createNotificationChannel(
-            NotificationChannel(CHANNEL, "Transfers", NotificationManager.IMPORTANCE_LOW),
+        readSpecs().forEach { specs[it.id] = it }
+        getSystemService(NotificationManager::class.java).createNotificationChannel(
+            NotificationChannel(
+                CHANNEL,
+                uiText("Transfers", "传输"),
+                NotificationManager.IMPORTANCE_LOW,
+            ),
         )
-        gcStaging()
     }
 
-    /** The per-card receive staging dir (Phase 4): `filesDir/incoming/<id>/`. */
-    private fun receiveStagingDir(id: Long) = File(File(filesDir, "incoming"), id.toString())
-
-    /**
-     * Reconcile staging with the record store at service start, before any
-     * action can run (onCreate precedes onStartCommand, so no session exists
-     * yet and nothing races the deletes):
-     * - per-id staging dirs with no record are crash residue - delete;
-     * - files directly in the incoming root are pre-Phase-4 shared-staging
-     *   leftovers: publish finals (the old pre-receive sweep's recovery
-     *   duty, one last time), drop sidecars. Runs async - new transfers
-     *   never touch the root anymore.
-     */
-    private fun gcStaging() {
-        var recordIds = emptySet<Long>()
-        var legacyRootInUse = false
-        val incoming = File(filesDir, "incoming")
-        runCatching {
-            val ctxs = org.json.JSONArray(Native.listRestoreContexts())
-            recordIds =
-                (0 until ctxs.length())
-                    .mapNotNull { ctxs.optJSONObject(it)?.optLong("id", -1L)?.takeIf { id -> id >= 0 } }
-                    .toSet()
-            // Pre-Phase-4 records point straight at the shared root; their
-            // artifacts live there and are NOT garbage while the record does.
-            legacyRootInUse =
-                (0 until ctxs.length()).any {
-                    ctxs.optJSONObject(it)?.optString("path") == incoming.absolutePath
-                }
-        }
-        incoming.listFiles { f -> f.isDirectory }?.forEach { dir ->
-            if (dir.name.toLongOrNull() !in recordIds) {
-                dir.deleteRecursively()
-                OpLog.add("gc: dropped orphan staging ${dir.name}")
-            }
-        }
-        val send = File(cacheDir, "send")
-        send.listFiles { f -> f.isDirectory }?.forEach { dir ->
-            if (dir.name.toLongOrNull() !in recordIds) dir.deleteRecursively()
-        }
-        if (!legacyRootInUse) {
-            scope.launch(Dispatchers.IO) {
-                publishJournal.sweepStaging(incoming.absolutePath, attributeTo = null)
-                incoming.listFiles { f -> f.isFile }?.forEach { it.delete() }
-            }
-        }
+    override fun onDestroy() {
+        val activeAttempts = callbacks.values.map(ManifestCallback::nativeId)
+        callbacks.clear()
+        progressTrackers.clear()
+        activeAttempts.forEach(Native::cancelManifestV2Session)
+        scope.cancel()
+        super.onDestroy()
     }
 
     override fun onStartCommand(
@@ -259,772 +70,835 @@ class TransferService : Service() {
         startId: Int,
     ): Int {
         when (intent?.action) {
-            ACTION_START -> {
-                val direction = intent.getStringExtra(EXTRA_DIRECTION)
-                val room = intent.getStringExtra(EXTRA_ROOM)
-                val path = intent.getStringExtra(EXTRA_PATH)
-                if (direction == null || room == null || path == null) return START_NOT_STICKY
-                val spec0 =
-                    Spec(
-                        direction,
-                        room,
-                        path,
-                        intent.getStringExtra(EXTRA_BROKER) ?: Endpoints.BROKER,
-                        intent.getStringExtra(EXTRA_RELAY) ?: Endpoints.RELAY,
-                        intent.getStringExtra(EXTRA_CHUNK_SIZE) ?: "",
-                        intent.getStringExtra(EXTRA_DATA_WINDOW) ?: "",
-                        intent.getStringExtra(EXTRA_CAND_ALLOW) ?: "",
-                        intent.getStringExtra(EXTRA_CAND_DENY) ?: "",
-                        intent.getStringExtra(EXTRA_QR),
-                        SettingsStore.settings.value.useRoom && hasInternet(),
-                        SettingsStore.settings.value.useMdns,
-                        SettingsStore.settings.value.logServer,
-                    )
-                enterForeground()
-                val id = TransferRepository.create(spec0.dir(), room)
-                // Receive staging is keyed by card id (Phase 4): a fresh dir
-                // is empty by construction, so the core's existing-final path
-                // cannot fire on another card's residue, and resume/receipt
-                // artifacts flow only through the card that owns them.
-                val spec =
-                    if (spec0.dir() == Direction.Receive) {
-                        spec0.copy(path = receiveStagingDir(id).absolutePath)
-                    } else {
-                        spec0
-                    }
-                TransferRepository.update(id) {
-                    it.copy(
-                        qrPayload = spec.qrPayload,
-                        // Show the outgoing file name right away; receives learn it on Started.
-                        fileName =
-                            if (spec.dir() == Direction.Send && spec.path.isNotEmpty()) {
-                                File(spec.path).name
-                            } else {
-                                it.fileName
-                            },
-                    )
-                }
-                specs[id] = spec
-                OpLog.add("start $direction room=${room.substringBefore('-')} id=$id")
-                val sourceUri = intent.getStringExtra(EXTRA_SOURCE_URI)
-                if (spec.dir() == Direction.Send && !sourceUri.isNullOrEmpty()) {
-                    val uri = Uri.parse(sourceUri)
-                    // The provider's DISPLAY_NAME is untrusted (can contain path
-                    // separators): keep only the leaf, never a dot name.
-                    val name =
-                        (displayName(uri) ?: "upload.bin")
-                            .let { File(it).name }
-                            .takeUnless { it.isEmpty() || it == "." || it == ".." }
-                            ?: "upload.bin"
-                    // A durable read grant lets a restart re-stage the source.
-                    val recoverable =
-                        runCatching {
-                            contentResolver.takePersistableUriPermission(
-                                uri,
-                                Intent.FLAG_GRANT_READ_URI_PERMISSION,
-                            )
-                        }.isSuccess
-                    // Staging is keyed by card id so two same-named sends never
-                    // share a source path (the sender hashes as it reads).
-                    val stagingPath =
-                        File(File(File(cacheDir, "send"), id.toString()), name).absolutePath
-                    TransferRepository.update(id) {
-                        it.copy(
-                            fileName = name,
-                            total = querySize(uri),
-                            log = addLog(it.log, "preparing · staging $name…"),
-                        )
-                    }
-                    val stagingSpec =
-                        spec.copy(path = stagingPath, sourceUri = sourceUri, sourceRecoverable = recoverable)
-                    specs[id] = stagingSpec
-                    // Record commits in Preparing FIRST; the copy launches from
-                    // the Preparing snapshot (durable intent before a byte moves).
-                    startSession(id, stagingSpec, resume = false, staging = true)
-                } else {
-                    startSession(id, spec, resume = false)
-                }
-            }
-            ACTION_RESUME -> {
-                val id = intent.getLongExtra(EXTRA_ID, -1L)
-                enterForeground()
-                OpLog.add("resume transfer id=$id", id)
-                // Restore-then-intent: rehydrate any dead sessions from their
-                // records FIRST, then let the machine's legality table decide.
-                // Never reconstruct from a shadow copy (the Q3 bypass bug).
-                if (!jobs.containsKey(id)) restoreAllRecords()
-                Native.sessionIntent(id, "resume")
-            }
-            ACTION_PAUSE -> {
-                val id = intent.getLongExtra(EXTRA_ID, -1L)
-                OpLog.add("pause transfer id=$id", id)
-                Native.sessionIntent(id, "pause")
-            }
-            ACTION_CANCEL -> {
-                val id = intent.getLongExtra(EXTRA_ID, -1L)
-                OpLog.add("cancel transfer id=$id", id)
-                Native.sessionIntent(id, "cancel")
-            }
-            ACTION_RESTORE_ALL -> restoreAllRecords()
-            ACTION_REVERIFY -> {
-                val id = intent.getLongExtra(EXTRA_ID, -1L)
-                OpLog.add("serve re-verify id=$id", id)
-                if (!jobs.containsKey(id)) restoreAllRecords()
-                publishJournal.reverifyPublishedFile(id)
-            }
-            ACTION_REMOVE -> {
-                val id = intent.getLongExtra(EXTRA_ID, -1L)
-                OpLog.add("remove transfer id=$id", id)
-                // Fence the card's async surface FIRST: staging copy, session
-                // collector, courier retries all die here, so nothing can
-                // start a hidden session or re-create files during cleanup.
-                // (A blocking copy may outlive the signal briefly; its dir is
-                // orphaned then and the startup GC reaps it.)
-                cancelTransferScope(id)
-                // D2, the one true abandon: discard partial + resume state +
-                // receipt, then tear the session and card down. Both staging
-                // dirs are keyed by card id, so they go too without consulting
-                // the (possibly already gone) spec.
-                File(File(cacheDir, "send"), id.toString()).deleteRecursively()
-                receiveStagingDir(id).deleteRecursively()
-                Native.destroySession(id, true)
-                TransferLogs.delete(id)
-                jobs.remove(id)
-                specs.remove(id)
-                lastSeq.remove(id)
-                generations.remove(id)
-                stagingExecutor.retireStaging(id)
-                TransferRepository.remove(id)
-                stopIfIdle()
-            }
+            ACTION_START_SEND -> startNew(intent, Direction.Send)
+            ACTION_START_RECEIVE -> startNew(intent, Direction.Receive)
+            ACTION_APPROVE_RECEIVE -> approveReceive(intent.getLongExtra(EXTRA_ID, -1))
+            ACTION_PAUSE -> pause(intent.getLongExtra(EXTRA_ID, -1))
+            ACTION_RESUME -> resume(intent.getLongExtra(EXTRA_ID, -1))
+            ACTION_CANCEL -> cancelTransfer(intent.getLongExtra(EXTRA_ID, -1))
+            ACTION_REMOVE -> removeTransfer(intent.getLongExtra(EXTRA_ID, -1))
+            ACTION_RESTORE -> restoreSessions()
         }
         return START_NOT_STICKY
     }
 
-    private fun enterForeground() {
-        startForeground(NOTIF_ID, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-        isForeground = true
-    }
-
-    private val logTime = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
-
-    /** Append a timestamped line to a transfer's log, keeping the last 60. */
-    internal fun addLog(
-        cur: List<String>,
-        line: String,
-    ): List<String> = (cur + "${logTime.format(java.util.Date())}  $line").takeLast(TransferRepository.LOG_CAP)
-
-    /**
-     * Restore persisted transfer records (roadmap #5): recreate each card with
-     * its durable id and rehydrate its Rust session — the session's initial
-     * snapshot repopulates the card through the normal rendering path. Resting
-     * cards idle; a restored Unconfirmed resumes its mailbox poll in Rust.
-     */
-    private fun restoreAllRecords() {
-        val ctxs = runCatching { org.json.JSONArray(Native.listRestoreContexts()) }.getOrNull() ?: return
-        for (i in 0 until ctxs.length()) {
-            val c = ctxs.optJSONObject(i) ?: continue
-            val id = c.optLong("id", -1L)
-            if (id < 0 || jobs.containsKey(id)) continue
-            val direction = c.optString("direction")
-            val code = c.optString("code")
-            if (code.isEmpty()) continue
-            if (!TransferRepository.restoreCard(
-                    id,
-                    if (direction == "send") Direction.Send else Direction.Receive,
-                    code,
-                    qrPayload = c.optString("qr").ifEmpty { null },
-                    savedUri = c.optString("saved_uri").ifEmpty { null },
-                    publishedName = c.optString("published_name").ifEmpty { null },
-                    publishedSize = c.takeIf { it.has("published_size") }?.optLong("published_size"),
-                    publishedSha256 = c.optString("published_sha256").ifEmpty { null },
-                    publicationInvalid = c.optBoolean("publication_invalid", false),
-                    publishFailed = c.optString("publish") == "failed",
-                )
-            ) {
-                continue
-            }
-            // Transport config (broker/relay/chunk/candidates) is unused for a
-            // restored session - the core relaunches from the durable record's
-            // own context - so the display Spec carries only what the card and
-            // platform effects need.
-            // A restored Preparing send re-stages only if its source grant was
-            // durable; otherwise the copy path fails it with "needs re-picking".
-            val recoverable = c.optBoolean("source_recoverable", false)
-            val spec =
-                Spec(
-                    direction,
-                    code,
-                    c.optString("path"),
-                    Endpoints.BROKER,
-                    Endpoints.RELAY,
-                    "",
-                    "",
-                    "",
-                    "",
-                    null,
-                    c.optBoolean("use_room"),
-                    c.optBoolean("use_mdns"),
-                    sourceUri = if (recoverable) c.optString("source_uri").ifEmpty { null } else null,
-                    sourceRecoverable = recoverable,
-                )
-            specs[id] = spec
-            lastSeq[id] = 0L
-            generations.remove(id)
-            val job =
-                transferScope(id).launch {
-                    try {
-                        NativeSession.restore(id).collect { notice ->
-                            if (!ownsCard(id, notice)) return@collect
-                            when (notice.optString("notice")) {
-                                "snapshot" -> onSnapshot(id, spec, notice)
-                                "fetch_receipt" ->
-                                    onFetchReceipt(id, notice.optString("key"), notice.optString("server"))
-                                "post_receipt" -> onPostReceipt(id, notice)
-                            }
-                        }
-                    } finally {
-                        releaseMulticast(id)
-                    }
-                }
-            jobs[id] = job
-            OpLog.add("restored transfer id=$id")
-        }
-    }
-
-    private fun displayName(uri: Uri): String? =
-        contentResolver
-            .query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
-            ?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
-
-    private fun querySize(uri: Uri): Long =
-        contentResolver
-            .query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)
-            ?.use { c -> if (c.moveToFirst()) c.getLong(0) else 0L } ?: 0L
-
-    /** Create the Rust session and render its notice stream. */
-    private fun startSession(
-        id: Long,
-        spec: Spec,
-        resume: Boolean,
-        staging: Boolean = false,
+    private fun startNew(
+        intent: Intent,
+        direction: Direction,
     ) {
-        lastSeq[id] = 0L
-        generations.remove(id)
-        val notices =
-            if (staging) {
-                NativeSession.startStaging(id, spec.paramsJson(resume = false))
-            } else {
-                NativeSession.start(id, spec.paramsJson(resume))
+        val room = intent.getStringExtra(EXTRA_ROOM)?.takeIf(String::isNotBlank) ?: return
+        val broker = intent.getStringExtra(EXTRA_BROKER).orEmpty()
+        val relay = intent.getStringExtra(EXTRA_RELAY).orEmpty()
+        val useRoom = intent.getBooleanExtra(EXTRA_USE_ROOM, true)
+        val useMdns = intent.getBooleanExtra(EXTRA_USE_MDNS, true)
+        val id = TransferRepository.create(direction, room)
+        val spec =
+            ManifestSpec(
+                id = id,
+                direction = direction,
+                room = room,
+                broker = broker,
+                relay = relay,
+                jobId = intent.getStringExtra(EXTRA_JOB_ID),
+                qrPayload = intent.getStringExtra(EXTRA_QR),
+                destinationCopyApproved = intent.getBooleanExtra(EXTRA_COPY_APPROVED, false),
+                useRoom = useRoom,
+                useMdns = useMdns,
+                holdState = null,
+            )
+        if (!useRoom && !useMdns) {
+            TransferRepository.update(id) {
+                it.copy(
+                    status = Status.Failed,
+                    error = uiText("Choose at least one available pairing route", "请至少选择一种可用的配对方式"),
+                )
             }
-        val job =
-            transferScope(id).launch {
-                try {
-                    notices.collect { notice ->
-                        if (!ownsCard(id, notice)) return@collect
-                        when (notice.optString("notice")) {
-                            "snapshot" -> onSnapshot(id, spec, notice)
-                            "fetch_receipt" ->
-                                onFetchReceipt(id, notice.optString("key"), notice.optString("server"))
-                            "post_receipt" -> onPostReceipt(id, notice)
-                        }
-                    }
-                } finally {
-                    releaseMulticast(id)
-                }
+            return
+        }
+        if (useRoom && broker.isBlank()) {
+            TransferRepository.update(id) {
+                it.copy(
+                    status = Status.Failed,
+                    error = uiText("Room pairing requires a rendezvous broker", "配对房间需要配置会合服务器"),
+                )
             }
-        jobs[id] = job
+            return
+        }
+        if (direction == Direction.Send && spec.jobId.isNullOrBlank()) {
+            TransferRepository.update(id) {
+                it.copy(
+                    status = Status.Failed,
+                    error = uiText("Prepared transfer job is missing", "缺少已准备的传输任务"),
+                )
+            }
+            return
+        }
+        specs[id] = spec
+        persistSpecs()
+        TransferRepository.update(id) {
+            it.copy(
+                status = if (spec.qrPayload == null) Status.Pairing else Status.WaitingForPeer,
+                qrPayload = spec.qrPayload,
+                jobId = spec.jobId,
+                log = addLog(it.log, "canonical Manifest v2 session started"),
+            )
+        }
+        startNative(spec)
+    }
+
+    private fun startNative(spec: ManifestSpec) {
+        enterForeground()
+        val initialBytes =
+            TransferRepository.transfers.value
+                .firstOrNull { it.id == spec.id }
+                ?.bytes ?: 0
+        progressTrackers[spec.id] = TransferProgressTracker(initialBytes)
+        val callback = ManifestCallback(spec.id, nextNativeAttemptId.getAndIncrement())
+        callbacks[spec.id] = callback
+        Native.startManifestV2Session(callback.nativeId, spec.paramsJson(this), callback)
         updateNotification()
     }
 
-    /** Map one machine snapshot onto the card. The machine is authoritative:
-     *  no interpretation, no guards — just rendering. */
-    private fun onSnapshot(
-        id: Long,
-        spec: Spec,
-        s: JSONObject,
-    ) {
-        val seq = s.optLong("seq")
-        val prev = lastSeq[id] ?: 0L
-        if (seq <= prev) return
-        lastSeq[id] = seq
-
-        val state = s.optString("state")
-        val status =
-            Status.fromWire(state) ?: run {
-                // Never silent: an unmapped core State would otherwise drop the
-                // whole snapshot and freeze the card with no trace. Surface it
-                // (the Kotlin Status enum is out of sync with the Rust State).
-                LogStore.append("app: unmapped session state '$state' (id=$id) — Status enum out of sync with core; snapshot dropped")
-                OpLog.add("unmapped state '$state' id=$id")
-                return
-            }
-        val reason = s.optString("reason").ifEmpty { null }
-        val bytes = s.optLong("bytes")
-        val total = s.optLong("total")
-        val speed = s.optDouble("speed_bps", 0.0)
-        val avg = s.optDouble("avg_bps", 0.0)
-        // Typed DataPath object ({type, addr|url|description}) — read the fields,
-        // don't re-parse a Display string.
-        val path = s.optJSONObject("path")
-        var entered: String? = null
-
-        TransferRepository.update(id) { t ->
-            entered = if (t.status != status) stateLogLine(state, s, bytes) else null
-            t.copy(
-                status = status,
-                attempt = s.optInt("attempt", t.attempt),
-                proofDelivered =
-                    s.optJSONObject("facts")?.optBoolean("proof_delivered")
-                        ?: t.proofDelivered,
-                transferId = s.optString("transfer_id").ifEmpty { t.transferId },
-                fileName = s.optString("file_name").ifEmpty { t.fileName },
-                bytes = bytes,
-                total = if (total > 0) total else t.total,
-                speedBps = if (status == Status.Transferring) speed else 0.0,
-                avgBps = avg,
-                speedHistory =
-                    if (status == Status.Transferring && speed > 0) {
-                        (t.speedHistory + speed).takeLast(90)
-                    } else {
-                        t.speedHistory
-                    },
-                pathType = path?.optString("type")?.ifEmpty { null } ?: t.pathType,
-                pathAddr =
-                    path?.let { p ->
-                        p
-                            .optString("addr")
-                            .ifEmpty { p.optString("url") }
-                            .ifEmpty { p.optString("description") }
-                            .ifEmpty { null }
-                    } ?: t.pathAddr,
-                error = if (status == Status.Failed || status == Status.Unconfirmed) reason else null,
-                log = entered?.let { addLog(t.log, it) } ?: t.log,
-            )
-        }
-
-        // Platform effects derive from the observed snapshot (design rule):
-        // the same code path serves fresh starts, restores, and cards born
-        // terminal - there is no launch-path special case to fall out of sync.
-        renderMulticast(id, spec, status)
-        // Staging (SEND) is driven SOLELY by the committed snapshot: a Preparing
-        // snapshot of generation `attempt` is the sole authority for its worker
-        // (the record is committed, so the copy never runs ahead of the durable
-        // intent), and any non-Preparing snapshot retires it. A stale worker's
-        // callbacks are rejected by the reducer's generation check regardless.
-        if (spec.dir() == Direction.Send) {
-            if (status == Status.Preparing) {
-                stagingExecutor.ensureStaging(id, spec, s.optInt("attempt", 1))
-            } else {
-                stagingExecutor.retireStaging(id)
-            }
-        }
-        when {
-            entered != null -> updateNotification()
-            else -> throttledNotification()
-        }
-        if (state == "completed" && spec.dir() == Direction.Receive) {
-            // Synchronous first attempt (before the foreground may detach), then a
-            // bounded async retry if anything didn't land — real forward progress
-            // instead of waiting for a restart.
-            publishJournal.sweepStaging(spec.path, attributeTo = id)
-            publishJournal.scheduleRepublishIfNeeded(id, spec.path)
-        }
-        // Foreground reconciles against the whole card set: when nothing is
-        // active, post the one final summary frame and detach - including for
-        // a card whose FIRST snapshot is already terminal.
-        val nowActive = TransferRepository.transfers.value.any { isActive(it.status) }
-        if (isForeground && !nowActive) {
-            updateNotification()
-            stopForeground(STOP_FOREGROUND_DETACH)
-            isForeground = false
-        }
-    }
-
-    /** Human line for a state transition, for the card's log drawer. */
-    private fun stateLogLine(
-        state: String,
-        s: JSONObject,
-        bytes: Long,
-    ): String =
-        when (state) {
-            "preparing" -> "preparing · staging the source…"
-            "waiting" -> "waiting for peer…"
-            "connecting" -> "pairing in room…"
-            "verifying" -> "verifying…"
-            "transferring" -> "started · ${s.optString("file_name")}"
-            "confirming" -> "confirming delivery…"
-            "paused" ->
-                when (s.optString("origin")) {
-                    "peer" -> "paused by peer (resumable)"
-                    "lost" -> "paused · interrupted, $bytes B kept (resumable)"
-                    else -> "paused"
+    private inner class ManifestCallback(
+        private val id: Long,
+        val nativeId: Long,
+    ) : ManifestV2Callback {
+        override fun onEvent(json: String) {
+            if (callbacks[id] !== this) return
+            val event = runCatching { JSONObject(json) }.getOrNull() ?: return
+            if (event.optString("notice") != "manifest_v2") return
+            when (event.optString("kind")) {
+                "progress" -> {
+                    progressTrackers[id]
+                        ?.update(event.optLong("bytes"), event.optLong("total"))
+                        ?.let { progress ->
+                            TransferRepository.update(id) {
+                                it.copy(
+                                    bytes = maxOf(it.bytes, progress.bytes),
+                                    total = maxOf(it.total, progress.total),
+                                    speedBps = progress.speedBps,
+                                    avgBps = progress.avgBps,
+                                    speedHistory = progress.speedHistory,
+                                )
+                            }
+                            updateNotification()
+                        }
+                    return
                 }
-            "unconfirmed" -> "sent · unconfirmed — awaiting proof (mailbox)"
-            "completed" -> "complete"
-            "failed" -> "failed · ${s.optString("reason")}"
-            "cancelled" -> "cancelled"
-            else -> state
-        }
-
-    /** Courier: GET the mailbox slot and hand the blob back to the driver. */
-    private fun onFetchReceipt(
-        id: Long,
-        key: String,
-        durableServer: String,
-    ) {
-        if (key.isEmpty()) return
-        // The driver's notice carries the endpoint the transfer was created
-        // with; the mutable setting is only the fallback for pre-field records.
-        val server =
-            durableServer
-                .ifEmpty { SettingsStore.settings.value.logServer }
-                .trimEnd('/')
-        if (server.isEmpty()) return
-        transferScope(id).launch {
-            val blob = LogUpload.getBytes("$server/receipts/$key")
-            val b64 =
-                blob?.let {
-                    java.util.Base64
-                        .getEncoder()
-                        .encodeToString(it)
-                } ?: ""
-            Native.receiptResponse(id, key, b64)
-        }
-    }
-
-    /** Courier: POST the sealed receipt blob (with backoff — the whole point
-     *  of the mailbox is that this can retry long after the ack could not). */
-    private fun onPostReceipt(
-        id: Long,
-        notice: JSONObject,
-    ) {
-        val key = notice.optString("key")
-        val b64 = notice.optString("blob")
-        if (key.isEmpty() || b64.isEmpty()) return
-        val server =
-            notice
-                .optString("server")
-                .ifEmpty { SettingsStore.settings.value.logServer }
-                .trimEnd('/')
-        if (server.isEmpty()) return
-        val bytes =
-            runCatching {
-                java.util.Base64
-                    .getDecoder()
-                    .decode(b64)
-            }.getOrNull() ?: return
-        transferScope(id).launch {
-            for (backoff in listOf(0L, 5_000L, 30_000L)) {
-                if (backoff > 0) delay(backoff)
-                if (LogUpload.postBytes("$server/receipts/$key", bytes)) {
-                    OpLog.add("receipt posted id=$id", id)
-                    Native.sessionIntent(id, "receipt_posted")
-                    return@launch
-                }
-            }
-            // Every backoff exhausted — the mailbox rescue could not be armed.
-            // (Success is the core's platform.courier.posted; this is the gap
-            // the driver can't see — the HTTP POST itself failing.)
-            TransferTimeline.event(id, "platform.courier", "post_failed")
-            OpLog.add("receipt post failed id=$id")
-        }
-    }
-
-    /** Active states pin the tray; everything else rests. Exhaustive (no `else`)
-     *  so a new Status is a compile error until classified — this predicate
-     *  deliberately differs from the machine's is_active (Preparing pins here). */
-    private fun isActive(st: Status) =
-        when (st) {
-            Status.Preparing,
-            Status.Waiting,
-            Status.Connecting,
-            Status.Verifying,
-            Status.Transferring,
-            Status.Confirming,
-            -> true
-            Status.Paused,
-            Status.Unconfirmed,
-            Status.Completed,
-            Status.Failed,
-            Status.Cancelled,
-            -> false
-        }
-
-    private fun arrow(t: Transfer) = if (t.direction == Direction.Send) "↑" else "↓"
-
-    private fun trayWord(t: Transfer): String =
-        when (t.status) {
-            Status.Preparing -> "Preparing…"
-            Status.Waiting -> "Waiting for peer"
-            Status.Connecting -> "Pairing…"
-            Status.Verifying -> "Verifying"
-            Status.Confirming -> "Confirming"
-            Status.Transferring ->
-                if (t.total > 0) "${((t.bytes * 100) / t.total).toInt().coerceIn(0, 100)}%" else "…"
-            Status.Paused -> "Paused"
-            Status.Unconfirmed -> "Unconfirmed"
-            Status.Completed -> "Done"
-            Status.Failed -> "Failed"
-            Status.Cancelled -> "Cancelled"
-        }
-
-    /**
-     * The tray is a THIRD renderer of the repository cards (after the list and
-     * the log): everything derived, zero tray-side state — so it can never
-     * disagree with the cards (the old tray said "transferring" forever).
-     */
-    private fun notification(): Notification {
-        val open =
-            PendingIntent.getActivity(
-                this,
-                0,
-                Intent(this, MainActivity::class.java),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-            )
-        val cards = TransferRepository.transfers.value
-        val active = cards.filter { isActive(it.status) }
-        // Direction-specific status-bar icon: up-only for sends, down-only for
-        // receives, both arrows only when genuinely sending AND receiving, a
-        // checkmark once everything is done.
-        val icon =
-            when {
-                active.isEmpty() -> R.drawable.ic_stat_done
-                active.any { it.direction == Direction.Send } &&
-                    active.any { it.direction == Direction.Receive } -> R.drawable.ic_stat_transfer
-                active.first().direction == Direction.Send -> R.drawable.ic_stat_upload
-                else -> R.drawable.ic_stat_download
-            }
-        val b =
-            NotificationCompat
-                .Builder(this, CHANNEL)
-                .setSmallIcon(icon)
-                .setOngoing(active.isNotEmpty())
-                .setOnlyAlertOnce(true)
-                .setContentIntent(open)
-        when {
-            active.isEmpty() -> {
-                // Final summary: outcomes, never a stale "transferring".
-                val done = cards.count { it.status == Status.Completed }
-                val paused = cards.count { it.status == Status.Paused || it.status == Status.Unconfirmed }
-                val failed = cards.count { it.status == Status.Failed }
-                val parts =
-                    buildList {
-                        if (done > 0) add("$done done")
-                        if (paused > 0) add("$paused paused")
-                        if (failed > 0) add("$failed failed")
+                "diagnostic" -> {
+                    val message = event.optString("message")
+                    if (message.isNotBlank()) {
+                        TransferRepository.update(id) { it.copy(log = addLog(it.log, message)) }
                     }
-                b.setContentTitle("Envoix").setContentText(
-                    if (parts.isEmpty()) {
-                        "No transfers"
+                    return
+                }
+                "path" -> {
+                    TransferRepository.update(id) { it.copy(pathAddr = event.optString("path")) }
+                    return
+                }
+            }
+            when (event.optString("state")) {
+                "waiting_for_peer" -> setState(id, Status.WaitingForPeer, "waiting for peer")
+                "pairing" -> setState(id, Status.Pairing, "pairing with peer")
+                "connecting" -> setState(id, Status.Connecting, "connecting to peer")
+                "offer" -> onOffer(id, event, this)
+                "transferring" -> setState(id, Status.Transferring, "transferring files")
+                "verifying" -> setState(id, Status.Verifying, "verifying received content")
+                "saving" -> setState(id, Status.Saving, "saving to selected destination")
+                "waiting_for_receiver_save" ->
+                    setState(id, Status.WaitingForReceiverSave, "waiting for receiver to save files")
+                "finalizing_delivery" -> setState(id, Status.FinalizingDelivery, "saved; finalizing delivery proof")
+                "completed" -> onCompleted(id, event, this)
+                "failed" -> onFailed(id, event, this)
+            }
+        }
+
+        override fun onSaveRequired(requestJson: String): String {
+            check(callbacks[id] === this) { "Manifest v2 attempt is no longer active" }
+            return destinationWriter.save(requestJson)
+        }
+
+        override fun onPlanRequired(requestJson: String): String {
+            check(callbacks[id] === this) { "Manifest v2 attempt is no longer active" }
+            return destinationWriter.plan(requestJson)
+        }
+    }
+
+    private fun onOffer(
+        id: Long,
+        offer: JSONObject,
+        callback: ManifestCallback,
+    ) {
+        val spec = specs[id] ?: return
+        val inventoryPage =
+            runCatching {
+                JSONObject(Native.listManifestV2OfferEntries(callback.nativeId, 0, 128))
+            }.getOrNull()
+        val projectedEntries =
+            inventoryPage
+                ?.optJSONArray("entries")
+                ?.let { entries ->
+                    (0 until entries.length()).map { index ->
+                        val entry = entries.getJSONObject(index)
+                        TransferInventoryEntry(
+                            entryId = entry.getInt("entry_id"),
+                            parentEntryId =
+                                entry
+                                    .takeIf { it.has("parent_entry_id") && !it.isNull("parent_entry_id") }
+                                    ?.getInt("parent_entry_id"),
+                            name = entry.getString("name"),
+                            directory = entry.getString("kind") == "directory",
+                            size = entry.getLong("plaintext_size"),
+                        )
+                    }
+                }.orEmpty()
+        val exceptional = offer.optBoolean("exceptional")
+        val hasDirectories = offer.optInt("directory_count") > 0
+        val needsFolder =
+            hasDirectories &&
+                SettingsStore.settings.value.saveTreeUri
+                    .isBlank()
+        TransferRepository.update(id) {
+            it.copy(
+                status =
+                    if (exceptional || needsFolder || !spec.destinationCopyApproved) {
+                        Status.AwaitingDecision
                     } else {
-                        "All transfers finished · ${parts.joinToString(", ")}"
+                        Status.Transferring
                     },
+                jobId = offer.optString("job_id"),
+                rootCount = offer.optInt("root_count"),
+                fileCount = offer.optInt("file_count"),
+                directoryCount = offer.optInt("directory_count"),
+                total = offer.optLong("total"),
+                exceptionalOffer = exceptional,
+                inventoryPreview = projectedEntries,
+                inventoryHasMore =
+                    inventoryPage?.has("next_offset") == true &&
+                        !inventoryPage.isNull("next_offset"),
+                error =
+                    when {
+                        needsFolder ->
+                            uiText(
+                                "Choose a writable save folder before receiving directories.",
+                                "接收文件夹前，请先选择可写入的保存位置。",
+                            )
+                        !spec.destinationCopyApproved ->
+                            uiText(
+                                "This Android destination requires private verification followed by an extra copy.",
+                                "此 Android 目标位置需要先在私有目录验证，再额外复制一次。",
+                            )
+                        exceptional ->
+                            uiText(
+                                "Review this unusually large transfer before continuing.",
+                                "此传输体积异常大，请确认后继续。",
+                            )
+                        else -> null
+                    },
+                log = addLog(it.log, "authenticated inventory received"),
+            )
+        }
+        if (!exceptional && !needsFolder && spec.destinationCopyApproved) {
+            continueReceive(id, exceptionalApproved = false)
+        }
+        updateNotification()
+    }
+
+    private fun continueReceive(
+        id: Long,
+        exceptionalApproved: Boolean,
+    ) {
+        val spec = specs[id] ?: return
+        val transfer = TransferRepository.transfers.value.firstOrNull { it.id == id } ?: return
+        if (transfer.directoryCount > 0 &&
+            SettingsStore.settings.value.saveTreeUri
+                .isBlank()
+        ) {
+            TransferRepository.update(id) {
+                it.copy(
+                    error =
+                        uiText(
+                            "Choose a writable save folder in Settings, then continue.",
+                            "请先在设置中选择可写入的保存位置，然后继续。",
+                        ),
                 )
             }
-            active.size == 1 -> {
-                val t = active.single()
-                val speed =
-                    if (t.status == Status.Transferring && t.speedBps > 0) {
-                        " · ${humanBytes(t.speedBps.toLong())}/s"
-                    } else {
-                        ""
-                    }
-                b.setContentTitle("${arrow(t)} ${t.fileName ?: "…"}")
-                b.setContentText(trayWord(t) + speed)
-                if (t.status == Status.Transferring && t.total > 0) {
-                    b.setProgress(100, ((t.bytes * 100) / t.total).toInt().coerceIn(0, 100), false)
-                } else {
-                    b.setProgress(0, 0, true)
-                }
-            }
-            else -> {
-                val up = active.count { it.direction == Direction.Send }
-                b.setContentTitle("${active.size} transfers · $up↑ ${active.size - up}↓")
-                val style = NotificationCompat.InboxStyle()
-                for (t in active.take(5)) {
-                    val speed =
-                        if (t.status == Status.Transferring && t.speedBps > 0) {
-                            " · ${humanBytes(t.speedBps.toLong())}/s"
-                        } else {
-                            ""
-                        }
-                    style.addLine("${arrow(t)} ${t.fileName ?: "…"} · ${trayWord(t)}$speed")
-                }
-                b.setStyle(style)
-            }
+            return
         }
-        return b.build()
+        val target = receiveTarget(id).apply { mkdirs() }
+        val response =
+            Native.continueManifestV2Receive(
+                callbacks[id]?.nativeId ?: return,
+                JSONObject()
+                    .put("target_directory", target.absolutePath)
+                    .put("target_allocatable_bytes", target.usableSpace)
+                    .put(
+                        "exceptional_transfer_approved",
+                        exceptionalApproved || !transfer.exceptionalOffer,
+                    ).toString(),
+            )
+        val error = runCatching { JSONObject(response).optString("error") }.getOrDefault("")
+        if (error.isNotEmpty()) {
+            TransferRepository.update(id) { it.copy(status = Status.AwaitingDecision, error = error) }
+        } else {
+            specs[id] = spec.copy(destinationCopyApproved = true)
+            persistSpecs()
+            setState(id, Status.Transferring, "destination decision committed")
+        }
     }
 
-    private var lastNotif = 0L
+    private fun approveReceive(id: Long) {
+        val transfer = TransferRepository.transfers.value.firstOrNull { it.id == id } ?: return
+        if (!TransferPresentationPolicy.actions(transfer).canApprove) return
+        continueReceive(id, exceptionalApproved = true)
+    }
 
-    private fun throttledNotification() {
-        val now = System.currentTimeMillis()
-        if (now - lastNotif > 700) {
-            lastNotif = now
-            updateNotification()
+    private fun onCompleted(
+        id: Long,
+        event: JSONObject,
+        callback: ManifestCallback,
+    ) {
+        val roots = event.optJSONArray("roots") ?: JSONArray()
+        val uris = (0 until roots.length()).map { roots.getJSONObject(it).getString("uri") }
+        val names = (0 until roots.length()).map { roots.getJSONObject(it).getString("final_name") }
+        TransferRepository.update(id) {
+            it.copy(
+                status = Status.Delivered,
+                bytes = it.total,
+                savedUri = uris.firstOrNull(),
+                savedUris = uris,
+                savedName = names.firstOrNull(),
+                error = null,
+                log = addLog(it.log, "delivered · receiver save proof acknowledged"),
+            )
+        }
+        callbacks.remove(id, callback)
+        progressTrackers.remove(id)
+        specs.remove(id)
+        persistSpecs()
+        leaveForegroundIfIdle()
+    }
+
+    private fun onFailed(
+        id: Long,
+        event: JSONObject,
+        callback: ManifestCallback,
+    ) {
+        val cause = event.optString("cause", "transfer")
+        val detail = event.optString("detail", "Transfer failed")
+        val canceled = cause == "user_canceled" || cause == "sender_canceled"
+        val retryable = !canceled && event.optBoolean("retryable", false)
+        val recoveryAction =
+            if (canceled) {
+                RecoveryAction.None
+            } else {
+                RecoveryAction.fromWire(event.optString("recovery_action"))
+            }
+        TransferRepository.update(id) {
+            it.copy(
+                status = if (canceled) Status.Canceled else Status.Failed,
+                failureCause = cause,
+                retryable = retryable,
+                recoveryAction = recoveryAction,
+                error = explainFailure(cause, detail),
+                log = addLog(it.log, "$cause · $detail"),
+            )
+        }
+        callbacks.remove(id, callback)
+        progressTrackers.remove(id)
+        leaveForegroundIfIdle()
+    }
+
+    private fun pause(id: Long) {
+        if (id < 0) return
+        val transfer = TransferRepository.transfers.value.firstOrNull { it.id == id } ?: return
+        if (!TransferPresentationPolicy.actions(transfer).canPause) return
+        callbacks.remove(id)?.let { Native.cancelManifestV2Session(it.nativeId) }
+        progressTrackers.remove(id)
+        specs[id]?.let { specs[id] = it.copy(holdState = "paused") }
+        persistSpecs()
+        TransferRepository.update(id) {
+            if (it.status.isTerminal) it else it.copy(status = Status.Paused, error = null)
+        }
+        leaveForegroundIfIdle()
+    }
+
+    private fun resume(id: Long) {
+        val transfer = TransferRepository.transfers.value.firstOrNull { it.id == id } ?: return
+        if (!TransferPresentationPolicy.actions(transfer).canResume) return
+        val spec = specs[id]?.copy(holdState = null) ?: return
+        if (callbacks.containsKey(id)) return
+        specs[id] = spec
+        persistSpecs()
+        TransferRepository.update(id) {
+            it.copy(
+                status = if (spec.qrPayload == null) Status.Pairing else Status.WaitingForPeer,
+                error = null,
+                failureCause = null,
+                retryable = false,
+                recoveryAction = RecoveryAction.None,
+                attempt = it.attempt + 1,
+                speedBps = 0.0,
+                avgBps = 0.0,
+                speedHistory = emptyList(),
+            )
+        }
+        startNative(spec)
+    }
+
+    private fun cancelTransfer(id: Long) {
+        val transfer = TransferRepository.transfers.value.firstOrNull { it.id == id } ?: return
+        if (!TransferPresentationPolicy.actions(transfer).canCancel) return
+        callbacks.remove(id)?.let { Native.cancelManifestV2Session(it.nativeId) }
+        progressTrackers.remove(id)
+        specs[id]?.let { specs[id] = it.copy(holdState = "canceled") }
+        persistSpecs()
+        TransferRepository.update(id) {
+            if (it.status.isTerminal) it else it.copy(status = Status.Canceled, error = null)
+        }
+        leaveForegroundIfIdle()
+    }
+
+    private fun removeTransfer(id: Long) {
+        val transfer = TransferRepository.transfers.value.firstOrNull { it.id == id } ?: return
+        if (!TransferPresentationPolicy.actions(transfer).canRemove) return
+        callbacks.remove(id)?.let { Native.cancelManifestV2Session(it.nativeId) }
+        progressTrackers.remove(id)
+        val spec = specs.remove(id)
+        val jobId =
+            spec?.jobId ?: TransferRepository.transfers.value
+                .firstOrNull { it.id == id }
+                ?.jobId
+        // Only job-owned private/incomplete artifacts are discarded. Public
+        // saved URIs returned by the result gate are never deleted here.
+        receiveBase(id).deleteRecursively()
+        jobId?.let {
+            File(filesDir, "manifest-v2/source-staging/$it").deleteRecursively()
+            File(filesDir, "manifest-v2/destination-save/$it.json").delete()
+            File(filesDir, "manifest-v2/destination-save/$it.json.tmp").delete()
+        }
+        persistSpecs()
+        TransferRepository.remove(id)
+        leaveForegroundIfIdle()
+    }
+
+    private fun restoreSessions() {
+        specs.values.sortedBy(ManifestSpec::id).forEach { spec ->
+            TransferRepository.restoreCard(
+                spec.id,
+                spec.direction,
+                spec.room,
+                qrPayload = spec.qrPayload,
+            )
+            TransferRepository.update(spec.id) {
+                it.copy(
+                    status =
+                        if (spec.holdState ==
+                            "canceled"
+                        ) {
+                            Status.Canceled
+                        } else if (spec.holdState == "paused") {
+                            Status.Paused
+                        } else {
+                            if (spec.qrPayload == null) Status.Pairing else Status.WaitingForPeer
+                        },
+                    jobId = spec.jobId,
+                )
+            }
+            if (spec.holdState == null && !callbacks.containsKey(spec.id)) startNative(spec)
+        }
+    }
+
+    private fun setState(
+        id: Long,
+        status: Status,
+        log: String,
+    ) {
+        TransferRepository.update(id) {
+            if (it.status.isTerminal && it.status != status) {
+                it
+            } else {
+                val payloadComplete =
+                    status == Status.Verifying ||
+                        status == Status.Saving ||
+                        status == Status.WaitingForReceiverSave ||
+                        status == Status.FinalizingDelivery ||
+                        status == Status.Delivered
+                it.copy(
+                    status = status,
+                    bytes = if (payloadComplete) maxOf(it.bytes, it.total) else it.bytes,
+                    speedBps = if (status == Status.Transferring) it.speedBps else 0.0,
+                    error = null,
+                    log = addLog(it.log, log),
+                )
+            }
+        }
+        updateNotification()
+    }
+
+    private fun addLog(
+        current: List<String>,
+        message: String,
+    ): List<String> = (current + "${clock.format(Instant.now())}  $message").takeLast(TransferRepository.LOG_CAP)
+
+    private fun explainFailure(
+        cause: String,
+        detail: String,
+    ): String =
+        when (cause) {
+            "sender_permission_lost" ->
+                uiText(
+                    "The sender lost permission to read a selected item. Reauthorize it and retry.",
+                    "发送端已失去所选项目的读取权限。请重新授权后重试。",
+                )
+            "sender_source_changed" ->
+                uiText(
+                    "A selected item changed after preparation. Review and send it again.",
+                    "所选项目在准备完成后发生了变化。请检查并重新发送。",
+                )
+            "receiver_space_insufficient" ->
+                uiText(
+                    "The receiver does not have enough space for this transfer.",
+                    "接收端没有足够空间完成此次传输。",
+                )
+            "receiver_destination_decision_required" ->
+                uiText(
+                    "The receiver must choose or approve a save destination.",
+                    "接收端必须选择或确认保存位置。",
+                )
+            "receiver_destination_unavailable" ->
+                uiText(
+                    "The selected receive destination is no longer available.",
+                    "所选接收位置已不可用。",
+                )
+            "receiver_save_failed" ->
+                uiText(
+                    "The receiver could not save the verified files: $detail",
+                    "接收端无法保存已验证的文件：$detail",
+                )
+            "receiver_reused_object_lost" ->
+                uiText(
+                    "A destination item selected for reuse changed or disappeared. Restore it and resume, or start a new transfer.",
+                    "计划复用的目标项目已变化或消失。请恢复后继续，或重新开始传输。",
+                )
+            "receiver_finalization_outcome_unknown" ->
+                uiText(
+                    "The final save could not be confirmed after an interruption. Resume to reconcile the destination.",
+                    "中断后无法确认最终保存结果。请继续任务以核对目标位置。",
+                )
+            "protocol_or_integrity_failure" ->
+                uiText(
+                    "Integrity verification failed; no unverified file was delivered.",
+                    "完整性验证失败；未交付任何未经验证的文件。",
+                )
+            "authentication_failed" ->
+                uiText(
+                    "The peer could not be authenticated. Pair the devices again.",
+                    "无法验证对端身份。请重新配对设备。",
+                )
+            "transport" ->
+                uiText(
+                    "The connection was interrupted. Resume to continue from verified data.",
+                    "连接已中断。继续任务即可从已验证的数据恢复。",
+                )
+            else -> detail
+        }
+
+    private fun uiText(
+        english: String,
+        simplifiedChinese: String,
+    ): String = AppText.value(english, simplifiedChinese, SettingsStore.settings.value.language)
+
+    private fun receiveBase(id: Long) = File(filesDir, "manifest-v2/receiver/$id")
+
+    private fun receiveTarget(id: Long) = File(receiveBase(id), "final")
+
+    private fun stateDirectory(id: Long) = File(receiveBase(id), "state")
+
+    private fun ManifestSpec.paramsJson(context: Context): String =
+        JSONObject()
+            .put("direction", if (direction == Direction.Send) "send" else "receive")
+            .put("room", room)
+            .put("broker", broker)
+            .put("relay", relay)
+            .put("use_room", useRoom)
+            .put("use_mdns", useMdns)
+            .put("state_directory", stateDirectory(id).apply { mkdirs() }.absolutePath)
+            .put("job_store_directory", jobStoreDirectory(context).absolutePath)
+            .apply { jobId?.let { put("job_id", it) } }
+            .toString()
+
+    @Synchronized
+    private fun persistSpecs() {
+        val values = JSONArray()
+        specs.values.sortedBy(ManifestSpec::id).forEach { values.put(it.toJson()) }
+        val file = specFile(this)
+        file.parentFile?.mkdirs()
+        val temporary = File(file.parentFile, "${file.name}.tmp")
+        temporary.writeText(values.toString())
+        runCatching {
+            Files.move(
+                temporary.toPath(),
+                file.toPath(),
+                StandardCopyOption.REPLACE_EXISTING,
+                StandardCopyOption.ATOMIC_MOVE,
+            )
+        }.getOrElse {
+            Files.move(
+                temporary.toPath(),
+                file.toPath(),
+                StandardCopyOption.REPLACE_EXISTING,
+            )
+        }
+    }
+
+    private fun readSpecs(): List<ManifestSpec> =
+        runCatching {
+            val values = JSONArray(specFile(this).readText())
+            (0 until values.length()).map { ManifestSpec.fromJson(values.getJSONObject(it)) }
+        }.getOrDefault(emptyList())
+
+    private fun enterForeground() {
+        if (!foreground) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification(uiText("Preparing transfer…", "正在准备传输…")),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+            )
+            foreground = true
         }
     }
 
     private fun updateNotification() {
-        getSystemService(NotificationManager::class.java).notify(NOTIF_ID, notification())
+        if (!foreground) return
+        val active = TransferRepository.transfers.value.filterNot { it.status.isTerminal }
+        val text =
+            active.lastOrNull()?.let { statusLabel(it.status) }
+                ?: uiText("No active transfer", "当前没有进行中的传输")
+        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(text))
     }
 
-    /** All cards at rest: drop the foreground state (notification dismissible)
-     *  but keep the service — sessions idle cheaply and stay resumable. */
-    private fun stopForegroundKeepCards() {
-        stopForeground(STOP_FOREGROUND_DETACH)
-        isForeground = false
-        updateNotification()
-    }
-
-    private fun stopIfIdle(): Int {
-        if (TransferRepository.transfers.value.isEmpty()) {
+    private fun leaveForegroundIfIdle() {
+        if (TransferRepository.activeCount() == 0 && foreground) {
             stopForeground(STOP_FOREGROUND_REMOVE)
+            foreground = false
             stopSelf()
+        } else {
+            updateNotification()
         }
-        return START_NOT_STICKY
     }
 
-    override fun onDestroy() {
-        scope.cancel() // collectors' awaitClose destroys the Rust sessions
-        super.onDestroy()
-    }
+    private fun notification(text: String) =
+        NotificationCompat
+            .Builder(this, CHANNEL)
+            .setSmallIcon(android.R.drawable.stat_sys_upload)
+            .setContentTitle("Envoix")
+            .setContentText(text)
+            .setOnlyAlertOnce(true)
+            .setOngoing(true)
+            .setContentIntent(
+                PendingIntent.getActivity(
+                    this,
+                    0,
+                    Intent(this, MainActivity::class.java),
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+                ),
+            ).build()
+
+    private fun statusLabel(status: Status): String =
+        when (status) {
+            Status.Preparing -> uiText("Preparing files…", "正在准备文件…")
+            Status.WaitingForPeer -> uiText("Waiting for peer…", "正在等待对端…")
+            Status.Pairing -> uiText("Pairing…", "正在配对…")
+            Status.Connecting -> uiText("Connecting…", "正在连接…")
+            Status.AwaitingDecision -> uiText("Waiting for your save decision", "等待确认保存方式")
+            Status.Transferring -> uiText("Transferring files…", "正在传输文件…")
+            Status.Verifying -> uiText("Verifying…", "正在验证…")
+            Status.Saving -> uiText("Saving…", "正在保存…")
+            Status.WaitingForReceiverSave -> uiText("Waiting for receiver to save…", "等待接收端保存…")
+            Status.FinalizingDelivery -> uiText("Saved; finalizing delivery…", "已保存，正在确认送达…")
+            Status.Paused -> uiText("Paused", "已暂停")
+            Status.Delivered -> uiText("Delivered", "已送达")
+            Status.Failed -> uiText("Failed", "失败")
+            Status.Canceled -> uiText("Canceled", "已取消")
+        }
 
     companion object {
         private const val CHANNEL = "transfers"
-        private const val NOTIF_ID = 1
-        private const val ACTION_START = "dev.envoix.app.START"
-        private const val ACTION_CANCEL = "dev.envoix.app.CANCEL"
-        private const val ACTION_PAUSE = "dev.envoix.app.PAUSE"
-        private const val ACTION_RESUME = "dev.envoix.app.RESUME"
-        private const val ACTION_REMOVE = "dev.envoix.app.REMOVE"
-        private const val ACTION_RESTORE_ALL = "dev.envoix.app.RESTORE_ALL"
-        private const val ACTION_REVERIFY = "dev.envoix.app.REVERIFY"
-
-        /** Launch specs by id, so a session can be re-created after the service
-         *  (or process) restarted. */
-        private val specs = java.util.concurrent.ConcurrentHashMap<Long, Spec>()
-        private const val EXTRA_DIRECTION = "direction"
+        private const val NOTIFICATION_ID = 1001
+        private const val ACTION_START_SEND = "dev.envoix.app.manifest_v2.START_SEND"
+        private const val ACTION_START_RECEIVE = "dev.envoix.app.manifest_v2.START_RECEIVE"
+        private const val ACTION_APPROVE_RECEIVE = "dev.envoix.app.manifest_v2.APPROVE_RECEIVE"
+        private const val ACTION_PAUSE = "dev.envoix.app.manifest_v2.PAUSE"
+        private const val ACTION_RESUME = "dev.envoix.app.manifest_v2.RESUME"
+        private const val ACTION_CANCEL = "dev.envoix.app.manifest_v2.CANCEL"
+        private const val ACTION_REMOVE = "dev.envoix.app.manifest_v2.REMOVE"
+        private const val ACTION_RESTORE = "dev.envoix.app.manifest_v2.RESTORE"
+        private const val EXTRA_ID = "id"
         private const val EXTRA_ROOM = "room"
-        private const val EXTRA_PATH = "path"
         private const val EXTRA_BROKER = "broker"
         private const val EXTRA_RELAY = "relay"
-        private const val EXTRA_CHUNK_SIZE = "chunk_size"
-        private const val EXTRA_DATA_WINDOW = "data_stream_window"
-        private const val EXTRA_CAND_ALLOW = "candidates_allow"
-        private const val EXTRA_CAND_DENY = "candidates_deny"
         private const val EXTRA_QR = "qr"
-        private const val EXTRA_SOURCE_URI = "source_uri"
-        private const val EXTRA_ID = "id"
+        private const val EXTRA_JOB_ID = "job_id"
+        private const val EXTRA_COPY_APPROVED = "destination_copy_approved"
+        private const val EXTRA_USE_ROOM = "use_room"
+        private const val EXTRA_USE_MDNS = "use_mdns"
 
-        /** `direction` is "send"/"receive"; `path` is the file to send or the
-         *  output directory to receive into; the config fields carry chunk_size +
-         *  the candidate CIDR allow/deny lists (comma-joined, "" when unset);
-         *  `qrPayload` is the invite to show while waiting (null when joining). */
-        fun start(
+        fun startSend(
             context: Context,
-            direction: String,
             room: String,
-            path: String,
             broker: String,
             relay: String,
-            chunkSize: String,
-            dataStreamWindow: String,
-            candidatesAllow: String,
-            candidatesDeny: String,
+            jobId: String,
             qrPayload: String?,
-            sourceUri: String? = null,
+        ) = launch(
+            context,
+            ACTION_START_SEND,
+            room,
+            broker,
+            relay,
+            qrPayload,
+            jobId,
+            copyApproved = false,
+        )
+
+        fun startReceive(
+            context: Context,
+            room: String,
+            broker: String,
+            relay: String,
+            qrPayload: String?,
+            destinationCopyApproved: Boolean,
+        ) = launch(
+            context,
+            ACTION_START_RECEIVE,
+            room,
+            broker,
+            relay,
+            qrPayload,
+            jobId = null,
+            copyApproved = destinationCopyApproved,
+        )
+
+        private fun launch(
+            context: Context,
+            action: String,
+            room: String,
+            broker: String,
+            relay: String,
+            qrPayload: String?,
+            jobId: String?,
+            copyApproved: Boolean,
         ) {
             context.startForegroundService(
                 Intent(context, TransferService::class.java).apply {
-                    action = ACTION_START
-                    putExtra(EXTRA_DIRECTION, direction)
+                    this.action = action
                     putExtra(EXTRA_ROOM, room)
-                    putExtra(EXTRA_PATH, path)
                     putExtra(EXTRA_BROKER, broker)
                     putExtra(EXTRA_RELAY, relay)
-                    putExtra(EXTRA_CHUNK_SIZE, chunkSize)
-                    putExtra(EXTRA_DATA_WINDOW, dataStreamWindow)
-                    putExtra(EXTRA_CAND_ALLOW, candidatesAllow)
-                    putExtra(EXTRA_CAND_DENY, candidatesDeny)
                     putExtra(EXTRA_QR, qrPayload)
-                    putExtra(EXTRA_SOURCE_URI, sourceUri)
+                    putExtra(EXTRA_JOB_ID, jobId)
+                    putExtra(EXTRA_COPY_APPROVED, copyApproved)
+                    putExtra(EXTRA_USE_ROOM, SettingsStore.settings.value.useRoom)
+                    putExtra(EXTRA_USE_MDNS, SettingsStore.settings.value.useMdns)
                 },
             )
         }
+
+        fun approveReceive(
+            context: Context,
+            id: Long,
+        ) = command(context, ACTION_APPROVE_RECEIVE, id)
+
+        fun pause(
+            context: Context,
+            id: Long,
+        ) = command(context, ACTION_PAUSE, id)
+
+        fun resume(
+            context: Context,
+            id: Long,
+        ) = command(context, ACTION_RESUME, id)
 
         fun cancel(
             context: Context,
             id: Long,
-        ) {
-            context.startService(
-                Intent(context, TransferService::class.java).apply {
-                    action = ACTION_CANCEL
-                    putExtra(EXTRA_ID, id)
-                },
-            )
-        }
+        ) = command(context, ACTION_CANCEL, id)
 
-        /** Stop a transfer but keep its partial + spec, so it can be resumed. */
-        fun pause(
-            context: Context,
-            id: Long,
-        ) {
-            context.startService(
-                Intent(context, TransferService::class.java).apply {
-                    action = ACTION_PAUSE
-                    putExtra(EXTRA_ID, id)
-                },
-            )
-        }
-
-        /** Resume/retry: a live session bumps its attempt; a dead one is
-         *  re-created from its spec with resume semantics. */
-        fun resume(
-            context: Context,
-            id: Long,
-        ) {
-            context.startForegroundService(
-                Intent(context, TransferService::class.java).apply {
-                    action = ACTION_RESUME
-                    putExtra(EXTRA_ID, id)
-                },
-            )
-        }
-
-        /** Serve a peer's re-verify from a Completed card (service, not resume). */
-        fun reverify(
-            context: Context,
-            id: Long,
-        ) {
-            context.startService(
-                Intent(context, TransferService::class.java).apply {
-                    action = ACTION_REVERIFY
-                    putExtra(EXTRA_ID, id)
-                },
-            )
-        }
-
-        /** Restore persisted transfer records into cards + idle sessions. */
-        fun restoreAll(context: Context) {
-            context.startService(
-                Intent(context, TransferService::class.java).apply { action = ACTION_RESTORE_ALL },
-            )
-        }
-
-        /** Remove the card AND its on-disk leftovers (D2: the one true abandon). */
         fun remove(
             context: Context,
             id: Long,
+        ) = command(context, ACTION_REMOVE, id)
+
+        fun restoreAll(context: Context) = command(context, ACTION_RESTORE, -1)
+
+        private fun command(
+            context: Context,
+            action: String,
+            id: Long,
         ) {
             context.startService(
                 Intent(context, TransferService::class.java).apply {
-                    action = ACTION_REMOVE
+                    this.action = action
                     putExtra(EXTRA_ID, id)
                 },
             )
         }
+
+        fun jobStoreDirectory(context: Context): File = File(context.filesDir, "manifest-v2/jobs").apply { mkdirs() }
+
+        fun nextSessionIdFloor(context: Context): Long =
+            runCatching {
+                val values = JSONArray(specFile(context).readText())
+                (0 until values.length()).maxOfOrNull { values.getJSONObject(it).getLong("id") }?.plus(1)
+                    ?: 1L
+            }.getOrDefault(1L)
+
+        private fun specFile(context: Context) = File(context.filesDir, "manifest-v2/android-sessions.json")
+    }
+}
+
+private data class ManifestSpec(
+    val id: Long,
+    val direction: Direction,
+    val room: String,
+    val broker: String,
+    val relay: String,
+    val jobId: String?,
+    val qrPayload: String?,
+    val destinationCopyApproved: Boolean,
+    val useRoom: Boolean,
+    val useMdns: Boolean,
+    val holdState: String?,
+) {
+    fun toJson(): JSONObject =
+        JSONObject()
+            .put("id", id)
+            .put("direction", direction.name.lowercase())
+            .put("room", room)
+            .put("broker", broker)
+            .put("relay", relay)
+            .put("job_id", jobId)
+            .put("qr", qrPayload)
+            .put("destination_copy_approved", destinationCopyApproved)
+            .put("use_room", useRoom)
+            .put("use_mdns", useMdns)
+            .put("hold_state", holdState)
+
+    companion object {
+        fun fromJson(value: JSONObject) =
+            ManifestSpec(
+                id = value.getLong("id"),
+                direction = if (value.getString("direction") == "send") Direction.Send else Direction.Receive,
+                room = value.getString("room"),
+                broker = value.getString("broker"),
+                relay = value.optString("relay"),
+                jobId = value.optString("job_id").takeIf(String::isNotEmpty),
+                qrPayload = value.optString("qr").takeIf(String::isNotEmpty),
+                destinationCopyApproved = value.optBoolean("destination_copy_approved"),
+                useRoom = value.getBoolean("use_room"),
+                useMdns = value.getBoolean("use_mdns"),
+                holdState = value.optString("hold_state").takeIf(String::isNotEmpty),
+            )
     }
 }

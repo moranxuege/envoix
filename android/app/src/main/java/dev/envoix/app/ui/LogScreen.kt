@@ -65,6 +65,13 @@ fun LogScreen(onBack: () -> Unit) {
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val language = LocalAppLanguage.current
+    val uiText =
+        remember(language) {
+            { english: String, simplifiedChinese: String ->
+                AppText.value(english, simplifiedChinese, language)
+            }
+        }
     var showSessions by remember { mutableStateOf(false) }
     var crashPending by remember { mutableStateOf(Diagnostics.pendingCrash()) }
 
@@ -83,10 +90,10 @@ fun LogScreen(onBack: () -> Unit) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = colors.text)
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, uiText("Back", "返回"), tint = colors.text)
             }
             Text(
-                "Logs · ${lines.size}",
+                uiText("Logs · ${lines.size}", "日志 · ${lines.size}"),
                 color = colors.text,
                 fontWeight = FontWeight.Bold,
                 fontSize = 18.sp,
@@ -108,19 +115,24 @@ fun LogScreen(onBack: () -> Unit) {
                                 "app",
                                 Diagnostics.build(Diagnostics.Kind.App),
                             )
-                    Toast.makeText(context, if (ok) "Report sent → $key" else "Upload failed", Toast.LENGTH_LONG).show()
+                    Toast
+                        .makeText(
+                            context,
+                            if (ok) uiText("Report sent → $key", "报告已发送 → $key") else uiText("Upload failed", "上传失败"),
+                            Toast.LENGTH_LONG,
+                        ).show()
                 }
-            }) { Text("Report", color = colors.accent, fontSize = 13.sp) }
+            }) { Text(uiText("Report", "报告"), color = colors.accent, fontSize = 13.sp) }
             // Dev-mode: reach the retained previous-session logs (survive relaunches),
             // for copy / upload — a native crash lives there, not in the live buffer.
             if (settings.devMode) {
                 IconButton(onClick = { showSessions = true }) {
-                    Icon(Icons.Default.History, "Session logs", tint = colors.accent)
+                    Icon(Icons.Default.History, uiText("Session logs", "会话日志"), tint = colors.accent)
                 }
             }
             IconButton(onClick = {
-                copyToClipboard(clipboard, context, LogStore.dump(), "logs")
-            }) { Icon(Icons.Default.ContentCopy, "Copy", tint = colors.accent) }
+                copyToClipboard(clipboard, context, LogStore.dump(), uiText("logs", "日志"), language)
+            }) { Icon(Icons.Default.ContentCopy, uiText("Copy", "复制"), tint = colors.accent) }
             IconButton(onClick = {
                 runCatching {
                     val intent =
@@ -128,11 +140,11 @@ fun LogScreen(onBack: () -> Unit) {
                             type = "text/plain"
                             putExtra(Intent.EXTRA_TEXT, tail(LogStore.dump(), CLIP_MAX))
                         }
-                    context.startActivity(Intent.createChooser(intent, "Share logs"))
+                    context.startActivity(Intent.createChooser(intent, uiText("Share logs", "分享日志")))
                 }
-            }) { Icon(Icons.Default.Share, "Share", tint = colors.accent) }
+            }) { Icon(Icons.Default.Share, uiText("Share", "分享"), tint = colors.accent) }
             IconButton(onClick = { LogStore.clear() }) {
-                Icon(Icons.Default.DeleteOutline, "Clear", tint = colors.muted)
+                Icon(Icons.Default.DeleteOutline, uiText("Clear", "清空"), tint = colors.muted)
             }
         }
 
@@ -145,7 +157,7 @@ fun LogScreen(onBack: () -> Unit) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    "Previous session crashed",
+                    uiText("Previous session crashed", "上次会话发生崩溃"),
                     color = colors.warning,
                     fontSize = 13.sp,
                     fontWeight = FontWeight.SemiBold,
@@ -167,18 +179,23 @@ fun LogScreen(onBack: () -> Unit) {
                                     "crash",
                                     Diagnostics.build(Diagnostics.Kind.Crash),
                                 )
-                        Toast.makeText(context, if (ok) "Uploaded → $key" else "Upload failed", Toast.LENGTH_LONG).show()
+                        Toast
+                            .makeText(
+                                context,
+                                if (ok) uiText("Uploaded → $key", "已上传 → $key") else uiText("Upload failed", "上传失败"),
+                                Toast.LENGTH_LONG,
+                            ).show()
                         if (ok) {
                             Diagnostics.ackCrash()
                             crashPending = false
                         }
                     }
-                }) { Text("Upload report", color = colors.warning, fontSize = 13.sp) }
+                }) { Text(uiText("Upload report", "上传报告"), color = colors.warning, fontSize = 13.sp) }
                 TextButton(onClick = {
                     Diagnostics.ackCrash()
                     crashPending = false
                 }) {
-                    Text("Dismiss", color = colors.muted, fontSize = 13.sp)
+                    Text(uiText("Dismiss", "忽略"), color = colors.muted, fontSize = 13.sp)
                 }
             }
         }
@@ -209,10 +226,10 @@ fun LogScreen(onBack: () -> Unit) {
             onDismissRequest = { showSessions = false },
             confirmButton = {
                 TextButton(onClick = { showSessions = false }) {
-                    Text("Close", color = colors.accent)
+                    Text(uiText("Close", "关闭"), color = colors.accent)
                 }
             },
-            title = { Text("Session logs", color = colors.text) },
+            title = { Text(uiText("Session logs", "会话日志"), color = colors.text) },
             text = {
                 Column {
                     // Operations breadcrumbs — the user-action trail, kept separate
@@ -222,16 +239,22 @@ fun LogScreen(onBack: () -> Unit) {
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Column(Modifier.weight(1f)) {
-                            Text("Operations", color = colors.text, fontSize = 13.sp)
+                            Text(uiText("Operations", "操作记录"), color = colors.text, fontSize = 13.sp)
                             Text(
-                                "what you did · recent launches",
+                                uiText("what you did · recent launches", "近期启动与用户操作"),
                                 color = colors.muted,
                                 fontSize = 11.sp,
                             )
                         }
                         TextButton(onClick = {
-                            copyToClipboard(clipboard, context, OpLog.report(), "operations")
-                        }) { Text("Copy", color = colors.accent, fontSize = 13.sp) }
+                            copyToClipboard(
+                                clipboard,
+                                context,
+                                OpLog.report(),
+                                uiText("operations", "操作记录"),
+                                language,
+                            )
+                        }) { Text(uiText("Copy", "复制"), color = colors.accent, fontSize = 13.sp) }
                         if (canUpload) {
                             TextButton(onClick = {
                                 val key =
@@ -247,15 +270,15 @@ fun LogScreen(onBack: () -> Unit) {
                                     Toast
                                         .makeText(
                                             context,
-                                            if (ok) "Uploaded → $key" else "Upload failed",
+                                            if (ok) uiText("Uploaded → $key", "已上传 → $key") else uiText("Upload failed", "上传失败"),
                                             Toast.LENGTH_LONG,
                                         ).show()
                                 }
-                            }) { Text("Upload", color = colors.accent, fontSize = 13.sp) }
+                            }) { Text(uiText("Upload", "上传"), color = colors.accent, fontSize = 13.sp) }
                         }
                     }
                     if (sessions.isEmpty()) {
-                        Text("No logs on disk yet.", color = colors.muted, fontSize = 13.sp)
+                        Text(uiText("No logs on disk yet.", "磁盘上尚无日志。"), color = colors.muted, fontSize = 13.sp)
                     }
                     sessions.forEach { s ->
                         Row(
@@ -271,8 +294,8 @@ fun LogScreen(onBack: () -> Unit) {
                                 )
                             }
                             TextButton(onClick = {
-                                copyToClipboard(clipboard, context, LogStore.readSession(s.file), s.label)
-                            }) { Text("Copy", color = colors.accent, fontSize = 13.sp) }
+                                copyToClipboard(clipboard, context, LogStore.readSession(s.file), s.label, language)
+                            }) { Text(uiText("Copy", "复制"), color = colors.accent, fontSize = 13.sp) }
                             if (canUpload) {
                                 TextButton(onClick = {
                                     val key =
@@ -288,11 +311,11 @@ fun LogScreen(onBack: () -> Unit) {
                                         Toast
                                             .makeText(
                                                 context,
-                                                if (ok) "Uploaded → $key" else "Upload failed",
+                                                if (ok) uiText("Uploaded → $key", "已上传 → $key") else uiText("Upload failed", "上传失败"),
                                                 Toast.LENGTH_LONG,
                                             ).show()
                                     }
-                                }) { Text("Upload", color = colors.accent, fontSize = 13.sp) }
+                                }) { Text(uiText("Upload", "上传"), color = colors.accent, fontSize = 13.sp) }
                             }
                         }
                     }
@@ -323,14 +346,20 @@ private fun copyToClipboard(
     context: Context,
     text: String,
     label: String,
+    language: String,
 ) {
     val body = tail(text, CLIP_MAX)
     val ok = runCatching { clipboard.setText(AnnotatedString(body)) }.isSuccess
     val msg =
         when {
-            !ok -> "Copy failed"
-            body.length != text.length -> "Copied last ${CLIP_MAX / 1024} KB of $label"
-            else -> "Copied $label"
+            !ok -> AppText.value("Copy failed", "复制失败", language)
+            body.length != text.length ->
+                AppText.value(
+                    "Copied last ${CLIP_MAX / 1024} KB of $label",
+                    "已复制 $label 的最后 ${CLIP_MAX / 1024} KB",
+                    language,
+                )
+            else -> AppText.value("Copied $label", "已复制$label", language)
         }
     Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
 }

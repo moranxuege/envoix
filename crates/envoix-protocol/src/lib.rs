@@ -1,18 +1,10 @@
-//! Wire protocol frame types and codecs.
+//! Authentication envelope and canonical Manifest v2 wire protocol.
 
-pub mod manifest;
+pub mod manifest_v2;
+pub mod manifest_v2_frames;
 
-pub use manifest::{
-    MANIFEST_V1_ALPN, MANIFEST_V1_PROTOCOL_VERSION, MAX_MANIFEST_V1_COMPONENT_BYTES,
-    MAX_MANIFEST_V1_ENCODED_BYTES, MAX_MANIFEST_V1_ENTRIES, MAX_MANIFEST_V1_PATH_BYTES,
-    MAX_MANIFEST_V1_PATH_DEPTH, ManifestAcceptV1, ManifestChunkV1, ManifestCompleteAckV1,
-    ManifestCompleteV1, ManifestEntryCompleteAckV1, ManifestEntryCompleteV1,
-    ManifestEntryDispositionKind, ManifestEntryDispositionV1, ManifestEntryKind,
-    ManifestEntryResultStatus, ManifestEntryResultV1, ManifestEntryStartV1, ManifestEntryV1,
-    ManifestErrorV1, ManifestFrame, ManifestHashAlgorithm, ManifestHelloV1, ManifestId,
-    ManifestOfferV1, ManifestPathViolation, ManifestResumeStatusV1, ManifestV1,
-    ManifestValidationError, SINGLE_FILE_V1_ALPN, TransferProtocol, read_manifest_frame,
-    validate_manifest_relative_path, write_manifest_chunk_frame, write_manifest_frame,
+pub use manifest_v2_frames::{
+    ManifestV2FrameConnection, read_manifest_v2_frame, write_manifest_v2_frame,
 };
 
 use std::fmt;
@@ -21,27 +13,20 @@ use std::str::FromStr;
 
 use async_trait::async_trait;
 use envoix_error::CoreError;
-use envoix_types::{PeerRole, TransferId};
+use envoix_types::PeerRole;
 use num_enum::TryFromPrimitive;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-const MAGIC: &[u8; 4] = b"ENVX";
-const WIRE_VERSION: u16 = 1;
-const HEADER_LEN: usize = 12;
+const AUTH_MAGIC: &[u8; 4] = b"ENVA";
+const AUTH_WIRE_VERSION: u16 = 2;
+const AUTH_HEADER_BYTES: usize = 12;
+const MAX_AUTH_FRAME_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, TryFromPrimitive)]
 #[repr(u8)]
-enum FrameType {
+enum AuthEnvelopeType {
     Auth = 1,
-    Hello = 2,
-    Ready = 3,
-    FileHeader = 4,
-    ResumeStatus = 5,
-    Chunk = 6,
-    Complete = 7,
-    CompleteAck = 8,
-    Error = 9,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, TryFromPrimitive)]
@@ -52,45 +37,15 @@ enum AuthFrameType {
     Confirm = 3,
 }
 
-/// Maximum encoded frame payload accepted by the binary codec.
-pub const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024 + 64 * 1024;
-
-/// Error type returned by protocol encoding and decoding.
 pub type ProtocolError = CoreError;
 
-/// A bidirectional frame stream used by authentication and transfer engines.
+/// Only authentication travels through this envelope. Payload starts after
+/// authentication and uses [`ManifestV2FrameConnection`].
 #[async_trait]
 pub trait FrameConnection: Send {
-    /// Sends one protocol frame.
     async fn send_frame(&mut self, frame: Frame) -> Result<(), ProtocolError>;
-
-    /// Sends one chunk frame, allowing transports to avoid copying payload bytes.
-    async fn send_chunk(
-        &mut self,
-        transfer_id: &TransferId,
-        index: u64,
-        offset: u64,
-        bytes: &[u8],
-    ) -> Result<(), ProtocolError>;
-
-    /// Sends one chunk while allowing a full-duplex transport to surface a
-    /// peer control frame. The default keeps simple transports compatible;
-    /// production full-duplex transports should override this method.
-    async fn send_chunk_or_recv_frame(
-        &mut self,
-        transfer_id: &TransferId,
-        index: u64,
-        offset: u64,
-        bytes: &[u8],
-    ) -> Result<Option<Frame>, ProtocolError> {
-        self.send_chunk(transfer_id, index, offset, bytes).await?;
-        Ok(None)
-    }
-
-    /// Receives one protocol frame.
     async fn recv_frame(&mut self) -> Result<Frame, ProtocolError>;
 
-    /// Exports 32 bytes of transport channel-binding material.
     fn export_keying_material(
         &self,
         _label: &[u8],
@@ -101,66 +56,35 @@ pub trait FrameConnection: Send {
         ))
     }
 
-    /// Closes the underlying transport connection.
     async fn close(&mut self) -> Result<(), ProtocolError>;
 }
 
-/// Bidirectional Manifest v1 frame stream used after the existing authenticated
-/// handshake completes.
-///
-/// This is intentionally separate from [`FrameConnection`]. Authentication
-/// continues to use the stable `Frame::Auth` family, while a negotiated
-/// `envoix/manifest/1` connection switches to this interface for transfer
-/// frames. Existing `FrameConnection` implementors therefore remain source
-/// compatible.
-#[async_trait]
-pub trait ManifestFrameConnection: Send {
-    /// Sends one Manifest v1 control frame.
-    async fn send_manifest_frame(&mut self, frame: ManifestFrame) -> Result<(), ProtocolError>;
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferProtocol {
+    ManifestV2,
+}
 
-    /// Sends one Manifest v1 chunk without requiring an owned payload buffer.
-    async fn send_manifest_chunk(
-        &mut self,
-        manifest_id: &ManifestId,
-        entry_id: u32,
-        transfer_id: &TransferId,
-        index: u64,
-        offset: u64,
-        bytes: &[u8],
-    ) -> Result<(), ProtocolError>;
-
-    /// Sends a chunk while allowing a full-duplex transport to surface a peer
-    /// control frame. The default keeps simple in-memory transports compatible.
-    #[allow(clippy::too_many_arguments)]
-    async fn send_manifest_chunk_or_recv_frame(
-        &mut self,
-        manifest_id: &ManifestId,
-        entry_id: u32,
-        transfer_id: &TransferId,
-        index: u64,
-        offset: u64,
-        bytes: &[u8],
-    ) -> Result<Option<ManifestFrame>, ProtocolError> {
-        self.send_manifest_chunk(manifest_id, entry_id, transfer_id, index, offset, bytes)
-            .await?;
-        Ok(None)
+impl TransferProtocol {
+    pub const fn alpn(self) -> &'static [u8] {
+        match self {
+            Self::ManifestV2 => manifest_v2::MANIFEST_V2_ALPN,
+        }
     }
 
-    /// Receives one Manifest v1 frame.
-    async fn recv_manifest_frame(&mut self) -> Result<ManifestFrame, ProtocolError>;
+    pub fn from_alpn(alpn: &[u8]) -> Option<Self> {
+        (alpn == manifest_v2::MANIFEST_V2_ALPN).then_some(Self::ManifestV2)
+    }
 }
 
 /// Direct addressing data needed to dial an iroh endpoint without a relay.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Hash, Serialize)]
 pub struct PeerDescriptor {
-    /// iroh endpoint ID, encoded as z-base-32.
     pub endpoint_id: String,
-    /// Direct socket addresses for this endpoint.
     pub direct_addrs: Vec<SocketAddr>,
 }
 
 impl PeerDescriptor {
-    /// Creates a direct peer descriptor.
     pub fn new(
         endpoint_id: impl Into<String>,
         direct_addrs: Vec<SocketAddr>,
@@ -173,7 +97,6 @@ impl PeerDescriptor {
         Ok(descriptor)
     }
 
-    /// Validates the app-level constraints independent of iroh parsing.
     pub fn validate(&self) -> Result<(), ProtocolError> {
         if self.endpoint_id.trim().is_empty() {
             return Err(CoreError::InvalidInput("endpoint id is empty".into()));
@@ -186,7 +109,6 @@ impl PeerDescriptor {
         Ok(())
     }
 
-    /// Parses the compact manual form: `<endpoint-id>@<addr>[,<addr>...]`.
     pub fn parse_compact(input: &str) -> Result<Self, ProtocolError> {
         input.parse()
     }
@@ -195,11 +117,11 @@ impl PeerDescriptor {
 impl fmt::Display for PeerDescriptor {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{}@", self.endpoint_id)?;
-        for (index, addr) in self.direct_addrs.iter().enumerate() {
+        for (index, address) in self.direct_addrs.iter().enumerate() {
             if index > 0 {
                 formatter.write_str(",")?;
             }
-            write!(formatter, "{addr}")?;
+            write!(formatter, "{address}")?;
         }
         Ok(())
     }
@@ -209,266 +131,108 @@ impl FromStr for PeerDescriptor {
     type Err = ProtocolError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        let (endpoint_id, addrs) = input
+        let (endpoint_id, addresses) = input
             .trim()
             .split_once('@')
             .ok_or_else(|| CoreError::InvalidInput("peer descriptor must contain '@'".into()))?;
-        let endpoint_id = endpoint_id.trim();
-        let direct_addrs = addrs
+        let direct_addrs = addresses
             .split(',')
             .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|addr| {
-                addr.parse::<SocketAddr>().map_err(|_| {
-                    CoreError::InvalidInput(format!("malformed peer address {addr:?}"))
+            .filter(|address| !address.is_empty())
+            .map(|address| {
+                address.parse::<SocketAddr>().map_err(|_| {
+                    CoreError::InvalidInput(format!("malformed peer address {address:?}"))
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Self::new(endpoint_id, direct_addrs)
+        Self::new(endpoint_id.trim(), direct_addrs)
     }
 }
 
-/// A single wire message exchanged between sender and receiver.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum Frame {
-    /// Carries pairing-authentication messages before transfer frames.
     Auth(AuthFrame),
-    /// Opens the protocol conversation and declares the peer role.
-    Hello(Hello),
-    /// Confirms that the receiver is ready for file metadata.
-    Ready(Ready),
-    /// Describes the file and whether receiver-side resume may be used.
-    FileHeader(FileHeader),
-    /// Tells the sender where this receiver can resume from.
-    ResumeStatus(ResumeStatus),
-    /// Carries one sequential data chunk.
-    Chunk(Chunk),
-    /// Marks the sender's end of data for a transfer.
-    Complete(Complete),
-    /// Confirms that the receiver verified and finalized the file.
-    CompleteAck(CompleteAck),
-    /// Carries a protocol-level error message.
-    Error(ErrorFrame),
 }
 
-/// Authentication handshake frame exchanged before transfer metadata.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum AuthFrame {
-    /// First SPAKE2 message from the sender.
     Spake2Start(Spake2Start),
-    /// SPAKE2 response message from the receiver.
     Spake2Message(Spake2Message),
-    /// Role-separated confirmation proof for the derived key.
     Spake2Confirm(Spake2Confirm),
 }
 
-/// Sender's initial SPAKE2 frame.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Spake2Start {
-    /// Auth protocol version expected by the sender.
     pub protocol_version: u32,
-    /// Sender role bound into the authentication transcript.
     pub role: PeerRole,
-    /// Sender-generated nonce.
     pub nonce: Vec<u8>,
-    /// SPAKE2 outbound message bytes.
     pub message: Vec<u8>,
 }
 
-/// Receiver's SPAKE2 response frame.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Spake2Message {
-    /// Receiver-generated nonce.
     pub nonce: Vec<u8>,
-    /// SPAKE2 outbound message bytes.
     pub message: Vec<u8>,
 }
 
-/// SPAKE2 key confirmation frame.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Spake2Confirm {
-    /// MAC proving possession of the SPAKE2 key for this transcript.
     pub proof: Vec<u8>,
 }
 
-/// Initial handshake frame sent before file metadata.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct Hello {
-    /// Wire protocol version expected by the sender.
-    pub protocol_version: u32,
-    /// Peer role for this connection.
-    pub role: PeerRole,
-}
-
-/// Receiver readiness marker sent after a valid sender `Hello`.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct Ready;
-
-/// File metadata sent before chunks.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct FileHeader {
-    /// Transfer identifier used by chunks, resume state, and completion frames.
-    pub transfer_id: TransferId,
-    /// Plain destination file name, without path components.
-    pub file_name: String,
-    /// Expected file length in bytes.
-    pub file_size: u64,
-    /// Sender chunk size in bytes.
-    pub chunk_size: u64,
-    /// Whether the receiver may advertise compatible resume state.
-    pub resume_requested: bool,
-}
-
-/// Receiver resume position for a transfer.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ResumeStatus {
-    /// Transfer this status applies to.
-    pub transfer_id: TransferId,
-    /// Next sequential chunk index the sender should transmit.
-    pub next_chunk_index: u64,
-    /// Number of plaintext bytes already stored by the receiver.
-    pub bytes_received: u64,
-    /// BLAKE3 hash of the stored prefix, hex-encoded.
-    pub prefix_hash: String,
-}
-
-/// Sequential file data frame.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct Chunk {
-    /// Transfer this chunk belongs to.
-    pub transfer_id: TransferId,
-    /// Zero-based sequential chunk index.
-    pub index: u64,
-    /// Plaintext byte offset for the first byte in `bytes`.
-    pub offset: u64,
-    /// Plaintext chunk payload bytes; transport encryption provided by QUIC
-    pub bytes: Vec<u8>,
-}
-
-/// Sender completion marker.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct Complete {
-    /// Transfer being completed.
-    pub transfer_id: TransferId,
-    /// BLAKE3 hash the sender expects the receiver to verify.
-    pub file_hash: String,
-}
-
-/// Receiver acknowledgement sent only after verified finalization.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct CompleteAck {
-    /// Transfer that was verified and finalized.
-    pub transfer_id: TransferId,
-}
-
-/// Protocol error frame for failures that can be represented on the wire.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ErrorFrame {
-    /// Human-readable error description.
-    pub message: String,
-}
-
-/// Reads one versioned binary frame from `reader`.
 pub async fn read_frame<R>(reader: &mut R) -> Result<Frame, ProtocolError>
 where
     R: AsyncRead + Unpin,
 {
-    let (raw_frame_type, payload) = read_frame_payload(reader).await?;
-    let frame_type = FrameType::try_from(raw_frame_type)
-        .map_err(|error| CoreError::Protocol(error.to_string()))?;
-
-    decode_frame(frame_type, &payload)
-}
-
-async fn read_frame_payload<R>(reader: &mut R) -> Result<(u8, Vec<u8>), ProtocolError>
-where
-    R: AsyncRead + Unpin,
-{
-    let mut header = [0_u8; HEADER_LEN];
+    let mut header = [0_u8; AUTH_HEADER_BYTES];
     reader.read_exact(&mut header).await?;
-
-    if &header[0..4] != MAGIC {
-        return Err(CoreError::Protocol("bad frame magic".into()));
+    if &header[..4] != AUTH_MAGIC {
+        return Err(CoreError::Protocol("bad authentication frame magic".into()));
     }
     let version = u16::from_be_bytes([header[4], header[5]]);
-    if version != WIRE_VERSION {
+    if version != AUTH_WIRE_VERSION {
         return Err(CoreError::Protocol(format!(
-            "unsupported frame version {version}"
+            "unsupported authentication frame version {version}"
         )));
     }
-    let frame_type = header[6];
-    if header[7] != 0 {
+    let envelope = AuthEnvelopeType::try_from(header[6])
+        .map_err(|error| CoreError::Protocol(error.to_string()))?;
+    if envelope != AuthEnvelopeType::Auth || header[7] != 0 {
         return Err(CoreError::Protocol(
-            "reserved frame byte must be zero".into(),
+            "invalid authentication frame header".into(),
         ));
     }
-
-    let length = u32::from_be_bytes([header[8], header[9], header[10], header[11]]) as usize;
-    if length > MAX_FRAME_SIZE {
-        return Err(CoreError::Protocol(format!(
-            "frame length {length} exceeds maximum {MAX_FRAME_SIZE}"
-        )));
+    let length = u32::from_be_bytes(header[8..12].try_into().expect("fixed header")) as usize;
+    if length > MAX_AUTH_FRAME_BYTES {
+        return Err(CoreError::Protocol(
+            "authentication frame exceeds its allocation bound".into(),
+        ));
     }
-
     let mut payload = vec![0_u8; length];
     reader.read_exact(&mut payload).await?;
-
-    Ok((frame_type, payload))
+    decode_auth_frame(&payload)
 }
 
-/// Writes one versioned binary frame to `writer`.
 pub async fn write_frame<W>(writer: &mut W, frame: &Frame) -> Result<(), ProtocolError>
 where
     W: AsyncWrite + Unpin,
 {
-    let (frame_type, payload) = encode_frame(frame)?;
-
-    if payload.len() > MAX_FRAME_SIZE {
-        return Err(CoreError::Protocol(format!(
-            "frame length {} exceeds maximum {MAX_FRAME_SIZE}",
-            payload.len()
-        )));
+    let payload = encode_auth_frame(frame)?;
+    if payload.len() > MAX_AUTH_FRAME_BYTES {
+        return Err(CoreError::Protocol(
+            "authentication frame exceeds its allocation bound".into(),
+        ));
     }
-
-    write_frame_header(writer, frame_type as u8, payload.len()).await?;
+    writer.write_all(AUTH_MAGIC).await?;
+    writer.write_all(&AUTH_WIRE_VERSION.to_be_bytes()).await?;
+    writer.write_all(&[AuthEnvelopeType::Auth as u8, 0]).await?;
+    writer
+        .write_all(&(payload.len() as u32).to_be_bytes())
+        .await?;
     writer.write_all(&payload).await?;
     Ok(())
 }
 
-/// Writes a chunk frame directly from a borrowed payload.
-pub async fn write_chunk_frame<W>(
-    writer: &mut W,
-    transfer_id: &TransferId,
-    index: u64,
-    offset: u64,
-    bytes: &[u8],
-) -> Result<(), ProtocolError>
-where
-    W: AsyncWrite + Unpin,
-{
-    let transfer_id_len = u32::try_from(transfer_id.0.len())
-        .map_err(|_| CoreError::Protocol("field length exceeds u32".into()))?;
-    let bytes_len = u32::try_from(bytes.len())
-        .map_err(|_| CoreError::Protocol("field length exceeds u32".into()))?;
-    let payload_len = 4_usize
-        .checked_add(transfer_id.0.len())
-        .and_then(|len| len.checked_add(8))
-        .and_then(|len| len.checked_add(8))
-        .and_then(|len| len.checked_add(4))
-        .and_then(|len| len.checked_add(bytes.len()))
-        .ok_or_else(|| CoreError::Protocol("frame length overflow".into()))?;
-
-    write_frame_header(writer, FrameType::Chunk as u8, payload_len).await?;
-    writer.write_all(&transfer_id_len.to_be_bytes()).await?;
-    writer.write_all(transfer_id.0.as_bytes()).await?;
-    writer.write_all(&index.to_be_bytes()).await?;
-    writer.write_all(&offset.to_be_bytes()).await?;
-    writer.write_all(&bytes_len.to_be_bytes()).await?;
-    writer.write_all(bytes).await?;
-    Ok(())
-}
-
-/// Flushes a frame writer when a caller needs a control-frame boundary.
 pub async fn flush_frame_writer<W>(writer: &mut W) -> Result<(), ProtocolError>
 where
     W: AsyncWrite + Unpin,
@@ -477,176 +241,50 @@ where
     Ok(())
 }
 
-async fn write_frame_header<W>(
-    writer: &mut W,
-    frame_type: u8,
-    payload_len: usize,
-) -> Result<(), ProtocolError>
-where
-    W: AsyncWrite + Unpin,
-{
-    if payload_len > MAX_FRAME_SIZE {
-        return Err(CoreError::Protocol(format!(
-            "frame length {payload_len} exceeds maximum {MAX_FRAME_SIZE}",
-        )));
-    }
-
-    writer.write_all(MAGIC).await?;
-    writer.write_all(&WIRE_VERSION.to_be_bytes()).await?;
-    writer.write_all(&[frame_type, 0]).await?;
-    writer
-        .write_all(&(payload_len as u32).to_be_bytes())
-        .await?;
-    Ok(())
-}
-
-fn encode_frame(frame: &Frame) -> Result<(FrameType, Vec<u8>), ProtocolError> {
+fn encode_auth_frame(frame: &Frame) -> Result<Vec<u8>, ProtocolError> {
     let mut payload = Vec::new();
-    let frame_type = match frame {
-        Frame::Auth(auth) => {
-            match auth {
-                AuthFrame::Spake2Start(start) => {
-                    write_u8(&mut payload, AuthFrameType::Start as u8);
-                    write_u32(&mut payload, start.protocol_version);
-                    write_peer_role(&mut payload, start.role);
-                    write_bytes(&mut payload, &start.nonce)?;
-                    write_bytes(&mut payload, &start.message)?;
-                }
-                AuthFrame::Spake2Message(message) => {
-                    write_u8(&mut payload, AuthFrameType::Message as u8);
-                    write_bytes(&mut payload, &message.nonce)?;
-                    write_bytes(&mut payload, &message.message)?;
-                }
-                AuthFrame::Spake2Confirm(confirm) => {
-                    write_u8(&mut payload, AuthFrameType::Confirm as u8);
-                    write_bytes(&mut payload, &confirm.proof)?;
-                }
-            }
-            FrameType::Auth
+    match frame {
+        Frame::Auth(AuthFrame::Spake2Start(start)) => {
+            payload.push(AuthFrameType::Start as u8);
+            payload.extend_from_slice(&start.protocol_version.to_be_bytes());
+            write_peer_role(&mut payload, start.role);
+            write_bytes(&mut payload, &start.nonce)?;
+            write_bytes(&mut payload, &start.message)?;
         }
-        Frame::Hello(hello) => {
-            write_u32(&mut payload, hello.protocol_version);
-            write_peer_role(&mut payload, hello.role);
-            FrameType::Hello
+        Frame::Auth(AuthFrame::Spake2Message(message)) => {
+            payload.push(AuthFrameType::Message as u8);
+            write_bytes(&mut payload, &message.nonce)?;
+            write_bytes(&mut payload, &message.message)?;
         }
-        Frame::Ready(_) => FrameType::Ready,
-        Frame::FileHeader(header) => {
-            write_string(&mut payload, &header.transfer_id.0)?;
-            write_string(&mut payload, &header.file_name)?;
-            write_u64(&mut payload, header.file_size);
-            write_u64(&mut payload, header.chunk_size);
-            write_bool(&mut payload, header.resume_requested);
-            FrameType::FileHeader
+        Frame::Auth(AuthFrame::Spake2Confirm(confirm)) => {
+            payload.push(AuthFrameType::Confirm as u8);
+            write_bytes(&mut payload, &confirm.proof)?;
         }
-        Frame::ResumeStatus(status) => {
-            write_string(&mut payload, &status.transfer_id.0)?;
-            write_u64(&mut payload, status.next_chunk_index);
-            write_u64(&mut payload, status.bytes_received);
-            write_string(&mut payload, &status.prefix_hash)?;
-            FrameType::ResumeStatus
-        }
-        Frame::Chunk(chunk) => {
-            write_string(&mut payload, &chunk.transfer_id.0)?;
-            write_u64(&mut payload, chunk.index);
-            write_u64(&mut payload, chunk.offset);
-            write_bytes(&mut payload, &chunk.bytes)?;
-            FrameType::Chunk
-        }
-        Frame::Complete(complete) => {
-            write_string(&mut payload, &complete.transfer_id.0)?;
-            write_string(&mut payload, &complete.file_hash)?;
-            FrameType::Complete
-        }
-        Frame::CompleteAck(ack) => {
-            write_string(&mut payload, &ack.transfer_id.0)?;
-            FrameType::CompleteAck
-        }
-        Frame::Error(error) => {
-            write_string(&mut payload, &error.message)?;
-            FrameType::Error
-        }
-    };
-
-    Ok((frame_type, payload))
+    }
+    Ok(payload)
 }
 
-fn decode_frame(frame_type: FrameType, payload: &[u8]) -> Result<Frame, ProtocolError> {
+fn decode_auth_frame(payload: &[u8]) -> Result<Frame, ProtocolError> {
     let mut reader = PayloadReader::new(payload);
-    let frame = match frame_type {
-        FrameType::Auth => Frame::Auth(decode_auth(&mut reader)?),
-        FrameType::Hello => Frame::Hello(Hello {
+    let frame_type = AuthFrameType::try_from(reader.read_u8()?)
+        .map_err(|error| CoreError::Protocol(error.to_string()))?;
+    let auth = match frame_type {
+        AuthFrameType::Start => AuthFrame::Spake2Start(Spake2Start {
             protocol_version: reader.read_u32()?,
             role: reader.read_peer_role()?,
+            nonce: reader.read_bytes()?,
+            message: reader.read_bytes()?,
         }),
-        FrameType::Ready => Frame::Ready(Ready),
-        FrameType::FileHeader => Frame::FileHeader(FileHeader {
-            transfer_id: TransferId::new(reader.read_string()?),
-            file_name: reader.read_string()?,
-            file_size: reader.read_u64()?,
-            chunk_size: reader.read_u64()?,
-            resume_requested: reader.read_bool()?,
+        AuthFrameType::Message => AuthFrame::Spake2Message(Spake2Message {
+            nonce: reader.read_bytes()?,
+            message: reader.read_bytes()?,
         }),
-        FrameType::ResumeStatus => Frame::ResumeStatus(ResumeStatus {
-            transfer_id: TransferId::new(reader.read_string()?),
-            next_chunk_index: reader.read_u64()?,
-            bytes_received: reader.read_u64()?,
-            prefix_hash: reader.read_string()?,
-        }),
-        FrameType::Chunk => Frame::Chunk(Chunk {
-            transfer_id: TransferId::new(reader.read_string()?),
-            index: reader.read_u64()?,
-            offset: reader.read_u64()?,
-            bytes: reader.read_bytes()?,
-        }),
-        FrameType::Complete => Frame::Complete(Complete {
-            transfer_id: TransferId::new(reader.read_string()?),
-            file_hash: reader.read_string()?,
-        }),
-        FrameType::CompleteAck => Frame::CompleteAck(CompleteAck {
-            transfer_id: TransferId::new(reader.read_string()?),
-        }),
-        FrameType::Error => Frame::Error(ErrorFrame {
-            message: reader.read_string()?,
+        AuthFrameType::Confirm => AuthFrame::Spake2Confirm(Spake2Confirm {
+            proof: reader.read_bytes()?,
         }),
     };
     reader.finish()?;
-    Ok(frame)
-}
-
-fn decode_auth(reader: &mut PayloadReader<'_>) -> Result<AuthFrame, ProtocolError> {
-    let auth_type = AuthFrameType::try_from(reader.read_u8()?)
-        .map_err(|error| CoreError::Protocol(error.to_string()))?;
-    match auth_type {
-        AuthFrameType::Start => Ok(AuthFrame::Spake2Start(Spake2Start {
-            protocol_version: reader.read_u32()?,
-            role: reader.read_peer_role()?,
-            nonce: reader.read_bytes()?,
-            message: reader.read_bytes()?,
-        })),
-        AuthFrameType::Message => Ok(AuthFrame::Spake2Message(Spake2Message {
-            nonce: reader.read_bytes()?,
-            message: reader.read_bytes()?,
-        })),
-        AuthFrameType::Confirm => Ok(AuthFrame::Spake2Confirm(Spake2Confirm {
-            proof: reader.read_bytes()?,
-        })),
-    }
-}
-
-fn write_u8(output: &mut Vec<u8>, value: u8) {
-    output.push(value);
-}
-
-fn write_u32(output: &mut Vec<u8>, value: u32) {
-    output.extend_from_slice(&value.to_be_bytes());
-}
-
-fn write_u64(output: &mut Vec<u8>, value: u64) {
-    output.extend_from_slice(&value.to_be_bytes());
-}
-
-fn write_bool(output: &mut Vec<u8>, value: bool) {
-    output.push(u8::from(value));
+    Ok(Frame::Auth(auth))
 }
 
 fn write_peer_role(output: &mut Vec<u8>, role: PeerRole) {
@@ -656,13 +294,9 @@ fn write_peer_role(output: &mut Vec<u8>, role: PeerRole) {
     });
 }
 
-fn write_string(output: &mut Vec<u8>, value: &str) -> Result<(), ProtocolError> {
-    write_bytes(output, value.as_bytes())
-}
-
 fn write_bytes(output: &mut Vec<u8>, value: &[u8]) -> Result<(), ProtocolError> {
     let length = u32::try_from(value.len())
-        .map_err(|_| CoreError::Protocol("field length exceeds u32".into()))?;
+        .map_err(|_| CoreError::Protocol("authentication field exceeds u32".into()))?;
     output.extend_from_slice(&length.to_be_bytes());
     output.extend_from_slice(value);
     Ok(())
@@ -683,25 +317,9 @@ impl<'a> PayloadReader<'a> {
     }
 
     fn read_u32(&mut self) -> Result<u32, ProtocolError> {
-        let bytes = self.take(4)?;
         Ok(u32::from_be_bytes(
-            bytes.try_into().expect("slice length was checked"),
+            self.take(4)?.try_into().expect("fixed u32"),
         ))
-    }
-
-    fn read_u64(&mut self) -> Result<u64, ProtocolError> {
-        let bytes = self.take(8)?;
-        Ok(u64::from_be_bytes(
-            bytes.try_into().expect("slice length was checked"),
-        ))
-    }
-
-    fn read_bool(&mut self) -> Result<bool, ProtocolError> {
-        match self.read_u8()? {
-            0 => Ok(false),
-            1 => Ok(true),
-            value => Err(CoreError::Protocol(format!("invalid boolean {value}"))),
-        }
     }
 
     fn read_peer_role(&mut self) -> Result<PeerRole, ProtocolError> {
@@ -710,11 +328,6 @@ impl<'a> PayloadReader<'a> {
             2 => Ok(PeerRole::Receiver),
             role => Err(CoreError::Protocol(format!("unknown peer role {role}"))),
         }
-    }
-
-    fn read_string(&mut self) -> Result<String, ProtocolError> {
-        let bytes = self.read_bytes()?;
-        String::from_utf8(bytes).map_err(|error| CoreError::Protocol(error.to_string()))
     }
 
     fn read_bytes(&mut self) -> Result<Vec<u8>, ProtocolError> {
@@ -726,10 +339,9 @@ impl<'a> PayloadReader<'a> {
         if self.offset == self.payload.len() {
             Ok(())
         } else {
-            Err(CoreError::Protocol(format!(
-                "{} trailing payload bytes",
-                self.payload.len() - self.offset
-            )))
+            Err(CoreError::Protocol(
+                "authentication frame has trailing bytes".into(),
+            ))
         }
     }
 
@@ -737,15 +349,12 @@ impl<'a> PayloadReader<'a> {
         let end = self
             .offset
             .checked_add(length)
-            .ok_or_else(|| CoreError::Protocol("payload offset overflow".into()))?;
-        if end > self.payload.len() {
-            return Err(CoreError::Protocol("malformed frame payload".into()));
-        }
-        let bytes = &self.payload[self.offset..end];
+            .ok_or_else(|| CoreError::Protocol("authentication field length overflow".into()))?;
+        let value = self
+            .payload
+            .get(self.offset..end)
+            .ok_or_else(|| CoreError::Protocol("truncated authentication frame".into()))?;
         self.offset = end;
-        Ok(bytes)
+        Ok(value)
     }
 }
-
-#[cfg(test)]
-mod tests;

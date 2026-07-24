@@ -2,10 +2,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use envoix_error::CoreError;
+use envoix_protocol::manifest_v2_frames::{
+    ManifestV2Frame, ManifestV2FrameCodecError, ManifestV2FrameConnection,
+};
 use envoix_protocol::{
-    Frame, FrameConnection, ManifestFrame, ManifestFrameConnection, ManifestId, ProtocolError,
-    TransferProtocol, flush_frame_writer, read_frame, read_manifest_frame, write_chunk_frame,
-    write_frame, write_manifest_chunk_frame, write_manifest_frame,
+    Frame, FrameConnection, ProtocolError, TransferProtocol, flush_frame_writer, read_frame,
+    read_manifest_v2_frame, write_frame, write_manifest_v2_frame,
 };
 use envoix_transfer::{EventSink, TransferEvent};
 use envoix_types::DataPath;
@@ -19,6 +21,13 @@ const STREAM_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 const PEER_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How often the background watcher samples the selected data path.
 const PATH_WATCH_INTERVAL: Duration = Duration::from_millis(500);
+
+fn manifest_v2_stream_error(error: ManifestV2FrameCodecError) -> ProtocolError {
+    match error {
+        ManifestV2FrameCodecError::Io(error) => CoreError::Transport(error.to_string()),
+        other => CoreError::Protocol(other.to_string()),
+    }
+}
 
 pub(crate) struct IrohFrameConnection {
     pub(crate) _local_endpoint: Endpoint,
@@ -123,13 +132,9 @@ impl IrohFrameConnection {
     /// wait (bounded) for the peer to close the connection instead of closing
     /// first.
     ///
-    /// The last frame of a transfer is the receiver's `CompleteAck`. Closing
-    /// right after sending it races our `CONNECTION_CLOSE` against the peer
-    /// reading that frame - QUIC may drop still-unread stream data on close, so
-    /// the ack is lost and an otherwise-complete transfer looks failed. Letting
-    /// the peer (which reads the ack) initiate the close keeps the stream open
-    /// long enough for the ack to be delivered. Bounded so a peer that never
-    /// closes cannot hang us; if it elapses we close ourselves.
+    /// A receiver sends DeliveryProof last. It leaves the stream open until the
+    /// sender validates, persists Delivered, and closes. The bound prevents a
+    /// peer that never closes from pinning the receiver indefinitely.
     pub(crate) async fn await_peer_close(&mut self) {
         let _ = self.send.finish();
         if tokio::time::timeout(PEER_CLOSE_TIMEOUT, self.connection.closed())
@@ -146,36 +151,6 @@ impl FrameConnection for IrohFrameConnection {
     async fn send_frame(&mut self, frame: Frame) -> Result<(), ProtocolError> {
         write_frame(&mut self.send, &frame).await?;
         flush_frame_writer(&mut self.send).await
-    }
-
-    async fn send_chunk(
-        &mut self,
-        transfer_id: &envoix_types::TransferId,
-        index: u64,
-        offset: u64,
-        bytes: &[u8],
-    ) -> Result<(), ProtocolError> {
-        write_chunk_frame(&mut self.send, transfer_id, index, offset, bytes).await?;
-        flush_frame_writer(&mut self.send).await
-    }
-
-    async fn send_chunk_or_recv_frame(
-        &mut self,
-        transfer_id: &envoix_types::TransferId,
-        index: u64,
-        offset: u64,
-        bytes: &[u8],
-    ) -> Result<Option<Frame>, ProtocolError> {
-        let send = &mut self.send;
-        let recv = &mut self.recv;
-        tokio::select! {
-            biased;
-            frame = read_frame(recv) => frame.map(Some),
-            result = async {
-                write_chunk_frame(send, transfer_id, index, offset, bytes).await?;
-                flush_frame_writer(send).await
-            } => result.map(|()| None),
-        }
     }
 
     async fn recv_frame(&mut self) -> Result<Frame, ProtocolError> {
@@ -204,67 +179,41 @@ impl FrameConnection for IrohFrameConnection {
 }
 
 #[async_trait::async_trait]
-impl ManifestFrameConnection for IrohFrameConnection {
-    async fn send_manifest_frame(&mut self, frame: ManifestFrame) -> Result<(), ProtocolError> {
-        write_manifest_frame(&mut self.send, &frame).await?;
-        flush_frame_writer(&mut self.send).await
-    }
-
-    async fn send_manifest_chunk(
+impl ManifestV2FrameConnection for IrohFrameConnection {
+    async fn send_manifest_v2_frame(
         &mut self,
-        manifest_id: &ManifestId,
-        entry_id: u32,
-        transfer_id: &envoix_types::TransferId,
-        index: u64,
-        offset: u64,
-        bytes: &[u8],
+        frame: ManifestV2Frame,
     ) -> Result<(), ProtocolError> {
-        write_manifest_chunk_frame(
-            &mut self.send,
-            manifest_id,
-            entry_id,
-            transfer_id,
-            index,
-            offset,
-            bytes,
-        )
-        .await?;
-        flush_frame_writer(&mut self.send).await
+        write_manifest_v2_frame(&mut self.send, &frame)
+            .await
+            .map_err(manifest_v2_stream_error)?;
+        Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn send_manifest_chunk_or_recv_frame(
-        &mut self,
-        manifest_id: &ManifestId,
-        entry_id: u32,
-        transfer_id: &envoix_types::TransferId,
-        index: u64,
-        offset: u64,
-        bytes: &[u8],
-    ) -> Result<Option<ManifestFrame>, ProtocolError> {
-        let send = &mut self.send;
-        let recv = &mut self.recv;
-        tokio::select! {
-            biased;
-            frame = read_manifest_frame(recv) => frame.map(Some),
-            result = async {
-                write_manifest_chunk_frame(
-                    send,
-                    manifest_id,
-                    entry_id,
-                    transfer_id,
-                    index,
-                    offset,
-                    bytes,
-                )
-                .await?;
-                flush_frame_writer(send).await
-            } => result.map(|()| None),
+    async fn recv_manifest_v2_frame(&mut self) -> Result<ManifestV2Frame, ProtocolError> {
+        read_manifest_v2_frame(&mut self.recv)
+            .await
+            .map_err(manifest_v2_stream_error)
+    }
+
+    fn export_keying_material(
+        &self,
+        label: &[u8],
+        context: &[u8],
+    ) -> Result<[u8; 32], ProtocolError> {
+        let mut output = [0_u8; 32];
+        self.connection
+            .export_keying_material(&mut output, label, context)
+            .map_err(|_| CoreError::Transport("failed to export iroh keying material".into()))?;
+        Ok(output)
+    }
+
+    async fn close(&mut self) -> Result<(), ProtocolError> {
+        if self.send.finish().is_ok() {
+            let _ = tokio::time::timeout(STREAM_CLOSE_TIMEOUT, self.send.stopped()).await;
         }
-    }
-
-    async fn recv_manifest_frame(&mut self) -> Result<ManifestFrame, ProtocolError> {
-        read_manifest_frame(&mut self.recv).await
+        self.connection.close(VarInt::from_u32(0), b"done");
+        Ok(())
     }
 }
 
@@ -273,5 +222,31 @@ impl Drop for IrohFrameConnection {
         // Stop the background path watcher when the connection goes away
         // (clean close or abrupt drop on interrupt).
         self.path_watcher.abort();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_v2_stream_io_is_a_transport_failure() {
+        let error = ManifestV2FrameCodecError::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "peer disconnected",
+        ));
+
+        assert!(matches!(
+            manifest_v2_stream_error(error),
+            CoreError::Transport(_)
+        ));
+    }
+
+    #[test]
+    fn manifest_v2_codec_failure_remains_a_protocol_failure() {
+        assert!(matches!(
+            manifest_v2_stream_error(ManifestV2FrameCodecError::BadMagic),
+            CoreError::Protocol(_)
+        ));
     }
 }

@@ -37,8 +37,8 @@ private enum TransferRole: String, CaseIterable {
 
     func title(language: String) -> String {
         switch self {
-        case .send: return AppText.value("Send", "发送", language: language)
-        case .receive: return AppText.value("Receive", "接收", language: language)
+        case .send: return AppText.localized("home.send.title", language: language)
+        case .receive: return AppText.localized("home.receive.title", language: language)
         }
     }
 
@@ -144,7 +144,21 @@ struct ContentView: View {
                         .accessibilityIdentifier("open_activity")
                     }
 
-                    ToolbarItem(placement: .topBarTrailing) {
+                    ToolbarItemGroup(placement: .topBarTrailing) {
+                        NavigationLink {
+                            NearbyDiscoveryView(coordinator: nearbyCoordinator) { selection in
+                                nearbyPairingSelection = selection
+                                nearbyInboundInvite = nil
+                                nearbyPairingError = nil
+                                mobileSheet = .nearbyPairing
+                            }
+                        } label: {
+                            Image(systemName: "dot.radiowaves.left.and.right")
+                                .font(.body.weight(.semibold))
+                        }
+                        .accessibilityLabel(AppText.localized("home.nearby", language: language))
+                        .accessibilityIdentifier("home_nearby")
+
                         Button {
                             mobileSheet = .settings
                         } label: {
@@ -202,9 +216,11 @@ struct ContentView: View {
             }
         }
         .onChange(of: model.receive.isBusy) { isBusy in
-            if isBusy, mobileSheet == .receive {
-                mobileSheet = nil
+            if isBusy {
                 nearbyPairingSelection = nil
+                if mobileSheet == .nearbyPairing {
+                    mobileSheet = .receive
+                }
             }
         }
         .onChange(of: nearbyCoordinator.state.incomingRendezvousOffer?.id) { _ in
@@ -240,80 +256,40 @@ struct ContentView: View {
 
     private var mobileHome: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(AppText.value("Move something", "传点东西", language: language))
-                        .font(.largeTitle.bold())
-                        .foregroundStyle(Theme.text)
-                    Text(AppText.value(
-                        "Choose what this device will do. Either device may show a QR code; the other scans it.",
-                        "选择这台设备要发送还是接收。任意一台设备都可以显示二维码，由另一台扫描。",
-                        language: language
-                    ))
-                    .font(.body)
-                    .foregroundStyle(Theme.muted)
-                    .fixedSize(horizontal: false, vertical: true)
-                }
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 12) {
+                    Image(systemName: "envelope.fill")
+                        .font(.title2.weight(.semibold))
+                        .foregroundStyle(Theme.accentStrong)
+                        .frame(width: 48, height: 48)
+                        .background(Theme.accentSoft, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
 
-                NavigationLink {
-                    NearbyDiscoveryView(coordinator: nearbyCoordinator) { selection in
-                        nearbyPairingSelection = selection
-                        nearbyInboundInvite = nil
-                        nearbyPairingError = nil
-                        mobileSheet = .nearbyPairing
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(AppText.localized("home.transfer.title", language: language))
+                            .font(.title.bold())
+                            .foregroundStyle(Theme.text)
+                        Text(AppText.localized("home.choose_action", language: language))
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.muted)
                     }
-                } label: {
-                    mobileHomeActionLabel(
-                        systemImage: "dot.radiowaves.left.and.right",
-                        title: AppText.value("Find nearby devices", "发现附近设备", language: language),
-                        subtitle: AppText.value(
-                            "Discover Envoix devices over Bluetooth and the local network.",
-                            "通过蓝牙和局域网发现 Envoix 设备。",
-                            language: language
-                        ),
-                        chevron: "chevron.right"
-                    )
                 }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("home_nearby")
+                .padding(.bottom, 4)
 
                 mobileHomeAction(
                     sheet: .send,
                     role: .send,
-                    title: AppText.value("Send items", "发送项目", language: language),
-                    subtitle: AppText.value(
-                        "Choose files or a folder, then show your send QR or scan a receive QR.",
-                        "选择文件或文件夹，然后显示发送码或扫描接收码。",
-                        language: language
-                    ),
+                    title: AppText.value("Send", "发送", language: language),
+                    subtitle: AppText.localized("home.send.subtitle", language: language),
                     identifier: "home_send"
                 )
 
                 mobileHomeAction(
                     sheet: .receive,
                     role: .receive,
-                    title: AppText.value("Receive a file", "接收文件", language: language),
-                    subtitle: AppText.value(
-                        "Choose where to save, then show your receive QR or scan a send QR.",
-                        "确认保存位置，然后显示接收码或扫描发送码。",
-                        language: language
-                    ),
+                    title: AppText.value("Receive", "接收", language: language),
+                    subtitle: AppText.localized("home.receive.subtitle", language: language),
                     identifier: "home_receive"
                 )
-
-                HStack(alignment: .top, spacing: 10) {
-                    Image(systemName: "arrow.triangle.2.circlepath")
-                        .foregroundStyle(Theme.accentStrong)
-                    Text(AppText.value(
-                        "The two devices choose opposite roles. It does not matter which one scans.",
-                        "两台设备选择相反角色即可，由哪一台扫码都可以。",
-                        language: language
-                    ))
-                    .font(.footnote)
-                    .foregroundStyle(Theme.muted)
-                    .fixedSize(horizontal: false, vertical: true)
-                }
-                .card(padding: 14)
 
                 #if DEBUG
                 if let openInUITestFixtureURL {
@@ -342,7 +318,7 @@ struct ContentView: View {
                 systemImage: role.icon,
                 title: title,
                 subtitle: subtitle,
-                chevron: "chevron.up"
+                chevron: "chevron.right"
             )
         }
         .buttonStyle(.plain)
@@ -355,16 +331,16 @@ struct ContentView: View {
         subtitle: String,
         chevron: String
     ) -> some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 13) {
             Image(systemName: systemImage)
-                .font(.title2.weight(.semibold))
+                .font(.title3.weight(.semibold))
                 .foregroundStyle(Theme.accentStrong)
-                .frame(width: 50, height: 50)
-                .background(Theme.accentSoft, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .frame(width: 46, height: 46)
+                .background(Theme.accentSoft, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
 
             VStack(alignment: .leading, spacing: 5) {
                 Text(title)
-                    .font(.title3.weight(.semibold))
+                    .font(.headline.weight(.semibold))
                     .foregroundStyle(Theme.text)
                 Text(subtitle)
                     .font(.subheadline)
@@ -377,15 +353,15 @@ struct ContentView: View {
                 .font(.caption.weight(.bold))
                 .foregroundStyle(Theme.muted)
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, minHeight: 96, alignment: .leading)
+        .padding(14)
+        .frame(maxWidth: .infinity, minHeight: 82, alignment: .leading)
         .background(Theme.surfaceRaised)
         .overlay(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
+            RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
                 .strokeBorder(Theme.line.opacity(0.72), lineWidth: 0.8)
         )
-        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous))
     }
 
     @ViewBuilder
@@ -432,7 +408,6 @@ struct ContentView: View {
             TransferStageView(
                 records: model.activities,
                 pendingRemovalIDs: model.pendingActivityRemovalIDs,
-                manifestByActivityID: model.manifestActivities,
                 metricsByActivityID: model.activityMetrics,
                 onCopyDiagnostics: model.diagnosticReport,
                 onRemoteLogTarget: model.remoteLogTarget,
@@ -442,7 +417,7 @@ struct ContentView: View {
                 onCanResume: model.canResumeActivity,
                 onResume: model.resumeActivity,
                 onCancel: model.cancelActivity,
-                onReplacePublicationTarget: model.replaceReceivePublicationTarget,
+                onApprove: model.approveActivity,
                 onDelete: model.removeActivity
             )
         case .settings:
@@ -737,46 +712,69 @@ struct ContentView: View {
         }
     }
 
-    private var featuredActivity: FfiTransferActivityRecord? {
+    private var featuredActivity: TransferActivityRecord? {
         model.activities.first { ActivityProjectionPolicy.isPending($0.state) }
     }
 
-    private func mobileActivityTitle(_ record: FfiTransferActivityRecord) -> String {
+    private func mobileActivityTitle(_ record: TransferActivityRecord) -> String {
         switch record.state {
-        case .queued, .binding, .waitingForPeer:
+        case .preparing:
+            return AppText.value("Preparing", "正在准备", language: language)
+        case .waitingForPeer:
             return AppText.value("Waiting to connect", "等待连接", language: language)
         case .pairing, .connecting:
             return AppText.value("Connecting", "正在连接", language: language)
+        case .awaitingDecision:
+            return AppText.value("Review incoming transfer", "确认接收内容", language: language)
         case .transferring:
             return record.direction == .send
                 ? AppText.value("Sending", "正在发送", language: language)
                 : AppText.value("Receiving", "正在接收", language: language)
-        case .verifying, .publishing, .unconfirmed:
+        case .verifying:
+            return AppText.value("Verifying", "正在校验", language: language)
+        case .saving:
             return AppText.value("Saving", "正在保存", language: language)
+        case .waitingForReceiverSave:
+            return AppText.value("Waiting for receiver to save", "等待接收方保存", language: language)
+        case .finalizingDelivery:
+            return AppText.value("Finalizing delivery", "正在确认送达", language: language)
         case .paused:
             return AppText.value("Transfer paused", "传输已暂停", language: language)
-        case .completed:
+        case .delivered:
             return AppText.value("Transfer complete", "传输完成", language: language)
         case .failed:
             return AppText.value("Transfer needs attention", "传输需要处理", language: language)
-        case .canceled, .unknown:
+        case .canceled:
             return AppText.value("Transfer", "传输", language: language)
         }
     }
 
-    private func mobileActivitySubtitle(_ record: FfiTransferActivityRecord) -> String {
-        let name = record.fileName.trimmed.isEmpty
-            ? AppText.value("Open Activity for details", "打开活动查看详情", language: language)
-            : record.fileName
+    private func mobileActivitySubtitle(_ record: TransferActivityRecord) -> String {
+        let name: String
+        if record.itemCount == 0 {
+            name = record.direction == .send
+                ? AppText.value("Outgoing transfer", "待发送内容", language: language)
+                : AppText.value("Incoming transfer", "待接收内容", language: language)
+        } else {
+            name = AppText.value(
+                "\(record.itemCount) items",
+                "\(record.itemCount) 个项目",
+                language: language
+            )
+        }
         guard record.totalBytes > 0 else { return name }
-        let percent = min(100, Int(Double(record.bytesTransferred) / Double(record.totalBytes) * 100))
+        let progress = TransferPresentationPolicy.progress(for: record.state)
+        let percent = progress == .complete
+            ? 100
+            : min(100, Int(Double(record.bytesTransferred) / Double(record.totalBytes) * 100))
         return "\(name) · \(percent)%"
     }
 
-    private func mobileActivityIcon(_ record: FfiTransferActivityRecord) -> String {
+    private func mobileActivityIcon(_ record: TransferActivityRecord) -> String {
         switch record.state {
         case .paused: return "pause.fill"
-        case .verifying, .publishing, .unconfirmed: return "tray.and.arrow.down.fill"
+        case .awaitingDecision: return "checklist"
+        case .verifying, .saving, .waitingForReceiverSave, .finalizingDelivery: return "tray.and.arrow.down.fill"
         default: return record.direction == .send ? "arrow.up" : "arrow.down"
         }
     }
@@ -875,7 +873,6 @@ struct ContentView: View {
             TransferStageView(
                 records: model.activities,
                 pendingRemovalIDs: model.pendingActivityRemovalIDs,
-                manifestByActivityID: model.manifestActivities,
                 metricsByActivityID: model.activityMetrics,
                 onCopyDiagnostics: model.diagnosticReport,
                 onRemoteLogTarget: model.remoteLogTarget,
@@ -885,7 +882,7 @@ struct ContentView: View {
                 onCanResume: model.canResumeActivity,
                 onResume: model.resumeActivity,
                 onCancel: model.cancelActivity,
-                onReplacePublicationTarget: model.replaceReceivePublicationTarget,
+                onApprove: model.approveActivity,
                 onDelete: model.removeActivity
             )
         case .settings:
@@ -951,11 +948,12 @@ struct ContentView: View {
     }
 
     private func kind(for viewModel: TransferViewModel) -> StatusPill.Kind {
-        switch viewModel.phase {
-        case .completed: return .success
-        case .failed: return .error
-        case .waiting, .transferring, .paused: return .warning
-        case .idle, .canceled: return .neutral
+        switch viewModel.presentationState {
+        case .delivered?: return .success
+        case .failed?: return .error
+        case .awaitingDecision?, .paused?: return .warning
+        case nil, .canceled?: return .neutral
+        default: return .warning
         }
     }
 
@@ -971,8 +969,7 @@ struct ContentView: View {
     }
 
     private func isFailed(_ viewModel: TransferViewModel) -> Bool {
-        if case .failed = viewModel.phase { return true }
-        return false
+        viewModel.presentationState == .failed
     }
 }
 
@@ -1091,7 +1088,6 @@ private struct TransferSetupStageView: View {
     }
 
     private func isIdle(_ viewModel: TransferViewModel) -> Bool {
-        if case .idle = viewModel.phase { return true }
-        return false
+        viewModel.presentationState == nil
     }
 }

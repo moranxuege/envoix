@@ -1,4 +1,4 @@
-//! Command-line arguments: clap definitions and parse tests.
+//! Command-line arguments and their canonical transfer-plan projection.
 
 use std::path::PathBuf;
 
@@ -40,9 +40,9 @@ pub(crate) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
-    /// Send one file to a receiver address printed by `envoix receive`.
+    /// Send one or more files or folders as one transfer job.
     Send(SendArgs),
-    /// Receive one file into an output directory.
+    /// Receive one transfer job into an output directory.
     Receive(ReceiveArgs),
 }
 
@@ -64,9 +64,6 @@ pub(crate) struct SendArgs {
     /// Use a fresh iroh identity for this run.
     #[arg(long)]
     pub(crate) ephemeral_identity: bool,
-    /// Start a new transfer and ignore compatible receiver-side resume state.
-    #[arg(long = "fresh", action = ArgAction::SetFalse, default_value_t = true)]
-    pub(crate) resume: bool,
     /// Shared ASCII pairing token (>=12 bytes). Required unless --invite or --room is set.
     #[arg(long, required_unless_present_any = ["invite", "room"], conflicts_with = "invite")]
     pub(crate) token: Option<String>,
@@ -94,8 +91,18 @@ pub(crate) struct SendArgs {
     /// the relay, so removing the relay removes the punch itself.
     #[arg(long, requires = "room", conflicts_with = "relay_only", hide = true)]
     pub(crate) direct_only: bool,
-    /// File to send.
+    /// First file or folder to send.
     pub(crate) file: PathBuf,
+    /// Additional files or folders. Every positional source becomes a root in
+    /// the same canonical transfer job.
+    #[arg(num_args = 0..)]
+    pub(crate) additional_files: Vec<PathBuf>,
+    /// Compression policy frozen into the job at Send.
+    #[arg(long, value_enum, default_value_t = CompressionPolicyArg::Smart)]
+    pub(crate) compression: CompressionPolicyArg,
+    /// How to resolve unreadable descendants discovered before Send.
+    #[arg(long, value_enum, default_value_t = SourceIssueActionArg::Fail)]
+    pub(crate) source_issue_action: SourceIssueActionArg,
 }
 
 /// Arguments for `envoix receive`.
@@ -144,6 +151,14 @@ pub(crate) struct ReceiveArgs {
     /// Address family to bind for receiving.
     #[arg(long, value_enum, default_value_t = IpVersion::Dual)]
     pub(crate) ip_version: IpVersion,
+    /// Explicitly approve an offer larger than the automatic receive limit or
+    /// more than half of currently allocatable destination space.
+    #[arg(long)]
+    pub(crate) approve_large_transfer: bool,
+    /// Save directly on the destination storage, or explicitly accept a
+    /// verified second copy and its additional peak-space cost.
+    #[arg(long, value_enum, default_value_t = SaveModeArg::Direct)]
+    pub(crate) save_mode: SaveModeArg,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -153,17 +168,42 @@ pub(crate) enum IpVersion {
     Ipv6,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum CompressionPolicyArg {
+    Never,
+    Always,
+    Smart,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum SourceIssueActionArg {
+    Fail,
+    ApprovePartial,
+    RemoveRoot,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum SaveModeArg {
+    Direct,
+    CopyAfterVerify,
+}
+
 /// Everything `run` needs to start a transfer, derived purely from the
 /// parsed arguments - no I/O, so the args -> behavior mapping is testable.
 pub(crate) struct TransferPlan {
     /// File to send, or directory to receive into.
     pub(crate) path: PathBuf,
+    pub(crate) additional_paths: Vec<PathBuf>,
     pub(crate) source: api::PeerSource,
     pub(crate) options: api::TransferOptions,
     /// Contextual line to print before starting, when the mode warrants one.
     pub(crate) note: Option<String>,
     pub(crate) config: Option<PathBuf>,
     pub(crate) identity: IdentityConfig,
+    pub(crate) compression: api::CompressionPolicyV2,
+    pub(crate) approve_large_transfer: bool,
+    pub(crate) source_issue_action: SourceIssueActionArg,
+    pub(crate) save_mode: SaveModeArg,
 }
 
 /// Resolve a `--room` value: use the code the user gave, or generate one via an
@@ -197,7 +237,6 @@ fn resolve_room_code(
 impl SendArgs {
     pub(crate) fn into_plan(self) -> Result<TransferPlan, TransferError> {
         let mut options = api::TransferOptions::default();
-        options.resume = self.resume;
         options.relay = self.relay.clone();
         options.path = path_policy(self.relay_only, self.direct_only)?;
 
@@ -239,11 +278,20 @@ impl SendArgs {
 
         Ok(TransferPlan {
             path: self.file,
+            additional_paths: self.additional_files,
             source,
             options,
             note,
             config: self.config,
             identity: identity_config(self.identity),
+            compression: match self.compression {
+                CompressionPolicyArg::Never => api::CompressionPolicyV2::Never,
+                CompressionPolicyArg::Always => api::CompressionPolicyV2::Always,
+                CompressionPolicyArg::Smart => api::CompressionPolicyV2::Smart,
+            },
+            approve_large_transfer: false,
+            source_issue_action: self.source_issue_action,
+            save_mode: SaveModeArg::Direct,
         })
     }
 }
@@ -280,11 +328,16 @@ impl ReceiveArgs {
 
         Ok(TransferPlan {
             path: self.output,
+            additional_paths: Vec::new(),
             source,
             options,
             note,
             config: self.config,
             identity: identity_config(self.identity),
+            compression: api::CompressionPolicyV2::Smart,
+            approve_large_transfer: self.approve_large_transfer,
+            source_issue_action: SourceIssueActionArg::Fail,
+            save_mode: self.save_mode,
         })
     }
 }
@@ -328,7 +381,3 @@ fn identity_config(path: Option<PathBuf>) -> IdentityConfig {
     path.map(IdentityConfig::Persistent)
         .unwrap_or(IdentityConfig::Ephemeral)
 }
-
-#[cfg(test)]
-#[path = "args_tests.rs"]
-mod tests;

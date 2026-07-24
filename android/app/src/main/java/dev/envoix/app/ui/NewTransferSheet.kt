@@ -1,8 +1,5 @@
 package dev.envoix.app.ui
 
-import android.content.Context
-import android.net.Uri
-import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -13,6 +10,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -25,6 +23,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
@@ -33,15 +32,21 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -49,53 +54,296 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.envoix.app.InviteCodec
+import dev.envoix.app.ManifestV2Source
+import dev.envoix.app.ManifestV2SourceStager
+import dev.envoix.app.ManifestV2StageResult
+import dev.envoix.app.Native
+import dev.envoix.app.PreparedManifestV2Source
+import dev.envoix.app.R
 import dev.envoix.app.SettingsStore
+import dev.envoix.app.TransferService
 import dev.envoix.app.discovery.DiscoverySource
 import dev.envoix.app.discovery.NearbyPairingSelection
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
 
 /**
- * New-transfer sheet. The top is a mutually-exclusive **Show QR / Scan QR** pane
- * (your own code vs a live inline scanner); below it a code field to type/paste a
- * code, then the role picker, the file/save path, and the start button. Scanning
- * fills the code and picks the opposite role, so both sides never share a role.
+ * Role-specific transfer setup. Scanning an invite may switch to the opposite
+ * role; the change is explained inline instead of interrupting with a dialog.
  */
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun NewTransferSheet(
-    onReceive: (code: String, broker: String, relay: String, qrPayload: String?) -> Unit,
-    onSend: (code: String, broker: String, relay: String, file: Uri, qrPayload: String?) -> Unit,
+    onReceive: (code: String, broker: String, relay: String, qrPayload: String?, copyApproved: Boolean) -> Unit,
+    onSend: (code: String, broker: String, relay: String, jobId: String, qrPayload: String?) -> Unit,
     nearbySelection: NearbyPairingSelection? = null,
     initialPairingInput: String? = null,
+    initialSources: List<android.net.Uri> = emptyList(),
+    initialRole: String? = null,
     onOfferInvite: ((invite: String, completion: (error: String?) -> Unit) -> Unit)? = null,
 ) {
     val colors = Envoix.colors
     val context = LocalContext.current
     val settings by SettingsStore.settings.collectAsState()
+    val language = LocalAppLanguage.current
+
+    fun text(
+        english: String,
+        simplifiedChinese: String,
+    ) = AppText.value(english, simplifiedChinese, language)
+    val switchedToSendNotice = appString(R.string.switched_to_send_notice)
+    val switchedToReceiveNotice = appString(R.string.switched_to_receive_notice)
     val broker = settings.broker
     val relay = settings.relay
 
-    var role by remember { mutableStateOf(settings.defaultRole) }
+    var role by remember(initialRole) { mutableStateOf(initialRole ?: settings.defaultRole) }
     var typed by remember { mutableStateOf("") }
     var generated by remember { mutableStateOf<Pair<String, String>?>(null) } // code, qr payload
     var scannedBroker by remember { mutableStateOf<String?>(null) }
     var scannedRelay by remember { mutableStateOf<String?>(null) }
-    var fileUri by remember { mutableStateOf<Uri?>(null) }
-    var fileName by remember { mutableStateOf<String?>(null) }
-    var topMode by remember { mutableStateOf("show") } // "show" | "scan"
+    val preparedSources = remember { mutableStateListOf<PreparedManifestV2Source>() }
+    var preparedJobId by remember { mutableStateOf<String?>(null) }
+    var preparationSummary by remember { mutableStateOf<JSONObject?>(null) }
+    var preparingCount by remember { mutableStateOf(0) }
+    var preparationError by remember { mutableStateOf<String?>(null) }
+    var sourceAwaitingReauthorization by remember {
+        mutableStateOf<PreparedManifestV2Source?>(null)
+    }
+    var roleChangeNotice by remember { mutableStateOf<String?>(null) }
+    var topMode by remember { mutableStateOf("closed") } // "closed" | "show" | "scan"
     var rendezvousBusy by remember { mutableStateOf(false) }
     var rendezvousError by remember { mutableStateOf<String?>(null) }
 
-    val filePicker =
-        rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-            if (uri != null) {
-                fileUri = uri
-                fileName = displayName(context, uri)
+    val preparationScope = rememberCoroutineScope()
+    val preparationMutex = remember { Mutex() }
+
+    fun addSources(sources: List<ManifestV2Source>) {
+        if (sources.isEmpty()) return
+        preparationScope.launch {
+            preparationMutex.withLock {
+                val fresh =
+                    sources.filter { candidate ->
+                        preparedSources.none { it.source.uri == candidate.uri }
+                    }
+                if (fresh.isEmpty()) return@withLock
+                preparingCount += fresh.size
+                preparationError = null
+                try {
+                    val store = TransferService.jobStoreDirectory(context).absolutePath
+                    val jobId =
+                        preparedJobId ?: withContext(Dispatchers.IO) {
+                            val response =
+                                JSONObject(
+                                    Native.createManifestV2Job(store, settings.compressionPolicy),
+                                )
+                            response.optString("error").takeIf(String::isNotEmpty)?.let(::error)
+                            response.getString("job_id")
+                        }.also { preparedJobId = it }
+                    for (source in fresh) {
+                        val staged = ManifestV2SourceStager.stage(context, jobId, source)
+                        var attached = false
+                        try {
+                            val response =
+                                withContext(Dispatchers.IO) {
+                                    Native.prepareManifestV2Job(
+                                        store,
+                                        jobId,
+                                        ManifestV2SourceStager.rootsJson(source, staged),
+                                    )
+                                }
+                            val parsed = JSONObject(response)
+                            parsed.optString("error").takeIf(String::isNotEmpty)?.let(::error)
+                            attached = true
+                            preparationSummary = parsed
+                            preparedSources +=
+                                ManifestV2SourceStager.parsePreparedSnapshot(source, staged.root, response)
+                        } catch (error: Throwable) {
+                            if (!attached) staged.root.parentFile?.deleteRecursively()
+                            throw error
+                        }
+                    }
+                } catch (error: Throwable) {
+                    preparationError =
+                        error.message ?: text(
+                            "Could not prepare the selected source",
+                            "无法准备所选内容",
+                        )
+                } finally {
+                    preparingCount -= fresh.size
+                }
             }
         }
-    val folderPicker =
+    }
+
+    fun removeSource(source: PreparedManifestV2Source) {
+        val jobId = preparedJobId ?: return
+        preparationScope.launch {
+            preparationMutex.withLock {
+                val store = TransferService.jobStoreDirectory(context).absolutePath
+                val response =
+                    withContext(Dispatchers.IO) {
+                        Native.resolveManifestV2Source(
+                            store,
+                            jobId,
+                            source.rootItemId,
+                            "remove_selection",
+                            "",
+                        )
+                    }
+                val error = JSONObject(response).optString("error")
+                if (error.isEmpty()) {
+                    preparedSources.remove(source)
+                    source.localRoot.parentFile?.deleteRecursively()
+                    preparationSummary = JSONObject(response)
+                } else {
+                    preparationError = error
+                }
+            }
+        }
+    }
+
+    fun approvePartial(source: PreparedManifestV2Source) {
+        val jobId = preparedJobId ?: return
+        preparationScope.launch {
+            preparationMutex.withLock {
+                val response =
+                    withContext(Dispatchers.IO) {
+                        Native.resolveManifestV2Source(
+                            TransferService.jobStoreDirectory(context).absolutePath,
+                            jobId,
+                            source.rootItemId,
+                            "approve_partial",
+                            "",
+                        )
+                    }
+                val parsed = JSONObject(response)
+                val error = parsed.optString("error")
+                if (error.isEmpty()) {
+                    val index = preparedSources.indexOf(source)
+                    if (index >= 0) preparedSources[index] = source.copy(partialApproved = true)
+                    preparationSummary = parsed
+                    preparationError = null
+                } else {
+                    preparationError = error
+                }
+            }
+        }
+    }
+
+    fun reauthorizeSource(
+        previous: PreparedManifestV2Source,
+        uri: android.net.Uri,
+    ) {
+        val jobId = preparedJobId ?: return
+        preparationScope.launch {
+            preparationMutex.withLock {
+                preparingCount += 1
+                preparationError = null
+                val source = ManifestV2SourceStager.sourceFromUri(context, uri, true)
+                var staged: ManifestV2StageResult? = null
+                var committed = false
+                try {
+                    val stagedResult = ManifestV2SourceStager.stage(context, jobId, source)
+                    staged = stagedResult
+                    val response =
+                        withContext(Dispatchers.IO) {
+                            Native.reauthorizeManifestV2ProviderSource(
+                                TransferService.jobStoreDirectory(context).absolutePath,
+                                jobId,
+                                previous.rootItemId,
+                                ManifestV2SourceStager.rootsJson(source, stagedResult),
+                            )
+                        }
+                    val parsed = JSONObject(response)
+                    parsed.optString("error").takeIf(String::isNotEmpty)?.let(::error)
+                    committed = true
+                    val replacement =
+                        ManifestV2SourceStager.parsePreparedSnapshot(
+                            source,
+                            stagedResult.root,
+                            response,
+                            previous.rootItemId,
+                        )
+                    val index = preparedSources.indexOf(previous)
+                    check(index >= 0) {
+                        text("Source selection changed while authorizing", "授权期间所选内容发生了变化")
+                    }
+                    preparedSources[index] = replacement
+                    previous.localRoot.parentFile?.deleteRecursively()
+                    preparationSummary = parsed
+                } catch (error: Throwable) {
+                    if (!committed) staged?.root?.parentFile?.deleteRecursively()
+                    preparationError =
+                        error.message ?: text(
+                            "Could not authorize the selected folder",
+                            "无法授权所选文件夹",
+                        )
+                } finally {
+                    preparingCount -= 1
+                }
+            }
+        }
+    }
+
+    val filePicker =
+        rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+            addSources(uris.map { ManifestV2SourceStager.sourceFromUri(context, it, false) })
+        }
+    val sourceFolderPicker =
+        rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            uri?.let {
+                addSources(listOf(ManifestV2SourceStager.sourceFromUri(context, it, true)))
+            }
+        }
+    val sourceReauthorizationPicker =
+        rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            val previous = sourceAwaitingReauthorization
+            sourceAwaitingReauthorization = null
+            if (uri != null && previous != null) reauthorizeSource(previous, uri)
+        }
+    val saveFolderPicker =
         rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
             if (uri != null) SettingsStore.setSaveTree(context, uri)
         }
     val joining = typed.isNotBlank()
+
+    LaunchedEffect(initialSources, initialRole) {
+        if (initialRole != "receive") {
+            preparationMutex.withLock {
+                if (preparedJobId == null && preparedSources.isEmpty()) {
+                    runCatching {
+                        withContext(Dispatchers.IO) {
+                            Native.listManifestV2PreparingJobs(
+                                TransferService.jobStoreDirectory(context).absolutePath,
+                            )
+                        }
+                    }.mapCatching(ManifestV2SourceStager::restoreLatestPreparation)
+                        .onSuccess { restored ->
+                            if (restored != null) {
+                                preparedJobId = restored.jobId
+                                preparationSummary = restored.summary
+                                preparedSources.addAll(restored.sources)
+                                role = "send"
+                            }
+                        }.onFailure { error ->
+                            preparationError =
+                                error.message ?: text(
+                                    "Could not restore prepared items",
+                                    "无法恢复已准备的项目",
+                                )
+                        }
+                }
+            }
+        }
+        if (initialSources.isNotEmpty()) {
+            role = "send"
+            addSources(initialSources.map { ManifestV2SourceStager.sourceFromUri(context, it, false) })
+        }
+    }
 
     // (Re)generate our own code whenever the role changes and we're not joining.
     LaunchedEffect(role, joining) {
@@ -107,8 +355,18 @@ fun NewTransferSheet(
         typed = inv.code
         scannedBroker = inv.broker
         scannedRelay = inv.relay
-        InviteCodec.oppositeRole(inv.role)?.let { role = it }
-        topMode = "show" // stop the camera; the code is filled in now
+        InviteCodec.oppositeRole(inv.role)?.let { scannedRole ->
+            if (scannedRole != role) {
+                role = scannedRole
+                roleChangeNotice =
+                    if (scannedRole == "send") {
+                        switchedToSendNotice
+                    } else {
+                        switchedToReceiveNotice
+                    }
+            }
+        }
+        topMode = "closed" // stop the camera; the code is filled in now
     }
 
     LaunchedEffect(initialPairingInput) {
@@ -122,129 +380,306 @@ fun NewTransferSheet(
         !rendezvousBusy &&
             !code.isNullOrBlank() &&
             code.contains("-") &&
-            (role == "receive" || fileUri != null)
+            when (role) {
+                "send" ->
+                    preparedSources.isNotEmpty() &&
+                        preparingCount == 0 &&
+                        preparedJobId != null &&
+                        preparedSources.all { it.issueCount == 0 || it.partialApproved }
+                else -> true
+            }
 
     Column(
         Modifier
+            .semantics { testTagsAsResourceId = true }
+            .testTag("transfer_sheet")
             .fillMaxWidth()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 20.dp)
-            .padding(bottom = 28.dp),
+            .fillMaxHeight(0.94f),
     ) {
-        Text("New transfer", color = colors.text, fontSize = 21.sp, fontWeight = FontWeight.ExtraBold)
-        Spacer(Modifier.height(14.dp))
+        Text(
+            if (role == "send") {
+                appString(R.string.send_action_title)
+            } else {
+                appString(R.string.receive_action_title)
+            },
+            color = colors.text,
+            fontSize = 24.sp,
+            fontWeight = FontWeight.ExtraBold,
+            modifier = Modifier.padding(horizontal = 20.dp),
+        )
+        Text(
+            if (role == "send") {
+                appString(R.string.send_setup_subtitle)
+            } else {
+                appString(R.string.receive_setup_subtitle)
+            },
+            color = colors.muted,
+            fontSize = 13.sp,
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
+        )
 
-        nearbySelection?.let { selection ->
-            NearbyPairingContext(selection)
-            Spacer(Modifier.height(14.dp))
-        }
-
-        rendezvousError?.let { error ->
-            Text(error, color = colors.danger, fontSize = 12.sp, lineHeight = 17.sp)
-            Spacer(Modifier.height(10.dp))
-        }
-
-        // ---- top pane: show my QR vs scan one ----
-        Row(
+        Column(
             Modifier
+                .weight(1f)
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(12.dp))
-                .background(colors.bg)
-                .border(1.dp, colors.line, RoundedCornerShape(12.dp))
-                .padding(3.dp),
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp)
+                .padding(top = 12.dp, bottom = 12.dp),
         ) {
-            SegTab("Show QR", topMode == "show", Modifier.weight(1f)) { topMode = "show" }
-            SegTab("Scan QR", topMode == "scan", Modifier.weight(1f)) { topMode = "scan" }
-        }
+            nearbySelection?.let { selection ->
+                NearbyPairingContext(selection)
+                Spacer(Modifier.height(14.dp))
+            }
 
-        Spacer(Modifier.height(14.dp))
-        Box(Modifier.fillMaxWidth().heightIn(min = 250.dp), contentAlignment = Alignment.Center) {
-            if (topMode == "scan") {
-                InlineScanner(onScanned = ::applyScanned, modifier = Modifier.fillMaxWidth())
-            } else if (joining) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("You'll join", color = colors.muted, fontSize = 13.sp)
-                    Spacer(Modifier.height(6.dp))
-                    Text(typed, color = colors.accent, fontSize = 18.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
-                    Spacer(Modifier.height(6.dp))
-                    Text("clear the code below to show your own", color = colors.muted, fontSize = 11.sp)
+            rendezvousError?.let { error ->
+                Text(error, color = colors.danger, fontSize = 12.sp, lineHeight = 17.sp)
+                Spacer(Modifier.height(10.dp))
+            }
+
+            roleChangeNotice?.let { notice ->
+                Text(
+                    notice,
+                    color = colors.accentStrong,
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp,
+                    modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(colors.accentSoft)
+                            .padding(10.dp),
+                )
+                Spacer(Modifier.height(10.dp))
+            }
+
+            // ---- canonical roots or receive destination ----
+            if (role == "send") {
+                PathRow(
+                    appString(R.string.add_files),
+                    appString(R.string.add_files_hint),
+                    placeholder = preparedSources.isEmpty(),
+                ) {
+                    filePicker.launch(arrayOf("*/*"))
                 }
-            } else if (generated != null) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    QrCode(generated!!.second, side = 168.dp)
-                    Spacer(Modifier.height(12.dp))
-                    val clip = LocalClipboardManager.current
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            generated!!.first,
-                            color = colors.text,
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            fontFamily = FontFamily.Monospace,
-                        )
-                        Spacer(Modifier.width(8.dp))
+                Spacer(Modifier.height(8.dp))
+                PathRow(
+                    appString(R.string.add_folder),
+                    appString(R.string.add_folder_hint),
+                    placeholder = false,
+                ) {
+                    sourceFolderPicker.launch(null)
+                }
+                preparedSources.forEach { prepared ->
+                    Row(
+                        Modifier.fillMaxWidth().padding(top = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                prepared.source.displayName,
+                                color = colors.text,
+                                fontSize = 14.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                when {
+                                    prepared.partialApproved ->
+                                        text("Folder · accessible content only", "文件夹 · 仅发送可访问内容")
+                                    prepared.issueCount > 0 ->
+                                        text("Folder · source decision required", "文件夹 · 需要处理来源访问问题")
+                                    prepared.source.directory -> text("Folder", "文件夹")
+                                    else -> text("File", "文件")
+                                },
+                                color = if (prepared.issueCount > 0 && !prepared.partialApproved) colors.warning else colors.muted,
+                                fontSize = 11.sp,
+                            )
+                        }
+                        if (prepared.issueCount > 0 && !prepared.partialApproved) {
+                            Text(
+                                text("Authorize again", "重新授权"),
+                                color = colors.accent,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier =
+                                    Modifier
+                                        .clip(RoundedCornerShape(7.dp))
+                                        .clickable {
+                                            sourceAwaitingReauthorization = prepared
+                                            sourceReauthorizationPicker.launch(null)
+                                        }.padding(horizontal = 7.dp, vertical = 5.dp),
+                            )
+                            if (prepared.canApprovePartial) {
+                                Text(
+                                    text("Send accessible", "发送可访问内容"),
+                                    color = colors.accent,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier =
+                                        Modifier
+                                            .clip(RoundedCornerShape(7.dp))
+                                            .clickable { approvePartial(prepared) }
+                                            .padding(horizontal = 7.dp, vertical = 5.dp),
+                                )
+                            }
+                        }
                         Icon(
-                            Icons.Default.ContentCopy,
-                            "Copy code",
+                            Icons.Default.Close,
+                            contentDescription =
+                                text(
+                                    "Remove ${prepared.source.displayName}",
+                                    "移除 ${prepared.source.displayName}",
+                                ),
                             tint = colors.muted,
                             modifier =
                                 Modifier
                                     .clip(CircleShape)
-                                    .clickable { clip.setText(AnnotatedString(generated!!.first)) }
-                                    .padding(6.dp)
-                                    .size(18.dp),
+                                    .clickable { removeSource(prepared) }
+                                    .padding(7.dp)
+                                    .size(17.dp),
                         )
                     }
                 }
+                if (preparingCount > 0) {
+                    Text(
+                        text(
+                            "Preparing $preparingCount selected source(s)…",
+                            "正在准备 $preparingCount 个所选来源…",
+                        ),
+                        color = colors.accent,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
+                preparationSummary?.takeIf { preparedSources.isNotEmpty() }?.let { summary ->
+                    val files = summary.optInt("file_count")
+                    val directories = summary.optInt("directory_count")
+                    val size = dev.envoix.app.humanBytes(summary.optLong("total"))
+                    Text(
+                        text(
+                            "$files files · $directories folders · $size",
+                            "$files 个文件 · $directories 个文件夹 · $size",
+                        ),
+                        color = colors.muted,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
+                preparationError?.let {
+                    Text(
+                        it,
+                        color = colors.danger,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
+            } else {
+                PathRow(appString(R.string.save_to), SettingsStore.saveLabel(context), placeholder = false) {
+                    saveFolderPicker.launch(SettingsStore.savePickerInitialUri())
+                }
             }
-        }
 
-        // ---- code field (type/paste a code to join) ----
-        Spacer(Modifier.height(16.dp))
-        OutlinedTextField(
-            value = typed,
-            onValueChange = {
-                typed = it.trim()
-                scannedBroker = null
-                scannedRelay = null
-            },
-            placeholder = { Text("or enter a code to join…") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
+            Spacer(Modifier.height(18.dp))
+            Text(
+                appString(R.string.connect_section_title),
+                color = colors.muted,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.sp,
+            )
+            Spacer(Modifier.height(6.dp))
 
-        // ---- role picker ----
-        Spacer(Modifier.height(16.dp))
-        Text("I WANT TO", color = colors.muted, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
-        Spacer(Modifier.height(6.dp))
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(12.dp))
-                .background(colors.bg)
-                .border(1.dp, colors.line, RoundedCornerShape(12.dp))
-                .padding(3.dp),
-        ) {
-            SegTab("Send", role == "send", Modifier.weight(1f)) { role = "send" }
-            SegTab("Receive", role == "receive", Modifier.weight(1f)) { role = "receive" }
-        }
-
-        // ---- path: file to send (required) or where received files land ----
-        Spacer(Modifier.height(14.dp))
-        if (role == "send") {
-            PathRow("FILE TO SEND", fileName ?: "Choose a file…", placeholder = fileName == null) {
-                filePicker.launch(arrayOf("*/*"))
+            // ---- top pane: show my QR vs scan one ----
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(colors.bg)
+                    .border(1.dp, colors.line, RoundedCornerShape(12.dp))
+                    .padding(3.dp),
+            ) {
+                SegTab(appString(R.string.show_qr), topMode == "show", Modifier.weight(1f)) {
+                    topMode = "show"
+                }
+                SegTab(appString(R.string.scan_qr), topMode == "scan", Modifier.weight(1f)) {
+                    topMode = "scan"
+                }
             }
-        } else {
-            PathRow("SAVE TO", SettingsStore.saveLabel(context), placeholder = false) {
-                folderPicker.launch(SettingsStore.savePickerInitialUri())
+
+            if (topMode != "closed") {
+                Spacer(Modifier.height(12.dp))
+                Box(Modifier.fillMaxWidth().heightIn(min = 210.dp), contentAlignment = Alignment.Center) {
+                    if (topMode == "scan") {
+                        InlineScanner(onScanned = ::applyScanned, modifier = Modifier.fillMaxWidth())
+                    } else if (joining) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(text("You'll join", "即将加入"), color = colors.muted, fontSize = 13.sp)
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                typed,
+                                color = colors.accent,
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace,
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                text("clear the code below to show your own", "清空下方配对码即可显示自己的二维码"),
+                                color = colors.muted,
+                                fontSize = 11.sp,
+                            )
+                        }
+                    } else if (generated != null) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            QrCode(generated!!.second, side = 168.dp)
+                            Spacer(Modifier.height(12.dp))
+                            val clip = LocalClipboardManager.current
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    generated!!.first,
+                                    color = colors.text,
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontFamily = FontFamily.Monospace,
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Icon(
+                                    Icons.Default.ContentCopy,
+                                    text("Copy code", "复制配对码"),
+                                    tint = colors.muted,
+                                    modifier =
+                                        Modifier
+                                            .clip(CircleShape)
+                                            .clickable { clip.setText(AnnotatedString(generated!!.first)) }
+                                            .padding(6.dp)
+                                            .size(18.dp),
+                                )
+                            }
+                        }
+                    }
+                }
             }
+
+            // ---- code field (type/paste a code to join) ----
+            Spacer(Modifier.height(16.dp))
+            OutlinedTextField(
+                value = typed,
+                onValueChange = {
+                    typed = it.trim()
+                    scannedBroker = null
+                    scannedRelay = null
+                },
+                placeholder = { Text(appString(R.string.enter_pairing_code_hint)) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
         }
 
         // ---- start ----
-        Spacer(Modifier.height(16.dp))
         Box(
             Modifier
+                .padding(horizontal = 20.dp, vertical = 12.dp)
+                .testTag("transfer_start")
                 .fillMaxWidth()
                 .height(52.dp)
                 .clip(RoundedCornerShape(14.dp))
@@ -254,9 +689,9 @@ fun NewTransferSheet(
                     val qr = if (joining) null else generated?.second
                     val startLocal = {
                         if (role == "send") {
-                            onSend(c, useBroker, useRelay, fileUri!!, qr)
+                            onSend(c, useBroker, useRelay, preparedJobId!!, qr)
                         } else {
-                            onReceive(c, useBroker, useRelay, qr)
+                            onReceive(c, useBroker, useRelay, qr, true)
                         }
                     }
                     val offer = onOfferInvite
@@ -280,9 +715,9 @@ fun NewTransferSheet(
         ) {
             Text(
                 when {
-                    rendezvousBusy -> "Delivering invite…"
-                    role == "send" -> "Send"
-                    else -> "Receive"
+                    rendezvousBusy -> text("Delivering invite…", "正在发送邀请…")
+                    role == "send" -> text("Send", "发送")
+                    else -> text("Receive", "接收")
                 },
                 color = Color.White,
                 fontWeight = FontWeight.Bold,
@@ -295,6 +730,12 @@ fun NewTransferSheet(
 @Composable
 private fun NearbyPairingContext(selection: NearbyPairingSelection) {
     val colors = Envoix.colors
+    val language = LocalAppLanguage.current
+
+    fun text(
+        english: String,
+        simplifiedChinese: String,
+    ) = AppText.value(english, simplifiedChinese, language)
     val sourceText =
         selection.sources
             .sortedBy(DiscoverySource::ordinal)
@@ -313,20 +754,26 @@ private fun NearbyPairingContext(selection: NearbyPairingSelection) {
             .padding(14.dp),
     ) {
         Text(
-            selection.displayName ?: "Nearby Envoix device",
+            selection.displayName ?: text("Nearby Envoix device", "附近的 Envoix 设备"),
             color = colors.text,
             fontWeight = FontWeight.Bold,
             fontSize = 16.sp,
         )
         if (sourceText.isNotEmpty()) {
-            Text("Found over $sourceText", color = colors.muted, fontSize = 12.sp)
+            Text(text("Found over $sourceText", "通过 $sourceText 发现"), color = colors.muted, fontSize = 12.sp)
         }
         Spacer(Modifier.height(6.dp))
         Text(
             if (DiscoverySource.Bluetooth in selection.sources) {
-                "Experimental insecure BLE pairing: the invitation is sent without peer authentication. A nearby attacker may impersonate or relay this device."
+                text(
+                    "Experimental insecure BLE pairing: the invitation is sent without peer authentication. A nearby attacker may impersonate or relay this device.",
+                    "实验性非安全 BLE 配对：邀请未经对端身份认证。附近的攻击者可能冒充或中继此设备。",
+                )
             } else {
-                "This device is not currently reachable over BLE. Use QR or a typed Envoix code to continue."
+                text(
+                    "This device is not currently reachable over BLE. Use QR or a typed Envoix code to continue.",
+                    "当前无法通过 BLE 连接此设备。请使用二维码或输入 Envoix 配对码继续。",
+                )
             },
             color = colors.muted,
             fontSize = 12.sp,
@@ -396,11 +843,3 @@ private fun PathRow(
         }
     }
 }
-
-private fun displayName(
-    context: Context,
-    uri: Uri,
-): String =
-    context.contentResolver
-        .query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
-        ?.use { c -> if (c.moveToFirst()) c.getString(0) else null } ?: "file"

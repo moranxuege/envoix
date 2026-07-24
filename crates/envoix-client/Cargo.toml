@@ -8,18 +8,7 @@ license.workspace = true
 envoix-auth.workspace = true
 envoix-error.workspace = true
 envoix-protocol.workspace = true
-envoix-qr.workspace = true
-envoix-pairing.workspace = true
 envoix-session.workspace = true
-envoix-storage.workspace = true
 envoix-types.workspace = true
-blake3.workspace = true
 serde.workspace = true
-serde_json.workspace = true
-tokio.workspace = true
 toml.workspace = true
-tracing.workspace = true
-
-[dev-dependencies]
-serde_json = { workspace = true }
-tempfile.workspace = true

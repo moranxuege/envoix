@@ -52,18 +52,26 @@ private struct TransferMenuRow: View {
     }
 
     private var summary: String {
-        switch viewModel.phase {
-        case .idle: return AppText.value("Idle", "空闲", language: language)
-        case .waiting: return AppText.value("Waiting…", "等待中…", language: language)
-        case .transferring:
+        switch viewModel.presentationState {
+        case nil: return AppText.value("Idle", "空闲", language: language)
+        case .preparing?: return AppText.value("Preparing…", "准备中…", language: language)
+        case .waitingForPeer?: return AppText.value("Waiting…", "等待中…", language: language)
+        case .pairing?: return AppText.value("Pairing…", "配对中…", language: language)
+        case .connecting?: return AppText.value("Connecting…", "连接中…", language: language)
+        case .awaitingDecision?: return AppText.value("Review", "待确认", language: language)
+        case .transferring?:
             let pct = Int((viewModel.progressFraction * 100).rounded())
             return viewModel.bytesPerSec > 0
                 ? "\(pct)% · \(rateString(viewModel.bytesPerSec))"
                 : "\(pct)%"
-        case .paused: return AppText.value("Paused", "已暂停", language: language)
-        case .completed: return AppText.value("Done", "已完成", language: language)
-        case .canceled: return AppText.value("Canceled", "已取消", language: language)
-        case .failed: return AppText.value("Failed", "失败", language: language)
+        case .verifying?: return AppText.value("Verifying…", "校验中…", language: language)
+        case .saving?: return AppText.value("Saving…", "保存中…", language: language)
+        case .waitingForReceiverSave?: return AppText.value("Receiver saving…", "接收端保存中…", language: language)
+        case .finalizingDelivery?: return AppText.value("Finalizing…", "确认送达中…", language: language)
+        case .paused?: return AppText.value("Paused", "已暂停", language: language)
+        case .delivered?: return AppText.value("Delivered", "已送达", language: language)
+        case .canceled?: return AppText.value("Canceled", "已取消", language: language)
+        case .failed?: return AppText.value("Failed", "失败", language: language)
         }
     }
 }

@@ -1,29 +1,29 @@
 //! Room rendezvous transfer: pair two peers via the rendezvous broker using a
-//! short code, then transfer over iroh with the existing data plane.
+//! short code, then transfer one canonical Manifest v2 job over iroh.
 //!
 //! The rendezvous only finds + authenticates the peers and exchanges their iroh
-//! addresses; the data transfer then uses either the compatible single-file
-//! path or the additive ALPN-negotiated Manifest path, authenticated with a
-//! token derived from the pairing key (so data-plane SPAKE2 still runs and is
-//! channel-bound).
+//! addresses. The data session is authenticated with a token derived from the
+//! pairing key, so SPAKE2 remains channel-bound after rendezvous.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use envoix_error::CoreError;
+use envoix_protocol::manifest_v2_frames::JobGenerationV2;
 use envoix_rendezvous_iroh::{
     JoinIntent, RoomPairing, build_endpoint_with_dns, drive_pairing, join_room_with_intent,
     split_code,
 };
+use envoix_transfer::{SenderDeliveryStoreV2, SenderTransferPhaseV2};
 use envoix_types::PairingStep;
 use iroh::{Endpoint, EndpointAddr, SecretKey};
 
 use crate::{
-    BindAddrs, BoundEndpoint, EventSink, ManifestSendRequest, ManifestTransferSummary,
-    PairingConfig, SessionConfig, SessionError, SessionEventSink, SessionTransferSummary,
-    TransferCancelToken, TransferEvent, TransferSummary, bind_iroh_endpoint_with_relay,
-    bind_iroh_transfer_endpoint_with_relay, receive_transfer_with_auth_retries,
-    receive_with_auth_retries, send_file_to_endpoint_addr, send_manifest_to_endpoint_addr,
+    BindAddrs, BoundEndpoint, CanonicalTransferJob, EventSink, PairingConfig,
+    PendingManifestV2Receive, SenderManifestV2SessionSummary, SessionConfig, SessionError,
+    TransferCancelToken, TransferEvent, bind_iroh_manifest_v2_endpoint, receive_manifest_v2_offer,
+    send_manifest_v2_to_endpoint_addr,
 };
 
 const SEND_ROOM_PAIRING_TIMEOUT: Duration = Duration::from_secs(35);
@@ -116,7 +116,7 @@ where
     let result = if let Some(timeout) = timeout {
         tokio::select! {
             result = pair_in_room_retrying(rdz, broker, room_id, password, mine, intent, events) => result,
-            _ = cancel.cancelled() => Err(CoreError::Transfer(interrupt_message(cancel).into())),
+            _ = cancel.cancelled() => Err(CoreError::Cancelled),
             _ = tokio::time::sleep(timeout) => {
                 Err(CoreError::Transport("rendezvous pairing timed out".into()))
             }
@@ -124,70 +124,13 @@ where
     } else {
         tokio::select! {
             result = pair_in_room_retrying(rdz, broker, room_id, password, mine, intent, events) => result,
-            _ = cancel.cancelled() => Err(CoreError::Transfer(interrupt_message(cancel).into())),
+            _ = cancel.cancelled() => Err(CoreError::Cancelled),
         }
     };
     if result.is_err() {
         rdz.close().await;
     }
     result
-}
-
-fn interrupt_message(cancel: &TransferCancelToken) -> &'static str {
-    if cancel.is_pause() {
-        crate::USER_PAUSE_MESSAGE
-    } else {
-        crate::USER_INTERRUPT_MESSAGE
-    }
-}
-
-/// Receive a file by pairing in a room: bind the data endpoint, exchange its
-/// descriptor with the sender over the broker (SPAKE2 with `code`), then accept
-/// the transfer using the token derived from the pairing.
-pub async fn receive_file_via_room(
-    broker: EndpointAddr,
-    code: &str,
-    listen_addrs: impl Into<BindAddrs>,
-    output_dir: PathBuf,
-    config: SessionConfig,
-    events: Box<dyn EventSink>,
-    cancel: TransferCancelToken,
-) -> Result<TransferSummary, SessionError> {
-    let bound = bind_iroh_endpoint_with_relay(
-        listen_addrs,
-        &config.identity,
-        &config.data_relay(),
-        config.relay_only,
-        &config.candidates,
-        config.data_stream_window,
-    )
-    .await?;
-    let auth = pair_room_receiver(&bound, broker, code, &config, events.as_ref(), &cancel).await?;
-    receive_with_auth_retries(bound, output_dir, config, &auth, events, cancel).await
-}
-
-/// Receive a negotiated single-file or Manifest transfer through the existing
-/// room rendezvous flow.
-pub async fn receive_transfer_via_room(
-    broker: EndpointAddr,
-    code: &str,
-    listen_addrs: impl Into<BindAddrs>,
-    output_dir: PathBuf,
-    config: SessionConfig,
-    events: Box<dyn SessionEventSink>,
-    cancel: TransferCancelToken,
-) -> Result<SessionTransferSummary, SessionError> {
-    let bound = bind_iroh_transfer_endpoint_with_relay(
-        listen_addrs,
-        &config.identity,
-        &config.data_relay(),
-        config.relay_only,
-        &config.candidates,
-        config.data_stream_window,
-    )
-    .await?;
-    let auth = pair_room_receiver(&bound, broker, code, &config, events.as_ref(), &cancel).await?;
-    receive_transfer_with_auth_retries(bound, output_dir, config, &auth, events, cancel).await
 }
 
 async fn pair_room_receiver(
@@ -248,27 +191,73 @@ async fn pair_room_receiver(
     Ok(auth)
 }
 
-/// Send a file by pairing in a room: exchange descriptors with the receiver over
-/// the broker (SPAKE2 with `code`), then dial the receiver and send using the
-/// token derived from the pairing.
-pub async fn send_file_via_room(
+/// Receives an authenticated Manifest v2 offer through room pairing. No
+/// destination or payload effect occurs until the returned pending offer is
+/// explicitly continued.
+pub async fn receive_manifest_v2_offer_via_room(
     broker: EndpointAddr,
     code: &str,
-    file_path: PathBuf,
-    resume: bool,
+    listen_addrs: impl Into<BindAddrs>,
     config: SessionConfig,
-    events: Box<dyn EventSink>,
-    cancel: TransferCancelToken,
-) -> Result<TransferSummary, SessionError> {
-    let pairing = pair_room_sender(broker, code, &config, events.as_ref(), &cancel).await?;
+    events: Arc<dyn EventSink>,
+    cancel: &TransferCancelToken,
+) -> Result<PendingManifestV2Receive, SessionError> {
+    let bound = bind_iroh_manifest_v2_endpoint(
+        listen_addrs,
+        &config.identity,
+        &config.data_relay(),
+        config.relay_only,
+        &config.candidates,
+        config.data_stream_window,
+    )
+    .await?;
+    let auth = pair_room_receiver(&bound, broker, code, &config, events.as_ref(), cancel).await?;
+    receive_manifest_v2_offer(bound, &auth, events, cancel).await
+}
+
+/// Sends a sealed canonical job through room pairing and returns only after
+/// the receiver's durable save proof is committed.
+pub async fn send_manifest_v2_via_room(
+    broker: EndpointAddr,
+    code: &str,
+    job: &CanonicalTransferJob,
+    state_directory: PathBuf,
+    config: SessionConfig,
+    events: Arc<dyn EventSink>,
+    cancel: &TransferCancelToken,
+) -> Result<SenderManifestV2SessionSummary, SessionError> {
+    let pairing = pair_room_sender(broker, code, &config, events.as_ref(), cancel).await?;
     let auth = PairingConfig::Spake2SharedToken {
         token: pairing.token,
     };
-    send_file_to_endpoint_addr(
+    let first_attempt = send_manifest_v2_to_endpoint_addr(
+        pairing.peer.clone(),
+        job,
+        state_directory.clone(),
+        config.clone(),
+        &auth,
+        events.clone(),
+        cancel,
+    )
+    .await;
+    let error = match first_attempt {
+        Ok(summary) => return Ok(summary),
+        Err(error) => error,
+    };
+    let sender_phase = sender_delivery_phase(job, &state_directory).await;
+    if !should_retry_room_with_relay(&config, &error, sender_phase) {
+        return Err(error);
+    }
+    events.on_event(TransferEvent::Diagnostic {
+        message: "direct connection failed before the offer; retrying through the relay".into(),
+    });
+    let mut relay_config = config;
+    relay_config.relay_only = true;
+    send_manifest_v2_to_endpoint_addr(
         pairing.peer,
-        file_path,
-        resume,
-        config,
+        job,
+        state_directory,
+        relay_config,
         &auth,
         events,
         cancel,
@@ -276,23 +265,41 @@ pub async fn send_file_via_room(
     .await
 }
 
-/// Send one Manifest transfer set through the existing room rendezvous flow.
-pub async fn send_manifest_via_room(
-    broker: EndpointAddr,
-    code: &str,
-    request: ManifestSendRequest,
-    resume: bool,
-    config: SessionConfig,
-    events: Box<dyn SessionEventSink>,
-    cancel: TransferCancelToken,
-) -> Result<ManifestTransferSummary, SessionError> {
-    let pairing = pair_room_sender(broker, code, &config, events.as_ref(), &cancel).await?;
-    let auth = PairingConfig::Spake2SharedToken {
-        token: pairing.token,
-    };
-    send_manifest_to_endpoint_addr(pairing.peer, request, resume, config, &auth, events, cancel)
-        .await
+fn should_retry_room_with_relay(
+    config: &SessionConfig,
+    error: &SessionError,
+    sender_phase: Option<SenderTransferPhaseV2>,
+) -> bool {
+    !config.relay_only
+        && config.data_relay().is_some()
+        && sender_phase == Some(SenderTransferPhaseV2::Offering)
+        && (matches!(error, CoreError::Transport(_))
+            || matches!(
+                error,
+                CoreError::Protocol(message) if message == "authentication timed out"
+            ))
 }
+
+async fn sender_delivery_phase(
+    job: &CanonicalTransferJob,
+    state_directory: &std::path::Path,
+) -> Option<SenderTransferPhaseV2> {
+    let manifest = job.manifest()?;
+    let identity = JobGenerationV2 {
+        job_id: manifest.job_id,
+        generation: manifest.generation,
+    };
+    SenderDeliveryStoreV2::new(state_directory.join("sender-delivery"))
+        .load(identity)
+        .await
+        .ok()
+        .flatten()
+        .map(|record| record.phase())
+}
+
+#[cfg(test)]
+#[path = "room_tests.rs"]
+mod tests;
 
 async fn pair_room_sender(
     broker: EndpointAddr,
@@ -333,7 +340,3 @@ async fn pair_room_sender(
     rdz.close().await;
     Ok(pairing)
 }
-
-#[cfg(test)]
-#[path = "room_tests.rs"]
-mod tests;
