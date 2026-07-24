@@ -371,7 +371,7 @@ private fun EmptyState() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun TransferCard(
+internal fun TransferCard(
     t: Transfer,
     expanded: Boolean,
     onToggleDetail: (Long) -> Unit,

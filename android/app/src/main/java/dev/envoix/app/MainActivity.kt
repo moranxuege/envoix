@@ -15,19 +15,22 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.core.content.IntentCompat
+import dev.envoix.app.discovery.DiscoveryViewModel
 import dev.envoix.app.ui.AppText
-import dev.envoix.app.ui.DiscoveryScreen
+import dev.envoix.app.ui.ConnectionHubScreen
+import dev.envoix.app.ui.DeviceRoomDraft
+import dev.envoix.app.ui.DeviceRoomScreen
 import dev.envoix.app.ui.EnvoixTheme
-import dev.envoix.app.ui.HomeScreen
 import dev.envoix.app.ui.LocalAppLanguage
-import dev.envoix.app.ui.LogScreen
 import dev.envoix.app.ui.SettingsScreen
+import dev.envoix.app.ui.TransferActivityScreen
 import kotlinx.coroutines.flow.MutableStateFlow
 
-private enum class Screen { Home, Discovery, Logs, Settings }
+private enum class Screen { Hub, Room, Activity, Settings }
 
 class MainActivity : ComponentActivity() {
     private val vm: TransferViewModel by viewModels()
+    private val discoveryVm: DiscoveryViewModel by viewModels()
     private val sharedUris = MutableStateFlow<List<Uri>>(emptyList())
 
     private val requestNotif =
@@ -45,46 +48,80 @@ class MainActivity : ComponentActivity() {
             CompositionLocalProvider(LocalAppLanguage provides settings.language) {
                 EnvoixTheme {
                     var screen by androidx.compose.runtime.remember {
-                        androidx.compose.runtime.mutableStateOf(Screen.Home)
+                        androidx.compose.runtime.mutableStateOf(Screen.Hub)
                     }
-                    if (screen != Screen.Home) BackHandler { screen = Screen.Home }
+                    var roomDraft by androidx.compose.runtime.remember {
+                        androidx.compose.runtime.mutableStateOf<DeviceRoomDraft?>(null)
+                    }
+                    val transfers by vm.transfers.collectAsState()
+                    val incomingShares by sharedUris.collectAsState()
+
+                    fun returnToHub() {
+                        roomDraft = null
+                        screen = Screen.Hub
+                    }
+
+                    if (screen != Screen.Hub) BackHandler { returnToHub() }
                     when (screen) {
-                        Screen.Discovery ->
-                            DiscoveryScreen(
-                                onBack = { screen = Screen.Home },
-                                onReceive = { c, b, r, qr, copyApproved ->
-                                    screen = Screen.Home
-                                    vm.startReceive(c, b, r, qr, copyApproved)
+                        Screen.Hub ->
+                            ConnectionHubScreen(
+                                onOpenRoom = { draft ->
+                                    roomDraft = draft
+                                    screen = Screen.Room
                                 },
-                                onSend = { c, b, r, jobId, qr ->
-                                    screen = Screen.Home
-                                    vm.startSend(c, jobId, b, r, qr)
-                                },
+                                onActivity = { screen = Screen.Activity },
+                                onSettings = { screen = Screen.Settings },
+                                pendingShareCount = incomingShares.size,
+                                discoveryViewModel = discoveryVm,
                             )
-                        Screen.Logs -> LogScreen(onBack = { screen = Screen.Home })
-                        Screen.Settings -> SettingsScreen(onBack = { screen = Screen.Home })
-                        Screen.Home -> {
-                            val transfers by vm.transfers.collectAsState()
-                            val incomingShares by sharedUris.collectAsState()
-                            HomeScreen(
+                        Screen.Room -> {
+                            val draft = roomDraft
+                            if (draft == null) {
+                                ConnectionHubScreen(
+                                    onOpenRoom = { selected ->
+                                        roomDraft = selected
+                                        screen = Screen.Room
+                                    },
+                                    onActivity = { screen = Screen.Activity },
+                                    onSettings = { screen = Screen.Settings },
+                                    pendingShareCount = incomingShares.size,
+                                    discoveryViewModel = discoveryVm,
+                                )
+                            } else {
+                                DeviceRoomScreen(
+                                    draft = draft,
+                                    transfers = transfers,
+                                    onBack = ::returnToHub,
+                                    initialSources = incomingShares,
+                                    onInitialSourcesConsumed = { sharedUris.value = emptyList() },
+                                    onReceive = { c, b, r, qr, copyApproved ->
+                                        vm.startReceive(c, b, r, qr, copyApproved)
+                                    },
+                                    onSend = { c, b, r, jobId, qr ->
+                                        vm.startSend(c, jobId, b, r, qr)
+                                    },
+                                    onPauseResume = { vm.pauseResume(it) },
+                                    onApproveReceive = { vm.approveReceive(it) },
+                                    onCancel = { vm.cancel(it) },
+                                    onRemove = { vm.remove(it) },
+                                    onOpen = { openReceived(it) },
+                                    onShare = { shareReceived(it) },
+                                    discoveryViewModel = discoveryVm,
+                                )
+                            }
+                        }
+                        Screen.Activity ->
+                            TransferActivityScreen(
                                 transfers = transfers,
-                                initialSharedUris = incomingShares,
-                                onSharedUrisConsumed = { sharedUris.value = emptyList() },
-                                onReceive = { c, b, r, qr, copyApproved ->
-                                    vm.startReceive(c, b, r, qr, copyApproved)
-                                },
-                                onSend = { c, b, r, jobId, qr -> vm.startSend(c, jobId, b, r, qr) },
+                                onBack = ::returnToHub,
                                 onPauseResume = { vm.pauseResume(it) },
                                 onApproveReceive = { vm.approveReceive(it) },
                                 onCancel = { vm.cancel(it) },
                                 onRemove = { vm.remove(it) },
-                                onOpenDiscovery = { screen = Screen.Discovery },
-                                onOpenLogs = { screen = Screen.Logs },
-                                onOpenSettings = { screen = Screen.Settings },
                                 onOpen = { openReceived(it) },
                                 onShare = { shareReceived(it) },
                             )
-                        }
+                        Screen.Settings -> SettingsScreen(onBack = ::returnToHub)
                     }
                 }
             }
@@ -95,6 +132,16 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         captureSharedUris(intent)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        discoveryVm.start()
+    }
+
+    override fun onStop() {
+        discoveryVm.stop()
+        super.onStop()
     }
 
     private fun captureSharedUris(intent: Intent?) {

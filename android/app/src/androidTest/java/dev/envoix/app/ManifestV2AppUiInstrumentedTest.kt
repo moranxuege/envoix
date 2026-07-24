@@ -16,7 +16,7 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class ManifestV2AppUiInstrumentedTest {
     @Test(timeout = TEST_TIMEOUT_MS)
-    fun sendAndReceiveExposeCanonicalInventoryControlsInBothLanguages() {
+    fun connectionFirstRoomExposesCanonicalInventoryControlsInBothLanguages() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val originalLanguage = SettingsStore.settings.value.language
@@ -26,37 +26,86 @@ class ManifestV2AppUiInstrumentedTest {
         SystemClock.sleep(UI_TRANSITION_SETTLE_MS)
 
         try {
-            var sheet = openSheet(device, HOME_SEND)
+            exerciseConnectionFirstFlow(
+                device = device,
+                copy =
+                    FlowCopy(
+                        connectTitle = "Connect to a device",
+                        activity = "Activity",
+                        showQr = "Show QR",
+                        openRoom = "Open room",
+                        roomSubtitle = "Transfer room",
+                        noActiveTransfer = "No active transfer",
+                        reviewInvite = "Review invite",
+                        addFiles = "Add files",
+                        inventoryFiles = "ADD FILES",
+                        inventoryFolder = "ADD FOLDER",
+                        saveTo = "SAVE TO",
+                    ),
+            )
 
-            textAfterScroll(device, sheet, "ADD FILES")
-            textAfterScroll(device, sheet, "ADD FOLDER")
-            resource(device, TRANSFER_START)
-
-            dismissSheet(device)
-            sheet = openSheet(device, HOME_RECEIVE)
-            textAfterScroll(device, sheet, "SAVE TO")
-            resource(device, TRANSFER_START)
-            assertFalse(device.hasObject(By.textContains("SAF/MediaStore")))
-            assertFalse(device.hasObject(By.textContains("Verify privately")))
-
-            dismissSheet(device)
             SettingsStore.update { it.copy(language = AppText.SIMPLIFIED_CHINESE) }
-            text(device, "传输文件")
-            sheet = openSheet(device, HOME_SEND)
-            textAfterScroll(device, sheet, "添加文件")
-            textAfterScroll(device, sheet, "添加文件夹")
-            resource(device, TRANSFER_START)
-
-            dismissSheet(device)
-            sheet = openSheet(device, HOME_RECEIVE)
-            textAfterScroll(device, sheet, "保存到")
-            resource(device, TRANSFER_START)
-            assertFalse(device.hasObject(By.textContains("SAF/MediaStore")))
-            assertFalse(device.hasObject(By.textContains("先在私有目录验证")))
+            exerciseConnectionFirstFlow(
+                device = device,
+                copy =
+                    FlowCopy(
+                        connectTitle = "连接设备",
+                        activity = "活动",
+                        showQr = "显示二维码",
+                        openRoom = "打开房间",
+                        roomSubtitle = "传输房间",
+                        noActiveTransfer = "无进行中的传输",
+                        reviewInvite = "查看邀请",
+                        addFiles = "添加文件",
+                        inventoryFiles = "添加文件",
+                        inventoryFolder = "添加文件夹",
+                        saveTo = "保存到",
+                    ),
+            )
         } finally {
             SettingsStore.update { it.copy(language = originalLanguage) }
             device.pressHome()
         }
+    }
+
+    private fun exerciseConnectionFirstFlow(
+        device: UiDevice,
+        copy: FlowCopy,
+    ) {
+        text(device, copy.connectTitle)
+
+        clickResourceUntilText(device, HUB_ACTIVITY, copy.activity)
+        device.pressBack()
+        text(device, copy.connectTitle)
+
+        text(device, copy.showQr)
+        clickResourceUntilText(device, HUB_SHOW_QR, copy.openRoom)
+        clickResourceUntilText(device, HUB_OPEN_ROOM, copy.roomSubtitle)
+
+        text(device, copy.noActiveTransfer)
+        assertFalse(device.hasObject(By.res(TRANSFER_SHEET)))
+
+        text(device, copy.reviewInvite)
+        var sheet = clickResourceUntilResource(device, ROOM_REVIEW_INVITE, TRANSFER_SHEET)
+        textAfterScroll(sheet, copy.saveTo)
+        resource(device, TRANSFER_START)
+        assertFalse(device.hasObject(By.textContains("SAF/MediaStore")))
+        assertFalse(device.hasObject(By.textContains("Verify privately")))
+        assertFalse(device.hasObject(By.textContains("先在私有目录验证")))
+
+        dismissSheet(device)
+        text(device, copy.roomSubtitle)
+        text(device, copy.noActiveTransfer)
+
+        text(device, copy.addFiles)
+        sheet = clickResourceUntilResource(device, ROOM_ADD_FILES, TRANSFER_SHEET)
+        textAfterScroll(sheet, copy.inventoryFiles)
+        textAfterScroll(sheet, copy.inventoryFolder)
+        resource(device, TRANSFER_START)
+
+        dismissSheet(device)
+        device.pressBack()
+        text(device, copy.connectTitle)
     }
 
     private fun resource(
@@ -69,34 +118,41 @@ class ManifestV2AppUiInstrumentedTest {
         value: String,
     ): UiObject2 = checkNotNull(device.wait(Until.findObject(By.text(value)), WAIT_TIMEOUT_MS)) { "Missing UI text: $value" }
 
-    private fun clickResource(
+    private fun clickResourceUntilText(
         device: UiDevice,
         id: String,
-    ) {
-        device.waitForIdle()
-        resource(device, id).click()
+        targetText: String,
+    ): UiObject2 {
+        repeat(CLICK_ATTEMPTS) {
+            device.waitForIdle()
+            resource(device, id).click()
+            device.wait(Until.findObject(By.text(targetText)), CLICK_WAIT_MS)?.let { return it }
+        }
+        error("Clicking $id did not reveal text: $targetText")
     }
 
-    private fun openSheet(
+    private fun clickResourceUntilResource(
         device: UiDevice,
-        homeAction: String,
+        id: String,
+        targetId: String,
     ): UiObject2 {
-        repeat(OPEN_SHEET_ATTEMPTS) {
-            clickResource(device, homeAction)
-            device.wait(Until.findObject(By.res(TRANSFER_SHEET)), OPEN_SHEET_WAIT_MS)?.let { return it }
+        repeat(CLICK_ATTEMPTS) {
+            device.waitForIdle()
+            resource(device, id).click()
+            device.wait(Until.findObject(By.res(targetId)), CLICK_WAIT_MS)?.let { return it }
         }
-        error("Transfer sheet did not open from: $homeAction")
+        error("Clicking $id did not reveal resource: $targetId")
     }
 
     private fun textAfterScroll(
-        device: UiDevice,
         sheet: UiObject2,
         value: String,
     ): UiObject2 {
-        device.wait(Until.findObject(By.text(value)), SHORT_WAIT_MS)?.let { return it }
+        sheet.findObject(By.text(value))?.let { return it }
         repeat(MAX_SCROLLS) {
             sheet.scroll(Direction.DOWN, SCROLL_PERCENT)
-            device.wait(Until.findObject(By.text(value)), SHORT_WAIT_MS)?.let { return it }
+            SystemClock.sleep(SHORT_WAIT_MS)
+            sheet.findObject(By.text(value))?.let { return it }
         }
         error("Missing UI text after scrolling: $value")
     }
@@ -110,17 +166,34 @@ class ManifestV2AppUiInstrumentedTest {
     }
 
     private companion object {
-        const val HOME_SEND = "home_send"
-        const val HOME_RECEIVE = "home_receive"
         const val TRANSFER_SHEET = "transfer_sheet"
         const val TRANSFER_START = "transfer_start"
-        const val TEST_TIMEOUT_MS = 60_000L
+        const val HUB_ACTIVITY = "hub_activity"
+        const val HUB_SHOW_QR = "hub_show_qr"
+        const val HUB_OPEN_ROOM = "hub_open_room"
+        const val ROOM_REVIEW_INVITE = "room_review_invite"
+        const val ROOM_ADD_FILES = "room_add_files"
+        const val TEST_TIMEOUT_MS = 90_000L
         const val WAIT_TIMEOUT_MS = 15_000L
         const val SHORT_WAIT_MS = 500L
+        const val CLICK_WAIT_MS = 3_000L
         const val UI_TRANSITION_SETTLE_MS = 750L
-        const val OPEN_SHEET_WAIT_MS = 3_000L
-        const val OPEN_SHEET_ATTEMPTS = 3
+        const val CLICK_ATTEMPTS = 3
         const val MAX_SCROLLS = 5
         const val SCROLL_PERCENT = 0.8f
     }
+
+    private data class FlowCopy(
+        val connectTitle: String,
+        val activity: String,
+        val showQr: String,
+        val openRoom: String,
+        val roomSubtitle: String,
+        val noActiveTransfer: String,
+        val reviewInvite: String,
+        val addFiles: String,
+        val inventoryFiles: String,
+        val inventoryFolder: String,
+        val saveTo: String,
+    )
 }
