@@ -8,7 +8,7 @@
 //! # Owns no transfer truth
 //! The authority for every card is L3's `TransferRecord`, persisted through P4's
 //! operation store. The runtime holds only leases, task handles, admission
-//! permits, and a derived read snapshot. If the process dies, every card is
+//! permits, and derived read projections. If the process dies, every card is
 //! reconstructable from the durable store alone (via [`SessionProvider`]).
 //!
 //! # Ports (dependency inversion)
@@ -22,12 +22,20 @@
 //! linearization, so a `RetirementAck` fed to the reducer is the genuine,
 //! non-forgeable token minted by the supervisor — never hand-rolled.
 //!
-//! # Deferred (named non-goals for RT1)
+//! Frontends observe one card at a time through [`Runtime::subscribe`]. Every
+//! attach has a fresh [`SubscriptionEpoch`], starts from current truth, and uses
+//! a bounded queue that coalesces replaceable projection updates while reserving
+//! a lossless lane for terminal transitions and capability duties. A full
+//! lossless lane surfaces [`SubscriptionLag`] instead of silently dropping.
+//!
+//! # Deferred (named non-goals for RT2)
 //! - The concrete iroh executor and the M4 `Phase(Confirming)` emission are wired
-//!   at the host / composition root; RT1 drives an injected executor port.
-//! - Confirm timers, mailbox polling, capability duties, and storage intents are
-//!   accepted as typed effects but left as no-op seams (RT2 / P6 integration / BN).
-//! - Frontend subscriber epochs + bounded/coalesced queues are RT2.
+//!   at the host / composition root.
+//! - Generated binding schemas, Rust-to-platform glue, and bulk-byte/OS-handle
+//!   containment are BN1.
+//! - Durable, epoch/provenance-checked mutating command intake is BN2.
+//! - Confirm timers, mailbox polling, capability-duty execution/results, and
+//!   storage intents remain injected-host / later-slice seams.
 //! - Evidence projection is RT3.
 
 #![forbid(unsafe_code)]
@@ -37,6 +45,7 @@ mod config;
 mod error;
 mod port;
 mod runtime;
+mod subscription;
 
 pub use config::RuntimeConfig;
 pub use error::{AcquireError, CommandError};
@@ -45,3 +54,7 @@ pub use port::{
     stop_channel,
 };
 pub use runtime::{Runtime, ShutdownReport};
+pub use subscription::{
+    CardSubscription, CardUpdate, CardUpdateKind, LosslessUpdateKind, SubscribeError,
+    SubscriptionEpoch, SubscriptionLag, TryRecvError,
+};

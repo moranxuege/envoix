@@ -1,8 +1,11 @@
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use envoix_capabilities::Duty;
 use envoix_product::{
-    ApplyOutcome, CommittedSession, ProductCommand, ProductInput, ProductState, TransferRecord,
+    ApplyOutcome, CapabilityAction, CommittedSession, ProductCommand, ProductInput, ProductState,
+    TransferRecord,
 };
 use envoix_types::RecordId;
 use tokio::runtime::Handle;
@@ -14,6 +17,10 @@ use crate::card::{CardActor, CardMessage};
 use crate::config::RuntimeConfig;
 use crate::error::{AcquireError, CommandError};
 use crate::port::{AttemptExecutor, SessionProvider};
+use crate::subscription::{
+    CardSubscription, RecordUpdateKind, SubscribeError, SubscriptionEpoch, SubscriptionPublisher,
+    subscription_channel,
+};
 
 const INBOX_CAPACITY: usize = 64;
 
@@ -23,6 +30,25 @@ const INBOX_CAPACITY: usize = 64;
 struct CardEntry {
     inbox: mpsc::Sender<CardMessage>,
     handle: Option<JoinHandle<()>>,
+}
+
+/// Process-lifetime derived state for a known card. It remains after the actor
+/// hibernates, but owns no authority: every field is copied from a committed L3
+/// record or a committed, idempotent L3 duty effect.
+struct CardProjection {
+    record: TransferRecord,
+    outstanding_duties: Vec<(Duty, CapabilityAction)>,
+    subscribers: Vec<SubscriptionPublisher>,
+}
+
+/// Whether the committed record shows this capability duty already discharged, so
+/// the projection can prune it (a reattach must never re-deliver a completed
+/// duty). Exhaustive over `CapabilityAction`, so a new duty kind must add a
+/// discharge rule here.
+fn duty_discharged(action: CapabilityAction, record: &TransferRecord) -> bool {
+    match action {
+        CapabilityAction::PostReceipt => record.facts.proof_delivered,
+    }
 }
 
 /// The result of a `shutdown`: how many live cards were torn down, and how many
@@ -40,7 +66,9 @@ pub struct ShutdownReport {
 /// join), and admission is refused atomically with the drain.
 struct Inner {
     stopped: bool,
+    next_epoch: u64,
     cards: HashMap<RecordId, CardEntry>,
+    projections: HashMap<RecordId, CardProjection>,
 }
 
 /// Generic-free runtime state, shared by every card actor via `Arc` so an actor
@@ -63,6 +91,124 @@ impl Shared {
 
     pub(crate) fn release(&self, card: RecordId) {
         self.lock().cards.remove(&card);
+    }
+
+    /// Evicts a card's derived projection. Hibernation deliberately PRESERVES the
+    /// projection (so an at-rest card still renders and reattaches to current
+    /// truth); this is called only when a card is durably removed / tombstoned and
+    /// no longer exists, so its cache must not leak for the process lifetime.
+    pub(crate) fn evict_projection(&self, card: RecordId) {
+        self.lock().projections.remove(&card);
+    }
+
+    pub(crate) fn observe_record(&self, kind: RecordUpdateKind, record: TransferRecord) {
+        let card = record.identity.card;
+        let subscribers = {
+            let mut inner = self.lock();
+            let projection = inner
+                .projections
+                .entry(card)
+                .or_insert_with(|| CardProjection {
+                    record: record.clone(),
+                    outstanding_duties: Vec::new(),
+                    subscribers: Vec::new(),
+                });
+            projection.record = record.clone();
+            // Prune any duty the committed record now shows discharged, so a
+            // reattach re-delivers only genuinely-outstanding duties.
+            projection
+                .outstanding_duties
+                .retain(|(_, action)| !duty_discharged(*action, &record));
+            projection
+                .subscribers
+                .retain(SubscriptionPublisher::is_attached);
+            projection.subscribers.clone()
+        };
+        for subscriber in subscribers {
+            subscriber.publish_record(kind, record.clone());
+        }
+    }
+
+    pub(crate) fn observe_duty(&self, card: RecordId, duty: Duty, action: CapabilityAction) {
+        let subscribers = {
+            let mut inner = self.lock();
+            let Some(projection) = inner.projections.get_mut(&card) else {
+                return;
+            };
+            // Supersede by action: keep only the LATEST duty per action, so a duty
+            // re-issued across restores replaces rather than accumulates — the
+            // outstanding set stays bounded by the distinct actions.
+            projection
+                .outstanding_duties
+                .retain(|(_, existing)| *existing != action);
+            projection.outstanding_duties.push((duty, action));
+            projection
+                .subscribers
+                .retain(SubscriptionPublisher::is_attached);
+            projection.subscribers.clone()
+        };
+        for subscriber in subscribers {
+            subscriber.publish_duty(duty, action);
+        }
+    }
+
+    fn snapshot(&self, card: RecordId) -> Option<TransferRecord> {
+        self.lock()
+            .projections
+            .get(&card)
+            .map(|projection| projection.record.clone())
+    }
+
+    fn subscribe(
+        &self,
+        card: RecordId,
+        capacity: NonZeroUsize,
+    ) -> Result<CardSubscription, SubscribeError> {
+        let mut inner = self.lock();
+        if inner.stopped {
+            return Err(SubscribeError::RuntimeStopped);
+        }
+        if !inner.projections.contains_key(&card) {
+            return Err(SubscribeError::UnknownCard);
+        }
+        let epoch = SubscriptionEpoch::new(inner.next_epoch);
+        inner.next_epoch = inner
+            .next_epoch
+            .checked_add(1)
+            .ok_or(SubscribeError::EpochExhausted)?;
+        let projection = inner
+            .projections
+            .get_mut(&card)
+            .expect("the projection was checked under the held lock");
+        let (publisher, subscription) = subscription_channel(
+            epoch,
+            card,
+            capacity,
+            projection.record.clone(),
+            &projection.outstanding_duties,
+        );
+        projection
+            .subscribers
+            .retain(SubscriptionPublisher::is_attached);
+        projection.subscribers.push(publisher);
+        Ok(subscription)
+    }
+
+    fn close_subscriptions(inner: &mut Inner) -> Vec<SubscriptionPublisher> {
+        inner
+            .projections
+            .values_mut()
+            .flat_map(|projection| projection.subscribers.drain(..))
+            .collect()
+    }
+}
+
+impl Drop for Shared {
+    fn drop(&mut self) {
+        let inner = self.inner.get_mut().unwrap_or_else(PoisonError::into_inner);
+        for subscriber in Self::close_subscriptions(inner) {
+            subscriber.close();
+        }
     }
 }
 
@@ -96,7 +242,9 @@ impl<P: SessionProvider, E: AttemptExecutor> Runtime<P, E> {
                 handle: Handle::current(),
                 inner: Mutex::new(Inner {
                     stopped: false,
+                    next_epoch: 1,
                     cards: HashMap::new(),
+                    projections: HashMap::new(),
                 }),
                 admission,
             }),
@@ -160,12 +308,26 @@ impl<P: SessionProvider, E: AttemptExecutor> Runtime<P, E> {
         response.await.map_err(|_| CommandError::NotLive)?
     }
 
-    /// A derived read snapshot of a live card's record, or `None` if not live.
+    /// A derived read snapshot of a known card's latest committed record.
+    ///
+    /// The projection remains available when a terminal/quiescent actor
+    /// hibernates. Durable L3 state remains authoritative.
     pub async fn snapshot(&self, card: RecordId) -> Option<TransferRecord> {
-        let inbox = self.inbox(card)?;
-        let (reply, response) = oneshot::channel();
-        inbox.send(CardMessage::Snapshot(reply)).await.ok()?;
-        response.await.ok()
+        self.shared.snapshot(card)
+    }
+
+    /// Attaches a bounded, per-card frontend stream.
+    ///
+    /// Every successful call opens a fresh epoch and seeds it from current
+    /// derived truth plus all outstanding capability duties. Dropping the
+    /// returned handle is the entire detach operation and cannot affect a card
+    /// actor or transfer state.
+    pub fn subscribe(
+        &self,
+        card: RecordId,
+        capacity: NonZeroUsize,
+    ) -> Result<CardSubscription, SubscribeError> {
+        self.shared.subscribe(card, capacity)
     }
 
     pub fn is_live(&self, card: RecordId) -> bool {
@@ -185,11 +347,16 @@ impl<P: SessionProvider, E: AttemptExecutor> Runtime<P, E> {
         // Atomically stop admission AND take ownership of every live card, so no
         // in-flight `admit`/`restore` can spawn an actor that escapes this
         // teardown: a `spawn_card` racing this sees `stopped` and aborts instead.
-        let drained: Vec<CardEntry> = {
+        let (drained, subscribers): (Vec<CardEntry>, Vec<SubscriptionPublisher>) = {
             let mut inner = self.shared.lock();
             inner.stopped = true;
-            inner.cards.drain().map(|(_, entry)| entry).collect()
+            let cards = inner.cards.drain().map(|(_, entry)| entry).collect();
+            let subscribers = Shared::close_subscriptions(&mut inner);
+            (cards, subscribers)
         };
+        for subscriber in subscribers {
+            subscriber.close();
+        }
         let cards = drained.len();
 
         // Phase 1: signal every card, then await the replies. ONE shared deadline
@@ -283,6 +450,8 @@ impl<P: SessionProvider, E: AttemptExecutor> Runtime<P, E> {
         inbox: mpsc::Sender<CardMessage>,
         inbox_rx: mpsc::Receiver<CardMessage>,
     ) {
+        self.shared
+            .observe_record(RecordUpdateKind::State, session.record().clone());
         let actor = CardActor::new(
             self.shared.clone(),
             self.executor.clone(),

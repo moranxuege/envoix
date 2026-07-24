@@ -1050,6 +1050,7 @@ name = "envoix-runtime"
 version = "0.2.0"
 dependencies = [
  "envoix-attempt-api",
+ "envoix-capabilities",
  "envoix-operation-store",
  "envoix-outcomes",
  "envoix-product",

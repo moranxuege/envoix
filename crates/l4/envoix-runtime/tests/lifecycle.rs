@@ -19,8 +19,9 @@ use envoix_product::{
     decode_record,
 };
 use envoix_runtime::{
-    AcquireError, AttemptExecution, AttemptExecutor, ExecutorSignal, Runtime, RuntimeConfig,
-    SessionProvider, ShutdownReport, stop_channel,
+    AcquireError, AttemptExecution, AttemptExecutor, CardUpdateKind, ExecutorSignal,
+    LosslessUpdateKind, Runtime, RuntimeConfig, SessionProvider, ShutdownReport, SubscribeError,
+    TryRecvError, stop_channel,
 };
 use envoix_storage_api::Durability;
 use envoix_storage_local::LocalStorage;
@@ -115,6 +116,7 @@ enum Script {
 #[derive(Clone)]
 struct ScriptedExecutor {
     scripts: Arc<Mutex<HashMap<TransferId, Script>>>,
+    signals: Arc<Mutex<HashMap<TransferId, mpsc::Sender<ExecutorSignal>>>>,
     default: Script,
 }
 
@@ -122,12 +124,27 @@ impl ScriptedExecutor {
     fn new(default: Script) -> Self {
         Self {
             scripts: Arc::new(Mutex::new(HashMap::new())),
+            signals: Arc::new(Mutex::new(HashMap::new())),
             default,
         }
     }
 
     fn set(&self, transfer: TransferId, script: Script) {
         self.scripts.lock().unwrap().insert(transfer, script);
+    }
+
+    async fn signal(&self, transfer: TransferId, signal: ExecutorSignal) {
+        let sender = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(sender) = self.signals.lock().unwrap().get(&transfer).cloned() {
+                    break sender;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the executor should start");
+        sender.send(signal).await.expect("the actor is still live");
     }
 }
 
@@ -144,6 +161,10 @@ impl AttemptExecutor for ScriptedExecutor {
             panic!("scripted executor panic for supervision test");
         }
         let (signal_tx, signals) = mpsc::channel(16);
+        self.signals
+            .lock()
+            .unwrap()
+            .insert(plan.transfer, signal_tx.clone());
         let (stop, token) = stop_channel();
         tokio::spawn(async move {
             let _ = signal_tx
@@ -238,6 +259,48 @@ async fn settle<P: SessionProvider, E: AttemptExecutor>(runtime: &Runtime<P, E>,
     })
     .await
     .expect("card should settle");
+}
+
+async fn wait_for_bytes<P: SessionProvider, E: AttemptExecutor>(
+    runtime: &Runtime<P, E>,
+    card: RecordId,
+    expected: u64,
+) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if runtime
+                .snapshot(card)
+                .await
+                .is_some_and(|record| record.bytes == ByteCount::new(expected))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the expected progress should be projected");
+}
+
+async fn wait_for_state<P: SessionProvider, E: AttemptExecutor>(
+    runtime: &Runtime<P, E>,
+    card: RecordId,
+    expected: ProductState,
+) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if runtime
+                .snapshot(card)
+                .await
+                .is_some_and(|record| record.state == expected)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the expected state should be projected");
 }
 
 // ---- the required lifecycle proof ----
@@ -393,6 +456,277 @@ async fn admission_rejects_over_cap() {
     let third_card = third.record().identity.card;
     runtime.admit(third, third_outcome).unwrap();
     assert!(runtime.is_live(third_card));
+
+    runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn detach_reattach_epoch_backpressure() {
+    let directory = TempDir::new().unwrap();
+    let root = directory.path();
+    let executor = ScriptedExecutor::new(Script::RunUntilStop);
+    let runtime = Runtime::start(
+        config(8),
+        OpStoreProvider {
+            root: root.to_path_buf(),
+        },
+        executor.clone(),
+    );
+
+    let (session, outcome) = create_session(root, Direction::Send, 0x10);
+    let card = session.record().identity.card;
+    let transfer = session.record().identity.transfer;
+    runtime.admit(session, outcome).unwrap();
+
+    let mut first = runtime
+        .subscribe(card, NonZeroUsize::new(3).unwrap())
+        .unwrap();
+    let first_epoch = first.epoch();
+    let initial = first.recv().await.unwrap().unwrap();
+    assert_eq!(initial.epoch, first_epoch);
+    assert!(matches!(
+        initial.kind,
+        CardUpdateKind::Snapshot(record) if record.identity.card == card
+    ));
+    wait_for_state(&runtime, card, ProductState::Transferring).await;
+
+    // A stalled frontend retains one latest progress projection, not the whole
+    // burst, and the total queue remains bounded.
+    for transferred in 1..=40 {
+        executor
+            .signal(
+                transfer,
+                ExecutorSignal::Event(AttemptEventKind::Progress {
+                    transferred: ByteCount::new(transferred),
+                }),
+            )
+            .await;
+    }
+    wait_for_bytes(&runtime, card, 40).await;
+    assert!(first.pending_len() <= first.capacity().get());
+    let latest = first.recv().await.unwrap().unwrap();
+    assert!(matches!(
+        latest.kind,
+        CardUpdateKind::Progress(record) if record.bytes == ByteCount::new(40)
+    ));
+    assert_eq!(first.try_recv(), Err(TryRecvError::Empty));
+
+    // Detach is just a drop. The actor continues to accept progress and mutate
+    // only through its normal L3 reducer path.
+    drop(first);
+    executor
+        .signal(
+            transfer,
+            ExecutorSignal::Event(AttemptEventKind::Progress {
+                transferred: ByteCount::new(80),
+            }),
+        )
+        .await;
+    wait_for_bytes(&runtime, card, 80).await;
+    assert!(runtime.is_live(card));
+
+    // Reattach receives no predecessor backlog: it has a fresh epoch and one
+    // current snapshot containing progress produced while detached.
+    let mut second = runtime
+        .subscribe(card, NonZeroUsize::new(3).unwrap())
+        .unwrap();
+    assert_ne!(second.epoch(), first_epoch);
+    let current = second.recv().await.unwrap().unwrap();
+    assert_eq!(current.epoch, second.epoch());
+    assert!(matches!(
+        current.kind,
+        CardUpdateKind::Snapshot(record) if record.bytes == ByteCount::new(80)
+    ));
+    assert_eq!(second.try_recv(), Err(TryRecvError::Empty));
+
+    runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_events_and_duties_never_dropped() {
+    let directory = TempDir::new().unwrap();
+    let root = directory.path();
+    let executor = ScriptedExecutor::new(Script::RunUntilStop);
+    let runtime = Runtime::start(
+        config(8),
+        OpStoreProvider {
+            root: root.to_path_buf(),
+        },
+        executor.clone(),
+    );
+
+    let (session, outcome) = create_session(root, Direction::Receive, 0x60);
+    let card = session.record().identity.card;
+    let transfer = session.record().identity.transfer;
+    runtime.admit(session, outcome).unwrap();
+
+    // Capacity three is one coalesced projection slot plus exactly two reserved
+    // lossless slots: one terminal transition and one capability duty.
+    let mut subscription = runtime
+        .subscribe(card, NonZeroUsize::new(3).unwrap())
+        .unwrap();
+    let mut deliberately_lagged = runtime.subscribe(card, NonZeroUsize::MIN).unwrap();
+    assert!(matches!(
+        subscription.recv().await.unwrap().unwrap().kind,
+        CardUpdateKind::Snapshot(_)
+    ));
+    assert!(matches!(
+        deliberately_lagged.recv().await.unwrap().unwrap().kind,
+        CardUpdateKind::Snapshot(_)
+    ));
+    wait_for_state(&runtime, card, ProductState::Transferring).await;
+
+    for transferred in 1..=40 {
+        executor
+            .signal(
+                transfer,
+                ExecutorSignal::Event(AttemptEventKind::Progress {
+                    transferred: ByteCount::new(transferred),
+                }),
+            )
+            .await;
+    }
+    wait_for_bytes(&runtime, card, 40).await;
+    assert_eq!(subscription.pending_len(), 1);
+
+    executor
+        .signal(transfer, ExecutorSignal::CommitCrossed)
+        .await;
+    executor
+        .signal(
+            transfer,
+            ExecutorSignal::Event(AttemptEventKind::Terminal(OutcomeCode::Completed)),
+        )
+        .await;
+    settle(&runtime, card).await;
+
+    // Even though the replaceable lane was backpressured, both lossless updates
+    // survive and the queue reaches, but never exceeds, its declared bound.
+    assert_eq!(subscription.pending_len(), subscription.capacity().get());
+    let mut terminal_count = 0;
+    let mut duty_count = 0;
+    while subscription.pending_len() != 0 {
+        match subscription.try_recv().unwrap().kind {
+            CardUpdateKind::Terminal(record) => {
+                terminal_count += 1;
+                assert_eq!(record.state, ProductState::Completed);
+            }
+            CardUpdateKind::CapabilityDuty { duty, .. } => {
+                duty_count += 1;
+                assert_eq!(duty.provenance.card, card);
+            }
+            CardUpdateKind::State(record) => {
+                assert_eq!(record.state, ProductState::Completed);
+                assert!(record.quiescence.is_quiescent());
+            }
+            CardUpdateKind::Snapshot(_) | CardUpdateKind::Progress(_) => {}
+        }
+    }
+    assert_eq!(terminal_count, 1);
+    assert_eq!(duty_count, 1);
+    assert_eq!(subscription.try_recv(), Err(TryRecvError::Empty));
+    assert_eq!(
+        deliberately_lagged.recv().await.unwrap_err().missed,
+        LosslessUpdateKind::Terminal
+    );
+
+    // The actor is hibernated, but a fresh epoch still starts from current
+    // terminal truth and replays each unique outstanding duty.
+    let old_epoch = subscription.epoch();
+    drop(subscription);
+    let mut reattached = runtime
+        .subscribe(card, NonZeroUsize::new(3).unwrap())
+        .unwrap();
+    assert_ne!(reattached.epoch(), old_epoch);
+    assert!(matches!(
+        reattached.recv().await.unwrap().unwrap().kind,
+        CardUpdateKind::Snapshot(record) if record.state == ProductState::Completed
+    ));
+    assert!(matches!(
+        reattached.recv().await.unwrap().unwrap().kind,
+        CardUpdateKind::CapabilityDuty { duty, .. } if duty.provenance.card == card
+    ));
+    assert_eq!(reattached.try_recv(), Err(TryRecvError::Empty));
+
+    runtime.shutdown().await;
+}
+
+// ---- F-A: a removed/tombstoned card evicts its projection (no leak) ----
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn removed_card_evicts_projection() {
+    let directory = TempDir::new().unwrap();
+    let root = directory.path();
+    let executor = ScriptedExecutor::new(Script::RunUntilStop);
+    let runtime = Runtime::start(
+        config(8),
+        OpStoreProvider {
+            root: root.to_path_buf(),
+        },
+        executor.clone(),
+    );
+
+    let (session, outcome) = create_session(root, Direction::Send, 0x10);
+    let card = session.record().identity.card;
+    runtime.admit(session, outcome).unwrap();
+    // A hibernating card keeps its projection (renders at rest); a REMOVED card is
+    // tombstoned and gone, so its projection must not leak for the process life.
+    runtime.command(card, ProductCommand::Remove).await.unwrap();
+    settle(&runtime, card).await;
+    assert!(durable_state(root, card).facts.remove_requested);
+    assert!(matches!(
+        runtime.subscribe(card, NonZeroUsize::new(2).unwrap()),
+        Err(SubscribeError::UnknownCard)
+    ));
+
+    runtime.shutdown().await;
+}
+
+// ---- F-B: a re-issued duty supersedes; the outstanding set stays bounded ----
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reissued_duty_supersedes_not_accumulates() {
+    let directory = TempDir::new().unwrap();
+    let root = directory.path();
+    let executor = ScriptedExecutor::new(Script::RunUntilStop);
+    let runtime = Runtime::start(
+        config(8),
+        OpStoreProvider {
+            root: root.to_path_buf(),
+        },
+        executor.clone(),
+    );
+
+    let (session, outcome) = create_session(root, Direction::Receive, 0x60);
+    let card = session.record().identity.card;
+    let transfer = session.record().identity.transfer;
+    executor.set(transfer, Script::Complete);
+    runtime.admit(session, outcome).unwrap();
+    // A completed receiver leaves exactly one outstanding PostReceipt duty.
+    settle(&runtime, card).await;
+
+    // Restoring a completed receiver (proof not yet delivered) RE-EMITS the receipt
+    // duty with a fresh request id. Supersede-by-action must keep exactly ONE
+    // outstanding duty, not accumulate a second.
+    runtime.restore(card).unwrap();
+    settle(&runtime, card).await;
+
+    let mut sub = runtime
+        .subscribe(card, NonZeroUsize::new(4).unwrap())
+        .unwrap();
+    let mut duty_count = 0;
+    loop {
+        match sub.try_recv() {
+            Ok(update) => {
+                if matches!(update.kind, CardUpdateKind::CapabilityDuty { .. }) {
+                    duty_count += 1;
+                }
+            }
+            Err(TryRecvError::Empty) => break,
+            Err(other) => panic!("unexpected receive error: {other:?}"),
+        }
+    }
+    assert_eq!(duty_count, 1);
 
     runtime.shutdown().await;
 }

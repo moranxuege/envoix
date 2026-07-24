@@ -12,6 +12,7 @@ role = "library"
 envoix-types = { path = "../../l0/envoix-types" }
 envoix-outcomes = { path = "../../l0/envoix-outcomes" }
 envoix-attempt-api = { path = "../../l1/envoix-attempt-api" }
+envoix-capabilities = { path = "../../l1/envoix-capabilities" }
 envoix-product = { path = "../../l3/envoix-product" }
 tokio = { workspace = true }
 

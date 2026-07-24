@@ -6,7 +6,7 @@ use envoix_attempt_api::{
 };
 use envoix_product::{
     ApplyOutcome, CommittedSession, IdentityError, ProductCommand, ProductEffect, ProductInput,
-    ProductState, Quiescence, RecordStore, TransferRecord,
+    ProductState, Quiescence, RecordStore,
 };
 use envoix_types::RecordId;
 use tokio::runtime::Handle;
@@ -16,6 +16,7 @@ use tokio::task::AbortHandle;
 use crate::error::CommandError;
 use crate::port::{AttemptExecution, AttemptExecutor, ExecutorSignal, StopHandle};
 use crate::runtime::Shared;
+use crate::subscription::RecordUpdateKind;
 
 /// Everything one card actor accepts on its single inbox: control from the
 /// runtime API, and executor signals forwarded by the per-attempt pump. Merging
@@ -25,7 +26,6 @@ pub(crate) enum CardMessage {
         ProductCommand,
         oneshot::Sender<Result<ProductState, CommandError>>,
     ),
-    Snapshot(oneshot::Sender<TransferRecord>),
     Shutdown(oneshot::Sender<()>),
     Signal {
         stamp: AttemptStamp,
@@ -123,9 +123,6 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
                         .map_err(|_| CommandError::Internal);
                     let _ = reply.send(result);
                 }
-                CardMessage::Snapshot(reply) => {
-                    let _ = reply.send(self.session().record().clone());
-                }
                 CardMessage::Shutdown(reply) => {
                     // Stop the live worker without mutating product truth: a
                     // process stop is not a transfer cancel (Pillar 7). Dropping
@@ -145,6 +142,12 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
                     }
                 }
             }
+        }
+        // Hibernation deliberately preserves the derived projection so an at-rest
+        // card still renders; but a durably-removed / tombstoned card no longer
+        // exists, so evict its projection before the actor drops.
+        if self.session().record().facts.remove_requested {
+            self.shared.evict_projection(self.card);
         }
         // Actor drops here: store closed, registry lease + admission permit freed.
     }
@@ -170,8 +173,31 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
     }
 
     fn apply(&mut self, input: ProductInput) -> Result<ProductState, IdentityError> {
+        let previous_state = self.session().record().state;
+        let mut update_kind = match &input {
+            ProductInput::StageProgress { .. } => RecordUpdateKind::Progress,
+            ProductInput::AttemptObserved(event)
+                if matches!(event.event().kind, AttemptEventKind::Progress { .. }) =>
+            {
+                RecordUpdateKind::Progress
+            }
+            ProductInput::AttemptObserved(event)
+                if matches!(event.event().kind, AttemptEventKind::Terminal(_)) =>
+            {
+                RecordUpdateKind::Terminal
+            }
+            _ => RecordUpdateKind::State,
+        };
         let outcome = self.session_mut().apply(input)?;
         let state = outcome.state;
+        let record = self.session().record().clone();
+        if state != previous_state && is_terminal_state(state) {
+            update_kind = RecordUpdateKind::Terminal;
+        }
+        // Committed L3 truth is projected before effects are dispatched. This
+        // preserves terminal-before-duty ordering without ever awaiting a
+        // subscriber.
+        self.shared.observe_record(update_kind, record);
         self.dispatch(outcome);
         Ok(state)
     }
@@ -214,16 +240,18 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
                 // acknowledged synchronously. A real staging executor is deferred.
                 let _ = self.apply(ProductInput::StagingRetired { stamp });
             }
+            ProductEffect::CapabilityDuty { duty, action } => {
+                self.shared.observe_duty(self.card, duty, action);
+                // Executing the platform duty and admitting its result are BN /
+                // host concerns. RT2 exposes the committed duty losslessly.
+            }
             ProductEffect::StartConfirmTimer { .. }
             | ProductEffect::StopConfirmTimer { .. }
             | ProductEffect::StartMailboxPoll { .. }
             | ProductEffect::StopMailboxPoll { .. }
-            | ProductEffect::CapabilityDuty { .. }
             | ProductEffect::StorageIntent { .. } => {
-                // Deferred typed seams: confirm timers / mailbox poll (RT2 + P6
-                // integration) and the capability / storage executors + the P4
-                // destructive-outbox drainer (BN / a dedicated RT slice). RT1 owns
-                // lifetime, not these mechanisms.
+                // Deferred typed seams: confirm timers / mailbox poll and the
+                // storage executor + P4 destructive-outbox drainer.
             }
         }
     }
@@ -259,6 +287,17 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
             let _ = self.apply(ProductInput::AttemptRetired(ack));
         }
     }
+}
+
+fn is_terminal_state(state: ProductState) -> bool {
+    matches!(
+        state,
+        ProductState::Paused(_)
+            | ProductState::Unconfirmed
+            | ProductState::Completed
+            | ProductState::Failed
+            | ProductState::Cancelled
+    )
 }
 
 /// Forwards one attempt's executor signals onto the actor's inbox, tagged with
