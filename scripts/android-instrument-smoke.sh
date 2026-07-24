@@ -79,7 +79,16 @@ install_apk "$test_apk"
 "$adb_bin" shell am force-stop com.lbe.security.miui >/dev/null 2>&1 || true
 "$adb_bin" shell am start -W -n dev.envoix.app/.MainActivity
 "$adb_bin" shell pidof dev.envoix.app >/dev/null
-"$adb_bin" shell am instrument -w -e class "$test_class" "$test_runner"
+instrument_log="$(mktemp "${TMPDIR:-/tmp}/envoix-android-instrument.XXXXXX")"
+if ! "$adb_bin" shell am instrument -w -e class "$test_class" "$test_runner" | tee "$instrument_log"; then
+  rm -f "$instrument_log"
+  exit 1
+fi
+if grep -Eq "FAILURES!!!|There (was|were) [0-9]+ failure|INSTRUMENTATION_FAILED|Process crashed" "$instrument_log"; then
+  rm -f "$instrument_log"
+  exit 1
+fi
+rm -f "$instrument_log"
 
 if [[ "${ENVOIX_TEST_CLEANUP:-0}" == "1" ]]; then
   "$adb_bin" uninstall dev.envoix.app.test >/dev/null || true

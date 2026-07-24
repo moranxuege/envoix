@@ -1,4 +1,4 @@
-//! Per-transfer options: transport policy and behavior toggles.
+//! Per-route transport options. Job behavior is sealed in the manifest.
 
 use envoix_session::BindAddrs;
 
@@ -40,21 +40,9 @@ pub struct TransferOptions {
     pub relay: Option<String>,
     /// Which data paths the transfer may use.
     pub path: PathPolicy,
-    /// Whether receiver-side resume state may be used (send side).
-    pub resume: bool,
     /// Local socket addresses to bind when listening; `None` binds
     /// dual-stack IPv4 + IPv6 with OS-assigned ports (receive side).
     pub listen_addrs: Option<BindAddrs>,
-    /// Internal canonical-session marker: the invite was accepted by an
-    /// earlier attempt, so expiry no longer blocks this transfer's resume.
-    #[serde(skip)]
-    pub(crate) continuation: bool,
-    /// Diagnostic only: the durable card id, recorded on the transfer span so
-    /// engine timeline events (e.g. `protocol.complete_ack`) route by card id
-    /// (docs/design/diagnostics.md v2, P4). Transient — the driver sets it fresh
-    /// per attempt; never persisted (`serde(skip)`).
-    #[serde(skip)]
-    pub session_id: Option<u64>,
 }
 
 impl Default for TransferOptions {
@@ -63,38 +51,7 @@ impl Default for TransferOptions {
             transport: TransportPreference::Automatic,
             relay: None,
             path: PathPolicy::Auto,
-            resume: true,
             listen_addrs: None,
-            continuation: false,
-            session_id: None,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn defaults_resume_on_auto_path_no_relay() {
-        let options = TransferOptions::default();
-        assert!(options.resume);
-        assert_eq!(options.transport, TransportPreference::Automatic);
-        assert_eq!(options.path, PathPolicy::Auto);
-        assert_eq!(options.relay, None);
-        assert_eq!(options.listen_addrs, None);
-    }
-
-    #[test]
-    fn deserializes_records_written_before_transport_preference_existed() {
-        let mut value = serde_json::to_value(TransferOptions::default()).unwrap();
-        value
-            .as_object_mut()
-            .expect("TransferOptions serializes as an object")
-            .remove("transport");
-
-        let options: TransferOptions = serde_json::from_value(value).unwrap();
-
-        assert_eq!(options.transport, TransportPreference::Automatic);
     }
 }

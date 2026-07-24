@@ -1,123 +1,105 @@
-# envoix
+# Envoix
 
-Minimal CLI-first secure file transfer walking skeleton for VE441.
+Envoix is a native, authenticated device-to-device transfer application for
+files, folders, Photos, and Share-provider content. Every transfer uses one
+canonical Manifest v2 job from local preparation through receiver save and
+delivery proof.
 
-## Debug Build Marker
+**[Download Envoix / 下载 Envoix](https://ece4410j-nuub.github.io/envoix/)**
 
-Current app debug marker: `Debug build 2026.07.08.19`.
+## Core behavior
 
-Before pushing or installing a new Android, iOS, or macOS test build, bump this
-marker in both app clients so device testers can confirm the build actually
-updated:
+- One immutable sealed job can contain multiple files and folders, including
+  empty directories and multiple roots.
+- Source enumeration and validation start locally when items are selected.
+  Hashing may finish opportunistically while payload reading begins, so a slow
+  preflight never blocks connection startup. No offer is sent before the
+  explicit Send action seals the job.
+- The receiver can inspect the authenticated inventory before payload and must
+  choose its save method before accepting it.
+- A sender remains in “waiting for receiver to save” after payload transfer.
+  Delivered is reported only after the receiver has saved the verified roots
+  and returned a persistent delivery proof.
+- Interrupted jobs resume from durable per-entry checkpoints. A completed
+  delivery proof can be replayed without retransmitting payload.
+- Existing destination names use keep-both allocation. The receiver's final
+  saved names are part of the result set and delivery proof.
+
+Manifest v1 and the former single-file protocol are not supported.
+
+## CLI
+
+### QR/direct invite
+
+```bash
+# Receiver
+cargo run -p envoix-cli -- receive --enable-mdns --output ./received
+
+# Sender: paste the invite printed by the receiver
+cargo run -p envoix-cli -- send --invite '<invite>' ./photo.jpg ./folder
+```
+
+### LAN mDNS with a shared token
+
+```bash
+# Receiver
+cargo run -p envoix-cli -- receive --enable-mdns \
+  --token shared-token-123 --output ./received
+
+# Sender
+cargo run -p envoix-cli -- send --enable-mdns \
+  --token shared-token-123 ./photo.jpg ./folder
+```
+
+### Manual endpoint
+
+```bash
+# Receiver prints its peer descriptor
+cargo run -p envoix-cli -- receive \
+  --token shared-token-123 --output ./received
+
+# Sender uses that descriptor
+cargo run -p envoix-cli -- send \
+  --peer '<endpoint-id>@<address>' \
+  --token shared-token-123 ./photo.jpg ./folder
+```
+
+The sender accepts additional positional files/folders as roots of the same
+job. `--compression never|always|smart` selects the sealed compression policy.
+The receiver defaults to direct save; `--save-mode copy-after-verify` explicitly
+accepts an additional verified copy and its peak-space cost. Exceptionally
+large offers require `--approve-large-transfer`.
+
+Runtime TOML configuration is transport-only:
+
+```toml
+data_stream_window = "32MB"
+
+[candidates]
+allow = ["192.168.0.0/16"]
+deny = ["100.64.0.0/10"]
+```
+
+## Repository layout
+
+- `crates/envoix-protocol`: authentication envelope and Manifest v2 frames.
+- `crates/envoix-transfer`: canonical job preparation, sequential data plane,
+  destination planning, checkpoints, compression, and delivery authority.
+- `crates/envoix-session`: authenticated iroh, Room, mDNS, and resume sessions.
+- `crates/envoix-ffi`: UniFFI surface for Apple and shared native semantics.
+- `apps/envoix-android-jni`: Android JNI projection and platform save gate.
+- `apps/envoix-apple`, `android`, `apps/envoix-cli`: native front ends.
+
+See [the Manifest v2 contract](docs/design/manifest-v2-goal0-contract.md) for
+the protocol and persistence boundaries, and [authentication](docs/auth.md) for
+the SPAKE2/channel-binding model.
+
+## Debug build marker
+
+Before distributing a new device build, keep these labels identical so testers
+can identify the installed build:
 
 - Apple: `apps/envoix-apple/Sources/Support.swift`
 - Android: `android/app/src/main/java/dev/envoix/app/DebugBuild.kt`
 
-Keep both labels identical. Treat this as part of any user-visible app,
-UniFFI, transfer, or settings change that needs real-device verification.
-
-## Usage
-
-### QR invite flow (recommended)
-
-The receiver generates a random pairing token and prints a QR code plus an
-invite string to the terminal. No manual token or address exchange is needed.
-
-```bash
-# Terminal 1 — receiver
-cargo run -p envoix-cli -- receive --auto --output ./received
-# prints QR code and: invite: envoix:<base64url>
-
-# Terminal 2 — sender (paste the invite string printed above)
-cargo run -p envoix-cli -- send --invite "envoix:<base64url>" ./hello.txt
-```
-
-The invite encodes the pairing token, receiver address, and a 5-minute expiry.
-The sender validates the invite before attempting a connection.
-
-### LAN mDNS auto flow (same local network)
-
-The sender discovers the receiver automatically via mDNS. No manual address
-exchange or QR scanning — both sides just need the same shared token.
-
-```bash
-# Terminal 1 — receiver (advertises over mDNS with the given token)
-cargo run -p envoix-cli -- receive --auto --output ./received --token "shared-token-123"
-
-# Terminal 2 — sender (discovers the receiver over mDNS)
-cargo run -p envoix-cli -- send --enable-mdns --token "shared-token-123" ./hello.txt
-```
-
-The receiver's iroh endpoint binds both IPv4 and IPv6 sockets by default and
-advertises its direct addresses over mDNS. The sender discovers compatible iroh
-endpoints, resolves their direct candidates, and dials them. SPAKE2 pairing
-still gates the transfer — a sender with the wrong token fails before any file
-data is exchanged.
-
-### Manual flow
-
-Supply the shared token explicitly. After binding, the receiver prints a
-`peer:` line — its iroh peer descriptor, `<endpoint-id>@<addr>[,<addr>...]` —
-plus the token to share. Copy the whole `peer:` value into the sender's
-`--peer`.
-
-```bash
-# Terminal 1 — receiver
-cargo run -p envoix-cli -- receive --output ./received --token "shared-token-123"
-# prints, for example:
-#   peer: 6sd3kp...u2a@192.168.1.5:54321,[2001:db8::5]:54322
-#   token: shared-token-123
-
-# Terminal 2 — sender (paste the receiver's full peer: value verbatim)
-cargo run -p envoix-cli -- send \
-  --peer "6sd3kp...u2a@192.168.1.5:54321,[2001:db8::5]:54322" \
-  --token "shared-token-123" ./hello.txt
-```
-
-By default, `receive` binds both IPv4 and IPv6 sockets, so the descriptor can
-list more than one address — pass the entire value. Use `--ip-version ipv4` or
-`--ip-version ipv6` to restrict the receiver to one address family.
-
-The receiver writes the file into the output directory using the original file
-name. If a transfer is interrupted, restart both sides with the same source file
-and output directory. The receiver resumes from its `.part` file and JSON sidecar
-state, then verifies the whole-file BLAKE3 hash before the final rename.
-
-For LAN transfers, prefer a `1M` chunk size. Larger chunks such as `4M` can be
-slower on typical local networks because each chunk is filled and flushed as one
-sequential protocol frame.
-
-See [docs/auth.md](docs/auth.md) for the pairing model and SPAKE2 prototype
-security caveat.
-
-## Current Scope
-
-Implemented:
-
-- LAN mDNS discovery — receiver advertises, sender browses `_envoix._udp.local.`;
-- one-file transfer over a manually supplied address (or discovered via mDNS);
-- QUIC transport;
-- required experimental SPAKE2 shared-token pairing before file metadata;
-- minimal length-prefixed JSON frame protocol;
-- sequential resumable chunks with progress events;
-- deterministic temp output file plus resume sidecar state;
-- whole-file BLAKE3 verification before final rename;
-- public CLI-facing facade through `envoix-client`.
-
-Not implemented in this walking skeleton:
-
-- end-to-end file encryption;
-- relay or server fallback;
-- interactive pause, folder transfer, or multi-file manifests;
-- enforced transfer speed limiting;
-- per-chunk hashes, parallel chunk transfer, or out-of-order chunk recovery;
-- CLI QR scanning (QR invites require manual paste in the CLI; the Apple app
-  has its own camera scanner).
-
-QUIC currently uses generated self-signed certificates with an explicitly
-insecure no-auth verifier. Peer/session authentication is provided by the
-required pairing layer before transfer metadata is sent.
-
-
-### Extra Notes
-* UDP GSO is disabled on android for more stable performance and compatability. If it's not disabled, emulators cannot work properly. If testing shows this impacts the performance too much, consider turning it on later.
+UDP GSO remains disabled on Android for emulator and device compatibility.

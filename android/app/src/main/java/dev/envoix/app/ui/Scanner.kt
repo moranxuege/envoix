@@ -113,7 +113,10 @@ fun InlineScanner(
                 CornerBrackets(colors.accent, Modifier.fillMaxSize())
             } else {
                 Text(
-                    "Camera access is off —\nchoose a QR image below",
+                    appText(
+                        "Camera access is off —\nchoose a QR image below",
+                        "相机权限未开启—\n请从下方选择二维码图片",
+                    ),
                     color = Color.White.copy(alpha = 0.75f),
                     fontSize = 13.sp,
                     modifier = Modifier.padding(16.dp),
@@ -122,7 +125,11 @@ fun InlineScanner(
         }
         Spacer(Modifier.height(10.dp))
         Text(
-            if (pickError) "No QR code found in that image" else "Point at an Envoix QR code",
+            if (pickError) {
+                appText("No QR code found in that image", "图片中未找到二维码")
+            } else {
+                appText("Point at an Envoix QR code", "请对准 Envoix 二维码")
+            },
             color = if (pickError) Color(0xFFE05B5B) else colors.muted,
             fontSize = 12.sp,
         )
@@ -139,7 +146,12 @@ fun InlineScanner(
         ) {
             Icon(Icons.Default.Image, null, tint = colors.accent, modifier = Modifier.size(18.dp))
             Spacer(Modifier.width(7.dp))
-            Text("Choose from photos", color = colors.accent, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            Text(
+                appText("Choose from photos", "从相册选择"),
+                color = colors.accent,
+                fontWeight = FontWeight.Bold,
+                fontSize = 13.sp,
+            )
         }
     }
 }

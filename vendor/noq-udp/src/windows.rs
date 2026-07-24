@@ -40,22 +40,48 @@ impl UdpSocketState {
     pub fn new(socket: UdpSockRef<'_>) -> io::Result<Self> {
         assert!(
             CMSG_LEN
-                >= WinSock::CMSGHDR::cmsg_space(mem::size_of::<WinSock::IN6_PKTINFO>())
-                    + WinSock::CMSGHDR::cmsg_space(mem::size_of::<c_int>())
-                    + WinSock::CMSGHDR::cmsg_space(mem::size_of::<u32>())
+                >= WinSock::CMSGHDR::cmsg_space(size_of::<WinSock::IN6_PKTINFO>())
+                    + WinSock::CMSGHDR::cmsg_space(size_of::<c_int>())
+                    + WinSock::CMSGHDR::cmsg_space(size_of::<u32>())
         );
         assert!(
-            mem::align_of::<WinSock::CMSGHDR>() <= mem::align_of::<cmsg::Aligned<[u8; 0]>>(),
+            align_of::<WinSock::CMSGHDR>() <= align_of::<cmsg::Aligned<[u8; 0]>>(),
             "control message buffers will be misaligned"
         );
 
         socket.0.set_nonblocking(true)?;
+
+        // Stop Windows from failing the next recv with WSAECONNRESET or WSAENETRESET when a
+        // prior send drew an ICMP error. WSAECONNRESET follows a port-unreachable (a send to a
+        // closed port) and WSAENETRESET follows a TTL-expired / net-unreachable; both are
+        // reported against the next recv on the same socket. We never want to fail the recv
+        // path due to a failed send. The SIO_UDP_CONNRESET and SIO_UDP_NETRESET ioctls with
+        // a FALSE argument switch these error reportings off completely.
+        for (control_code, name) in [
+            (WinSock::SIO_UDP_CONNRESET, "SIO_UDP_CONNRESET"),
+            (WinSock::SIO_UDP_NETRESET, "SIO_UDP_NETRESET"),
+        ] {
+            if let Err(error) = disable_udp_ioctl(&*socket.0, control_code) {
+                if is_unsupported_error(&error) {
+                    // SIO_UDP_NETRESET requires Windows 8+, and neither ioctl is implemented
+                    // under Wine.
+                    crate::log::debug!(
+                        "{name} not supported, recv may emit errors after a prior send drew an ICMP error"
+                    );
+                } else {
+                    crate::log::debug!(
+                        "disabling {name} failed: {error}, recv may emit errors after a prior send drew an ICMP error"
+                    );
+                }
+            }
+        }
+
         let addr = socket.0.local_addr()?;
         let is_ipv6 = addr.as_socket_ipv6().is_some();
         let is_ipv4 = if is_ipv6 {
             let v6only = unsafe {
                 let mut result: u32 = 0;
-                let mut len = mem::size_of_val(&result) as i32;
+                let mut len = size_of_val(&result) as i32;
                 let rc = WinSock::getsockopt(
                     socket.0.as_raw_socket() as _,
                     WinSock::IPPROTO_IPV6,
@@ -265,7 +291,7 @@ impl UdpSocketState {
 
         let mut wsa_msg = WinSock::WSAMSG {
             name: &mut source as *mut _ as *mut _,
-            namelen: mem::size_of_val(&source) as _,
+            namelen: size_of_val(&source) as _,
             lpBuffers: &mut data,
             Control: ctrl,
             dwBufferCount: 1,
@@ -288,7 +314,7 @@ impl UdpSocketState {
 
         let addr = unsafe {
             let (_, addr) = socket2::SockAddr::try_init(|addr_storage, len| {
-                *len = mem::size_of_val(&source) as _;
+                *len = size_of_val(&source) as _;
                 ptr::copy_nonoverlapping(&source, addr_storage as _, 1);
                 Ok(())
             })?;
@@ -353,6 +379,7 @@ impl UdpSocketState {
             ecn: EcnCodepoint::from_bits(ecn_bits as u8),
             dst_ip,
             interface_index,
+            timestamp: None,
         };
         Ok(1)
     }
@@ -527,6 +554,36 @@ fn send(state: &UdpSocketState, socket: UdpSockRef<'_>, transmit: &Transmit<'_>)
     }
 }
 
+/// Disables a boolean UDP `WSAIoctl` notification flag on `socket` by passing `FALSE`.
+///
+/// Used to turn off the ICMP-error notifications (`SIO_UDP_CONNRESET`,
+/// `SIO_UDP_NETRESET`) that Windows otherwise reports against the next recv. See
+/// [`UdpSocketState::new`] for why we suppress them.
+///
+/// See <https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-wsaioctl>.
+fn disable_udp_ioctl(socket: &impl AsRawSocket, control_code: u32) -> io::Result<()> {
+    let disabled: u32 = 0; // FALSE
+    let mut bytes_returned: u32 = 0;
+    let rc = unsafe {
+        WinSock::WSAIoctl(
+            socket.as_raw_socket() as usize,
+            control_code,
+            &disabled as *const _ as *const _,
+            size_of_val(&disabled) as u32,
+            ptr::null_mut(),
+            0,
+            &mut bytes_returned,
+            ptr::null_mut(),
+            None,
+        )
+    };
+
+    match rc == 0 {
+        true => Ok(()),
+        false => Err(io::Error::last_os_error()),
+    }
+}
+
 fn set_socket_option(
     socket: &impl AsRawSocket,
     level: i32,
@@ -539,7 +596,7 @@ fn set_socket_option(
             level,
             name,
             &value as *const _ as _,
-            mem::size_of_val(&value) as _,
+            size_of_val(&value) as _,
         )
     };
 
@@ -576,9 +633,9 @@ static WSARECVMSG_PTR: LazyLock<WinSock::LPFN_WSARECVMSG> = LazyLock::new(|| {
             s as _,
             WinSock::SIO_GET_EXTENSION_FUNCTION_POINTER,
             &guid as *const _ as *const _,
-            mem::size_of_val(&guid) as u32,
+            size_of_val(&guid) as u32,
             &mut wsa_recvmsg_ptr as *mut _ as *mut _,
-            mem::size_of_val(&wsa_recvmsg_ptr) as u32,
+            size_of_val(&wsa_recvmsg_ptr) as u32,
             &mut len,
             ptr::null_mut(),
             None,
@@ -590,7 +647,7 @@ static WSARECVMSG_PTR: LazyLock<WinSock::LPFN_WSARECVMSG> = LazyLock::new(|| {
             "ignoring WSARecvMsg function pointer due to ioctl error: {}",
             io::Error::last_os_error()
         );
-    } else if len as usize != mem::size_of::<WinSock::LPFN_WSARECVMSG>() {
+    } else if len as usize != size_of::<WinSock::LPFN_WSARECVMSG>() {
         debug!("ignoring WSARecvMsg function pointer due to pointer size mismatch");
         wsa_recvmsg_ptr = None;
     }

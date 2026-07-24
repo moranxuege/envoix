@@ -10,7 +10,6 @@ struct ShareDraftDescriptor: Codable, Equatable, Identifiable {
     }
 
     static let currentSchemaVersion = 2
-    static let legacySchemaVersion = 1
 
     let schemaVersion: Int
     let id: UUID
@@ -49,94 +48,6 @@ struct ShareDraftDescriptor: Codable, Equatable, Identifiable {
         self.items = items
     }
 
-    /// Compatibility initializer retained for existing single-file tests and
-    /// for emitting a legacy descriptor fixture.
-    init(
-        schemaVersion: Int,
-        id: UUID,
-        mediaKind: MediaKind,
-        contentTypeIdentifier: String,
-        fileName: String,
-        byteCount: UInt64,
-        createdAtMilliseconds: UInt64,
-        stagedRelativePath: String
-    ) {
-        self.init(
-            schemaVersion: schemaVersion,
-            id: id,
-            createdAtMilliseconds: createdAtMilliseconds,
-            items: [
-                ShareDraftItemDescriptor(
-                    mediaKind: mediaKind,
-                    contentTypeIdentifier: contentTypeIdentifier,
-                    fileName: fileName,
-                    byteCount: byteCount,
-                    stagedRelativePath: stagedRelativePath
-                )
-            ]
-        )
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case schemaVersion
-        case id
-        case createdAtMilliseconds
-        case items
-        case mediaKind
-        case contentTypeIdentifier
-        case fileName
-        case byteCount
-        case stagedRelativePath
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
-        id = try container.decode(UUID.self, forKey: .id)
-        createdAtMilliseconds = try container.decode(UInt64.self, forKey: .createdAtMilliseconds)
-        if let decodedItems = try container.decodeIfPresent(
-            [ShareDraftItemDescriptor].self,
-            forKey: .items
-        ) {
-            items = decodedItems
-        } else {
-            guard schemaVersion == Self.legacySchemaVersion else {
-                throw DecodingError.dataCorruptedError(
-                    forKey: .items,
-                    in: container,
-                    debugDescription: "Share draft v2 requires an item list."
-                )
-            }
-            items = [
-                ShareDraftItemDescriptor(
-                    mediaKind: try container.decode(MediaKind.self, forKey: .mediaKind),
-                    contentTypeIdentifier: try container.decode(
-                        String.self,
-                        forKey: .contentTypeIdentifier
-                    ),
-                    fileName: try container.decode(String.self, forKey: .fileName),
-                    byteCount: try container.decode(UInt64.self, forKey: .byteCount),
-                    stagedRelativePath: try container.decode(String.self, forKey: .stagedRelativePath)
-                )
-            ]
-        }
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(schemaVersion, forKey: .schemaVersion)
-        try container.encode(id, forKey: .id)
-        try container.encode(createdAtMilliseconds, forKey: .createdAtMilliseconds)
-        if schemaVersion == Self.legacySchemaVersion, items.count == 1, let item = items.first {
-            try container.encode(item.mediaKind, forKey: .mediaKind)
-            try container.encode(item.contentTypeIdentifier, forKey: .contentTypeIdentifier)
-            try container.encode(item.fileName, forKey: .fileName)
-            try container.encode(item.byteCount, forKey: .byteCount)
-            try container.encode(item.stagedRelativePath, forKey: .stagedRelativePath)
-        } else {
-            try container.encode(items, forKey: .items)
-        }
-    }
 }
 
 struct ShareDraftItemDescriptor: Codable, Equatable {
@@ -458,14 +369,11 @@ struct ShareDraftStore {
         } catch {
             throw ShareDraftStoreError.invalidDraft
         }
-        guard (descriptor.schemaVersion == ShareDraftDescriptor.currentSchemaVersion
-                || descriptor.schemaVersion == ShareDraftDescriptor.legacySchemaVersion),
+        guard descriptor.schemaVersion == ShareDraftDescriptor.currentSchemaVersion,
               descriptor.id == id,
               !descriptor.items.isEmpty,
               descriptor.items.count <= Self.maxItemCount,
-              checkedShareDraftByteCount(descriptor.items) != nil,
-              descriptor.schemaVersion != ShareDraftDescriptor.legacySchemaVersion
-                || descriptor.items.count == 1 else {
+              checkedShareDraftByteCount(descriptor.items) != nil else {
             throw ShareDraftStoreError.invalidDraft
         }
 
@@ -473,9 +381,7 @@ struct ShareDraftStore {
         var seenPaths = Set<String>()
         payloadURLs.reserveCapacity(descriptor.items.count)
         for item in descriptor.items {
-            let expectedRelativePath = descriptor.schemaVersion == ShareDraftDescriptor.legacySchemaVersion
-                ? "\(id.uuidString)/\(item.fileName)"
-                : "\(id.uuidString)/\(Self.payloadDirectoryName)/\(item.fileName)"
+            let expectedRelativePath = "\(id.uuidString)/\(Self.payloadDirectoryName)/\(item.fileName)"
             guard item.fileName == safeFileName(item.fileName),
                   !item.contentTypeIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   item.stagedRelativePath == expectedRelativePath,

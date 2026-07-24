@@ -1,12 +1,9 @@
 package dev.envoix.app.ui
 
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,18 +25,19 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Devices
-import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.MailOutline
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -60,6 +58,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
@@ -71,6 +70,9 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -80,31 +82,39 @@ import androidx.compose.ui.unit.sp
 import dev.envoix.app.Diagnostics
 import dev.envoix.app.Direction
 import dev.envoix.app.LogUpload
+import dev.envoix.app.R
 import dev.envoix.app.Room
 import dev.envoix.app.SettingsStore
 import dev.envoix.app.Status
 import dev.envoix.app.Transfer
+import dev.envoix.app.TransferPresentationPolicy
+import dev.envoix.app.TransferProgressPresentation
 import dev.envoix.app.humanBytes
+import dev.envoix.app.isTerminal
 import dev.envoix.app.smoothedBps
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalComposeUiApi::class)
 @Composable
 fun HomeScreen(
     transfers: List<Transfer>,
-    onReceive: (code: String, broker: String, relay: String, qrPayload: String?) -> Unit,
-    onSend: (code: String, broker: String, relay: String, file: android.net.Uri, qrPayload: String?) -> Unit,
+    initialSharedUris: List<android.net.Uri> = emptyList(),
+    onSharedUrisConsumed: () -> Unit = {},
+    onReceive: (code: String, broker: String, relay: String, qrPayload: String?, copyApproved: Boolean) -> Unit,
+    onSend: (code: String, broker: String, relay: String, jobId: String, qrPayload: String?) -> Unit,
     onPauseResume: (Long) -> Unit,
+    onApproveReceive: (Long) -> Unit,
     onCancel: (Long) -> Unit,
     onRemove: (Long) -> Unit,
     onOpenDiscovery: () -> Unit,
     onOpenLogs: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpen: (Transfer) -> Unit,
+    onShare: (Transfer) -> Unit,
 ) {
     val colors = Envoix.colors
-    var sheetOpen by remember { mutableStateOf(false) }
+    var sheetRole by remember { mutableStateOf<String?>(null) }
     val expanded = remember { mutableStateListOf<Long>() }
     val listState = rememberLazyListState()
     // A just-created transfer lands at the top (newest-first sort); bring it
@@ -113,26 +123,15 @@ fun HomeScreen(
     LaunchedEffect(newestId) {
         if (newestId >= 0) listState.animateScrollToItem(0)
     }
+    LaunchedEffect(initialSharedUris) {
+        if (initialSharedUris.isNotEmpty()) sheetRole = "send"
+    }
     val active =
-        transfers.count {
-            it.status == Status.Preparing ||
-                it.status == Status.Connecting ||
-                it.status == Status.Transferring
-        }
+        transfers.count { !it.status.isTerminal }
 
     Scaffold(
+        modifier = Modifier.semantics { testTagsAsResourceId = true },
         containerColor = colors.bg,
-        floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = { sheetOpen = true },
-                containerColor = colors.accent,
-                contentColor = androidx.compose.ui.graphics.Color.White,
-            ) {
-                Icon(Icons.Default.Add, contentDescription = null)
-                Spacer(Modifier.width(8.dp))
-                Text("New transfer", fontWeight = FontWeight.SemiBold)
-            }
-        },
     ) { inner ->
         Column(
             Modifier
@@ -141,14 +140,53 @@ fun HomeScreen(
                 .padding(horizontal = 20.dp),
         ) {
             Header(active, onOpenDiscovery, onOpenLogs, onOpenSettings)
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(18.dp))
+            Text(
+                appString(R.string.transfer_files_title),
+                color = colors.text,
+                fontSize = 28.sp,
+                fontWeight = FontWeight.ExtraBold,
+            )
+            Text(
+                appString(R.string.choose_device_action),
+                color = colors.muted,
+                fontSize = 14.sp,
+                modifier = Modifier.padding(top = 3.dp),
+            )
+            Spacer(Modifier.height(14.dp))
+            HomeActionCard(
+                title = appString(R.string.send_action_title),
+                subtitle = appString(R.string.send_action_subtitle),
+                icon = Icons.Default.Share,
+                testTag = "home_send",
+            ) {
+                sheetRole = "send"
+            }
+            Spacer(Modifier.height(10.dp))
+            HomeActionCard(
+                title = appString(R.string.receive_action_title),
+                subtitle = appString(R.string.receive_action_subtitle),
+                icon = Icons.Default.Download,
+                testTag = "home_receive",
+            ) {
+                sheetRole = "receive"
+            }
+            Spacer(Modifier.height(18.dp))
+            Text(
+                appString(R.string.activity_title),
+                color = colors.text,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.height(8.dp))
             if (transfers.isEmpty()) {
                 EmptyState()
             } else {
                 LazyColumn(
+                    modifier = Modifier.weight(1f),
                     state = listState,
                     verticalArrangement = Arrangement.spacedBy(12.dp),
-                    contentPadding = PaddingValues(top = 4.dp, bottom = 96.dp),
+                    contentPadding = PaddingValues(top = 4.dp, bottom = 24.dp),
                 ) {
                     items(transfers.sortedByDescending { it.id }, key = { it.id }) { t ->
                         TransferCard(
@@ -156,9 +194,11 @@ fun HomeScreen(
                             expanded = t.id in expanded,
                             onToggleDetail = { if (it in expanded) expanded.remove(it) else expanded.add(it) },
                             onPauseResume = onPauseResume,
+                            onApproveReceive = onApproveReceive,
                             onCancel = onCancel,
                             onRemove = onRemove,
                             onOpen = onOpen,
+                            onShare = onShare,
                         )
                     }
                 }
@@ -166,22 +206,25 @@ fun HomeScreen(
         }
     }
 
-    if (sheetOpen) {
+    sheetRole?.let { initialRole ->
         ModalBottomSheet(
             onDismissRequest = {
-                sheetOpen = false
+                sheetRole = null
             },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
             containerColor = colors.surface,
         ) {
             NewTransferSheet(
-                onReceive = { c, b, r, qr ->
-                    sheetOpen = false
-                    onReceive(c, b, r, qr)
+                initialRole = initialRole,
+                initialSources = initialSharedUris,
+                onReceive = { c, b, r, qr, copyApproved ->
+                    sheetRole = null
+                    onReceive(c, b, r, qr, copyApproved)
                 },
-                onSend = { c, b, r, uri, qr ->
-                    sheetOpen = false
-                    onSend(c, b, r, uri, qr)
+                onSend = { c, b, r, jobId, qr ->
+                    sheetRole = null
+                    onSharedUrisConsumed()
+                    onSend(c, b, r, jobId, qr)
                 },
             )
         }
@@ -203,15 +246,36 @@ private fun Header(
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text("Envoix", color = colors.text, fontSize = 32.sp, fontWeight = FontWeight.ExtraBold)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier
+                    .size(42.dp)
+                    .clip(RoundedCornerShape(13.dp))
+                    .background(colors.accentSoft),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Default.MailOutline,
+                    contentDescription = null,
+                    tint = colors.accentStrong,
+                    modifier = Modifier.size(24.dp),
+                )
+            }
+            Spacer(Modifier.width(10.dp))
+            Text("Envoix", color = colors.text, fontSize = 26.sp, fontWeight = FontWeight.ExtraBold)
+        }
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (active > 0) {
-                Pill(text = "$active active", fg = colors.success, bg = colors.successSoft)
+                Pill(
+                    text = appString(R.string.active_transfer_count, active),
+                    fg = colors.success,
+                    bg = colors.successSoft,
+                )
                 Spacer(Modifier.width(8.dp))
             }
             Icon(
                 Icons.Default.Devices,
-                contentDescription = "Nearby devices",
+                contentDescription = appString(R.string.nearby_devices),
                 tint = colors.accent,
                 modifier =
                     Modifier
@@ -221,7 +285,7 @@ private fun Header(
                         .size(22.dp),
             )
             Text(
-                "Logs",
+                appString(R.string.logs),
                 color = colors.accent,
                 fontWeight = FontWeight.Bold,
                 fontSize = 14.sp,
@@ -233,7 +297,7 @@ private fun Header(
             )
             Icon(
                 Icons.Default.Settings,
-                contentDescription = "Settings",
+                contentDescription = appString(R.string.settings),
                 tint = colors.accent,
                 modifier =
                     Modifier
@@ -247,35 +311,86 @@ private fun Header(
 }
 
 @Composable
+private fun HomeActionCard(
+    title: String,
+    subtitle: String,
+    icon: ImageVector,
+    testTag: String,
+    onClick: () -> Unit,
+) {
+    val colors = Envoix.colors
+    Row(
+        Modifier
+            .testTag(testTag)
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(colors.surfaceRaised)
+            .border(1.dp, colors.line, RoundedCornerShape(16.dp))
+            .clickable(onClick = onClick)
+            .padding(14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier
+                .size(48.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(colors.accentSoft),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(icon, contentDescription = null, tint = colors.accentStrong, modifier = Modifier.size(24.dp))
+        }
+        Spacer(Modifier.width(13.dp))
+        Column(Modifier.weight(1f)) {
+            Text(title, color = colors.text, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+            Text(
+                subtitle,
+                color = colors.muted,
+                fontSize = 13.sp,
+                lineHeight = 18.sp,
+                modifier = Modifier.padding(top = 2.dp),
+            )
+        }
+        Text("›", color = colors.muted, fontSize = 26.sp)
+    }
+}
+
+@Composable
 private fun EmptyState() {
     val colors = Envoix.colors
-    Box(Modifier.fillMaxWidth().padding(top = 80.dp), contentAlignment = Alignment.Center) {
+    Box(Modifier.fillMaxWidth().padding(vertical = 24.dp), contentAlignment = Alignment.Center) {
         Text(
-            "No transfers yet.\nTap “New transfer” to send or receive.",
+            appText(
+                "No activity yet. Transfers will appear here.",
+                "暂无活动，传输任务会显示在这里。",
+            ),
             color = colors.muted,
-            fontSize = 15.sp,
+            fontSize = 13.sp,
         )
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun TransferCard(
     t: Transfer,
     expanded: Boolean,
     onToggleDetail: (Long) -> Unit,
     onPauseResume: (Long) -> Unit,
+    onApproveReceive: (Long) -> Unit,
     onCancel: (Long) -> Unit,
     onRemove: (Long) -> Unit,
     onOpen: (Transfer) -> Unit,
+    onShare: (Transfer) -> Unit,
 ) {
     val colors = Envoix.colors
+    val language = LocalAppLanguage.current
     val failed = t.status == Status.Failed
-    val cancelled = t.status == Status.Cancelled
+    val canceled = t.status == Status.Canceled
+    val progressPresentation = TransferPresentationPolicy.progress(t.status)
     val dismissState =
         rememberSwipeToDismissBoxState(
             confirmValueChange = {
-                if (it == SwipeToDismissBoxValue.EndToStart) {
+                if (t.status.isTerminal && it == SwipeToDismissBoxValue.EndToStart) {
                     onRemove(t.id)
                     true
                 } else {
@@ -286,7 +401,7 @@ private fun TransferCard(
     SwipeToDismissBox(
         state = dismissState,
         enableDismissFromStartToEnd = false,
-        enableDismissFromEndToStart = true,
+        enableDismissFromEndToStart = t.status.isTerminal,
         backgroundContent = {
             Row(
                 Modifier
@@ -297,9 +412,14 @@ private fun TransferCard(
                 horizontalArrangement = Arrangement.End,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(Icons.Default.Delete, null, tint = Color.White, modifier = Modifier.size(18.dp))
+                Icon(
+                    Icons.Default.Delete,
+                    appText("Remove transfer", "移除传输"),
+                    tint = Color.White,
+                    modifier = Modifier.size(18.dp),
+                )
                 Spacer(Modifier.width(8.dp))
-                Text("Remove", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                Text(appText("Remove", "移除"), color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
             }
         },
     ) {
@@ -307,25 +427,19 @@ private fun TransferCard(
             Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(16.dp))
-                .background(if (cancelled) colors.line else colors.surface)
+                .background(if (canceled) colors.line else colors.surface)
                 .border(1.dp, colors.line, RoundedCornerShape(16.dp))
-                .combinedClickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null, // the drawer expanding is feedback enough; the
-                    // default ripple fills the whole card, which looks heavy
-                    onClick = { if (t.status == Status.Completed && t.savedUri != null) onOpen(t) },
-                    onLongClick = { onToggleDetail(t.id) },
-                ),
+                .clickable { onToggleDetail(t.id) },
         ) {
-            if ((t.status == Status.Waiting || t.status == Status.Connecting) && t.qrPayload != null) {
-                WaitingBody(t, onCancel)
+            if (t.status == Status.WaitingForPeer && t.qrPayload != null) {
+                WaitingBody(t, onPauseResume, onCancel)
             } else {
                 Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
-                                title(t),
-                                color = if (cancelled) colors.muted else colors.text,
+                                title(t, language),
+                                color = if (canceled) colors.muted else colors.text,
                                 fontSize = 16.sp,
                                 fontWeight = FontWeight.Bold,
                                 maxLines = 1,
@@ -336,53 +450,54 @@ private fun TransferCard(
                             PathBadge(t)
                         }
                         Text(
-                            subtitle(t),
+                            subtitle(t, language),
                             color = colors.muted,
                             fontSize = 13.sp,
                             fontFamily = FontFamily.Monospace,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
-                        Spacer(Modifier.height(10.dp))
-                        LinearProgressIndicator(
-                            progress = { fraction(t) },
-                            modifier = Modifier.fillMaxWidth().height(8.dp).clip(CircleShape),
-                            color =
-                                when {
-                                    failed -> colors.danger
-                                    t.status == Status.Paused || t.status == Status.Unconfirmed -> colors.warning
-                                    cancelled -> colors.muted
-                                    else -> colors.accent
-                                },
-                            trackColor = colors.line.copy(alpha = 0.6f),
-                        )
-                        Spacer(Modifier.height(10.dp))
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Stat(speedText(t))
-                            Stat(etaText(t))
-                            Stat(sizeText(t))
+                        if (progressPresentation != TransferProgressPresentation.Hidden && t.total > 0) {
+                            Spacer(Modifier.height(10.dp))
+                            LinearProgressIndicator(
+                                progress = { fraction(t) },
+                                modifier = Modifier.fillMaxWidth().height(8.dp).clip(CircleShape),
+                                color =
+                                    when {
+                                        failed -> colors.danger
+                                        t.status == Status.Paused -> colors.warning
+                                        canceled -> colors.muted
+                                        else -> colors.accent
+                                    },
+                                trackColor = colors.line.copy(alpha = 0.6f),
+                            )
+                            Spacer(Modifier.height(10.dp))
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                if (progressPresentation == TransferProgressPresentation.Active) {
+                                    Stat(speedText(t, language))
+                                    Stat(etaText(t))
+                                }
+                                Stat(progressText(t))
+                            }
+                        }
+                        if (t.status == Status.AwaitingDecision && t.rootCount > 0) {
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                appText(
+                                    "Tap to review the authenticated incoming list.",
+                                    "点击查看已认证的待接收清单。",
+                                ),
+                                color = colors.warning,
+                                fontSize = 12.sp,
+                            )
                         }
                         if (failed && t.error != null) {
                             Spacer(Modifier.height(6.dp))
                             Text(t.error, color = colors.danger, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
                         }
-                        if (t.publicationInvalid && t.error != null) {
-                            Spacer(Modifier.height(6.dp))
-                            Text(t.error, color = colors.danger, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                        }
-                        if (t.status == Status.Unconfirmed) {
-                            Spacer(Modifier.height(6.dp))
-                            Text(
-                                "All bytes sent — peer didn't confirm receipt. It likely arrived; tap ↻ to re-confirm.",
-                                color = colors.warning,
-                                fontSize = 12.sp,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
                     }
                     Spacer(Modifier.width(10.dp))
-                    CardControls(t, onPauseResume, onCancel, onOpen)
+                    CardControls(t, onPauseResume, onApproveReceive, onCancel, onOpen, onShare)
                 }
             }
             if (expanded) DetailDrawer(t)
@@ -394,35 +509,47 @@ private fun TransferCard(
 private fun CardControls(
     t: Transfer,
     onPauseResume: (Long) -> Unit,
+    onApproveReceive: (Long) -> Unit,
     onCancel: (Long) -> Unit,
     onOpen: (Transfer) -> Unit,
+    onShare: (Transfer) -> Unit,
 ) {
+    val actions = TransferPresentationPolicy.actions(t)
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        when (t.status) {
-            Status.Preparing ->
-                CircleBtn(Icons.Default.Close, filled = false) { onCancel(t.id) }
-            Status.Waiting, Status.Connecting, Status.Verifying,
-            Status.Transferring, Status.Confirming,
-            -> {
-                CircleBtn(Icons.Default.Pause, filled = true) { onPauseResume(t.id) }
-                CircleBtn(Icons.Default.Close, filled = false) { onCancel(t.id) }
+        if (actions.canApprove) {
+            CircleBtn(Icons.Default.PlayArrow, appText("Accept transfer", "接收传输"), filled = true) {
+                onApproveReceive(t.id)
             }
-            Status.Paused -> {
-                CircleBtn(Icons.Default.PlayArrow, filled = true) { onPauseResume(t.id) }
-                CircleBtn(Icons.Default.Close, filled = false) { onCancel(t.id) }
+        }
+        if (actions.canPause) {
+            CircleBtn(Icons.Default.Pause, appText("Pause transfer", "暂停传输"), filled = true) {
+                onPauseResume(t.id)
             }
-            Status.Failed, Status.Unconfirmed, Status.Cancelled ->
-                CircleBtn(Icons.Default.Refresh, filled = true) { onPauseResume(t.id) }
-            Status.Completed -> {
-                if (t.savedUri != null) CircleBtn(Icons.Default.OpenInNew, filled = false) { onOpen(t) }
-                // RECEIVER, and ONLY while the confirmation duty is open (the
-                // receipt has not reached the rdz): the manual fallback for
-                // serving the peer's re-verify. Once delivered - retired, no ↻.
-                if (t.direction == Direction.Receive && !t.proofDelivered && !t.publicationInvalid) {
-                    CircleBtn(Icons.Default.Refresh, filled = false) { onPauseResume(t.id) }
+        }
+        if (actions.canResume) {
+            CircleBtn(Icons.Default.Refresh, appText("Resume transfer", "继续传输"), filled = true) {
+                onPauseResume(t.id)
+            }
+        }
+        if (actions.canCancel) {
+            CircleBtn(Icons.Default.Close, appText("Cancel transfer", "取消传输"), filled = false) {
+                onCancel(t.id)
+            }
+        }
+        if (t.status == Status.Delivered) {
+            if (t.savedUri != null) {
+                CircleBtn(
+                    Icons.AutoMirrored.Filled.OpenInNew,
+                    appText("Open received item", "打开接收项目"),
+                    filled = false,
+                ) { onOpen(t) }
+            }
+            if (t.savedUris.isNotEmpty()) {
+                CircleBtn(Icons.Default.Share, appText("Share received items", "分享接收项目"), filled = false) {
+                    onShare(t)
                 }
             }
         }
@@ -432,6 +559,7 @@ private fun CardControls(
 @Composable
 private fun CircleBtn(
     icon: ImageVector,
+    contentDescription: String,
     filled: Boolean,
     onClick: () -> Unit,
 ) {
@@ -449,34 +577,49 @@ private fun CircleBtn(
             ).clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        Icon(icon, null, tint = if (filled) Color.White else colors.muted, modifier = Modifier.size(18.dp))
+        Icon(
+            icon,
+            contentDescription,
+            tint = if (filled) Color.White else colors.muted,
+            modifier = Modifier.size(18.dp),
+        )
     }
 }
 
-/** The waiting-to-pair variant of a card: shows the QR + code for a peer to scan
- *  or type, with only a Cancel action. Used for initiated sessions until they pair,
- *  then the card becomes the normal progress variant. */
+/** The waiting-to-pair card: shows the QR + code until the core reports a match. */
 @Composable
 private fun WaitingBody(
     t: Transfer,
+    onPauseResume: (Long) -> Unit,
     onCancel: (Long) -> Unit,
 ) {
     val colors = Envoix.colors
+    val language = LocalAppLanguage.current
     val settings by SettingsStore.settings.collectAsState()
     Column(Modifier.fillMaxWidth().padding(16.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
             Column(Modifier.weight(1f)) {
                 Text(
-                    if (t.direction == Direction.Send) "Waiting to send" else "Waiting to receive",
+                    if (t.direction == Direction.Send) {
+                        appText("Waiting to send", "等待发送")
+                    } else {
+                        appText("Waiting to receive", "等待接收")
+                    },
                     color = colors.text,
                     fontSize = 16.sp,
                     fontWeight = FontWeight.Bold,
                 )
                 Text(
                     if (t.direction == Direction.Send) {
-                        "Sending ${t.fileName ?: "a file"}"
+                        appText(
+                            "Sending ${itemTitle(t, language)}",
+                            "准备发送 ${itemTitle(t, language)}",
+                        )
                     } else {
-                        "Saving to Downloads/${settings.saveFolder}"
+                        appText(
+                            "Saving to Downloads/${settings.saveFolder}",
+                            "将保存到 Downloads/${settings.saveFolder}",
+                        )
                     },
                     color = colors.muted,
                     fontSize = 13.sp,
@@ -484,7 +627,14 @@ private fun WaitingBody(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            CircleBtn(Icons.Default.Close, filled = false) { onCancel(t.id) }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                CircleBtn(Icons.Default.Pause, appText("Pause transfer", "暂停传输"), filled = true) {
+                    onPauseResume(t.id)
+                }
+                CircleBtn(Icons.Default.Close, appText("Cancel transfer", "取消传输"), filled = false) {
+                    onCancel(t.id)
+                }
+            }
         }
         Spacer(Modifier.height(14.dp))
         Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
@@ -507,7 +657,7 @@ private fun WaitingBody(
             Spacer(Modifier.width(8.dp))
             Icon(
                 Icons.Default.ContentCopy,
-                "Copy code",
+                appText("Copy code", "复制配对码"),
                 tint = colors.muted,
                 modifier =
                     Modifier
@@ -519,7 +669,7 @@ private fun WaitingBody(
         }
         Spacer(Modifier.height(2.dp))
         Text(
-            "Scan or enter this code",
+            appText("Scan or enter this code", "扫描或输入此配对码"),
             color = colors.muted,
             fontSize = 12.sp,
             modifier = Modifier.fillMaxWidth(),
@@ -543,14 +693,17 @@ private fun DetailDrawer(t: Transfer) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    "SPEED",
+                    appText("SPEED", "速度"),
                     color = colors.muted,
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 1.sp,
                 )
                 Text(
-                    "avg ${humanBps(avg)} · peak ${humanBps(peak)}",
+                    appText(
+                        "avg ${humanBps(avg)} · peak ${humanBps(peak)}",
+                        "平均 ${humanBps(avg)} · 峰值 ${humanBps(peak)}",
+                    ),
                     color = colors.muted,
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
@@ -559,28 +712,58 @@ private fun DetailDrawer(t: Transfer) {
             SpeedChart(t.speedHistory, t.avgBps)
         }
         Spacer(Modifier.height(4.dp))
-        DetailRow("Room", t.room)
-        if (t.pathAddr != null) DetailRow("Path", "${t.pathType ?: "—"} · ${t.pathAddr}")
-        DetailRow("Transferred", "${humanBytes(t.bytes)} / ${humanBytes(t.total)}")
+        DetailRow(appText("Room", "配对房间"), t.room)
+        if (t.pathAddr != null) DetailRow(appText("Path", "连接路径"), t.pathAddr)
+        DetailRow(appText("Transferred", "已传输"), "${humanBytes(t.bytes)} / ${humanBytes(t.total)}")
+        if (t.rootCount > 0) {
+            DetailRow(
+                appText("Inventory", "清单"),
+                appText(
+                    "${t.rootCount} roots · ${t.fileCount} files · ${t.directoryCount} folders",
+                    "${t.rootCount} 个根项目 · ${t.fileCount} 个文件 · ${t.directoryCount} 个文件夹",
+                ),
+            )
+            DrawerLabel(appText("Authenticated items", "已认证项目"))
+            t.inventoryPreview.take(20).forEach { entry ->
+                DetailRow(
+                    if (entry.directory) appText("Folder", "文件夹") else appText("File", "文件"),
+                    if (entry.directory) entry.name else "${entry.name} · ${humanBytes(entry.size)}",
+                )
+            }
+            if (t.inventoryPreview.size > 20 || t.inventoryHasMore) {
+                Text(
+                    appText(
+                        "More items are available in bounded pages; only the first 20 are shown here.",
+                        "还有更多项目可分页查看；此处仅显示前 20 项。",
+                    ),
+                    color = colors.muted,
+                    fontSize = 11.sp,
+                )
+            }
+        }
         if (t.log.isNotEmpty()) {
             val clip = LocalClipboardManager.current
             var copied by remember(t.id) { mutableStateOf(false) }
             val settings by SettingsStore.settings.collectAsState()
             val scope = rememberCoroutineScope()
             var upload by remember(t.id) { mutableStateOf("") }
+            val uploadLabel = appText("Upload", "上传")
+            val uploadingLabel = appText("Uploading…", "正在上传…")
+            val uploadedLabel = appText("Uploaded ✓", "已上传 ✓")
+            val uploadFailedLabel = appText("Failed", "失败")
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                DrawerLabel("This transfer's log")
+                DrawerLabel(appText("This transfer's log", "本次传输日志"))
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     if (settings.devMode && settings.logServer.isNotBlank()) {
-                        PillButton(upload.ifEmpty { "Upload" }) {
-                            upload = "Uploading…"
+                        PillButton(upload.ifEmpty { uploadLabel }) {
+                            upload = uploadingLabel
                             scope.launch {
                                 val ok =
                                     LogUpload.upload(
@@ -589,11 +772,11 @@ private fun DetailDrawer(t: Transfer) {
                                         if (t.direction == Direction.Send) "send" else "receive",
                                         Diagnostics.build(Diagnostics.Kind.Transfer, t.id),
                                     )
-                                upload = if (ok) "Uploaded ✓" else "Failed"
+                                upload = if (ok) uploadedLabel else uploadFailedLabel
                             }
                         }
                     }
-                    PillButton(if (copied) "Copied ✓" else "Copy") {
+                    PillButton(if (copied) appText("Copied ✓", "已复制 ✓") else appText("Copy", "复制")) {
                         // The full durable log via the one assembler (clip-capped).
                         runCatching {
                             clip.setText(
@@ -733,21 +916,28 @@ private fun DetailRow(
 private fun PathBadge(t: Transfer) {
     val colors = Envoix.colors
     val (label, fg, bg) =
-        when {
-            t.status == Status.Completed -> Triple("Done", colors.success, colors.successSoft)
-            t.status == Status.Unconfirmed ->
-                Triple("Sent · unconfirmed", colors.warning, colors.warning.copy(alpha = 0.14f))
-            t.status == Status.Failed -> Triple("Failed", colors.danger, colors.danger.copy(alpha = 0.12f))
-            t.status == Status.Cancelled -> Triple("Cancelled", colors.muted, colors.line.copy(alpha = 0.5f))
-            t.status == Status.Paused -> Triple("Paused", colors.warning, colors.warning.copy(alpha = 0.14f))
-            t.status == Status.Preparing -> Triple("Preparing", colors.accent, colors.accentSoft)
-            t.status == Status.Waiting -> Triple("Waiting", colors.accent, colors.accentSoft)
-            t.status == Status.Verifying -> Triple("Verifying", colors.accent, colors.accentSoft)
-            t.status == Status.Confirming -> Triple("Confirming", colors.accent, colors.accentSoft)
-            t.pathType == "relay" -> Triple("Relay", colors.accent, colors.accentSoft)
-            t.pathType == "direct" -> Triple("Direct", colors.accent, colors.accentSoft)
-            // pre-connection, path unknown: say what is HAPPENING, never "…"
-            else -> Triple("Pairing", colors.accent, colors.accentSoft)
+        when (t.status) {
+            Status.Delivered -> Triple(appText("Delivered", "已送达"), colors.success, colors.successSoft)
+            Status.Failed -> Triple(appText("Failed", "失败"), colors.danger, colors.danger.copy(alpha = 0.12f))
+            Status.Canceled -> Triple(appText("Canceled", "已取消"), colors.muted, colors.line.copy(alpha = 0.5f))
+            Status.Paused -> Triple(appText("Paused", "已暂停"), colors.warning, colors.warning.copy(alpha = 0.14f))
+            Status.Preparing -> Triple(appText("Preparing", "正在准备"), colors.accent, colors.accentSoft)
+            Status.WaitingForPeer -> Triple(appText("Waiting", "等待中"), colors.accent, colors.accentSoft)
+            Status.Pairing -> Triple(appText("Pairing", "正在配对"), colors.accent, colors.accentSoft)
+            Status.Connecting -> Triple(appText("Connecting", "正在连接"), colors.accent, colors.accentSoft)
+            Status.AwaitingDecision -> Triple(appText("Review", "待确认"), colors.warning, colors.warning.copy(alpha = 0.14f))
+            Status.Transferring ->
+                if (t.direction == Direction.Send) {
+                    Triple(appText("Sending", "正在发送"), colors.accent, colors.accentSoft)
+                } else {
+                    Triple(appText("Receiving", "正在接收"), colors.accent, colors.accentSoft)
+                }
+            Status.Verifying -> Triple(appText("Verifying", "正在验证"), colors.accent, colors.accentSoft)
+            Status.Saving -> Triple(appText("Saving", "正在保存"), colors.accent, colors.accentSoft)
+            Status.WaitingForReceiverSave ->
+                Triple(appText("Saving remotely", "接收端正在保存"), colors.accent, colors.accentSoft)
+            Status.FinalizingDelivery ->
+                Triple(appText("Finalizing delivery", "正在确认送达"), colors.accent, colors.accentSoft)
         }
     Pill(label, fg, bg)
 }
@@ -778,40 +968,71 @@ private fun Stat(text: String) {
 
 // ---- formatting helpers ----
 
-private fun title(t: Transfer): String {
+private fun title(
+    t: Transfer,
+    language: String,
+): String {
     val arrow = if (t.direction == Direction.Send) "↑" else "↓"
-    val name = t.fileName ?: if (t.direction == Direction.Send) "file" else "incoming"
-    return "$arrow $name"
+    return "$arrow ${itemTitle(t, language)}"
 }
 
-private fun subtitle(t: Transfer): String =
+private fun itemTitle(
+    t: Transfer,
+    language: String,
+): String {
+    val itemCount = t.fileCount + t.directoryCount
+    return when {
+        t.savedUris.size == 1 && !t.savedName.isNullOrBlank() -> t.savedName
+        !t.fileName.isNullOrBlank() -> t.fileName
+        itemCount == 1 -> AppText.value("1 item", "1 个项目", language)
+        itemCount > 1 -> AppText.value("$itemCount items", "$itemCount 个项目", language)
+        t.direction == Direction.Send -> AppText.value("Outgoing transfer", "待发送内容", language)
+        else -> AppText.value("Incoming transfer", "待接收内容", language)
+    }
+}
+
+private fun subtitle(
+    t: Transfer,
+    language: String,
+): String =
     when {
-        t.publicationInvalid -> "Saved file is missing or changed"
-        t.status == Status.Completed && t.savedUri != null -> "Saved to Downloads · tap to open"
+        t.status == Status.Delivered && t.savedUri != null ->
+            AppText.value("Saved to Downloads · tap to open", "已保存到 Downloads · 点击打开", language)
         t.pathAddr != null -> t.pathAddr
-        else -> "room ${t.room}"
+        else -> AppText.value("room ${t.room}", "配对房间 ${t.room}", language)
     }
 
 private fun fraction(t: Transfer): Float {
-    if (t.status == Status.Completed) return 1f
+    if (TransferPresentationPolicy.progress(t.status) == TransferProgressPresentation.Complete) return 1f
     if (t.total <= 0) return 0f
     return (t.bytes.toFloat() / t.total.toFloat()).coerceIn(0f, 1f)
 }
 
-private fun speedText(t: Transfer): String {
+private fun speedText(
+    t: Transfer,
+    language: String,
+): String {
     if (t.status != Status.Transferring || t.speedBps <= 0) {
         return when (t.status) {
-            Status.Preparing -> "preparing"
-            Status.Waiting -> "waiting for peer"
-            Status.Connecting -> "connecting"
-            Status.Verifying -> "verifying"
-            Status.Confirming -> "confirming"
-            Status.Completed -> "complete"
-            Status.Paused -> "paused"
-            Status.Failed -> "failed"
-            Status.Unconfirmed -> "unconfirmed"
-            Status.Cancelled -> "cancelled"
-            else -> "—"
+            Status.Preparing -> AppText.value("preparing", "正在准备", language)
+            Status.WaitingForPeer -> AppText.value("waiting", "正在等待", language)
+            Status.Pairing -> AppText.value("pairing", "正在配对", language)
+            Status.Connecting -> AppText.value("connecting", "正在连接", language)
+            Status.AwaitingDecision -> AppText.value("review required", "需要确认", language)
+            Status.Transferring ->
+                if (t.direction == Direction.Send) {
+                    AppText.value("sending", "正在发送", language)
+                } else {
+                    AppText.value("receiving", "正在接收", language)
+                }
+            Status.Verifying -> AppText.value("verifying", "正在验证", language)
+            Status.Saving -> AppText.value("saving", "正在保存", language)
+            Status.WaitingForReceiverSave -> AppText.value("receiver saving", "接收端正在保存", language)
+            Status.FinalizingDelivery -> AppText.value("finalizing delivery", "正在确认送达", language)
+            Status.Delivered -> AppText.value("delivered", "已送达", language)
+            Status.Paused -> AppText.value("paused", "已暂停", language)
+            Status.Failed -> AppText.value("failed", "失败", language)
+            Status.Canceled -> AppText.value("canceled", "已取消", language)
         }
     }
     val bps = smoothedBps(t)
@@ -833,22 +1054,7 @@ private fun etaText(t: Transfer): String {
     return "%02d:%02d ETA".format(m, s)
 }
 
-private fun sizeText(t: Transfer): String {
-    val bytes = if (t.total > 0) t.total else t.bytes
-    return humanBytes(bytes)
-}
-
-private fun humanBytes(b: Long): String {
-    if (b <= 0) return "0 B"
-    val units = listOf("B", "KB", "MB", "GB")
-    var v = b.toDouble()
-    var i = 0
-    while (v >= 1024 && i < units.size - 1) {
-        v /= 1024
-        i++
-    }
-    return if (i == 0) "$b B" else "${(v * 10).roundToInt() / 10.0} ${units[i]}"
-}
+private fun progressText(t: Transfer): String = "${humanBytes(t.bytes)} / ${humanBytes(t.total)}"
 
 private fun humanBps(bps: Double): String {
     if (bps <= 0) return "—"

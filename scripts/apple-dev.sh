@@ -6,7 +6,29 @@ repo_root="$(cd "$script_dir/.." && pwd)"
 apple_dir="$repo_root/apps/envoix-apple"
 project="$apple_dir/Envoix.xcodeproj"
 xcodegen_input_stamp="$project/.envoix-inputs.sha256"
-cache_root="${ENVOIX_APPLE_CACHE_ROOT:-${TMPDIR:-/tmp}/envoix-apple-cache}"
+resolve_cache_root() {
+  local configured="${ENVOIX_APPLE_CACHE_ROOT:-}"
+  local default_root="${TMPDIR:-/tmp}/envoix-apple-cache"
+  local github_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+
+  if [[ "${GITHUB_ACTIONS:-0}" == "1" ]]; then
+    configured="${configured:-$github_root/envoix-apple-cache/$GITHUB_RUN_ID}"
+    case "$configured" in
+      "$github_root/"*|"/private/tmp/"*|"/tmp/"*)
+        ;;
+      *)
+        echo "warning: ENVOIX_APPLE_CACHE_ROOT=$configured is outside runner temp; using $github_root/envoix-apple-cache/$GITHUB_RUN_ID" >&2
+        configured="$github_root/envoix-apple-cache/$GITHUB_RUN_ID"
+        ;;
+    esac
+  else
+    configured="${configured:-$default_root}"
+  fi
+
+  printf '%s\n' "${configured%/}"
+}
+
+cache_root="$(resolve_cache_root)"
 ios_sim_cache="$cache_root/ios-simulator-debug"
 ios_device_cache="$cache_root/ios-device-debug"
 macos_cache="$cache_root/macos-debug"
@@ -50,7 +72,7 @@ Environment:
   ENVOIX_IOS_DEVICE_DESTINATION Required by ios-device-build
   ENVOIX_XCRESULT_PATH          Optional milestone-only .xcresult output path
   ENVOIX_BUILD_CACHE_MIN_FREE_GIB
-                                Hard free-space minimum (default: 64)
+                                Hard free-space minimum (default: 32)
   ENVOIX_BUILD_CACHE_TARGET_FREE_GIB
                                 Auto-clean target (default: 96)
   ENVOIX_APPLE_FORCE_PROJECT_REBUILD

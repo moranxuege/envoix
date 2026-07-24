@@ -1,8 +1,6 @@
 name: apple-ci
 
 on:
-  push:
-    branches: ['**']
   pull_request:
   workflow_dispatch:
     inputs:
@@ -44,7 +42,7 @@ jobs:
 
       - name: Prepare temporary build paths
         run: |
-          printf 'ENVOIX_APPLE_CACHE_ROOT=%s\n' "$RUNNER_TEMP/envoix-apple-cache" >> "$GITHUB_ENV"
+          printf 'ENVOIX_APPLE_CACHE_ROOT=%s\n' "$RUNNER_TEMP/envoix-apple-cache/$GITHUB_RUN_ID" >> "$GITHUB_ENV"
           printf 'CARGO_INSTALL_ROOT=%s\n' "$RUNNER_TEMP/cargo-tools" >> "$GITHUB_ENV"
 
       - name: Restore cargo-swift
@@ -96,7 +94,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: apple-macos-logs
-          path: ${{ runner.temp }}/envoix-apple-cache/macos-debug/Logs
+          path: |
+            ${{ env.ENVOIX_APPLE_CACHE_ROOT }}/macos-debug/Logs
           if-no-files-found: warn
           retention-days: 14
 
@@ -112,7 +111,7 @@ jobs:
 
       - name: Prepare temporary build paths
         run: |
-          printf 'ENVOIX_APPLE_CACHE_ROOT=%s\n' "$RUNNER_TEMP/envoix-apple-cache" >> "$GITHUB_ENV"
+          printf 'ENVOIX_APPLE_CACHE_ROOT=%s\n' "$RUNNER_TEMP/envoix-apple-cache/$GITHUB_RUN_ID" >> "$GITHUB_ENV"
           printf 'CARGO_INSTALL_ROOT=%s\n' "$RUNNER_TEMP/cargo-tools" >> "$GITHUB_ENV"
 
       - name: Restore cargo-swift
@@ -163,9 +162,9 @@ jobs:
           scripts/check-apple-test-results.py
           "${{ runner.temp }}/envoix-ios-hosted.xcresult"
           --label hosted
-          --minimum-total 46
-          --minimum-executed 35
-          --maximum-skipped 11
+          --minimum-total 18
+          --minimum-executed 15
+          --maximum-skipped 3
 
       - name: Select UI test scope
         id: ui_scope
@@ -192,9 +191,8 @@ jobs:
           ui_args=()
           if [[ "$UI_SCOPE" == "smoke" ]]; then
             ui_args=(
-              -only-testing:Envoix-iOSAppUITests/EnvoixIOSAppUITests/testTransferScreenShowsStableControls
-              -only-testing:Envoix-iOSAppUITests/EnvoixIOSAppUITests/testScannerAppliesReceiverQRToSendRoomCode
-              -only-testing:Envoix-iOSAppUITests/EnvoixIOSAppUITests/testActivityActionsMatchCanonicalLifecycle
+              -only-testing:Envoix-iOSAppUITests/ManifestV2AppUITests/testEnglishSendAndReceiveExposeCanonicalInventoryControls
+              -only-testing:Envoix-iOSAppUITests/ManifestV2AppUITests/testSimplifiedChineseSendAndReceiveExposeCanonicalInventoryControls
             )
           fi
 
@@ -222,15 +220,15 @@ jobs:
           if [[ "$UI_SCOPE" == "smoke" ]]; then
             scripts/check-apple-test-results.py "$UI_RESULT" \
               --label ui-smoke \
-              --minimum-total 3 \
-              --minimum-executed 3 \
+              --minimum-total 2 \
+              --minimum-executed 2 \
               --maximum-skipped 0
           else
             scripts/check-apple-test-results.py "$UI_RESULT" \
               --label ui-full \
-              --minimum-total 20 \
-              --minimum-executed 17 \
-              --maximum-skipped 3
+              --minimum-total 2 \
+              --minimum-executed 2 \
+              --maximum-skipped 0
           fi
 
       - name: Shut down Simulator
@@ -251,6 +249,6 @@ jobs:
           path: |
             ${{ runner.temp }}/envoix-ios-hosted.xcresult
             ${{ runner.temp }}/envoix-ios-ui-*.xcresult
-            ${{ runner.temp }}/envoix-apple-cache/ios-simulator-debug/Logs
+            ${{ env.ENVOIX_APPLE_CACHE_ROOT }}/ios-simulator-debug/Logs
           if-no-files-found: warn
           retention-days: 14

@@ -47,11 +47,7 @@ object TransferRepository {
         room: String,
         qrPayload: String? = null,
         savedUri: String? = null,
-        publishedName: String? = null,
-        publishedSize: Long? = null,
-        publishedSha256: String? = null,
-        publicationInvalid: Boolean = false,
-        publishFailed: Boolean = false,
+        savedName: String? = null,
     ): Boolean {
         if (_transfers.value.any { it.id == id }) return false
         nextId = maxOf(nextId, id + 1)
@@ -62,11 +58,7 @@ object TransferRepository {
                 room = room,
                 qrPayload = qrPayload,
                 savedUri = savedUri,
-                publishedName = publishedName,
-                publishedSize = publishedSize,
-                publishedSha256 = publishedSha256,
-                publicationInvalid = publicationInvalid,
-                publishFailed = publishFailed,
+                savedName = savedName,
             )
         return true
     }
@@ -104,8 +96,9 @@ object TransferRepository {
         _transfers.value = _transfers.value.filterNot { it.id == id }
     }
 
-    /** Ids of transfers still in flight (drive the foreground notification). */
-    fun activeCount(): Int = _transfers.value.count { !it.status.isTerminal }
+    /** Attempts that still own active native work and therefore require the
+     * foreground service. Paused records remain durable without a worker. */
+    fun activeCount(): Int = _transfers.value.count { !it.status.isTerminal && it.status != Status.Paused }
 }
 
 /** Deployed Envoix broker + relay defaults (overridable in Settings later). */
@@ -114,9 +107,6 @@ object Endpoints {
         "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445"
     const val RELAY = "https://envoix.chkxwlyh.us:8444"
 
-    /** Per-room log-collection + receipt-mailbox endpoint on the rdz box (TLS). */
+    /** Per-room log-collection + diagnostic log endpoint on the rdz box (TLS). */
     const val LOG_SERVER = "https://rdz.chkxwlyh.us:8460"
-
-    /** Pre-TLS default; migrated to [LOG_SERVER] on settings load. */
-    const val LOG_SERVER_LEGACY = "http://67.230.187.238:8460"
 }

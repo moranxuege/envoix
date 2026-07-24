@@ -23,7 +23,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app
-        MARKETING_VERSION: "0.1.0"
+        MARKETING_VERSION: "0.2.0"
         CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "5.0"
         GENERATE_INFOPLIST_FILE: YES
@@ -67,7 +67,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app.ios
-        MARKETING_VERSION: "0.1.0"
+        MARKETING_VERSION: "0.2.0"
         CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "5.0"
         GENERATE_INFOPLIST_FILE: NO
@@ -115,7 +115,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app.ios.share
         PRODUCT_NAME: EnvoixShare
-        MARKETING_VERSION: "0.1.0"
+        MARKETING_VERSION: "0.2.0"
         CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "5.0"
         GENERATE_INFOPLIST_FILE: NO
@@ -174,24 +174,36 @@ targets:
         DEVELOPMENT_TEAM: 6638TTB2SF
         TEST_TARGET_NAME: Envoix-iOS
 
-  Envoix-macOSTests:
-    # Host the test in Envoix.app so cross-device acceptance exercises the
-    # production AppModel, Activity projection, and macOS destination path.
+  Envoix-macOSUITests:
+    # Host cross-device tests in the production macOS app so the Rust core
+    # uses the same network and filesystem environment as the shipped client.
     type: bundle.unit-test
     platform: macOS
     deploymentTarget: "13.0"
     sources:
-      - Tests/EnvoixMacOSHostedTests
+      - Tests/EnvoixIOSUITests/ManifestV2PhysicalTransferTests.swift
     dependencies:
       - target: Envoix
       - package: EnvoixCore
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app.macos-tests
+        PRODUCT_BUNDLE_IDENTIFIER: com.envoix.app.macos.uitests
         SWIFT_VERSION: "5.0"
         GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: Envoix
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Envoix.app/Contents/MacOS/Envoix"
         BUNDLE_LOADER: "$(TEST_HOST)"
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGNING_REQUIRED: NO
+        OTHER_LDFLAGS:
+          - "-framework"
+          - "SystemConfiguration"
+          - "-framework"
+          - "Security"
+          - "-framework"
+          - "SecurityFoundation"
+          - "-framework"
+          - "CoreWLAN"
 
 schemes:
   Envoix:
@@ -238,11 +250,9 @@ schemes:
     build:
       targets:
         Envoix: all
-        Envoix-macOSTests: [test]
+        Envoix-macOSUITests: [test]
     test:
       config: Debug
       gatherCoverageData: false
-      commandLineArguments:
-        "--macos-hosted-testing": true
       targets:
-        - Envoix-macOSTests
+        - Envoix-macOSUITests

@@ -18,10 +18,14 @@ __pycache__/
 /apps/envoix-apple/*.xcodeproj
 /apps/envoix-apple/build*/
 /apps/envoix-apple/*.zip
+*.xctestrun
 
 # cargo-swift generated Swift package (binary xcframework)
 /crates/envoix-ffi/EnvoixCore/
-# cargo-swift duplicates the reviewed root bindings into package-layout paths.
+# cargo-swift owns all generated bindings; Rust declarations are the source of truth.
+/crates/envoix-ffi/generated/envoix_ffi.swift
+/crates/envoix-ffi/generated/envoix_ffiFFI.h
+/crates/envoix-ffi/generated/envoix_ffiFFI.modulemap
 /crates/envoix-ffi/generated/headers/
 /crates/envoix-ffi/generated/sources/
 
@@ -36,3 +40,11 @@ android/app/build/
 # native libs are built by cargo-ndk (see .github/workflows/release.yml); not tracked
 android/app/src/main/jniLibs/
 android/.kotlin/
+
+# local design docs
+/docs/design/wifi-aware-vertical-slice.md
+/docs/issues/issue-reconciliation-plan-2026-07-20.md
+/docs/debate.md
+/docs/manifest_plan.md
+/docs/manifest_goal.md
+/docs/issue55_acceptance_review.md

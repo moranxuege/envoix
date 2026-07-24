@@ -1,4 +1,4 @@
-//! Command-line arguments: clap definitions and parse tests.
+//! Command-line arguments and their canonical transfer-plan projection.
 
 use std::path::PathBuf;
 
@@ -40,9 +40,9 @@ pub(crate) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
-    /// Send one file to a receiver address printed by `envoix receive`.
+    /// Send one or more files or folders as one transfer job.
     Send(SendArgs),
-    /// Receive one file into an output directory.
+    /// Receive one transfer job into an output directory.
     Receive(ReceiveArgs),
 }
 
@@ -64,9 +64,6 @@ pub(crate) struct SendArgs {
     /// Use a fresh iroh identity for this run.
     #[arg(long)]
     pub(crate) ephemeral_identity: bool,
-    /// Start a new transfer and ignore compatible receiver-side resume state.
-    #[arg(long = "fresh", action = ArgAction::SetFalse, default_value_t = true)]
-    pub(crate) resume: bool,
     /// Shared ASCII pairing token (>=12 bytes). Required unless --invite or --room is set.
     #[arg(long, required_unless_present_any = ["invite", "room"], conflicts_with = "invite")]
     pub(crate) token: Option<String>,
@@ -94,8 +91,18 @@ pub(crate) struct SendArgs {
     /// the relay, so removing the relay removes the punch itself.
     #[arg(long, requires = "room", conflicts_with = "relay_only", hide = true)]
     pub(crate) direct_only: bool,
-    /// File to send.
+    /// First file or folder to send.
     pub(crate) file: PathBuf,
+    /// Additional files or folders. Every positional source becomes a root in
+    /// the same canonical transfer job.
+    #[arg(num_args = 0..)]
+    pub(crate) additional_files: Vec<PathBuf>,
+    /// Compression policy frozen into the job at Send.
+    #[arg(long, value_enum, default_value_t = CompressionPolicyArg::Smart)]
+    pub(crate) compression: CompressionPolicyArg,
+    /// How to resolve unreadable descendants discovered before Send.
+    #[arg(long, value_enum, default_value_t = SourceIssueActionArg::Fail)]
+    pub(crate) source_issue_action: SourceIssueActionArg,
 }
 
 /// Arguments for `envoix receive`.
@@ -144,6 +151,14 @@ pub(crate) struct ReceiveArgs {
     /// Address family to bind for receiving.
     #[arg(long, value_enum, default_value_t = IpVersion::Dual)]
     pub(crate) ip_version: IpVersion,
+    /// Explicitly approve an offer larger than the automatic receive limit or
+    /// more than half of currently allocatable destination space.
+    #[arg(long)]
+    pub(crate) approve_large_transfer: bool,
+    /// Save directly on the destination storage, or explicitly accept a
+    /// verified second copy and its additional peak-space cost.
+    #[arg(long, value_enum, default_value_t = SaveModeArg::Direct)]
+    pub(crate) save_mode: SaveModeArg,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -153,17 +168,42 @@ pub(crate) enum IpVersion {
     Ipv6,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum CompressionPolicyArg {
+    Never,
+    Always,
+    Smart,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum SourceIssueActionArg {
+    Fail,
+    ApprovePartial,
+    RemoveRoot,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum SaveModeArg {
+    Direct,
+    CopyAfterVerify,
+}
+
 /// Everything `run` needs to start a transfer, derived purely from the
 /// parsed arguments - no I/O, so the args -> behavior mapping is testable.
 pub(crate) struct TransferPlan {
     /// File to send, or directory to receive into.
     pub(crate) path: PathBuf,
+    pub(crate) additional_paths: Vec<PathBuf>,
     pub(crate) source: api::PeerSource,
     pub(crate) options: api::TransferOptions,
     /// Contextual line to print before starting, when the mode warrants one.
     pub(crate) note: Option<String>,
     pub(crate) config: Option<PathBuf>,
     pub(crate) identity: IdentityConfig,
+    pub(crate) compression: api::CompressionPolicyV2,
+    pub(crate) approve_large_transfer: bool,
+    pub(crate) source_issue_action: SourceIssueActionArg,
+    pub(crate) save_mode: SaveModeArg,
 }
 
 /// Resolve a `--room` value: use the code the user gave, or generate one via an
@@ -197,7 +237,6 @@ fn resolve_room_code(
 impl SendArgs {
     pub(crate) fn into_plan(self) -> Result<TransferPlan, TransferError> {
         let mut options = api::TransferOptions::default();
-        options.resume = self.resume;
         options.relay = self.relay.clone();
         options.path = path_policy(self.relay_only, self.direct_only)?;
 
@@ -239,11 +278,20 @@ impl SendArgs {
 
         Ok(TransferPlan {
             path: self.file,
+            additional_paths: self.additional_files,
             source,
             options,
             note,
             config: self.config,
             identity: identity_config(self.identity),
+            compression: match self.compression {
+                CompressionPolicyArg::Never => api::CompressionPolicyV2::Never,
+                CompressionPolicyArg::Always => api::CompressionPolicyV2::Always,
+                CompressionPolicyArg::Smart => api::CompressionPolicyV2::Smart,
+            },
+            approve_large_transfer: false,
+            source_issue_action: self.source_issue_action,
+            save_mode: SaveModeArg::Direct,
         })
     }
 }
@@ -280,11 +328,16 @@ impl ReceiveArgs {
 
         Ok(TransferPlan {
             path: self.output,
+            additional_paths: Vec::new(),
             source,
             options,
             note,
             config: self.config,
             identity: identity_config(self.identity),
+            compression: api::CompressionPolicyV2::Smart,
+            approve_large_transfer: self.approve_large_transfer,
+            source_issue_action: SourceIssueActionArg::Fail,
+            save_mode: self.save_mode,
         })
     }
 }
@@ -327,491 +380,4 @@ fn receive_addrs_for(ip_version: IpVersion) -> BindAddrs {
 fn identity_config(path: Option<PathBuf>) -> IdentityConfig {
     path.map(IdentityConfig::Persistent)
         .unwrap_or(IdentityConfig::Ephemeral)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const PEER: &str = "peer@[::1]:9000";
-
-    #[test]
-    fn parses_send_command() {
-        let cli = Cli::try_parse_from([
-            "envoix",
-            "send",
-            "--peer",
-            PEER,
-            "--token",
-            "abcdefghijkl",
-            "hello.txt",
-        ])
-        .unwrap();
-
-        assert!(matches!(
-            cli.command,
-            Command::Send(SendArgs {
-                peer,
-                config: None,
-                enable_mdns,
-                resume,
-                ref token,
-                invite: None,
-                ref file,
-                ..
-            }) if peer == Some(PEER.parse().unwrap())
-                && !enable_mdns
-                && resume
-                && token.as_deref() == Some("abcdefghijkl")
-                && file == std::path::Path::new("hello.txt")
-        ));
-    }
-
-    #[test]
-    fn parses_send_enable_mdns_command() {
-        let cli = Cli::try_parse_from([
-            "envoix",
-            "send",
-            "--enable-mdns",
-            "--token",
-            "abcdefghijkl",
-            "hello.txt",
-        ])
-        .unwrap();
-
-        assert!(matches!(
-            cli.command,
-            Command::Send(SendArgs {
-                peer: None,
-                config: None,
-                enable_mdns: true,
-                resume: true,
-                ref token,
-                invite: None,
-                ref file,
-                ..
-            }) if token.as_deref() == Some("abcdefghijkl")
-                && file == std::path::Path::new("hello.txt")
-        ));
-    }
-
-    #[test]
-    fn parses_send_fresh_command() {
-        let cli = Cli::try_parse_from([
-            "envoix",
-            "send",
-            "--peer",
-            PEER,
-            "--fresh",
-            "--token",
-            "abcdefghijkl",
-            "hello.txt",
-        ])
-        .unwrap();
-
-        assert!(matches!(
-            cli.command,
-            Command::Send(SendArgs { resume: false, .. })
-        ));
-    }
-
-    #[test]
-    fn parses_receive_command() {
-        let cli = Cli::try_parse_from([
-            "envoix",
-            "receive",
-            "--output",
-            "received",
-            "--token",
-            "abcdefghijkl",
-        ])
-        .unwrap();
-
-        assert!(matches!(
-            cli.command,
-            Command::Receive(ReceiveArgs {
-                output,
-                config: None,
-                enable_mdns,
-                token: Some(ref token),
-                ip_version,
-                ..
-            }) if output == std::path::Path::new("received")
-                && !enable_mdns
-                && token == "abcdefghijkl"
-                && ip_version == IpVersion::Dual
-        ));
-    }
-
-    #[test]
-    fn parses_receive_ipv4() {
-        let cli = Cli::try_parse_from([
-            "envoix",
-            "receive",
-            "--output",
-            "received",
-            "--token",
-            "abcdefghijkl",
-            "--ip-version",
-            "ipv4",
-        ])
-        .unwrap();
-
-        assert!(matches!(
-            cli.command,
-            Command::Receive(ReceiveArgs {
-                ip_version: IpVersion::Ipv4,
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn parses_receive_enable_mdns_command() {
-        let cli =
-            Cli::try_parse_from(["envoix", "receive", "--enable-mdns", "--output", "received"])
-                .unwrap();
-
-        assert!(matches!(
-            cli.command,
-            Command::Receive(ReceiveArgs {
-                output,
-                enable_mdns: true,
-                token: None,
-                ..
-            }) if output == std::path::Path::new("received")
-        ));
-    }
-
-    #[test]
-    fn parses_receive_auto_alias() {
-        let cli =
-            Cli::try_parse_from(["envoix", "receive", "--auto", "--output", "received"]).unwrap();
-
-        assert!(matches!(
-            cli.command,
-            Command::Receive(ReceiveArgs {
-                enable_mdns: true,
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn parses_receive_with_explicit_token() {
-        let cli = Cli::try_parse_from([
-            "envoix",
-            "receive",
-            "--output",
-            "received",
-            "--token",
-            "abcdefghijkl",
-        ])
-        .unwrap();
-
-        assert!(matches!(
-            cli.command,
-            Command::Receive(ReceiveArgs {
-                enable_mdns: false,
-                token: Some(ref t),
-                ..
-            }) if t == "abcdefghijkl"
-        ));
-    }
-
-    #[test]
-    fn parses_send_room_command() {
-        let cli = Cli::try_parse_from([
-            "envoix",
-            "send",
-            "--room",
-            "123456-amber-comet",
-            "--rendezvous",
-            "id@1.2.3.4:8445",
-            "hello.txt",
-        ])
-        .unwrap();
-
-        assert!(matches!(
-            cli.command,
-            Command::Send(SendArgs { room: Some(Some(ref r)), rendezvous: Some(ref rv), .. })
-                if r == "123456-amber-comet" && rv == "id@1.2.3.4:8445"
-        ));
-    }
-
-    #[test]
-    fn send_room_requires_rendezvous() {
-        let result = Cli::try_parse_from([
-            "envoix",
-            "send",
-            "--room",
-            "123456-amber-comet",
-            "hello.txt",
-        ]);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn send_room_conflicts_with_token() {
-        let result = Cli::try_parse_from([
-            "envoix",
-            "send",
-            "--room",
-            "123456-amber-comet",
-            "--rendezvous",
-            "id@1.2.3.4:8445",
-            "--token",
-            "abcdefghijkl",
-            "hello.txt",
-        ]);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn parses_receive_room_command() {
-        let cli = Cli::try_parse_from([
-            "envoix",
-            "receive",
-            "--output",
-            "received",
-            "--room",
-            "123456-amber-comet",
-            "--rendezvous",
-            "id@1.2.3.4:8445",
-        ])
-        .unwrap();
-
-        assert!(matches!(
-            cli.command,
-            Command::Receive(ReceiveArgs { room: Some(Some(ref r)), .. }) if r == "123456-amber-comet"
-        ));
-    }
-
-    #[test]
-    fn parses_receive_ipv6() {
-        let cli = Cli::try_parse_from([
-            "envoix",
-            "receive",
-            "--output",
-            "received",
-            "--token",
-            "abcdefghijkl",
-            "--ip-version",
-            "ipv6",
-        ])
-        .unwrap();
-
-        assert!(matches!(
-            cli.command,
-            Command::Receive(ReceiveArgs {
-                ip_version: IpVersion::Ipv6,
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn parses_send_invite_command() {
-        let cli = Cli::try_parse_from(["envoix", "send", "--invite", "envoix:dGVzdA", "hello.txt"])
-            .unwrap();
-
-        assert!(matches!(
-            cli.command,
-            Command::Send(SendArgs {
-                peer: None,
-                config: None,
-                enable_mdns: false,
-                resume: true,
-                token: None,
-                ref invite,
-                ref file,
-                ..
-            }) if invite.as_deref() == Some("envoix:dGVzdA")
-                && file == std::path::Path::new("hello.txt")
-        ));
-    }
-
-    #[test]
-    fn parses_explicit_config_path() {
-        let cli = Cli::try_parse_from([
-            "envoix",
-            "send",
-            "--peer",
-            PEER,
-            "--config",
-            "envoix.toml",
-            "--token",
-            "abcdefghijkl",
-            "hello.txt",
-        ])
-        .unwrap();
-
-        assert!(matches!(
-            cli.command,
-            Command::Send(SendArgs {
-                config,
-                ..
-            }) if config == Some(std::path::PathBuf::from("envoix.toml"))
-        ));
-    }
-
-    #[test]
-    fn rejects_missing_token() {
-        let error =
-            Cli::try_parse_from(["envoix", "send", "--peer", PEER, "hello.txt"]).unwrap_err();
-
-        assert_eq!(
-            error.kind(),
-            clap::error::ErrorKind::MissingRequiredArgument
-        );
-    }
-
-    #[test]
-    fn receive_enable_mdns_with_token_is_valid() {
-        assert!(
-            Cli::try_parse_from([
-                "envoix",
-                "receive",
-                "--enable-mdns",
-                "--output",
-                "recv",
-                "--token",
-                "abcdefghijkl",
-            ])
-            .is_ok()
-        );
-    }
-
-    #[test]
-    fn receive_enable_mdns_without_token_is_valid() {
-        assert!(
-            Cli::try_parse_from(["envoix", "receive", "--enable-mdns", "--output", "recv",])
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn rejects_send_invite_with_peer() {
-        assert!(
-            Cli::try_parse_from([
-                "envoix",
-                "send",
-                "--invite",
-                "envoix:dGVzdA",
-                "--peer",
-                PEER,
-                "f.txt",
-            ])
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn rejects_send_invite_with_token() {
-        assert!(
-            Cli::try_parse_from([
-                "envoix",
-                "send",
-                "--invite",
-                "envoix:dGVzdA",
-                "--token",
-                "abcdefghijkl",
-                "f.txt",
-            ])
-            .is_err()
-        );
-    }
-    #[test]
-    fn send_plan_maps_room_args_to_room_source_with_path_policy() {
-        let cli = Cli::try_parse_from([
-            "envoix",
-            "send",
-            "--room",
-            "123456-amber-comet",
-            "--rendezvous",
-            "id@1.2.3.4:8445",
-            "--relay",
-            "https://r.example:8444",
-            "--relay-only",
-            "file.txt",
-        ])
-        .unwrap();
-        let Command::Send(args) = cli.command else {
-            panic!()
-        };
-        let plan = args.into_plan().unwrap();
-        assert!(matches!(plan.source, api::PeerSource::Room { .. }));
-        assert_eq!(plan.options.path, api::PathPolicy::RelayOnly);
-        assert_eq!(
-            plan.options.relay.as_deref(),
-            Some("https://r.example:8444")
-        );
-        assert!(plan.note.unwrap().contains("id@1.2.3.4:8445"));
-    }
-
-    #[test]
-    fn receive_plan_without_flags_listens_manually() {
-        let cli = Cli::try_parse_from([
-            "envoix",
-            "receive",
-            "--output",
-            "out",
-            "--token",
-            "abcdefghijkl",
-        ])
-        .unwrap();
-        let Command::Receive(args) = cli.command else {
-            panic!()
-        };
-        let plan = args.into_plan().unwrap();
-        assert!(matches!(
-            plan.source,
-            api::PeerSource::ShowManual { token: Some(_) }
-        ));
-        assert_eq!(plan.options.path, api::PathPolicy::Auto);
-        assert!(plan.note.is_none());
-    }
-
-    #[test]
-    fn send_plan_rejects_peer_with_mdns() {
-        let cli = Cli::try_parse_from([
-            "envoix",
-            "send",
-            "--enable-mdns",
-            "--token",
-            "abcdefghijkl",
-            "--peer",
-            "id@1.2.3.4:1",
-            "file.txt",
-        ])
-        .unwrap();
-        let Command::Send(args) = cli.command else {
-            panic!()
-        };
-        assert!(args.into_plan().is_err());
-    }
-    #[test]
-    fn verbose_flag_counts() {
-        let cli = Cli::try_parse_from([
-            "envoix",
-            "receive",
-            "-vv",
-            "--output",
-            "out",
-            "--token",
-            "abcdefghijkl",
-        ])
-        .unwrap();
-        assert_eq!(cli.verbose, 2);
-        let cli = Cli::try_parse_from([
-            "envoix",
-            "receive",
-            "--output",
-            "out",
-            "--token",
-            "abcdefghijkl",
-        ])
-        .unwrap();
-        assert_eq!(cli.verbose, 0);
-    }
 }

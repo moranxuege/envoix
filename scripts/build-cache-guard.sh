@@ -6,7 +6,7 @@ repo_root="$(cd "$script_dir/.." && pwd)"
 system_tmp="${TMPDIR:-/tmp}"
 system_tmp="${system_tmp%/}"
 repo_key="$(printf '%s' "$repo_root" | cksum | awk '{print $1}')"
-minimum_free_gib="${ENVOIX_BUILD_CACHE_MIN_FREE_GIB:-64}"
+minimum_free_gib="${ENVOIX_BUILD_CACHE_MIN_FREE_GIB:-32}"
 target_free_gib="${ENVOIX_BUILD_CACHE_TARGET_FREE_GIB:-96}"
 mode="${1:---auto}"
 mark_path="${2:-}"
@@ -25,7 +25,7 @@ Usage: scripts/build-cache-guard.sh [--auto|--check|--status|--dry-run]
   --mark     Mark one top-level envoix-* temporary directory as regenerable.
 
 Environment:
-  ENVOIX_BUILD_CACHE_MIN_FREE_GIB     Hard minimum (default: 64)
+  ENVOIX_BUILD_CACHE_MIN_FREE_GIB     Hard minimum (default: 32)
   ENVOIX_BUILD_CACHE_TARGET_FREE_GIB  Cleanup target (default: 96)
 EOF
 }

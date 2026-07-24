@@ -1,5 +1,4 @@
 import SwiftUI
-import Darwin
 #if os(macOS)
 import AppKit
 #elseif os(iOS)
@@ -27,38 +26,7 @@ let deprecatedLogServers: Set<String> = [
     "http://envoix.chkxwlyh.us:8460",
 ]
 
-struct ActivityActionAvailability: Equatable {
-    let canPause: Bool
-    let canResume: Bool
-    let canCancel: Bool
-    let canDelete: Bool
-    let isFinalizing: Bool
-}
-
-/// Single lifecycle-to-UI action policy. SwiftUI must not infer buttons from
-/// presentation state independently of the canonical transfer snapshot.
-func activityActionAvailability(for record: FfiTransferActivityRecord) -> ActivityActionAvailability {
-    let actions = transferActivityActions(record: record)
-    return ActivityActionAvailability(
-        canPause: actions.canPause,
-        canResume: actions.canResume,
-        canCancel: actions.canCancel,
-        canDelete: actions.canDelete,
-        isFinalizing: actions.isFinalizing
-    )
-}
-
-/// True when this attempt completed entirely from bytes already present at
-/// the destination. `bytesTransferred` is the verified total, while
-/// `bytesResumed` identifies how much of that total crossed no wire this time.
-func isFullyResumedCompletion(_ record: FfiTransferActivityRecord) -> Bool {
-    record.state == .completed
-        && record.totalBytes > 0
-        && record.bytesTransferred >= record.totalBytes
-        && record.bytesResumed >= record.totalBytes
-}
-
-let expectedCoreFFIAPIVersion: UInt32 = 3
+let expectedCoreFFIAPIVersion: UInt32 = 4
 let appDebugBuildLabel = "Debug build 2026.07.08.19"
 
 /// Generates a short, memorable, easy-to-type pairing token of the form
@@ -77,8 +45,8 @@ func friendlyToken() -> String {
 /// How two peers find and authenticate each other.
 enum PairingMode: Hashable {
     case room    // Android-compatible QR/code, broker-assisted pairing
-    case invite  // legacy direct invite link, kept for compatibility
-    case token   // compatibility-only shared token; no longer exposed in Apple UI
+    case invite  // direct endpoint invite
+    case token   // shared-token mDNS route; not exposed in the primary Apple UI
 }
 
 extension String {
@@ -91,7 +59,6 @@ enum RuntimeSettingsProvider {
         language: String,
         serverURL: String,
         relayURL: String,
-        configChunkSize: String,
         candidatesAllow: String = "",
         candidatesDeny: String = "",
         speedLimit: Int
@@ -101,7 +68,6 @@ enum RuntimeSettingsProvider {
         }
 
         let configPath = try resolveConfigPath(
-            chunkSize: configChunkSize,
             candidatesAllow: candidatesAllow,
             candidatesDeny: candidatesDeny
         )
@@ -134,6 +100,17 @@ struct RuntimeSettingsError: LocalizedError {
 enum AppText {
     static func value(_ english: String, _ simplifiedChinese: String, language: String) -> String {
         language == "zh-Hans" ? simplifiedChinese : english
+    }
+
+    static func localized(_ key: String, language: String) -> String {
+        let resourceLanguage = language == "zh-Hans" ? "zh-Hans" : "en"
+        guard
+            let path = Bundle.main.path(forResource: resourceLanguage, ofType: "lproj"),
+            let languageBundle = Bundle(path: path)
+        else {
+            return key
+        }
+        return languageBundle.localizedString(forKey: key, value: nil, table: "Localizable")
     }
 }
 
@@ -497,6 +474,47 @@ func isRegularFileURL(_ url: URL) -> Bool {
     (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
 }
 
+func availableCompletedDirectoryURL(path: String) -> URL? {
+    let path = path.trimmed
+    guard !path.isEmpty else { return nil }
+    let url = URL(fileURLWithPath: path, isDirectory: true)
+    guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
+          values.isDirectory == true,
+          values.isSymbolicLink != true else {
+        return nil
+    }
+    return url
+}
+
+func availableReceivedDirectoryItemURLs(
+    directory: URL,
+    fileManager: FileManager = .default
+) -> [URL] {
+    guard availableCompletedDirectoryURL(path: directory.path) != nil,
+          let contents = try? fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey],
+            options: [.skipsHiddenFiles]
+          ) else {
+        return []
+    }
+    return contents.compactMap { url -> (url: URL, isDirectory: Bool)? in
+        guard let values = try? url.resourceValues(
+            forKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey]
+        ), values.isSymbolicLink != true else {
+            return nil
+        }
+        if values.isDirectory == true { return (url, true) }
+        if values.isRegularFile == true { return (url, false) }
+        return nil
+    }.sorted { lhs, rhs in
+        if lhs.isDirectory != rhs.isDirectory { return lhs.isDirectory }
+        return lhs.url.lastPathComponent.localizedStandardCompare(
+            rhs.url.lastPathComponent
+        ) == .orderedAscending
+    }.map(\.url)
+}
+
 func platformRevealTitle(language: String) -> String {
     #if os(macOS)
     return AppText.value("Reveal in Finder", "在 Finder 中显示", language: language)
@@ -615,412 +633,6 @@ struct ReceivedItemsSheet: View {
 }
 #endif
 
-/// Returns a completed receive only when the final path still names a regular
-/// file with the byte count reported by the transfer core. A completion receipt
-/// may legitimately outlive a moved/deleted file, so it must not drive a
-/// "Saved file" UI on its own.
-func availableCompletedFileURL(path: String, expectedBytes: UInt64) -> URL? {
-    let path = path.trimmed
-    guard !path.isEmpty else { return nil }
-    let url = URL(fileURLWithPath: path)
-    guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
-          values.isRegularFile == true else {
-        return nil
-    }
-    if expectedBytes > 0 {
-        guard let fileSize = values.fileSize, fileSize >= 0, UInt64(fileSize) == expectedBytes else {
-            return nil
-        }
-    }
-    return url
-}
-
-func availableCompletedDirectoryURL(path: String) -> URL? {
-    let path = path.trimmed
-    guard !path.isEmpty else { return nil }
-    let url = URL(fileURLWithPath: path, isDirectory: true)
-    guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
-          values.isDirectory == true,
-          values.isSymbolicLink != true else {
-        return nil
-    }
-    return url
-}
-
-/// Lists user-visible children without following symbolic links outside the
-/// received directory. Directories sort before files to match Files/Finder.
-func availableReceivedDirectoryItemURLs(
-    directory: URL,
-    fileManager: FileManager = .default
-) -> [URL] {
-    guard availableCompletedDirectoryURL(path: directory.path) != nil,
-          let contents = try? fileManager.contentsOfDirectory(
-            at: directory,
-            includingPropertiesForKeys: [
-                .isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey,
-            ],
-            options: [.skipsHiddenFiles]
-          ) else {
-        return []
-    }
-    let items = contents.compactMap { url -> (url: URL, isDirectory: Bool)? in
-        guard let values = try? url.resourceValues(forKeys: [
-            .isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey,
-        ]), values.isSymbolicLink != true else {
-            return nil
-        }
-        if values.isDirectory == true {
-            return (url, true)
-        }
-        if values.isRegularFile == true {
-            return (url, false)
-        }
-        return nil
-    }
-    return items.sorted { lhs, rhs in
-        if lhs.isDirectory != rhs.isDirectory {
-            return lhs.isDirectory
-        }
-        return lhs.url.lastPathComponent.localizedStandardCompare(
-            rhs.url.lastPathComponent
-        ) == .orderedAscending
-    }.map(\.url)
-}
-
-/// Resolves the top-level items that are still available after a completed
-/// Manifest receive. Result paths are authoritative because publication may
-/// rename a conflicting item.
-func availableCompletedManifestItemURLs(record: FfiManifestActivityRecord) -> [URL] {
-    let activity = record.activity
-    guard activity.direction == .receive,
-          activity.state == .completed,
-          record.rootCount > 0 else { return [] }
-    let destination = URL(fileURLWithPath: activity.completedFilePath, isDirectory: true)
-    let successfulStatuses: Set<FfiManifestEntryResultStatus> = [
-        .completed, .skippedIdentical, .renamed,
-    ]
-    let results = Dictionary(
-        record.entryResults.map { ($0.entryId, $0) },
-        uniquingKeysWith: { first, _ in first }
-    )
-    return record.entries.compactMap { entry in
-        guard isSafeManifestTopLevelName(entry.relativePath),
-              let result = results[entry.entryId],
-              successfulStatuses.contains(result.status),
-              isSafeManifestTopLevelName(result.finalRelativePath) else {
-            return nil
-        }
-        let finalURL = destination.appendingPathComponent(
-            result.finalRelativePath,
-            isDirectory: entry.kind == .directory
-        )
-        switch entry.kind {
-        case .file:
-            return availableCompletedFileURL(path: finalURL.path, expectedBytes: entry.size)
-        case .directory:
-            return availableCompletedDirectoryURL(path: finalURL.path)
-        }
-    }
-}
-
-/// Resolves the most useful single completed location for compatibility with
-/// existing callers. A multi-root transfer continues to resolve to its
-/// destination directory; item-aware UI should use the array helper above.
-func availableCompletedManifestURL(record: FfiManifestActivityRecord) -> URL? {
-    guard record.activity.direction == .receive,
-          record.activity.state == .completed,
-          record.rootCount > 0 else { return nil }
-    guard record.rootCount == 1 else {
-        return availableCompletedDirectoryURL(path: record.activity.completedFilePath)
-    }
-    let items = availableCompletedManifestItemURLs(record: record)
-    return items.count == 1 ? items[0] : nil
-}
-
-enum PublicationMaterialization: Equatable {
-    case clone
-    case copy
-}
-
-private struct TransferReceiptReference: Decodable {
-    let fileName: String
-
-    private enum CodingKeys: String, CodingKey {
-        case fileName = "file_name"
-    }
-}
-
-/// Removes completion receipts whose directly received file no longer exists.
-/// A receipt is valid without its staging file only when native publication is
-/// in use; direct destinations must materialize the file again after deletion.
-func removeOrphanedDirectReceiveReceipts(
-    in directory: URL,
-    fileManager: FileManager = .default
-) throws {
-    let prefix = ".envoix-receipt."
-    let suffix = ".json"
-    let entries = try fileManager.contentsOfDirectory(
-        at: directory,
-        includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
-        options: []
-    )
-    for receiptURL in entries {
-        let receiptName = receiptURL.lastPathComponent
-        guard receiptName.hasPrefix(prefix), receiptName.hasSuffix(suffix) else { continue }
-        let values = try? receiptURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
-        guard values?.isRegularFile == true, values?.isSymbolicLink != true,
-              let data = try? Data(contentsOf: receiptURL),
-              let receipt = try? JSONDecoder().decode(TransferReceiptReference.self, from: data),
-              isSafeDirectReceiveFileName(receipt.fileName),
-              receiptName == "\(prefix)\(receipt.fileName)\(suffix)" else { continue }
-        let receivedFile = directory.appendingPathComponent(receipt.fileName, isDirectory: false)
-        guard !fileManager.fileExists(atPath: receivedFile.path) else { continue }
-        try fileManager.removeItem(at: receiptURL)
-    }
-}
-
-private func isSafeDirectReceiveFileName(_ name: String) -> Bool {
-    !name.isEmpty
-        && name != "."
-        && name != ".."
-        && URL(fileURLWithPath: name).lastPathComponent == name
-        && !name.contains("\\")
-        && !name.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
-}
-
-/// Uses same-volume copy-on-write when the destination supports it. A local
-/// APFS publication then allocates metadata instead of rewriting the full
-/// payload; FileProvider and cross-volume targets transparently fall back to a
-/// normal copy.
-@discardableResult
-func materializePublishedFile(
-    from source: URL,
-    to destination: URL,
-    fileManager: FileManager = .default
-) throws -> PublicationMaterialization {
-    let cloneResult = source.path.withCString { sourcePath in
-        destination.path.withCString { destinationPath in
-            clonefile(sourcePath, destinationPath, 0)
-        }
-    }
-    if cloneResult == 0 {
-        return .clone
-    }
-    try fileManager.copyItem(at: source, to: destination)
-    return .copy
-}
-
-/// Publishes one already-verified staging file into a user-selected Files
-/// directory. The destination becomes visible only after clone/copy completion
-/// and a size check. The verified source remains available for retries.
-func publishReceivedFile(
-    from source: URL,
-    to destinationDirectory: URL,
-    expectedBytes: UInt64
-) throws -> URL {
-    guard availableCompletedFileURL(path: source.path, expectedBytes: expectedBytes) != nil else {
-        throw RuntimeSettingsError("The verified staging file is missing or has an unexpected size.")
-    }
-    let fileManager = FileManager.default
-    try fileManager.createDirectory(at: destinationDirectory, withIntermediateDirectories: true)
-    let finalURL = destinationDirectory.appendingPathComponent(source.lastPathComponent)
-    if fileManager.fileExists(atPath: finalURL.path) {
-        guard availableCompletedFileURL(path: finalURL.path, expectedBytes: expectedBytes) != nil,
-              try filesHaveEqualContents(source, finalURL) else {
-            throw RuntimeSettingsError("A different file with the same name already exists in the selected folder.")
-        }
-        return finalURL
-    }
-    let temporaryURL = destinationDirectory.appendingPathComponent(
-        ".envoix-publish-\(UUID().uuidString).part"
-    )
-    defer { try? fileManager.removeItem(at: temporaryURL) }
-    try materializePublishedFile(from: source, to: temporaryURL, fileManager: fileManager)
-    guard availableCompletedFileURL(path: temporaryURL.path, expectedBytes: expectedBytes) != nil else {
-        throw RuntimeSettingsError("The copied file did not match the verified size.")
-    }
-    try fileManager.moveItem(at: temporaryURL, to: finalURL)
-    return finalURL
-}
-
-/// Publishes every verified top-level Manifest root. Existing identical roots
-/// make retries idempotent; a conflicting root fails before any new copy starts.
-func publishReceivedManifest(
-    from sourceRoot: URL,
-    to destinationDirectory: URL,
-    record: FfiManifestActivityRecord
-) throws -> URL {
-    let fileManager = FileManager.default
-    let successfulStatuses: Set<FfiManifestEntryResultStatus> = [
-        .completed, .skippedIdentical, .renamed,
-    ]
-    let results = Dictionary(
-        record.entryResults.map { ($0.entryId, $0) },
-        uniquingKeysWith: { first, _ in first }
-    )
-    let roots = try record.entries.filter { !$0.relativePath.contains("/") }.map { entry in
-        guard let result = results[entry.entryId],
-              successfulStatuses.contains(result.status),
-              isSafeManifestTopLevelName(entry.relativePath),
-              isSafeManifestTopLevelName(result.finalRelativePath) else {
-            throw RuntimeSettingsError("The verified Manifest is missing a safe top-level result.")
-        }
-        return (
-            entry,
-            sourceRoot.appendingPathComponent(result.finalRelativePath),
-            destinationDirectory.appendingPathComponent(result.finalRelativePath)
-        )
-    }
-    guard roots.count == Int(record.rootCount), !roots.isEmpty else {
-        throw RuntimeSettingsError("The verified Manifest root count is inconsistent.")
-    }
-
-    try fileManager.createDirectory(at: destinationDirectory, withIntermediateDirectories: true)
-    for (entry, source, destination) in roots where fileManager.fileExists(atPath: destination.path) {
-        guard try publishedItemMatches(entry: entry, source: source, destination: destination) else {
-            throw RuntimeSettingsError(
-                "A different item named \(destination.lastPathComponent) already exists in the selected folder."
-            )
-        }
-    }
-
-    for (entry, source, destination) in roots where !fileManager.fileExists(atPath: destination.path) {
-        switch entry.kind {
-        case .file:
-            _ = try publishReceivedFile(
-                from: source,
-                to: destinationDirectory,
-                expectedBytes: entry.size
-            )
-        case .directory:
-            try publishReceivedDirectory(from: source, to: destination)
-        }
-    }
-    return destinationDirectory
-}
-
-private func isSafeManifestTopLevelName(_ name: String) -> Bool {
-    !name.isEmpty
-        && name != "."
-        && name != ".."
-        && !name.contains("/")
-        && !name.contains("\\")
-        && !name.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
-}
-
-private func publishReceivedDirectory(from source: URL, to destination: URL) throws {
-    let fileManager = FileManager.default
-    let sourceValues = try source.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
-    guard sourceValues.isDirectory == true, sourceValues.isSymbolicLink != true else {
-        throw RuntimeSettingsError("A verified Manifest directory is missing or invalid.")
-    }
-    let temporaryURL = destination.deletingLastPathComponent().appendingPathComponent(
-        ".envoix-publish-\(UUID().uuidString).part",
-        isDirectory: true
-    )
-    defer { try? fileManager.removeItem(at: temporaryURL) }
-    try fileManager.copyItem(at: source, to: temporaryURL)
-    guard try directoryTreesHaveEqualContents(source, temporaryURL) else {
-        throw RuntimeSettingsError("The copied directory did not match the verified staging data.")
-    }
-    try fileManager.moveItem(at: temporaryURL, to: destination)
-}
-
-private func publishedItemMatches(
-    entry: FfiPreparedManifestEntry,
-    source: URL,
-    destination: URL
-) throws -> Bool {
-    switch entry.kind {
-    case .file:
-        guard availableCompletedFileURL(path: destination.path, expectedBytes: entry.size) != nil else {
-            return false
-        }
-        return try filesHaveEqualContents(source, destination)
-    case .directory:
-        return try directoryTreesHaveEqualContents(source, destination)
-    }
-}
-
-private func directoryTreesHaveEqualContents(_ lhs: URL, _ rhs: URL) throws -> Bool {
-    let leftItems = try directoryInventory(lhs)
-    let rightItems = try directoryInventory(rhs)
-    guard leftItems.keys == rightItems.keys else { return false }
-    for path in leftItems.keys {
-        guard let left = leftItems[path], let right = rightItems[path], left.kind == right.kind else {
-            return false
-        }
-        if left.kind == .file {
-            guard left.size == right.size,
-                  try filesHaveEqualContents(
-                    lhs.appendingPathComponent(path),
-                    rhs.appendingPathComponent(path)
-                  ) else { return false }
-        }
-    }
-    return true
-}
-
-private enum PublishedItemKind: Equatable {
-    case file
-    case directory
-}
-
-private func directoryInventory(_ root: URL) throws -> [String: (kind: PublishedItemKind, size: Int)] {
-    let keys: Set<URLResourceKey> = [
-        .isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey,
-    ]
-    let rootValues = try root.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
-    guard rootValues.isDirectory == true, rootValues.isSymbolicLink != true else {
-        throw RuntimeSettingsError("A Manifest directory is missing or invalid.")
-    }
-    let resolvedRoot = root.resolvingSymlinksInPath().standardizedFileURL
-    let rootPrefix = resolvedRoot.path + "/"
-    guard let enumerator = FileManager.default.enumerator(
-        at: resolvedRoot,
-        includingPropertiesForKeys: Array(keys),
-        options: []
-    ) else {
-        throw RuntimeSettingsError("Could not inspect a Manifest directory.")
-    }
-    var inventory: [String: (kind: PublishedItemKind, size: Int)] = [:]
-    while let url = enumerator.nextObject() as? URL {
-        let values = try url.resourceValues(forKeys: keys)
-        guard values.isSymbolicLink != true else {
-            throw RuntimeSettingsError("Symbolic links are not supported in a Manifest directory.")
-        }
-        let resolvedURL = url.resolvingSymlinksInPath().standardizedFileURL
-        guard resolvedURL.path.hasPrefix(rootPrefix) else {
-            throw RuntimeSettingsError("A Manifest directory entry escaped its root.")
-        }
-        let relativePath = String(resolvedURL.path.dropFirst(rootPrefix.count))
-        if values.isDirectory == true {
-            inventory[relativePath] = (.directory, 0)
-        } else if values.isRegularFile == true {
-            inventory[relativePath] = (.file, values.fileSize ?? -1)
-        } else {
-            throw RuntimeSettingsError("A Manifest directory contains an unsupported item.")
-        }
-    }
-    return inventory
-}
-
-private func filesHaveEqualContents(_ lhs: URL, _ rhs: URL) throws -> Bool {
-    let left = try FileHandle(forReadingFrom: lhs)
-    let right = try FileHandle(forReadingFrom: rhs)
-    defer {
-        try? left.close()
-        try? right.close()
-    }
-    let chunkSize = 1024 * 1024
-    while true {
-        let leftChunk = try left.read(upToCount: chunkSize) ?? Data()
-        let rightChunk = try right.read(upToCount: chunkSize) ?? Data()
-        guard leftChunk == rightChunk else { return false }
-        if leftChunk.isEmpty { return true }
-    }
-}
-
 /// Formats a byte count as a short human-readable string (auto KB/MB/GB).
 func byteString(_ bytes: UInt64) -> String {
     ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
@@ -1031,14 +643,12 @@ func byteString(_ bytes: UInt64) -> String {
 private let runtimeConfigFileName = "envoix-runtime-config.toml"
 
 func resolveConfigPath(
-    chunkSize: String,
     candidatesAllow: String = "",
     candidatesDeny: String = ""
 ) throws -> String {
-    let chunkSize = chunkSize.trimmed
     let allow = configListLines(candidatesAllow)
     let deny = configListLines(candidatesDeny)
-    if chunkSize.isEmpty && allow.isEmpty && deny.isEmpty {
+    if allow.isEmpty && deny.isEmpty {
         return ""
     }
 
@@ -1053,9 +663,6 @@ func resolveConfigPath(
     try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
     let configFile = configDir.appendingPathComponent(runtimeConfigFileName)
     var lines: [String] = []
-    if !chunkSize.isEmpty {
-        lines.append("chunk_size = \"\(tomlEscaped(chunkSize))\"")
-    }
     if !allow.isEmpty || !deny.isEmpty {
         lines.append("[candidates]")
         if !allow.isEmpty {
@@ -1097,732 +704,4 @@ func etaString(_ seconds: Double) -> String {
     let (h, m, sec) = (s / 3600, (s % 3600) / 60, s % 60)
     if h > 0 { return String(format: "ETA %d:%02d:%02d", h, m, sec) }
     return String(format: "ETA %d:%02d", m, sec)
-}
-
-/// Builds a compact, bounded diagnostic report for a transfer and its snapshots.
-struct TransferDiagnostics {
-    static let clipboardMaxBytes = 256 * 1024
-    static let uploadMaxBytes = RemoteLogUpload.bodyMaxBytes
-    #if os(macOS)
-    static let appIdentifier = "envoix-macos"
-    #else
-    static let appIdentifier = "envoix-ios"
-    #endif
-    private static let headerMaxBytes = 2048
-    private static let failureMaxBytes = 48 * 1024
-    private static let eventLinesMaxBytes = 80 * 1024
-    private static let eventLogMaxBytes = 96 * 1024
-
-    static func report(
-        for record: FfiTransferActivityRecord,
-        eventLog: [String] = [],
-        transferEventLines: [String] = [],
-        budget: Int = clipboardMaxBytes,
-        includeSensitiveFields: Bool = true
-    ) -> String {
-        var remaining = budget
-        var lines: [String] = []
-
-        append(
-            section: section("header", headerText(for: record)),
-            cap: headerMaxBytes,
-            into: &lines,
-            remaining: &remaining
-        )
-
-        if hasFailureMetadata(record) {
-            append(
-                section: section("failure", failureText(for: record)),
-                cap: failureMaxBytes,
-                into: &lines,
-                remaining: &remaining
-            )
-        }
-
-        append(
-            section: section("activity", activityText(for: record, includeSensitiveFields: includeSensitiveFields)),
-            cap: remaining,
-            into: &lines,
-            remaining: &remaining
-        )
-
-        append(
-            section: section("transfer_events", transferEventLines.joined(separator: "\n")),
-            cap: eventLinesMaxBytes,
-            into: &lines,
-            remaining: &remaining
-        )
-
-        append(
-            section: section("activity_log", eventLog.joined(separator: "\n")),
-            cap: eventLogMaxBytes,
-            into: &lines,
-            remaining: &remaining
-        )
-
-        return lines.joined(separator: "\n")
-    }
-
-    /// Remote reports are larger than clipboard copies but never contain pairing secrets.
-    static func remoteReport(
-        for record: FfiTransferActivityRecord,
-        eventLog: [String] = [],
-        transferEventLines: [String] = []
-    ) -> String {
-        report(
-            for: record,
-            eventLog: eventLog,
-            transferEventLines: transferEventLines,
-            budget: uploadMaxBytes,
-            includeSensitiveFields: false
-        )
-    }
-
-    /// App-level report used before a Room exists and for cross-transfer diagnosis.
-    static func appReport(
-        activities: [FfiTransferActivityRecord],
-        eventLines: [String] = []
-    ) -> String {
-        var remaining = uploadMaxBytes
-        var lines: [String] = []
-        append(
-            section: section("header", ([
-                "app=\(appIdentifier)",
-                "version=\(appVersion)",
-                "build=\(appBuild)",
-                "generated=\(isoDate())",
-                "activity_count=\(activities.count)",
-            ] + runtimeIdentityLines).joined(separator: "\n")),
-            cap: headerMaxBytes,
-            into: &lines,
-            remaining: &remaining
-        )
-
-        let activitySnapshots = activities.map { record in
-            var sections = ["[activity \(record.activityId)]", activityText(for: record, includeSensitiveFields: false)]
-            if hasFailureMetadata(record) {
-                sections.append(failureText(for: record))
-            }
-            return sections.joined(separator: "\n")
-        }.joined(separator: "\n\n")
-        append(
-            section: section("activities", activitySnapshots),
-            cap: remaining,
-            into: &lines,
-            remaining: &remaining
-        )
-
-        append(
-            section: section("activity_events", eventLines.joined(separator: "\n")),
-            cap: remaining,
-            into: &lines,
-            remaining: &remaining
-        )
-
-        return lines.joined(separator: "\n")
-    }
-
-    static func transferEventLine(_ event: FfiTransferEvent) -> String {
-        let date = formatTime(event.tsMs)
-        var parts = [
-            "[\(date)]",
-            "\(event.kind)",
-            "\(event.direction)",
-            "\(event.mode)",
-            "\(event.pairingStep)",
-        ]
-        let file = event.fileName.isEmpty ? "unknown" : event.fileName
-        parts.append("file=\(file)")
-        parts.append("bytes=\(event.bytesTransferred)/\(event.totalBytes)")
-        if event.bytesResumed > 0 {
-            parts.append("resumed=\(event.bytesResumed)")
-        }
-        if !event.dataPathDetail.isEmpty {
-            parts.append("path=\(event.dataPathKind) \(event.dataPathDetail)")
-        }
-        if !event.diagnosticMessage.isEmpty {
-            parts.append("message=\(event.diagnosticMessage)")
-        }
-        return parts.joined(separator: " · ")
-    }
-
-    private static func append(
-        section: String,
-        cap: Int,
-        into report: inout [String],
-        remaining: inout Int
-    ) {
-        guard cap > 0 else { return }
-        let allowed = min(cap, remaining)
-        if allowed <= 0 { return }
-        let piece = tail(section, maxBytes: allowed)
-        guard !piece.isEmpty else { return }
-        if piece.utf8.count > remaining { return }
-        report.append(piece)
-        remaining -= piece.utf8.count
-        if remaining > 0 { remaining -= 1 }
-    }
-
-    private static func section(_ title: String, _ body: String) -> String {
-        if body.isEmpty { return "[\(title)]\n(empty)" }
-        return "[\(title)]\n\(body)"
-    }
-
-    private static func headerText(for record: FfiTransferActivityRecord) -> String {
-        ([
-            "app=\(appIdentifier)",
-            "version=\(appVersion)",
-            "build=\(appBuild)",
-            "record_id=\(record.activityId)",
-            "attempt_id=\(record.attemptId)",
-            "generated=\(isoDate())",
-        ] + runtimeIdentityLines).joined(separator: "\n")
-    }
-
-    private static func failureText(for record: FfiTransferActivityRecord) -> String {
-        [
-            "failure_code=\(record.failureCode)",
-            "failure_category=\(record.failureCategory)",
-            "failure_phase=\(record.failurePhase)",
-            "failure_origin=\(record.failureOrigin)",
-            "user_message_key=\(record.userMessageKey)",
-            "retryable=\(record.retryable)",
-            "recovery_action=\(record.recoveryAction)",
-            "diagnostic_message=\(record.diagnosticMessage)",
-        ].joined(separator: "\n")
-    }
-
-    private static func activityText(
-        for record: FfiTransferActivityRecord,
-        includeSensitiveFields: Bool
-    ) -> String {
-        [
-            "activity_id=\(record.activityId)",
-            "attempt_id=\(record.attemptId)",
-            "state=\(record.state)",
-            "direction=\(record.direction)",
-            "mode=\(record.mode)",
-            "created_at=\(formatTime(record.createdAtMs))",
-            "updated_at=\(formatTime(record.updatedAtMs))",
-            "started_at=\(formatTime(record.startedAtMs))",
-            "completed_at=\(formatTime(record.completedAtMs))",
-            "transfer_id=\(record.transferId)",
-            "file_name=\(record.fileName)",
-            "bytes=\(record.bytesTransferred)/\(record.totalBytes)",
-            "resumed_bytes=\(record.bytesResumed)",
-            "invite=\(sensitiveValue(record.invite, include: includeSensitiveFields))",
-            "token=\(sensitiveValue(record.token, include: includeSensitiveFields))",
-            "peer=\(sensitiveValue(record.peerDescriptor, include: includeSensitiveFields))",
-            "data_path=\(record.dataPathKind) \(record.dataPathDetail)",
-            "limits=\(record.limits)",
-            "completed_file_path=\(sensitiveValue(record.completedFilePath, include: includeSensitiveFields))",
-            "diagnostic_message=\(record.diagnosticMessage)",
-        ].joined(separator: "\n")
-    }
-
-    private static func hasFailureMetadata(_ record: FfiTransferActivityRecord) -> Bool {
-        record.state == .failed
-            || record.state == .unconfirmed
-            || record.failureCode != .unknown
-            || record.failureCategory != .unknown
-            || !record.userMessageKey.isEmpty
-            || record.recoveryAction != .none
-    }
-
-    private static func sensitiveValue(_ value: String, include: Bool) -> String {
-        guard !value.isEmpty else { return "" }
-        return include ? value : "[redacted]"
-    }
-
-    private static var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
-    }
-
-    private static var appBuild: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "dev"
-    }
-
-    private static var runtimeIdentityLines: [String] {
-        let core = envoixCoreInfo()
-        return [
-            "core_version=\(core.coreVersion)",
-            "core_ffi_api=\(core.ffiApiVersion)",
-            "core_capabilities=\(core.capabilities.sorted().joined(separator: ","))",
-            "executable_sha256=\(executableFingerprint)",
-            "runtime_code_file=\(runtimeCodeURL?.lastPathComponent ?? "unavailable")",
-            "runtime_code_sha256=\(fileFingerprint(runtimeCodeURL))",
-        ]
-    }
-
-    private static let executableFingerprint = fileFingerprint(Bundle.main.executableURL)
-
-    private static let runtimeCodeURL: URL? = {
-        guard let executableURL = Bundle.main.executableURL else { return nil }
-        let debugDylibURL = executableURL
-            .deletingLastPathComponent()
-            .appendingPathComponent("\(executableURL.lastPathComponent).debug.dylib")
-        if FileManager.default.isReadableFile(atPath: debugDylibURL.path) {
-            return debugDylibURL
-        }
-        return executableURL
-    }()
-
-    private static func fileFingerprint(_ url: URL?) -> String {
-        guard let url, let handle = try? FileHandle(forReadingFrom: url) else {
-            return "unavailable"
-        }
-        defer { try? handle.close() }
-        var hasher = SHA256()
-        while true {
-            let data = handle.readData(ofLength: 1024 * 1024)
-            if data.isEmpty { break }
-            hasher.update(data: data)
-        }
-        return hasher.finalize().prefix(12).map { String(format: "%02x", $0) }.joined()
-    }
-
-    private static func formatTime(_ ms: UInt64) -> String {
-        guard ms > 0 else { return "0" }
-        let date = Date(timeIntervalSince1970: TimeInterval(ms) / 1000)
-        let formatter = ISO8601DateFormatter()
-        return formatter.string(from: date)
-    }
-
-    private static func isoDate() -> String {
-        ISO8601DateFormatter().string(from: Date())
-    }
-
-    private static func tail(_ text: String, maxBytes: Int) -> String {
-        let bytes = Array(text.utf8)
-        if bytes.count <= maxBytes { return text }
-        let head = "[… trimmed — last \(maxBytes / 1024) KB]\n"
-        let headBytes = Array(head.utf8)
-        let remaining = max(0, maxBytes - headBytes.count)
-        if remaining == 0 { return head }
-        let tailBytes = bytes.suffix(remaining)
-        return head + String(decoding: tailBytes, as: UTF8.self)
-    }
-}
-
-/// Shared status / progress section used by both the send and receive views.
-struct TransferStatusView: View {
-    @Environment(\.appLanguage) private var language
-    @AppStorage("envoix.developerMode") private var developerMode = false
-    @AppStorage("envoix.verboseLog") private var verboseLog = false
-    @ObservedObject var viewModel: TransferViewModel
-    #if os(iOS)
-    @State private var previewFileURL: URL?
-    @State private var receivedItemsPresentation: ReceivedItemsPresentation?
-    #endif
-
-    var body: some View {
-        if showsStatus {
-            statusCard
-        }
-    }
-
-    private var showsStatus: Bool {
-        switch viewModel.phase {
-        case .idle: return !viewModel.statusText.isEmpty
-        default: return true
-        }
-    }
-
-    private var statusCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top, spacing: 12) {
-                Image(systemName: iconName)
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(tint)
-                    .frame(width: 30, height: 30)
-                    .background(tint.opacity(0.10), in: Circle())
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(titleText)
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(Theme.text)
-                        .lineLimit(2)
-
-                    if let detailText {
-                        Text(detailText)
-                            .font(.body)
-                            .foregroundStyle(Theme.muted)
-                            .lineLimit(3)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-
-                Spacer(minLength: 8)
-            }
-
-            switch viewModel.phase {
-            case .idle, .waiting, .canceled, .failed:
-                EmptyView()
-            case .paused:
-                if viewModel.total > 0 {
-                    transferProgressLine
-                }
-                if let path = currentDataPathText {
-                    pathLine(path)
-                }
-            case .transferring:
-                ProgressBar(value: viewModel.progressFraction)
-                transferProgressLine
-                if let path = currentDataPathText {
-                    pathLine(path)
-                }
-            case .completed(let bytes):
-                Text(byteString(bytes))
-                    .font(.body.monospacedDigit())
-                    .foregroundStyle(Theme.muted)
-                if !viewModel.completedItemURLs.isEmpty {
-                    completedFileControls(viewModel.completedItemURLs)
-                } else if let url = viewModel.completedFileURL, isRegularFileURL(url) {
-                    completedFileControls([url])
-                }
-            }
-
-            if let stepText {
-                Text(stepText)
-                    .font(.callout.monospaced())
-                    .foregroundStyle(Theme.muted)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-
-            if developerMode && !viewModel.eventLog.isEmpty {
-                Divider().overlay(Theme.line)
-                logsCard
-            }
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(backgroundTint)
-        .overlay(
-            RoundedRectangle(cornerRadius: Theme.cardRadius)
-                .strokeBorder(tint.opacity(borderOpacity), lineWidth: 0.9)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
-        #if os(iOS)
-        .quickLookPreview($previewFileURL)
-        .sheet(item: $receivedItemsPresentation) { presentation in
-            ReceivedItemsSheet(urls: presentation.urls)
-        }
-        #endif
-    }
-
-    private var transferProgressLine: some View {
-        HStack(spacing: 6) {
-            Text("\(byteString(viewModel.transferred)) / \(byteString(viewModel.total))")
-            if viewModel.bytesPerSec > 0 {
-                Text("·")
-                Text(rateString(viewModel.bytesPerSec))
-            }
-            if let eta = viewModel.etaSeconds {
-                Text("·")
-                Text(etaString(eta))
-            }
-        }
-        .font(.body.monospacedDigit())
-        .foregroundStyle(Theme.muted)
-    }
-
-    private func pathLine(_ path: String) -> some View {
-        HStack(spacing: 6) {
-            Text(AppText.value("Path", "链路", language: language))
-                .fontWeight(.semibold)
-            Text("·")
-            Text(path)
-                .lineLimit(1)
-                .truncationMode(.middle)
-        }
-        .font(.body.monospacedDigit())
-        .foregroundStyle(Theme.muted)
-    }
-
-    private var currentDataPathText: String? {
-        guard let record = viewModel.transferActivity, record.dataPathKind != .none else { return nil }
-        let pathKind: String
-        switch record.dataPathKind {
-        case .direct:
-            pathKind = AppText.value("Direct", "直连", language: language)
-        case .relay:
-            pathKind = AppText.value("Relay", "中继", language: language)
-        case .other:
-            pathKind = AppText.value("Path", "路径", language: language)
-        case .none:
-            return nil
-        }
-        guard developerMode, !record.dataPathDetail.isEmpty else { return pathKind }
-        return "\(pathKind) · \(record.dataPathDetail)"
-    }
-
-    @ViewBuilder private var logsCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text(AppText.value("Activity log", "活动日志", language: language))
-                    .font(.callout.weight(.semibold))
-                    .foregroundStyle(Theme.text)
-                Spacer(minLength: 8)
-                if verboseLog {
-                    Text(AppText.value("Verbose", "详细", language: language))
-                        .font(.caption.monospaced())
-                        .foregroundStyle(Theme.muted)
-                }
-                Button {
-                    copyWithToast(
-                        viewModel.eventLog.joined(separator: "\n"),
-                        AppText.value("Log copied", "日志已复制", language: language),
-                        language: language
-                    )
-                } label: {
-                    Label(AppText.value("Copy", "复制", language: language), systemImage: "doc.on.doc")
-                        .labelStyle(.iconOnly)
-                        .frame(width: 30, height: 30)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 4) {
-                    ForEach(viewModel.eventLog, id: \.self) { line in
-                        Text(line)
-                            .font(.caption.monospaced())
-                            .foregroundStyle(Theme.muted)
-                            .lineLimit(2)
-                            .textSelection(.enabled)
-                    }
-                }
-            }
-            .frame(maxHeight: 180)
-        }
-    }
-
-    private var titleText: String {
-        switch viewModel.phase {
-        case .idle:
-            return AppText.value("Status", "状态", language: language)
-        case .waiting:
-            return AppText.value("Waiting for the other device", "正在等待另一台设备", language: language)
-        case .transferring:
-            return viewModel.fileName.isEmpty ? AppText.value("Transferring", "正在传输", language: language) : viewModel.fileName
-        case .paused:
-            return AppText.value("Transfer paused", "传输已暂停", language: language)
-        case .completed:
-            return AppText.value("Transfer completed", "传输完成", language: language)
-        case .canceled:
-            return AppText.value("Transfer canceled", "传输已取消", language: language)
-        case .failed(let reason):
-            return failureText(reason: reason).title
-        }
-    }
-
-    private var detailText: String? {
-        switch viewModel.phase {
-        case .idle:
-            return viewModel.statusText.isEmpty ? nil : viewModel.statusText
-        case .waiting:
-            return viewModel.statusText.isEmpty
-                ? AppText.value("Keep this window open until the peer connects.", "请保持此窗口打开，直到对方连接。", language: language)
-                : viewModel.statusText
-        case .transferring:
-            return AppText.value("Keep both devices awake until the transfer finishes.", "请保持两台设备唤醒，直到传输完成。", language: language)
-        case .paused:
-            return AppText.value("Resume or delete this transfer from Activity.", "请在活动页继续或删除此传输。", language: language)
-        case .completed:
-            return viewModel.statusText.isEmpty ? AppText.value("The file is ready.", "文件已准备好。", language: language) : viewModel.statusText
-        case .canceled:
-            return AppText.value("Ready to start another transfer.", "可以开始新的传输。", language: language)
-        case .failed(let reason):
-            return failureText(reason: reason).detail
-        }
-    }
-
-    private var stepText: String? {
-        let text = viewModel.statusText.trimmed
-        guard !text.isEmpty else { return nil }
-        if case .failed = viewModel.phase {
-            return AppText.value("Last step: \(text)", "上一步：\(text)", language: language)
-        }
-        return nil
-    }
-
-    private var iconName: String {
-        switch viewModel.phase {
-        case .idle: return "info.circle"
-        case .waiting: return "antenna.radiowaves.left.and.right"
-        case .transferring: return "arrow.up.arrow.down.circle"
-        case .paused: return "pause.circle"
-        case .completed: return "checkmark.circle.fill"
-        case .canceled: return "xmark.circle"
-        case .failed: return "exclamationmark.triangle.fill"
-        }
-    }
-
-    private var tint: Color {
-        switch viewModel.phase {
-        case .idle: return Theme.muted
-        case .waiting, .transferring, .paused: return Theme.warning
-        case .completed: return Theme.success
-        case .canceled: return Theme.muted
-        case .failed: return Theme.danger
-        }
-    }
-
-    private var backgroundTint: Color {
-        switch viewModel.phase {
-        case .failed: return Theme.dangerSoft.opacity(0.55)
-        case .waiting, .transferring, .paused: return Theme.warning.opacity(0.06)
-        case .completed: return Theme.success.opacity(0.06)
-        case .idle, .canceled: return Theme.surface
-        }
-    }
-
-    private var borderOpacity: Double {
-        switch viewModel.phase {
-        case .idle: return 0.25
-        default: return 0.35
-        }
-    }
-
-    private func failureText(reason: String) -> (title: String, detail: String) {
-        if let failure = viewModel.failure {
-            return structuredFailureText(failure)
-        }
-        return fallbackFailureText(reason)
-    }
-
-    private func structuredFailureText(_ failure: FfiTransferFailure) -> (title: String, detail: String) {
-        let title: String
-        switch failure.code {
-        case .userCanceled, .peerCanceled:
-            title = AppText.value("Transfer canceled", "传输已取消", language: language)
-        case .networkLost, .peerUnreachable, .timeout:
-            title = AppText.value("Connection failed", "连接失败", language: language)
-        case .authenticationFailed:
-            title = AppText.value("Pairing failed", "配对失败", language: language)
-        case .permissionDenied:
-            title = AppText.value("Permission needed", "需要权限", language: language)
-        case .diskFull:
-            title = AppText.value("Not enough space", "空间不足", language: language)
-        case .hashMismatch:
-            title = AppText.value("Verification failed", "校验失败", language: language)
-        case .protocolError:
-            title = AppText.value("Protocol mismatch", "协议不匹配", language: language)
-        case .destinationConflict:
-            title = AppText.value("Destination conflict", "目标位置冲突", language: language)
-        case .unsupportedFeature:
-            title = AppText.value("Update required", "需要更新", language: language)
-        case .internalError, .unknown:
-            title = AppText.value("Transfer failed", "传输失败", language: language)
-        }
-        return (title, friendlyFailure(failure, language: language))
-    }
-
-    private func fallbackFailureText(_ reason: String) -> (title: String, detail: String) {
-        let cleanReason = reason.trimmed
-        let lower = cleanReason.lowercased()
-        if lower.contains("mdns") && lower.contains("peers discovered") {
-            return (
-                AppText.value("No device found on the local network", "未在局域网发现设备", language: language),
-                AppText.value("Make sure the other device is receiving with the same token and both devices are on the same network.", "请确认另一台设备正在使用相同口令接收，并且两台设备在同一网络中。", language: language)
-            )
-        }
-        if cleanReason.isEmpty {
-            return (
-                AppText.value("Transfer failed", "传输失败", language: language),
-                AppText.value("Try again, or switch pairing method if discovery keeps failing.", "请重试；如果一直无法发现设备，请切换配对方式。", language: language)
-            )
-        }
-        return (AppText.value("Transfer failed", "传输失败", language: language), cleanReason)
-    }
-
-    /// Reveal the received file. iOS hides the raw container path unless
-    /// developer mode is enabled because it is not a user-facing location.
-    @ViewBuilder private func completedFileControls(_ urls: [URL]) -> some View {
-        if let firstURL = urls.first {
-            HStack {
-            #if os(macOS)
-            Button(platformRevealTitle(language: language)) { revealInFinder(urls) }
-            if urls.count == 1 {
-                copyPathButton(firstURL)
-            }
-            #elseif os(iOS)
-            if urls.count == 1, isRegularFileURL(firstURL) {
-                Button(platformRevealTitle(language: language)) { previewFileURL = firstURL }
-                ShareLink(item: firstURL) {
-                    Label(AppText.value("Share", "分享", language: language), systemImage: "square.and.arrow.up")
-                }
-            } else {
-                Button {
-                    receivedItemsPresentation = ReceivedItemsPresentation(urls: urls)
-                } label: {
-                    Label(
-                        AppText.value(
-                            "View \(urls.count) Items",
-                            "查看 \(urls.count) 个项目",
-                            language: language
-                        ),
-                        systemImage: "square.stack"
-                    )
-                }
-            }
-            if developerMode, urls.count == 1 {
-                copyPathButton(firstURL)
-            }
-            #endif
-        }
-        #if os(macOS)
-        if urls.count == 1 {
-            Text(firstURL.path)
-                .font(.body.monospaced())
-                .foregroundStyle(Theme.muted)
-                .textSelection(.enabled)
-                .lineLimit(1)
-                .truncationMode(.middle)
-        } else {
-            Text(AppText.value(
-                "\(urls.count) received items",
-                "已接收 \(urls.count) 个项目",
-                language: language
-            ))
-            .font(.body)
-            .foregroundStyle(Theme.muted)
-        }
-        #elseif os(iOS)
-        Text(urls.count == 1
-             ? AppText.value(
-                "Saved as \(firstURL.lastPathComponent)",
-                "已保存为 \(firstURL.lastPathComponent)",
-                language: language
-             )
-             : AppText.value(
-                "Saved \(urls.count) items",
-                "已保存 \(urls.count) 个项目",
-                language: language
-             ))
-            .font(.body)
-            .foregroundStyle(Theme.muted)
-            .lineLimit(1)
-            .truncationMode(.middle)
-        if developerMode {
-            ForEach(urls, id: \.path) { url in
-                Text(url.path)
-                    .font(.body.monospaced())
-                    .foregroundStyle(Theme.muted)
-                    .textSelection(.enabled)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-        }
-            #endif
-        }
-    }
-
-    private func copyPathButton(_ url: URL) -> some View {
-        Button(AppText.value("Copy Path", "复制路径", language: language)) {
-            copyWithToast(url.path, AppText.value("Path copied", "路径已复制", language: language), language: language)
-        }
-    }
 }

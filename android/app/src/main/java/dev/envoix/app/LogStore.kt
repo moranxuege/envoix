@@ -66,16 +66,8 @@ object LogStore {
     }
 
     /** Shift the retained ring one slot: core.log -> core-1 -> core-2 -> ... ->
-     *  core-KEEP, dropping the oldest. Folds the legacy single core-prev.log in on
-     *  first run so an upgrade doesn't lose the last crash log. */
+     *  core-KEEP, dropping the oldest. */
     private fun shiftRing(dir: File) {
-        File(dir, "core-prev.log").let { legacy ->
-            if (legacy.exists() && !File(dir, "core-1.log").exists()) {
-                legacy.renameTo(File(dir, "core-1.log"))
-            } else {
-                legacy.delete()
-            }
-        }
         File(dir, "core-$KEEP.log").delete()
         for (i in KEEP downTo 2) File(dir, "core-${i - 1}.log").renameTo(File(dir, "core-$i.log"))
         File(dir, "core.log").renameTo(File(dir, "core-1.log"))

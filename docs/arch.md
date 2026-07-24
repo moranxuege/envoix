@@ -1,5 +1,11 @@
 # envoix Architecture
 
+> **Historical walking-skeleton document.** This file describes the repository's
+> original CLI-first phase and is not an implementation contract for transfers.
+> The active transfer architecture is the canonical Manifest v2 pipeline in
+> [`manifest-v2-goal0-contract.md`](design/manifest-v2-goal0-contract.md); no
+> presentation/skeletal build or legacy wire compatibility is required.
+
 Status: draft  
 Scope: minimal CLI-first architecture and intended final architecture  
 Primary design rule: **applications depend on the core; the core must not depend on applications.**

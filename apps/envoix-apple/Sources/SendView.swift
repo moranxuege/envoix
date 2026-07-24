@@ -13,8 +13,8 @@ private final class SelectedResourceAccessGroup {
     }
 }
 
-func sendSelectionRequiresManifest(_ urls: [URL]) -> Bool {
-    guard urls.count == 1, let url = urls.first else { return urls.count > 1 }
+func sendSelectionContainsDirectory(_ urls: [URL]) -> Bool {
+    guard urls.count == 1, let url = urls.first else { return false }
     let values = try? url.resourceValues(forKeys: [.isDirectoryKey])
     return values?.isDirectory == true
 }
@@ -39,7 +39,6 @@ struct SendView: View {
     @AppStorage("envoix.language") private var language = "en"
     @AppStorage("envoix.serverURL") private var serverURL = ""
     @AppStorage("envoix.relayURL") private var relayURL = ""
-    @AppStorage("envoix.configChunkSize") private var configChunkSize = ""
     @AppStorage("envoix.candidatesAllow") private var candidatesAllow = ""
     @AppStorage("envoix.candidatesDeny") private var candidatesDeny = ""
     @AppStorage("envoix.speedLimit") private var speedLimit = 40
@@ -114,11 +113,11 @@ struct SendView: View {
             )
         }
         .sheet(isPresented: $isFolderPickerPresented) {
-            FolderPickerSheet(
+            MultiFolderPickerSheet(
                 initialDirectoryURL: folderPickerInitialDirectoryURL,
-                onPick: { url in
+                onPick: { urls in
                     isFolderPickerPresented = false
-                    handleImportedFolder(url)
+                    handleImportedFolders(urls)
                 },
                 onCancel: { isFolderPickerPresented = false }
             )
@@ -134,8 +133,12 @@ struct SendView: View {
         }
         .onAppear(perform: adoptSharedSelectionIfAvailable)
         .onAppear(perform: applyInitialPairingInputIfNeeded)
+        .onAppear(perform: prepareCurrentSelectionIfNeeded)
         .onChange(of: model.pendingSendSelection?.id) { _ in
             adoptSharedSelectionIfAvailable()
+        }
+        .onChange(of: viewModel.preparedManifestSourcePaths) { paths in
+            adoptPreparedManifestPaths(paths)
         }
         .onDisappear(perform: cancelPhotoImport)
         #else
@@ -146,25 +149,22 @@ struct SendView: View {
                 .padding(.top, 12)
         }
         .onAppear(perform: applyInitialPairingInputIfNeeded)
+        .onAppear(perform: prepareCurrentSelectionIfNeeded)
+        .onChange(of: viewModel.preparedManifestSourcePaths) { paths in
+            adoptPreparedManifestPaths(paths)
+        }
         #endif
     }
 
     private var scrollContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                #if os(iOS)
                 fileSection
                 if onOpenNearbyDevices != nil {
                     nearbyDevicesAction
                 }
                 connectionSection
-                #else
-                connectionSection
-                fileSection
-                #endif
-                #if os(macOS)
                 TransferStatusView(viewModel: viewModel)
-                #endif
             }
             .padding(.vertical, 12)
             #if os(iOS)
@@ -538,14 +538,14 @@ struct SendView: View {
     private var selectionGuidance: String {
         #if os(iOS)
         AppText.value(
-            "Choose Photos, one or more files, or one folder. In the folder picker, Open uploads the current folder.",
-            "可选择照片、一个或多个文件，或一个文件夹；在文件夹选择器中点“打开”即上传当前文件夹。",
+            "Choose Photos, files, or one or more folders. Folder structure is preserved.",
+            "可选择照片、文件或一个或多个文件夹；目录结构会完整保留。",
             language: uiLanguage
         )
         #else
         AppText.value(
-            "Choose one or more files, or a folder. Folder structure is preserved.",
-            "可选择一个或多个文件，也可选择文件夹；目录结构会完整保留。",
+            "Choose one or more files or folders. Folder structure is preserved.",
+            "可选择一个或多个文件或文件夹；目录结构会完整保留。",
             language: uiLanguage
         )
         #endif
@@ -936,7 +936,6 @@ struct SendView: View {
             language: language,
             serverURL: parsed.broker.trimmed.isEmpty ? serverURL : parsed.broker,
             relayURL: parsed.relay.trimmed.isEmpty ? relayURL : parsed.relay,
-            configChunkSize: configChunkSize,
             candidatesAllow: candidatesAllow,
             candidatesDeny: candidatesDeny,
             speedLimit: speedLimit
@@ -960,7 +959,9 @@ struct SendView: View {
     }
 
     private var canSend: Bool {
-        guard !selectedItems.isEmpty else { return false }
+        guard !selectedItems.isEmpty,
+              viewModel.isManifestSelectionReady,
+              viewModel.pendingSourceSelections.isEmpty else { return false }
         switch mode {
         case .room:
             return !roomCode.trimmed.isEmpty || pairingInvite != nil
@@ -988,7 +989,7 @@ struct SendView: View {
     private var selectionTitle: String {
         switch selectedItems.count {
         case 0:
-            return AppText.value("Choose files or folder", "选择文件或文件夹", language: uiLanguage)
+            return AppText.value("Choose files or folders", "选择文件或文件夹", language: uiLanguage)
         case 1:
             return selectedItems[0].lastPathComponent
         default:
@@ -1012,7 +1013,7 @@ struct SendView: View {
                 language: uiLanguage
             )
             #endif
-        case 1 where sendSelectionRequiresManifest(selectedItems):
+        case 1 where sendSelectionContainsDirectory(selectedItems):
             return AppText.value("Folder structure will be preserved.", "将完整保留文件夹结构。", language: uiLanguage)
         case 1:
             #if os(iOS)
@@ -1034,7 +1035,7 @@ struct SendView: View {
             #endif
         }
         if selectedItems.count > 1 { return "square.stack.3d.up.fill" }
-        return sendSelectionRequiresManifest(selectedItems) ? "folder.fill" : "doc.fill"
+        return sendSelectionContainsDirectory(selectedItems) ? "folder.fill" : "doc.fill"
     }
 
     @discardableResult
@@ -1064,23 +1065,48 @@ struct SendView: View {
         selectedPendingSelectionID = pendingSelectionID
         selectedItems = accepted
         filePathInput = accepted.count == 1 ? accepted[0].path : ""
+        viewModel.prepareManifestSelection(
+            selectedPaths: accepted.map(\.path),
+            sourceAccess: access
+        )
         return true
     }
 
+    private func prepareCurrentSelectionIfNeeded() {
+        if selectedItems.isEmpty, !viewModel.preparedManifestSourcePaths.isEmpty {
+            adoptPreparedManifestPaths(viewModel.preparedManifestSourcePaths)
+            return
+        }
+        guard !selectedItems.isEmpty else { return }
+        viewModel.prepareManifestSelection(
+            selectedPaths: selectedItems.map(\.path),
+            sourceAccess: selectedSourceAccess
+        )
+    }
+
+    private func adoptPreparedManifestPaths(_ paths: [String]) {
+        guard !viewModel.isBusy else { return }
+        selectedItems = paths.map { URL(fileURLWithPath: $0).standardizedFileURL }
+        filePathInput = selectedItems.count == 1 ? selectedItems[0].path : ""
+    }
+
     #if os(iOS)
-    private func handleImportedFolder(_ url: URL) {
+    private func handleImportedFolders(_ urls: [URL]) {
         do {
-            guard try url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else {
-                throw RuntimeSettingsError(AppText.value(
-                    "Choose a folder, not a file.",
-                    "请选择文件夹，而不是文件。",
-                    language: uiLanguage
-                ))
+            guard !urls.isEmpty else { return }
+            for url in urls {
+                guard try url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else {
+                    throw RuntimeSettingsError(AppText.value(
+                        "Choose folders, not files.",
+                        "请选择文件夹，而不是文件。",
+                        language: uiLanguage
+                    ))
+                }
             }
-            guard try adoptUserSelectedItems([url]) else { return }
+            guard try adoptUserSelectedItems(urls) else { return }
             ToastCenter.shared.show(AppText.value(
-                "Folder ready to upload",
-                "文件夹已准备上传",
+                urls.count == 1 ? "Folder ready to upload" : "Folders ready to upload",
+                urls.count == 1 ? "文件夹已准备上传" : "多个文件夹已准备上传",
                 language: uiLanguage
             ))
         } catch {
@@ -1307,59 +1333,32 @@ struct SendView: View {
 
     private func startRoomSend(code: String, settings: EnvoixRuntimeSettings) {
         let access = selectedSourceAccessForTransfer()
-        if sendSelectionRequiresManifest(selectedItems) {
-            viewModel.startSendingManifestWithRoom(
-                selectedPaths: selectedItems.map(\.path),
-                code: code,
-                settings: settings,
-                sourceAccess: access
-            )
-        } else if let file = selectedItems.first {
-            viewModel.startSendingWithRoom(
-                filePath: file.path,
-                code: code,
-                settings: settings,
-                sourceAccess: access
-            )
-        }
+        viewModel.startSendingManifestWithRoom(
+            selectedPaths: selectedItems.map(\.path),
+            code: code,
+            settings: settings,
+            sourceAccess: access
+        )
     }
 
     private func startInviteSend(invite: String, settings: EnvoixRuntimeSettings) {
         let access = selectedSourceAccessForTransfer()
-        if sendSelectionRequiresManifest(selectedItems) {
-            viewModel.startSendingManifestWithInvite(
-                selectedPaths: selectedItems.map(\.path),
-                invite: invite,
-                settings: settings,
-                sourceAccess: access
-            )
-        } else if let file = selectedItems.first {
-            viewModel.startSendingWithInvite(
-                filePath: file.path,
-                invite: invite,
-                settings: settings,
-                sourceAccess: access
-            )
-        }
+        viewModel.startSendingManifestWithInvite(
+            selectedPaths: selectedItems.map(\.path),
+            invite: invite,
+            settings: settings,
+            sourceAccess: access
+        )
     }
 
     private func startTokenSend(token: String, settings: EnvoixRuntimeSettings) {
         let access = selectedSourceAccessForTransfer()
-        if sendSelectionRequiresManifest(selectedItems) {
-            viewModel.startSendingManifestWithToken(
-                selectedPaths: selectedItems.map(\.path),
-                token: token,
-                settings: settings,
-                sourceAccess: access
-            )
-        } else if let file = selectedItems.first {
-            viewModel.startSendingWithToken(
-                filePath: file.path,
-                token: token,
-                settings: settings,
-                sourceAccess: access
-            )
-        }
+        viewModel.startSendingManifestWithToken(
+            selectedPaths: selectedItems.map(\.path),
+            token: token,
+            settings: settings,
+            sourceAccess: access
+        )
     }
 
     private func primaryButtonAction() {
@@ -1379,7 +1378,6 @@ struct SendView: View {
                 language: language,
                 serverURL: serverURL,
                 relayURL: relayURL,
-                configChunkSize: configChunkSize,
                 candidatesAllow: candidatesAllow,
                 candidatesDeny: candidatesDeny,
                 speedLimit: speedLimit
