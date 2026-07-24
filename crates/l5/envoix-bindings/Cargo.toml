@@ -13,5 +13,6 @@ envoix-types = { path = "../../l0/envoix-types" }
 envoix-outcomes = { path = "../../l0/envoix-outcomes" }
 envoix-evidence = { path = "../../l4/envoix-evidence" }
 envoix-runtime = { path = "../../l4/envoix-runtime" }
+serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }

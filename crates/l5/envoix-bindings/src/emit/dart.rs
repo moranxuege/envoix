@@ -4,7 +4,7 @@
 //! with the same shape/range/bound checks as the Rust reference codec and
 //! throws `ReadContractException` with a typed reason and static context.
 
-use crate::model::{Decl, FieldTy, SchemaDoc, StructDecl, UnionDecl};
+use crate::model::{Decl, FieldTy, RuleValue, SchemaDoc, StructDecl, UnionDecl};
 
 use super::{dart_member, helper_use, is_envelope_field, upper_camel};
 
@@ -25,6 +25,7 @@ pub fn module(doc: &SchemaDoc) -> String {
         "const int readMaxFrameBytes = {};\n",
         doc.max_frame_bytes
     ));
+    rules_consts(&mut out, doc);
     out.push_str("const int _u63Max = 9223372036854775807;\n\n");
     error_type(&mut out);
     for decl in &doc.decls {
@@ -41,7 +42,26 @@ pub fn module(doc: &SchemaDoc) -> String {
     if out.ends_with("\n\n") {
         out.pop();
     }
-    out
+    super::apply_naming(out, doc)
+}
+
+fn rules_consts(out: &mut String, doc: &SchemaDoc) {
+    if doc.rules.is_empty() {
+        return;
+    }
+    out.push_str("// Contract rules frozen by schema/read.schema.\n");
+    for (key, value) in &doc.rules {
+        match value {
+            RuleValue::Bool(flag) => out.push_str(&format!(
+                "const bool {} = {flag};\n",
+                super::lower_camel(key)
+            )),
+            RuleValue::Int(bound) => out.push_str(&format!(
+                "const int {} = {bound};\n",
+                super::lower_camel(key)
+            )),
+        }
+    }
 }
 
 fn error_type(out: &mut String) {

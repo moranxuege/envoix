@@ -7,7 +7,7 @@
 //! scalar or named type, and `list` elements are named types.
 
 use crate::model::{
-    Decl, EnumDecl, FieldDecl, FieldTy, SchemaDoc, StructDecl, UnionDecl, UnionVariant,
+    Decl, EnumDecl, FieldDecl, FieldTy, RuleValue, SchemaDoc, StructDecl, UnionDecl, UnionVariant,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -49,12 +49,13 @@ pub fn parse_schema(text: &str) -> Result<SchemaDoc, SchemaParseError> {
         .ok_or_else(|| SchemaParseError::shape("document root"))?;
 
     for key in table.keys() {
-        if !matches!(key.as_str(), "id" | "root" | "limits" | "decl") {
+        if !matches!(key.as_str(), "id" | "root" | "limits" | "rules" | "decl") {
             return Err(SchemaParseError::shape(format!("unknown key {key}")));
         }
     }
 
     let id = require_str(table.get("id"), "id")?;
+    require_schema_id(&id)?;
     let root = require_str(table.get("root"), "root")?;
     let limits = table
         .get("limits")
@@ -66,6 +67,23 @@ pub fn parse_schema(text: &str) -> Result<SchemaDoc, SchemaParseError> {
         }
     }
     let max_frame_bytes = require_bound(limits.get("max_frame_bytes"), "limits.max_frame_bytes")?;
+
+    let mut rules = Vec::new();
+    if let Some(raw_rules) = table.get("rules") {
+        let raw_rules = raw_rules
+            .as_table()
+            .ok_or_else(|| SchemaParseError::shape("rules"))?;
+        for (key, value) in raw_rules {
+            let context = format!("rules.{key}");
+            require_member_name(key, &context)?;
+            let value = match value {
+                toml::Value::Boolean(flag) => RuleValue::Bool(*flag),
+                toml::Value::Integer(_) => RuleValue::Int(require_bound(Some(value), &context)?),
+                _ => return Err(SchemaParseError::shape(context)),
+            };
+            rules.push((key.clone(), value));
+        }
+    }
 
     let raw_decls = table
         .get("decl")
@@ -91,6 +109,7 @@ pub fn parse_schema(text: &str) -> Result<SchemaDoc, SchemaParseError> {
         id,
         max_frame_bytes,
         root,
+        rules,
         decls,
     };
     let Some(Decl::Struct(root_decl)) = doc.find(&doc.root) else {
@@ -326,6 +345,28 @@ fn require_declared(
     Ok(())
 }
 
+/// Schema ids are `envoix/binding/<stem>/<version>` with a lowercase stem and
+/// a numeric version. The stem names the emitted artifacts; a malformed id is
+/// a parse error, never a silent fallback.
+fn require_schema_id(id: &str) -> Result<(), SchemaParseError> {
+    let mut segments = id.split('/');
+    let shape = segments.next() == Some("envoix")
+        && segments.next() == Some("binding")
+        && segments.next().is_some_and(|stem| {
+            let mut chars = stem.chars();
+            chars.next().is_some_and(|first| first.is_ascii_lowercase())
+                && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        })
+        && segments.next().is_some_and(|version| {
+            !version.is_empty() && version.chars().all(|c| c.is_ascii_digit())
+        })
+        && segments.next().is_none();
+    if !shape {
+        return Err(SchemaParseError::grammar(format!("bad schema id {id}")));
+    }
+    Ok(())
+}
+
 fn require_type_name(name: &str, context: &str) -> Result<(), SchemaParseError> {
     let mut chars = name.chars();
     let valid = chars.next().is_some_and(|first| first.is_ascii_uppercase())
@@ -333,6 +374,13 @@ fn require_type_name(name: &str, context: &str) -> Result<(), SchemaParseError> 
     if !valid {
         return Err(SchemaParseError::grammar(format!(
             "{context}: bad type name {name}"
+        )));
+    }
+    // The naming pass whole-text-renames the codec scaffold identifiers, so a
+    // declared name matching one would silently diverge across artifacts.
+    if crate::emit::SCAFFOLD_TOKENS.contains(&name) {
+        return Err(SchemaParseError::grammar(format!(
+            "{context}: {name} collides with a codec scaffold identifier"
         )));
     }
     Ok(())
@@ -350,6 +398,22 @@ fn require_member_name(name: &str, context: &str) -> Result<(), SchemaParseError
     if !valid || !representable {
         return Err(SchemaParseError::grammar(format!(
             "{context}: bad member name {name}"
+        )));
+    }
+    // No emitted form of a member may match a naming-scaffold token (the pass
+    // would rename it in some languages but not others).
+    let emitted = [
+        name.to_owned(),
+        crate::emit::lower_camel(name),
+        crate::emit::upper_camel(name),
+        crate::emit::upper_snake(name),
+    ];
+    if emitted
+        .iter()
+        .any(|form| crate::emit::SCAFFOLD_TOKENS.contains(&form.as_str()))
+    {
+        return Err(SchemaParseError::grammar(format!(
+            "{context}: {name} collides with a codec scaffold identifier"
         )));
     }
     Ok(())

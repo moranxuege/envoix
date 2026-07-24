@@ -886,6 +886,7 @@ dependencies = [
  "envoix-outcomes",
  "envoix-runtime",
  "envoix-types",
+ "serde",
  "serde_json",
  "toml",
 ]

@@ -545,7 +545,7 @@ pub fn decode_read_frame(bytes: &[u8]) -> Result<ReadFrame, ReadError> {
     if bytes.len() > READ_MAX_FRAME_BYTES {
         return Err(ReadError::FrameTooLarge);
     }
-    let value: Value = serde_json::from_slice(bytes).map_err(|_| ReadError::MalformedJson)?;
+    let value = strict_json(bytes)?;
     decode_read_frame_value(&value, "ReadFrame")
 }
 
@@ -558,6 +558,78 @@ pub fn encode_read_frame(frame: &ReadFrame) -> Result<Vec<u8>, ReadError> {
         return Err(ReadError::FrameTooLarge);
     }
     Ok(bytes)
+}
+
+/// Parses JSON while rejecting duplicate object keys at any depth and
+/// trailing input. A duplicated key is the smuggling shape: a first-wins
+/// upstream parser would see a different value than a last-wins one applies.
+fn strict_json(bytes: &[u8]) -> Result<Value, ReadError> {
+    struct StrictValue;
+
+    impl<'de> serde::de::DeserializeSeed<'de> for StrictValue {
+        type Value = Value;
+
+        fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<Value, D::Error> {
+            deserializer.deserialize_any(self)
+        }
+    }
+
+    impl<'de> serde::de::Visitor<'de> for StrictValue {
+        type Value = Value;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a json value without duplicate object keys")
+        }
+
+        fn visit_bool<E>(self, value: bool) -> Result<Value, E> {
+            Ok(Value::Bool(value))
+        }
+
+        fn visit_i64<E>(self, value: i64) -> Result<Value, E> {
+            Ok(Value::from(value))
+        }
+
+        fn visit_u64<E>(self, value: u64) -> Result<Value, E> {
+            Ok(Value::from(value))
+        }
+
+        fn visit_f64<E>(self, value: f64) -> Result<Value, E> {
+            Ok(Value::from(value))
+        }
+
+        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Value, E> {
+            Ok(Value::from(value))
+        }
+
+        fn visit_unit<E>(self) -> Result<Value, E> {
+            Ok(Value::Null)
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut access: A) -> Result<Value, A::Error> {
+            let mut items = Vec::new();
+            while let Some(item) = access.next_element_seed(StrictValue)? {
+                items.push(item);
+            }
+            Ok(Value::Array(items))
+        }
+
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, mut access: A) -> Result<Value, A::Error> {
+            let mut map = Map::new();
+            while let Some(key) = access.next_key::<String>()? {
+                let value = access.next_value_seed(StrictValue)?;
+                if map.insert(key, value).is_some() {
+                    return Err(serde::de::Error::custom("duplicate object key"));
+                }
+            }
+            Ok(Value::Object(map))
+        }
+    }
+
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    let value = serde::de::DeserializeSeed::deserialize(StrictValue, &mut deserializer)
+        .map_err(|_| ReadError::MalformedJson)?;
+    deserializer.end().map_err(|_| ReadError::MalformedJson)?;
+    Ok(value)
 }
 
 fn frame_object<'a>(value: &'a Value, context: &'static str) -> Result<&'a Map<String, Value>, ReadError> {

@@ -54,8 +54,8 @@ fn generated_artifacts_match_schema() {
         );
     }
 
-    // The generated tree holds exactly the four artifacts: a rogue extra file
-    // would ship unreviewed to native consumers.
+    // The generated tree holds exactly the read + command artifacts: a rogue
+    // extra file would ship unreviewed to native consumers.
     fn walk(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
         for entry in std::fs::read_dir(dir).expect("read generated dir") {
             let path = entry.expect("generated dir entry").path();
@@ -78,14 +78,21 @@ fn generated_artifacts_match_schema() {
         })
         .collect();
     on_disk.sort();
+    let command_artifacts = [
+        "generated/rust/command.rs",
+        "generated/dart/envoix_command.dart",
+        "generated/kotlin/EnvoixCommand.kt",
+        "generated/swift/EnvoixCommand.swift",
+    ];
     let mut expected: Vec<String> = artifacts(&doc)
         .iter()
         .map(|(path, _)| (*path).to_owned())
+        .chain(command_artifacts.iter().map(|path| (*path).to_owned()))
         .collect();
     expected.sort();
     assert_eq!(
         on_disk, expected,
-        "generated/ must contain exactly the four artifacts"
+        "generated/ must contain exactly the read + command artifacts"
     );
 }
 
@@ -606,6 +613,25 @@ fn epoch_gate_enforces_reattach_contract() {
     assert_eq!(closed_gate.admit(&frames[7]), GateDecision::DropStale);
 }
 
+/// Duplicate JSON object keys are rejected outright, never resolved
+/// last-wins — the read decoder shares the strict parse with the hostile
+/// command boundary (one algorithm, both schemas).
+#[test]
+fn duplicate_json_keys_are_rejected() {
+    let base = encode_read_frame(&full_surface_frames().remove(0)).expect("base frame encodes");
+    let text = String::from_utf8(base).expect("utf8 frame");
+    let dup_schema = text.replacen(
+        "\"schema\":",
+        "\"schema\":\"envoix/binding/read/1\",\"schema\":",
+        1,
+    );
+    assert_ne!(dup_schema, text, "schema key found");
+    assert_eq!(
+        decode_read_frame(dup_schema.as_bytes()),
+        Err(ReadError::MalformedJson)
+    );
+}
+
 #[test]
 fn schema_parser_rejects_unbounded_or_malformed_grammar() {
     let minimal = |body: &str| {
@@ -649,6 +675,51 @@ fn schema_parser_rejects_unbounded_or_malformed_grammar() {
             parse_schema(&minimal(&body)).is_err(),
             "member name {bad_member} must be rejected"
         );
+    }
+
+    // Names whose emitted forms match a naming-scaffold token would be
+    // silently renamed in some languages but not others.
+    for scaffold_member in ["read_schema_id", "read_max_frame_bytes"] {
+        let body = format!(
+            "[[decl]]\nkind = \"union\"\nname = \"ReadBody\"\nvariants = [{{ name = \"closed\" }}]\n\n\
+             [[decl]]\nkind = \"struct\"\nname = \"ReadFrame\"\nfields = [\n\
+             \x20 {{ name = \"schema\", type = \"ascii(64)\" }},\n\
+             \x20 {{ name = \"{scaffold_member}\", type = \"ascii(8)\" }},\n\
+             \x20 {{ name = \"body\", type = \"ReadBody\" }},\n]\n"
+        );
+        assert!(
+            parse_schema(&minimal(&body)).is_err(),
+            "scaffold member {scaffold_member} must be rejected"
+        );
+    }
+    let scaffold_decl = minimal(
+        "[[decl]]\nkind = \"union\"\nname = \"ReadError\"\nvariants = [{ name = \"closed\" }]\n\n\
+         [[decl]]\nkind = \"struct\"\nname = \"ReadFrame\"\nfields = [\n\
+         \x20 { name = \"schema\", type = \"ascii(64)\" },\n\
+         \x20 { name = \"body\", type = \"ReadError\" },\n]\n",
+    );
+    assert!(
+        parse_schema(&scaffold_decl).is_err(),
+        "scaffold decl name must be rejected"
+    );
+
+    // Malformed schema ids are parse errors, never a silent artifact stem.
+    for bad_id in [
+        "evil/binding/read/1",
+        "envoix/binding/Read/1",
+        "envoix/binding//1",
+        "envoix/binding/read/x",
+        "envoix/binding/read",
+        "envoix/binding/read/1/extra",
+    ] {
+        let bad = format!(
+            "id = \"{bad_id}\"\nroot = \"ReadFrame\"\n\n[limits]\nmax_frame_bytes = 1024\n\n\
+             [[decl]]\nkind = \"union\"\nname = \"ReadBody\"\nvariants = [{{ name = \"closed\" }}]\n\n\
+             [[decl]]\nkind = \"struct\"\nname = \"ReadFrame\"\nfields = [\n\
+             \x20 {{ name = \"schema\", type = \"ascii(64)\" }},\n\
+             \x20 {{ name = \"body\", type = \"ReadBody\" }},\n]\n"
+        );
+        assert!(parse_schema(&bad).is_err(), "id {bad_id} must be rejected");
     }
 
     // The root struct must lead with the ascii schema envelope field.

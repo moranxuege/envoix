@@ -5,9 +5,13 @@
 //! implement one algorithm. It is included via `include!` and therefore not
 //! touched by rustfmt; the emitter owns its formatting.
 
-use crate::model::{Decl, DeclKind, FieldDecl, FieldTy, SchemaDoc, StructDecl, UnionDecl};
+use crate::model::{
+    Decl, DeclKind, FieldDecl, FieldTy, RuleValue, SchemaDoc, StructDecl, UnionDecl,
+};
 
-use super::{helper_use, is_envelope_field, rust_field, snake, upper_camel};
+use super::{
+    apply_naming, helper_use, is_envelope_field, rust_field, snake, upper_camel, upper_snake,
+};
 
 pub fn module(doc: &SchemaDoc) -> String {
     let mut out = String::new();
@@ -25,7 +29,7 @@ pub fn module(doc: &SchemaDoc) -> String {
         decode_fn(&mut out, doc, decl);
         encode_fn(&mut out, doc, decl);
     }
-    out
+    apply_naming(out, doc)
 }
 
 fn header(out: &mut String, doc: &SchemaDoc) {
@@ -42,7 +46,26 @@ fn header(out: &mut String, doc: &SchemaDoc) {
         "pub const READ_MAX_FRAME_BYTES: usize = {};\n\n",
         doc.max_frame_bytes
     ));
+    rules_consts(out, doc);
     out.push_str("const U63_MAX: u64 = 9_223_372_036_854_775_807;\n\n");
+}
+
+fn rules_consts(out: &mut String, doc: &SchemaDoc) {
+    if doc.rules.is_empty() {
+        return;
+    }
+    out.push_str("// Contract rules frozen by schema/read.schema.\n");
+    for (key, value) in &doc.rules {
+        match value {
+            RuleValue::Bool(flag) => {
+                out.push_str(&format!("pub const {}: bool = {flag};\n", upper_snake(key)))
+            }
+            RuleValue::Int(bound) => {
+                out.push_str(&format!("pub const {}: u32 = {bound};\n", upper_snake(key)))
+            }
+        }
+    }
+    out.push('\n');
 }
 
 fn error_type(out: &mut String) {
@@ -220,7 +243,7 @@ fn root_api(out: &mut String, doc: &SchemaDoc) {
          \x20   if bytes.len() > READ_MAX_FRAME_BYTES {{\n\
          \x20       return Err(ReadError::FrameTooLarge);\n\
          \x20   }}\n\
-         \x20   let value: Value = serde_json::from_slice(bytes).map_err(|_| ReadError::MalformedJson)?;\n\
+         \x20   let value = strict_json(bytes)?;\n\
          \x20   decode_{root_snake}_value(&value, \"{root}\")\n\
          }}\n\n\
          /// Encodes one frame, stamping the schema envelope and enforcing the\n\
@@ -241,7 +264,78 @@ fn root_api(out: &mut String, doc: &SchemaDoc) {
 fn helpers(out: &mut String, doc: &SchemaDoc) {
     let used = helper_use(doc);
     out.push_str(
-        "fn frame_object<'a>(value: &'a Value, context: &'static str) -> Result<&'a Map<String, Value>, ReadError> {\n\
+        "/// Parses JSON while rejecting duplicate object keys at any depth and\n\
+         /// trailing input. A duplicated key is the smuggling shape: a first-wins\n\
+         /// upstream parser would see a different value than a last-wins one applies.\n\
+         fn strict_json(bytes: &[u8]) -> Result<Value, ReadError> {\n\
+         \x20   struct StrictValue;\n\
+         \n\
+         \x20   impl<'de> serde::de::DeserializeSeed<'de> for StrictValue {\n\
+         \x20       type Value = Value;\n\
+         \n\
+         \x20       fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<Value, D::Error> {\n\
+         \x20           deserializer.deserialize_any(self)\n\
+         \x20       }\n\
+         \x20   }\n\
+         \n\
+         \x20   impl<'de> serde::de::Visitor<'de> for StrictValue {\n\
+         \x20       type Value = Value;\n\
+         \n\
+         \x20       fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n\
+         \x20           formatter.write_str(\"a json value without duplicate object keys\")\n\
+         \x20       }\n\
+         \n\
+         \x20       fn visit_bool<E>(self, value: bool) -> Result<Value, E> {\n\
+         \x20           Ok(Value::Bool(value))\n\
+         \x20       }\n\
+         \n\
+         \x20       fn visit_i64<E>(self, value: i64) -> Result<Value, E> {\n\
+         \x20           Ok(Value::from(value))\n\
+         \x20       }\n\
+         \n\
+         \x20       fn visit_u64<E>(self, value: u64) -> Result<Value, E> {\n\
+         \x20           Ok(Value::from(value))\n\
+         \x20       }\n\
+         \n\
+         \x20       fn visit_f64<E>(self, value: f64) -> Result<Value, E> {\n\
+         \x20           Ok(Value::from(value))\n\
+         \x20       }\n\
+         \n\
+         \x20       fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Value, E> {\n\
+         \x20           Ok(Value::from(value))\n\
+         \x20       }\n\
+         \n\
+         \x20       fn visit_unit<E>(self) -> Result<Value, E> {\n\
+         \x20           Ok(Value::Null)\n\
+         \x20       }\n\
+         \n\
+         \x20       fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut access: A) -> Result<Value, A::Error> {\n\
+         \x20           let mut items = Vec::new();\n\
+         \x20           while let Some(item) = access.next_element_seed(StrictValue)? {\n\
+         \x20               items.push(item);\n\
+         \x20           }\n\
+         \x20           Ok(Value::Array(items))\n\
+         \x20       }\n\
+         \n\
+         \x20       fn visit_map<A: serde::de::MapAccess<'de>>(self, mut access: A) -> Result<Value, A::Error> {\n\
+         \x20           let mut map = Map::new();\n\
+         \x20           while let Some(key) = access.next_key::<String>()? {\n\
+         \x20               let value = access.next_value_seed(StrictValue)?;\n\
+         \x20               if map.insert(key, value).is_some() {\n\
+         \x20                   return Err(serde::de::Error::custom(\"duplicate object key\"));\n\
+         \x20               }\n\
+         \x20           }\n\
+         \x20           Ok(Value::Object(map))\n\
+         \x20       }\n\
+         \x20   }\n\
+         \n\
+         \x20   let mut deserializer = serde_json::Deserializer::from_slice(bytes);\n\
+         \x20   let value = serde::de::DeserializeSeed::deserialize(StrictValue, &mut deserializer)\n\
+         \x20       .map_err(|_| ReadError::MalformedJson)?;\n\
+         \x20   deserializer.end().map_err(|_| ReadError::MalformedJson)?;\n\
+         \x20   Ok(value)\n\
+         }\n\n\
+         fn frame_object<'a>(value: &'a Value, context: &'static str) -> Result<&'a Map<String, Value>, ReadError> {\n\
          \x20   value.as_object().ok_or(ReadError::Shape { context })\n\
          }\n\n\
          fn known_keys(map: &Map<String, Value>, allowed: &[&str], context: &'static str) -> Result<(), ReadError> {\n\

@@ -11,7 +11,18 @@ pub struct SchemaDoc {
     pub id: String,
     pub max_frame_bytes: u32,
     pub root: String,
+    /// Contract rules stated by the schema and emitted as generated consts in
+    /// every artifact, sorted by key (TOML table order).
+    pub rules: Vec<(String, RuleValue)>,
     pub decls: Vec<Decl>,
+}
+
+/// A contract-rule value; rules freeze semantic guarantees (booleans) and
+/// numeric horizons into every generated artifact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuleValue {
+    Bool(bool),
+    Int(u32),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

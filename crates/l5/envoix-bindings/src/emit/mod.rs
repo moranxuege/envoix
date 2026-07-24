@@ -215,6 +215,57 @@ pub(crate) fn is_envelope_field(doc: &SchemaDoc, decl: &str, field: &str) -> boo
     decl == doc.root && field == "schema"
 }
 
+/// The artifact stem from the schema id: `envoix/binding/command/1` → `command`.
+pub(crate) fn schema_stem(doc: &SchemaDoc) -> &str {
+    doc.id
+        .split('/')
+        .nth(2)
+        .expect("schema id shape is validated by the parser")
+}
+
+/// The scaffold identifiers [`apply_naming`] rewrites for non-read schemas,
+/// longest first so `ReadErrorKind` never half-renames via `ReadError`. The
+/// schema parser rejects any declared name whose emitted forms match one of
+/// these, so the whole-text rename can never touch a schema-declared name.
+pub(crate) const SCAFFOLD_TOKENS: &[&str] = &[
+    "ReadContractException",
+    "schema/read.schema",
+    "READ_MAX_FRAME_BYTES",
+    "readMaxFrameBytes",
+    "ReadContractError",
+    "EnvoixReadCodec",
+    "READ_SCHEMA_ID",
+    "ReadErrorKind",
+    "readSchemaId",
+    "ReadError",
+];
+
+/// Every emitter writes the codec scaffolding with its read-contract names;
+/// for any other schema this pass renames exactly the [`SCAFFOLD_TOKENS`].
+/// Type names like `ReadFrame` come from the schema itself and are never
+/// touched. The read schema is the identity case, which the read drift test
+/// pins byte-exactly.
+pub(crate) fn apply_naming(out: String, doc: &SchemaDoc) -> String {
+    let stem = schema_stem(doc);
+    if stem == "read" {
+        return out;
+    }
+    let mut renamed = out;
+    for token in SCAFFOLD_TOKENS {
+        let to = if *token == "schema/read.schema" {
+            format!("schema/{stem}.schema")
+        } else if token.contains("READ") {
+            token.replace("READ", &upper_snake(stem))
+        } else if token.contains("Read") {
+            token.replace("Read", &upper_camel(stem))
+        } else {
+            token.replace("read", &lower_camel(stem))
+        };
+        renamed = renamed.replace(token, &to);
+    }
+    renamed
+}
+
 /// Which optional helper groups a schema actually exercises.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct HelperUse {
@@ -237,6 +288,11 @@ pub(crate) fn helper_use(doc: &SchemaDoc) -> HelperUse {
             Decl::Enum(_) => {}
             Decl::Struct(decl) => {
                 for field in &decl.fields {
+                    // The envelope field is stamped/verified directly by the
+                    // generated codec, never through the scalar helpers.
+                    if is_envelope_field(doc, &decl.name, &field.name) {
+                        continue;
+                    }
                     visit_ty(&field.ty, &mut used);
                 }
             }
@@ -280,7 +336,8 @@ fn visit_ty(ty: &FieldTy, used: &mut HelperUse) {
 
 #[cfg(test)]
 mod tests {
-    use super::{dart_member, kotlin_member, rust_field, swift_member};
+    use super::{apply_naming, dart_member, kotlin_member, rust_field, schema_stem, swift_member};
+    use crate::model::SchemaDoc;
 
     #[test]
     fn finishers_escape_reserved_words_per_language() {
@@ -292,5 +349,31 @@ mod tests {
         assert_eq!(kotlin_member("is_active"), "isActive");
         assert_eq!(swift_member("internal"), "`internal`");
         assert_eq!(swift_member("peer_lost"), "peerLost");
+    }
+
+    fn doc(id: &str) -> SchemaDoc {
+        SchemaDoc {
+            id: id.to_owned(),
+            max_frame_bytes: 1,
+            root: "Frame".to_owned(),
+            rules: Vec::new(),
+            decls: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn naming_pass_renames_scaffold_tokens_longest_first() {
+        let command = doc("envoix/binding/command/1");
+        assert_eq!(schema_stem(&command), "command");
+        let renamed = apply_naming(
+            "ReadErrorKind ReadError readSchemaId READ_SCHEMA_ID schema/read.schema EnvoixReadCodec ReadFrame".to_owned(),
+            &command,
+        );
+        assert_eq!(
+            renamed,
+            "CommandErrorKind CommandError commandSchemaId COMMAND_SCHEMA_ID schema/command.schema EnvoixCommandCodec ReadFrame"
+        );
+        let read = doc("envoix/binding/read/1");
+        assert_eq!(apply_naming("ReadError".to_owned(), &read), "ReadError");
     }
 }

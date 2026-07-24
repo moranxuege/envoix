@@ -7,6 +7,8 @@
 
 use crate::model::{Decl, FieldTy, SchemaDoc, StructDecl, UnionDecl};
 
+use crate::model::RuleValue;
+
 use super::{helper_use, is_envelope_field, kotlin_member, upper_camel, upper_snake};
 
 pub fn module(doc: &SchemaDoc) -> String {
@@ -32,6 +34,7 @@ pub fn module(doc: &SchemaDoc) -> String {
         "const val READ_MAX_FRAME_BYTES: Int = {}\n\n",
         doc.max_frame_bytes
     ));
+    rules_consts(&mut out, doc);
     error_type(&mut out);
     for decl in &doc.decls {
         type_decl(&mut out, doc, decl);
@@ -40,7 +43,26 @@ pub fn module(doc: &SchemaDoc) -> String {
         epoch_gate(&mut out);
     }
     codec(&mut out, doc);
-    out
+    super::apply_naming(out, doc)
+}
+
+fn rules_consts(out: &mut String, doc: &SchemaDoc) {
+    if doc.rules.is_empty() {
+        return;
+    }
+    out.push_str("// Contract rules frozen by schema/read.schema.\n");
+    for (key, value) in &doc.rules {
+        match value {
+            RuleValue::Bool(flag) => out.push_str(&format!(
+                "const val {}: Boolean = {flag}\n",
+                upper_snake(key)
+            )),
+            RuleValue::Int(bound) => {
+                out.push_str(&format!("const val {}: Int = {bound}\n", upper_snake(key)))
+            }
+        }
+    }
+    out.push('\n');
 }
 
 fn error_type(out: &mut String) {

@@ -68,8 +68,8 @@ pub use envoix_attempt_api::RetirementIntent;
 pub use envoix_capabilities::{Duty, DutyKind, DutyProvenance};
 pub use envoix_evidence::{EvidenceSink, EvidenceSinkError};
 pub use envoix_product::{
-    CapabilityAction, PauseOrigin, ProductIdentity, ProductState, Quiescence, TransferRecord,
-    WorkerKind,
+    CapabilityAction, CommandLedger, PauseOrigin, ProductCommand, ProductIdentity, ProductState,
+    Quiescence, TransferRecord, WorkerKind,
 };
 pub use error::{AcquireError, CommandRejected};
 pub use port::{

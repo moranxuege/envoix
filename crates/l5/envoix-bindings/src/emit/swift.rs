@@ -7,6 +7,8 @@
 
 use crate::model::{Decl, FieldTy, SchemaDoc, StructDecl, UnionDecl};
 
+use crate::model::RuleValue;
+
 use super::{helper_use, is_envelope_field, swift_member};
 
 pub fn module(doc: &SchemaDoc) -> String {
@@ -28,6 +30,7 @@ pub fn module(doc: &SchemaDoc) -> String {
         "public let readMaxFrameBytes = {}\n",
         doc.max_frame_bytes
     ));
+    rules_consts(&mut out, doc);
     out.push_str("private let u63Max: Int64 = 9_223_372_036_854_775_807\n\n");
     error_type(&mut out);
     for decl in &doc.decls {
@@ -37,7 +40,26 @@ pub fn module(doc: &SchemaDoc) -> String {
         epoch_gate(&mut out);
     }
     codec(&mut out, doc);
-    out
+    super::apply_naming(out, doc)
+}
+
+fn rules_consts(out: &mut String, doc: &SchemaDoc) {
+    if doc.rules.is_empty() {
+        return;
+    }
+    out.push_str("// Contract rules frozen by schema/read.schema.\n");
+    for (key, value) in &doc.rules {
+        match value {
+            RuleValue::Bool(flag) => out.push_str(&format!(
+                "public let {} = {flag}\n",
+                super::lower_camel(key)
+            )),
+            RuleValue::Int(bound) => out.push_str(&format!(
+                "public let {} = {bound}\n",
+                super::lower_camel(key)
+            )),
+        }
+    }
 }
 
 fn error_type(out: &mut String) {

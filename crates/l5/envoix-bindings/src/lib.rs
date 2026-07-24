@@ -1,27 +1,30 @@
-//! envoix-bindings (L5): the generated read contract.
+//! envoix-bindings (L5): the generated read and command contracts.
 //!
-//! One TOML schema (`schema/read.schema`) is the single source of truth for
-//! everything a frontend may observe: card snapshots/updates, subscription
-//! epoch rules, capability duties, the evidence timeline, typed outcomes, and
-//! build/trust metadata. Deterministic emitters generate the read-side glue
-//! for Rust (`generated/rust/read.rs`, the reference codec included below),
-//! Dart, Kotlin, and Swift; a drift test regenerates all four and fails on any
-//! byte difference.
+//! Two TOML schemas are the single sources of truth: `schema/read.schema` for
+//! everything a frontend may observe, and `schema/command.schema` for the
+//! mutating command conversation (submit → acceptance → completion, BN2's
+//! frozen semantics). One deterministic generator emits both into per-schema
+//! Rust/Dart/Kotlin/Swift artifacts; drift tests regenerate all eight and fail
+//! on any byte difference.
 //!
 //! # Containment
-//! The schema's scalar vocabulary has no bytes/blob type and no
-//! handle/path/URI type, so bulk payload bytes and OS handles cannot cross the
-//! binding. Every numeric field is range-checked, every string/hex/list field
-//! is bounded, unknown enum variants / union kinds / fields / schema versions
-//! are typed decode failures, and no decode path panics on hostile input.
+//! The shared scalar vocabulary has no bytes/blob type and no handle/path/URI
+//! type, so bulk payload bytes and OS handles cannot cross the binding in
+//! either direction. Every numeric field is range-checked, every
+//! string/hex/list field is bounded, unknown enum variants / union kinds /
+//! fields / schema versions are typed decode failures, and no decode path
+//! panics on hostile input — including the command direction, where hostile
+//! bytes arrive AT the Rust boundary.
 //!
 //! # Layering
 //! L5 depends on L0 + L4 only. The L3/L1 types crossing L4's public API reach
-//! this crate through the `envoix-runtime` façade re-exports; the projection
-//! in [`project`] turns live L4 values into generated view types.
+//! this crate through the `envoix-runtime` façade re-exports; [`project`]
+//! turns live L4 values into read views, and [`bridge`] converts between the
+//! command contract and L4's live command vocabulary.
 
 #![forbid(unsafe_code)]
 
+pub mod bridge;
 pub mod emit;
 mod model;
 mod parse;
@@ -35,8 +38,17 @@ pub mod read {
     ));
 }
 
+/// Generated command-contract types and codec; see `generated/rust/command.rs`.
+pub mod command {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/generated/rust/command.rs"
+    ));
+}
+
 pub use model::{
-    Decl, DeclKind, EnumDecl, FieldDecl, FieldTy, SchemaDoc, StructDecl, UnionDecl, UnionVariant,
+    Decl, DeclKind, EnumDecl, FieldDecl, FieldTy, RuleValue, SchemaDoc, StructDecl, UnionDecl,
+    UnionVariant,
 };
 pub use parse::{SchemaParseError, parse_schema};
 pub use project::{
@@ -44,7 +56,12 @@ pub use project::{
     subscribe_rejected_frame,
 };
 
-/// The schema source this build was generated from.
+/// The read-schema source this build was generated from.
 pub fn read_schema_text() -> &'static str {
     include_str!("../schema/read.schema")
+}
+
+/// The command-schema source this build was generated from.
+pub fn command_schema_text() -> &'static str {
+    include_str!("../schema/command.schema")
 }

@@ -1,1 +1,141 @@
+# envoix generated command contract — the single source every generated
+# command binding (Rust/Dart/Kotlin/Swift) derives from. The identifier
+# catalog extracts the schema id from the `id` key; regenerate artifacts with
+# `ENVOIX_BINDINGS_REGEN=1 cargo test -p envoix-bindings generated_artifacts`.
+#
+# Direction: native frontends ENCODE `submit` bodies; the Rust host decodes
+# them (hostile input) and ENCODES `acceptance`/`completion` bodies, which
+# frontends decode. The host bridge rejects a non-submit body arriving from a
+# frontend; the frame type is shared so both directions stay in one versioned
+# contract.
+#
+# The scalar vocabulary and grammar are identical to schema/read.schema: no
+# bytes/blob type and no handle/path/URI type, so a command can never carry
+# file bytes or an OS handle.
+
 id = "envoix/binding/command/1"
+root = "CommandFrame"
+
+[limits]
+max_frame_bytes = 1048576
+
+# BN2's frozen intake semantics, stated as generated consts in every artifact:
+# only the newest attachment commands (a superseded frontend receives
+# stale_epoch and must reattach); supersession is inert PRE-acceptance only (an
+# accepted command still commits, honestly reported); a command id older than
+# retry_horizon_completions newer completions on the same card re-applies as
+# fresh, so hosts re-issue only within that horizon.
+[rules]
+newest_attachment_commands = true
+supersession_inert_pre_acceptance_only = true
+retry_horizon_completions = 256
+
+# ---- closed vocabularies mirrored from L4's public command surface ----
+
+[[decl]]
+kind = "enum"
+name = "CommandView"
+variants = ["pause", "cancel", "resume", "remove", "re_pick_source"]
+
+[[decl]]
+kind = "enum"
+name = "PauseCauseView"
+variants = ["local", "peer", "lost"]
+
+[[decl]]
+kind = "struct"
+name = "PausedStateView"
+fields = [{ name = "origin", type = "PauseCauseView" }]
+
+[[decl]]
+kind = "union"
+name = "DispositionView"
+variants = [
+  { name = "preparing" },
+  { name = "waiting" },
+  { name = "connecting" },
+  { name = "verifying" },
+  { name = "transferring" },
+  { name = "confirming" },
+  { name = "paused", payload = "PausedStateView" },
+  { name = "unconfirmed" },
+  { name = "completed" },
+  { name = "failed" },
+  { name = "cancelled" },
+]
+
+[[decl]]
+kind = "struct"
+name = "SubmitView"
+fields = [
+  { name = "card", type = "hex16" },
+  { name = "epoch", type = "u63" },
+  { name = "command_id", type = "hex32" },
+  { name = "command", type = "CommandView" },
+]
+
+[[decl]]
+kind = "enum"
+name = "RejectionView"
+variants = [
+  "unknown_card",
+  "stale_epoch",
+  "superseded",
+  "at_capacity",
+  "runtime_stopped",
+  "interrupted",
+  "conflict",
+  "internal",
+]
+
+[[decl]]
+kind = "union"
+name = "AcceptanceView"
+variants = [
+  { name = "accepted" },
+  { name = "duplicate", payload = "DispositionView" },
+  { name = "rejected", payload = "RejectionView" },
+]
+
+[[decl]]
+kind = "struct"
+name = "CommandAcceptanceView"
+fields = [
+  { name = "command_id", type = "hex32" },
+  { name = "acceptance", type = "AcceptanceView" },
+]
+
+[[decl]]
+kind = "union"
+name = "CompletionView"
+variants = [
+  { name = "committed", payload = "DispositionView" },
+  { name = "commit_failed", payload = "DispositionView" },
+  { name = "interrupted" },
+  { name = "internal" },
+]
+
+[[decl]]
+kind = "struct"
+name = "CommandCompletionView"
+fields = [
+  { name = "command_id", type = "hex32" },
+  { name = "completion", type = "CompletionView" },
+]
+
+[[decl]]
+kind = "union"
+name = "CommandBody"
+variants = [
+  { name = "submit", payload = "SubmitView" },
+  { name = "acceptance", payload = "CommandAcceptanceView" },
+  { name = "completion", payload = "CommandCompletionView" },
+]
+
+[[decl]]
+kind = "struct"
+name = "CommandFrame"
+fields = [
+  { name = "schema", type = "ascii(64)" },
+  { name = "body", type = "CommandBody" },
+]
