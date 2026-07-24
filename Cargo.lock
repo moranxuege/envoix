@@ -1048,6 +1048,17 @@ dependencies = [
 [[package]]
 name = "envoix-runtime"
 version = "0.2.0"
+dependencies = [
+ "envoix-attempt-api",
+ "envoix-operation-store",
+ "envoix-outcomes",
+ "envoix-product",
+ "envoix-storage-api",
+ "envoix-storage-local",
+ "envoix-types",
+ "tempfile",
+ "tokio",
+]
 
 [[package]]
 name = "envoix-server"
