@@ -29,6 +29,8 @@ pub enum DataPath {
         /// The relay's URL.
         url: String,
     },
+    /// A routerless platform Wi-Fi Aware data path.
+    WifiAware,
     /// A transport this build cannot classify.
     Other {
         /// Debug description of the transport address.
@@ -41,6 +43,7 @@ impl fmt::Display for DataPath {
         match self {
             Self::Direct { addr } => write!(formatter, "direct ({addr})"),
             Self::Relay { url } => write!(formatter, "relay ({url})"),
+            Self::WifiAware => formatter.write_str("wifi_aware"),
             Self::Other { description } => formatter.write_str(description),
         }
     }
@@ -114,4 +117,18 @@ pub enum ConnectionMode {
 pub enum PeerRole {
     Sender,
     Receiver,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DataPath;
+
+    #[test]
+    fn wifi_aware_path_has_stable_wire_and_display_names() {
+        assert_eq!(DataPath::WifiAware.to_string(), "wifi_aware");
+        assert_eq!(
+            serde_json::to_string(&DataPath::WifiAware).unwrap(),
+            r#"{"type":"wifi_aware"}"#
+        );
+    }
 }

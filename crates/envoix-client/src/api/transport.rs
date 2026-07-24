@@ -18,22 +18,6 @@ const DEFAULT_PROVIDER_ORDER: [TransportProvider; 3] = [
     TransportProvider::Iroh,
 ];
 
-/// Provider adapters compiled into the current client.
-///
-/// Platform capability probes are necessary inputs for Wi-Fi Aware, but they
-/// do not make the provider selectable before its connection adapter exists.
-pub(crate) const BUILT_IN_TRANSPORT_CANDIDATES: [TransportCandidate; 3] = [
-    TransportCandidate::new(
-        TransportProvider::Wired,
-        TransportAvailability::ImplementationPending,
-    ),
-    TransportCandidate::new(
-        TransportProvider::WifiAware,
-        TransportAvailability::ImplementationPending,
-    ),
-    TransportCandidate::new(TransportProvider::Iroh, TransportAvailability::Ready),
-];
-
 /// A mechanism capable of establishing an Envoix data channel.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Deserialize, serde::Serialize)]
 #[non_exhaustive]
@@ -504,15 +488,20 @@ mod tests {
     }
 
     #[test]
-    fn current_build_selects_iroh_without_advertising_pending_providers() {
+    fn peer_specific_ready_wifi_aware_candidate_is_selectable() {
+        let candidates = [
+            TransportCandidate::new(
+                TransportProvider::Wired,
+                TransportAvailability::ImplementationPending,
+            ),
+            ready(TransportProvider::WifiAware),
+            ready(TransportProvider::Iroh),
+        ];
         assert_eq!(
-            TransportSelector::select(
-                TransportPreference::Automatic,
-                &BUILT_IN_TRANSPORT_CANDIDATES,
-            )
-            .unwrap()
-            .provider,
-            TransportProvider::Iroh
+            TransportSelector::select(TransportPreference::Automatic, &candidates)
+                .unwrap()
+                .provider,
+            TransportProvider::WifiAware
         );
     }
 

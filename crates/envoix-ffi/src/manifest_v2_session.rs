@@ -9,10 +9,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use envoix_client::api::{
     DestinationDecisionV2, DestinationRequestV2, EventSink, PairingConfig, PeerSource,
-    PendingManifestV2Receive, SessionError, TransferCancelToken, TransferEvent, parse_broker_addr,
-    receive_manifest_v2_offer_enable_mdns, receive_manifest_v2_offer_via_room,
+    PendingManifestV2Receive, PendingNativeManifestV2Receive, SessionError, TransferCancelToken,
+    TransferEvent, parse_broker_addr, receive_manifest_v2_offer_enable_mdns,
+    receive_manifest_v2_offer_over_native_transport, receive_manifest_v2_offer_via_room,
     receive_manifest_v2_offer_with_bound_peer, send_manifest_v2_enable_mdns,
-    send_manifest_v2_manual, send_manifest_v2_to_endpoint_addr, send_manifest_v2_via_room,
+    send_manifest_v2_manual, send_manifest_v2_over_native_transport,
+    send_manifest_v2_to_endpoint_addr, send_manifest_v2_via_room,
 };
 use envoix_qr::{QrInvitePayload, generate_token};
 use envoix_types::PairingStep;
@@ -21,10 +23,10 @@ use tokio::task::JoinSet;
 
 use super::{
     EnvoixError, EnvoixRuntimeSettings, FfiFailureCategory, FfiFailureCode, FfiFailureOrigin,
-    FfiFailurePhase, FfiManifestV2Phase, FfiRecoveryAction, FfiTransferDirection,
-    FfiTransferFailure, FfiTransferJobV2, FfiTransferRequest, TransferObserver,
-    build_client_for_request, on_ffi_runtime, op_err, peer_sources_for_request,
-    spawn_on_ffi_runtime, transfer_options_for_request,
+    FfiFailurePhase, FfiManifestV2Phase, FfiNativeDuplexTransport, FfiRecoveryAction,
+    FfiTransferDirection, FfiTransferFailure, FfiTransferJobV2, FfiTransferRequest,
+    TransferObserver, build_client_for_request, core_native_transport, on_ffi_runtime, op_err,
+    peer_sources_for_request, spawn_on_ffi_runtime, transfer_options_for_request,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -78,6 +80,18 @@ pub struct FfiManifestV2Completion {
     pub saved_paths: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum FfiSelectedDataPath {
+    Unknown,
+    WifiAware,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct FfiNativeManifestV2Completion {
+    pub transfer: FfiManifestV2Completion,
+    pub selected_path: FfiSelectedDataPath,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct FfiDestinationRequestV2 {
     pub target_directory: String,
@@ -114,17 +128,56 @@ impl FfiManifestV2Cancellation {
 
 #[derive(uniffi::Object)]
 pub struct FfiPendingManifestV2Receive {
-    pending: Mutex<Option<PendingManifestV2Receive>>,
+    pending: Mutex<Option<CorePendingManifestV2Receive>>,
     summary: FfiManifestOfferSummaryV2,
     entries: Vec<FfiManifestOfferEntryV2>,
     state_directory: PathBuf,
     cancellation: Arc<FfiManifestV2Cancellation>,
+    selected_path: FfiSelectedDataPath,
+}
+
+enum CorePendingManifestV2Receive {
+    Iroh(Box<PendingManifestV2Receive>),
+    Native(Box<PendingNativeManifestV2Receive>),
+}
+
+impl CorePendingManifestV2Receive {
+    fn offer(&self) -> &envoix_protocol::manifest_v2::ManifestOfferV2 {
+        match self {
+            Self::Iroh(pending) => pending.offer(),
+            Self::Native(pending) => pending.offer(),
+        }
+    }
+
+    async fn receive(
+        self,
+        destination: DestinationRequestV2,
+        state_directory: PathBuf,
+        cancellation: &TransferCancelToken,
+    ) -> Result<envoix_client::api::ReceiverManifestV2SessionSummary, SessionError> {
+        match self {
+            Self::Iroh(pending) => {
+                pending
+                    .receive(destination, state_directory, cancellation)
+                    .await
+            }
+            Self::Native(pending) => {
+                pending
+                    .receive(destination, state_directory, cancellation)
+                    .await
+            }
+        }
+    }
 }
 
 #[uniffi::export]
 impl FfiPendingManifestV2Receive {
     pub fn summary(&self) -> FfiManifestOfferSummaryV2 {
         self.summary.clone()
+    }
+
+    pub fn selected_path(&self) -> FfiSelectedDataPath {
+        self.selected_path
     }
 
     /// Bounded projection for native large-tree UIs.
@@ -347,6 +400,70 @@ pub async fn send_transfer_job_v2(
     .await
 }
 
+/// Runs the canonical sender over a platform-established Wi-Fi Aware stream.
+/// The invitation token still authenticates both peers inside Rust.
+#[uniffi::export]
+pub async fn send_transfer_job_v2_over_native_transport(
+    job: Arc<FfiTransferJobV2>,
+    pairing_token: String,
+    state_directory: String,
+    transport: Arc<dyn FfiNativeDuplexTransport>,
+    cancellation: Arc<FfiManifestV2Cancellation>,
+    observer: Arc<dyn TransferObserver>,
+) -> Result<FfiNativeManifestV2Completion, EnvoixError> {
+    spawn_on_ffi_runtime(async move {
+        let state_directory = required_directory(state_directory, "state_directory")?;
+        let pairing = PairingConfig::spake2_shared_token(pairing_token).map_err(op_err)?;
+        let job = job.clone_sealed_job().await?;
+        let manifest = job
+            .manifest()
+            .expect("clone_sealed_job guarantees a manifest")
+            .clone();
+        observer.on_started(
+            u32::try_from(manifest.entries.len()).unwrap_or(u32::MAX),
+            manifest.totals.total_plaintext_bytes,
+        );
+        let events: Arc<dyn EventSink> = Arc::new(NativeSessionEvents {
+            observer: observer.clone(),
+        });
+        let summary = match send_manifest_v2_over_native_transport(
+            core_native_transport(transport),
+            &job,
+            state_directory,
+            &pairing,
+            events,
+            &cancellation.token,
+        )
+        .await
+        {
+            Ok(summary) => summary,
+            Err(error) => {
+                report_v2_failure(
+                    observer.as_ref(),
+                    &error,
+                    FfiTransferDirection::Send,
+                    FfiFailurePhase::Transferring,
+                );
+                return Err(op_err(error));
+            }
+        };
+        observer.on_phase(FfiManifestV2Phase::Delivered);
+        observer.on_completed(manifest.totals.total_plaintext_bytes);
+        Ok(FfiNativeManifestV2Completion {
+            transfer: FfiManifestV2Completion {
+                job_id: encode_job_id(manifest.job_id),
+                entry_count: u32::try_from(summary.data_plane.entry_results.len())
+                    .unwrap_or(u32::MAX),
+                total_plaintext_bytes: manifest.totals.total_plaintext_bytes,
+                delivery_proof_digest: summary.delivery_proof_digest.0.to_vec(),
+                saved_paths: Vec::new(),
+            },
+            selected_path: FfiSelectedDataPath::WifiAware,
+        })
+    })
+    .await
+}
+
 #[uniffi::export]
 pub async fn receive_transfer_offer_v2(
     settings: EnvoixRuntimeSettings,
@@ -372,6 +489,49 @@ pub async fn receive_transfer_offer_v2(
             observer,
         )
         .await
+    })
+    .await
+}
+
+/// Authenticates and projects a canonical receiver offer over a
+/// platform-established Wi-Fi Aware stream. No payload is accepted until the
+/// returned pending offer receives a destination decision.
+#[uniffi::export]
+pub async fn receive_transfer_offer_v2_over_native_transport(
+    pairing_token: String,
+    state_directory: String,
+    transport: Arc<dyn FfiNativeDuplexTransport>,
+    cancellation: Arc<FfiManifestV2Cancellation>,
+    observer: Arc<dyn TransferObserver>,
+) -> Result<Arc<FfiPendingManifestV2Receive>, EnvoixError> {
+    spawn_on_ffi_runtime(async move {
+        let state_directory = required_directory(state_directory, "state_directory")?;
+        let pairing = PairingConfig::spake2_shared_token(pairing_token).map_err(op_err)?;
+        let events: Arc<dyn EventSink> = Arc::new(NativeSessionEvents {
+            observer: observer.clone(),
+        });
+        let pending = receive_manifest_v2_offer_over_native_transport(
+            core_native_transport(transport),
+            &pairing,
+            events,
+            &cancellation.token,
+        )
+        .await
+        .map_err(|error| {
+            report_v2_failure(
+                observer.as_ref(),
+                &error,
+                FfiTransferDirection::Receive,
+                FfiFailurePhase::Connecting,
+            );
+            op_err(error)
+        })?;
+        Ok(Arc::new(project_pending_offer(
+            CorePendingManifestV2Receive::Native(Box::new(pending)),
+            state_directory,
+            cancellation,
+            FfiSelectedDataPath::WifiAware,
+        )))
     })
     .await
 }
@@ -409,9 +569,10 @@ async fn receive_offer_from_attempts(
             op_err(error)
         })?;
         return Ok(Arc::new(project_pending_offer(
-            pending,
+            CorePendingManifestV2Receive::Iroh(Box::new(pending)),
             state_directory,
             cancellation,
+            FfiSelectedDataPath::Unknown,
         )));
     }
 
@@ -448,9 +609,10 @@ async fn receive_offer_from_attempts(
                     }
                     while routes.join_next().await.is_some() {}
                     return Ok(Arc::new(project_pending_offer(
-                        pending,
+                        CorePendingManifestV2Receive::Iroh(Box::new(pending)),
                         state_directory,
                         cancellation,
+                        FfiSelectedDataPath::Unknown,
                     )));
                 }
                 Some(Ok((_, Err(error)))) => {
@@ -692,9 +854,10 @@ async fn receive_offer_attempt(
 }
 
 fn project_pending_offer(
-    pending: PendingManifestV2Receive,
+    pending: CorePendingManifestV2Receive,
     state_directory: PathBuf,
     cancellation: Arc<FfiManifestV2Cancellation>,
+    selected_path: FfiSelectedDataPath,
 ) -> FfiPendingManifestV2Receive {
     let manifest = &pending.offer().manifest;
     let total = manifest.totals.total_plaintext_bytes;
@@ -737,6 +900,7 @@ fn project_pending_offer(
         entries,
         state_directory,
         cancellation,
+        selected_path,
     }
 }
 

@@ -11,6 +11,16 @@ interface ManifestV2Callback {
     fun onSaveRequired(requestJson: String): String
 }
 
+/** Platform-owned reliable byte stream. Null from [receive] is EOF. Rust owns
+ * TLS, invitation authentication, Manifest-v2 framing, and file semantics. */
+interface NativeDuplexTransport {
+    fun send(bytes: ByteArray)
+
+    fun receive(maxBytes: Int): ByteArray?
+
+    fun close()
+}
+
 /** Sink for the core's `tracing` log lines. */
 interface LogCallback {
     fun log(
@@ -94,6 +104,16 @@ object Native {
     external fun startManifestV2Session(
         id: Long,
         paramsJson: String,
+        callback: ManifestV2Callback,
+    )
+
+    /** Start the same canonical engine on an already established platform
+     * Wi-Fi Aware byte stream. */
+    external fun startManifestV2NativeSession(
+        id: Long,
+        paramsJson: String,
+        pairingToken: String,
+        transport: NativeDuplexTransport,
         callback: ManifestV2Callback,
     )
 

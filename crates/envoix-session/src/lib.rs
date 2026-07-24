@@ -5,6 +5,7 @@ mod connection;
 mod endpoint;
 mod identity;
 mod manifest_v2_session;
+mod native_transport;
 mod room;
 
 use std::future::Future;
@@ -52,8 +53,14 @@ use endpoint::{
 };
 pub use identity::{IdentityConfig, MemoryIdentity};
 pub use manifest_v2_session::{
-    PendingManifestV2Receive, ReceiverManifestV2SessionSummary, SenderManifestV2SessionSummary,
-    receive_manifest_v2_offer, send_manifest_v2_manual, send_manifest_v2_to_endpoint_addr,
+    PendingManifestV2Receive, PendingNativeManifestV2Receive, ReceiverManifestV2SessionSummary,
+    SenderManifestV2SessionSummary, receive_manifest_v2_offer,
+    receive_manifest_v2_offer_over_native_transport, send_manifest_v2_manual,
+    send_manifest_v2_over_native_transport, send_manifest_v2_to_endpoint_addr,
+};
+pub use native_transport::{
+    NATIVE_TRANSPORT_IO_CHUNK_BYTES, NativeFrameConnection, NativeTransportRead,
+    NativeTransportRole, PlatformDuplexTransport,
 };
 pub use room::{receive_manifest_v2_offer_via_room, send_manifest_v2_via_room};
 

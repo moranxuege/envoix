@@ -49,6 +49,7 @@ final class WifiAwareCapabilityTests: XCTestCase {
         )
         XCTAssertEqual(envoixWifiAwareService, "_envoix._udp")
         XCTAssertEqual(envoixWifiAwareProbeService, "_envoix-probe._tcp")
+        XCTAssertEqual(envoixWifiAwareTransferService, "_envoix-transfer._tcp")
     }
 
     func testProbeProtocolRoundTripAndRejectsCorruption() throws {

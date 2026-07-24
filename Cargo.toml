@@ -43,6 +43,8 @@ ipnet = "2"
 maxminddb = "0.29"
 base64 = "0.22"
 qrcode = { version = "0.14", default-features = false }
+rcgen = { version = "0.14", default-features = false, features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustix = { version = "1.1", features = ["fs"] }
 blake3 = "1"
 chacha20poly1305 = "0.10"
@@ -61,6 +63,7 @@ spake2 = "0.4"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 toml = "0.8"
 uniffi = "0.31"
 tracing = "0.1"

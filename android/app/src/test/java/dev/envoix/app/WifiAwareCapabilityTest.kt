@@ -51,6 +51,7 @@ class WifiAwareCapabilityTest {
         )
         assertEquals("_envoix._udp", ENVOIX_WIFI_AWARE_SERVICE)
         assertEquals("_envoix-probe._tcp", ENVOIX_WIFI_AWARE_PROBE_SERVICE)
+        assertEquals("_envoix-transfer._tcp", ENVOIX_WIFI_AWARE_TRANSFER_SERVICE)
     }
 
     private fun readyFacts(

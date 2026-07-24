@@ -1,8 +1,8 @@
 # Transport provider selector
 
-Status: **foundation implemented; iroh is the only registered adapter**
+Status: **Wi-Fi Aware byte-stream adapter implemented; product selection remains peer-specific**
 
-Last reviewed: 2026-07-17
+Last reviewed: 2026-07-24
 
 ## Decision
 
@@ -64,26 +64,35 @@ pairing and channel gates pass.
 | Provider | Compiled status | Current behavior |
 | --- | --- | --- |
 | iroh | `ready` | Existing Manual/Invite/mDNS/Room send and receive functions; existing `PathPolicy` preserved |
-| Wi-Fi Aware | `implementation_pending` | Never selected; native capability diagnostics remain visible only in developer mode |
+| Wi-Fi Aware | adapter implemented | Apple Network.framework and Android `WifiAwareNetworkSpecifier` provide a raw TCP stream; Rust owns TLS 1.3, SPAKE2 authentication, Manifest v2, recovery, and delivery proof |
 | wired | `implementation_pending` | Reserved for a future raw wired provider; never treated as an iroh/IP path |
 
-All four client construction paths (single-file send/receive and Manifest
-send/negotiated receive) now select a provider before delegating to their iroh
-adapter. The default is `Automatic`, so existing callers and durable records
-continue to use iroh without changing behavior. Records serialized before the
-new field deserialize to `Automatic`.
+Wi-Fi Aware readiness is supplied for the selected paired device, not inferred
+from a global hardware probe. Apple calls the additive UniFFI native-transport
+entry points while retaining the publisher/listener or subscriber/connection
+scope for the complete session. Android calls the additive JNI entry point
+after its Wi-Fi Aware network callback has produced a TCP socket. Existing
+iroh APIs are unchanged, so `Prefer(WifiAware)` may retry through iroh without
+creating another job or transfer protocol.
 
-## Next integration slices
+The native TLS server certificate is ephemeral and intentionally does not claim
+Envoix identity. Immediately after TLS, mutual SPAKE2 authenticates the
+invitation secret and binds it to the TLS exporter. A TLS MITM therefore cannot
+authenticate either substituted connection without the invitation secret and
+the matching exporter. Platform code never implements protocol frames or file
+semantics.
 
-1. W1/W2 physical evidence establishes Wi-Fi Aware pairing and a secure native
-   byte channel.
-2. Register the Wi-Fi Aware adapter only after it can produce the existing
-   authenticated `FrameConnection` semantics, including channel binding,
-   cancellation, full-duplex control frames, and close ordering.
-3. Add peer-specific Wi-Fi Aware candidates to the same selector; do not add a
-   parallel transfer state machine.
-4. Add a wired adapter later by registering another candidate. It may use raw
-   USB bulk/accessory I/O and does not require a synthetic IP interface.
+## Validation gates
+
+1. Fragmented in-memory streams must complete TLS, exporter binding, SPAKE2,
+   Manifest v2 file delivery, receiver save, and matching delivery proof.
+2. Apple simulator compilation and Android JVM/JNI checks validate the foreign
+   transport contracts without consuming physical test devices.
+3. Final release evidence remains hardware-gated: Apple ↔ Android must complete
+   both directions on actual Wi-Fi Aware hardware, including cancellation,
+   network loss, and `Prefer` fallback.
+4. A future wired adapter may register another peer-specific candidate. It may
+   use raw USB bulk/accessory I/O and does not require a synthetic IP interface.
 
 The selector itself must stay pure and deterministic. Provider discovery,
 permission prompts, pairing UI, connection attempts, and transfer fallback

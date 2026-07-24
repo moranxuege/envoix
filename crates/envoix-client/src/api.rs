@@ -4,6 +4,7 @@ mod error;
 mod invite;
 mod options;
 mod source;
+mod transport;
 
 use std::path::Path;
 
@@ -17,6 +18,10 @@ pub use error::TransferError;
 pub use invite::{Invite, Role};
 pub use options::{PathPolicy, TransferOptions};
 pub use source::{PeerSource, TransferMode};
+pub use transport::{
+    TransportAvailability, TransportCandidate, TransportPreference, TransportProvider,
+    TransportSelection, TransportSelectionError, TransportSelectionReason, TransportSelector,
+};
 
 /// Runtime settings shared by every Manifest v2 route.
 #[derive(Clone, Debug)]
