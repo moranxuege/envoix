@@ -8,6 +8,10 @@ final class EnvoixIOSAppUITests: XCTestCase {
     private static let physicalNearbyTimeout: TimeInterval = 90
     private static let defaultPhysicalNearbyHold: TimeInterval = 20
     private static let maximumPhysicalNearbyHold: TimeInterval = 120
+    private static let physicalWifiAwareProbeAttemptTimeout: TimeInterval = 35
+    private static let physicalWifiAwareProbeAttemptLimit = 4
+    private static let physicalWifiAwareProbeScrollLimit = 12
+    private static let physicalWifiAwareProbePollInterval: TimeInterval = 0.25
     private static let iOS26DocumentPickerOpenPosition = CGVector(dx: 0.86, dy: 0.11)
 
     override func setUpWithError() throws {
@@ -147,6 +151,91 @@ final class EnvoixIOSAppUITests: XCTestCase {
             "The removed Wi-Fi Aware pairing remained in the provider snapshot"
         )
         XCTAssertFalse(app.descendants(matching: .any)["nearby_wifi_aware_device"].exists)
+    }
+
+    func testPhysicalWifiAwareProbeUsesWifiAwarePath() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let role = environment["ENVOIX_PHYSICAL_WIFI_AWARE_PROBE_ROLE"] else {
+            throw XCTSkip("Requires an explicit Wi-Fi Aware publisher or subscriber role")
+        }
+
+        let actionIdentifier: String
+        switch role {
+        case "publisher":
+            actionIdentifier = "settings_wifi_aware_probe_receive"
+        case "subscriber":
+            actionIdentifier = "settings_wifi_aware_probe_send"
+        default:
+            XCTFail("ENVOIX_PHYSICAL_WIFI_AWARE_PROBE_ROLE must be publisher or subscriber")
+            return
+        }
+
+        let app = XCUIApplication()
+        app.launchArguments += [
+            "--ui-testing",
+            "-envoix.language", "en",
+            "-envoix.developerMode", "YES",
+        ]
+        app.launch()
+        defer { app.terminate() }
+        dismissSheetIfNeeded(app)
+
+        let settings = app.buttons["open_settings"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 8))
+        settings.tap()
+
+        let settingsScroll = app.scrollViews.firstMatch
+        XCTAssertTrue(settingsScroll.waitForExistence(timeout: 5))
+        let status = app.descendants(matching: .any)["settings_wifi_aware_probe"]
+        for _ in 0..<Self.physicalWifiAwareProbeScrollLimit where !status.exists {
+            settingsScroll.swipeUp()
+        }
+        XCTAssertTrue(status.waitForExistence(timeout: 20))
+        XCTAssertTrue(
+            app.descendants(matching: .any)["settings_wifi_aware_probe_target"]
+                .waitForExistence(timeout: 20),
+            "The paired Wi-Fi Aware target was not available"
+        )
+
+        let action = app.buttons[actionIdentifier]
+        for _ in 0..<Self.physicalWifiAwareProbeScrollLimit where !action.isHittable {
+            settingsScroll.swipeUp()
+        }
+        XCTAssertTrue(action.waitForExistence(timeout: 5))
+        XCTAssertTrue(action.isEnabled)
+        XCTAssertTrue(action.isHittable)
+        FileHandle.standardError.write(Data("ENVOIX_WIFI_AWARE_PROBE_READY role=\(role)\n".utf8))
+
+        var lastSummary = status.label
+        for _ in 0..<Self.physicalWifiAwareProbeAttemptLimit {
+            action.tap()
+            let deadline = Date().addingTimeInterval(Self.physicalWifiAwareProbeAttemptTimeout)
+            var attemptStarted = false
+            repeat {
+                lastSummary = status.label
+                if !lastSummary.contains("phase=succeeded") {
+                    attemptStarted = true
+                }
+                if attemptStarted,
+                   lastSummary.contains("phase=succeeded"),
+                   lastSummary.contains("path=wifi_aware") {
+                    let evidence = XCTAttachment(screenshot: app.screenshot())
+                    evidence.name = "wifi-aware-probe-\(role)"
+                    evidence.lifetime = .keepAlways
+                    add(evidence)
+                    return
+                }
+                if attemptStarted, lastSummary.contains("phase=failed") {
+                    break
+                }
+                RunLoop.current.run(
+                    until: Date().addingTimeInterval(Self.physicalWifiAwareProbePollInterval)
+                )
+            } while Date() < deadline
+        }
+
+        attachFailureState(of: app, named: "wifi-aware-probe-\(role)")
+        XCTFail("Wi-Fi Aware probe did not succeed for \(role): \(lastSummary)")
     }
 
     func testPhysicalNearbyDiscoveryFindsAndroid() throws {

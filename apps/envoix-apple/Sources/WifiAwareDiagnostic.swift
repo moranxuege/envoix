@@ -617,17 +617,20 @@ struct AppleWifiAwareDeveloperPanel: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(controller.selectedDeviceID == nil)
+                .accessibilityIdentifier("settings_wifi_aware_probe_receive")
 
                 Button(AppText.value("Send probe", "发送探针", language: language)) {
                     controller.startSubscriberProbe()
                 }
                 .buttonStyle(.bordered)
                 .disabled(controller.selectedDeviceID == nil)
+                .accessibilityIdentifier("settings_wifi_aware_probe_send")
 
                 Button(AppText.value("Stop", "停止", language: language)) {
                     controller.stop()
                 }
                 .buttonStyle(.bordered)
+                .accessibilityIdentifier("settings_wifi_aware_probe_stop")
             }
             .controlSize(.small)
         }
