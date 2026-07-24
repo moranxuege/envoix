@@ -1,6 +1,6 @@
 use envoix_attempt_api::{
     AttemptEvent, AttemptEventKind, AttemptPlan, AttemptStamp, AttemptSupervisor, EventAdmission,
-    OpenResult, ResumeIntent, RetirementIntent,
+    OpenResult, ResumeIntent, RetirementAck, RetirementAckResult, RetirementIntent,
 };
 use envoix_capabilities::{
     Admission, DutyKind, DutyLedger, DutyProvenance, DutyResult, GenerationUpdate, Registration,
@@ -149,6 +149,42 @@ fn start_plan(effects: &[ProductEffect]) -> AttemptPlan {
         .expect("StartAttempt effect")
 }
 
+/// Mints a real C7 [`RetirementAck`] for the record's current generation by
+/// driving an [`AttemptSupervisor`] — so tests exercise the ACTUAL cancel-vs-
+/// commit linearization. `cross_first` = the attempt's commit crossed before
+/// the retirement resolved (so a Cancel/Finalize resolves to `Completed`).
+fn retirement_ack(
+    record: &TransferRecord,
+    intent: RetirementIntent,
+    cross_first: bool,
+) -> RetirementAck {
+    let plan = AttemptPlan {
+        stamp: record.stamp(),
+        direction: record.direction,
+        transfer: record.identity.transfer,
+        artifact: record.identity.artifact,
+        resume: ResumeIntent::Fresh,
+    };
+    let mut supervisor = AttemptSupervisor::new();
+    assert!(matches!(supervisor.open(plan), OpenResult::Opened));
+    if cross_first {
+        supervisor.cross_commit_point(plan.stamp);
+    }
+    supervisor.request_retirement(plan.stamp, intent);
+    match supervisor.acknowledge_retirement(plan.stamp) {
+        RetirementAckResult::Acknowledged(ack) => ack,
+        other => panic!("expected an acknowledged retirement, got {other:?}"),
+    }
+}
+
+/// Drives the record to quiescence via a retirement ack of the given intent
+/// (commit not crossed → the ack's outcome matches the intent). Returns the
+/// released effects (e.g. the deferred discard on a Cancel).
+fn quiesce(record: &mut TransferRecord, intent: RetirementIntent) -> Vec<ProductEffect> {
+    let ack = retirement_ack(record, intent, false);
+    record.reduce(ProductInput::AttemptRetired(ack)).unwrap()
+}
+
 fn assert_outcome(record: &TransferRecord, code: OutcomeCode) {
     assert_eq!(
         record.outcome.as_ref().map(|outcome| outcome.code),
@@ -225,18 +261,30 @@ fn receive_happy_path_posts_receipt() {
 
     assert_eq!(record.state, ProductState::Completed);
     assert_eq!(record.bytes, record.total);
+    // The receipt duty is DEFERRED behind the attempt's retirement (committed
+    // effects + quiescence): the terminal only asks the attempt to finalize.
     assert!(matches!(
         effects.as_slice(),
-        [
-            ProductEffect::CapabilityDuty {
-                duty,
-                action: CapabilityAction::PostReceipt,
-            },
-            ProductEffect::RetireAttempt {
-                intent: RetirementIntent::Finalize,
-                ..
-            }
-        ] if duty.kind == DutyKind::Courier
+        [ProductEffect::RetireAttempt {
+            intent: RetirementIntent::Finalize,
+            ..
+        }]
+    ));
+    // The attempt retires with its commit crossed → the receipt is now posted.
+    let posted = record
+        .reduce(ProductInput::AttemptRetired(retirement_ack(
+            &record,
+            RetirementIntent::Finalize,
+            true,
+        )))
+        .unwrap();
+    assert_eq!(record.quiescence, crate::Quiescence::Quiescent);
+    assert!(matches!(
+        posted.as_slice(),
+        [ProductEffect::CapabilityDuty {
+            duty,
+            action: CapabilityAction::PostReceipt,
+        }] if duty.kind == DutyKind::Courier
     ));
 }
 
@@ -261,6 +309,10 @@ fn storage_failed_ends_active_states_and_spares_terminal_ones() {
             AttemptEventKind::Terminal(OutcomeCode::Completed),
         ))
         .unwrap();
+    // Only a DURABLY at-rest terminal (the attempt has retired → Quiescent) is
+    // spared; a still-Retiring terminal would escalate (that is how P2 surfaces
+    // a failed destructive write).
+    completed.quiescence = crate::Quiescence::Quiescent;
     let snapshot = completed.clone();
     assert!(
         completed
@@ -281,21 +333,31 @@ fn stage_complete_launches_the_first_attempt_fresh() {
             transferred: ByteCount::new(80),
         })
         .unwrap();
+    // Staging COMPLETE records the source but does NOT launch the attempt yet:
+    // the staging worker must retire (release its lease) first, so a fresh
+    // attempt never races the staged prefix.
     let effects = record
         .reduce(ProductInput::StageComplete {
             stamp,
             total: ByteCount::new(80),
         })
         .unwrap();
-    assert_eq!(record.state, ProductState::Connecting);
+    assert_eq!(record.state, ProductState::Preparing);
     assert!(record.facts.source_ready);
     assert_eq!(
         record.total,
         ByteCount::new(80),
         "the staged artifact is the authoritative source length"
     );
+    assert_eq!(effects, vec![ProductEffect::RetireStaging { stamp }]);
+
+    // The staging worker retires; only now does the first attempt launch fresh.
+    let launched = record
+        .reduce(ProductInput::StagingRetired { stamp })
+        .unwrap();
+    assert_eq!(record.state, ProductState::Connecting);
     assert_eq!(record.bytes, ByteCount::new(0));
-    assert_eq!(start_plan(&effects).resume, ResumeIntent::Fresh);
+    assert_eq!(start_plan(&launched).resume, ResumeIntent::Fresh);
 }
 
 #[test]
@@ -353,13 +415,41 @@ fn stage_failed_fails_with_typed_source_recovery() {
 }
 
 #[test]
-fn cancel_during_preparing_abandons_without_a_wire_effect() {
+fn cancel_during_preparing_retires_the_worker_before_discarding() {
     let mut record = preparing(Direction::Send, true);
+    let stamp = record.stamp();
+    // A Preparing cancel asks the staging WORKER to retire; the destructive
+    // discard is deferred until the worker confirms it stopped — otherwise a
+    // half-staged file could be shipped by a later send.
     let effects = record
         .reduce(ProductInput::Command(ProductCommand::Cancel))
         .unwrap();
     assert_eq!(record.state, ProductState::Cancelled);
-    assert!(effects.is_empty());
+    assert!(record.quiescence.is_retiring(), "not yet at rest");
+    assert_eq!(effects, vec![ProductEffect::RetireStaging { stamp }]);
+    assert!(
+        !effects.iter().any(|e| matches!(
+            e,
+            ProductEffect::StorageIntent {
+                action: StorageAction::DiscardPartial,
+                ..
+            }
+        )),
+        "no discard until the worker retires"
+    );
+
+    // The worker retires; only now does the discard fire and the card quiesce.
+    let released = record
+        .reduce(ProductInput::StagingRetired { stamp })
+        .unwrap();
+    assert_eq!(record.quiescence, crate::Quiescence::Quiescent);
+    assert_eq!(
+        released,
+        vec![ProductEffect::StorageIntent {
+            identity: record.identity,
+            action: StorageAction::DiscardPartial,
+        }]
+    );
 }
 
 #[test]
@@ -398,6 +488,10 @@ fn stale_generation_staging_inputs_are_rejected_after_retry() {
     record
         .reduce(ProductInput::Command(ProductCommand::Cancel))
         .unwrap();
+    // The staging worker retires before the card can re-stage under a new gen.
+    record
+        .reduce(ProductInput::StagingRetired { stamp: first })
+        .unwrap();
     assert!(
         record
             .reduce(ProductInput::Command(ProductCommand::Resume))
@@ -423,23 +517,29 @@ fn stale_generation_staging_inputs_are_rejected_after_retry() {
         assert_eq!(record, snapshot);
     }
 
-    let effects = record
+    let stamp = record.stamp();
+    let staged = record
         .reduce(ProductInput::StageComplete {
-            stamp: record.stamp(),
+            stamp,
             total: ByteCount::new(100),
         })
         .unwrap();
+    assert_eq!(staged, vec![ProductEffect::RetireStaging { stamp }]);
+    let launched = record
+        .reduce(ProductInput::StagingRetired { stamp })
+        .unwrap();
     assert_eq!(record.state, ProductState::Connecting);
-    assert_eq!(start_plan(&effects).resume, ResumeIntent::Fresh);
+    assert_eq!(start_plan(&launched).resume, ResumeIntent::Fresh);
 }
 
 #[test]
 fn resume_from_failed_staging_re_stages_not_the_wire() {
     let mut record = preparing(Direction::Send, true);
+    let stamp = record.stamp();
+    record.reduce(ProductInput::StageFailed { stamp }).unwrap();
+    // The staging worker must retire before the failed card is at rest.
     record
-        .reduce(ProductInput::StageFailed {
-            stamp: record.stamp(),
-        })
+        .reduce(ProductInput::StagingRetired { stamp })
         .unwrap();
     let effects = record
         .reduce(ProductInput::Command(ProductCommand::Resume))
@@ -451,21 +551,35 @@ fn resume_from_failed_staging_re_stages_not_the_wire() {
 #[test]
 fn resume_after_completed_staging_goes_to_the_wire() {
     let mut record = preparing(Direction::Send, true);
+    let stamp = record.stamp();
+    // Staging completes and its worker retires: the attempt goes to the wire.
     record
         .reduce(ProductInput::StageComplete {
-            stamp: record.stamp(),
+            stamp,
             total: ByteCount::new(100),
         })
         .unwrap();
     record
-        .reduce(ProductInput::Command(ProductCommand::Cancel))
+        .reduce(ProductInput::StagingRetired { stamp })
         .unwrap();
+    assert_eq!(record.state, ProductState::Connecting);
     assert!(record.facts.source_ready);
+    // Pausing then resuming stays on the wire (the source is ready); it does
+    // NOT drop back to re-staging.
+    record
+        .reduce(ProductInput::Command(ProductCommand::Pause))
+        .unwrap();
+    quiesce(&mut record, RetirementIntent::Pause);
     let effects = record
         .reduce(ProductInput::Command(ProductCommand::Resume))
         .unwrap();
     assert_eq!(record.state, ProductState::Connecting);
-    assert_eq!(start_plan(&effects).resume, ResumeIntent::Fresh);
+    assert_eq!(
+        start_plan(&effects).resume,
+        ResumeIntent::ResumeFrom {
+            offset: ByteCount::new(0)
+        }
+    );
 }
 
 #[test]
@@ -482,6 +596,21 @@ fn cancel_clears_progress_and_the_fresh_resume_inherits_it() {
     record
         .reduce(ProductInput::Command(ProductCommand::Cancel))
         .unwrap();
+    // Optimistic cancel KEEPS the bytes: the discard (and the byte reset) is
+    // deferred to the retirement ack, so a cancel that loses to a crossed
+    // commit can still surface its real progress.
+    assert!(record.quiescence.is_retiring());
+    assert_eq!(record.bytes, ByteCount::new(50));
+    // A fresh resume waits for the cancelled attempt to retire (quiescence);
+    // only then are the bytes cleared and the partial discarded.
+    let discard = quiesce(&mut record, RetirementIntent::Cancel);
+    assert!(discard.iter().any(|e| matches!(
+        e,
+        ProductEffect::StorageIntent {
+            action: StorageAction::DiscardPartial,
+            ..
+        }
+    )));
     assert_eq!(record.bytes, ByteCount::new(0));
     assert_eq!(record.bytes_resumed, ByteCount::new(0));
     let effects = record
@@ -504,6 +633,10 @@ fn paused_resume_keeps_progress_until_phase_corrects_it() {
     record
         .reduce(ProductInput::Command(ProductCommand::Pause))
         .unwrap();
+    // The pause is not at rest until its attempt retires; only then can resume
+    // launch a new generation. The partial progress is preserved throughout.
+    quiesce(&mut record, RetirementIntent::Pause);
+    assert_eq!(record.bytes, ByteCount::new(50));
     let effects = record
         .reduce(ProductInput::Command(ProductCommand::Resume))
         .unwrap();
@@ -828,6 +961,9 @@ fn peer_pause_and_lost_connection_classify_as_paused() {
 #[test]
 fn peer_cancel_discards_and_restart_is_fresh() {
     let mut record = transfer(Direction::Receive);
+    // A peer-cancel terminal moves the card to Cancelled optimistically and
+    // requests the attempt finalize; the destructive discard is DEFERRED until
+    // the attempt retires (Pillar 4 — no discard while the lease is held).
     let effects = record
         .reduce(event(
             &record,
@@ -835,18 +971,26 @@ fn peer_cancel_discards_and_restart_is_fresh() {
         ))
         .unwrap();
     assert_eq!(record.state, ProductState::Cancelled);
+    assert!(record.quiescence.is_retiring());
+    // The attempt already observed the peer's terminal, so it is CLEAN-CLOSED
+    // (Finalize); the destructive discard is enacted by the adopted ack, not the
+    // retirement request's intent.
     assert_eq!(
         effects,
-        vec![
-            ProductEffect::StorageIntent {
-                identity: record.identity,
-                action: StorageAction::DiscardPartial,
-            },
-            ProductEffect::RetireAttempt {
-                stamp: record.stamp(),
-                intent: RetirementIntent::Finalize,
-            },
-        ]
+        vec![ProductEffect::RetireAttempt {
+            stamp: record.stamp(),
+            intent: RetirementIntent::Finalize,
+        }]
+    );
+    // The attempt retires with the (peer-)Cancelled outcome: now the discard
+    // fires and the card is quiescent.
+    let discard = quiesce(&mut record, RetirementIntent::Cancel);
+    assert_eq!(
+        discard,
+        vec![ProductEffect::StorageIntent {
+            identity: record.identity,
+            action: StorageAction::DiscardPartial,
+        }]
     );
     let effects = record
         .reduce(ProductInput::Command(ProductCommand::Resume))
@@ -859,6 +1003,9 @@ fn resume_from_resting_retryable_states_uses_resume_semantics() {
     for origin in [PauseOrigin::Local, PauseOrigin::Peer, PauseOrigin::Lost] {
         let mut record = transfer(Direction::Send);
         record.state = ProductState::Paused(origin);
+        // A genuinely at-rest paused card: its worker has retired (Quiescent),
+        // which is the precondition for a fresh attempt to launch.
+        record.quiescence = crate::Quiescence::Quiescent;
         let offset = record.bytes;
         let effects = record
             .reduce(ProductInput::Command(ProductCommand::Resume))
@@ -876,6 +1023,8 @@ fn resume_from_resting_retryable_states_uses_resume_semantics() {
             AttemptEventKind::Terminal(OutcomeCode::PeerLost),
         ))
         .unwrap();
+    // The lost attempt has retired (mailbox is now the resting card's channel).
+    record.quiescence = crate::Quiescence::Quiescent;
     let effects = record
         .reduce(ProductInput::Command(ProductCommand::Resume))
         .unwrap();
@@ -937,12 +1086,28 @@ fn cancel_from_resting_states_and_terminal_inputs_are_ignored() {
     paused
         .reduce(ProductInput::Command(ProductCommand::Pause))
         .unwrap();
+    // The pause must retire to rest before it can be cancelled; a cancel while
+    // the pause is still in flight is dropped.
     assert!(
         paused
             .reduce(ProductInput::Command(ProductCommand::Cancel))
             .unwrap()
-            .is_empty()
+            .is_empty(),
+        "a cancel is dropped while a retirement is in flight"
     );
+    assert_eq!(paused.state, ProductState::Paused(PauseOrigin::Local));
+    quiesce(&mut paused, RetirementIntent::Pause);
+    // Now quiescent: the cancel takes effect and discards the partial.
+    let effects = paused
+        .reduce(ProductInput::Command(ProductCommand::Cancel))
+        .unwrap();
+    assert!(effects.iter().any(|e| matches!(
+        e,
+        ProductEffect::StorageIntent {
+            action: StorageAction::DiscardPartial,
+            ..
+        }
+    )));
     assert_eq!(paused.state, ProductState::Cancelled);
 
     for state in [
@@ -966,12 +1131,21 @@ fn cancel_from_resting_states_and_terminal_inputs_are_ignored() {
 #[test]
 fn restore_derives_state_from_durable_facts() {
     let mut confirming = confirming_send();
+    let stamp = confirming.stamp();
     let effects = confirming.reduce(ProductInput::Restore).unwrap();
     assert_eq!(confirming.state, ProductState::Unconfirmed);
-    assert!(matches!(
-        effects.as_slice(),
-        [ProductEffect::StartMailboxPoll { .. }]
-    ));
+    // Restore asks the (now-defunct) attempt to retire AND starts the mailbox
+    // poll: the in-band confirmation is abandoned for the durable proof channel.
+    assert_eq!(
+        effects,
+        vec![
+            ProductEffect::RetireAttempt {
+                stamp,
+                intent: RetirementIntent::Cancel,
+            },
+            ProductEffect::StartMailboxPoll { stamp },
+        ]
+    );
 
     let mut active = transfer(Direction::Receive);
     active.reduce(ProductInput::Restore).unwrap();
@@ -1017,10 +1191,14 @@ fn legal_commands_come_only_from_product_state() {
     );
 
     let mut needs_repick = preparing(Direction::Send, false);
+    let stamp = needs_repick.stamp();
     needs_repick
-        .reduce(ProductInput::StageFailed {
-            stamp: needs_repick.stamp(),
-        })
+        .reduce(ProductInput::StageFailed { stamp })
+        .unwrap();
+    // The staging worker must retire before the failed card is at rest and can
+    // offer its recovery commands.
+    needs_repick
+        .reduce(ProductInput::StagingRetired { stamp })
         .unwrap();
     assert_eq!(
         needs_repick.allowed_commands(),
@@ -1037,13 +1215,21 @@ fn legal_commands_come_only_from_product_state() {
 #[test]
 fn receipt_delivery_result_requires_exact_provenance() {
     let mut record = transfer(Direction::Receive);
-    let effects = record
+    record
         .reduce(event(
             &record,
             AttemptEventKind::Terminal(OutcomeCode::Completed),
         ))
         .unwrap();
-    let provenance = effects
+    // The receipt duty is posted once the attempt retires (its commit crossed).
+    let posted = record
+        .reduce(ProductInput::AttemptRetired(retirement_ack(
+            &record,
+            RetirementIntent::Finalize,
+            true,
+        )))
+        .unwrap();
+    let provenance = posted
         .iter()
         .find_map(|effect| match effect {
             ProductEffect::CapabilityDuty { duty, .. } => Some(duty.provenance),
@@ -1195,6 +1381,9 @@ fn product_model_scenario_trace() {
     send.reduce(ProductInput::Command(ProductCommand::Pause))
         .unwrap();
     assert_eq!(send.state, ProductState::Paused(PauseOrigin::Local));
+    // The pause reaches rest only when its attempt acks the retirement; only
+    // then can resume launch the next generation.
+    quiesce(&mut send, RetirementIntent::Pause);
     let effects = send
         .reduce(ProductInput::Command(ProductCommand::Resume))
         .unwrap();
@@ -1226,24 +1415,38 @@ fn product_model_scenario_trace() {
         ))
         .unwrap();
     assert_eq!(receive.state, ProductState::Completed);
+    // The terminal only finalizes the attempt; the receipt duty is DEFERRED
+    // behind the retirement ack (committed effects + quiescence).
+    assert_eq!(
+        effects,
+        vec![ProductEffect::RetireAttempt {
+            stamp: receive.stamp(),
+            intent: RetirementIntent::Finalize,
+        }]
+    );
+    let posted = receive
+        .reduce(ProductInput::AttemptRetired(retirement_ack(
+            &receive,
+            RetirementIntent::Finalize,
+            true,
+        )))
+        .unwrap();
     assert!(
-        effects
+        posted
             .iter()
             .any(|effect| matches!(effect, ProductEffect::CapabilityDuty { .. }))
     );
-    assert!(effects.iter().any(|effect| matches!(
-        effect,
-        ProductEffect::RetireAttempt {
-            intent: RetirementIntent::Finalize,
-            ..
-        }
-    )));
 
     let mut cancelled = transfer(Direction::Send);
     cancelled
         .reduce(ProductInput::Command(ProductCommand::Cancel))
         .unwrap();
+    // Optimistically Cancelled but still Retiring: bytes are kept until the ack.
     assert_eq!(cancelled.state, ProductState::Cancelled);
+    assert!(cancelled.quiescence.is_retiring());
+    assert_eq!(cancelled.bytes, ByteCount::new(40));
+    // The retirement ack confirms the cancel: now the bytes clear and discard.
+    quiesce(&mut cancelled, RetirementIntent::Cancel);
     assert_eq!(cancelled.bytes, ByteCount::new(0));
 
     let mut storage_failed = transfer(Direction::Receive);
@@ -1269,6 +1472,7 @@ fn fixture_record() -> TransferRecord {
         offered_name: OfferedName::from_untrusted("a.txt"),
         total: ByteCount::new(10),
         state: ProductState::Paused(PauseOrigin::Local),
+        quiescence: crate::Quiescence::Quiescent,
         generation: AttemptGen::new(7),
         phase: Phase::Transferring,
         bytes: ByteCount::new(4),
@@ -1298,7 +1502,7 @@ fn product_record_v1_roundtrips() {
 
 #[test]
 fn product_record_v1_has_a_byte_exact_fixture() {
-    let body = br#"{"identity":{"card":1,"transfer":"00000000000000000000000000000002","artifact":"00000000000000000000000000000003"},"direction":"send","offered_name":"a.txt","total":10,"state":{"state":"paused","origin":"local"},"generation":7,"phase":"transferring","bytes":4,"bytes_resumed":2,"outcome":null,"facts":{"source_ready":true,"complete_sent":false,"proof_delivered":false,"receipt_mismatch":false,"remove_requested":false},"source_recoverable":true,"receipt_request":"00000000000000000000000000000004"}"#;
+    let body = br#"{"identity":{"card":1,"transfer":"00000000000000000000000000000002","artifact":"00000000000000000000000000000003"},"direction":"send","offered_name":"a.txt","total":10,"state":{"state":"paused","origin":"local"},"quiescence":{"status":"quiescent"},"generation":7,"phase":"transferring","bytes":4,"bytes_resumed":2,"outcome":null,"facts":{"source_ready":true,"complete_sent":false,"proof_delivered":false,"receipt_mismatch":false,"remove_requested":false},"source_recoverable":true,"receipt_request":"00000000000000000000000000000004"}"#;
     let mut expected = Vec::new();
     expected.extend_from_slice(&23_u16.to_be_bytes());
     expected.extend_from_slice(b"envoix/product-record/1");

@@ -1,4 +1,6 @@
-use envoix_attempt_api::{AdmittedAttemptEvent, AttemptPlan, AttemptStamp, RetirementIntent};
+use envoix_attempt_api::{
+    AdmittedAttemptEvent, AttemptPlan, AttemptStamp, RetirementAck, RetirementIntent,
+};
 use envoix_capabilities::{AdmittedDutyResult, Duty};
 use envoix_outcomes::{Outcome, Phase};
 use envoix_types::{AttemptGen, ByteCount, Direction, OfferedName, RequestId};
@@ -45,6 +47,37 @@ impl ProductState {
             | Self::Failed
             | Self::Cancelled => false,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerKind {
+    Attempt,
+    Staging,
+}
+
+/// Durable proof state for the worker that owns the current generation.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum Quiescence {
+    Running {
+        worker: WorkerKind,
+    },
+    Retiring {
+        worker: WorkerKind,
+        intent: RetirementIntent,
+    },
+    Quiescent,
+}
+
+impl Quiescence {
+    pub const fn is_quiescent(self) -> bool {
+        matches!(self, Self::Quiescent)
+    }
+
+    pub const fn is_retiring(self) -> bool {
+        matches!(self, Self::Retiring { .. })
     }
 }
 
@@ -108,6 +141,10 @@ pub enum ProductInput {
         stamp: AttemptStamp,
     },
     AttemptObserved(AdmittedAttemptEvent),
+    AttemptRetired(RetirementAck),
+    StagingRetired {
+        stamp: AttemptStamp,
+    },
     AttemptEnded {
         stamp: AttemptStamp,
     },
@@ -147,6 +184,9 @@ pub enum ProductEffect {
         stamp: AttemptStamp,
         intent: RetirementIntent,
     },
+    RetireStaging {
+        stamp: AttemptStamp,
+    },
     StartConfirmTimer {
         stamp: AttemptStamp,
     },
@@ -177,6 +217,7 @@ pub struct TransferRecord {
     pub offered_name: OfferedName,
     pub total: ByteCount,
     pub state: ProductState,
+    pub quiescence: Quiescence,
     pub generation: AttemptGen,
     pub phase: Phase,
     pub bytes: ByteCount,

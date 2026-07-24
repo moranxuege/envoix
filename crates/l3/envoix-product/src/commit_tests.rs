@@ -1,8 +1,9 @@
 use std::num::NonZeroUsize;
 
 use envoix_attempt_api::{
-    AttemptEvent, AttemptEventKind, AttemptPlan, AttemptSupervisor, EventAdmission, OpenResult,
-    ResumeIntent, RetirementIntent,
+    AttemptEvent, AttemptEventKind, AttemptPlan, AttemptSupervisor, CommitPointResult,
+    EventAdmission, OpenResult, ResumeIntent, RetirementAck, RetirementAckResult, RetirementIntent,
+    RetirementRequestResult, TerminalResolutionResult,
 };
 use envoix_outcomes::{OutcomeCode, Phase};
 use envoix_types::{ByteCount, Direction, OfferedName};
@@ -128,6 +129,56 @@ fn admitted_event(record: &crate::TransferRecord, kind: AttemptEventKind) -> Pro
         EventAdmission::Accepted(event) => ProductInput::AttemptObserved(event),
         other => panic!("test event was not admitted: {other:?}"),
     }
+}
+
+fn completed_ack(record: &crate::TransferRecord) -> RetirementAck {
+    let plan = AttemptPlan {
+        stamp: record.stamp(),
+        direction: record.direction,
+        transfer: record.identity.transfer,
+        artifact: record.identity.artifact,
+        resume: ResumeIntent::Fresh,
+    };
+    let mut supervisor = AttemptSupervisor::new();
+    assert_eq!(supervisor.open(plan), OpenResult::Opened);
+    assert_eq!(
+        supervisor.cross_commit_point(plan.stamp),
+        CommitPointResult::Crossed
+    );
+    assert_eq!(
+        supervisor.request_retirement(plan.stamp, RetirementIntent::Finalize),
+        RetirementRequestResult::Requested
+    );
+    let RetirementAckResult::Acknowledged(ack) = supervisor.acknowledge_retirement(plan.stamp)
+    else {
+        panic!("completed retirement must be acknowledgeable");
+    };
+    ack
+}
+
+fn cancelled_finalize_ack(record: &crate::TransferRecord) -> RetirementAck {
+    let plan = AttemptPlan {
+        stamp: record.stamp(),
+        direction: record.direction,
+        transfer: record.identity.transfer,
+        artifact: record.identity.artifact,
+        resume: ResumeIntent::Fresh,
+    };
+    let mut supervisor = AttemptSupervisor::new();
+    assert_eq!(supervisor.open(plan), OpenResult::Opened);
+    assert_eq!(
+        supervisor.resolve_terminal(plan.stamp, OutcomeCode::Cancelled),
+        TerminalResolutionResult::Recorded
+    );
+    assert_eq!(
+        supervisor.request_retirement(plan.stamp, RetirementIntent::Finalize),
+        RetirementRequestResult::Requested
+    );
+    let RetirementAckResult::Acknowledged(ack) = supervisor.acknowledge_retirement(plan.stamp)
+    else {
+        panic!("cancelled retirement must be acknowledgeable");
+    };
+    ack
 }
 
 #[test]
@@ -279,33 +330,29 @@ fn never_committed_mixed_batch_drops_destructive_storage_intent() {
         attempts(2),
     )
     .unwrap();
-    session.store_mut().fail = true;
     let stamp = session.record().stamp();
     let input = admitted_event(
         session.record(),
         AttemptEventKind::Terminal(OutcomeCode::Cancelled),
     );
+    let terminal = session.apply(input).unwrap();
+    assert_eq!(terminal.commit, CommitStatus::Committed { attempts: 1 });
+    assert_eq!(
+        terminal.released_immediately,
+        vec![ProductEffect::RetireAttempt {
+            stamp,
+            intent: RetirementIntent::Finalize,
+        }]
+    );
+    assert!(terminal.released_after_commit.is_empty());
 
-    let outcome = session.apply(input).unwrap();
+    let ack = cancelled_finalize_ack(session.record());
+    session.store_mut().fail = true;
+    let outcome = session.apply(ProductInput::AttemptRetired(ack)).unwrap();
 
     assert_eq!(session.record().state, ProductState::Failed);
     assert!(outcome.released_after_commit.is_empty());
-    assert!(
-        outcome
-            .released_immediately
-            .contains(&ProductEffect::RetireAttempt {
-                stamp,
-                intent: RetirementIntent::Finalize,
-            })
-    );
-    assert!(
-        outcome
-            .released_immediately
-            .contains(&ProductEffect::RetireAttempt {
-                stamp,
-                intent: RetirementIntent::Cancel,
-            })
-    );
+    assert!(outcome.released_immediately.is_empty());
     assert!(!outcome.released_immediately.iter().any(|effect| matches!(
         effect,
         ProductEffect::StorageIntent {
@@ -437,6 +484,12 @@ fn receipt_duty_releases_only_after_completed_record_commits() {
             intent: RetirementIntent::Finalize,
         }]
     );
+    assert!(outcome.released_after_commit.is_empty());
+
+    let ack = completed_ack(session.record());
+    let outcome = session.apply(ProductInput::AttemptRetired(ack)).unwrap();
+    assert_eq!(outcome.commit, CommitStatus::Committed { attempts: 1 });
+    assert!(outcome.released_immediately.is_empty());
     assert!(matches!(
         outcome.released_after_commit.as_slice(),
         [ProductEffect::CapabilityDuty {

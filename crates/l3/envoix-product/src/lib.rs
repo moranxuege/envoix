@@ -17,7 +17,7 @@ pub use commit::{
 pub use identity::{IdentityError, IdentitySource, ProductIdentity, SystemIdentitySource};
 pub use model::{
     CapabilityAction, Facts, NewTransfer, PauseOrigin, ProductCommand, ProductEffect, ProductInput,
-    ProductState, SourceDecision, StorageAction, TransferRecord,
+    ProductState, Quiescence, SourceDecision, StorageAction, TransferRecord, WorkerKind,
 };
 pub use record::{
     PRODUCT_RECORD_VERSION, RecordCodecError, RecordDecode, decode_record, encode_record,
@@ -26,5 +26,7 @@ pub use source::resolve_source;
 
 #[cfg(test)]
 mod commit_tests;
+#[cfg(test)]
+mod quiescence_tests;
 #[cfg(test)]
 mod tests;

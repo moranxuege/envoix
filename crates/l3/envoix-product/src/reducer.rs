@@ -1,5 +1,6 @@
 use envoix_attempt_api::{
-    AttemptEvent, AttemptEventKind, AttemptPlan, AttemptStamp, ResumeIntent, RetirementIntent,
+    AttemptEvent, AttemptEventKind, AttemptPlan, AttemptStamp, ResumeIntent, RetirementAck,
+    RetirementIntent,
 };
 use envoix_capabilities::{AdmittedDutyResult, Duty, DutyKind, DutyProvenance};
 use envoix_outcomes::{Outcome, OutcomeCode, Phase, Recovery, Retryability, SafeDisplay};
@@ -8,8 +9,8 @@ use envoix_types::{ByteCount, Direction};
 use crate::identity::next_generation;
 use crate::{
     CapabilityAction, Facts, IdentityError, IdentitySource, NewTransfer, PauseOrigin,
-    ProductCommand, ProductEffect, ProductIdentity, ProductInput, ProductState, SourceDecision,
-    StorageAction, TransferRecord,
+    ProductCommand, ProductEffect, ProductIdentity, ProductInput, ProductState, Quiescence,
+    SourceDecision, StorageAction, TransferRecord, WorkerKind,
 };
 
 impl TransferRecord {
@@ -18,9 +19,12 @@ impl TransferRecord {
         identities: &mut impl IdentitySource,
     ) -> Result<(Self, Vec<ProductEffect>), IdentityError> {
         let (identity, generation, receipt_request) = ProductIdentity::mint(identities)?;
-        let (state, phase, facts, source_recoverable, outcome) = match transfer.source {
+        let (state, quiescence, phase, facts, source_recoverable, outcome) = match transfer.source {
             SourceDecision::Ready => (
                 ProductState::Connecting,
+                Quiescence::Running {
+                    worker: WorkerKind::Attempt,
+                },
                 Phase::Pairing,
                 Facts {
                     source_ready: true,
@@ -31,6 +35,9 @@ impl TransferRecord {
             ),
             SourceDecision::Stage { recoverable } => (
                 ProductState::Preparing,
+                Quiescence::Running {
+                    worker: WorkerKind::Staging,
+                },
                 Phase::Preparing,
                 Facts::default(),
                 recoverable,
@@ -38,6 +45,7 @@ impl TransferRecord {
             ),
             SourceDecision::NeedsRepick => (
                 ProductState::Failed,
+                Quiescence::Quiescent,
                 Phase::Preparing,
                 Facts::default(),
                 false,
@@ -50,6 +58,7 @@ impl TransferRecord {
             offered_name: transfer.offered_name,
             total: transfer.total,
             state,
+            quiescence,
             generation,
             phase,
             bytes: ByteCount::new(0),
@@ -75,7 +84,7 @@ impl TransferRecord {
     }
 
     pub fn allowed_commands(&self) -> Vec<ProductCommand> {
-        if self.facts.remove_requested {
+        if self.facts.remove_requested || matches!(self.quiescence, Quiescence::Retiring { .. }) {
             return Vec::new();
         }
         let mut commands = match self.state {
@@ -115,7 +124,12 @@ impl TransferRecord {
     }
 
     pub fn reduce(&mut self, input: ProductInput) -> Result<Vec<ProductEffect>, IdentityError> {
-        if self.facts.remove_requested {
+        if self.facts.remove_requested
+            && !matches!(
+                &input,
+                ProductInput::AttemptRetired(_) | ProductInput::StagingRetired { .. }
+            )
+        {
             return Ok(Vec::new());
         }
         let effects = match input {
@@ -130,6 +144,8 @@ impl TransferRecord {
             ProductInput::VerificationStarted { stamp } => self.on_verification_started(stamp),
             ProductInput::VerificationFinished { stamp } => self.on_verification_finished(stamp),
             ProductInput::AttemptObserved(event) => self.on_attempt_event(event.event()),
+            ProductInput::AttemptRetired(ack) => self.on_attempt_retired(ack),
+            ProductInput::StagingRetired { stamp } => self.on_staging_retired(stamp),
             ProductInput::AttemptEnded { stamp } => self.on_attempt_ended(stamp),
             ProductInput::ConfirmTimeout { stamp } => self.on_confirm_timeout(stamp),
             ProductInput::ReceiptVerified { stamp } => self.on_receipt_verified(stamp),
@@ -151,13 +167,22 @@ impl TransferRecord {
     }
 
     fn on_pause(&mut self) -> Vec<ProductEffect> {
-        if !self.state.is_active() {
+        if !self.state.is_active()
+            || self.quiescence
+                != (Quiescence::Running {
+                    worker: WorkerKind::Attempt,
+                })
+        {
             return Vec::new();
         }
         let stamp = self.stamp();
         let mut effects = self.exit_effects();
         self.state = ProductState::Paused(PauseOrigin::Local);
         self.outcome = Some(outcome_for(OutcomeCode::Paused, self.phase));
+        self.quiescence = Quiescence::Retiring {
+            worker: WorkerKind::Attempt,
+            intent: RetirementIntent::Pause,
+        };
         effects.push(ProductEffect::RetireAttempt {
             stamp,
             intent: RetirementIntent::Pause,
@@ -167,8 +192,10 @@ impl TransferRecord {
 
     fn on_cancel(&mut self) -> Vec<ProductEffect> {
         let stamp = self.stamp();
-        let effects = match self.state {
-            state if state.is_active() => {
+        let mut effects = match self.quiescence {
+            Quiescence::Running {
+                worker: WorkerKind::Attempt,
+            } if self.state.is_active() => {
                 let mut effects = self.exit_effects();
                 effects.push(ProductEffect::RetireAttempt {
                     stamp,
@@ -176,19 +203,45 @@ impl TransferRecord {
                 });
                 effects
             }
-            ProductState::Preparing | ProductState::Paused(_) | ProductState::Unconfirmed => {
+            Quiescence::Running {
+                worker: WorkerKind::Staging,
+            } if self.state == ProductState::Preparing => {
+                vec![ProductEffect::RetireStaging { stamp }]
+            }
+            Quiescence::Quiescent
+                if matches!(
+                    self.state,
+                    ProductState::Paused(_) | ProductState::Unconfirmed
+                ) =>
+            {
                 self.exit_effects()
             }
-            _ => return Vec::new(),
+            Quiescence::Running { .. } | Quiescence::Retiring { .. } | Quiescence::Quiescent => {
+                return Vec::new();
+            }
         };
         self.state = ProductState::Cancelled;
-        self.bytes = ByteCount::new(0);
-        self.bytes_resumed = ByteCount::new(0);
         self.outcome = Some(outcome_for(OutcomeCode::Cancelled, self.phase));
+        match self.quiescence {
+            Quiescence::Running { worker } => {
+                self.quiescence = Quiescence::Retiring {
+                    worker,
+                    intent: RetirementIntent::Cancel,
+                };
+            }
+            Quiescence::Quiescent => {
+                self.clear_progress();
+                effects.push(self.discard_partial());
+            }
+            Quiescence::Retiring { .. } => unreachable!("retiring cancellation returned above"),
+        }
         effects
     }
 
     fn on_resume(&mut self) -> Result<Vec<ProductEffect>, IdentityError> {
+        if !self.quiescence.is_quiescent() {
+            return Ok(Vec::new());
+        }
         let resume = match self.state {
             ProductState::Paused(_) | ProductState::Unconfirmed => true,
             ProductState::Failed
@@ -207,15 +260,21 @@ impl TransferRecord {
         self.outcome = None;
         if self.facts.source_ready {
             self.state = ProductState::Connecting;
+            self.quiescence = Quiescence::Running {
+                worker: WorkerKind::Attempt,
+            };
             self.phase = Phase::Pairing;
             effects.push(self.start_attempt(resume));
         } else if self.source_recoverable {
             self.state = ProductState::Preparing;
+            self.quiescence = Quiescence::Running {
+                worker: WorkerKind::Staging,
+            };
             self.phase = Phase::Preparing;
-            self.bytes = ByteCount::new(0);
-            self.bytes_resumed = ByteCount::new(0);
+            self.clear_progress();
         } else {
             self.state = ProductState::Failed;
+            self.quiescence = Quiescence::Quiescent;
             self.phase = Phase::Preparing;
             self.outcome = Some(source_failure(false, Phase::Preparing));
         }
@@ -223,23 +282,47 @@ impl TransferRecord {
     }
 
     fn on_remove(&mut self) -> Vec<ProductEffect> {
+        if matches!(self.quiescence, Quiescence::Retiring { .. }) {
+            return Vec::new();
+        }
         let mut effects = self.exit_effects();
-        if self.state.is_active() {
-            effects.push(ProductEffect::RetireAttempt {
-                stamp: self.stamp(),
-                intent: RetirementIntent::Cancel,
-            });
+        match self.quiescence {
+            Quiescence::Running {
+                worker: WorkerKind::Attempt,
+            } => {
+                self.quiescence = Quiescence::Retiring {
+                    worker: WorkerKind::Attempt,
+                    intent: RetirementIntent::Cancel,
+                };
+                effects.push(ProductEffect::RetireAttempt {
+                    stamp: self.stamp(),
+                    intent: RetirementIntent::Cancel,
+                });
+            }
+            Quiescence::Running {
+                worker: WorkerKind::Staging,
+            } => {
+                self.quiescence = Quiescence::Retiring {
+                    worker: WorkerKind::Staging,
+                    intent: RetirementIntent::Cancel,
+                };
+                effects.push(ProductEffect::RetireStaging {
+                    stamp: self.stamp(),
+                });
+            }
+            Quiescence::Quiescent => {}
+            Quiescence::Retiring { .. } => unreachable!("retiring removal returned above"),
         }
         self.facts.remove_requested = true;
-        effects.push(ProductEffect::StorageIntent {
-            identity: self.identity,
-            action: StorageAction::TombstoneCard,
-        });
+        if self.quiescence.is_quiescent() {
+            effects.push(self.tombstone_card());
+        }
         effects
     }
 
     fn on_repick_source(&mut self) -> Result<Vec<ProductEffect>, IdentityError> {
         if self.state != ProductState::Failed
+            || !self.quiescence.is_quiescent()
             || self.outcome.as_ref().and_then(|outcome| outcome.recovery)
                 != Some(Recovery::RePickSource)
         {
@@ -247,9 +330,11 @@ impl TransferRecord {
         }
         self.generation = next_generation(self.generation)?;
         self.state = ProductState::Preparing;
+        self.quiescence = Quiescence::Running {
+            worker: WorkerKind::Staging,
+        };
         self.phase = Phase::Preparing;
-        self.bytes = ByteCount::new(0);
-        self.bytes_resumed = ByteCount::new(0);
+        self.clear_progress();
         self.outcome = None;
         self.source_recoverable = true;
         Ok(Vec::new())
@@ -258,29 +343,44 @@ impl TransferRecord {
     fn on_restore(&mut self) -> Vec<ProductEffect> {
         match self.state {
             ProductState::Confirming if self.facts.complete_sent => {
+                let stamp = self.stamp();
                 self.state = ProductState::Unconfirmed;
                 self.outcome = Some(outcome_for(OutcomeCode::PeerLost, Phase::Confirming));
-                vec![ProductEffect::StartMailboxPoll {
-                    stamp: self.stamp(),
-                }]
+                self.request_attempt_retirement(RetirementIntent::Cancel);
+                vec![
+                    ProductEffect::RetireAttempt {
+                        stamp,
+                        intent: RetirementIntent::Cancel,
+                    },
+                    ProductEffect::StartMailboxPoll { stamp },
+                ]
             }
             state if state.is_active() => {
+                let stamp = self.stamp();
                 self.state = ProductState::Paused(PauseOrigin::Lost);
                 self.phase = Phase::Restoring;
                 self.outcome = Some(outcome_for(OutcomeCode::PeerLost, Phase::Restoring));
-                Vec::new()
+                self.request_attempt_retirement(RetirementIntent::Cancel);
+                vec![ProductEffect::RetireAttempt {
+                    stamp,
+                    intent: RetirementIntent::Cancel,
+                }]
             }
             ProductState::Preparing if !self.facts.source_ready && !self.source_recoverable => {
+                let stamp = self.stamp();
                 self.state = ProductState::Failed;
                 self.phase = Phase::Restoring;
                 self.outcome = Some(source_failure(false, Phase::Restoring));
-                Vec::new()
+                self.request_staging_retirement(RetirementIntent::Cancel);
+                vec![ProductEffect::RetireStaging { stamp }]
             }
             ProductState::Unconfirmed => vec![ProductEffect::StartMailboxPoll {
                 stamp: self.stamp(),
             }],
             ProductState::Completed
-                if self.direction == Direction::Receive && !self.facts.proof_delivered =>
+                if self.quiescence.is_quiescent()
+                    && self.direction == Direction::Receive
+                    && !self.facts.proof_delivered =>
             {
                 vec![self.post_receipt()]
             }
@@ -295,6 +395,10 @@ impl TransferRecord {
     ) -> Vec<ProductEffect> {
         if !self.is_current(stamp)
             || self.state != ProductState::Preparing
+            || self.quiescence
+                != (Quiescence::Running {
+                    worker: WorkerKind::Staging,
+                })
             || (self.total.get() != 0 && transferred.get() > self.total.get())
         {
             return Vec::new();
@@ -304,26 +408,36 @@ impl TransferRecord {
     }
 
     fn on_stage_complete(&mut self, stamp: AttemptStamp, total: ByteCount) -> Vec<ProductEffect> {
-        if !self.is_current(stamp) || self.state != ProductState::Preparing {
+        if !self.is_current(stamp)
+            || self.state != ProductState::Preparing
+            || self.quiescence
+                != (Quiescence::Running {
+                    worker: WorkerKind::Staging,
+                })
+        {
             return Vec::new();
         }
         self.facts.source_ready = true;
         self.total = total;
-        self.state = ProductState::Connecting;
-        self.phase = Phase::Pairing;
-        self.bytes = ByteCount::new(0);
-        self.bytes_resumed = ByteCount::new(0);
         self.outcome = None;
-        vec![self.start_attempt(false)]
+        self.request_staging_retirement(RetirementIntent::Finalize);
+        vec![ProductEffect::RetireStaging { stamp }]
     }
 
     fn on_stage_failed(&mut self, stamp: AttemptStamp) -> Vec<ProductEffect> {
-        if !self.is_current(stamp) || self.state != ProductState::Preparing {
+        if !self.is_current(stamp)
+            || self.state != ProductState::Preparing
+            || self.quiescence
+                != (Quiescence::Running {
+                    worker: WorkerKind::Staging,
+                })
+        {
             return Vec::new();
         }
         self.state = ProductState::Failed;
         self.outcome = Some(source_failure(self.source_recoverable, Phase::Preparing));
-        Vec::new()
+        self.request_staging_retirement(RetirementIntent::Finalize);
+        vec![ProductEffect::RetireStaging { stamp }]
     }
 
     fn on_advertised(&mut self, stamp: AttemptStamp) -> Vec<ProductEffect> {
@@ -352,7 +466,12 @@ impl TransferRecord {
     }
 
     fn on_attempt_event(&mut self, event: AttemptEvent) -> Vec<ProductEffect> {
-        if !self.is_current(event.stamp) {
+        if !self.is_current(event.stamp)
+            || self.quiescence
+                != (Quiescence::Running {
+                    worker: WorkerKind::Attempt,
+                })
+        {
             return Vec::new();
         }
         match event.kind {
@@ -419,18 +538,39 @@ impl TransferRecord {
     }
 
     fn on_attempt_ended(&mut self, stamp: AttemptStamp) -> Vec<ProductEffect> {
-        if !self.is_current(stamp) || !self.state.is_active() {
+        if !self.is_current(stamp)
+            || !self.state.is_active()
+            || self.quiescence
+                != (Quiescence::Running {
+                    worker: WorkerKind::Attempt,
+                })
+        {
             return Vec::new();
         }
         self.classify_terminal(OutcomeCode::Internal)
     }
 
     fn on_confirm_timeout(&mut self, stamp: AttemptStamp) -> Vec<ProductEffect> {
-        if !self.is_current(stamp) || self.state != ProductState::Confirming {
+        if !self.is_current(stamp)
+            || self.state != ProductState::Confirming
+            || self.quiescence
+                != (Quiescence::Running {
+                    worker: WorkerKind::Attempt,
+                })
+        {
             return Vec::new();
         }
         self.state = ProductState::Unconfirmed;
         self.outcome = Some(outcome_for(OutcomeCode::Timeout, Phase::Confirming));
+        // The in-band confirmation is ABANDONED; the mailbox poll is now the sole
+        // proof channel. The attempt is asked to close (RetireAttempt), but the
+        // card goes Quiescent immediately so that ack is a clean-close, NOT a
+        // state authority: a Cancel-retirement ack would otherwise linearize to
+        // `Cancelled` and DISCARD a send that was in fact delivered but whose
+        // receipt is still pending in the mailbox. The send has already fully
+        // transmitted (complete_sent), so there is no partial to protect and only
+        // a read-lease to release — proactive quiescence is safe here.
+        self.quiescence = Quiescence::Quiescent;
         vec![
             ProductEffect::RetireAttempt {
                 stamp,
@@ -453,6 +593,7 @@ impl TransferRecord {
         let mut effects = self.exit_effects();
         self.complete();
         if was_confirming {
+            self.request_attempt_retirement(RetirementIntent::Cancel);
             effects.push(ProductEffect::RetireAttempt {
                 stamp,
                 intent: RetirementIntent::Cancel,
@@ -481,18 +622,40 @@ impl TransferRecord {
     }
 
     fn on_storage_failed(&mut self) -> Vec<ProductEffect> {
-        if matches!(
-            self.state,
-            ProductState::Completed | ProductState::Failed | ProductState::Cancelled
-        ) {
+        // A card that is DURABLY at rest (Quiescent + terminal) has a settled
+        // outcome and is spared. A terminal-OPTIMISTIC card that is still
+        // Retiring was never durably confirmed: if the store then fails it must
+        // escalate to a visible failure — this is also the path by which P2
+        // surfaces a failed destructive write (it reduces StorageFailed on the
+        // rolled-back, still-Retiring baseline), so it must NOT be spared here.
+        if self.quiescence.is_quiescent()
+            && matches!(
+                self.state,
+                ProductState::Completed | ProductState::Failed | ProductState::Cancelled
+            )
+        {
             return Vec::new();
         }
         let mut effects = self.exit_effects();
-        if self.state.is_active() {
-            effects.push(ProductEffect::RetireAttempt {
-                stamp: self.stamp(),
-                intent: RetirementIntent::Cancel,
-            });
+        match self.quiescence {
+            Quiescence::Running {
+                worker: WorkerKind::Attempt,
+            } => {
+                self.request_attempt_retirement(RetirementIntent::Cancel);
+                effects.push(ProductEffect::RetireAttempt {
+                    stamp: self.stamp(),
+                    intent: RetirementIntent::Cancel,
+                });
+            }
+            Quiescence::Running {
+                worker: WorkerKind::Staging,
+            } => {
+                self.request_staging_retirement(RetirementIntent::Cancel);
+                effects.push(ProductEffect::RetireStaging {
+                    stamp: self.stamp(),
+                });
+            }
+            Quiescence::Retiring { .. } | Quiescence::Quiescent => {}
         }
         self.state = ProductState::Failed;
         self.outcome = Some(outcome_for(OutcomeCode::StorageFault, self.phase));
@@ -506,9 +669,6 @@ impl TransferRecord {
         match code {
             OutcomeCode::Completed => {
                 self.complete();
-                if self.direction == Direction::Receive {
-                    effects.push(self.post_receipt());
-                }
             }
             // Local pause/cancel commands move the record before their executor
             // echo arrives. While still active, these terminal codes therefore
@@ -519,13 +679,7 @@ impl TransferRecord {
             }
             OutcomeCode::Cancelled => {
                 self.state = ProductState::Cancelled;
-                self.bytes = ByteCount::new(0);
-                self.bytes_resumed = ByteCount::new(0);
                 self.outcome = Some(outcome_for(code, self.phase));
-                effects.push(ProductEffect::StorageIntent {
-                    identity: self.identity,
-                    action: StorageAction::DiscardPartial,
-                });
             }
             OutcomeCode::PeerLost if was_confirming => {
                 self.state = ProductState::Unconfirmed;
@@ -543,6 +697,7 @@ impl TransferRecord {
                 self.outcome = Some(outcome_for(code, self.phase));
             }
         }
+        self.request_attempt_retirement(RetirementIntent::Finalize);
         // C7 requires an explicit retirement request even after a terminal
         // observation; only its later acknowledgement proves quiescence.
         effects.push(ProductEffect::RetireAttempt {
@@ -552,10 +707,169 @@ impl TransferRecord {
         effects
     }
 
+    fn on_attempt_retired(&mut self, ack: RetirementAck) -> Vec<ProductEffect> {
+        let stamp = ack.stamp();
+        let outcome = ack.outcome();
+        let Quiescence::Retiring {
+            worker: WorkerKind::Attempt,
+            intent,
+        } = self.quiescence
+        else {
+            return Vec::new();
+        };
+        if !self.is_current(stamp) {
+            return Vec::new();
+        }
+
+        self.quiescence = Quiescence::Quiescent;
+        if self.facts.remove_requested {
+            return vec![self.tombstone_card()];
+        }
+        // A storage fault that escalated AFTER this retirement was requested is
+        // the authoritative terminal: the record could not be persisted. The ack
+        // proves the attempt released its lease (so the card is now safely
+        // Quiescent and resumable), but it must NOT re-adopt the network outcome
+        // and mask the storage failure — otherwise a Cancelled/Completed ack
+        // would silently overwrite the visible StorageFault.
+        if self.state == ProductState::Failed
+            && self.outcome.as_ref().map(|outcome| outcome.code) == Some(OutcomeCode::StorageFault)
+        {
+            return Vec::new();
+        }
+        self.adopt_retired_outcome(outcome, intent)
+    }
+
+    fn on_staging_retired(&mut self, stamp: AttemptStamp) -> Vec<ProductEffect> {
+        let Quiescence::Retiring {
+            worker: WorkerKind::Staging,
+            intent,
+        } = self.quiescence
+        else {
+            return Vec::new();
+        };
+        if !self.is_current(stamp) {
+            return Vec::new();
+        }
+
+        self.quiescence = Quiescence::Quiescent;
+        if self.facts.remove_requested {
+            return vec![self.tombstone_card()];
+        }
+
+        match intent {
+            RetirementIntent::Cancel if self.state == ProductState::Cancelled => {
+                self.clear_progress();
+                vec![self.discard_partial()]
+            }
+            RetirementIntent::Finalize
+                if self.state == ProductState::Preparing && self.facts.source_ready =>
+            {
+                self.clear_progress();
+                self.state = ProductState::Connecting;
+                self.phase = Phase::Pairing;
+                self.quiescence = Quiescence::Running {
+                    worker: WorkerKind::Attempt,
+                };
+                vec![self.start_attempt(false)]
+            }
+            RetirementIntent::Pause | RetirementIntent::Cancel | RetirementIntent::Finalize => {
+                Vec::new()
+            }
+        }
+    }
+
+    fn adopt_retired_outcome(
+        &mut self,
+        code: OutcomeCode,
+        intent: RetirementIntent,
+    ) -> Vec<ProductEffect> {
+        match code {
+            OutcomeCode::Completed => {
+                self.complete();
+                if self.direction == Direction::Receive {
+                    vec![self.post_receipt()]
+                } else {
+                    Vec::new()
+                }
+            }
+            OutcomeCode::Cancelled => {
+                self.state = ProductState::Cancelled;
+                self.clear_progress();
+                self.outcome = Some(outcome_for(code, self.phase));
+                vec![self.discard_partial()]
+            }
+            OutcomeCode::Paused => {
+                let origin = if intent == RetirementIntent::Pause {
+                    PauseOrigin::Local
+                } else {
+                    PauseOrigin::Peer
+                };
+                self.state = ProductState::Paused(origin);
+                self.outcome = Some(outcome_for(code, self.phase));
+                Vec::new()
+            }
+            OutcomeCode::PeerLost
+                if self.facts.complete_sent && self.phase == Phase::Confirming =>
+            {
+                let already_polling = self.state == ProductState::Unconfirmed;
+                self.state = ProductState::Unconfirmed;
+                self.outcome = Some(outcome_for(code, self.phase));
+                if already_polling {
+                    Vec::new()
+                } else {
+                    vec![ProductEffect::StartMailboxPoll {
+                        stamp: self.stamp(),
+                    }]
+                }
+            }
+            OutcomeCode::PeerLost if self.bytes.get() > 0 => {
+                self.state = ProductState::Paused(PauseOrigin::Lost);
+                self.outcome = Some(outcome_for(code, self.phase));
+                Vec::new()
+            }
+            _ => {
+                self.state = ProductState::Failed;
+                self.outcome = Some(outcome_for(code, self.phase));
+                Vec::new()
+            }
+        }
+    }
+
     fn complete(&mut self) {
         self.state = ProductState::Completed;
         self.bytes = self.total;
         self.outcome = Some(outcome_for(OutcomeCode::Completed, self.phase));
+    }
+
+    fn clear_progress(&mut self) {
+        self.bytes = ByteCount::new(0);
+        self.bytes_resumed = ByteCount::new(0);
+    }
+
+    fn request_attempt_retirement(&mut self, intent: RetirementIntent) {
+        if self.quiescence
+            == (Quiescence::Running {
+                worker: WorkerKind::Attempt,
+            })
+        {
+            self.quiescence = Quiescence::Retiring {
+                worker: WorkerKind::Attempt,
+                intent,
+            };
+        }
+    }
+
+    fn request_staging_retirement(&mut self, intent: RetirementIntent) {
+        if self.quiescence
+            == (Quiescence::Running {
+                worker: WorkerKind::Staging,
+            })
+        {
+            self.quiescence = Quiescence::Retiring {
+                worker: WorkerKind::Staging,
+                intent,
+            };
+        }
     }
 
     fn start_attempt(&self, resume: bool) -> ProductEffect {
@@ -579,6 +893,20 @@ impl TransferRecord {
         ProductEffect::CapabilityDuty {
             duty: self.receipt_duty(),
             action: CapabilityAction::PostReceipt,
+        }
+    }
+
+    fn discard_partial(&self) -> ProductEffect {
+        ProductEffect::StorageIntent {
+            identity: self.identity,
+            action: StorageAction::DiscardPartial,
+        }
+    }
+
+    fn tombstone_card(&self) -> ProductEffect {
+        ProductEffect::StorageIntent {
+            identity: self.identity,
+            action: StorageAction::TombstoneCard,
         }
     }
 
