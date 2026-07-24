@@ -237,6 +237,20 @@ collision_scope = "server-http-route"
 extract = "rust-const:EVIDENCE_HTTP_ROUTE"
 
 [[identifier]]
+key = "evidence.timeline_schema_id"
+owner = "crate:envoix-evidence"
+owner_path = "crates/l4/envoix-evidence/src/identifiers.rs"
+collision_scope = "evidence-timeline-schema"
+extract = "rust-const:EVIDENCE_TIMELINE_SCHEMA_ID"
+
+[[identifier]]
+key = "evidence.rust_abi_id"
+owner = "crate:envoix-evidence"
+owner_path = "crates/l4/envoix-evidence/src/identifiers.rs"
+collision_scope = "evidence-native-abi"
+extract = "rust-const:EVIDENCE_RUST_ABI_ID"
+
+[[identifier]]
 key = "evidence.server_table_name"
 owner = "manifest:server-storage"
 owner_path = "apps/envoix-server/storage-identifiers.toml"

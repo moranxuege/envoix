@@ -7,10 +7,12 @@
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use envoix_attempt_api::{AttemptEventKind, AttemptPlan};
+use envoix_evidence::EvidenceRecord;
 use envoix_operation_store::OperationStore;
 use envoix_outcomes::{OutcomeCode, Phase};
 use envoix_product::{
@@ -19,9 +21,9 @@ use envoix_product::{
     decode_record,
 };
 use envoix_runtime::{
-    AcquireError, AttemptExecution, AttemptExecutor, CardUpdateKind, ExecutorSignal,
-    LosslessUpdateKind, Runtime, RuntimeConfig, SessionProvider, ShutdownReport, SubscribeError,
-    TryRecvError, stop_channel,
+    AcquireError, AttemptExecution, AttemptExecutor, CardUpdateKind, EvidenceSink,
+    EvidenceSinkError, ExecutorSignal, LosslessUpdateKind, Runtime, RuntimeConfig, SessionProvider,
+    ShutdownReport, SubscribeError, TryRecvError, stop_channel,
 };
 use envoix_storage_api::Durability;
 use envoix_storage_local::LocalStorage;
@@ -187,6 +189,58 @@ impl AttemptExecutor for ScriptedExecutor {
     }
 }
 
+// ---- hostile evidence sink: slow, full/erroring, panicking, then closed ----
+
+struct HostileEvidenceState {
+    calls: AtomicUsize,
+    released: Mutex<bool>,
+    release: Condvar,
+}
+
+#[derive(Clone)]
+struct HostileEvidence {
+    state: Arc<HostileEvidenceState>,
+}
+
+impl HostileEvidence {
+    fn new() -> Self {
+        Self {
+            state: Arc::new(HostileEvidenceState {
+                calls: AtomicUsize::new(0),
+                released: Mutex::new(false),
+                release: Condvar::new(),
+            }),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.state.calls.load(Ordering::SeqCst)
+    }
+
+    fn release(&self) {
+        *self.state.released.lock().unwrap() = true;
+        self.state.release.notify_all();
+    }
+}
+
+impl EvidenceSink for HostileEvidence {
+    fn record(&self, _record: EvidenceRecord) -> Result<(), EvidenceSinkError> {
+        match self.state.calls.fetch_add(1, Ordering::SeqCst) {
+            0 => {
+                let released = self.state.released.lock().unwrap();
+                let _guard = self
+                    .state
+                    .release
+                    .wait_while(released, |released| !*released)
+                    .unwrap();
+                Err(EvidenceSinkError::Full)
+            }
+            1 => panic!("hostile evidence sink panic"),
+            _ => Err(EvidenceSinkError::Closed),
+        }
+    }
+}
+
 // ---- helpers ----
 
 struct FixedIdentity {
@@ -301,6 +355,73 @@ async fn wait_for_state<P: SessionProvider, E: AttemptExecutor>(
     })
     .await
     .expect("the expected state should be projected");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evidence_failure_is_non_authoritative() {
+    let directory = TempDir::new().unwrap();
+    let root = directory.path();
+    let executor = ScriptedExecutor::new(Script::RunUntilStop);
+    let evidence = HostileEvidence::new();
+    let runtime = Runtime::start_with_evidence(
+        config(8),
+        OpStoreProvider {
+            root: root.to_path_buf(),
+        },
+        executor.clone(),
+        evidence.clone(),
+    );
+
+    let (session, outcome) = create_session(root, Direction::Receive, 0x20);
+    let card = session.record().identity.card;
+    let transfer = session.record().identity.transfer;
+    runtime.admit(session, outcome).unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while evidence.calls() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the deliberately slow sink should receive the first event");
+
+    // The evidence worker is blocked above. More than its bounded lane capacity
+    // is emitted, proving saturation/drops cannot backpressure the card actor.
+    for transferred in 1..=96 {
+        executor
+            .signal(
+                transfer,
+                ExecutorSignal::Event(AttemptEventKind::Progress {
+                    transferred: ByteCount::new(transferred),
+                }),
+            )
+            .await;
+    }
+    executor
+        .signal(transfer, ExecutorSignal::CommitCrossed)
+        .await;
+    executor
+        .signal(
+            transfer,
+            ExecutorSignal::Event(AttemptEventKind::Terminal(OutcomeCode::Completed)),
+        )
+        .await;
+
+    settle(&runtime, card).await;
+    assert_eq!(durable_state(root, card).state, ProductState::Completed);
+
+    // Once released, the sink returns a typed full error, panics, and then
+    // reports itself closed. All are contained after durable completion too.
+    evidence.release();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while evidence.calls() < 3 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("queued evidence should exercise errors and panic containment");
+    assert_eq!(durable_state(root, card).state, ProductState::Completed);
+    runtime.shutdown().await;
 }
 
 // ---- the required lifecycle proof ----

@@ -372,6 +372,12 @@ fn extract_compiled_owner(entry: &CatalogIdentifier) -> CheckResult<Extraction> 
         ("crate:envoix-evidence", "rust-const:EVIDENCE_HTTP_ROUTE") => {
             one(evidence::EVIDENCE_HTTP_ROUTE)
         }
+        ("crate:envoix-evidence", "rust-const:EVIDENCE_TIMELINE_SCHEMA_ID") => {
+            one(evidence::EVIDENCE_TIMELINE_SCHEMA_ID)
+        }
+        ("crate:envoix-evidence", "rust-const:EVIDENCE_RUST_ABI_ID") => {
+            one(evidence::EVIDENCE_RUST_ABI_ID)
+        }
         ("crate:envoix-product", "rust-const:PRODUCT_RECORD_SCHEMA_ID") => {
             one(product::PRODUCT_RECORD_SCHEMA_ID)
         }

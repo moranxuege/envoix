@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use envoix_attempt_api::AttemptStamp;
 use envoix_capabilities::Duty;
+use envoix_evidence::{EvidenceProgress, EvidenceRecord, EvidenceSink, EvidenceValue};
 use envoix_product::{
     ApplyOutcome, CapabilityAction, CommittedSession, ProductCommand, ProductInput, ProductState,
     TransferRecord,
@@ -16,6 +18,7 @@ use tokio::time::{Instant, timeout_at};
 use crate::card::{CardActor, CardMessage};
 use crate::config::RuntimeConfig;
 use crate::error::{AcquireError, CommandError};
+use crate::evidence::EvidencePublisher;
 use crate::port::{AttemptExecutor, SessionProvider};
 use crate::subscription::{
     CardSubscription, RecordUpdateKind, SubscribeError, SubscriptionEpoch, SubscriptionPublisher,
@@ -78,6 +81,7 @@ pub(crate) struct Shared {
     pub(crate) handle: Handle,
     inner: Mutex<Inner>,
     admission: Arc<Semaphore>,
+    evidence: EvidencePublisher,
 }
 
 impl Shared {
@@ -99,10 +103,25 @@ impl Shared {
     /// no longer exists, so its cache must not leak for the process lifetime.
     pub(crate) fn evict_projection(&self, card: RecordId) {
         self.lock().projections.remove(&card);
+        self.evidence.evict_card(card);
     }
 
     pub(crate) fn observe_record(&self, kind: RecordUpdateKind, record: TransferRecord) {
         let card = record.identity.card;
+        let session = AttemptStamp {
+            card,
+            generation: record.generation,
+        };
+        let evidence = match kind {
+            RecordUpdateKind::Progress => {
+                EvidenceValue::progress(EvidenceProgress::new(record.bytes, record.total))
+            }
+            RecordUpdateKind::State => EvidenceValue::phase(record.phase),
+            RecordUpdateKind::Terminal => record.outcome.as_ref().map_or_else(
+                || EvidenceValue::phase(record.phase),
+                EvidenceValue::outcome,
+            ),
+        };
         let subscribers = {
             let mut inner = self.lock();
             let projection = inner
@@ -127,6 +146,8 @@ impl Shared {
         for subscriber in subscribers {
             subscriber.publish_record(kind, record.clone());
         }
+        self.evidence
+            .publish(EvidenceRecord::new(session, evidence));
     }
 
     pub(crate) fn observe_duty(&self, card: RecordId, duty: Duty, action: CapabilityAction) {
@@ -235,6 +256,29 @@ impl<P: SessionProvider, E: AttemptExecutor> Runtime<P, E> {
     /// Builds the runtime. Must be called within a Tokio runtime; the host owns
     /// the reactor and RT1 holds its handle.
     pub fn start(config: RuntimeConfig, provider: P, executor: E) -> Self {
+        Self::start_inner(config, provider, executor, EvidencePublisher::default())
+    }
+
+    /// Builds the runtime with a typed evidence sink.
+    ///
+    /// The sink runs behind a fixed-capacity, non-blocking lane. Its latency,
+    /// failures, panics, disconnection, or saturation cannot affect admission,
+    /// reduction, durable commits, commands, or shutdown.
+    pub fn start_with_evidence<S: EvidenceSink>(
+        config: RuntimeConfig,
+        provider: P,
+        executor: E,
+        sink: S,
+    ) -> Self {
+        Self::start_inner(config, provider, executor, EvidencePublisher::new(sink))
+    }
+
+    fn start_inner(
+        config: RuntimeConfig,
+        provider: P,
+        executor: E,
+        evidence: EvidencePublisher,
+    ) -> Self {
         let admission = Arc::new(Semaphore::new(config.max_live_cards.get()));
         Self {
             shared: Arc::new(Shared {
@@ -247,6 +291,7 @@ impl<P: SessionProvider, E: AttemptExecutor> Runtime<P, E> {
                     projections: HashMap::new(),
                 }),
                 admission,
+                evidence,
             }),
             provider: Arc::new(provider),
             executor: Arc::new(executor),

@@ -934,6 +934,15 @@ dependencies = [
 [[package]]
 name = "envoix-evidence"
 version = "0.2.0"
+dependencies = [
+ "envoix-attempt-api",
+ "envoix-outcomes",
+ "envoix-protocol",
+ "envoix-storage-api",
+ "envoix-types",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "envoix-invite"
@@ -1051,6 +1060,7 @@ version = "0.2.0"
 dependencies = [
  "envoix-attempt-api",
  "envoix-capabilities",
+ "envoix-evidence",
  "envoix-operation-store",
  "envoix-outcomes",
  "envoix-product",
