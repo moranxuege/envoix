@@ -5,6 +5,7 @@ let envoixWifiAwareTransferService = "_envoix-transfer._tcp"
 #if os(iOS) && canImport(WiFiAware)
 import EnvoixCore
 import Network
+import OSLog
 import WiFiAware
 
 @available(iOS 26.0, *)
@@ -14,6 +15,18 @@ enum AppleWifiAwareTransportError: Error {
     case serviceNotDeclared
     case listenerFinishedWithoutResult
     case invalidReadBound
+    case noWifiAwarePath
+}
+
+/// Apple requires matching performance modes on both endpoints. Keep the
+/// system-recommended bulk mode explicit and retain the default best-effort
+/// service class for file transfer.
+@available(iOS 26.0, *)
+func envoixWifiAwareTCPParameters() -> NWParametersBuilder<TCP> {
+    .parameters {
+        TCP()
+    }
+    .wifiAware { $0.performanceMode = .bulk }
 }
 
 /// Keeps the Wi-Fi Aware publisher or subscriber scope alive for the entire
@@ -23,6 +36,11 @@ enum AppleWifiAwareTransportSession {
     private enum PublisherFinished: Error {
         case completed
     }
+
+    private static let logger = Logger(
+        subsystem: "com.envoix.app.ios",
+        category: "wifi-aware-transport"
+    )
 
     static func pairedDevice(sourceScopedID: String) async throws -> WAPairedDevice {
         guard sourceScopedID.count <= NearbyPairedDevice.maximumSourceScopedIDLength,
@@ -93,14 +111,30 @@ enum AppleWifiAwareTransportSession {
         }
         let listener: NetworkListener<TCP> = try NetworkListener(
             for: .wifiAware(.connecting(to: service, from: .selected([device]))),
-            using: transportParameters()
+            using: envoixWifiAwareTCPParameters()
         )
         .newConnectionLimit(1)
+        .onStateUpdate { _, state in
+            Self.logListenerState(state)
+        }
         let result = PublisherResult<Result>()
 
         do {
             try await listener.run { connection in
+                connection.onStateUpdate { connection, state in
+                    Self.logConnectionState(
+                        state,
+                        role: "receiver",
+                        connection: connection
+                    )
+                }
+                Self.logConnectionState(
+                    connection.state,
+                    role: "receiver",
+                    connection: connection
+                )
                 let value = try await operation(AppleWifiAwareNativeTransport(connection))
+                try await requireWifiAwarePath(connection)
                 await result.store(value)
                 throw PublisherFinished.completed
             }
@@ -127,6 +161,9 @@ enum AppleWifiAwareTransportSession {
                 .connecting(to: .selected([device]), from: service)
             )
         )
+        .onStateUpdate { _, state in
+            Self.logBrowserState(state)
+        }
         let endpoint: WAEndpoint = try await browser.run { endpoints in
             guard let endpoint = endpoints.first(where: { $0.device.id == device.id }) else {
                 return .continue
@@ -135,17 +172,99 @@ enum AppleWifiAwareTransportSession {
         }
         let connection: NetworkConnection<TCP> = NetworkConnection(
             to: endpoint,
-            using: transportParameters()
+            using: envoixWifiAwareTCPParameters()
         )
-        return try await operation(AppleWifiAwareNativeTransport(connection))
+        .onStateUpdate { connection, state in
+            Self.logConnectionState(
+                state,
+                role: "sender",
+                connection: connection
+            )
+        }
+        let value = try await operation(AppleWifiAwareNativeTransport(connection))
+        try await requireWifiAwarePath(connection)
+        return value
     }
 
-    private static func transportParameters() -> NWParametersBuilder<TCP> {
-        .parameters {
-            TCP().noDelay(true)
+    private static func logListenerState(_ state: NetworkListener<TCP>.State) {
+        let detail: String
+        switch state {
+        case .setup: detail = "setup"
+        case .waiting(let error): detail = "waiting:\(error.wifiAware?.wireName ?? "network")"
+        case .ready: detail = "ready"
+        case .failed(let error): detail = "failed:\(error.wifiAware?.wireName ?? "network")"
+        case .cancelled: detail = "cancelled"
+        @unknown default: detail = "unknown"
         }
-        .wifiAware { $0.performanceMode = .bulk }
-        .serviceClass(.background)
+        logger.info("role=receiver listener_state=\(detail, privacy: .public)")
+    }
+
+    private static func logBrowserState(_ state: NetworkBrowser<WASubscriberBrowser>.State) {
+        let detail: String
+        switch state {
+        case .setup: detail = "setup"
+        case .waiting(let error): detail = "waiting:\(error.wifiAware?.wireName ?? "network")"
+        case .ready: detail = "ready"
+        case .failed(let error): detail = "failed:\(error.wifiAware?.wireName ?? "network")"
+        case .cancelled: detail = "cancelled"
+        @unknown default: detail = "unknown"
+        }
+        logger.info("role=sender browser_state=\(detail, privacy: .public)")
+    }
+
+    private static func logConnectionState(
+        _ state: NetworkChannel<TCP>.State,
+        role: String,
+        connection: NetworkConnection<TCP>
+    ) {
+        let path = connection.currentPath
+        let detail: String
+        switch state {
+        case .setup: detail = "setup"
+        case .waiting(let error): detail = "waiting:\(error.wifiAware?.wireName ?? "network")"
+        case .preparing: detail = "preparing"
+        case .ready: detail = "ready"
+        case .failed(let error): detail = "failed:\(error.wifiAware?.wireName ?? "network")"
+        case .cancelled: detail = "cancelled"
+        @unknown default: detail = "unknown"
+        }
+        let pathStatus: String
+        switch path?.status {
+        case .satisfied: pathStatus = "satisfied"
+        case .unsatisfied: pathStatus = "unsatisfied"
+        case .requiresConnection: pathStatus = "requires_connection"
+        case nil: pathStatus = "missing"
+        @unknown default: pathStatus = "unknown"
+        }
+        let interfaceNames = path?.availableInterfaces
+            .map(\.name)
+            .sorted()
+        let interfaces = interfaceNames
+            .flatMap { $0.isEmpty ? nil : $0.joined(separator: ",") }
+            ?? "none"
+        let localEndpoint = path?.localEndpoint == nil ? "missing" : "present"
+        let remoteEndpoint = path?.remoteEndpoint == nil ? "missing" : "present"
+        let wifiAwareConnection: String
+        if #available(iOS 26.4, *) {
+            wifiAwareConnection = connection.wifiAware == nil ? "missing" : "present"
+        } else {
+            wifiAwareConnection = "api_unavailable"
+        }
+        let message = "role=\(role) connection_state=\(detail) " +
+            "path_status=\(pathStatus) interfaces=\(interfaces) " +
+            "local_endpoint=\(localEndpoint) remote_endpoint=\(remoteEndpoint) " +
+            "wifi_aware_connection=\(wifiAwareConnection)"
+        logger.info("\(message, privacy: .public)")
+    }
+
+    private static func requireWifiAwarePath(
+        _ connection: NetworkConnection<TCP>
+    ) async throws {
+        guard let path = connection.currentPath,
+              try await path.wifiAware != nil
+        else {
+            throw AppleWifiAwareTransportError.noWifiAwarePath
+        }
     }
 }
 

@@ -265,11 +265,7 @@ final class AppleWifiAwareDiagnosticController: ObservableObject {
 
         let listener: NetworkListener<TCP> = try NetworkListener(
             for: .wifiAware(.connecting(to: service, from: .selected([device]))),
-            using: .parameters {
-                TCP().noDelay(true)
-            }
-            .wifiAware { $0.performanceMode = .bulk }
-            .serviceClass(.background)
+            using: envoixWifiAwareTCPParameters()
         )
         .newConnectionLimit(1)
         .onStateUpdate { _, state in
@@ -324,11 +320,7 @@ final class AppleWifiAwareDiagnosticController: ObservableObject {
 
         let connection: NetworkConnection<TCP> = NetworkConnection(
             to: endpoint,
-            using: .parameters {
-                TCP().noDelay(true)
-            }
-            .wifiAware { $0.performanceMode = .bulk }
-            .serviceClass(.background)
+            using: envoixWifiAwareTCPParameters()
         )
         .onStateUpdate { _, state in
             Self.logConnectionState(state)
@@ -548,7 +540,7 @@ final class AppleWifiAwareDiagnosticController: ObservableObject {
 }
 
 @available(iOS 26.0, *)
-private extension WAError {
+extension WAError {
     var wireName: String {
         switch self {
         case .error: return "error"

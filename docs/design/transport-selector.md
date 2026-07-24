@@ -91,9 +91,41 @@ semantics.
 3. Final release evidence remains hardware-gated: Apple ↔ Android must complete
    both directions on actual Wi-Fi Aware hardware, including cancellation,
    network loss, and `Prefer` fallback.
-4. A future wired adapter may register another peer-specific candidate. It may
+4. Register the production Wi-Fi Aware service names with IANA before release;
+   the current names satisfy Apple's syntax and 15-character label limit.
+5. A future wired adapter may register another peer-specific candidate. It may
    use raw USB bulk/accessory I/O and does not require a synthetic IP interface.
 
 The selector itself must stay pure and deterministic. Provider discovery,
 permission prompts, pairing UI, connection attempts, and transfer fallback
 side effects live outside it.
+
+### Apple physical validation status
+
+Apple-to-Apple discovery and pairing passed on 2026-07-24 with one paired
+device visible at each endpoint. Re-pairing from an empty inventory, fully
+rebooting both devices, and retesting over physical Mac connections did not
+make the data plane usable on the tested iPhone 15 Pro Max (iOS 26.5, 23F77)
+and iPad Air 5 (iPadOS 26.5.2, 23F84):
+
+- with Apple's documented `bulk` mode and default `bestEffort` service class,
+  the publisher became ready on `nan0` with Wi-Fi Aware connection metadata
+  present;
+- the subscriber became ready with Wi-Fi Aware metadata present but its
+  underlying path was assigned to cellular `pdp_ip0`. Its first 40-byte TCP
+  frame failed below the application with Darwin `ENOBUFS` (55), followed by
+  `lost nexus assignment, error Wi-Fi Aware`;
+- the system reported zero-length Wi-Fi Aware custom path metadata on the
+  subscriber and the publisher reported that it could not reclassify the
+  Wi-Fi Aware client;
+- requiring a Wi-Fi interface prevented that invalid cellular route, but the
+  subscriber remained `preparing` with no interface or local endpoint while
+  the publisher listener was ready.
+
+`NWPath.availableInterfaces` and the private `nan0` name are diagnostic
+details, not Apple's Wi-Fi Aware path contract. The adapter therefore uses
+Apple's default `bulk` plus `bestEffort` configuration without an interface
+type constraint, and validates successful sessions through `NWPath.wifiAware`.
+Manifest v2 physical transfer is not claimed as passing until the corrected raw
+TCP probe succeeds. Repeat the raw probe after both endpoints run the same
+current stable OS before closing the Manifest v2 hardware gate.
