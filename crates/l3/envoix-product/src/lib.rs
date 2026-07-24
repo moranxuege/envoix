@@ -11,16 +11,18 @@ mod source;
 pub mod record;
 
 pub use commit::{
-    ApplyOutcome, CommitError, CommitFailure, CommitStatus, CommittedSession, NoRecordStore,
-    RecordStore,
+    ApplyOutcome, CommandApplied, CommitError, CommitFailure, CommitStatus, CommittedSession,
+    NoRecordStore, RecordStore,
 };
 pub use identity::{IdentityError, IdentitySource, ProductIdentity, SystemIdentitySource};
 pub use model::{
-    CapabilityAction, Facts, NewTransfer, PauseOrigin, ProductCommand, ProductEffect, ProductInput,
-    ProductState, Quiescence, SourceDecision, StorageAction, TransferRecord, WorkerKind,
+    AppliedCommand, CapabilityAction, CommandLedger, Facts, LedgerHit, NewTransfer, PauseOrigin,
+    ProductCommand, ProductEffect, ProductInput, ProductState, Quiescence, SourceDecision,
+    StorageAction, TransferRecord, WorkerKind,
 };
 pub use record::{
-    PRODUCT_RECORD_VERSION, RecordCodecError, RecordDecode, decode_record, encode_record,
+    OLDEST_READABLE_RECORD_VERSION, PRODUCT_RECORD_VERSION, RecordCodecError, RecordDecode,
+    decode_record, encode_record,
 };
 pub use source::resolve_source;
 

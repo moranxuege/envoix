@@ -7,7 +7,7 @@ mod name;
 mod secret;
 mod value;
 
-pub use identity::{ArtifactId, AttemptGen, RecordId, RequestId, TransferId};
+pub use identity::{ArtifactId, AttemptGen, CommandId, RecordId, RequestId, TransferId};
 pub use name::{LandedName, OfferedName};
 pub use secret::Secret;
 pub use value::{ByteCount, Direction};

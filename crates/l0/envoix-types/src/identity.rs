@@ -65,6 +65,7 @@ integer_identity!(AttemptGen, u32);
 opaque_128_identity!(TransferId);
 opaque_128_identity!(ArtifactId);
 opaque_128_identity!(RequestId);
+opaque_128_identity!(CommandId);
 
 fn serialize_u128_hex<S>(value: &u128, serializer: S) -> Result<S::Ok, S::Error>
 where

@@ -1,11 +1,12 @@
 use std::fmt;
 use std::num::NonZeroUsize;
 
-use envoix_types::{ArtifactId, TransferId};
+use envoix_types::{ArtifactId, CommandId, TransferId};
 
 use crate::{
-    IdentityError, IdentitySource, NewTransfer, ProductEffect, ProductInput, ProductState,
-    Quiescence, RecordCodecError, TransferRecord, WorkerKind, encode_record,
+    IdentityError, IdentitySource, LedgerHit, NewTransfer, ProductCommand, ProductEffect,
+    ProductInput, ProductState, Quiescence, RecordCodecError, TransferRecord, WorkerKind,
+    encode_record,
 };
 
 /// Persists one card-scoped product record body.
@@ -58,6 +59,21 @@ impl CommitStatus {
     pub const fn authorizing_commit_succeeded(self) -> bool {
         matches!(self, Self::Vacuous | Self::Committed { .. })
     }
+}
+
+/// How [`CommittedSession::apply_command`] resolved one identified command.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CommandApplied {
+    /// The command reduced and its ledger entry rode the same record write as
+    /// its effect (inspect `outcome.commit` for whether that write succeeded).
+    Applied { outcome: ApplyOutcome },
+    /// The identity was already in the committed ledger for the SAME command;
+    /// nothing reduced.
+    Duplicate { state: ProductState },
+    /// The identity is owned by a DIFFERENT committed command; nothing
+    /// reduced. Answering a disposition here would silently swallow the new
+    /// command behind a plausible-looking duplicate.
+    Conflict { applied: ProductCommand },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -145,6 +161,38 @@ impl<S: RecordStore> CommittedSession<S> {
             self.store
                 .expect("a store-backed session always retains its store"),
         )
+    }
+
+    /// Applies one identified frontend command exactly once.
+    ///
+    /// A duplicate identity returns its recorded disposition WITHOUT reducing.
+    /// Otherwise the command reduces and its ledger entry is written into the
+    /// record before the commit barrier runs, so the dedup fact and the effect
+    /// are durable atomically: an escalated (failed) barrier rolls the entry
+    /// back with the effect, and a committed barrier retains both. The ledger
+    /// entry always makes the reduction a durable change — an applied no-op
+    /// command still commits, because "applied" is itself the fact that must
+    /// survive a process death.
+    pub fn apply_command(
+        &mut self,
+        id: CommandId,
+        command: ProductCommand,
+    ) -> Result<CommandApplied, IdentityError> {
+        match self.record.command_ledger.disposition(id, command) {
+            Some(LedgerHit::Duplicate { state }) => {
+                return Ok(CommandApplied::Duplicate { state });
+            }
+            Some(LedgerHit::Conflict { applied }) => {
+                return Ok(CommandApplied::Conflict { applied });
+            }
+            None => {}
+        }
+        let before = self.record.clone();
+        let effects = self.record.reduce(ProductInput::Command(command))?;
+        let state = self.record.state;
+        self.record.command_ledger.record(id, command, state);
+        let outcome = self.finish_reduction(effects, true, Some(before), false)?;
+        Ok(CommandApplied::Applied { outcome })
     }
 
     pub fn apply(&mut self, input: ProductInput) -> Result<ApplyOutcome, IdentityError> {

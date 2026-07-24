@@ -160,7 +160,7 @@ impl CardSubscription {
                     return Ok(Some(CardUpdate {
                         epoch: self.epoch,
                         card: self.card,
-                        kind,
+                        kind: *kind,
                     }));
                 }
                 QueuePop::Lagged(missed) => {
@@ -180,7 +180,7 @@ impl CardSubscription {
             QueuePop::Update(kind) => Ok(CardUpdate {
                 epoch: self.epoch,
                 card: self.card,
-                kind,
+                kind: *kind,
             }),
             QueuePop::Lagged(missed) => Err(TryRecvError::Lagged(SubscriptionLag {
                 epoch: self.epoch,
@@ -286,13 +286,13 @@ impl SubscriberQueue {
             return QueuePop::Lagged(missed);
         }
         if let Some(record) = state.initial.take() {
-            return QueuePop::Update(CardUpdateKind::Snapshot(record));
+            return QueuePop::Update(Box::new(CardUpdateKind::Snapshot(record)));
         }
         if let Some(update) = state.lossless.pop_front() {
-            return QueuePop::Update(update);
+            return QueuePop::Update(Box::new(update));
         }
         if let Some(update) = state.latest.take() {
-            return QueuePop::Update(update);
+            return QueuePop::Update(Box::new(update));
         }
         if state.closed {
             QueuePop::Closed
@@ -393,7 +393,9 @@ impl QueueState {
 }
 
 enum QueuePop {
-    Update(CardUpdateKind),
+    // Boxed: `CardUpdateKind` carries a whole record, dwarfing the flag
+    // variants (clippy::large_enum_variant).
+    Update(Box<CardUpdateKind>),
     Lagged(LosslessUpdateKind),
     Empty,
     Closed,

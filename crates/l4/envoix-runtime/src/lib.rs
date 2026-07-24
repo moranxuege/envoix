@@ -30,12 +30,19 @@
 //! a lossless lane for terminal transitions and capability duties. A full
 //! lossless lane surfaces [`SubscriptionLag`] instead of silently dropping.
 //!
+//! # Command intake (BN2)
+//! Frontend mutating commands enter only through [`Runtime::submit_command`]:
+//! provenance is the live [`CardSubscription`] itself (the card's newest
+//! attachment is its commander), acceptance is answered separately from the
+//! committed completion (a [`CommandTicket`]), and every command carries a
+//! caller-minted `CommandId` deduplicated through the durable ledger riding
+//! inside the L3 record — exactly-once across a process death. Internal
+//! inputs (executor signals, retirement acks, restore) never pass this gate.
+//!
 //! # Deferred
 //! - The concrete iroh executor and the M4 `Phase(Confirming)` emission are wired
 //!   at the host / composition root.
-//! - Generated binding schemas, Rust-to-platform glue, and bulk-byte/OS-handle
-//!   containment are BN1.
-//! - Durable, epoch/provenance-checked mutating command intake is BN2.
+//! - Generated command binding schemas are BN3.
 //! - Confirm timers, mailbox polling, capability-duty execution/results, and
 //!   storage intents remain injected-host / later-slice seams.
 //! - The evidence HTTP service and storage manifest are D1.
@@ -44,6 +51,7 @@
 #![forbid(unsafe_code)]
 
 mod card;
+mod command;
 mod config;
 mod error;
 mod evidence;
@@ -51,6 +59,7 @@ mod port;
 mod runtime;
 mod subscription;
 
+pub use command::{CommandCompletion, CommandTicket, CommandVerdict};
 pub use config::RuntimeConfig;
 // Façade completeness: the L3/L1 types that cross this crate's public API
 // (through `CardUpdateKind` and `TransferRecord`) are re-exported so L5 can
@@ -62,7 +71,7 @@ pub use envoix_product::{
     CapabilityAction, PauseOrigin, ProductIdentity, ProductState, Quiescence, TransferRecord,
     WorkerKind,
 };
-pub use error::{AcquireError, CommandError};
+pub use error::{AcquireError, CommandRejected};
 pub use port::{
     AttemptExecution, AttemptExecutor, ExecutorSignal, SessionProvider, StopHandle, StopToken,
     stop_channel,

@@ -8,7 +8,14 @@ pub mod identifiers;
 
 pub use identifiers::PRODUCT_RECORD_SCHEMA_ID;
 
-pub const PRODUCT_RECORD_VERSION: u32 = 1;
+/// The version written by this build. Version 2 added `command_ledger` (BN2);
+/// the body codec is self-describing, so every version back to
+/// [`OLDEST_READABLE_RECORD_VERSION`] decodes with absent fields defaulted.
+/// A pre-BN2 reader seeing version 2 takes the honest
+/// [`RecordDecode::UnsupportedFuture`] quarantine, never the corrupt path.
+pub const PRODUCT_RECORD_VERSION: u32 = 2;
+/// The oldest record version this build still decodes.
+pub const OLDEST_READABLE_RECORD_VERSION: u32 = 1;
 const MAX_RECORD_BODY_BYTES: usize = 1024 * 1024;
 const SCHEMA_LENGTH_BYTES: usize = 2;
 const VERSION_BYTES: usize = 4;
@@ -115,7 +122,7 @@ pub fn decode_record(encoded: &[u8]) -> Result<RecordDecode, RecordCodecError> {
     if version > PRODUCT_RECORD_VERSION {
         return Ok(RecordDecode::UnsupportedFuture { version });
     }
-    if version != PRODUCT_RECORD_VERSION {
+    if version < OLDEST_READABLE_RECORD_VERSION {
         return Err(RecordCodecError::UnsupportedVersion { actual: version });
     }
 

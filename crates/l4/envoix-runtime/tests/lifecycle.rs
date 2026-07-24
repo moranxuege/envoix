@@ -21,13 +21,13 @@ use envoix_product::{
     decode_record,
 };
 use envoix_runtime::{
-    AcquireError, AttemptExecution, AttemptExecutor, CardUpdateKind, EvidenceSink,
-    EvidenceSinkError, ExecutorSignal, LosslessUpdateKind, Runtime, RuntimeConfig, SessionProvider,
-    ShutdownReport, SubscribeError, TryRecvError, stop_channel,
+    AcquireError, AttemptExecution, AttemptExecutor, CardUpdateKind, CommandCompletion,
+    CommandVerdict, EvidenceSink, EvidenceSinkError, ExecutorSignal, LosslessUpdateKind, Runtime,
+    RuntimeConfig, SessionProvider, ShutdownReport, SubscribeError, TryRecvError, stop_channel,
 };
 use envoix_storage_api::Durability;
 use envoix_storage_local::LocalStorage;
-use envoix_types::{ByteCount, Direction, OfferedName, RecordId, TransferId};
+use envoix_types::{ByteCount, CommandId, Direction, OfferedName, RecordId, TransferId};
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 
@@ -567,10 +567,24 @@ async fn admission_rejects_over_cap() {
     );
 
     // Freeing the first card's permit (cancel → retire → hibernate) admits again.
-    runtime
-        .command(first_card, ProductCommand::Cancel)
+    let commander = runtime
+        .subscribe(first_card, NonZeroUsize::new(4).unwrap())
+        .unwrap();
+    let verdict = runtime
+        .submit_command(
+            &commander,
+            CommandId::from_bytes([0xC1; 16]),
+            ProductCommand::Cancel,
+        )
         .await
         .unwrap();
+    let CommandVerdict::Accepted(ticket) = verdict else {
+        panic!("a fresh command id is accepted");
+    };
+    assert!(matches!(
+        ticket.completed().await,
+        CommandCompletion::Committed { .. }
+    ));
     settle(&runtime, first_card).await;
 
     let (third, third_outcome) = create_session(root, Direction::Send, 0x90);
@@ -792,7 +806,18 @@ async fn removed_card_evicts_projection() {
     runtime.admit(session, outcome).unwrap();
     // A hibernating card keeps its projection (renders at rest); a REMOVED card is
     // tombstoned and gone, so its projection must not leak for the process life.
-    runtime.command(card, ProductCommand::Remove).await.unwrap();
+    let commander = runtime
+        .subscribe(card, NonZeroUsize::new(4).unwrap())
+        .unwrap();
+    runtime
+        .submit_command(
+            &commander,
+            CommandId::from_bytes([0xC2; 16]),
+            ProductCommand::Remove,
+        )
+        .await
+        .unwrap();
+    drop(commander);
     settle(&runtime, card).await;
     assert!(durable_state(root, card).facts.remove_requested);
     assert!(matches!(

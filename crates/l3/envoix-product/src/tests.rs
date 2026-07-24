@@ -7,7 +7,8 @@ use envoix_capabilities::{
 };
 use envoix_outcomes::{OutcomeCode, Phase, Recovery};
 use envoix_types::{
-    ArtifactId, AttemptGen, ByteCount, Direction, OfferedName, RecordId, RequestId, TransferId,
+    ArtifactId, AttemptGen, ByteCount, CommandId, Direction, OfferedName, RecordId, RequestId,
+    TransferId,
 };
 
 use crate::{
@@ -1838,11 +1839,12 @@ fn fixture_record() -> TransferRecord {
         },
         source_recoverable: true,
         receipt_request: RequestId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4]),
+        command_ledger: crate::CommandLedger::default(),
     }
 }
 
 #[test]
-fn product_record_v1_roundtrips() {
+fn product_record_roundtrips() {
     let record = fixture_record();
     let encoded = encode_record(&record).unwrap();
     assert_eq!(
@@ -1852,25 +1854,42 @@ fn product_record_v1_roundtrips() {
 }
 
 #[test]
-fn product_record_v1_has_a_byte_exact_fixture() {
-    let body = br#"{"identity":{"card":1,"transfer":"00000000000000000000000000000002","artifact":"00000000000000000000000000000003"},"direction":"send","offered_name":"a.txt","total":10,"state":{"state":"paused","origin":"local"},"quiescence":{"status":"quiescent"},"generation":7,"phase":"transferring","bytes":4,"bytes_resumed":2,"outcome":null,"facts":{"source_ready":true,"complete_sent":false,"proof_delivered":false,"receipt_mismatch":false,"remove_requested":false},"source_recoverable":true,"receipt_request":"00000000000000000000000000000004"}"#;
+fn product_record_v2_has_a_byte_exact_fixture() {
+    let body = br#"{"identity":{"card":1,"transfer":"00000000000000000000000000000002","artifact":"00000000000000000000000000000003"},"direction":"send","offered_name":"a.txt","total":10,"state":{"state":"paused","origin":"local"},"quiescence":{"status":"quiescent"},"generation":7,"phase":"transferring","bytes":4,"bytes_resumed":2,"outcome":null,"facts":{"source_ready":true,"complete_sent":false,"proof_delivered":false,"receipt_mismatch":false,"remove_requested":false},"source_recoverable":true,"receipt_request":"00000000000000000000000000000004","command_ledger":[]}"#;
     let mut expected = Vec::new();
     expected.extend_from_slice(&23_u16.to_be_bytes());
     expected.extend_from_slice(b"envoix/product-record/1");
-    expected.extend_from_slice(&1_u32.to_be_bytes());
+    expected.extend_from_slice(&2_u32.to_be_bytes());
     expected.extend_from_slice(&(body.len() as u32).to_be_bytes());
     expected.extend_from_slice(body);
     assert_eq!(encode_record(&fixture_record()).unwrap(), expected);
+}
+
+/// A pre-BN2 v1 body (no `command_ledger`) still decodes: the ledger field is
+/// additive and defaulted, so existing durable records survive the upgrade.
+#[test]
+fn product_record_v1_without_command_ledger_still_decodes() {
+    let body = br#"{"identity":{"card":1,"transfer":"00000000000000000000000000000002","artifact":"00000000000000000000000000000003"},"direction":"send","offered_name":"a.txt","total":10,"state":{"state":"paused","origin":"local"},"quiescence":{"status":"quiescent"},"generation":7,"phase":"transferring","bytes":4,"bytes_resumed":2,"outcome":null,"facts":{"source_ready":true,"complete_sent":false,"proof_delivered":false,"receipt_mismatch":false,"remove_requested":false},"source_recoverable":true,"receipt_request":"00000000000000000000000000000004"}"#;
+    let mut encoded = Vec::new();
+    encoded.extend_from_slice(&23_u16.to_be_bytes());
+    encoded.extend_from_slice(b"envoix/product-record/1");
+    encoded.extend_from_slice(&1_u32.to_be_bytes());
+    encoded.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    encoded.extend_from_slice(body);
+    assert_eq!(
+        decode_record(&encoded).unwrap(),
+        RecordDecode::Loaded(fixture_record())
+    );
 }
 
 #[test]
 fn product_record_future_version_is_quarantinable() {
     let mut encoded = encode_record(&fixture_record()).unwrap();
     let version_offset = 2 + b"envoix/product-record/1".len();
-    encoded[version_offset..version_offset + 4].copy_from_slice(&2_u32.to_be_bytes());
+    encoded[version_offset..version_offset + 4].copy_from_slice(&3_u32.to_be_bytes());
     assert_eq!(
         decode_record(&encoded).unwrap(),
-        RecordDecode::UnsupportedFuture { version: 2 }
+        RecordDecode::UnsupportedFuture { version: 3 }
     );
 }
 
@@ -1930,4 +1949,50 @@ fn state_json_names_cover_the_product_vocabulary() {
     let paused = serde_json::to_value(ProductState::Paused(PauseOrigin::Peer)).unwrap();
     assert_eq!(paused["state"], "paused");
     assert_eq!(paused["origin"], "peer");
+}
+
+/// A reused identity answers its disposition only for the SAME command; a
+/// different command is a typed conflict, and pruning keeps the newest
+/// [`CommandLedger::RETENTION`] entries.
+#[test]
+fn command_ledger_conflicts_and_prunes() {
+    let mut ledger = crate::CommandLedger::default();
+    let reused = CommandId::from_bytes([0xAA; 16]);
+    ledger.record(
+        reused,
+        ProductCommand::Pause,
+        ProductState::Paused(PauseOrigin::Local),
+    );
+    assert_eq!(
+        ledger.disposition(reused, ProductCommand::Pause),
+        Some(crate::LedgerHit::Duplicate {
+            state: ProductState::Paused(PauseOrigin::Local)
+        })
+    );
+    assert_eq!(
+        ledger.disposition(reused, ProductCommand::Cancel),
+        Some(crate::LedgerHit::Conflict {
+            applied: ProductCommand::Pause
+        })
+    );
+
+    for n in 0..crate::CommandLedger::RETENTION {
+        let mut id = [0u8; 16];
+        id[..8].copy_from_slice(&(n as u64 + 1).to_be_bytes());
+        ledger.record(
+            CommandId::from_bytes(id),
+            ProductCommand::Resume,
+            ProductState::Waiting,
+        );
+    }
+    assert_eq!(ledger.len(), crate::CommandLedger::RETENTION);
+    // The oldest entry (the reused id) was pruned; a re-issue is fresh again.
+    assert_eq!(ledger.disposition(reused, ProductCommand::Pause), None);
+    let mut newest = [0u8; 16];
+    newest[..8].copy_from_slice(&(crate::CommandLedger::RETENTION as u64).to_be_bytes());
+    assert!(
+        ledger
+            .disposition(CommandId::from_bytes(newest), ProductCommand::Resume)
+            .is_some()
+    );
 }

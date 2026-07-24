@@ -3,7 +3,7 @@ use envoix_attempt_api::{
 };
 use envoix_capabilities::{AdmittedDutyResult, Duty};
 use envoix_outcomes::{Outcome, Phase};
-use envoix_types::{AttemptGen, ByteCount, Direction, OfferedName, RequestId};
+use envoix_types::{AttemptGen, ByteCount, CommandId, Direction, OfferedName, RequestId};
 use serde::{Deserialize, Serialize};
 
 use crate::ProductIdentity;
@@ -107,7 +107,8 @@ pub struct NewTransfer {
     pub source: SourceDecision,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProductCommand {
     Pause,
     Cancel,
@@ -210,6 +211,85 @@ pub enum ProductEffect {
     },
 }
 
+/// One applied frontend command and the product state its application produced.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppliedCommand {
+    pub id: CommandId,
+    /// The command that owns this identity. A re-presented identity answers
+    /// its disposition only for the SAME command; a different command with a
+    /// reused identity is a conflict, never a plausible-looking duplicate.
+    pub command: ProductCommand,
+    pub state: ProductState,
+}
+
+/// How the ledger resolves a re-presented command identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LedgerHit {
+    /// Same identity, same command: the committed disposition.
+    Duplicate { state: ProductState },
+    /// Same identity, DIFFERENT command: the identity is owned by `applied`.
+    /// The new command must be rejected typed — answering the recorded
+    /// disposition would silently swallow it.
+    Conflict { applied: ProductCommand },
+}
+
+/// The durable dedup ledger for frontend mutating commands.
+///
+/// The ledger rides inside [`TransferRecord`], so an entry becomes durable in
+/// the SAME record write that commits the command's effect — they can only
+/// commit or roll back together, which is what makes command application
+/// exactly-once across a process death. It is bounded ([`Self::RETENTION`],
+/// newest kept): the horizon only has to span command identities a frontend
+/// may still re-issue after a restart, and a live frontend re-issues promptly
+/// on reattach.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct CommandLedger(Vec<AppliedCommand>);
+
+impl CommandLedger {
+    /// The host's retry horizon: a re-issue older than this many newer
+    /// completions has been pruned and re-applies as fresh. BN3's generated
+    /// command contract states this bound to hosts (entries are ~20 bytes, so
+    /// the worst case is ~5 KiB per card).
+    pub const RETENTION: usize = 256;
+
+    /// How the ledger resolves `id` re-presented with `command`, if `id` was
+    /// already applied.
+    pub fn disposition(&self, id: CommandId, command: ProductCommand) -> Option<LedgerHit> {
+        self.0
+            .iter()
+            .find(|applied| applied.id == id)
+            .map(|applied| {
+                if applied.command == command {
+                    LedgerHit::Duplicate {
+                        state: applied.state,
+                    }
+                } else {
+                    LedgerHit::Conflict {
+                        applied: applied.command,
+                    }
+                }
+            })
+    }
+
+    pub(crate) fn record(&mut self, id: CommandId, command: ProductCommand, state: ProductState) {
+        self.0.push(AppliedCommand { id, command, state });
+        if self.0.len() > Self::RETENTION {
+            let excess = self.0.len() - Self::RETENTION;
+            self.0.drain(..excess);
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TransferRecord {
@@ -227,4 +307,8 @@ pub struct TransferRecord {
     pub facts: Facts,
     pub source_recoverable: bool,
     pub(crate) receipt_request: RequestId,
+    /// Durable frontend-command dedup, committed atomically with each effect.
+    /// Defaulted so pre-BN2 dev records still decode.
+    #[serde(default)]
+    pub command_ledger: CommandLedger,
 }

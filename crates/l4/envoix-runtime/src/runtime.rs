@@ -6,18 +6,19 @@ use envoix_attempt_api::AttemptStamp;
 use envoix_capabilities::Duty;
 use envoix_evidence::{EvidenceProgress, EvidenceRecord, EvidenceSink, EvidenceValue};
 use envoix_product::{
-    ApplyOutcome, CapabilityAction, CommittedSession, ProductCommand, ProductInput, ProductState,
+    ApplyOutcome, CapabilityAction, CommittedSession, LedgerHit, ProductCommand, ProductInput,
     TransferRecord,
 };
-use envoix_types::RecordId;
+use envoix_types::{CommandId, RecordId};
 use tokio::runtime::Handle;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout_at};
 
 use crate::card::{CardActor, CardMessage};
+use crate::command::{CommandTicket, CommandVerdict, FrontendVerdict};
 use crate::config::RuntimeConfig;
-use crate::error::{AcquireError, CommandError};
+use crate::error::{AcquireError, CommandRejected};
 use crate::evidence::EvidencePublisher;
 use crate::port::{AttemptExecutor, SessionProvider};
 use crate::subscription::{
@@ -26,6 +27,14 @@ use crate::subscription::{
 };
 
 const INBOX_CAPACITY: usize = 64;
+
+/// Why one delivery round of a frontend command did not land.
+enum Undelivered {
+    /// Typed intake refusal — final.
+    Refused(CommandRejected),
+    /// Lost a hibernate/spawn race; the message survives for the next round.
+    Raced,
+}
 
 /// A live card's registry slot: its inbox, and — once spawned — its supervised
 /// task handle. Holding the handle here (rather than a side list) makes shutdown
@@ -42,6 +51,9 @@ struct CardProjection {
     record: TransferRecord,
     outstanding_duties: Vec<(Duty, CapabilityAction)>,
     subscribers: Vec<SubscriptionPublisher>,
+    /// The newest attachment epoch — the card's commander. Only commands
+    /// stamped with it pass intake; a reattach supersedes older authority.
+    commander: Option<SubscriptionEpoch>,
 }
 
 /// Whether the committed record shows this capability duty already discharged, so
@@ -131,6 +143,7 @@ impl Shared {
                     record: record.clone(),
                     outstanding_duties: Vec::new(),
                     subscribers: Vec::new(),
+                    commander: None,
                 });
             projection.record = record.clone();
             // Prune any duty the committed record now shows discharged, so a
@@ -212,7 +225,13 @@ impl Shared {
             .subscribers
             .retain(SubscriptionPublisher::is_attached);
         projection.subscribers.push(publisher);
+        projection.commander = Some(epoch);
         Ok(subscription)
+    }
+
+    /// The card's current commander (newest attachment) epoch.
+    pub(crate) fn commander_epoch(&self, card: RecordId) -> Option<SubscriptionEpoch> {
+        self.lock().projections.get(&card)?.commander
     }
 
     fn close_subscriptions(inner: &mut Inner) -> Vec<SubscriptionPublisher> {
@@ -337,20 +356,162 @@ impl<P: SessionProvider, E: AttemptExecutor> Runtime<P, E> {
         Ok(())
     }
 
-    /// Delivers a command to a live card. Errors if the card is not live; the
-    /// caller restores it first (lazy restore is an explicit step).
-    pub async fn command(
+    /// Submits one identified mutating command through the durable intake.
+    ///
+    /// Provenance is the live attachment itself: `origin` must be the card's
+    /// NEWEST subscription (its commander) — a bare epoch integer cannot be
+    /// submitted, and a superseded or torn-down attachment's commands are
+    /// rejected typed. The returned verdict is ACCEPTANCE only; the committed
+    /// completion arrives separately through the [`CommandVerdict::Accepted`]
+    /// ticket. A command identity already in the committed ledger answers
+    /// [`CommandVerdict::Duplicate`] without reducing anything — including for
+    /// hibernated cards, straight from committed truth. A fresh command to a
+    /// hibernated card lazily restores it with the command pre-queued, so the
+    /// actor processes it before any hibernate decision.
+    ///
+    /// # The exact supersession guarantee
+    /// A superseded attachment's commands are inert BEFORE acceptance: the
+    /// gate and the actor's commander re-check both reject them typed. A
+    /// command that was already ACCEPTED when the reattach landed still
+    /// commits — its submitter honestly observes `Accepted` then `Committed`,
+    /// and the new attachment's stream sees the resulting state update.
+    /// Strict post-acceptance inertness would require the commander
+    /// generation to join the record write; that is a deliberate non-goal
+    /// (BN3 documents this guarantee to hosts).
+    pub async fn submit_command(
+        &self,
+        origin: &CardSubscription,
+        id: CommandId,
+        command: ProductCommand,
+    ) -> Result<CommandVerdict, CommandRejected> {
+        let card = origin.card();
+        {
+            let inner = self.shared.lock();
+            if inner.stopped {
+                return Err(CommandRejected::RuntimeStopped);
+            }
+            let Some(projection) = inner.projections.get(&card) else {
+                return Err(CommandRejected::UnknownCard);
+            };
+            if projection.commander != Some(origin.epoch()) {
+                return Err(CommandRejected::StaleEpoch);
+            }
+            match projection.record.command_ledger.disposition(id, command) {
+                Some(LedgerHit::Duplicate { state }) => {
+                    return Ok(CommandVerdict::Duplicate { state });
+                }
+                Some(LedgerHit::Conflict { .. }) => {
+                    return Err(CommandRejected::Conflict);
+                }
+                None => {}
+            }
+        }
+        // Deliver to the live actor, or lazily restore the card with the
+        // message pre-queued. Each round builds fresh reply channels so a
+        // race can be retried with the message rebuilt. Three rounds absorb
+        // two independent races, each of which resolves within one round:
+        // a send that fails (actor just exited, receiver dropped), a restore
+        // reservation lost to a concurrent spawn, or a send that SUCCEEDED
+        // into an actor that exited without draining (the buffered message —
+        // never linearized — died with the inbox, so redelivery cannot
+        // double-apply: the ledger dedups a committed identity).
+        for _ in 0..3 {
+            let (acceptance_tx, acceptance_rx) = oneshot::channel();
+            let (completion_tx, completion_rx) = oneshot::channel();
+            let message = CardMessage::Frontend {
+                epoch: origin.epoch(),
+                id,
+                command,
+                acceptance: acceptance_tx,
+                completion: completion_tx,
+            };
+            let outcome = match self.inbox(card) {
+                Some(inbox) => inbox.send(message).await.map_err(|_| Undelivered::Raced),
+                None => self.restore_with_message(card, message),
+            };
+            match outcome {
+                Ok(()) => match acceptance_rx.await {
+                    // The message died undelivered with an exiting actor's
+                    // inbox (its sender was never touched); retry the round.
+                    Err(_) => continue,
+                    Ok(Err(rejected)) => return Err(rejected),
+                    Ok(Ok(FrontendVerdict::Duplicate { state })) => {
+                        return Ok(CommandVerdict::Duplicate { state });
+                    }
+                    Ok(Ok(FrontendVerdict::Accepted)) => {
+                        return Ok(CommandVerdict::Accepted(CommandTicket {
+                            completion: completion_rx,
+                        }));
+                    }
+                },
+                Err(Undelivered::Refused(rejected)) => return Err(rejected),
+                Err(Undelivered::Raced) => {}
+            }
+        }
+        Err(CommandRejected::Interrupted)
+    }
+
+    /// Restores a hibernated card with `message` already queued on its fresh
+    /// inbox, so the actor cannot hibernate past it. Uses the identical
+    /// restore contract as [`Self::restore`] (feed `ProductInput::Restore`,
+    /// let the hardened reducer reconcile).
+    ///
+    /// Blocking bound: `provider.restore` + the restore reduction run
+    /// synchronous store I/O inline in the submitter's async task (the same
+    /// shape as host-called `admit`/`restore`). BN4 routes this through the
+    /// host's blocking seam; until then a slow store stalls this task for one
+    /// card-restore, bounded by the store's own commit budget.
+    fn restore_with_message(
         &self,
         card: RecordId,
-        command: ProductCommand,
-    ) -> Result<ProductState, CommandError> {
-        let inbox = self.inbox(card).ok_or(CommandError::NotLive)?;
-        let (reply, response) = oneshot::channel();
-        inbox
-            .send(CardMessage::Command(command, reply))
-            .await
-            .map_err(|_| CommandError::NotLive)?;
-        response.await.map_err(|_| CommandError::NotLive)?
+        message: CardMessage,
+    ) -> Result<(), Undelivered> {
+        let (permit, inbox, inbox_rx) = match self.reserve(card) {
+            Ok(reserved) => reserved,
+            // A concurrent admit/restore won the lease; its inbox is (or is
+            // about to be) observable — retry the send round.
+            Err(AcquireError::AlreadyLive) => return Err(Undelivered::Raced),
+            Err(AcquireError::NotAdmitting) => {
+                return Err(Undelivered::Refused(CommandRejected::RuntimeStopped));
+            }
+            Err(AcquireError::AtCapacity) => {
+                return Err(Undelivered::Refused(CommandRejected::AtCapacity));
+            }
+            Err(AcquireError::Absent | AcquireError::Internal) => {
+                return Err(Undelivered::Refused(CommandRejected::Internal));
+            }
+        };
+        let mut session = match self.provider.restore(card) {
+            Some(session) => session,
+            None => {
+                self.shared.release(card);
+                return Err(Undelivered::Refused(CommandRejected::Internal));
+            }
+        };
+        let initial = match session.apply(ProductInput::Restore) {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                self.shared.release(card);
+                return Err(Undelivered::Refused(CommandRejected::Internal));
+            }
+        };
+        match inbox.try_send(message) {
+            Ok(()) => {
+                self.spawn_card(card, session, initial, permit, inbox, inbox_rx);
+                Ok(())
+            }
+            // The registry publishes the inbox before this send, so enough
+            // concurrent submits can fill it first. The card must still spawn
+            // (those queued messages need their actor); our message retries
+            // into the now-live inbox on the next round.
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.spawn_card(card, session, initial, permit, inbox, inbox_rx);
+                Err(Undelivered::Raced)
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                unreachable!("the reserved inbox receiver is held on this stack")
+            }
+        }
     }
 
     /// A derived read snapshot of a known card's latest committed record.

@@ -5,27 +5,35 @@ use envoix_attempt_api::{
     RetirementAckResult,
 };
 use envoix_product::{
-    ApplyOutcome, CommittedSession, IdentityError, ProductCommand, ProductEffect, ProductInput,
-    ProductState, Quiescence, RecordStore,
+    ApplyOutcome, CommandApplied, CommittedSession, IdentityError, LedgerHit, ProductCommand,
+    ProductEffect, ProductInput, ProductState, Quiescence, RecordStore,
 };
-use envoix_types::RecordId;
+use envoix_types::{CommandId, RecordId};
 use tokio::runtime::Handle;
+use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{OwnedSemaphorePermit, mpsc, oneshot};
 use tokio::task::AbortHandle;
 
-use crate::error::CommandError;
+use crate::command::{CommandCompletion, FrontendVerdict};
+use crate::error::CommandRejected;
 use crate::port::{AttemptExecution, AttemptExecutor, ExecutorSignal, StopHandle};
 use crate::runtime::Shared;
-use crate::subscription::RecordUpdateKind;
+use crate::subscription::{RecordUpdateKind, SubscriptionEpoch};
 
-/// Everything one card actor accepts on its single inbox: control from the
-/// runtime API, and executor signals forwarded by the per-attempt pump. Merging
-/// both onto one channel keeps the actor loop a plain `recv` — no `select!`.
+/// Everything one card actor accepts on its single inbox: frontend commands
+/// from the intake, control from the runtime API, and executor signals
+/// forwarded by the per-attempt pump. Merging all onto one channel keeps the
+/// actor loop a plain `recv` — no `select!`.
 pub(crate) enum CardMessage {
-    Command(
-        ProductCommand,
-        oneshot::Sender<Result<ProductState, CommandError>>,
-    ),
+    /// An identified, epoch-stamped mutating command from a frontend
+    /// attachment. Internal inputs never use this variant.
+    Frontend {
+        epoch: SubscriptionEpoch,
+        id: CommandId,
+        command: ProductCommand,
+        acceptance: oneshot::Sender<Result<FrontendVerdict, CommandRejected>>,
+        completion: oneshot::Sender<CommandCompletion>,
+    },
     Shutdown(oneshot::Sender<()>),
     Signal {
         stamp: AttemptStamp,
@@ -56,7 +64,9 @@ pub(crate) struct CardActor<R: RecordStore, E: AttemptExecutor> {
     shared: Arc<Shared>,
     executor: Arc<E>,
     card: RecordId,
-    _permit: OwnedSemaphorePermit,
+    // `Option` so `Drop` can free the admission permit BEFORE the registry
+    // entry is removed — see the `Drop` impl.
+    permit: Option<OwnedSemaphorePermit>,
     // `Option` so `Drop` can close the store (releasing its backend write lease)
     // BEFORE the registry entry is removed — see the `Drop` impl.
     session: Option<CommittedSession<R>>,
@@ -72,12 +82,17 @@ impl<R: RecordStore, E: AttemptExecutor> Drop for CardActor<R, E> {
         // Ordering matters. Close the card's durable store FIRST (dropping the
         // session releases its per-instance backend write lease), so a concurrent
         // `restore` that observes the freed registry slot cannot open a second
-        // store for this card while ours is still alive. Then remove the registry
-        // entry. Dropping `current` stops the executor and aborts its pump;
-        // `_permit` frees the admission permit. This one path covers hibernation,
-        // shutdown, AND a panic unwind through the actor task.
+        // store for this card while ours is still alive. Free the admission
+        // permit NEXT, then remove the registry entry — the other order lets a
+        // racing `reserve` on a full runtime see the slot free while the
+        // semaphore is still held (a spurious final `AtCapacity`; the
+        // permit-first order instead yields `AlreadyLive`, which callers retry).
+        // Dropping `current` stops the executor and aborts its pump. This one
+        // path covers hibernation, shutdown, AND a panic unwind through the
+        // actor task.
         self.current = None;
         self.session = None;
+        self.permit = None;
         self.shared.release(self.card);
     }
 }
@@ -98,7 +113,7 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
             shared,
             executor,
             card,
-            _permit: permit,
+            permit: Some(permit),
             session: Some(session),
             supervisor: AttemptSupervisor::new(),
             inbox,
@@ -112,35 +127,29 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
         if let Some(initial) = self.initial.take() {
             self.dispatch(initial);
         }
-        while !self.at_rest() {
+        loop {
+            // Drain everything already queued BEFORE deciding to hibernate, so
+            // a command delivered to a freshly restored (or resting) card is
+            // processed rather than lost to an instant at-rest exit — this is
+            // what makes restore-with-queued-command lazy delivery work.
+            match self.inbox_rx.try_recv() {
+                Ok(message) => {
+                    if self.handle(message) {
+                        break;
+                    }
+                    continue;
+                }
+                Err(TryRecvError::Disconnected) => break,
+                Err(TryRecvError::Empty) => {}
+            }
+            if self.at_rest() {
+                break;
+            }
             let Some(message) = self.inbox_rx.recv().await else {
                 break;
             };
-            match message {
-                CardMessage::Command(command, reply) => {
-                    let result = self
-                        .apply(ProductInput::Command(command))
-                        .map_err(|_| CommandError::Internal);
-                    let _ = reply.send(result);
-                }
-                CardMessage::Shutdown(reply) => {
-                    // Stop the live worker without mutating product truth: a
-                    // process stop is not a transfer cancel (Pillar 7). Dropping
-                    // the current attempt stops its executor + pump; Restore
-                    // reconciles the still-non-quiescent record on the next start.
-                    self.current = None;
-                    let _ = reply.send(());
-                    break;
-                }
-                CardMessage::Signal { stamp, signal } => {
-                    if self
-                        .current
-                        .as_ref()
-                        .is_some_and(|meta| meta.stamp == stamp)
-                    {
-                        self.on_signal(stamp, signal);
-                    }
-                }
+            if self.handle(message) {
+                break;
             }
         }
         // Hibernation deliberately preserves the derived projection so an at-rest
@@ -150,6 +159,118 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
             self.shared.evict_projection(self.card);
         }
         // Actor drops here: store closed, registry lease + admission permit freed.
+    }
+
+    /// Handles one inbox message; `true` means the actor loop must break.
+    fn handle(&mut self, message: CardMessage) -> bool {
+        match message {
+            CardMessage::Frontend {
+                epoch,
+                id,
+                command,
+                acceptance,
+                completion,
+            } => {
+                self.on_frontend(epoch, id, command, acceptance, completion);
+                false
+            }
+            CardMessage::Shutdown(reply) => {
+                // Stop the live worker without mutating product truth: a
+                // process stop is not a transfer cancel (Pillar 7). Dropping
+                // the current attempt stops its executor + pump; Restore
+                // reconciles the still-non-quiescent record on the next start.
+                self.current = None;
+                let _ = reply.send(());
+                true
+            }
+            CardMessage::Signal { stamp, signal } => {
+                if self
+                    .current
+                    .as_ref()
+                    .is_some_and(|meta| meta.stamp == stamp)
+                {
+                    self.on_signal(stamp, signal);
+                }
+                false
+            }
+        }
+    }
+
+    /// The command intake's linearization point. Re-checks the commander epoch
+    /// (a reattach between the gate and here supersedes the command), answers
+    /// duplicates from the committed ledger, then sends acceptance BEFORE the
+    /// commit barrier runs and the completion only after it resolves.
+    fn on_frontend(
+        &mut self,
+        epoch: SubscriptionEpoch,
+        id: CommandId,
+        command: ProductCommand,
+        acceptance: oneshot::Sender<Result<FrontendVerdict, CommandRejected>>,
+        completion: oneshot::Sender<CommandCompletion>,
+    ) {
+        if self.shared.commander_epoch(self.card) != Some(epoch) {
+            let _ = acceptance.send(Err(CommandRejected::Superseded));
+            return;
+        }
+        match self
+            .session()
+            .record()
+            .command_ledger
+            .disposition(id, command)
+        {
+            Some(LedgerHit::Duplicate { state }) => {
+                let _ = acceptance.send(Ok(FrontendVerdict::Duplicate { state }));
+                let _ = completion.send(CommandCompletion::Committed { state });
+                return;
+            }
+            Some(LedgerHit::Conflict { .. }) => {
+                let _ = acceptance.send(Err(CommandRejected::Conflict));
+                return;
+            }
+            None => {}
+        }
+        let _ = acceptance.send(Ok(FrontendVerdict::Accepted));
+        let resolved = self
+            .apply_frontend(id, command)
+            .unwrap_or(CommandCompletion::Internal);
+        let _ = completion.send(resolved);
+    }
+
+    /// Applies an accepted frontend command through the exactly-once barrier,
+    /// then projects and dispatches exactly like any other reduction.
+    fn apply_frontend(
+        &mut self,
+        id: CommandId,
+        command: ProductCommand,
+    ) -> Result<CommandCompletion, IdentityError> {
+        let previous_state = self.session().record().state;
+        let applied = self.session_mut().apply_command(id, command)?;
+        let outcome = match applied {
+            CommandApplied::Applied { outcome } => outcome,
+            // The ledger was checked just above on this same single-threaded
+            // actor; answering the recorded disposition keeps this total.
+            CommandApplied::Duplicate { state } => {
+                return Ok(CommandCompletion::Committed { state });
+            }
+            // Equally unreachable after the same-actor check; typed rather
+            // than a lying disposition if the invariant ever breaks.
+            CommandApplied::Conflict { .. } => return Ok(CommandCompletion::Internal),
+        };
+        let state = outcome.state;
+        let committed = outcome.commit.authorizing_commit_succeeded();
+        let record = self.session().record().clone();
+        let update_kind = if state != previous_state && is_terminal_state(state) {
+            RecordUpdateKind::Terminal
+        } else {
+            RecordUpdateKind::State
+        };
+        self.shared.observe_record(update_kind, record);
+        self.dispatch(outcome);
+        Ok(if committed {
+            CommandCompletion::Committed { state }
+        } else {
+            CommandCompletion::CommitFailed { state }
+        })
     }
 
     /// A card at a quiescent resting state with no live worker needs no actor:

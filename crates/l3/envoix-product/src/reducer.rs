@@ -89,6 +89,7 @@ impl TransferRecord {
             facts,
             source_recoverable,
             receipt_request,
+            command_ledger: crate::CommandLedger::default(),
         };
         let effects = if record.facts.source_ready {
             vec![record.start_attempt(false)]
