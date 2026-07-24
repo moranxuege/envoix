@@ -5,6 +5,7 @@
 mod config;
 mod error;
 mod key;
+mod mailbox;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -15,14 +16,16 @@ use envoix_rendezvous_iroh::{
     EndpointConfig, IrohRendezvousError, bind_endpoint, endpoint_addr, serve_endpoint,
 };
 use iroh::{Endpoint, EndpointAddr, EndpointId};
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 pub use config::{
     DEFAULT_BIND, DEFAULT_CLOSE_GRACE_SECS, DEFAULT_HANDSHAKE_DEADLINE_SECS,
-    DEFAULT_JOIN_DEADLINE_SECS, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_ROOM_KEY_LENGTH,
-    DEFAULT_MAX_WAITING_ROOMS, DEFAULT_NODE_KEY_PATH, DEFAULT_RELAY_TTL_SECS,
-    DEFAULT_ROOM_TTL_SECS, ServerConfig,
+    DEFAULT_JOIN_DEADLINE_SECS, DEFAULT_MAILBOX_BIND, DEFAULT_MAILBOX_MAX_BLOB_SIZE,
+    DEFAULT_MAILBOX_MAX_ENTRIES, DEFAULT_MAILBOX_MAX_KEY_LENGTH, DEFAULT_MAILBOX_TTL_SECS,
+    DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_ROOM_KEY_LENGTH, DEFAULT_MAX_WAITING_ROOMS,
+    DEFAULT_NODE_KEY_PATH, DEFAULT_RELAY_TTL_SECS, DEFAULT_ROOM_TTL_SECS, ServerConfig,
 };
 pub use error::{KeyError, KeyOperation, ServerError};
 
@@ -31,8 +34,11 @@ pub struct ServerHandle {
     endpoint_addr: EndpointAddr,
     requested_bind: SocketAddr,
     bound_addr: SocketAddr,
+    mailbox_bound_addr: SocketAddr,
     shutdown_deadline: Duration,
-    task: JoinHandle<Result<(), IrohRendezvousError>>,
+    iroh_task: JoinHandle<Result<(), IrohRendezvousError>>,
+    mailbox_task: JoinHandle<Result<(), std::io::Error>>,
+    mailbox_shutdown: Option<oneshot::Sender<()>>,
 }
 
 impl ServerHandle {
@@ -48,6 +54,10 @@ impl ServerHandle {
         self.bound_addr
     }
 
+    pub const fn mailbox_bound_addr(&self) -> SocketAddr {
+        self.mailbox_bound_addr
+    }
+
     pub fn connect_string(&self) -> String {
         if self.requested_bind.ip().is_unspecified() {
             format!(
@@ -61,21 +71,29 @@ impl ServerHandle {
     }
 
     pub fn is_running(&self) -> bool {
-        !self.task.is_finished()
+        !self.iroh_task.is_finished() && !self.mailbox_task.is_finished()
     }
 
     pub async fn shutdown(mut self) -> Result<(), ServerError> {
         let endpoint = self.endpoint.clone();
+        if let Some(shutdown) = self.mailbox_shutdown.take() {
+            let _ = shutdown.send(());
+        }
         match timeout(self.shutdown_deadline, async {
             endpoint.close().await;
-            (&mut self.task).await
+            tokio::join!(&mut self.iroh_task, &mut self.mailbox_task)
         })
         .await
         {
-            Ok(completed) => map_server_task(completed),
+            Ok((iroh, mailbox)) => {
+                map_iroh_task(iroh)?;
+                map_mailbox_task(mailbox)
+            }
             Err(_) => {
-                self.task.abort();
-                let _ = self.task.await;
+                self.iroh_task.abort();
+                self.mailbox_task.abort();
+                let _ = self.iroh_task.await;
+                let _ = self.mailbox_task.await;
                 Err(ServerError::ShutdownDeadline)
             }
         }
@@ -87,11 +105,28 @@ impl ServerHandle {
                 signal.map_err(ServerError::Signal)?;
                 self.shutdown().await
             }
-            completed = &mut self.task => {
+            completed = &mut self.iroh_task => {
+                if let Some(shutdown) = self.mailbox_shutdown.take() {
+                    let _ = shutdown.send(());
+                }
+                let mailbox = timeout(self.shutdown_deadline, &mut self.mailbox_task)
+                    .await
+                    .map_err(|_| ServerError::ShutdownDeadline)?;
                 timeout(self.shutdown_deadline, self.endpoint.close())
                     .await
                     .map_err(|_| ServerError::ShutdownDeadline)?;
-                map_server_task(completed)
+                map_iroh_task(completed)?;
+                map_mailbox_task(mailbox)
+            }
+            completed = &mut self.mailbox_task => {
+                timeout(self.shutdown_deadline, self.endpoint.close())
+                    .await
+                    .map_err(|_| ServerError::ShutdownDeadline)?;
+                let iroh = timeout(self.shutdown_deadline, &mut self.iroh_task)
+                    .await
+                    .map_err(|_| ServerError::ShutdownDeadline)?;
+                map_mailbox_task(completed)?;
+                map_iroh_task(iroh)
             }
         }
     }
@@ -99,6 +134,13 @@ impl ServerHandle {
 
 pub async fn run(config: ServerConfig) -> Result<ServerHandle, ServerError> {
     let (registry_config, server_config) = config.mechanism_configs()?;
+    config.validate_mailbox()?;
+    let mailbox_listener = tokio::net::TcpListener::bind(config.mailbox_bind)
+        .await
+        .map_err(ServerError::MailboxBind)?;
+    let mailbox_bound_addr = mailbox_listener
+        .local_addr()
+        .map_err(ServerError::MailboxBind)?;
     let secret_key = key::load_or_create_node_key(&config.node_key_path)?;
     let endpoint_config =
         EndpointConfig::new(config.bind, config.relay, secret_key, config.bind_deadline)
@@ -111,11 +153,22 @@ pub async fn run(config: ServerConfig) -> Result<ServerHandle, ServerError> {
         .find(|address| address.is_ipv4() == config.bind.is_ipv4())
         .unwrap_or(config.bind);
     let shutdown_endpoint = endpoint.clone();
-    let task = tokio::spawn(serve_endpoint(
+    let iroh_task = tokio::spawn(serve_endpoint(
         endpoint,
         Arc::new(RoomRegistry::new(registry_config)),
         server_config,
         observe_connection,
+    ));
+    let (mailbox_shutdown, mailbox_shutdown_receiver) = oneshot::channel();
+    let mailbox_task = tokio::spawn(mailbox::serve(
+        mailbox_listener,
+        mailbox::MailboxLimits {
+            ttl: config.mailbox_ttl,
+            max_blob_size: config.mailbox_max_blob_size,
+            max_key_length: config.mailbox_max_key_length,
+            max_entries: config.mailbox_max_entries,
+        },
+        mailbox_shutdown_receiver,
     ));
 
     Ok(ServerHandle {
@@ -123,8 +176,11 @@ pub async fn run(config: ServerConfig) -> Result<ServerHandle, ServerError> {
         endpoint_addr: address,
         requested_bind: config.bind,
         bound_addr,
+        mailbox_bound_addr,
         shutdown_deadline: config.close_grace,
-        task,
+        iroh_task,
+        mailbox_task,
+        mailbox_shutdown: Some(mailbox_shutdown),
     })
 }
 
@@ -193,12 +249,20 @@ fn observe_connection(result: &Result<(), IrohRendezvousError>) {
     }
 }
 
-fn map_server_task(
+fn map_iroh_task(
     completed: Result<Result<(), IrohRendezvousError>, tokio::task::JoinError>,
 ) -> Result<(), ServerError> {
     completed
         .map_err(|_| ServerError::ServerTaskFailed)?
         .map_err(ServerError::Iroh)
+}
+
+fn map_mailbox_task(
+    completed: Result<Result<(), std::io::Error>, tokio::task::JoinError>,
+) -> Result<(), ServerError> {
+    completed
+        .map_err(|_| ServerError::MailboxTaskFailed)?
+        .map_err(ServerError::Mailbox)
 }
 
 #[cfg(test)]

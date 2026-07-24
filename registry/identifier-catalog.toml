@@ -602,3 +602,10 @@ owner = "crate:envoix-pairing"
 owner_path = "crates/l1/envoix-pairing/src/identifiers.rs"
 collision_scope = "crypto-label"
 extract = "rust-const:DATA_TOKEN_CONTEXT"
+
+[[identifier]]
+key = "pairing.mailbox_secret_context"
+owner = "crate:envoix-pairing"
+owner_path = "crates/l1/envoix-pairing/src/identifiers.rs"
+collision_scope = "crypto-label"
+extract = "rust-const:MAILBOX_SECRET_CONTEXT"

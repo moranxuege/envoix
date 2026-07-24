@@ -8,3 +8,4 @@ pub const BUNDLE_KEY_CONTEXT: &str = "envoix/rdz-pair/bundle-key/v2";
 pub const INITIATOR_SEAL_AAD: &[u8] = b"envoix/rdz-pair/seal/initiator/v2";
 pub const RESPONDER_SEAL_AAD: &[u8] = b"envoix/rdz-pair/seal/responder/v2";
 pub const DATA_TOKEN_CONTEXT: &str = "envoix/rdz-pair/data-token/v2";
+pub const MAILBOX_SECRET_CONTEXT: &str = "envoix/rdz-pair/mailbox-secret/v2";

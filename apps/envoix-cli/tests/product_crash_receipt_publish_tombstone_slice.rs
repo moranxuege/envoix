@@ -338,6 +338,7 @@ async fn handoff_offer_through_real_pairing(
 fn server_config(root: &Path) -> ServerConfig {
     let mut config = ServerConfig::operational_defaults();
     config.bind = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
+    config.mailbox_bind = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
     config.node_key_path = root.join("rendezvous-node.key");
     config.room_ttl = Duration::from_secs(10);
     config.relay_ttl = Duration::from_secs(10);

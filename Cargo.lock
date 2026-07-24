@@ -901,6 +901,7 @@ dependencies = [
  "envoix-attempt-iroh",
  "envoix-capabilities",
  "envoix-invite",
+ "envoix-mailbox",
  "envoix-operation-store",
  "envoix-outcomes",
  "envoix-pairing",
@@ -941,6 +942,15 @@ dependencies = [
  "base64",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "envoix-mailbox"
+version = "0.2.0"
+dependencies = [
+ "envoix-protocol",
+ "reqwest",
+ "rustls",
 ]
 
 [[package]]
@@ -1008,8 +1018,11 @@ dependencies = [
 name = "envoix-protocol"
 version = "0.2.0"
 dependencies = [
+ "blake3",
+ "chacha20poly1305",
  "envoix-outcomes",
  "envoix-types",
+ "zeroize",
 ]
 
 [[package]]
@@ -1040,11 +1053,18 @@ version = "0.2.0"
 name = "envoix-server"
 version = "0.2.0"
 dependencies = [
+ "bytes",
  "clap",
  "envoix-invite",
+ "envoix-mailbox",
  "envoix-pairing",
+ "envoix-protocol",
  "envoix-rendezvous",
  "envoix-rendezvous-iroh",
+ "envoix-types",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "iroh",
  "tempfile",
  "tokio",

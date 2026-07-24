@@ -69,3 +69,36 @@ impl fmt::Display for DataPlaneToken {
         formatter.write_str("DataPlaneToken([redacted])")
     }
 }
+
+pub struct MailboxSecret(Zeroizing<[u8; 32]>);
+
+impl MailboxSecret {
+    pub(crate) fn from_zeroizing(bytes: Zeroizing<[u8; 32]>) -> Self {
+        Self(bytes)
+    }
+
+    /// Explicitly crosses the redaction boundary for receipt sealing and verification.
+    pub fn expose(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl PartialEq for MailboxSecret {
+    fn eq(&self, other: &Self) -> bool {
+        blake3::Hash::from_bytes(*self.0) == blake3::Hash::from_bytes(*other.0)
+    }
+}
+
+impl Eq for MailboxSecret {}
+
+impl fmt::Debug for MailboxSecret {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("MailboxSecret([redacted])")
+    }
+}
+
+impl fmt::Display for MailboxSecret {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("MailboxSecret([redacted])")
+    }
+}

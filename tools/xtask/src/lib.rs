@@ -447,6 +447,9 @@ fn extract_compiled_owner(entry: &CatalogIdentifier) -> CheckResult<Extraction> 
         ("crate:envoix-pairing", "rust-const:DATA_TOKEN_CONTEXT") => {
             one(pairing::DATA_TOKEN_CONTEXT)
         }
+        ("crate:envoix-pairing", "rust-const:MAILBOX_SECRET_CONTEXT") => {
+            one(pairing::MAILBOX_SECRET_CONTEXT)
+        }
         _ => {
             return Err(format!(
                 "existing owner {} has unsupported extractor {}",

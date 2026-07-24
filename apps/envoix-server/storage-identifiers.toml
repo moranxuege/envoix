@@ -1,0 +1,7 @@
+[mailbox]
+receipt_table = "envoix_mailbox_receipts_v2"
+receipt_key_prefix = "receipt:v2:"
+
+[evidence]
+session_table = "envoix_evidence_sessions_v2"
+session_key_prefix = "evidence:v2:"

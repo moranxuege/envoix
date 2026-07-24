@@ -62,8 +62,12 @@ pub enum ServerError {
     RendezvousConfig(envoix_rendezvous::ConfigError),
     IrohConfig(envoix_rendezvous_iroh::ConfigError),
     Iroh(envoix_rendezvous_iroh::IrohRendezvousError),
+    InvalidMailboxConfig(&'static str),
+    MailboxBind(io::Error),
+    Mailbox(io::Error),
     Signal(io::Error),
     ServerTaskFailed,
+    MailboxTaskFailed,
     ShutdownDeadline,
 }
 
@@ -74,8 +78,14 @@ impl fmt::Display for ServerError {
             Self::RendezvousConfig(error) => error.fmt(formatter),
             Self::IrohConfig(error) => error.fmt(formatter),
             Self::Iroh(error) => error.fmt(formatter),
+            Self::InvalidMailboxConfig(reason) => {
+                write!(formatter, "invalid mailbox configuration: {reason}")
+            }
+            Self::MailboxBind(error) => write!(formatter, "failed to bind mailbox: {error}"),
+            Self::Mailbox(error) => write!(formatter, "mailbox server failed: {error}"),
             Self::Signal(error) => write!(formatter, "failed to wait for shutdown signal: {error}"),
             Self::ServerTaskFailed => formatter.write_str("rendezvous server task failed"),
+            Self::MailboxTaskFailed => formatter.write_str("mailbox server task failed"),
             Self::ShutdownDeadline => formatter.write_str("rendezvous shutdown deadline exceeded"),
         }
     }

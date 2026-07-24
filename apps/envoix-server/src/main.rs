@@ -5,9 +5,11 @@ use std::time::Duration;
 use clap::Parser;
 use envoix_server::{
     DEFAULT_BIND, DEFAULT_CLOSE_GRACE_SECS, DEFAULT_HANDSHAKE_DEADLINE_SECS,
-    DEFAULT_JOIN_DEADLINE_SECS, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_ROOM_KEY_LENGTH,
-    DEFAULT_MAX_WAITING_ROOMS, DEFAULT_NODE_KEY_PATH, DEFAULT_RELAY_TTL_SECS,
-    DEFAULT_ROOM_TTL_SECS, ServerConfig, ServerError, ServerHandle, run,
+    DEFAULT_JOIN_DEADLINE_SECS, DEFAULT_MAILBOX_BIND, DEFAULT_MAILBOX_MAX_BLOB_SIZE,
+    DEFAULT_MAILBOX_MAX_ENTRIES, DEFAULT_MAILBOX_MAX_KEY_LENGTH, DEFAULT_MAILBOX_TTL_SECS,
+    DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_ROOM_KEY_LENGTH, DEFAULT_MAX_WAITING_ROOMS,
+    DEFAULT_NODE_KEY_PATH, DEFAULT_RELAY_TTL_SECS, DEFAULT_ROOM_TTL_SECS, ServerConfig,
+    ServerError, ServerHandle, run,
 };
 use iroh::RelayUrl;
 use tracing_subscriber::EnvFilter;
@@ -17,6 +19,8 @@ use tracing_subscriber::EnvFilter;
 struct Cli {
     #[arg(long, default_value = DEFAULT_BIND)]
     bind: SocketAddr,
+    #[arg(long, default_value = DEFAULT_MAILBOX_BIND)]
+    mailbox_bind: SocketAddr,
     #[arg(long, default_value = DEFAULT_NODE_KEY_PATH)]
     secret_key: PathBuf,
     #[arg(long)]
@@ -37,12 +41,21 @@ struct Cli {
     max_connections: usize,
     #[arg(long, default_value_t = DEFAULT_HANDSHAKE_DEADLINE_SECS)]
     handshake_deadline: u64,
+    #[arg(long, default_value_t = DEFAULT_MAILBOX_TTL_SECS)]
+    mailbox_ttl: u64,
+    #[arg(long, default_value_t = DEFAULT_MAILBOX_MAX_BLOB_SIZE)]
+    mailbox_max_blob_size: usize,
+    #[arg(long, default_value_t = DEFAULT_MAILBOX_MAX_KEY_LENGTH)]
+    mailbox_max_key_length: usize,
+    #[arg(long, default_value_t = DEFAULT_MAILBOX_MAX_ENTRIES)]
+    mailbox_max_entries: usize,
 }
 
 impl Cli {
     fn into_config(self) -> ServerConfig {
         let mut config = ServerConfig::operational_defaults();
         config.bind = self.bind;
+        config.mailbox_bind = self.mailbox_bind;
         config.node_key_path = self.secret_key;
         config.relay = self.relay;
         config.room_ttl = Duration::from_secs(self.room_ttl);
@@ -53,6 +66,10 @@ impl Cli {
         config.max_waiting_rooms = self.max_waiting_rooms;
         config.max_connections = self.max_connections;
         config.handshake_deadline = Duration::from_secs(self.handshake_deadline);
+        config.mailbox_ttl = Duration::from_secs(self.mailbox_ttl);
+        config.mailbox_max_blob_size = self.mailbox_max_blob_size;
+        config.mailbox_max_key_length = self.mailbox_max_key_length;
+        config.mailbox_max_entries = self.mailbox_max_entries;
         config
     }
 }
@@ -72,10 +89,12 @@ fn announce(handle: &ServerHandle) {
     tracing::info!(
         endpoint_id = %handle.endpoint_id(),
         bind = %handle.bound_addr(),
+        mailbox_bind = %handle.mailbox_bound_addr(),
         connect = %handle.connect_string(),
         "rendezvous server listening"
     );
     println!("rendezvous endpoint id: {}", handle.endpoint_id());
     println!("listening on {}", handle.bound_addr());
+    println!("mailbox listening on {}", handle.mailbox_bound_addr());
     println!("connect with: {}", handle.connect_string());
 }

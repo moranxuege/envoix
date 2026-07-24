@@ -7,15 +7,15 @@ use crate::PairingError;
 use crate::bundle::{DescriptorPayload, PeerDescriptor, open_descriptor, seal_descriptor};
 use crate::identifiers::{
     BUNDLE_KEY_CONTEXT, CONFIRM_KEY_CONTEXT, DATA_TOKEN_CONTEXT, INITIATOR_CONFIRM_LABEL,
-    INITIATOR_IDENTITY, INITIATOR_SEAL_AAD, RESPONDER_CONFIRM_LABEL, RESPONDER_IDENTITY,
-    RESPONDER_SEAL_AAD, SPAKE2_DOMAIN,
+    INITIATOR_IDENTITY, INITIATOR_SEAL_AAD, MAILBOX_SECRET_CONTEXT, RESPONDER_CONFIRM_LABEL,
+    RESPONDER_IDENTITY, RESPONDER_SEAL_AAD, SPAKE2_DOMAIN,
 };
 use crate::message::{
     Confirmation, MessageKind, PairingMessage, PakeResponse, PakeStart, decode_message,
     encode_message,
 };
 use crate::random::{EntropySource, SpakeRng};
-use crate::secret::{DataPlaneToken, PairingCode};
+use crate::secret::{DataPlaneToken, MailboxSecret, PairingCode};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Role {
@@ -65,6 +65,7 @@ pub struct Paired {
     role: Role,
     bundle_key: Zeroizing<[u8; 32]>,
     data_token: DataPlaneToken,
+    mailbox_secret: MailboxSecret,
     next_nonce: u64,
 }
 
@@ -74,12 +75,14 @@ impl Paired {
             confirmation_key,
             bundle_key,
             data_token,
+            mailbox_secret,
         } = keys;
         drop(confirmation_key);
         Self {
             role,
             bundle_key,
             data_token: DataPlaneToken::from_zeroizing(data_token),
+            mailbox_secret: MailboxSecret::from_zeroizing(mailbox_secret),
             next_nonce: 0,
         }
     }
@@ -90,6 +93,10 @@ impl Paired {
 
     pub const fn data_token(&self) -> &DataPlaneToken {
         &self.data_token
+    }
+
+    pub const fn mailbox_secret(&self) -> &MailboxSecret {
+        &self.mailbox_secret
     }
 
     /// Transfers the derived data-plane credential to the attempt executor.
@@ -228,6 +235,7 @@ pub(crate) struct KeySchedule {
     confirmation_key: Zeroizing<[u8; 32]>,
     bundle_key: Zeroizing<[u8; 32]>,
     data_token: Zeroizing<[u8; 32]>,
+    mailbox_secret: Zeroizing<[u8; 32]>,
 }
 
 impl KeySchedule {
@@ -237,6 +245,7 @@ impl KeySchedule {
             confirmation_key: Zeroizing::new(blake3::derive_key(CONFIRM_KEY_CONTEXT, &material)),
             bundle_key: Zeroizing::new(blake3::derive_key(BUNDLE_KEY_CONTEXT, &material)),
             data_token: Zeroizing::new(blake3::derive_key(DATA_TOKEN_CONTEXT, &material)),
+            mailbox_secret: Zeroizing::new(blake3::derive_key(MAILBOX_SECRET_CONTEXT, &material)),
         }
     }
 
@@ -259,6 +268,11 @@ impl KeySchedule {
     #[cfg(test)]
     pub(crate) fn derived_data_token(&self) -> &[u8; 32] {
         &self.data_token
+    }
+
+    #[cfg(test)]
+    pub(crate) fn derived_mailbox_secret(&self) -> &[u8; 32] {
+        &self.mailbox_secret
     }
 
     pub(crate) fn verify_confirmation(

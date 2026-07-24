@@ -1,0 +1,14 @@
+[package]
+name = "envoix-mailbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[package.metadata.envoix]
+layer = "L2"
+role = "library"
+
+[dependencies]
+envoix-protocol = { path = "../../l1/envoix-protocol" }
+reqwest.workspace = true
+rustls.workspace = true

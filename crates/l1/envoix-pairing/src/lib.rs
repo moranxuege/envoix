@@ -22,7 +22,7 @@ pub use message::{
     SealedDescriptor, WIRE_HEADER_LEN, decode_message, encode_message,
 };
 pub use random::{EntropyError, EntropySource, SystemEntropy};
-pub use secret::{DataPlaneToken, PairingCode};
+pub use secret::{DataPlaneToken, MailboxSecret, PairingCode};
 
 #[cfg(test)]
 mod tests;

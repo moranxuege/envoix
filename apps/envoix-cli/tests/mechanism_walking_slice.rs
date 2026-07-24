@@ -783,6 +783,7 @@ async fn headless_end_to_end_transfer_and_resume() {
 
     let mut server_config = ServerConfig::operational_defaults();
     server_config.bind = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
+    server_config.mailbox_bind = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
     server_config.node_key_path = directory.path().join("rendezvous-node.key");
     server_config.room_ttl = Duration::from_secs(10);
     server_config.relay_ttl = Duration::from_secs(10);

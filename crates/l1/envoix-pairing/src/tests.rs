@@ -51,6 +51,11 @@ fn complete_pair(code: &str) -> Result<(Paired, Paired), PairingError> {
 fn pairing_v1_conformance() {
     let (mut initiator, mut responder) = complete_pair("42-galaxy-pencil").unwrap();
     assert_eq!(initiator.data_token(), responder.data_token());
+    assert_eq!(initiator.mailbox_secret(), responder.mailbox_secret());
+    assert_ne!(
+        initiator.mailbox_secret().expose(),
+        initiator.data_token().expose()
+    );
 
     let initiator_descriptor = DescriptorPayload::new(b"initiator endpoint".to_vec()).unwrap();
     let sealed = initiator.seal_descriptor(&initiator_descriptor).unwrap();
@@ -132,6 +137,14 @@ fn deterministic_fixtures() {
             0x73, 0x55, 0xc4, 0x37, 0x86, 0xf0, 0x75, 0x3d, 0x11, 0x47, 0x90, 0xdd, 0xd4, 0x5b,
             0xff, 0xca, 0xd8, 0xea, 0x02, 0x4f, 0x81, 0x28, 0x72, 0xd0, 0x91, 0xbc, 0xee, 0xd9,
             0x22, 0x2d, 0xdf, 0xe3,
+        ]
+    );
+    assert_eq!(
+        schedule.derived_mailbox_secret(),
+        &[
+            0xcd, 0x85, 0x3d, 0xdd, 0x38, 0x9d, 0x74, 0xb6, 0xe8, 0xde, 0xf5, 0x18, 0x89, 0xbc,
+            0x9e, 0xff, 0x07, 0xb6, 0x07, 0x7e, 0x85, 0x57, 0xc4, 0x54, 0xe2, 0x21, 0x69, 0x52,
+            0x23, 0x2a, 0x48, 0xa4,
         ]
     );
     assert_eq!(
@@ -228,6 +241,15 @@ fn secret_redaction() {
         .collect::<String>();
     assert!(!format!("{token:?}").contains(&token_hex));
     assert!(!format!("{token}").contains(&token_hex));
+
+    let mailbox_secret = initiator.mailbox_secret();
+    let mailbox_secret_hex = mailbox_secret
+        .expose()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert!(!format!("{mailbox_secret:?}").contains(&mailbox_secret_hex));
+    assert!(!format!("{mailbox_secret}").contains(&mailbox_secret_hex));
 }
 
 fn sealed_nonce(encoded: &[u8]) -> [u8; 12] {

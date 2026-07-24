@@ -9,9 +9,14 @@ layer = "L7"
 role = "composition-root"
 
 [dependencies]
+bytes.workspace = true
 clap.workspace = true
+envoix-protocol = { path = "../../crates/l1/envoix-protocol" }
 envoix-rendezvous = { path = "../../crates/l2/envoix-rendezvous" }
 envoix-rendezvous-iroh = { path = "../../crates/l2/envoix-rendezvous-iroh" }
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
 iroh.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -19,6 +24,8 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 envoix-invite = { path = "../../crates/l1/envoix-invite" }
+envoix-mailbox = { path = "../../crates/l2/envoix-mailbox" }
 envoix-pairing = { path = "../../crates/l1/envoix-pairing" }
+envoix-types = { path = "../../crates/l0/envoix-types" }
 tempfile.workspace = true
 toml.workspace = true
