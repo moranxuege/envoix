@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -9,7 +9,7 @@ use envoix_bindings::bridge::{
 };
 use envoix_bindings::command::encode_command_frame;
 use envoix_bindings::read::encode_read_frame;
-use envoix_bindings::{card_update_frame, lag_frame};
+use envoix_bindings::{card_update_frame, closed_frame, lag_frame, subscribe_rejected_frame};
 use envoix_capabilities::{Admission, DutyLedger, Registration};
 use envoix_platform_android::{DutyAdapter, IssueDecision, WorkOrder, WorkReport, platform_work};
 use envoix_product::{
@@ -17,7 +17,7 @@ use envoix_product::{
 };
 use envoix_runtime::{
     CardSubscription, CardUpdateKind, CommandRejected, CommandVerdict, Runtime, RuntimeConfig,
-    TransferRecord, TryRecvError,
+    SubscribeError, TransferRecord, TryRecvError,
 };
 use envoix_storage_local::LocalStorage;
 use envoix_types::{ByteCount, Direction, OfferedName, RecordId};
@@ -36,6 +36,45 @@ const PUMP_INTERVAL: Duration = Duration::from_millis(50);
 pub enum BootError {
     Storage,
     Runtime,
+}
+
+/// Identifies ONE frontend attachment.
+///
+/// [`Host::open_lane`] mints a fresh token and supersedes every earlier one in
+/// the same instant. The frame queue is destructive, so a consumer that cannot
+/// be told apart from its successor is a consumer that can eat the snapshot the
+/// successor is waiting for; carrying the token on every poll makes that
+/// unrepresentable rather than a matter of which thread wakes first.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AttachmentToken(u64);
+
+impl AttachmentToken {
+    /// The token no attachment ever holds: what the lane carries before it has
+    /// attached, and what an unrecognised value from the wire becomes.
+    pub const NONE: Self = Self(0);
+
+    pub const fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+/// What one poll of the frame lane found.
+///
+/// `Superseded` is a REFUSAL, not an emptiness: nothing was consumed, and the
+/// caller holding that token will never consume anything again. The frontend
+/// needs to be able to tell the two apart, or a replaced pump spins forever.
+#[derive(Debug, Eq, PartialEq)]
+pub enum FramePoll {
+    /// One encoded contract frame, addressed to the attachment that asked.
+    Frame(Vec<u8>),
+    /// The attachment is current and nothing is queued right now.
+    Drained,
+    /// A newer attachment holds the lane; this token consumes nothing.
+    Superseded,
 }
 
 /// The Android composition root: one process-wide runtime owner.
@@ -57,6 +96,14 @@ struct Shared {
 
 #[derive(Default)]
 struct SharedState {
+    /// The attachment that currently owns the frame lane. It starts at
+    /// [`AttachmentToken::NONE`], so a frontend that polls without attaching is
+    /// superseded from the outset.
+    attachment: AttachmentToken,
+    /// Every card this host has admitted or restored. An attach that the
+    /// runtime refused is still a card the host knows about, so the next
+    /// attachment retries it instead of losing it silently.
+    known: BTreeSet<RecordId>,
     subscriptions: HashMap<RecordId, CardSubscription>,
     ledger: DutyLedger,
     adapter: DutyAdapter,
@@ -153,11 +200,50 @@ impl Host {
     /// Opens (or refreshes) the host's own observer subscription for `card`.
     /// The newest attachment is the card's commander (BN2), so this is also
     /// the epoch under which frontend submissions are authorized.
+    ///
+    /// A refusal is typed truth, not silence: the reason crosses to the
+    /// frontend as a `subscribe_rejected` frame and the card stays known, so
+    /// the next attachment tries again.
     pub fn attach(&self, card: RecordId) {
+        let subscription = self.subscribe(card);
+        install(&mut self.shared.lock(), card, subscription);
+    }
+
+    fn subscribe(&self, card: RecordId) -> Result<CardSubscription, SubscribeError> {
         let capacity = NonZeroUsize::new(64).expect("nonzero");
-        if let Ok(subscription) = self.runtime.subscribe(card, capacity) {
-            self.shared.lock().subscriptions.insert(card, subscription);
+        self.runtime.subscribe(card, capacity)
+    }
+
+    /// Opens a fresh frontend attachment over the whole lane.
+    ///
+    /// The frontend owns no lifetime (Pillar 7): this starts nothing, stops
+    /// nothing and touches no durable state. It discards the backlog the
+    /// superseded attachment never drained and re-subscribes every known card,
+    /// so each card's stream restarts at a NEW epoch that opens with the
+    /// snapshot the contract promises — which is what makes a re-attached
+    /// frontend usable at all.
+    ///
+    /// There is deliberately no matching detach. A frontend that goes away
+    /// simply stops polling, so "leave" is not a verb it can spell and cannot
+    /// be the thing that affects a transfer.
+    ///
+    /// The returned token is the attachment's identity, and the ONE thing that
+    /// can consume from the lane afterwards. Every subscription is opened
+    /// before the lock is taken and the whole set is installed under it, so the
+    /// pump never observes a lane that is half-way through being reopened.
+    pub fn open_lane(&self) -> AttachmentToken {
+        let cards: Vec<RecordId> = self.shared.lock().known.iter().copied().collect();
+        let fresh: Vec<(RecordId, Result<CardSubscription, SubscribeError>)> = cards
+            .into_iter()
+            .map(|card| (card, self.subscribe(card)))
+            .collect();
+        let mut state = self.shared.lock();
+        state.attachment = AttachmentToken(state.attachment.0 + 1);
+        state.frames.clear();
+        for (card, subscription) in fresh {
+            install(&mut state, card, subscription);
         }
+        state.attachment
     }
 
     fn spawn_pump(&self) {
@@ -170,9 +256,20 @@ impl Host {
         });
     }
 
-    /// One encoded contract frame for the frontend lane, if any is queued.
-    pub fn poll_frame(&self) -> Option<Vec<u8>> {
-        self.shared.lock().frames.pop_front()
+    /// One encoded contract frame for the attachment `token` identifies.
+    ///
+    /// The queue is destructive, so the token is checked BEFORE anything is
+    /// popped: a superseded consumer cannot take the snapshot its successor is
+    /// waiting for, whatever order the two threads happen to run in.
+    pub fn poll_frame(&self, token: AttachmentToken) -> FramePoll {
+        let mut state = self.shared.lock();
+        if token != state.attachment {
+            return FramePoll::Superseded;
+        }
+        state
+            .frames
+            .pop_front()
+            .map_or(FramePoll::Drained, FramePoll::Frame)
     }
 
     /// One encoded platform work order for the service executor, if any.
@@ -196,18 +293,23 @@ impl Host {
         let runtime = Arc::clone(&self.runtime);
         self.tokio.block_on(async move {
             // Take the subscription out for the await so no lock is held
-            // across it; the pump simply skips the card for one tick.
-            let taken = shared.lock().subscriptions.remove(&spec.card);
+            // across it; the pump simply skips the card for one tick. The
+            // attachment it was taken under is remembered with it: putting it
+            // back is only correct while it is still the card's commander.
+            let (attachment, taken) = {
+                let mut state = shared.lock();
+                (state.attachment, state.subscriptions.remove(&spec.card))
+            };
             let acceptance = match taken {
                 Some(subscription) if subscription.epoch().get() == spec.epoch => {
                     let acceptance = runtime
                         .submit_command(&subscription, spec.command_id, spec.command)
                         .await;
-                    shared.lock().subscriptions.insert(spec.card, subscription);
+                    restore(&shared, attachment, spec.card, subscription);
                     acceptance
                 }
                 Some(subscription) => {
-                    shared.lock().subscriptions.insert(spec.card, subscription);
+                    restore(&shared, attachment, spec.card, subscription);
                     Err(CommandRejected::StaleEpoch)
                 }
                 None => Err(CommandRejected::UnknownCard),
@@ -288,17 +390,66 @@ impl Host {
     }
 }
 
+/// Records one subscribe outcome against the shared state, under a lock the
+/// caller already holds. A refusal is typed truth: the reason crosses to the
+/// frontend as a `subscribe_rejected` frame.
+fn install(
+    state: &mut SharedState,
+    card: RecordId,
+    subscription: Result<CardSubscription, SubscribeError>,
+) {
+    match subscription {
+        Ok(subscription) => {
+            state.known.insert(card);
+            state.subscriptions.insert(card, subscription);
+        }
+        Err(error) => {
+            state.subscriptions.remove(&card);
+            // A card the runtime holds no projection for is nothing to
+            // observe, so it stops being one of ours; a stopped or exhausted
+            // runtime is a reason to try again next time.
+            if matches!(error, SubscribeError::UnknownCard) {
+                state.known.remove(&card);
+            } else {
+                state.known.insert(card);
+            }
+            if let Ok(bytes) = encode_read_frame(&subscribe_rejected_frame(card, error)) {
+                push_bounded(&mut state.frames, bytes);
+            }
+        }
+    }
+}
+
+/// Puts a subscription taken out for an await back, but only while it is still
+/// the card's commander: a concurrent `open_lane` installs a fresh-epoch
+/// subscription, and overwriting it with this one would lose that epoch's
+/// snapshot and freeze the card at an epoch nothing feeds.
+fn restore(
+    shared: &Shared,
+    attachment: AttachmentToken,
+    card: RecordId,
+    subscription: CardSubscription,
+) {
+    let mut state = shared.lock();
+    if state.attachment == attachment && !state.subscriptions.contains_key(&card) {
+        state.subscriptions.insert(card, subscription);
+    }
+}
+
 /// Drains every subscription once: contract frames to the frame lane, duty
 /// updates through the adapter to the work lane.
 fn pump_once(shared: &Shared) {
     let mut state = shared.lock();
     let SharedState {
+        attachment: _,
+        known: _,
         subscriptions,
         ledger,
         adapter,
         frames,
         work,
     } = &mut *state;
+    let mut closed: Vec<(RecordId, u64)> = Vec::new();
     for (card, subscription) in subscriptions.iter_mut() {
         loop {
             match subscription.try_recv() {
@@ -330,7 +481,14 @@ fn pump_once(shared: &Shared) {
                         push_bounded(frames, bytes);
                     }
                 }
-                Err(TryRecvError::Empty | TryRecvError::Closed) => break,
+                Err(TryRecvError::Empty) => break,
+                // The runtime ended this epoch. Surfacing it once — and
+                // dropping the dead subscription — is what stops the lane from
+                // pretending a card is still being observed.
+                Err(TryRecvError::Closed) => {
+                    closed.push((*card, subscription.epoch().get()));
+                    break;
+                }
                 Err(TryRecvError::Lagged(lag)) => {
                     let frame = lag_frame(lag.epoch.get(), *card, lag.missed);
                     if let Ok(bytes) = encode_read_frame(&frame) {
@@ -339,6 +497,12 @@ fn pump_once(shared: &Shared) {
                     break;
                 }
             }
+        }
+    }
+    for (card, epoch) in closed {
+        subscriptions.remove(&card);
+        if let Ok(bytes) = encode_read_frame(&closed_frame(epoch, card)) {
+            push_bounded(frames, bytes);
         }
     }
 }
@@ -351,5 +515,55 @@ const fn observed_record(kind: &CardUpdateKind) -> Option<&TransferRecord> {
         | CardUpdateKind::State(record)
         | CardUpdateKind::Terminal(record) => Some(record),
         CardUpdateKind::CapabilityDuty { .. } => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `submit` takes the card's subscription out for its await so no lock is
+    /// held across it. If the frontend reopens the lane in that window, the
+    /// subscription put back afterwards is the SUPERSEDED one: the fresh
+    /// epoch's snapshot is lost and the card freezes at an epoch nothing feeds.
+    /// F1b made `open_lane` frontend-triggerable at any instant, so the window
+    /// is real; the reinsert is guarded on still being the card's commander.
+    #[test]
+    fn a_superseded_subscription_never_overwrites_the_cards_commander() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let host = Host::boot(root.path()).expect("the host boots");
+        let card = host
+            .create_for_e2e("r5-card.bin", 1024)
+            .expect("a durable card is created");
+
+        let attachment = host.open_lane();
+        let taken = host
+            .shared
+            .lock()
+            .subscriptions
+            .remove(&card)
+            .expect("the card has a live subscription");
+        // The frontend re-attaches while the await is in flight.
+        let reopened = host.open_lane();
+        let fresh = host.shared.lock().subscriptions[&card].epoch().get();
+        assert_ne!(fresh, taken.epoch().get());
+
+        restore(&host.shared, attachment, card, taken);
+        assert_eq!(
+            host.shared.lock().subscriptions[&card].epoch().get(),
+            fresh,
+            "the superseded subscription overwrote the card's commander"
+        );
+
+        // With no reopen in the window the subscription simply goes back.
+        let taken = host
+            .shared
+            .lock()
+            .subscriptions
+            .remove(&card)
+            .expect("still subscribed");
+        let epoch = taken.epoch().get();
+        restore(&host.shared, reopened, card, taken);
+        assert_eq!(host.shared.lock().subscriptions[&card].epoch().get(), epoch);
     }
 }

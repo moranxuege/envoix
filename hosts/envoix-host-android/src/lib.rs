@@ -29,7 +29,7 @@ mod stores;
 mod jni_lane;
 
 pub use executor::PreparedIrohExecutor;
-pub use host::{BootError, Host};
+pub use host::{AttachmentToken, BootError, FramePoll, Host};
 pub use provider::HostProvider;
 pub use store::HostStore;
 pub use stores::{CardStores, LiveStore};

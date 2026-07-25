@@ -5,3 +5,5 @@ local.properties
 # cargo-ndk output; rebuilt by scripts/build-jni-libs.sh
 app/src/debug/jniLibs/
 app/src/release/jniLibs/
+app/.cxx/
+app/src/main/java/io/flutter/plugins/GeneratedPluginRegistrant.java

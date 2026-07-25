@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 pub mod release;
 
-pub use release::{ReleaseGateReport, record_payload, release_gate};
+pub use release::{ReleaseGateReport, record_bundled, record_payload, release_gate};
 
 pub type CheckResult<T> = Result<T, String>;
 
@@ -328,6 +328,9 @@ fn extract_identifier(root: &Path, entry: &CatalogIdentifier) -> CheckResult<Ext
     if entry.extract == "android-manifest-provider-authority:generated-per-variant" {
         return extract_manifest_provider_authorities(&owner_path);
     }
+    if let Some(key) = entry.extract.strip_prefix("pubspec-key:") {
+        return extract_pubspec_key(&owner_path, key);
+    }
 
     extract_compiled_owner(root, entry)
 }
@@ -369,6 +372,24 @@ fn extract_gradle_application_id(path: &Path, flavor: &str) -> CheckResult<Extra
         "{} has no applicationId for flavor {flavor}",
         path.display()
     ))
+}
+
+/// A top-level scalar key of a pubspec, which is flat where it matters
+/// (`version: 0.2.0`). Indented lines are a nested mapping and never this key.
+fn extract_pubspec_key(path: &Path, key: &str) -> CheckResult<Extraction> {
+    let text = fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    for line in text.lines() {
+        if line.starts_with(char::is_whitespace) {
+            continue;
+        }
+        if let Some(value) = line
+            .strip_prefix(key)
+            .and_then(|rest| rest.strip_prefix(':'))
+        {
+            return Ok(Extraction::Values(vec![value.trim().to_owned()]));
+        }
+    }
+    Err(format!("{} has no top-level `{key}:`", path.display()))
 }
 
 /// The `${applicationId}.files`-style provider authority, expanded to one
@@ -540,6 +561,24 @@ fn extract_compiled_owner(root: &Path, entry: &CatalogIdentifier) -> CheckResult
                 }
             }
             values
+        }
+        ("crate:envoix-platform-android", "rust-function:frontend_lane_channel") => {
+            let gradle = root.join("apps/envoix-flutter/android/app/build.gradle.kts");
+            if !gradle.exists() {
+                return Ok(Extraction::Pending(
+                    "depends on pending Android namespace owner".into(),
+                ));
+            }
+            let Extraction::Values(namespaces) = extract_gradle_property(&gradle, "namespace")?
+            else {
+                return Err("gradle namespace unexpectedly pending".into());
+            };
+            namespaces
+                .iter()
+                .map(|namespace| {
+                    envoix_platform_android::identifiers::frontend_lane_channel(namespace)
+                })
+                .collect()
         }
         ("crate:envoix-platform-android", "rust-const:PRIVATE_STORAGE_ROOT") => {
             one(envoix_platform_android::identifiers::PRIVATE_STORAGE_ROOT)

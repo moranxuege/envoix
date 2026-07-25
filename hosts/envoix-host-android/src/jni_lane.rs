@@ -13,11 +13,16 @@ use std::sync::{OnceLock, RwLock};
 
 use jni::JNIEnv;
 use jni::objects::{JByteArray, JClass, JString};
-use jni::sys::{jboolean, jbyteArray};
+use jni::sys::{jboolean, jbyteArray, jlong};
 
-use crate::host::Host;
+use crate::host::{AttachmentToken, FramePoll, Host};
 
 static HOST: OnceLock<RwLock<Option<Host>>> = OnceLock::new();
+
+/// The Kotlin exception a superseded poll raises. A refusal that reads as
+/// "nothing queued" would leave the replaced pump spinning forever, so the
+/// frontend is told in the one way a JNI method can say something typed.
+const SUPERSEDED: &str = "app/envoix/host/SupersededAttachment";
 
 fn host_slot() -> &'static RwLock<Option<Host>> {
     HOST.get_or_init(|| RwLock::new(None))
@@ -67,14 +72,39 @@ pub extern "system" fn Java_app_envoix_host_NativeHost_boot(
     }
 }
 
-/// `NativeHost.pollFrame(): ByteArray?` — one read/command contract frame.
+/// `NativeHost.attach(): Long` — opens a fresh frontend attachment and returns
+/// its token; 0 means no host is running.
+///
+/// The one verb an observer needs and the only one it gets: it starts and
+/// stops nothing, and the lane has no detach counterpart, so a frontend that
+/// goes away cannot spell anything a transfer could notice. The token is what
+/// makes the attachment an identity rather than an anonymous consumer.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_app_envoix_host_NativeHost_attach(
+    _env: JNIEnv<'_>,
+    _class: JClass<'_>,
+) -> jlong {
+    with_host(Host::open_lane).map_or(0, |token| token.raw() as jlong)
+}
+
+/// `NativeHost.pollFrame(token): ByteArray?` — one read/command contract frame
+/// for THAT attachment. A superseded token consumes nothing and raises
+/// `SupersededAttachment`.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_app_envoix_host_NativeHost_pollFrame(
     mut env: JNIEnv<'_>,
     _class: JClass<'_>,
+    token: jlong,
 ) -> jbyteArray {
-    let frame = with_host(Host::poll_frame).flatten();
-    bytes_out(&mut env, frame)
+    let token = AttachmentToken::from_raw(token as u64);
+    match with_host(|host| host.poll_frame(token)) {
+        Some(FramePoll::Frame(bytes)) => bytes_out(&mut env, Some(bytes)),
+        Some(FramePoll::Superseded) => {
+            let _ = env.throw_new(SUPERSEDED, "a newer attachment holds the frame lane");
+            std::ptr::null_mut()
+        }
+        Some(FramePoll::Drained) | None => std::ptr::null_mut(),
+    }
 }
 
 /// `NativeHost.pollWork(): ByteArray?` — one platform work order.

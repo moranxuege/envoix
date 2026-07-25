@@ -11,6 +11,33 @@
         android:allowBackup="false"
         android:label="Envoix">
 
+        <!-- The observer. It attaches to whatever the service is already
+             running and detaches by dying; `configChanges` is the Flutter
+             template's list, so a rotation never recreates it.
+
+             A LAUNCHER activity has to be exported, so the launch mode is what
+             bounds it: `singleInstance` means the system holds at most one
+             instance, alone in its task, however it is started. One instance is
+             one engine, one lane and one consumer of a destructive queue —
+             which is the state the frame lane can actually reason about. -->
+        <activity
+            android:name=".MainActivity"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:exported="true"
+            android:hardwareAccelerated="true"
+            android:launchMode="singleInstance"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- The embedding version the Flutter engine looks for. -->
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+
         <!-- The process-lifetime owner: transfers live and die with this
              service, never with a UI attachment (Pillar 7). -->
         <service

@@ -8,6 +8,14 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jlleitschuh.gradle.ktlint")
+    // Compiles the Dart in ../.. and packages the engine. Must come last: it
+    // reads the android extension the plugins above install.
+    id("dev.flutter.flutter-gradle-plugin")
+}
+
+/** The Flutter package whose Dart this app runs. */
+flutter {
+    source = "../.."
 }
 
 /** The repository root; this project lives at apps/envoix-flutter/android/app. */
@@ -38,8 +46,11 @@ fun policyList(key: String): List<String> = policy(key).split(',').filter(String
 val expectedSigner = policy("signer_sha256")
 val requiredAbis = policyList("required_abis")
 
-/** The one library the app loads; anything else in jniLibs is dead weight. */
+/** The one library this repository BUILDS; anything else in jniLibs is dead weight. */
 val hostSoname = policy("native_library")
+
+/** Libraries the release packages but does not build, by soname. */
+val bundledLibraries = policyList("bundled_libraries")
 
 /** The complete exported surface a release payload may have, in both directions. */
 val allowedNativeSymbols = policyList("allowed_native_symbols").toSet()
@@ -130,6 +141,17 @@ android {
             // Never `signingConfigs.getByName("debug")`: an unsigned release is
             // a loud failure, a debug-signed one would be a silent lie.
             signingConfig = signingConfigs.findByName("release")
+        }
+    }
+
+    packaging {
+        jniLibs {
+            // The payload record accounts for the bytes cargo-ndk produced, so
+            // the packaged file must BE those bytes. AGP strips a native
+            // library on its way into the archive, which would leave the
+            // shipped artifact impossible to tie back to the sources it was
+            // built from — the one thing that record exists to state.
+            keepDebugSymbols += "**/$hostSoname"
         }
     }
 
@@ -412,14 +434,85 @@ fun manifestContainer(
     return container
 }
 
-/** PEM trust material, whether it sits in an asset, a resource or a string pool. */
+/**
+ * A complete PEM header: the five dashes, a label, and five dashes again. The
+ * label class carries digits because real ones do — `PKCS7`, `X509 CRL`,
+ * `PKCS12`, `SSH2 PUBLIC KEY` — and a fix for a false positive that quietly
+ * stopped catching those would be worse than the false positive.
+ */
+val pemHeader = Regex("^-----BEGIN [A-Z0-9 ]{1,48}-----")
+
+/**
+ * PEM trust material, whether it sits in an asset, a resource or a string pool.
+ *
+ * The LABEL and its closing dashes are what separate trust material from a
+ * mention of it. `libflutter.so` carries the bare string `"-----BEGIN "`
+ * because dart:io's own PEM reader is compiled into it, next to `"-----END "`
+ * and `"OPEN "` in the same constant pool — a prefix-only test reads that as a
+ * packaged root certificate. Every label still matches, so a CERTIFICATE, a
+ * PRIVATE KEY or a PUBLIC KEY block is caught exactly as before.
+ */
 fun carriesPem(bytes: ByteArray): Boolean =
     listOf(Charsets.US_ASCII, Charsets.UTF_16LE, Charsets.UTF_16BE).any { charset ->
         val needle = "-----BEGIN ".toByteArray(charset)
+        // The longest header this can be: the prefix, 48 label characters and
+        // the closing dashes, in whatever width the charset uses.
+        val window = needle.size + 53 * (needle.size / "-----BEGIN ".length)
         (0..bytes.size - needle.size).any { start ->
-            needle.indices.all { index -> bytes[start + index] == needle[index] }
+            needle.indices.all { index -> bytes[start + index] == needle[index] } &&
+                pemHeader.containsMatchIn(
+                    String(bytes, start, minOf(window, bytes.size - start), charset),
+                )
         }
     }
+
+/** Labels a packaged trust root could realistically carry. */
+val pemLabels =
+    listOf(
+        "CERTIFICATE",
+        "PRIVATE KEY",
+        "PUBLIC KEY",
+        "RSA PRIVATE KEY",
+        "PKCS7",
+        "PKCS12",
+        "X509 CERTIFICATE",
+        "X509 CRL",
+        "SSH2 PUBLIC KEY",
+    )
+
+/**
+ * Proves the byte scan still discriminates before it is trusted with 25 MB of
+ * engine. A build script has no test harness, so the predicate proves itself:
+ * every label, in every shape a packaged file could hold one, must be caught,
+ * and the bare prefix that dart:io's PEM *parser* compiles into libflutter.so
+ * must not be.
+ */
+fun assertPemScanDiscriminates() {
+    for (label in pemLabels) {
+        val header = "-----BEGIN $label-----"
+        val shapes =
+            mapOf(
+                "verbatim" to header.toByteArray(),
+                "CRLF" to "$header\r\nQUJD\r\n-----END $label-----\r\n".toByteArray(),
+                "UTF-16LE" to header.toByteArray(Charsets.UTF_16LE),
+                "UTF-16BE" to header.toByteArray(Charsets.UTF_16BE),
+                "mid-file" to ("x".repeat(4096) + header + "\n").toByteArray(),
+                "single-line" to "trustRoot=$header QUJD -----END $label-----".toByteArray(),
+            )
+        for ((shape, probe) in shapes) {
+            if (!carriesPem(probe)) {
+                throw GradleException("the packaged trust-material scan misses $label ($shape)")
+            }
+        }
+    }
+    // A mention of PEM is not PEM: the parser's constant pool holds the bare
+    // prefix, and a header with no label is not a header.
+    for (benign in listOf("literal: \"-----BEGIN \" OPEN  -----END  ", "-----BEGIN -----")) {
+        if (carriesPem(benign.toByteArray())) {
+            throw GradleException("the packaged trust-material scan reads $benign as trust material")
+        }
+    }
+}
 
 /**
  * Verifies one packaged release artifact against the policy and records what it
@@ -446,6 +539,7 @@ fun verifyReleaseArtifact(
             .orEmpty()
             .singleOrNull()
             ?: throw GradleException("expected exactly one release $suffix in $directory")
+    assertPemScanDiscriminates()
     val prefix = if (kind == "apk") "" else "base/"
     val scratch =
         layout.buildDirectory
@@ -601,10 +695,45 @@ fun verifyReleaseArtifact(
         failures += "$variant ships an $abi payload the release does not claim"
     }
     val expectedLibraries = requiredAbis.map { abi -> "${prefix}lib/$abi/$hostSoname" }
+    // Libraries the release packages but does not build. Kept apart from the
+    // payload paths, never merged into them: naming one lets it exist, and
+    // nothing else.
+    val bundledLibraryPaths =
+        requiredAbis
+            .flatMap { abi -> bundledLibraries.map { soname -> "${prefix}lib/$abi/$soname" } }
+            .toSet()
     for (expected in expectedLibraries - payload.map { it.first }.toSet()) {
         failures += "$variant packages no $expected, but the release requires it"
     }
     for ((entry, digest, symbols) in payload) {
+        if (entry in bundledLibraryPaths) {
+            // Its BYTES, not its name. A bundled library can bind every JNI
+            // method from JNI_OnLoad without exporting a single name, so a
+            // soname cannot be the trust decision; the recorded digest is.
+            val soname = entry.substringAfterLast('/')
+            val abi = entry.split('/')[if (kind == "apk") 1 else 2]
+            when (val recorded = releasePolicy.getProperty("bundled_${soname}_${abi}_sha256")) {
+                null ->
+                    failures +=
+                        "$variant packages $entry, a bundled library whose bytes the release has " +
+                        "not recorded: re-run `cargo run -p xtask -- record-bundled`"
+                digest -> Unit
+                else ->
+                    failures +=
+                        "$variant packages $entry hashing to $digest, but the bundled record " +
+                        "accepts $recorded"
+            }
+            for (symbol in symbols) {
+                if (symbol in allowedNativeSymbols) {
+                    failures +=
+                        "$variant packages $entry, a library the release does not build, " +
+                        "which exports the payload's own entry point $symbol"
+                } else if (forbiddenNativeSymbols.any(symbol::startsWith)) {
+                    failures += "$variant packages $entry, which exports the debug-only symbol $symbol"
+                }
+            }
+            continue
+        }
         if (entry !in expectedLibraries) {
             failures += "$variant packages $entry, which the release does not claim"
         } else {

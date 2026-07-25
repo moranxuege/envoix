@@ -1,0 +1,4 @@
+# Dart/Flutter tool output. `flutter pub get` regenerates .dart_tool and the
+# (empty, this app has no plugins) GeneratedPluginRegistrant under android/.
+.dart_tool/
+build/

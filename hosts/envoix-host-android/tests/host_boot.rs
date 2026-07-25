@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use envoix_attempt_api::{AttemptEvent, AttemptEventKind, AttemptSupervisor, EventAdmission};
-use envoix_host_android::{CardStores, Host, HostStore};
+use envoix_host_android::{CardStores, FramePoll, Host, HostStore};
 use envoix_operation_store::{ArtifactKey, OperationStore, PossessionState};
 use envoix_outcomes::{OutcomeCode, Phase};
 use envoix_platform_android::{Work, WorkOrder, WorkReport};
@@ -302,10 +302,12 @@ fn created_card_survives_reboot_and_reattaches() {
     let host = Host::boot(root.path()).expect("reboot");
     // The restored card produced a fresh attachment; frames flow from
     // durable truth (snapshot-first per epoch), so the frame lane yields at
-    // least one encoded read frame for the card.
+    // least one encoded read frame for the card. Only an attachment can drain
+    // it, so the token an observer would hold is what asks.
+    let token = host.open_lane();
     let mut saw_frame = false;
     for _ in 0..100 {
-        if let Some(bytes) = host.poll_frame() {
+        if let FramePoll::Frame(bytes) = host.poll_frame(token) {
             let text = String::from_utf8(bytes).expect("frames are UTF-8 JSON");
             assert!(text.contains("envoix/binding/read/2"));
             saw_frame = true;

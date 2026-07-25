@@ -1,12 +1,14 @@
 use std::process::ExitCode;
 
-use xtask::{arch_check, identifier_check, record_payload, release_gate, workspace_root};
+use xtask::{
+    arch_check, identifier_check, record_bundled, record_payload, release_gate, workspace_root,
+};
 
 fn main() -> ExitCode {
     let Some(command) = std::env::args().nth(1) else {
         eprintln!(
             "usage: cargo run -p xtask -- \
-             <identifier-check|arch-check|release-gate|record-payload>"
+             <identifier-check|arch-check|release-gate|record-payload|record-bundled>"
         );
         return ExitCode::FAILURE;
     };
@@ -49,6 +51,16 @@ fn main() -> ExitCode {
                 record.library.len(),
                 record.build_manifest_sha256
             );
+            Ok(())
+        }),
+        "record-bundled" => record_bundled(&root).map(|record| {
+            println!("record-bundled: bundled={}", record.bundled.len());
+            for library in &record.bundled {
+                println!(
+                    "accepted: {} {} {}",
+                    library.soname, library.abi, library.sha256
+                );
+            }
             Ok(())
         }),
         _ => {

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use envoix_capabilities::{Admission, Duty, DutyKind, DutyLedger, DutyProvenance, Registration};
 use envoix_outcomes::OutcomeCode;
@@ -314,6 +314,246 @@ fn uniquified(display_name: &str, attempt: u32) -> String {
         ),
         _ => format!("{display_name} ({attempt})"),
     }
+}
+
+/// The frontend lane's channel name is ONE name, spelled in three places that
+/// no compiler relates: this crate derives it, Kotlin opens the channel with it
+/// and Dart listens on it. A typo in either literal is a lane that silently
+/// never delivers, which is why the identifier catalog owns the value and this
+/// pins the two literals to it.
+#[test]
+fn frontend_lane_channel_is_one_name() {
+    const GRADLE: &str =
+        include_str!("../../../../apps/envoix-flutter/android/app/build.gradle.kts");
+    const KOTLIN: &str = include_str!(concat!(
+        "../../../../apps/envoix-flutter/android/app/src/main/kotlin/app/envoix/host/",
+        "FrontendLane.kt"
+    ));
+    const DART: &str = include_str!("../../../../apps/envoix-flutter/lib/lane.dart");
+
+    fn literal(text: &str, declaration: &str, quote: char) -> String {
+        text.split_once(declaration)
+            .unwrap_or_else(|| panic!("{declaration:?} is declared"))
+            .1
+            .split(quote)
+            .nth(1)
+            .unwrap_or_else(|| panic!("{declaration:?} assigns a string literal"))
+            .to_owned()
+    }
+
+    let expected = crate::identifiers::frontend_lane_channel(&literal(GRADLE, "namespace = ", '"'));
+    assert_eq!(literal(KOTLIN, "const val CHANNEL = ", '"'), expected);
+    assert_eq!(literal(DART, "const String laneChannel = ", '\''), expected);
+}
+
+/// The frontend Kotlin sources: the shim between the Dart lane and the JNI
+/// verbs. `EnvoixHostService` and `DutyExecutor` are deliberately NOT here —
+/// the service owns the lifetime and executes duties, which is exactly what a
+/// frontend may not do.
+const FRONTEND_KOTLIN: [(&str, &str); 2] = [
+    (
+        "FrontendLane.kt",
+        include_str!(concat!(
+            "../../../../apps/envoix-flutter/android/app/src/main/kotlin/app/envoix/host/",
+            "FrontendLane.kt"
+        )),
+    ),
+    (
+        "MainActivity.kt",
+        include_str!(concat!(
+            "../../../../apps/envoix-flutter/android/app/src/main/kotlin/app/envoix/host/",
+            "MainActivity.kt"
+        )),
+    ),
+];
+
+const ANDROID_MANIFEST: &str =
+    include_str!("../../../../apps/envoix-flutter/android/app/src/main/AndroidManifest.xml");
+
+/// The Kotlin with its comments removed. The rule is about what the frontend
+/// CALLS, so prose that names a verb in order to say it is never called must
+/// not read as a call.
+fn code_only(source: &str) -> String {
+    let mut code = String::with_capacity(source.len());
+    let mut rest = source;
+    while let Some(at) = rest.find("/*").into_iter().chain(rest.find("//")).min() {
+        code.push_str(&rest[..at]);
+        let (opening, closing) = if rest[at..].starts_with("/*") {
+            ("/*", "*/")
+        } else {
+            ("//", "\n")
+        };
+        rest = match rest[at + opening.len()..].find(closing) {
+            Some(end) => &rest[at + opening.len() + end + closing.len()..],
+            None => "",
+        };
+        code.push('\n');
+    }
+    code.push_str(rest);
+    code
+}
+
+/// Every identifier `text` uses as `owner.<identifier>`.
+fn members_of(text: &str, owner: &str) -> BTreeSet<String> {
+    let needle = format!("{owner}.");
+    text.match_indices(&needle)
+        .map(|(at, _)| {
+            text[at + needle.len()..]
+                .chars()
+                .take_while(|character| character.is_alphanumeric() || *character == '_')
+                .collect()
+        })
+        .filter(|name: &String| !name.is_empty())
+        .collect()
+}
+
+/// Every top-level type and function a generated Kotlin artifact declares.
+fn declared_types(generated: &str) -> BTreeSet<String> {
+    generated
+        .lines()
+        .filter_map(|line| {
+            let declaration = [
+                "enum class ",
+                "data class ",
+                "sealed class ",
+                "class ",
+                "object ",
+                "fun ",
+            ]
+            .into_iter()
+            .find_map(|keyword| line.strip_prefix(keyword))?;
+            let name: String = declaration
+                .chars()
+                .take_while(|character| character.is_alphanumeric() || *character == '_')
+                .collect();
+            (!name.is_empty()).then_some(name)
+        })
+        .collect()
+}
+
+/// The frontend Kotlin holds every JNI verb in its hand and is checked by
+/// nothing else: Dart cannot reach the host at all except through it, so this
+/// is the layer that actually decides whether Pillar 7 holds. Putting
+/// `NativeHost.shutdown()` in `onCancel` — a Dart isolate ending every transfer
+/// in the process — otherwise passes every headless gate this repository has.
+///
+/// The PERMITTED set is the rule, and it is data: every verb `NativeHost`
+/// declares is denied here unless it is named, so a verb added to the lane
+/// tomorrow is refused to the frontend by default rather than needing someone
+/// to remember a new forbidden string.
+#[test]
+fn the_frontend_kotlin_speaks_only_the_observer_vocabulary() {
+    const NATIVE_HOST: &str = include_str!(concat!(
+        "../../../../apps/envoix-flutter/android/app/src/main/kotlin/app/envoix/host/",
+        "NativeHost.kt"
+    ));
+    /// Open an attachment, drain its frames. Everything else on the lane is a
+    /// lifetime verb or a mutation, and an observer has neither.
+    const PERMITTED_VERBS: [&str; 2] = ["attach", "pollFrame"];
+    /// The token constant the lane compares against; not a verb.
+    const PERMITTED_CONSTANTS: [&str; 1] = ["NO_ATTACHMENT"];
+    /// A cold launch has to start something and this is the only entry point a
+    /// user has. Ending the service is the one thing a frontend must not spell.
+    const PERMITTED_SERVICE_CONTROL: [&str; 1] = ["startForegroundService"];
+
+    let declared: BTreeSet<String> = NATIVE_HOST
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("external fun "))
+        .map(|declaration| {
+            declaration
+                .chars()
+                .take_while(|character| character.is_alphanumeric())
+                .collect()
+        })
+        .collect();
+    // Vacuity: the set this test denies from has to be the real lane.
+    for verb in ["boot", "shutdown", "submit", "reportDuty", "pollWork"] {
+        assert!(
+            declared.contains(verb),
+            "{verb} is no longer a NativeHost verb; this test denies from the wrong set"
+        );
+    }
+    for verb in PERMITTED_VERBS {
+        assert!(
+            declared.contains(verb),
+            "{verb} is permitted to the frontend but is not a verb at all"
+        );
+    }
+
+    let generated: BTreeSet<String> = declared_types(include_str!(
+        "../../../l5/envoix-bindings/generated/kotlin/EnvoixRead.kt"
+    ))
+    .union(&declared_types(include_str!(
+        "../../../l5/envoix-bindings/generated/kotlin/EnvoixCommand.kt"
+    )))
+    .cloned()
+    .collect();
+    assert!(
+        generated.contains("ReadFrame") && generated.contains("EnvoixCommandCodec"),
+        "the generated contract types were not read"
+    );
+
+    let mut reached = BTreeSet::new();
+    for (file, prose) in FRONTEND_KOTLIN {
+        let source = &code_only(prose);
+        for member in members_of(source, "NativeHost") {
+            assert!(
+                PERMITTED_VERBS.contains(&member.as_str())
+                    || PERMITTED_CONSTANTS.contains(&member.as_str()),
+                "{file} reaches NativeHost.{member}, which an observer may not spell"
+            );
+            reached.insert(member);
+        }
+        for call in [
+            "startService",
+            "stopService",
+            "bindService",
+            "unbindService",
+            "stopSelf",
+        ] {
+            assert!(
+                PERMITTED_SERVICE_CONTROL.contains(&call) || !source.contains(call),
+                "{file} calls {call}: the frontend owns no lifetime (Pillar 7)"
+            );
+        }
+        for kind in &generated {
+            assert!(
+                !source.contains(kind.as_str()),
+                "{file} names the generated type {kind}: Kotlin shuttles bytes and \
+                 decodes nothing"
+            );
+        }
+    }
+    // A lane that never attaches, or never polls, is a frontend that shows an
+    // empty screen forever — and would satisfy every denial above.
+    for verb in PERMITTED_VERBS {
+        assert!(
+            reached.contains(verb),
+            "the frontend never calls NativeHost.{verb}"
+        );
+    }
+}
+
+/// One Activity, one engine, one lane, one consumer of a destructive queue.
+///
+/// A LAUNCHER activity has to be exported, so the launch mode is the mechanism:
+/// `singleInstance` means the system holds at most one instance of it, alone in
+/// its task, however it is started. The attachment token makes a second
+/// consumer's frames a typed refusal rather than silent theft; this removes the
+/// second consumer.
+#[test]
+fn one_activity_means_one_frontend() {
+    let activity = ANDROID_MANIFEST
+        .split_once("android:name=\".MainActivity\"")
+        .expect("the manifest declares MainActivity")
+        .1
+        .split_once("</activity>")
+        .expect("the activity declaration closes")
+        .0;
+    assert!(
+        activity.contains("android:launchMode=\"singleInstance\""),
+        "MainActivity must be launch-bounded to a single instance"
+    );
 }
 
 /// The Kotlin service executor and the Rust dispatch set are ONE set. A duty

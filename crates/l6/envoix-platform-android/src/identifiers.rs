@@ -25,3 +25,10 @@ pub fn internal_action_identifiers(application_id: &str) -> Vec<String> {
         .map(|action| format!("{application_id}.action.{action}"))
         .collect()
 }
+
+/// The platform channel the Flutter frontend lane rides on, derived from the
+/// gradle-owned namespace so the two cannot drift. It names a slot in one
+/// process's message-channel namespace, which a plugin could otherwise claim.
+pub fn frontend_lane_channel(namespace: &str) -> String {
+    format!("{namespace}/frontend-lane")
+}

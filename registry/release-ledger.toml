@@ -25,16 +25,51 @@ signer_sha256 = "afcc5006f88b1bdd274153a7356667d77a3832057fb35822ab224b7ecacedb3
 # The ABIs a release artifact must ship — exactly these, no more and no fewer.
 required_abis = ["arm64-v8a", "x86_64"]
 
-# The only native library a release artifact may package, once per required
-# ABI, at `lib/<abi>/` (`base/lib/<abi>/` in an app bundle) and nowhere else.
+# THE payload: the only library this repository BUILDS, packaged once per
+# required ABI at `lib/<abi>/` (`base/lib/<abi>/` in an app bundle) and nowhere
+# else. It is hash-checked against `registry/release-payload.toml` and held to
+# exactly `allowed_native_symbols`, in both directions.
 native_library = "libenvoix_host_android.so"
 
-# The COMPLETE exported surface of the release payload: the six JNI entry
-# points the Kotlin `NativeHost` binds. The gate compares the packaged
+# Libraries the release PACKAGES but does not BUILD, by soname. Naming one here
+# lets it exist at `lib/<abi>/<soname>`; it exempts nothing else. The payload
+# above is still required at its own path, still hash-checked, still held to
+# exactly the entry points below, and a bundled library that exports one of
+# THOSE is a failure (`ImpersonatedNativeSymbol`) precisely because two
+# libraries answering the same lane is a thing nobody can reason about.
+#
+#   libflutter.so  the Flutter engine, from the SDK's own artifact cache
+#   libapp.so      this app's Dart, AOT-compiled by the Flutter tool
+#
+# A name is NOT the trust decision, and a symbol rule cannot be one either: a
+# bundled library may bind every `NativeHost` method from `JNI_OnLoad` without
+# exporting a single name to judge (which is the escape the exact-surface
+# assertion closes for the payload, and `libflutter.so` legitimately exports
+# `JNI_OnLoad`). So the BYTES are pinned: every packaged bundled library must
+# match a `[[payload.bundled]]` digest in `registry/release-payload.toml`, and
+# one that matches nothing fails as loudly as a smuggled library.
+#
+# The digests are produced by `cargo run -p xtask -- record-bundled`, which
+# reads the packaging facts the release assertions write before they fail. AGP
+# strips both libraries into the archive, so the shipped bytes exist nowhere
+# else. A Flutter SDK upgrade or any Dart edit therefore fails the release once
+# and is accepted by re-running that command — the registry diff is where those
+# bytes were reviewed.
+bundled_libraries = ["libapp.so", "libflutter.so"]
+
+# The COMPLETE exported surface of the release payload: the JNI entry points the
+# Kotlin `NativeHost` binds, and nothing else. The gate compares the packaged
 # library's dynamic symbol table against this set in BOTH directions, so an
 # entry point that is merely renamed — or registered from `JNI_OnLoad` with no
 # exported name at all — is a failure, not a gap in a prefix rule.
+#
+# `attach` is F1b's one addition, and it is the only verb a frontend needs:
+# it opens a fresh observer attachment (every card's stream restarts at a new
+# epoch) and can start nothing, stop nothing and write nothing. There is
+# deliberately no `detach` — a frontend that goes away stops polling, so
+# leaving is not a verb it can spell.
 allowed_native_symbols = [
+    "Java_app_envoix_host_NativeHost_attach",
     "Java_app_envoix_host_NativeHost_boot",
     "Java_app_envoix_host_NativeHost_pollFrame",
     "Java_app_envoix_host_NativeHost_pollWork",
@@ -56,6 +91,11 @@ forbidden_native_symbols = ["Java_app_envoix_host_E2eBridge_"]
 # archive is rejected by name, which is what a deny-list of certificate
 # extensions can never do: an extension-less trust root, a `.der`, a `.pfx` or
 # a PEM hidden in a text asset all fail here simply for not being claimed.
+#
+# The `assets/flutter_assets/**` block and the two Flutter libraries are F1b's
+# additions, each named rather than waved through by an `assets/**` wildcard:
+# the whole point of this list is that a file nobody reviewed has no pattern to
+# hide under, and a directory wildcard would give every future asset one.
 allowed_package_entries = [
     "AndroidManifest.xml",
     "DebugProbesKt.bin",
@@ -65,13 +105,30 @@ allowed_package_entries = [
     "assets/dexopt/baseline.prof",
     "assets/dexopt/baseline.profm",
     "assets/envoix-build-manifest.json",
+    # The Flutter tool's own bundle. Three manifests it always writes (the app
+    # declares no assets and no fonts of its own, so they are empty
+    # inventories), the aggregated third-party licence text, and the engine's
+    # two built-in shaders — named one by one, because `shaders/*.frag` would
+    # let any future `shaders/anything.frag` in unreviewed. Data, all of it;
+    # the executable Dart is libapp.so.
+    "assets/flutter_assets/AssetManifest.bin",
+    "assets/flutter_assets/FontManifest.json",
+    "assets/flutter_assets/NativeAssetsManifest.json",
+    "assets/flutter_assets/NOTICES.Z",
+    "assets/flutter_assets/shaders/ink_sparkle.frag",
+    "assets/flutter_assets/shaders/stretch_effect.frag",
     "kotlin/*.kotlin_builtins",
     "kotlin/*/*.kotlin_builtins",
+    "lib/*/libapp.so",
     "lib/*/libenvoix_host_android.so",
+    "lib/*/libflutter.so",
     "META-INF/*.version",
     "META-INF/com/android/build/gradle/app-metadata.properties",
     "META-INF/services/kotlinx.coroutines.*",
     "META-INF/version-control-info.textproto",
+    # Inert OSGi metadata from a multi-release jar on the embedding's
+    # dependency path (androidx pulls it in). One exact entry, not `META-INF/**`.
+    "META-INF/versions/9/OSGI-INF/MANIFEST.MF",
     "res/*.png",
     "res/*.xml",
 ]

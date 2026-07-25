@@ -1,0 +1,22 @@
+name: envoix
+description: >-
+  The Envoix frontend. Read-only in F1b — it attaches to the running host and
+  renders the cards it decodes.
+publish_to: none
+version: 0.2.0
+
+environment:
+  sdk: ^3.12.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+# No third-party packages, and no assets of our own: the only thing that crosses
+# into this app is generated code (lib/bindings is the generator's own output).
+flutter:
+  uses-material-design: false

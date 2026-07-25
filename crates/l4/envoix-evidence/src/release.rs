@@ -84,7 +84,15 @@ pub struct ReleaseLedger {
 pub struct ReleasePolicy {
     pub signer_sha256: String,
     pub required_abis: Vec<String>,
+    /// THE payload: the one library this repository builds and accounts for.
     pub native_library: String,
+    /// Libraries the release packages but does not build, by soname. They are
+    /// held to a different rule — see [`check_payload`] — and naming one here
+    /// exempts nothing else: [`ReleasePolicy::native_library`] is still
+    /// required at its own path, still hash-checked against the payload
+    /// record, and still held to exactly [`ReleasePolicy::allowed_native_symbols`].
+    #[serde(default)]
+    pub bundled_libraries: Vec<String>,
     /// The complete exported surface of the release payload. A packaged
     /// library that exports anything else — or that is missing one of these —
     /// is rejected, so a `RegisterNatives`-style entry point with no exported
@@ -116,6 +124,12 @@ pub struct PayloadRecord {
     /// Digest over every contract source the payload was compiled from.
     pub sources_sha256: String,
     pub library: Vec<PayloadLibrary>,
+    /// The bundled libraries as they were REVIEWED, per ABI. A soname is a
+    /// filename, and a filename is not a trust decision: a library that
+    /// registers its natives at load time exports nothing to judge, so the
+    /// bytes are the only thing that can be judged at all.
+    #[serde(default)]
+    pub bundled: Vec<BundledLibrary>,
 }
 
 /// One cross-compiled library in the payload record.
@@ -127,12 +141,35 @@ pub struct PayloadLibrary {
     pub sha256: String,
 }
 
+/// One bundled library's accepted bytes.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct BundledLibrary {
+    pub soname: String,
+    pub abi: String,
+    pub sha256: String,
+}
+
 impl PayloadRecord {
     fn release_library(&self, abi: &str) -> Option<&PayloadLibrary> {
         self.library
             .iter()
             .find(|library| library.build_type == "release" && library.abi == abi)
     }
+
+    fn bundled_library(&self, soname: &str, abi: &str) -> Option<&BundledLibrary> {
+        self.bundled
+            .iter()
+            .find(|library| library.soname == soname && library.abi == abi)
+    }
+}
+
+/// The `(abi, soname)` a packaged library's path names.
+fn library_identity(artifact: &str) -> (&str, &str) {
+    let mut segments = artifact.rsplit('/');
+    let soname = segments.next().unwrap_or_default();
+    let abi = segments.next().unwrap_or_default();
+    (abi, soname)
 }
 
 /// Everything the build says about itself, gathered outside this layer.
@@ -162,11 +199,11 @@ pub enum ArtifactKind {
 }
 
 impl ArtifactKind {
-    /// Where this kind of archive keeps the packaged native payload.
-    fn library_path(self, abi: &str, native_library: &str) -> String {
+    /// Where this kind of archive keeps a packaged native library.
+    fn library_path(self, abi: &str, soname: &str) -> String {
         match self {
-            Self::Apk => format!("lib/{abi}/{native_library}"),
-            Self::Bundle => format!("base/lib/{abi}/{native_library}"),
+            Self::Apk => format!("lib/{abi}/{soname}"),
+            Self::Bundle => format!("base/lib/{abi}/{soname}"),
         }
     }
 
@@ -317,11 +354,31 @@ pub enum Disagreement {
         artifact: String,
         symbol: String,
     },
+    /// A library the release packages but does not build exports one of the
+    /// payload's own entry points. Two libraries answering to the same name is
+    /// a lane nobody can reason about, so it fails whichever one loads first.
+    ImpersonatedNativeSymbol {
+        variant: String,
+        artifact: String,
+        symbol: String,
+    },
     /// A packaged library is missing an entry point the release requires.
     MissingNativeSymbol {
         variant: String,
         artifact: String,
         symbol: String,
+    },
+    /// A bundled library whose bytes the release never accounted for. A soname
+    /// is a filename; `RegisterNatives` needs no exported name at all, so the
+    /// digest is the only thing that can decide whether this is the library
+    /// that was reviewed.
+    UnaccountedBundledLibrary { variant: String, artifact: String },
+    /// A bundled library is not the one whose bytes were accepted.
+    BundledLibraryMismatch {
+        variant: String,
+        artifact: String,
+        recorded: String,
+        observed: String,
     },
     /// The payload record was written against a different build manifest.
     PayloadManifestDrift { recorded: String, compiled: String },
@@ -472,6 +529,15 @@ impl fmt::Display for Disagreement {
                 "payload: {variant} packages {artifact}, which exports {symbol}, \
                  an entry point the release does not allow"
             ),
+            Self::ImpersonatedNativeSymbol {
+                variant,
+                artifact,
+                symbol,
+            } => write!(
+                formatter,
+                "payload: {variant} packages {artifact}, a library the release does \
+                 not build, which exports the payload's own entry point {symbol}"
+            ),
             Self::MissingNativeSymbol {
                 variant,
                 artifact,
@@ -480,6 +546,22 @@ impl fmt::Display for Disagreement {
                 formatter,
                 "payload: {variant} packages {artifact}, which does not export \
                  the required entry point {symbol}"
+            ),
+            Self::UnaccountedBundledLibrary { variant, artifact } => write!(
+                formatter,
+                "payload: {variant} packages {artifact}, a bundled library whose \
+                 bytes the release has not recorded: \
+                 re-run `cargo run -p xtask -- record-bundled`"
+            ),
+            Self::BundledLibraryMismatch {
+                variant,
+                artifact,
+                recorded,
+                observed,
+            } => write!(
+                formatter,
+                "payload: {variant} packages {artifact} hashing to {observed}, \
+                 but the bundled record accepts {recorded}"
             ),
             Self::PayloadManifestDrift { recorded, compiled } => write!(
                 formatter,
@@ -578,6 +660,7 @@ pub fn render_policy(
     line("signer_sha256", policy.signer_sha256.clone());
     line("required_abis", policy.required_abis.join(","));
     line("native_library", policy.native_library.clone());
+    line("bundled_libraries", policy.bundled_libraries.join(","));
     line(
         "allowed_native_symbols",
         policy.allowed_native_symbols.join(","),
@@ -621,6 +704,12 @@ pub fn render_policy(
     for library in &payload.library {
         line(
             &format!("payload_{}_{}_sha256", library.build_type, library.abi),
+            library.sha256.clone(),
+        );
+    }
+    for library in &payload.bundled {
+        line(
+            &format!("bundled_{}_{}_sha256", library.soname, library.abi),
             library.sha256.clone(),
         );
     }
@@ -700,6 +789,7 @@ fn check_policy_projection(
     let policy = &ledger.policy;
     for (key, values) in [
         ("required_abis", &policy.required_abis),
+        ("bundled_libraries", &policy.bundled_libraries),
         ("allowed_native_symbols", &policy.allowed_native_symbols),
         ("forbidden_native_symbols", &policy.forbidden_native_symbols),
         ("allowed_package_entries", &policy.allowed_package_entries),
@@ -922,6 +1012,20 @@ fn check_payload(
         .iter()
         .map(|abi| facts.kind.library_path(abi, &policy.native_library))
         .collect();
+    // Libraries the release packages but does not build. They are allowed to
+    // EXIST, at exactly these paths and under exactly these names; they are
+    // never allowed to answer for the payload, so this set is kept apart from
+    // `expected_paths` rather than merged into it.
+    let bundled_paths: BTreeSet<String> = policy
+        .required_abis
+        .iter()
+        .flat_map(|abi| {
+            policy
+                .bundled_libraries
+                .iter()
+                .map(move |soname| facts.kind.library_path(abi, soname))
+        })
+        .collect();
 
     for path in &expected_paths {
         if !facts
@@ -937,6 +1041,52 @@ fn check_payload(
     }
 
     for library in &facts.payload {
+        // A library the release packages but does not build gets its own
+        // toolchain's exported surface — and none of the payload's. It cannot
+        // stand in for the payload either: the assertions below are keyed on
+        // `expected_paths`, which no bundled name can enter.
+        if bundled_paths.contains(&library.artifact) {
+            // Its BYTES, not its name. A bundled library that binds the lane
+            // from `JNI_OnLoad` exports nothing a symbol rule could see, so
+            // being called `libflutter.so` has to stop being the trust
+            // decision.
+            let (abi, soname) = library_identity(&library.artifact);
+            match build.payload.bundled_library(soname, abi) {
+                None => disagreements.push(Disagreement::UnaccountedBundledLibrary {
+                    variant: variant.to_owned(),
+                    artifact: library.artifact.clone(),
+                }),
+                Some(recorded) if recorded.sha256 != library.sha256 => {
+                    disagreements.push(Disagreement::BundledLibraryMismatch {
+                        variant: variant.to_owned(),
+                        artifact: library.artifact.clone(),
+                        recorded: recorded.sha256.clone(),
+                        observed: library.sha256.clone(),
+                    });
+                }
+                Some(_) => {}
+            }
+            for symbol in &library.symbols {
+                if allowed.contains(symbol) {
+                    disagreements.push(Disagreement::ImpersonatedNativeSymbol {
+                        variant: variant.to_owned(),
+                        artifact: library.artifact.clone(),
+                        symbol: symbol.clone(),
+                    });
+                } else if policy
+                    .forbidden_native_symbols
+                    .iter()
+                    .any(|prefix| symbol.starts_with(prefix))
+                {
+                    disagreements.push(Disagreement::DebugTrustMaterial {
+                        variant: variant.to_owned(),
+                        artifact: library.artifact.clone(),
+                        symbol: symbol.clone(),
+                    });
+                }
+            }
+            continue;
+        }
         // The full path, not a suffix: `assets/lib/x/libenvoix_host_android.so`
         // is not the payload, it is a smuggled library.
         if !expected_paths.contains(&library.artifact) {
@@ -1037,11 +1187,13 @@ mod tests {
                 signer_sha256: "ab".repeat(32),
                 required_abis: vec!["arm64-v8a".to_owned()],
                 native_library: "libhost.so".to_owned(),
+                bundled_libraries: vec!["libthird.so".to_owned()],
                 allowed_native_symbols: vec!["Java_probe_boot".to_owned()],
                 forbidden_native_symbols: vec!["Java_probe_E2e".to_owned()],
                 allowed_package_entries: vec![
                     "classes.dex".to_owned(),
                     "lib/*/libhost.so".to_owned(),
+                    "lib/*/libthird.so".to_owned(),
                     "res/*.xml".to_owned(),
                 ],
                 forbidden_manifest_markers: vec![":debuggable(".to_owned()],
@@ -1060,6 +1212,11 @@ mod tests {
                 build_type: "release".to_owned(),
                 abi: "arm64-v8a".to_owned(),
                 sha256: "33".repeat(32),
+            }],
+            bundled: vec![BundledLibrary {
+                soname: "libthird.so".to_owned(),
+                abi: "arm64-v8a".to_owned(),
+                sha256: "66".repeat(32),
             }],
         }
     }
@@ -1241,6 +1398,145 @@ mod tests {
                 artifact: "lib/arm64-v8a/libhost.so".to_owned(),
                 symbol: "Java_probe_boot".to_owned(),
             }]
+        );
+    }
+
+    /// A library the release packages but does not build is judged by a
+    /// different rule, and naming it exempts nothing: it may export whatever
+    /// its own toolchain exports, it may never export the payload's entry
+    /// points or the debug lane, and the payload's own assertions are untouched
+    /// by its presence.
+    #[test]
+    fn a_bundled_library_is_not_the_payload() {
+        let third = PackagedPayload {
+            artifact: "lib/arm64-v8a/libthird.so".to_owned(),
+            sha256: "66".repeat(32),
+            symbols: vec!["JNI_OnLoad".to_owned(), "_kDartVmSnapshotData".to_owned()],
+        };
+        // Its own surface is its own business, and the payload still has to be
+        // there, hashed and exporting exactly the allow-list.
+        assert_eq!(
+            verdict(|_, artifact| {
+                artifact.facts.payload.push(third.clone());
+                artifact
+                    .facts
+                    .entries
+                    .push("lib/arm64-v8a/libthird.so".to_owned());
+            }),
+            Vec::new()
+        );
+        // It cannot answer for the payload.
+        assert_eq!(
+            verdict(|_, artifact| {
+                let mut impostor = third.clone();
+                impostor.symbols.push("Java_probe_boot".to_owned());
+                artifact.facts.payload.push(impostor);
+                artifact
+                    .facts
+                    .entries
+                    .push("lib/arm64-v8a/libthird.so".to_owned());
+            }),
+            vec![Disagreement::ImpersonatedNativeSymbol {
+                variant: "prodRelease".to_owned(),
+                artifact: "lib/arm64-v8a/libthird.so".to_owned(),
+                symbol: "Java_probe_boot".to_owned(),
+            }]
+        );
+        // Nor smuggle the debug lane in.
+        assert_eq!(
+            verdict(|_, artifact| {
+                let mut impostor = third.clone();
+                impostor.symbols.push("Java_probe_E2ecreate".to_owned());
+                artifact.facts.payload.push(impostor);
+                artifact
+                    .facts
+                    .entries
+                    .push("lib/arm64-v8a/libthird.so".to_owned());
+            }),
+            vec![Disagreement::DebugTrustMaterial {
+                variant: "prodRelease".to_owned(),
+                artifact: "lib/arm64-v8a/libthird.so".to_owned(),
+                symbol: "Java_probe_E2ecreate".to_owned(),
+            }]
+        );
+        // And its presence never stands in for the payload's absence.
+        assert_eq!(
+            verdict(|_, artifact| {
+                artifact.facts.payload = vec![third.clone()];
+                artifact.facts.entries = vec!["lib/arm64-v8a/libthird.so".to_owned()];
+            }),
+            vec![Disagreement::MissingNativeLibrary {
+                variant: "prodRelease".to_owned(),
+                artifact: "lib/arm64-v8a/libhost.so".to_owned(),
+            }]
+        );
+        // Its BYTES are what the release accepted. An unrecorded bundled
+        // library, or one whose bytes are not the recorded ones, is rejected
+        // even though its name and its path are both allowed — which is the
+        // only rule that reaches a library binding the lane from `JNI_OnLoad`
+        // with no exported name to judge.
+        assert_eq!(
+            verdict(|_, artifact| {
+                let mut swapped = third.clone();
+                swapped.sha256 = "77".repeat(32);
+                artifact.facts.payload.push(swapped);
+                artifact
+                    .facts
+                    .entries
+                    .push("lib/arm64-v8a/libthird.so".to_owned());
+            }),
+            vec![Disagreement::BundledLibraryMismatch {
+                variant: "prodRelease".to_owned(),
+                artifact: "lib/arm64-v8a/libthird.so".to_owned(),
+                recorded: "66".repeat(32),
+                observed: "77".repeat(32),
+            }]
+        );
+        assert_eq!(
+            verdict(|ledger, artifact| {
+                ledger
+                    .policy
+                    .bundled_libraries
+                    .push("libfourth.so".to_owned());
+                ledger
+                    .policy
+                    .allowed_package_entries
+                    .push("lib/*/libfourth.so".to_owned());
+                let mut unrecorded = third.clone();
+                unrecorded.artifact = "lib/arm64-v8a/libfourth.so".to_owned();
+                artifact.facts.payload.push(unrecorded);
+                artifact
+                    .facts
+                    .entries
+                    .push("lib/arm64-v8a/libfourth.so".to_owned());
+            }),
+            vec![Disagreement::UnaccountedBundledLibrary {
+                variant: "prodRelease".to_owned(),
+                artifact: "lib/arm64-v8a/libfourth.so".to_owned(),
+            }]
+        );
+        // A bundled NAME at a path the release does not claim is still a
+        // smuggled library, and it is judged as one — the bundled rule is keyed
+        // on the full path, so being called `libthird.so` buys nothing.
+        let smuggled = verdict(|_, artifact| {
+            let mut elsewhere = third.clone();
+            elsewhere.artifact = "assets/lib/arm64-v8a/libthird.so".to_owned();
+            artifact.facts.payload.push(elsewhere);
+            artifact
+                .facts
+                .entries
+                .push("assets/lib/arm64-v8a/libthird.so".to_owned());
+        });
+        assert!(
+            smuggled.contains(&Disagreement::UnexpectedNativeLibrary {
+                variant: "prodRelease".to_owned(),
+                artifact: "assets/lib/arm64-v8a/libthird.so".to_owned(),
+            }) && smuggled.contains(&Disagreement::UnexpectedPackageEntry {
+                variant: "prodRelease".to_owned(),
+                entry: "assets/lib/arm64-v8a/libthird.so".to_owned(),
+            }),
+            "a bundled name at an unclaimed path must fail as a smuggled library, \
+             got {smuggled:#?}"
         );
     }
 

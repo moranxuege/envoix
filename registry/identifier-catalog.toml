@@ -351,6 +351,29 @@ owner_path = "apps/envoix-flutter/android/app/build.gradle.kts"
 collision_scope = "android-application-id"
 extract = "gradle-variant-application-id:qa"
 
+# The Flutter package's own version. Inert to the Android build (gradle spells
+# versionName itself), which is exactly why it would drift unwatched; the chain
+# pubspec -> gradle -> Cargo is closed here instead.
+[[identifier]]
+key = "flutter.package_version"
+owner = "manifest:flutter-package"
+owner_path = "apps/envoix-flutter/pubspec.yaml"
+collision_scope = "workspace-package-version"
+comparison = "must-equal:android.version_name"
+extract = "pubspec-key:version"
+
+# The platform channel the Flutter frontend lane rides on. It is a slot in ONE
+# process's message-channel namespace, which any plugin could otherwise claim,
+# so it is catalogued like every other name that has to be unique somewhere.
+# Derived from the gradle-owned namespace; the Kotlin and Dart literals are
+# pinned against this function by `frontend_lane_channel_is_one_name`.
+[[identifier]]
+key = "android.frontend_lane_channel"
+owner = "crate:envoix-platform-android"
+owner_path = "crates/l6/envoix-platform-android/src/identifiers.rs"
+collision_scope = "android-platform-channel"
+extract = "rust-function:frontend_lane_channel"
+
 [[identifier]]
 key = "android.file_provider_authority"
 owner = "manifest:flutter-android"

@@ -8,6 +8,9 @@ package app.envoix.host
  * lives on this boundary.
  */
 object NativeHost {
+    /** The token [attach] returns when there is no host to observe. */
+    const val NO_ATTACHMENT = 0L
+
     init {
         System.loadLibrary("envoix_host_android")
     }
@@ -15,8 +18,23 @@ object NativeHost {
     /** Boots the process-wide host over the app-private storage root. */
     external fun boot(storageRoot: String): Boolean
 
-    /** One encoded read/command contract frame, or null when drained. */
-    external fun pollFrame(): ByteArray?
+    /**
+     * Opens a fresh frontend attachment: every known card's stream restarts at
+     * a new epoch. Starts and stops nothing; [NO_ATTACHMENT] means no host is
+     * running. There is no detach counterpart — a frontend that leaves stops
+     * polling.
+     *
+     * The returned token IS the attachment. Opening the next one supersedes it,
+     * and only the newest may take a frame off the destructive queue.
+     */
+    external fun attach(): Long
+
+    /**
+     * One encoded read/command contract frame for [token], or null when
+     * drained. Throws [SupersededAttachment] once a newer attachment holds the
+     * lane.
+     */
+    external fun pollFrame(token: Long): ByteArray?
 
     /** One encoded platform work order, or null when drained. */
     external fun pollWork(): ByteArray?
@@ -30,3 +48,12 @@ object NativeHost {
     /** Stops the runtime; durable truth is already on disk. */
     external fun shutdown()
 }
+
+/**
+ * Raised by [NativeHost.pollFrame] when a newer attachment holds the lane. The
+ * poll consumed nothing and never will again, which is why it is a refusal and
+ * not an empty result.
+ */
+class SupersededAttachment(
+    message: String,
+) : IllegalStateException(message)

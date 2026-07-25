@@ -1,0 +1,6 @@
+# The generated binding is analysed with the app, so a contract artifact that
+# stops compiling in a real Flutter package fails `flutter analyze` here.
+analyzer:
+  language:
+    strict-casts: true
+    strict-raw-types: true
