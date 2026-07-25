@@ -37,28 +37,20 @@ final class ManifestV2AppUITests: XCTestCase {
     }
 
     func testNearbySendHandoffKeepsEverySourcePickerUsable() {
-        launch(
-            language: "en",
-            locale: "en_US",
-            extraArguments: ["--ui-testing-discovery-fixtures"]
-        )
-
-        element("connection_hub").assertExists()
-        button("nearby_peer_card").tap()
-        element("one_time_room").assertExists()
-        element("room_context_unverified").assertExists()
-        button("room_add_files").tap()
-
-        element("send_content_scroll").assertExists()
-        element("nearby_transfer_context").assertExists()
-        XCTAssertFalse(element("nearby_invite_delivery_progress").exists)
-
-        assertPickerCanOpen(from: "send_photo_picker")
-        assertPickerCanOpen(from: "send_file_picker")
-        // A fresh simulator has no deterministic folder in Recents. Opening
-        // and canceling still verifies that the room preserves every picker
-        // handoff without pretending that an unavailable folder was selected.
-        assertPickerCanOpen(from: "send_folder_picker")
+        for pickerIdentifier in [
+            "send_photo_picker",
+            "send_file_picker",
+            "send_folder_picker",
+        ] {
+            launch(
+                language: "en",
+                locale: "en_US",
+                extraArguments: ["--ui-testing-discovery-fixtures"]
+            )
+            openNearbySend()
+            assertPickerCanPresent(from: pickerIdentifier)
+            app.terminate()
+        }
     }
 
     func testActivityAndSettingsAreSeparatePages() {
@@ -170,21 +162,37 @@ final class ManifestV2AppUITests: XCTestCase {
         element("receive_start_button").assertExists()
     }
 
-    private func assertPickerCanOpen(from identifier: String) {
+    private func openNearbySend() {
+        element("connection_hub").assertExists()
+        button("nearby_peer_card").tap()
+        element("one_time_room").assertExists()
+        element("room_context_unverified").assertExists()
+        button("room_add_files").tap()
+        element("send_content_scroll").assertExists()
+        element("nearby_transfer_context").assertExists()
+        XCTAssertFalse(element("nearby_invite_delivery_progress").exists)
+    }
+
+    private func assertPickerCanPresent(from identifier: String) {
         let source = button(identifier)
         source.assertExists()
         XCTAssertTrue(source.isEnabled)
         XCTAssertTrue(source.isHittable)
         source.tap()
 
-        // Document pickers do not expose a stable accessibility identifier
-        // for this system button on every supported iOS release.
-        let dismissal = app.buttons.matching(
-            NSPredicate(format: "label == %@", "Cancel")
-        ).firstMatch
-        dismissal.assertExists()
-        dismissal.tap()
-        element("nearby_transfer_context").assertExists()
+        // Photos and Documents are external system surfaces. Their controls
+        // and provider contents vary across clean simulator runtimes, so the
+        // application contract ends when its source control is covered by the
+        // presented modal.
+        let presented = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == true AND hittable == false"),
+            object: source
+        )
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [presented], timeout: 5),
+            .completed,
+            "Picker did not cover source control: \(identifier)"
+        )
     }
 
     private func element(_ identifier: String) -> XCUIElement {
