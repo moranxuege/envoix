@@ -11,6 +11,10 @@ interface ManifestV2Callback {
     fun onSaveRequired(requestJson: String): String
 }
 
+interface RoomControlCallback {
+    fun onEvent(json: String)
+}
+
 /** Sink for the core's `tracing` log lines. */
 interface LogCallback {
     fun log(
@@ -56,6 +60,30 @@ object Native {
     /** Parse a typed code or a scanned `envoix://` payload. Returns JSON
      *  `{"code":..,"broker":..,"relay":..,"role":..}`, or `{"error":..}`. */
     external fun parseInvite(input: String): String
+
+    external fun generateRoomControlInvite(
+        broker: String,
+        relay: String,
+    ): String
+
+    external fun parseRoomControlInvite(
+        input: String,
+        fallbackBroker: String,
+        fallbackRelay: String,
+    ): String
+
+    external fun startRoomControlSession(
+        id: Long,
+        paramsJson: String,
+        callback: RoomControlCallback,
+    )
+
+    external fun sendRoomControlCommand(
+        id: Long,
+        commandJson: String,
+    ): String
+
+    external fun cancelRoomControlSession(id: Long)
 
     /** Create the durable canonical job as soon as the first source is chosen. */
     external fun createManifestV2Job(

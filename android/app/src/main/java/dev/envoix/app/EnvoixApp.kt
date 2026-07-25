@@ -1,6 +1,8 @@
 package dev.envoix.app
 
 import android.app.Application
+import dev.envoix.app.ui.NativeRoomControlGateway
+import dev.envoix.app.ui.RoomControlGatewayProvider
 
 /** Initializes logging + the native Android context once, before any transfer. */
 class EnvoixApp : Application() {
@@ -16,6 +18,7 @@ class EnvoixApp : Application() {
         Native.initLogging(LogSink) // before initContext, so init logs are captured
         SettingsStore.applyLogLevel() // restore the saved (dev) verbosity
         Native.initContext(this)
+        RoomControlGatewayProvider.gateway = NativeRoomControlGateway(this)
 
         // Capture uncaught exceptions into the log (foundation for crash reporting).
         val previous = Thread.getDefaultUncaughtExceptionHandler()

@@ -49,15 +49,32 @@ class MainActivity : ComponentActivity() {
                     val transfers by vm.transfers.collectAsState()
                     val workflow by workflowVm.uiState.collectAsState()
                     val selectedPeerKey = workflow.room?.nearbySelection?.discoveryPeerKey
+                    val controlRoom = workflow.room?.controlSession == true
+                    val activeRoomTransferCount =
+                        workflow.room
+                            ?.transferCodes
+                            ?.let { roomCodes ->
+                                transfers.count { transfer ->
+                                    transfer.room in roomCodes &&
+                                        !transfer.status.isTerminal
+                                }
+                            } ?: 0
 
-                    LaunchedEffect(workflow.screen, selectedPeerKey) {
+                    LaunchedEffect(workflow.screen, selectedPeerKey, controlRoom) {
                         when {
                             workflow.screen == WorkflowScreen.Hub ->
                                 discoveryVm.setMode(DiscoveryMode.BrowseNearby)
-                            workflow.screen == WorkflowScreen.Room && selectedPeerKey != null ->
+                            workflow.screen == WorkflowScreen.Room &&
+                                selectedPeerKey != null &&
+                                !controlRoom ->
                                 discoveryVm.setMode(DiscoveryMode.SelectedPeer, selectedPeerKey)
                             else -> discoveryVm.setMode(DiscoveryMode.Off)
                         }
+                    }
+                    // Keep room idleness correct even while Activity, Settings,
+                    // or the Hub is covering the room screen.
+                    LaunchedEffect(activeRoomTransferCount, workflow.room?.id) {
+                        workflowVm.updateRoomTransferActivity(activeRoomTransferCount)
                     }
 
                     if (workflow.screen != WorkflowScreen.Hub) {
@@ -66,7 +83,14 @@ class MainActivity : ComponentActivity() {
                     when (workflow.screen) {
                         WorkflowScreen.Hub ->
                             ConnectionHubScreen(
-                                onOpenRoom = workflowVm::openRoom,
+                                control = workflow.control,
+                                onRevealInvite = workflowVm::revealRoomInvite,
+                                onHideInvite = workflowVm::hideRoomInvite,
+                                onRefreshInvite = workflowVm::refreshRoomInvite,
+                                onEndWaitingRoom = workflowVm::endWaitingRoom,
+                                onJoinInvite = { workflowVm.joinRoom(it) },
+                                onNearbyRoom = workflowVm::startNearbyRoom,
+                                onReturnToRoom = workflowVm::returnToCurrentRoom,
                                 onActivity = workflowVm::openActivity,
                                 onSettings = workflowVm::openSettings,
                                 onAcceptIncomingOffer = { offer ->
@@ -75,6 +99,9 @@ class MainActivity : ComponentActivity() {
                                         SettingsStore.settings.value.defaultRole,
                                     )
                                 },
+                                onCancelReplacement = workflowVm::cancelReplacement,
+                                onConfirmReplacement = workflowVm::confirmReplacement,
+                                onExternalActivityChanged = workflowVm::setExternalActivityActive,
                                 pendingShareCount = workflow.pendingShares.size,
                                 discoveryViewModel = discoveryVm,
                             )
@@ -82,7 +109,14 @@ class MainActivity : ComponentActivity() {
                             val draft = workflow.room
                             if (draft == null) {
                                 ConnectionHubScreen(
-                                    onOpenRoom = workflowVm::openRoom,
+                                    control = workflow.control,
+                                    onRevealInvite = workflowVm::revealRoomInvite,
+                                    onHideInvite = workflowVm::hideRoomInvite,
+                                    onRefreshInvite = workflowVm::refreshRoomInvite,
+                                    onEndWaitingRoom = workflowVm::endWaitingRoom,
+                                    onJoinInvite = { workflowVm.joinRoom(it) },
+                                    onNearbyRoom = workflowVm::startNearbyRoom,
+                                    onReturnToRoom = workflowVm::returnToCurrentRoom,
                                     onActivity = workflowVm::openActivity,
                                     onSettings = workflowVm::openSettings,
                                     onAcceptIncomingOffer = { offer ->
@@ -91,12 +125,16 @@ class MainActivity : ComponentActivity() {
                                             SettingsStore.settings.value.defaultRole,
                                         )
                                     },
+                                    onCancelReplacement = workflowVm::cancelReplacement,
+                                    onConfirmReplacement = workflowVm::confirmReplacement,
+                                    onExternalActivityChanged = workflowVm::setExternalActivityActive,
                                     pendingShareCount = workflow.pendingShares.size,
                                     discoveryViewModel = discoveryVm,
                                 )
                             } else {
                                 DeviceRoomScreen(
                                     draft = draft,
+                                    control = workflow.control,
                                     transferDraft = workflow.transferDraft,
                                     transfers = transfers,
                                     onBack = workflowVm::returnToHub,
@@ -107,6 +145,15 @@ class MainActivity : ComponentActivity() {
                                     onShowRoomQr = workflowVm::showRoomQr,
                                     onDismissTransfer = workflowVm::dismissTransferDraft,
                                     onTransferStarted = workflowVm::completeTransferDraft,
+                                    onOfferRoomTransfer = workflowVm::offerRoomTransfer,
+                                    onPrepareIncomingRoomOffer = workflowVm::acceptIncomingRoomOffer,
+                                    onConfirmIncomingRoomOffer = workflowVm::confirmIncomingRoomOffer,
+                                    onRejectIncomingRoomOffer = workflowVm::rejectIncomingRoomOffer,
+                                    onKeepOpen = workflowVm::setKeepOpen,
+                                    onEndRoom = { workflowVm.endRoom() },
+                                    onDismissEndedRoom = workflowVm::dismissEndedRoom,
+                                    onRoomActiveTransfers = workflowVm::updateRoomTransferActivity,
+                                    onExternalActivityChanged = workflowVm::setExternalActivityActive,
                                     onAcceptIncomingOffer = { offer ->
                                         workflowVm.acceptIncomingOffer(
                                             offer,
@@ -116,6 +163,17 @@ class MainActivity : ComponentActivity() {
                                     onReceive = { c, b, r, qr, copyApproved ->
                                         vm.startReceive(c, b, r, qr, copyApproved)
                                     },
+                                    onPrepareReceive = { c, b, r, qr, copyApproved, completion ->
+                                        vm.startReceiveWhenReady(
+                                            c,
+                                            b,
+                                            r,
+                                            qr,
+                                            copyApproved,
+                                            completion,
+                                        )
+                                    },
+                                    onCancelReceive = vm::cancel,
                                     onSend = { c, b, r, jobId, qr ->
                                         vm.startSend(c, jobId, b, r, qr)
                                     },
@@ -149,11 +207,17 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        workflowVm.setForeground(true)
         discoveryVm.setForeground(true)
     }
 
     override fun onStop() {
-        discoveryVm.setForeground(false)
+        // Rotation/recreation keeps the same retained ViewModels and must not
+        // be interpreted as the user backgrounding the room.
+        if (!isChangingConfigurations) {
+            workflowVm.setForeground(false)
+            discoveryVm.setForeground(false)
+        }
         super.onStop()
     }
 

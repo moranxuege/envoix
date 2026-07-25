@@ -31,6 +31,7 @@ import kotlin.random.Random
 internal class BluetoothDiscoveryProvider(
     private val context: Context,
     private val localIdentity: LocalDiscoveryIdentity,
+    private val advertiseEnabled: Boolean = true,
 ) : DiscoveryProvider,
     NearbyRendezvousProvider {
     override val source = DiscoverySource.Bluetooth
@@ -304,23 +305,25 @@ internal class BluetoothDiscoveryProvider(
 
         active = true
         failureDetail = null
-        rendezvousReady = false
-        gattServer = runCatching { manager.openGattServer(context, gattServerCallback) }.getOrNull()
-        val pairingService =
-            BluetoothGattService(
-                BleRendezvousProtocol.SERVICE_UUID,
-                BluetoothGattService.SERVICE_TYPE_PRIMARY,
-            ).apply {
-                addCharacteristic(
-                    BluetoothGattCharacteristic(
-                        BleRendezvousProtocol.WRITE_CHARACTERISTIC_UUID,
-                        BluetoothGattCharacteristic.PROPERTY_WRITE,
-                        BluetoothGattCharacteristic.PERMISSION_WRITE,
-                    ),
-                )
+        rendezvousReady = !advertiseEnabled
+        if (advertiseEnabled) {
+            gattServer = runCatching { manager.openGattServer(context, gattServerCallback) }.getOrNull()
+            val pairingService =
+                BluetoothGattService(
+                    BleRendezvousProtocol.SERVICE_UUID,
+                    BluetoothGattService.SERVICE_TYPE_PRIMARY,
+                ).apply {
+                    addCharacteristic(
+                        BluetoothGattCharacteristic(
+                            BleRendezvousProtocol.WRITE_CHARACTERISTIC_UUID,
+                            BluetoothGattCharacteristic.PROPERTY_WRITE,
+                            BluetoothGattCharacteristic.PERMISSION_WRITE,
+                        ),
+                    )
+                }
+            if (gattServer?.addService(pairingService) != true) {
+                failureDetail = "Experimental Bluetooth pairing service could not start"
             }
-        if (gattServer?.addService(pairingService) != true) {
-            failureDetail = "Experimental Bluetooth pairing service could not start"
         }
 
         adapter.bluetoothLeScanner?.let { scanner ->
@@ -351,7 +354,7 @@ internal class BluetoothDiscoveryProvider(
         } ?: run { failureDetail = "Bluetooth scanning is unavailable" }
 
         val serviceUuid = ParcelUuid(checkNotNull(BleDiscoveryUuid.encode(localIdentity.peerKey)))
-        adapter.bluetoothLeAdvertiser?.let { advertiser ->
+        adapter.bluetoothLeAdvertiser?.takeIf { advertiseEnabled }?.let { advertiser ->
             val settings =
                 AdvertiseSettings
                     .Builder()
@@ -376,7 +379,9 @@ internal class BluetoothDiscoveryProvider(
                 advertisingPending = false
                 failureDetail = "Bluetooth advertising could not start"
             }
-        } ?: run { failureDetail = "Bluetooth advertising is unavailable" }
+        } ?: run {
+            if (advertiseEnabled) failureDetail = "Bluetooth advertising is unavailable"
+        }
         emitOperationalStatus()
     }
 
@@ -388,7 +393,7 @@ internal class BluetoothDiscoveryProvider(
     ) {
         val normalizedPeerKey = DiscoveryPeerRegistry.normalizePeerKey(peerKey)
         val device = normalizedPeerKey?.let(discoveredDevices::get)
-        if (!active || !rendezvousReady) {
+        if (!active || !scanning) {
             completion("Experimental Bluetooth pairing is not ready")
             return
         }

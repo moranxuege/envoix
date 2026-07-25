@@ -53,12 +53,23 @@ internal data class RoomStatus(
 @Composable
 internal fun RoomHeader(
     displayName: String,
-    state: RoomStatus,
+    control: RoomControlUiState,
+    legacyState: RoomStatus,
     onBack: () -> Unit,
     onActivity: () -> Unit,
     onSettings: () -> Unit,
 ) {
     val colors = Envoix.colors
+    val state =
+        when (control.phase) {
+            RoomControlPhase.Connected ->
+                RoomStatus(appText("Authenticated for this room", "已为此房间认证"), colors.success)
+            RoomControlPhase.Closed ->
+                RoomStatus(control.closeReason.roomEndedLabel(), colors.danger)
+            RoomControlPhase.Failed ->
+                RoomStatus(appText("Connection failed", "连接失败"), colors.danger)
+            else -> legacyState
+        }
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -79,8 +90,21 @@ internal fun RoomHeader(
         Spacer(Modifier.size(11.dp))
         Column(Modifier.weight(1f)) {
             Text(
-                appText("ONE-TIME ROOM · UNVERIFIED", "一次性房间 · 未验证"),
-                color = colors.warning,
+                when (control.phase) {
+                    RoomControlPhase.Connected ->
+                        appText("ROOM", "房间")
+                    RoomControlPhase.Closed, RoomControlPhase.Failed ->
+                        appText("ROOM ENDED", "房间已结束")
+                    else -> appText("LEGACY ONE-TIME ROOM", "旧版一次性房间")
+                },
+                color =
+                    if (control.phase == RoomControlPhase.Closed ||
+                        control.phase == RoomControlPhase.Failed
+                    ) {
+                        colors.danger
+                    } else {
+                        colors.warning
+                    },
                 fontSize = 10.sp,
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 0.7.sp,
@@ -126,6 +150,18 @@ internal fun RoomHeader(
         }
     }
 }
+
+@Composable
+private fun RoomCloseReason?.roomEndedLabel(): String =
+    when (this) {
+        RoomCloseReason.IdleExpired -> appText("Closed after 15 minutes idle", "闲置 15 分钟后已关闭")
+        RoomCloseReason.InvitationExpired -> appText("Invitation expired", "邀请已过期")
+        RoomCloseReason.PeerEnded -> appText("The other device ended the room", "另一台设备已结束房间")
+        RoomCloseReason.Backgrounded -> appText("Closed when Envoix left the foreground", "离开 Envoix 后已关闭")
+        RoomCloseReason.NetworkLost -> appText("Connection lost", "连接已断开")
+        RoomCloseReason.ProtocolFailure -> appText("Room connection failed", "房间连接失败")
+        else -> appText("Room ended", "房间已结束")
+    }
 
 @Composable
 internal fun RoomTransferSummary(transfer: Transfer) {
@@ -182,7 +218,7 @@ internal fun RoomTransferSummary(transfer: Transfer) {
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
-                    roomTransferStatus(transfer.status),
+                    roomTransferStatus(transfer),
                     color = if (transfer.status == Status.Failed) colors.danger else colors.muted,
                     fontSize = 12.sp,
                 )
@@ -210,8 +246,8 @@ internal fun RoomTransferSummary(transfer: Transfer) {
 }
 
 @Composable
-private fun roomTransferStatus(status: Status): String =
-    when (status) {
+private fun roomTransferStatus(transfer: Transfer): String =
+    when (transfer.status) {
         Status.Preparing -> appText("Preparing", "正在准备")
         Status.WaitingForPeer -> appText("Waiting for the other device", "等待另一台设备")
         Status.Pairing, Status.Connecting -> appText("Connecting", "正在连接")
@@ -221,7 +257,12 @@ private fun roomTransferStatus(status: Status): String =
         Status.Saving, Status.WaitingForReceiverSave, Status.FinalizingDelivery ->
             appText("Finishing", "正在完成")
         Status.Paused -> appText("Paused", "已暂停")
-        Status.Delivered -> appText("Delivered", "已送达")
+        Status.Delivered ->
+            if (transfer.direction == dev.envoix.app.Direction.Send) {
+                appText("Delivered", "已送达")
+            } else {
+                appText("Received", "已接收")
+            }
         Status.Failed -> appText("Needs attention", "需要处理")
         Status.Canceled -> appText("Canceled", "已取消")
     }
@@ -311,12 +352,78 @@ internal fun PendingRoomAction(
 }
 
 @Composable
-internal fun RoomActions(
-    onAddFiles: () -> Unit,
-    onShowQr: () -> Unit,
-    onClose: () -> Unit,
+internal fun IncomingRoomOfferCard(
+    offer: RoomTransferOffer,
+    onAccept: () -> Unit,
+    onReject: () -> Unit,
 ) {
     val colors = Envoix.colors
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .background(colors.accentSoft)
+            .border(1.dp, colors.accent.copy(alpha = 0.22f), RoundedCornerShape(18.dp))
+            .padding(16.dp),
+    ) {
+        Text(
+            appText("Incoming file offer", "收到文件"),
+            color = colors.accentStrong,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Bold,
+        )
+        Spacer(Modifier.height(5.dp))
+        Text(
+            offer.rootNames.take(3).joinToString(" · ").ifBlank {
+                if (offer.itemCount == 1) {
+                    appText("1 item", "1 个项目")
+                } else {
+                    appText("${offer.itemCount} items", "${offer.itemCount} 个项目")
+                }
+            },
+            color = colors.text,
+            fontSize = 13.sp,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            appText(
+                "${offer.itemCount} items · ${humanBytes(offer.totalBytes)}",
+                "${offer.itemCount} 个项目 · ${humanBytes(offer.totalBytes)}",
+            ),
+            color = colors.muted,
+            fontSize = 12.sp,
+        )
+        Spacer(Modifier.height(12.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            TextButton(onClick = onReject, modifier = Modifier.testTag("room_offer_reject")) {
+                Text(appText("Reject", "拒绝"), color = colors.muted)
+            }
+            Button(onClick = onAccept, modifier = Modifier.testTag("room_offer_accept")) {
+                Text(appText("Review offer", "查看邀请"))
+            }
+        }
+    }
+}
+
+@Composable
+internal fun RoomControlPanel(
+    control: RoomControlUiState,
+    legacy: Boolean,
+    onAddFiles: () -> Unit,
+    onShowQr: () -> Unit,
+    onKeepOpen: (Boolean) -> Unit,
+    onEnd: () -> Unit,
+    onDone: () -> Unit,
+) {
+    val colors = Envoix.colors
+    val canAddFiles =
+        legacy ||
+            (
+                control.connected &&
+                    control.incomingOffer == null &&
+                    !control.outgoingOfferPending
+            )
     Column(
         Modifier
             .fillMaxWidth()
@@ -325,21 +432,103 @@ internal fun RoomActions(
             .navigationBarsPadding(),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
+        if (control.phase == RoomControlPhase.Closed ||
+            control.phase == RoomControlPhase.Failed
+        ) {
+            Text(
+                control.closeReason.roomEndedLabel(),
+                color = colors.danger,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(colors.danger.copy(alpha = 0.09f))
+                        .padding(12.dp),
+            )
+            Spacer(Modifier.height(8.dp))
+            Button(onClick = onDone, modifier = Modifier.fillMaxWidth()) {
+                Text(appText("Done", "完成"))
+            }
+            return@Column
+        }
         RoomActionButton(
             label = appText("Add files", "添加文件"),
             icon = Icons.Default.Add,
             onClick = onAddFiles,
+            enabled = canAddFiles,
             modifier = Modifier.fillMaxWidth().testTag("room_add_files"),
         )
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-            TextButton(onClick = onShowQr, modifier = Modifier.testTag("room_show_qr")) {
-                Text(appText("Show a room QR", "显示房间二维码"), color = colors.accent)
+        if (legacy) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                TextButton(onClick = onShowQr, modifier = Modifier.testTag("room_show_qr")) {
+                    Text(appText("Show transfer QR", "显示传输二维码"), color = colors.accent)
+                }
+                TextButton(onClick = onEnd, modifier = Modifier.testTag("room_close")) {
+                    Text(appText("Close", "关闭"), color = colors.muted)
+                }
             }
-            TextButton(onClick = onClose, modifier = Modifier.testTag("room_close")) {
-                Text(appText("Close room", "关闭房间"), color = colors.muted)
+        } else {
+            Spacer(Modifier.height(8.dp))
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        roomLifetimeLabel(control),
+                        color = colors.muted,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    if (!control.creator) {
+                        Text(
+                            appText("The room creator controls its lifetime.", "房间时限由创建者控制。"),
+                            color = colors.muted,
+                            fontSize = 10.sp,
+                        )
+                    }
+                }
+                if (control.creator) {
+                    TextButton(
+                        onClick = {
+                            onKeepOpen(
+                                control.policy != RoomLifetimePolicy.UntilForegroundEnds,
+                            )
+                        },
+                        modifier = Modifier.testTag("room_keep_open"),
+                    ) {
+                        Text(
+                            if (control.policy == RoomLifetimePolicy.UntilForegroundEnds) {
+                                appText("Use 15 min", "使用 15 分钟")
+                            } else {
+                                appText("Keep open", "保持开启")
+                            },
+                            color = colors.accent,
+                        )
+                    }
+                }
+                TextButton(onClick = onEnd, modifier = Modifier.testTag("room_close")) {
+                    Text(appText("End room", "结束房间"), color = colors.danger)
+                }
             }
         }
     }
+}
+
+@Composable
+private fun roomLifetimeLabel(control: RoomControlUiState): String {
+    if (control.policy == RoomLifetimePolicy.UntilForegroundEnds) {
+        return appText("Kept open while Envoix is active", "Envoix 使用期间保持开启")
+    }
+    val deadline =
+        control.idleDeadlineMs
+            ?: return appText("Idle timer paused", "闲置计时已暂停")
+    val seconds = ((deadline - control.nowMs).coerceAtLeast(0L) + 999L) / 1_000L
+    val minutesPart = seconds / 60L
+    val secondsPart = seconds % 60L
+    return appText(
+        "Closes after ${"%d:%02d".format(minutesPart, secondsPart)} idle",
+        "闲置 ${"%d:%02d".format(minutesPart, secondsPart)} 后关闭",
+    )
 }
 
 @Composable
@@ -347,6 +536,7 @@ private fun RoomActionButton(
     label: String,
     icon: ImageVector,
     onClick: () -> Unit,
+    enabled: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
     val colors = Envoix.colors
@@ -354,8 +544,8 @@ private fun RoomActionButton(
         modifier
             .height(50.dp)
             .clip(RoundedCornerShape(14.dp))
-            .background(colors.accent)
-            .clickable(onClick = onClick),
+            .background(colors.accent.copy(alpha = if (enabled) 1f else 0.38f))
+            .clickable(enabled = enabled, onClick = onClick),
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically,
     ) {

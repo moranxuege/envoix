@@ -14,6 +14,7 @@ import java.nio.charset.StandardCharsets
 internal class MdnsDiscoveryProvider(
     context: Context,
     private val localIdentity: LocalDiscoveryIdentity,
+    private val advertiseEnabled: Boolean = true,
 ) : DiscoveryProvider {
     override val source = DiscoverySource.Mdns
 
@@ -184,7 +185,7 @@ internal class MdnsDiscoveryProvider(
         active = true
         registered = false
         registrationRequested = false
-        registrationSettled = false
+        registrationSettled = !advertiseEnabled
         discovering = false
         discoveryRequested = false
         discoverySettled = false
@@ -200,13 +201,15 @@ internal class MdnsDiscoveryProvider(
                 setAttribute(TXT_DISPLAY_NAME, localIdentity.displayName)
             }
 
-        try {
-            registrationRequested = true
-            nsdManager.registerService(serviceInfo, NsdManager.PROTOCOL_DNS_SD, registrationListener)
-        } catch (_: Exception) {
-            registrationRequested = false
-            registrationSettled = true
-            failureDetail = "mDNS visibility could not start"
+        if (advertiseEnabled) {
+            try {
+                registrationRequested = true
+                nsdManager.registerService(serviceInfo, NsdManager.PROTOCOL_DNS_SD, registrationListener)
+            } catch (_: Exception) {
+                registrationRequested = false
+                registrationSettled = true
+                failureDetail = "mDNS visibility could not start"
+            }
         }
         try {
             discoveryRequested = true
@@ -290,7 +293,7 @@ internal class MdnsDiscoveryProvider(
             when {
                 !registrationSettled || !discoverySettled ->
                     ProviderStatus(source, ProviderAvailability.Starting, "Starting local-network discovery")
-                registered && discovering ->
+                (registered || !advertiseEnabled) && discovering ->
                     ProviderStatus(source, ProviderAvailability.Ready, "Scanning and visible on the local network")
                 registered || discovering ->
                     ProviderStatus(

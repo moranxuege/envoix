@@ -70,6 +70,16 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.util.UUID
+
+internal typealias PrepareReceiveBeforeDecision = (
+    code: String,
+    broker: String,
+    relay: String,
+    qrPayload: String?,
+    copyApproved: Boolean,
+    completion: (id: Long, error: String?) -> Unit,
+) -> Unit
 
 /**
  * Role-specific transfer setup. Scanning an invite may switch to the opposite
@@ -90,8 +100,14 @@ internal fun NewTransferSheet(
     initialHostedCode: String? = null,
     initialHostedPayload: String? = null,
     roomMode: Boolean = false,
+    connectedRoom: Boolean = false,
     showQrInitially: Boolean = false,
-    onOfferInvite: ((invite: String, completion: (error: String?) -> Unit) -> Unit)? = null,
+    onExternalActivityChanged: (Boolean) -> Unit = {},
+    onOfferInvite: ((offer: RoomTransferOfferDraft, completion: (error: String?) -> Unit) -> Unit)? = null,
+    onBeforeStart: ((completion: (error: String?) -> Unit) -> Unit)? = null,
+    onPrepareReceiveBeforeDecision: PrepareReceiveBeforeDecision? = null,
+    onCancelPreparedReceive: (Long) -> Unit = {},
+    onPreparedReceiveCommitted: (String) -> Unit = {},
 ) {
     val colors = Envoix.colors
     val context = LocalContext.current
@@ -335,22 +351,26 @@ internal fun NewTransferSheet(
 
     val filePicker =
         rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+            onExternalActivityChanged(false)
             addSources(uris.map { ManifestV2SourceStager.sourceFromUri(context, it, false) })
         }
     val sourceFolderPicker =
         rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            onExternalActivityChanged(false)
             uri?.let {
                 addSources(listOf(ManifestV2SourceStager.sourceFromUri(context, it, true)))
             }
         }
     val sourceReauthorizationPicker =
         rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            onExternalActivityChanged(false)
             val previous = sourceAwaitingReauthorization
             sourceAwaitingReauthorization = null
             if (uri != null && previous != null) reauthorizeSource(previous, uri)
         }
     val saveFolderPicker =
         rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            onExternalActivityChanged(false)
             if (uri != null) SettingsStore.setSaveTree(context, uri)
         }
     val joining = typed.isNotBlank()
@@ -430,7 +450,8 @@ internal fun NewTransferSheet(
     val roomConnectionReady =
         roomMode &&
             (
-                !initialPairingInput.isNullOrBlank() ||
+                connectedRoom ||
+                    !initialPairingInput.isNullOrBlank() ||
                     !initialHostedPayload.isNullOrBlank() ||
                     nearbySelection?.sources?.contains(DiscoverySource.Bluetooth) == true
             )
@@ -513,6 +534,7 @@ internal fun NewTransferSheet(
                     appString(R.string.add_files_hint),
                     placeholder = preparedSources.isEmpty(),
                 ) {
+                    onExternalActivityChanged(true)
                     filePicker.launch(arrayOf("*/*"))
                 }
                 Spacer(Modifier.height(8.dp))
@@ -521,6 +543,7 @@ internal fun NewTransferSheet(
                     appString(R.string.add_folder_hint),
                     placeholder = false,
                 ) {
+                    onExternalActivityChanged(true)
                     sourceFolderPicker.launch(null)
                 }
                 preparedSources.forEach { prepared ->
@@ -577,6 +600,7 @@ internal fun NewTransferSheet(
                                         .clip(RoundedCornerShape(7.dp))
                                         .clickable {
                                             sourceAwaitingReauthorization = prepared
+                                            onExternalActivityChanged(true)
                                             sourceReauthorizationPicker.launch(null)
                                         }.padding(horizontal = 7.dp, vertical = 5.dp),
                             )
@@ -663,6 +687,7 @@ internal fun NewTransferSheet(
                 }
             } else {
                 PathRow(appString(R.string.save_to), SettingsStore.saveLabel(context), placeholder = false) {
+                    onExternalActivityChanged(true)
                     saveFolderPicker.launch(SettingsStore.savePickerInitialUri())
                 }
             }
@@ -794,28 +819,100 @@ internal fun NewTransferSheet(
                             }
                         }
                     }
-                    val offer = onOfferInvite
-                    if (!joining && offer != null) {
-                        val payload = generated?.second ?: return@clickable
+                    val continueAfterRoomDecision = {
+                        val offer = onOfferInvite
+                        if (!joining && offer != null) {
+                            val payload = generated?.second
+                            if (payload == null) {
+                                startSubmitted = false
+                            } else {
+                                rendezvousBusy = true
+                                rendezvousError = null
+                                val summary = preparationSummary
+                                offer(
+                                    RoomTransferOfferDraft(
+                                        id = UUID.randomUUID().toString(),
+                                        transferInvite = payload,
+                                        rootNames =
+                                            preparedSources
+                                                .map { it.source.displayName }
+                                                .take(3),
+                                        itemCount =
+                                            (summary?.optInt("file_count") ?: 0) +
+                                                (summary?.optInt("directory_count") ?: 0),
+                                        totalBytes = summary?.optLong("total") ?: 0L,
+                                    ),
+                                ) { error ->
+                                    rendezvousBusy = false
+                                    if (error == null) {
+                                        startLocal()
+                                    } else {
+                                        rendezvousError = error
+                                        startSubmitted = false
+                                    }
+                                }
+                            }
+                        } else {
+                            startLocal()
+                        }
+                    }
+                    val beforeStart = onBeforeStart
+                    val prepareReceive = onPrepareReceiveBeforeDecision
+                    if (beforeStart != null && role == "receive" && prepareReceive != null) {
                         rendezvousBusy = true
                         rendezvousError = null
-                        offer(payload) { error ->
+                        prepareReceive(c, useBroker, useRelay, qr, true) { receiveId, startError ->
+                            if (startError != null) {
+                                onCancelPreparedReceive(receiveId)
+                                rendezvousBusy = false
+                                rendezvousError = startError
+                                startSubmitted = false
+                            } else if (!preparation.transferOwnership()) {
+                                onCancelPreparedReceive(receiveId)
+                                rendezvousBusy = false
+                                rendezvousError =
+                                    text(
+                                        "The receive setup was already closed",
+                                        "接收设置已关闭",
+                                    )
+                                startSubmitted = false
+                            } else {
+                                beforeStart { decisionError ->
+                                    rendezvousBusy = false
+                                    if (decisionError == null) {
+                                        onPreparedReceiveCommitted(c)
+                                    } else {
+                                        onCancelPreparedReceive(receiveId)
+                                        preparation.rollbackTransferredOwnership()
+                                        rendezvousError =
+                                            decisionError
+                                        startSubmitted = false
+                                    }
+                                }
+                            }
+                        }
+                    } else if (beforeStart != null) {
+                        rendezvousBusy = true
+                        rendezvousError = null
+                        beforeStart { error ->
                             rendezvousBusy = false
                             if (error == null) {
-                                startLocal()
+                                continueAfterRoomDecision()
                             } else {
                                 rendezvousError = error
                                 startSubmitted = false
                             }
                         }
                     } else {
-                        startLocal()
+                        continueAfterRoomDecision()
                     }
                 },
             contentAlignment = Alignment.Center,
         ) {
             Text(
                 when {
+                    rendezvousBusy && role == "receive" ->
+                        text("Preparing receiver…", "正在准备接收…")
                     rendezvousBusy -> text("Delivering invite…", "正在发送邀请…")
                     roomMode && role == "send" -> text("Offer files", "发送文件")
                     roomMode -> text("Start waiting", "开始等待")

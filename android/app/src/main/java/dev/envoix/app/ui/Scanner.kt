@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
@@ -23,11 +24,14 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -59,6 +63,128 @@ import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.RGBLuminanceSource
 import com.google.zxing.common.HybridBinarizer
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
+
+@Composable
+internal fun FullScreenScanner(
+    onScanned: (String) -> Unit,
+    onClose: () -> Unit,
+    onExternalActivityChanged: (Boolean) -> Unit = {},
+) {
+    BackHandler(onBack = onClose)
+    val colors = Envoix.colors
+    val context = LocalContext.current
+    var handled by remember { mutableStateOf(false) }
+    var pickError by remember { mutableStateOf(false) }
+    var hasCamera by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+                PackageManager.PERMISSION_GRANTED,
+        )
+    }
+    val deliver: (String) -> Unit = { value ->
+        if (!handled) {
+            handled = true
+            onScanned(value)
+        }
+    }
+    val permissionLauncher =
+        rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+            onExternalActivityChanged(false)
+            hasCamera = it
+        }
+    val picker =
+        rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+            onExternalActivityChanged(false)
+            if (uri != null) {
+                decodeQrFromUri(context, uri)?.let(deliver) ?: run { pickError = true }
+            }
+        }
+    LaunchedEffect(Unit) {
+        if (!hasCamera) {
+            onExternalActivityChanged(true)
+            permissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        if (hasCamera) {
+            CameraPreview(onQr = deliver, modifier = Modifier.fillMaxSize())
+        }
+        Column(
+            Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .navigationBarsPadding()
+                .padding(18.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.Close,
+                    contentDescription = appText("Close scanner", "关闭扫描"),
+                    tint = Color.White,
+                    modifier =
+                        Modifier
+                            .clip(RoundedCornerShape(22.dp))
+                            .background(Color.Black.copy(alpha = 0.42f))
+                            .clickable(onClick = onClose)
+                            .padding(10.dp)
+                            .size(22.dp),
+                )
+                Spacer(Modifier.weight(1f))
+                Text(
+                    appText("Scan room QR", "扫描房间二维码"),
+                    color = Color.White,
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.weight(1f))
+                Spacer(Modifier.size(42.dp))
+            }
+            Spacer(Modifier.weight(1f))
+            Box(
+                Modifier
+                    .size(284.dp)
+                    .clip(RoundedCornerShape(24.dp))
+                    .background(Color.Transparent),
+            ) {
+                CornerBrackets(colors.accent, Modifier.fillMaxSize())
+            }
+            Spacer(Modifier.height(18.dp))
+            Text(
+                when {
+                    pickError -> appText("No QR code found in that image", "图片中未找到二维码")
+                    hasCamera -> appText("Point at an Envoix room code", "请对准 Envoix 房间二维码")
+                    else -> appText("Camera access is off", "相机权限未开启")
+                },
+                color = if (pickError) colors.danger else Color.White.copy(alpha = 0.82f),
+                fontSize = 13.sp,
+            )
+            Spacer(Modifier.weight(1f))
+            Row(
+                Modifier
+                    .clip(RoundedCornerShape(22.dp))
+                    .background(Color.Black.copy(alpha = 0.5f))
+                    .clickable {
+                        pickError = false
+                        onExternalActivityChanged(true)
+                        picker.launch("image/*")
+                    }.padding(horizontal = 18.dp, vertical = 11.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Default.Image, null, tint = Color.White, modifier = Modifier.size(19.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    appText("Choose from photos", "从相册选择"),
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 14.sp,
+                )
+            }
+        }
+    }
+}
 
 /**
  * Inline QR scanner: a live camera preview in a rounded, bracketed viewfinder,
@@ -163,33 +289,52 @@ private fun CameraPreview(
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
     val executor = remember { Executors.newSingleThreadExecutor() }
-    DisposableEffect(Unit) { onDispose { executor.shutdown() } }
+    val disposed = remember { AtomicBoolean(false) }
+    var provider: ProcessCameraProvider? by remember { mutableStateOf(null) }
+    var preview: Preview? by remember { mutableStateOf(null) }
+    var analysis: ImageAnalysis? by remember { mutableStateOf(null) }
+    DisposableEffect(lifecycleOwner) {
+        onDispose {
+            disposed.set(true)
+            val activeUseCases = listOfNotNull(preview, analysis).toTypedArray()
+            if (activeUseCases.isNotEmpty()) provider?.unbind(*activeUseCases)
+            executor.shutdown()
+        }
+    }
     AndroidView(
         modifier = modifier,
         factory = { ctx ->
-            val previewView = PreviewView(ctx).apply { scaleType = PreviewView.ScaleType.FILL_CENTER }
+            val previewView =
+                PreviewView(ctx).apply {
+                    scaleType = PreviewView.ScaleType.FILL_CENTER
+                    implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+                }
             val future = ProcessCameraProvider.getInstance(ctx)
             future.addListener({
-                val provider = future.get()
-                val preview =
+                if (disposed.get()) return@addListener
+                val cameraProvider = future.get()
+                val previewUseCase =
                     Preview
                         .Builder()
                         .build()
                         .also { it.setSurfaceProvider(previewView.surfaceProvider) }
-                val analysis =
+                val analysisUseCase =
                     ImageAnalysis
                         .Builder()
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                         .build()
                         .also { it.setAnalyzer(executor, QrAnalyzer(onQr)) }
                 runCatching {
-                    provider.unbindAll()
-                    provider.bindToLifecycle(
+                    cameraProvider.unbind(previewUseCase, analysisUseCase)
+                    cameraProvider.bindToLifecycle(
                         lifecycleOwner,
                         CameraSelector.DEFAULT_BACK_CAMERA,
-                        preview,
-                        analysis,
+                        previewUseCase,
+                        analysisUseCase,
                     )
+                    provider = cameraProvider
+                    preview = previewUseCase
+                    analysis = analysisUseCase
                 }
             }, ContextCompat.getMainExecutor(ctx))
             previewView

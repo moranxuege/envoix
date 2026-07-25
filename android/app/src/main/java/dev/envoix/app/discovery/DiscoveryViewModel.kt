@@ -6,11 +6,15 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.envoix.app.InviteCodec
 import dev.envoix.app.OpLog
+import dev.envoix.app.SettingsStore
+import dev.envoix.app.ui.RoomControlInviteFormat
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
@@ -33,7 +37,10 @@ internal enum class DiscoveryMode {
 internal class DiscoveryViewModel(
     application: Application,
 ) : AndroidViewModel(application) {
-    private val identity = DiscoveryIdentityFactory.create()
+    private var identity =
+        DiscoveryIdentityFactory.create(
+            displayName = SettingsStore.settings.value.nearbyDisplayName,
+        )
     private val registry = DiscoveryPeerRegistry()
     private val offerQueue = NearbyRendezvousOfferQueue()
     private var providers: List<DiscoveryProvider> = emptyList()
@@ -55,6 +62,40 @@ internal class DiscoveryViewModel(
     private var started = false
     private var generation = 0
     private var ticker: Job? = null
+    private var currentPresence =
+        PresenceSettings(
+            displayName = identity.displayName,
+            visibility =
+                NearbyVisibility.fromPersisted(
+                    SettingsStore.settings.value.nearbyVisibility,
+                ),
+            expiresAtEpochMs = SettingsStore.settings.value.nearbyVisibilityExpiresAtEpochMs,
+        )
+
+    init {
+        viewModelScope.launch {
+            SettingsStore.settings
+                .map {
+                    PresenceSettings(
+                        displayName = it.nearbyDisplayName,
+                        visibility = NearbyVisibility.fromPersisted(it.nearbyVisibility),
+                        expiresAtEpochMs = it.nearbyVisibilityExpiresAtEpochMs,
+                    )
+                }.distinctUntilChanged()
+                .collect { presence ->
+                    val normalizedName =
+                        DiscoveryPeerRegistry.sanitizeDisplayName(presence.displayName)
+                            ?: "Android device"
+                    val changed =
+                        normalizedName != identity.displayName ||
+                            presence != currentPresence
+                    currentPresence = presence.copy(displayName = normalizedName)
+                    identity = identity.copy(displayName = normalizedName)
+                    _uiState.value = _uiState.value.copy(localName = normalizedName)
+                    if (changed && started) restart()
+                }
+        }
+    }
 
     fun setForeground(value: Boolean) {
         if (foreground == value) return
@@ -189,6 +230,7 @@ internal class DiscoveryViewModel(
     }
 
     private fun publishPeers() {
+        expireTemporaryVisibilityIfNeeded()
         val now = SystemClock.elapsedRealtime()
         val peers =
             registry.peers(now).let { discovered ->
@@ -236,7 +278,9 @@ internal class DiscoveryViewModel(
                     if (!started || generation != activeGeneration || offer.senderPeerKey == identity.peerKey) {
                         return@launch
                     }
-                    if (InviteCodec.parse(offer.invite) == null) {
+                    if (InviteCodec.parse(offer.invite) == null &&
+                        !RoomControlInviteFormat.looksLikeRoomInvite(offer.invite)
+                    ) {
                         OpLog.add("DISCOVERY provider=bluetooth state=invalid_offer")
                         return@launch
                     }
@@ -250,10 +294,26 @@ internal class DiscoveryViewModel(
 
     private fun createProviders(): List<DiscoveryProvider> =
         listOf(
-            BluetoothDiscoveryProvider(getApplication(), identity),
-            MdnsDiscoveryProvider(getApplication(), identity),
+            BluetoothDiscoveryProvider(getApplication(), identity, advertisingAllowed()),
+            MdnsDiscoveryProvider(getApplication(), identity, advertisingAllowed()),
             WifiAwareDiscoveryProvider(),
         )
+
+    private fun advertisingAllowed(): Boolean =
+        nearbyAdvertisingAllowed(
+            visibility = currentPresence.visibility,
+            expiresAtEpochMs = currentPresence.expiresAtEpochMs,
+            nowEpochMs = System.currentTimeMillis(),
+        )
+
+    private fun expireTemporaryVisibilityIfNeeded() {
+        if (currentPresence.visibility != NearbyVisibility.EveryoneTenMinutes ||
+            System.currentTimeMillis() < currentPresence.expiresAtEpochMs
+        ) {
+            return
+        }
+        SettingsStore.setNearbyVisibility(NearbyVisibility.Hidden.persistedValue)
+    }
 
     private fun stoppedStatuses(): Map<DiscoverySource, ProviderStatus> =
         DiscoverySource.entries.associateWith { source ->
@@ -267,3 +327,9 @@ internal class DiscoveryViewModel(
         private val UPPERCASE_BOUNDARY = Regex("(?<=[a-z])(?=[A-Z])")
     }
 }
+
+private data class PresenceSettings(
+    val displayName: String,
+    val visibility: NearbyVisibility,
+    val expiresAtEpochMs: Long,
+)

@@ -3,43 +3,25 @@ package dev.envoix.app.ui
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.History
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
@@ -47,7 +29,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import dev.envoix.app.InviteCodec
 import dev.envoix.app.SettingsStore
 import dev.envoix.app.discovery.DiscoveredPeer
 import dev.envoix.app.discovery.DiscoveryPermissions
@@ -55,56 +36,45 @@ import dev.envoix.app.discovery.DiscoverySource
 import dev.envoix.app.discovery.DiscoveryViewModel
 import dev.envoix.app.discovery.NearbyPairingSelection
 import dev.envoix.app.discovery.NearbyRendezvousOffer
+import dev.envoix.app.discovery.NearbyVisibility
 import dev.envoix.app.discovery.ProviderAvailability
 
-@OptIn(ExperimentalComposeUiApi::class, ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 internal fun ConnectionHubScreen(
-    onOpenRoom: (DeviceRoomDraft) -> Unit,
+    control: RoomControlUiState,
+    onRevealInvite: () -> Unit,
+    onHideInvite: () -> Unit,
+    onRefreshInvite: () -> Unit,
+    onEndWaitingRoom: () -> Unit,
+    onJoinInvite: (String) -> Unit,
+    onNearbyRoom: (
+        selection: NearbyPairingSelection,
+        deliver: (String, (String?) -> Unit) -> Unit,
+    ) -> Unit,
+    onReturnToRoom: () -> Unit,
     onActivity: () -> Unit,
     onSettings: () -> Unit,
     onAcceptIncomingOffer: (NearbyRendezvousOffer) -> Boolean,
+    onCancelReplacement: () -> Unit,
+    onConfirmReplacement: () -> Unit,
+    onExternalActivityChanged: (Boolean) -> Unit,
     pendingShareCount: Int = 0,
     discoveryViewModel: DiscoveryViewModel,
 ) {
     val colors = Envoix.colors
-    val state by discoveryViewModel.uiState.collectAsStateWithLifecycle()
+    val discovery by discoveryViewModel.uiState.collectAsStateWithLifecycle()
     val settings by SettingsStore.settings.collectAsStateWithLifecycle()
-    var action by remember { mutableStateOf<HubAction?>(null) }
-    var error by remember { mutableStateOf<String?>(null) }
+    var scannerOpen by remember { mutableStateOf(false) }
+    var codeDialogOpen by remember { mutableStateOf(false) }
+    var identityDialogOpen by remember { mutableStateOf(false) }
+    var visibilityDialogOpen by remember { mutableStateOf(false) }
+    var localError by remember { mutableStateOf<String?>(null) }
     val permissionLauncher =
         rememberLauncherForActivityResult(
             ActivityResultContracts.RequestMultiplePermissions(),
         ) { discoveryViewModel.restart() }
-    val nearbyName = appText("Nearby Envoix device", "附近的 Envoix 设备")
-    val qrName = appText("Device from QR", "二维码设备")
-    val codeName = appText("Device from code", "配对码设备")
-    val waitingName = appText("One-time room", "一次性房间")
-    val invalidInvite = appText("That is not a valid Envoix invite.", "这不是有效的 Envoix 邀请。")
 
-    fun openInvite(
-        input: String,
-        displayName: String,
-    ) {
-        val normalized = input.trim()
-        val parsed = InviteCodec.parse(normalized)
-        if (parsed == null) {
-            error = invalidInvite
-            return
-        }
-        action = null
-        error = null
-        onOpenRoom(
-            DeviceRoomDraft(
-                displayName = displayName,
-                pairingInput = normalized,
-                pairingCode = parsed.code,
-                directionAdapter =
-                    InviteCodec.oppositeRole(parsed.role)
-                        ?: settings.defaultRole.validDirection(),
-            ),
-        )
-    }
     Column(
         Modifier
             .semantics { testTagsAsResourceId = true }
@@ -112,423 +82,241 @@ internal fun ConnectionHubScreen(
             .fillMaxSize()
             .background(colors.bg),
     ) {
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                "Envoix",
-                color = colors.text,
-                fontSize = 21.sp,
-                fontWeight = FontWeight.ExtraBold,
-                modifier = Modifier.weight(1f),
-            )
-            IconButton(onClick = onActivity, modifier = Modifier.testTag("hub_activity")) {
-                Icon(Icons.Default.History, appText("Activity", "活动"), tint = colors.muted)
-            }
-            IconButton(onClick = onSettings, modifier = Modifier.testTag("hub_settings")) {
-                Icon(Icons.Default.Settings, appText("Settings", "设置"), tint = colors.muted)
-            }
-        }
+        ConnectionHubAppBar(onActivity = onActivity, onSettings = onSettings)
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 32.dp),
+            contentPadding = PaddingValues(start = 18.dp, end = 18.dp, bottom = 28.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            item {
-                Text(
-                    appText("Connect to a device", "连接设备"),
-                    color = colors.text,
-                    fontSize = 30.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                )
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    appText(
-                        "Nearby devices appear automatically. Choose one, then start a transfer.",
-                        "附近设备会自动出现。选择一台设备，然后开始传输。",
-                    ),
-                    color = colors.muted,
-                    fontSize = 14.sp,
-                    lineHeight = 20.sp,
-                )
-            }
             if (pendingShareCount > 0) {
                 item {
                     Text(
                         appText(
-                            "$pendingShareCount items are ready. Choose a device to offer them.",
-                            "已有 $pendingShareCount 个项目就绪。请选择设备发送。",
+                            "$pendingShareCount items are ready. Connect to a device to offer them.",
+                            "已有 $pendingShareCount 个项目就绪。连接设备后即可发送。",
                         ),
-                        color = colors.accent,
+                        color = colors.accentStrong,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.fillMaxWidth().background(colors.accentSoft).padding(12.dp),
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .background(colors.accentSoft)
+                                .padding(12.dp),
                     )
                 }
             }
             item {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    HubAction.entries.forEach { item ->
-                        OutlinedButton(
-                            onClick = {
-                                error = null
-                                action = item
-                            },
-                            modifier = Modifier.weight(1f).testTag(item.testTag()),
-                            contentPadding = PaddingValues(horizontal = 4.dp),
-                        ) {
-                            Text(item.label(), maxLines = 1, fontSize = 12.sp)
-                        }
-                    }
-                }
-            }
-            item {
-                Text(
-                    appText(
-                        "NEARBY DEVICES · Visible as ${state.localName}",
-                        "附近设备 · 本机显示为 ${state.localName}",
-                    ),
-                    color = colors.muted,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
+                MainRoomInviteCard(
+                    control = control,
+                    onReveal = onRevealInvite,
+                    onHide = onHideInvite,
+                    onRefresh = onRefreshInvite,
+                    onEndWaiting = onEndWaitingRoom,
+                    onReturnToRoom = onReturnToRoom,
                 )
             }
             item {
-                ProviderSummary(state.statuses)
+                ConnectionMethodActions(
+                    onScan = {
+                        localError = null
+                        scannerOpen = true
+                    },
+                    onEnterCode = {
+                        localError = null
+                        codeDialogOpen = true
+                    },
+                )
             }
-            if (state.statuses.values.any { it.availability == ProviderAvailability.PermissionRequired }) {
+            item {
+                NearbyIdentityRow(
+                    displayName = settings.nearbyDisplayName,
+                    visibility =
+                        NearbyVisibility.fromPersisted(
+                            settings.nearbyVisibility,
+                        ),
+                    onEditName = { identityDialogOpen = true },
+                    onVisibility = { visibilityDialogOpen = true },
+                )
+            }
+            item {
+                Text(
+                    appText("NEARBY DEVICES", "附近设备"),
+                    color = colors.muted,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 0.8.sp,
+                )
+            }
+            if (discovery.statuses.values.any {
+                    it.availability == ProviderAvailability.PermissionRequired
+                }
+            ) {
                 item {
                     Button(
                         onClick = {
-                            permissionLauncher.launch(DiscoveryPermissions.bluetoothRuntimePermissions())
+                            permissionLauncher.launch(
+                                DiscoveryPermissions.bluetoothRuntimePermissions(),
+                            )
                         },
                     ) {
                         Text(appText("Allow nearby access", "允许附近设备访问"))
                     }
                 }
             }
-            if (state.peers.isEmpty()) {
+            if (discovery.peers.isEmpty()) {
                 item {
                     Text(
-                        nearbyEmptyMessage(state.active, state.statuses.values.map { it.availability }),
+                        appText("Looking for nearby devices…", "正在寻找附近设备…"),
                         color = colors.muted,
                         fontSize = 14.sp,
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 22.dp),
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 20.dp),
                     )
                 }
             } else {
-                items(state.peers, key = DiscoveredPeer::peerKey) { peer ->
-                    NearbyDeviceCard(
-                        peer = peer,
-                        canPairNearby = DiscoverySource.Bluetooth in peer.sources,
-                    ) {
-                        onOpenRoom(
-                            DeviceRoomDraft(
-                                displayName = peer.displayName ?: nearbyName,
-                                directionAdapter = settings.defaultRole.validDirection(),
-                                nearbySelection = NearbyPairingSelection.from(peer),
-                            ),
-                        )
+                items(discovery.peers, key = DiscoveredPeer::peerKey) { peer ->
+                    NearbyDeviceCard(peer) {
+                        val selection = NearbyPairingSelection.from(peer)
+                        onNearbyRoom(selection) { invite, completion ->
+                            if (DiscoverySource.Bluetooth !in peer.sources) {
+                                completion(
+                                    AppText.value(
+                                        "Use QR or code with this device",
+                                        "请使用二维码或房间码连接此设备",
+                                        settings.language,
+                                    ),
+                                )
+                            } else {
+                                discoveryViewModel.offerInvite(
+                                    peer.peerKey,
+                                    invite,
+                                    completion,
+                                )
+                            }
+                        }
                     }
                 }
             }
-            item {
-                Text(
-                    appText(
-                        "Nearby names are not verified. A privately shared QR or code authenticates each transfer.",
-                        "附近设备名称未经验证。私下分享的二维码或配对码会验证每次传输。",
-                    ),
-                    color = colors.muted,
-                    fontSize = 12.sp,
-                )
+            localError?.let { message ->
+                item { Text(message, color = colors.danger, fontSize = 13.sp) }
             }
         }
     }
-    action?.let { selected ->
-        ModalBottomSheet(
-            onDismissRequest = {
-                action = null
-                error = null
+
+    if (scannerOpen) {
+        FullScreenScanner(
+            onScanned = {
+                scannerOpen = false
+                onJoinInvite(it)
             },
-            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            containerColor = colors.surface,
-        ) {
-            ConnectionActionSheet(
-                action = selected,
-                error = error,
-                broker = settings.broker,
-                relay = settings.relay,
-                hostedRole = if (pendingShareCount > 0) "send" else "receive",
-                onScanned = { openInvite(it, qrName) },
-                onCode = { openInvite(it, codeName) },
-                onOpenLocalRoom = { code, payload ->
-                    action = null
-                    error = null
-                    onOpenRoom(
-                        DeviceRoomDraft(
-                            displayName = waitingName,
-                            directionAdapter = if (pendingShareCount > 0) "send" else "receive",
-                            hostedCode = code,
-                            hostedPayload = payload,
-                        ),
-                    )
-                },
-            )
-        }
+            onClose = { scannerOpen = false },
+            onExternalActivityChanged = onExternalActivityChanged,
+        )
     }
-    state.incomingRendezvousOffers.firstOrNull()?.let { offer ->
-        AlertDialog(
-            onDismissRequest = {
+    if (codeDialogOpen) {
+        EnterRoomCodeDialog(
+            error = localError,
+            onDismiss = { codeDialogOpen = false },
+            onContinue = {
+                codeDialogOpen = false
+                onJoinInvite(it)
+            },
+        )
+    }
+    if (identityDialogOpen) {
+        EditNearbyNameDialog(
+            currentName = settings.nearbyDisplayName,
+            onDismiss = { identityDialogOpen = false },
+            onSave = { value ->
+                if (SettingsStore.setNearbyDisplayName(value)) {
+                    identityDialogOpen = false
+                } else {
+                    localError =
+                        AppText.value(
+                            "Enter a name between 1 and 48 characters.",
+                            "请输入 1 到 48 个字符的名称。",
+                            settings.language,
+                        )
+                }
+            },
+        )
+    }
+    if (visibilityDialogOpen) {
+        NearbyVisibilityDialog(
+            selected = NearbyVisibility.fromPersisted(settings.nearbyVisibility),
+            onDismiss = { visibilityDialogOpen = false },
+            onSelect = {
+                SettingsStore.setNearbyVisibility(it.persistedValue)
+                visibilityDialogOpen = false
+            },
+        )
+    }
+    discovery.incomingRendezvousOffers.firstOrNull()?.let { offer ->
+        IncomingNearbyInvitationDialog(
+            roomInvitation = RoomControlInviteFormat.looksLikeRoomInvite(offer.invite),
+            peerName =
+                offer.senderDisplayName
+                    ?: appText("Nearby Envoix device", "附近的 Envoix 设备"),
+            onAccept = {
+                if (!onAcceptIncomingOffer(offer)) {
+                    localError =
+                        AppText.value(
+                            "This invitation is not supported.",
+                            "暂不支持这个邀请。",
+                            settings.language,
+                        )
+                }
                 discoveryViewModel.consumeRendezvousOffer(offer.requestId)
             },
-            title = { Text(appText("Nearby transfer invitation", "附近传输邀请")) },
+            onReject = {
+                discoveryViewModel.consumeRendezvousOffer(offer.requestId)
+            },
+        )
+    }
+    if (control.replacementRequested) {
+        val canReturnToRoom =
+            control.connected ||
+                control.phase == RoomControlPhase.Legacy
+        AlertDialog(
+            onDismissRequest =
+                if (canReturnToRoom) {
+                    onReturnToRoom
+                } else {
+                    onCancelReplacement
+                },
+            title = { Text(appText("Another room is active", "已有一个房间")) },
             text = {
                 Text(
                     appText(
-                        "${offer.senderDisplayName ?: nearbyName} wants to start a one-time transfer. " +
-                            "This experimental Bluetooth invitation is unverified.",
-                        "${offer.senderDisplayName ?: nearbyName} 想要开始一次性传输。" +
-                            "此实验性蓝牙邀请未经验证。",
+                        "Envoix can keep one room at a time. End the current room before starting another.",
+                        "Envoix 同时只能保留一个房间。开始新房间前需要结束当前房间。",
                     ),
                 )
             },
             confirmButton = {
-                TextButton(
-                    onClick = {
-                        if (!onAcceptIncomingOffer(offer)) error = invalidInvite
-                        discoveryViewModel.consumeRendezvousOffer(offer.requestId)
-                    },
-                    modifier = Modifier.testTag("nearby_offer_accept"),
-                ) {
-                    Text(appText("Accept", "接受"))
+                TextButton(onClick = onConfirmReplacement) {
+                    Text(appText("End and replace", "结束并替换"))
                 }
             },
             dismissButton = {
                 TextButton(
-                    onClick = { discoveryViewModel.consumeRendezvousOffer(offer.requestId) },
-                    modifier = Modifier.testTag("nearby_offer_reject"),
+                    onClick =
+                        if (canReturnToRoom) {
+                            onReturnToRoom
+                        } else {
+                            onCancelReplacement
+                        },
                 ) {
-                    Text(appText("Reject", "拒绝"))
+                    Text(
+                        if (canReturnToRoom) {
+                            appText("Return to room", "返回房间")
+                        } else {
+                            appText("Keep current", "保留当前房间")
+                        },
+                    )
                 }
             },
             containerColor = colors.surface,
         )
     }
 }
-
-@Composable
-private fun ProviderSummary(statuses: Map<DiscoverySource, dev.envoix.app.discovery.ProviderStatus>) {
-    val colors = Envoix.colors
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .background(colors.surface)
-            .border(1.dp, colors.line, RoundedCornerShape(14.dp))
-            .padding(horizontal = 14.dp, vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(7.dp),
-    ) {
-        DiscoverySource.entries.forEach { source ->
-            val availability = statuses[source]?.availability ?: ProviderAvailability.Stopped
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text(source.connectionLabel(), color = colors.text, fontSize = 12.sp, modifier = Modifier.weight(1f))
-                Text(
-                    availability.connectionLabel(),
-                    color =
-                        when (availability) {
-                            ProviderAvailability.Ready -> colors.success
-                            ProviderAvailability.Starting -> colors.accent
-                            ProviderAvailability.Degraded,
-                            ProviderAvailability.TemporarilyUnavailable,
-                            -> colors.warning
-                            ProviderAvailability.Stopped,
-                            ProviderAvailability.Reserved,
-                            ProviderAvailability.Unsupported,
-                            -> colors.muted
-                            else -> colors.danger
-                        },
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun DiscoverySource.connectionLabel(): String =
-    when (this) {
-        DiscoverySource.Bluetooth -> appText("Bluetooth", "蓝牙")
-        DiscoverySource.Mdns -> appText("Local network", "局域网")
-        DiscoverySource.WifiAware -> "Wi-Fi Aware"
-    }
-
-@Composable
-private fun ProviderAvailability.connectionLabel(): String =
-    when (this) {
-        ProviderAvailability.Stopped -> appText("Paused", "已暂停")
-        ProviderAvailability.Starting -> appText("Starting", "正在启动")
-        ProviderAvailability.Ready -> appText("Available", "可用")
-        ProviderAvailability.Degraded -> appText("Limited", "受限")
-        ProviderAvailability.PermissionRequired -> appText("Permission needed", "需要权限")
-        ProviderAvailability.Disabled -> appText("Turned off", "未开启")
-        ProviderAvailability.Unsupported -> appText("Unsupported", "不支持")
-        ProviderAvailability.TemporarilyUnavailable -> appText("Unavailable", "暂不可用")
-        ProviderAvailability.Reserved -> appText("Coming later", "暂未开放")
-        ProviderAvailability.Error -> appText("Error", "错误")
-    }
-
-@Composable
-private fun nearbyEmptyMessage(
-    active: Boolean,
-    availability: Collection<ProviderAvailability>,
-): String =
-    when {
-        !active -> appText("Nearby discovery is paused.", "附近设备发现已暂停。")
-        availability.any { it == ProviderAvailability.PermissionRequired } ->
-            appText("Allow nearby access, or use QR/code.", "请允许附近设备访问，或使用二维码/配对码。")
-        availability.any { it == ProviderAvailability.Ready || it == ProviderAvailability.Starting } ->
-            appText("Looking for nearby devices…", "正在寻找附近设备…")
-        availability.any { it == ProviderAvailability.Disabled } ->
-            appText("A nearby connection method is turned off. You can still use QR/code.", "附近连接方式未开启，仍可使用二维码/配对码。")
-        else ->
-            appText("Nearby discovery is unavailable. Use QR or a pairing code.", "附近设备发现不可用，请使用二维码或配对码。")
-    }
-
-@Composable
-private fun NearbyDeviceCard(
-    peer: DiscoveredPeer,
-    canPairNearby: Boolean,
-    onClick: () -> Unit,
-) {
-    val colors = Envoix.colors
-    val bluetoothLabel = appText("Bluetooth", "蓝牙")
-    val localNetworkLabel = appText("Local network", "局域网")
-    val wifiAwareLabel = appText("Wi-Fi Aware", "Wi-Fi Aware")
-    val sourceText =
-        listOfNotNull(
-            bluetoothLabel.takeIf { DiscoverySource.Bluetooth in peer.sources },
-            localNetworkLabel.takeIf { DiscoverySource.Mdns in peer.sources },
-            wifiAwareLabel.takeIf { DiscoverySource.WifiAware in peer.sources },
-        ).joinToString(" · ")
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
-            .background(colors.surface)
-            .border(1.dp, colors.line, RoundedCornerShape(16.dp))
-            .clickable(onClick = onClick)
-            .padding(15.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(Modifier.weight(1f)) {
-            Text(
-                peer.displayName ?: appText("Nearby Envoix device", "附近的 Envoix 设备"),
-                color = colors.text,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Bold,
-            )
-            Spacer(Modifier.height(3.dp))
-            Text(
-                sourceText,
-                color = colors.muted,
-                fontSize = 11.sp,
-            )
-        }
-        Text(
-            if (canPairNearby) appText("Unverified ›", "未验证 ›") else appText("Use QR/code", "使用二维码/配对码"),
-            color = if (canPairNearby) colors.warning else colors.muted,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.SemiBold,
-        )
-    }
-}
-
-@Composable
-@OptIn(ExperimentalComposeUiApi::class)
-private fun ConnectionActionSheet(
-    action: HubAction,
-    error: String?,
-    broker: String,
-    relay: String,
-    hostedRole: String,
-    onScanned: (String) -> Unit,
-    onCode: (String) -> Unit,
-    onOpenLocalRoom: (String, String) -> Unit,
-) {
-    val colors = Envoix.colors
-    var typed by remember(action) { mutableStateOf("") }
-    val generated = remember(broker, relay, hostedRole) { InviteCodec.generate(hostedRole, broker, relay) }
-    Column(
-        Modifier
-            .semantics { testTagsAsResourceId = true }
-            .fillMaxWidth()
-            .padding(start = 20.dp, end = 20.dp, bottom = 32.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Text(action.label(), color = colors.text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-        Spacer(Modifier.height(14.dp))
-        when (action) {
-            HubAction.Scan -> InlineScanner(onScanned = onScanned, modifier = Modifier.fillMaxWidth())
-            HubAction.Show ->
-                if (generated == null) {
-                    Text(appText("Could not create an invite.", "无法创建邀请。"), color = colors.danger)
-                } else {
-                    QrCode(generated.second, side = 190.dp)
-                    Spacer(Modifier.height(10.dp))
-                    Text(
-                        generated.first,
-                        color = colors.text,
-                        fontWeight = FontWeight.Bold,
-                    )
-                    Spacer(Modifier.height(12.dp))
-                    Button(
-                        onClick = { onOpenLocalRoom(generated.first, generated.second) },
-                        modifier = Modifier.testTag("hub_open_room"),
-                    ) {
-                        Text(appText("Open room", "打开房间"))
-                    }
-                }
-            HubAction.Code -> {
-                OutlinedTextField(
-                    value = typed,
-                    onValueChange = { typed = it },
-                    singleLine = true,
-                    label = { Text(appText("Pairing code", "配对码")) },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Spacer(Modifier.height(12.dp))
-                Button(onClick = { onCode(typed) }, enabled = typed.isNotBlank()) {
-                    Text(appText("Continue", "继续"))
-                }
-            }
-        }
-        error?.let {
-            Spacer(Modifier.height(10.dp))
-            Text(it, color = colors.danger, fontSize = 13.sp)
-        }
-    }
-}
-
-private enum class HubAction { Scan, Show, Code }
-
-private fun HubAction.testTag(): String =
-    when (this) {
-        HubAction.Scan -> "hub_scan_qr"
-        HubAction.Show -> "hub_show_qr"
-        HubAction.Code -> "hub_enter_code"
-    }
-
-@Composable
-private fun HubAction.label() =
-    when (this) {
-        HubAction.Scan -> appText("Scan QR", "扫描二维码")
-        HubAction.Show -> appText("Show QR", "显示二维码")
-        HubAction.Code -> appText("Enter code", "输入配对码")
-    }
-
-private fun String.validDirection(): String = if (this == "send") "send" else "receive"

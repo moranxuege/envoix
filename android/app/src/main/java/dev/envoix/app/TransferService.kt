@@ -91,7 +91,17 @@ class TransferService : Service() {
         val relay = intent.getStringExtra(EXTRA_RELAY).orEmpty()
         val useRoom = intent.getBooleanExtra(EXTRA_USE_ROOM, true)
         val useMdns = intent.getBooleanExtra(EXTRA_USE_MDNS, true)
-        val id = TransferRepository.create(direction, room)
+        val reservedId = intent.getLongExtra(EXTRA_ID, -1L)
+        val id =
+            if (reservedId >= 0L &&
+                TransferRepository.transfers.value.any {
+                    it.id == reservedId && it.direction == direction && it.room == room
+                }
+            ) {
+                reservedId
+            } else {
+                TransferRepository.create(direction, room)
+            }
         val spec =
             ManifestSpec(
                 id = id,
@@ -135,15 +145,25 @@ class TransferService : Service() {
         }
         specs[id] = spec
         persistSpecs()
-        TransferRepository.update(id) {
-            it.copy(
-                status = if (spec.qrPayload == null) Status.Pairing else Status.WaitingForPeer,
-                qrPayload = spec.qrPayload,
-                jobId = spec.jobId,
-                log = addLog(it.log, "canonical Manifest v2 session started"),
-            )
-        }
         startNative(spec)
+        // Publish readiness only after the native receiver/sender has been
+        // launched. Room control uses this transition before acknowledging an
+        // incoming offer, so the peer cannot race an unbound receiver.
+        TransferRepository.update(id) {
+            if (it.status != Status.Connecting) {
+                // A synchronous native callback may already have failed the
+                // attempt. Never overwrite that terminal result with a false
+                // readiness signal.
+                it
+            } else {
+                it.copy(
+                    status = if (spec.qrPayload == null) Status.Pairing else Status.WaitingForPeer,
+                    qrPayload = spec.qrPayload,
+                    jobId = spec.jobId,
+                    log = addLog(it.log, "canonical Manifest v2 session started"),
+                )
+            }
+        }
     }
 
     private fun startNative(spec: ManifestSpec) {
@@ -789,16 +809,24 @@ class TransferService : Service() {
             relay: String,
             qrPayload: String?,
             destinationCopyApproved: Boolean,
-        ) = launch(
-            context,
-            ACTION_START_RECEIVE,
-            room,
-            broker,
-            relay,
-            qrPayload,
-            jobId = null,
-            copyApproved = destinationCopyApproved,
-        )
+        ): Long {
+            // Reserve the card synchronously. The caller can then wait for the
+            // service to move it out of Connecting before accepting a room
+            // offer, and can cancel this exact attempt if acceptance fails.
+            val id = TransferRepository.create(Direction.Receive, room)
+            launch(
+                context,
+                ACTION_START_RECEIVE,
+                room,
+                broker,
+                relay,
+                qrPayload,
+                jobId = null,
+                copyApproved = destinationCopyApproved,
+                reservedId = id,
+            )
+            return id
+        }
 
         private fun launch(
             context: Context,
@@ -809,6 +837,7 @@ class TransferService : Service() {
             qrPayload: String?,
             jobId: String?,
             copyApproved: Boolean,
+            reservedId: Long? = null,
         ) {
             context.startForegroundService(
                 Intent(context, TransferService::class.java).apply {
@@ -821,6 +850,7 @@ class TransferService : Service() {
                     putExtra(EXTRA_COPY_APPROVED, copyApproved)
                     putExtra(EXTRA_USE_ROOM, SettingsStore.settings.value.useRoom)
                     putExtra(EXTRA_USE_MDNS, SettingsStore.settings.value.useMdns)
+                    reservedId?.let { putExtra(EXTRA_ID, it) }
                 },
             )
         }

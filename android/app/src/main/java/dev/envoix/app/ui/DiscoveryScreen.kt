@@ -207,8 +207,12 @@ internal fun DiscoveryScreen(
                 initialPairingInput = initialPairingInput,
                 onOfferInvite =
                     if (DiscoverySource.Bluetooth in selection.sources && initialPairingInput == null) {
-                        { invite, completion ->
-                            discoveryViewModel.offerInvite(selection.discoveryPeerKey, invite, completion)
+                        { offer, completion ->
+                            discoveryViewModel.offerInvite(
+                                selection.discoveryPeerKey,
+                                offer.transferInvite,
+                                completion,
+                            )
                         }
                     } else {
                         null

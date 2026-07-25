@@ -42,6 +42,17 @@ class TransferDraftPreparationStateTest {
     }
 
     @Test
+    fun `failed room acceptance can release a claimed receiver for retry`() {
+        val state = TransferDraftPreparationState(onDiscard = {})
+
+        assertTrue(state.transferOwnership())
+        assertTrue(state.rollbackTransferredOwnership())
+        assertFalse(state.rollbackTransferredOwnership())
+        assertTrue(state.acceptsPreparationChanges())
+        assertTrue(state.transferOwnership())
+    }
+
+    @Test
     fun `connection fields remain attached to the draft state`() {
         val state =
             TransferDraftPreparationState(

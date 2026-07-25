@@ -65,6 +65,19 @@ internal class TransferDraftPreparationState(
     @Synchronized
     fun ownershipWasTransferred(): Boolean = disposition == DraftDisposition.Transferred
 
+    /**
+     * Returns a claimed receive draft to editable state after the exact
+     * receiver attempt has been canceled because its room Accept failed.
+     */
+    @Synchronized
+    fun rollbackTransferredOwnership(): Boolean =
+        if (disposition == DraftDisposition.Transferred) {
+            disposition = DraftDisposition.Active
+            true
+        } else {
+            false
+        }
+
     /** Prevents queued picker work from recreating staging after disposition. */
     @Synchronized
     fun acceptsPreparationChanges(): Boolean = disposition == DraftDisposition.Active
