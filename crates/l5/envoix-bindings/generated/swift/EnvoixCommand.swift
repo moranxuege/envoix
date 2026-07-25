@@ -5,6 +5,13 @@
 // minimum still fails its range check). Unpaired-surrogate escapes need no
 // explicit scan in this artifact: a Swift `String` cannot hold them, so
 // `JSONSerialization` never produces one.
+// Encoding sorts object keys (a Swift dictionary has no order of its own).
+// `.sortedKeys` sorts with NSString.compare under the system locale, not by
+// byte value, so it agrees with the Rust reference codec's sorted map only
+// for key sets whose ASCII and collation orders cannot differ — which the
+// schema parser enforces for every encode-direction contract. For this
+// contract's keys the emitted frame is therefore byte-identical to the
+// reference bytes for the same value.
 
 import Foundation
 
@@ -70,6 +77,13 @@ public struct SubmitView: Equatable {
     public let epoch: Int64
     public let commandId: String
     public let command: CommandView
+
+    public init(card: String, epoch: Int64, commandId: String, command: CommandView) {
+        self.card = card
+        self.epoch = epoch
+        self.commandId = commandId
+        self.command = command
+    }
 }
 
 public enum RejectionView: String, Equatable {
@@ -137,6 +151,28 @@ public enum EnvoixCommandCodec {
             throw CommandContractError(kind: .unknownSchema, context: "CommandFrame")
         }
         return try decodeCommandFrame(parsed, "CommandFrame")
+    }
+
+    /// Encodes the one frame a frontend may originate, stamping the schema
+    /// envelope and the `submit` body around it and enforcing every bound
+    /// `decode` checks. Every failure is a typed `CommandContractError`; an
+    /// over-bound frame never leaves the process.
+    public static func encode(_ body: SubmitView) throws -> Data {
+        let encoded = try encodeSubmitView(body)
+        let object: [String: Any] = [
+            "schema": commandSchemaId,
+            "body": ["kind": "submit", "value": encoded],
+        ]
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: object,
+            options: [.sortedKeys]
+        ) else {
+            throw CommandContractError(kind: .malformedJson, context: "CommandFrame")
+        }
+        if data.count > commandMaxFrameBytes {
+            throw CommandContractError(kind: .frameTooLarge, context: "CommandFrame")
+        }
+        return data
     }
 
     private static func object(_ value: Any?, _ context: String) throws -> [String: Any] {
@@ -208,6 +244,14 @@ public enum EnvoixCommandCodec {
         }
     }
 
+    private static func encodeInteger(_ value: Int64, _ max: Int64, _ context: String) throws -> Int64 {
+        return try integer(NSNumber(value: value), max, context)
+    }
+
+    private static func encodeHexFixed(_ value: String, _ chars: Int, _ context: String) throws -> String {
+        return try hexFixed(value, chars, context)
+    }
+
     private static func decodeCommandView(_ value: Any?, _ context: String) throws -> CommandView {
         guard let text = value as? String else {
             throw CommandContractError(kind: .shape, context: context)
@@ -216,6 +260,10 @@ public enum EnvoixCommandCodec {
             throw CommandContractError(kind: .unknownVariant, context: context)
         }
         return decoded
+    }
+
+    private static func encodeCommandView(_ value: CommandView) -> String {
+        return value.rawValue
     }
 
     private static func decodePauseCauseView(_ value: Any?, _ context: String) throws -> PauseCauseView {
@@ -294,6 +342,15 @@ public enum EnvoixCommandCodec {
             commandId: commandId,
             command: command
         )
+    }
+
+    private static func encodeSubmitView(_ value: SubmitView) throws -> [String: Any] {
+        var map: [String: Any] = [:]
+        map["card"] = try encodeHexFixed(value.card, 16, "SubmitView.card")
+        map["epoch"] = try encodeInteger(value.epoch, u63Max, "SubmitView.epoch")
+        map["command_id"] = try encodeHexFixed(value.commandId, 32, "SubmitView.command_id")
+        map["command"] = encodeCommandView(value.command)
+        return map
     }
 
     private static func decodeRejectionView(_ value: Any?, _ context: String) throws -> RejectionView {

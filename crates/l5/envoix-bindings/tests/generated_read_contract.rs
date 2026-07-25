@@ -641,7 +641,7 @@ fn duplicate_json_keys_are_rejected() {
 fn schema_parser_rejects_unbounded_or_malformed_grammar() {
     let minimal = |body: &str| {
         format!(
-            "id = \"envoix/binding/read/2\"\nroot = \"ReadFrame\"\n\n[limits]\nmax_frame_bytes = 1024\n\n{body}"
+            "id = \"envoix/binding/read/2\"\nroot = \"ReadFrame\"\ndirection = \"host_to_frontend\"\n\n[limits]\nmax_frame_bytes = 1024\n\n{body}"
         )
     };
     let valid = minimal(
@@ -651,6 +651,103 @@ fn schema_parser_rejects_unbounded_or_malformed_grammar() {
          \x20 { name = \"body\", type = \"ReadBody\" },\n]\n",
     );
     assert!(parse_schema(&valid).is_ok());
+
+    // Every contract states who originates its frames: the emitters read the
+    // direction to decide which entry points an artifact carries, so an
+    // unstated or unknown one is a parse error, never a silent decode-only
+    // default.
+    assert!(
+        parse_schema(&valid.replace("direction = \"host_to_frontend\"\n", "")).is_err(),
+        "an unstated direction must be rejected"
+    );
+    assert!(
+        parse_schema(&valid.replace("host_to_frontend", "outbound")).is_err(),
+        "an unknown direction must be rejected"
+    );
+    // Origination is per union arm. A bidirectional contract names exactly one
+    // frontend-originated body, and that arm's payload is the only type the
+    // native artifacts can encode — so a forged observation has no encoder to
+    // call rather than a runtime check saying it must not.
+    let payload_decl = "[[decl]]\nkind = \"struct\"\nname = \"OpenView\"\n\
+                        fields = [{ name = \"card\", type = \"hex16\" }]\n\n";
+    let bidirectional = |arms: &str| {
+        minimal(&format!(
+            "{payload_decl}[[decl]]\nkind = \"union\"\nname = \"ReadBody\"\nvariants = [{arms}]\n\n\
+             [[decl]]\nkind = \"struct\"\nname = \"ReadFrame\"\nfields = [\n\
+             \x20 {{ name = \"schema\", type = \"ascii(64)\" }},\n\
+             \x20 {{ name = \"body\", type = \"ReadBody\" }},\n]\n"
+        ))
+        .replace("host_to_frontend", "bidirectional")
+    };
+    let originated = bidirectional(
+        "{ name = \"open\", payload = \"OpenView\", originator = \"frontend\" }, { name = \"closed\" }",
+    );
+    let doc = parse_schema(&originated).expect("an originated contract parses");
+    assert_eq!(doc.direction, envoix_bindings::Direction::Bidirectional);
+    let body = doc.frontend_body().expect("the originated body resolves");
+    assert_eq!(
+        (body.field, body.variant, body.payload),
+        ("body", "open", "OpenView")
+    );
+    for (label, arms) in [
+        ("no originated arm", "{ name = \"closed\" }"),
+        (
+            "two originated arms",
+            "{ name = \"open\", payload = \"OpenView\", originator = \"frontend\" }, \
+             { name = \"again\", payload = \"OpenView\", originator = \"frontend\" }",
+        ),
+        (
+            "an originated unit arm",
+            "{ name = \"open\", originator = \"frontend\" }",
+        ),
+        (
+            "an unknown originator",
+            "{ name = \"open\", payload = \"OpenView\", originator = \"host\" }",
+        ),
+    ] {
+        assert!(
+            parse_schema(&bidirectional(arms)).is_err(),
+            "{label} must be rejected"
+        );
+    }
+    assert!(
+        parse_schema(&originated.replace("bidirectional", "host_to_frontend")).is_err(),
+        "an observe-only contract must originate nothing"
+    );
+    // The originated payload is the frame's whole body, so the encoder's
+    // argument type IS the arm it may originate.
+    assert!(
+        parse_schema(&originated.replace(
+            "  { name = \"body\", type = \"ReadBody\" },\n",
+            "  { name = \"body\", type = \"ReadBody\" },\n  { name = \"extra\", type = \"hex16\" },\n"
+        ))
+        .is_err(),
+        "a second body field must be rejected"
+    );
+
+    // Foundation's `.sortedKeys` is a collation, not a byte sort, so an
+    // encode-direction schema whose key set could order differently there is
+    // rejected rather than shipped under a false byte-identity claim.
+    let collide =
+        |keys: &str| originated.replace("fields = [{ name = \"card\", type = \"hex16\" }]", keys);
+    for keys in [
+        "fields = [{ name = \"a0b\", type = \"hex16\" }, { name = \"a_b\", type = \"hex16\" }]",
+        "fields = [{ name = \"a2\", type = \"hex16\" }, { name = \"a10\", type = \"hex16\" }]",
+    ] {
+        assert!(
+            parse_schema(&collide(keys)).is_err(),
+            "collation-unstable keys must be rejected on an encode-direction contract"
+        );
+        // The claim exists only where a native encodes, so the same key set is
+        // legal on an observe-only contract.
+        let observe_only = collide(keys)
+            .replace(", originator = \"frontend\"", "")
+            .replace("bidirectional", "host_to_frontend");
+        assert!(
+            parse_schema(&observe_only).is_ok(),
+            "the collation rule is scoped to contracts a native encodes"
+        );
+    }
 
     // Unbounded or unknown types cannot be declared.
     for bad_type in ["str", "bytes", "blob", "handle", "uri", "list(ReadBody)"] {
@@ -718,7 +815,7 @@ fn schema_parser_rejects_unbounded_or_malformed_grammar() {
         "envoix/binding/read/2/extra",
     ] {
         let bad = format!(
-            "id = \"{bad_id}\"\nroot = \"ReadFrame\"\n\n[limits]\nmax_frame_bytes = 1024\n\n\
+            "id = \"{bad_id}\"\nroot = \"ReadFrame\"\ndirection = \"host_to_frontend\"\n\n[limits]\nmax_frame_bytes = 1024\n\n\
              [[decl]]\nkind = \"union\"\nname = \"ReadBody\"\nvariants = [{{ name = \"closed\" }}]\n\n\
              [[decl]]\nkind = \"struct\"\nname = \"ReadFrame\"\nfields = [\n\
              \x20 {{ name = \"schema\", type = \"ascii(64)\" }},\n\

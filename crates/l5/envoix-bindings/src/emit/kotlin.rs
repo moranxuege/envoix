@@ -1,15 +1,25 @@
 //! Emits the generated Kotlin read bindings (`generated/kotlin/EnvoixRead.kt`).
 //!
-//! Decode-only, targeting Android/JVM with the platform-bundled `org.json`.
-//! The JSON syntax layer inherits `org.json` leniency; every shape, range,
-//! bound, and unknown-variant/field/schema rule is enforced strictly on top,
-//! matching the Rust reference codec.
+//! Targets Android/JVM with the platform-bundled `org.json`. The JSON syntax
+//! layer inherits `org.json` leniency; every shape, range, bound, and
+//! unknown-variant/field/schema rule is enforced strictly on top, matching the
+//! Rust reference codec. A host-to-frontend contract is decode-only — an
+//! observer cannot fabricate an observation. A bidirectional contract also gets
+//! an encoder for the one body its frontends may originate, and every encode
+//! helper is the decode predicate itself, so the two halves cannot check
+//! different things.
 
 use crate::model::{Decl, FieldTy, SchemaDoc, StructDecl, UnionDecl};
 
 use crate::model::RuleValue;
 
-use super::{helper_use, is_envelope_field, kotlin_member, upper_camel, upper_snake};
+use super::{
+    encodable_decls, encode_helper_use, helper_use, is_envelope_field, kotlin_member,
+    scalar_predicate, upper_camel, upper_snake,
+};
+
+/// How Kotlin names 2^63-1 in the generated artifact.
+const U63_MAX: &str = "Long.MAX_VALUE";
 
 pub fn module(doc: &SchemaDoc) -> String {
     let mut out = String::new();
@@ -22,8 +32,21 @@ pub fn module(doc: &SchemaDoc) -> String {
          // (Android keeps the last key; the reference json.org jar throws, so JVM unit\n\
          // tests may see MALFORMED_JSON where a device sees last-wins). JSON `-0`\n\
          // decodes as integer 0 here while the Rust reference codec rejects it (benign:\n\
-         // every field with a positive minimum still fails its range check).\n\n",
+         // every field with a positive minimum still fails its range check).\n",
     );
+    if doc.direction.natives_encode() {
+        out.push_str(
+            "// Encoded frames are semantically identical to the Rust reference codec's but\n\
+             // not byte-identical: `org.json` decides key order and escaping, both of which\n\
+             // are runtime-dependent. The wire contract is the decoded value, and every\n\
+             // decoder here is order-insensitive. The frame cap is defined over the\n\
+             // canonical (serde_json) serialization, and `org.json` escapes U+0080..U+009F\n\
+             // and U+2000..U+20FF as `\\uXXXX` — up to 3x the canonical bytes — so this\n\
+             // encoder can refuse a frame the contract permits. It is never the other way\n\
+             // round: the cap is measured on the bytes this artifact actually emits.\n",
+        );
+    }
+    out.push('\n');
     out.push_str("package com.envoix.bindings\n\n");
     out.push_str("import org.json.JSONArray\nimport org.json.JSONException\nimport org.json.JSONObject\nimport org.json.JSONTokener\n\n");
     out.push_str(&format!(
@@ -190,8 +213,12 @@ fn codec(out: &mut String, doc: &SchemaDoc) {
     out.push_str("object EnvoixReadCodec {\n");
     entry_point(out, doc);
     helpers(out, doc);
+    let encodable = encodable_decls(doc);
     for decl in &doc.decls {
         decode_fn(out, doc, decl);
+        if encodable.contains(&decl.name()) {
+            encode_fn(out, decl);
+        }
     }
     if out.ends_with("\n\n") {
         out.pop();
@@ -232,6 +259,34 @@ fn entry_point(out: &mut String, doc: &SchemaDoc) {
          \x20       return decode{root}(value, \"{root}\")\n\
          \x20   }}\n\n",
         root = doc.root,
+    ));
+    let Some(body) = doc.frontend_body() else {
+        return;
+    };
+    out.push_str(&format!(
+        "    /**\n\
+         \x20    * Encodes the one frame a frontend may originate, stamping the schema\n\
+         \x20    * envelope and the `{variant}` body around it and enforcing every bound\n\
+         \x20    * [decode] checks. Every failure is a typed [ReadContractException]; an\n\
+         \x20    * over-bound frame never leaves the process.\n\
+         \x20    */\n\
+         \x20   fun encode(body: {payload}): String {{\n\
+         \x20       val map = JSONObject()\n\
+         \x20       map.put(\"schema\", READ_SCHEMA_ID)\n\
+         \x20       map.put(\n\
+         \x20           \"{field}\",\n\
+         \x20           JSONObject().put(\"kind\", \"{variant}\").put(\"value\", encode{payload}(body)),\n\
+         \x20       )\n\
+         \x20       val text = map.toString()\n\
+         \x20       if (text.toByteArray(Charsets.UTF_8).size > READ_MAX_FRAME_BYTES) {{\n\
+         \x20           throw ReadContractException(ReadErrorKind.FRAME_TOO_LARGE, \"{root}\")\n\
+         \x20       }}\n\
+         \x20       return text\n\
+         \x20   }}\n\n",
+        root = doc.root,
+        field = body.field,
+        variant = body.variant,
+        payload = body.payload,
     ));
 }
 
@@ -387,24 +442,71 @@ fn helpers(out: &mut String, doc: &SchemaDoc) {
              \x20   }\n\n",
         );
     }
+    encode_helpers(out, encode_helper_use(doc));
+}
+
+/// The encode half of every helper group the encodable declarations exercise.
+/// Each one *is* the decode predicate — the decode helper's type test is a
+/// tautology for an already-typed value — so the two halves cannot check
+/// different bounds, and no bound is written twice.
+fn encode_helpers(out: &mut String, used: super::HelperUse) {
+    if used.integer {
+        out.push_str(
+            "    private fun encodeInteger(value: Long, max: Long, context: String): Long =\n\
+             \x20       integer(value, max, context)\n\n",
+        );
+    }
+    if used.hex_fixed {
+        out.push_str(
+            "    private fun encodeHexFixed(value: String, chars: Int, context: String): String =\n\
+             \x20       hexFixed(value, chars, context)\n\n",
+        );
+    }
+    if used.hex_variable {
+        out.push_str(
+            "    private fun encodeHexVariable(value: String, maxChars: Int, context: String): String =\n\
+             \x20       hexVariable(value, maxChars, context)\n\n",
+        );
+    }
+    if used.utf8 {
+        out.push_str(
+            "    private fun encodeUtf8Bounded(value: String, maxBytes: Int, context: String): String =\n\
+             \x20       utf8Bounded(value, maxBytes, context)\n\n",
+        );
+    }
+    if used.ascii {
+        out.push_str(
+            "    private fun encodeAsciiBounded(value: String, maxBytes: Int, context: String): String =\n\
+             \x20       asciiBounded(value, maxBytes, context)\n\n",
+        );
+    }
+    if used.list {
+        out.push_str(
+            "    private fun <T> encodeList(\n\
+             \x20       value: List<T>,\n\
+             \x20       maxLen: Int,\n\
+             \x20       context: String,\n\
+             \x20       encodeElement: (T) -> Any,\n\
+             \x20   ): JSONArray {\n\
+             \x20       if (value.size > maxLen) {\n\
+             \x20           throw ReadContractException(ReadErrorKind.BOUND, context)\n\
+             \x20       }\n\
+             \x20       val items = JSONArray()\n\
+             \x20       for (item in value) {\n\
+             \x20           items.put(encodeElement(item))\n\
+             \x20       }\n\
+             \x20       return items\n\
+             \x20   }\n\n",
+        );
+    }
 }
 
 fn decode_expr(ty: &FieldTy, json: &str, context: &str) -> String {
-    match ty {
-        FieldTy::U16 => format!("integer({json}, 65535, {context})"),
-        FieldTy::U32 => format!("integer({json}, 4294967295, {context})"),
-        FieldTy::U63 => format!("integer({json}, Long.MAX_VALUE, {context})"),
-        FieldTy::Hex16 => format!("hexFixed({json}, 16, {context})"),
-        FieldTy::Hex32 => format!("hexFixed({json}, 32, {context})"),
-        FieldTy::Hex64 => format!("hexFixed({json}, 64, {context})"),
-        FieldTy::HexVar { max_chars } => format!("hexVariable({json}, {max_chars}, {context})"),
-        FieldTy::Str { max_bytes } => format!("utf8Bounded({json}, {max_bytes}, {context})"),
-        FieldTy::Ascii { max_bytes } => format!("asciiBounded({json}, {max_bytes}, {context})"),
-        FieldTy::Named(name) => format!("decode{name}({json}, {context})"),
-        FieldTy::Option(_) | FieldTy::List { .. } => {
-            unreachable!("wrapper types are expanded at the field level")
-        }
+    if let FieldTy::Named(name) = ty {
+        return format!("decode{name}({json}, {context})");
     }
+    let predicate = scalar_predicate(ty, U63_MAX);
+    format!("{}({json}, {}, {context})", predicate.stem, predicate.bound)
 }
 
 fn decode_fn(out: &mut String, doc: &SchemaDoc, decl: &Decl) {
@@ -517,4 +619,96 @@ fn decode_union_fn(out: &mut String, decl: &UnionDecl) {
          \x20       }\n\
          \x20   }\n\n",
     );
+}
+
+fn encode_expr(ty: &FieldTy, value: &str, context: &str) -> String {
+    if let FieldTy::Named(name) = ty {
+        return format!("encode{name}({value})");
+    }
+    let predicate = scalar_predicate(ty, U63_MAX);
+    format!(
+        "{}({value}, {}, {context})",
+        predicate.encode_stem(),
+        predicate.bound
+    )
+}
+
+fn encode_fn(out: &mut String, decl: &Decl) {
+    match decl {
+        Decl::Enum(decl) => {
+            out.push_str(&format!(
+                "    private fun encode{name}(value: {name}): String = when (value) {{\n",
+                name = decl.name
+            ));
+            for variant in &decl.variants {
+                out.push_str(&format!(
+                    "        {}.{} -> \"{variant}\"\n",
+                    decl.name,
+                    upper_snake(variant)
+                ));
+            }
+            out.push_str("    }\n\n");
+        }
+        Decl::Struct(decl) => encode_struct_fn(out, decl),
+        Decl::Union(decl) => encode_union_fn(out, decl),
+    }
+}
+
+/// The root frame is never encodable (nothing a frontend originates contains
+/// it), so the envelope is stamped by the entry point alone.
+fn encode_struct_fn(out: &mut String, decl: &StructDecl) {
+    out.push_str(&format!(
+        "    private fun encode{name}(value: {name}): JSONObject {{\n\
+         \x20       val map = JSONObject()\n",
+        name = decl.name
+    ));
+    for field in &decl.fields {
+        let context = format!("\"{}.{}\"", decl.name, field.name);
+        let member = format!("value.{}", kotlin_member(&field.name));
+        let expr = match &field.ty {
+            FieldTy::Option(inner) => {
+                let inner_expr = encode_expr(inner, "it", &context);
+                format!("{member}?.let {{ {inner_expr} }} ?: JSONObject.NULL")
+            }
+            FieldTy::List { element, max_len } => {
+                let FieldTy::Named(element) = element.as_ref() else {
+                    unreachable!("list elements are named types");
+                };
+                format!("encodeList({member}, {max_len}, {context}, ::encode{element})")
+            }
+            ty => encode_expr(ty, &member, &context),
+        };
+        out.push_str(&format!(
+            "        map.put(\"{name}\", {expr})\n",
+            name = field.name
+        ));
+    }
+    out.push_str("        return map\n    }\n\n");
+}
+
+fn encode_union_fn(out: &mut String, decl: &UnionDecl) {
+    out.push_str(&format!(
+        "    private fun encode{name}(value: {name}): JSONObject = when (value) {{\n",
+        name = decl.name
+    ));
+    for variant in &decl.variants {
+        let class = upper_camel(&variant.name);
+        match &variant.payload {
+            Some(payload) => {
+                let call = format!("encode{payload}(value.value)");
+                out.push_str(&format!(
+                    "        is {union}.{class} ->\n\
+                     \x20           JSONObject().put(\"kind\", \"{name}\").put(\"value\", {call})\n",
+                    name = variant.name,
+                    union = decl.name,
+                ));
+            }
+            None => out.push_str(&format!(
+                "        is {union}.{class} -> JSONObject().put(\"kind\", \"{name}\")\n",
+                name = variant.name,
+                union = decl.name,
+            )),
+        }
+    }
+    out.push_str("    }\n\n");
 }

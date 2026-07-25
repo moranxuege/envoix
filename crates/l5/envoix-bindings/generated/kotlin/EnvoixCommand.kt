@@ -5,6 +5,14 @@
 // tests may see MALFORMED_JSON where a device sees last-wins). JSON `-0`
 // decodes as integer 0 here while the Rust reference codec rejects it (benign:
 // every field with a positive minimum still fails its range check).
+// Encoded frames are semantically identical to the Rust reference codec's but
+// not byte-identical: `org.json` decides key order and escaping, both of which
+// are runtime-dependent. The wire contract is the decoded value, and every
+// decoder here is order-insensitive. The frame cap is defined over the
+// canonical (serde_json) serialization, and `org.json` escapes U+0080..U+009F
+// and U+2000..U+20FF as `\uXXXX` — up to 3x the canonical bytes — so this
+// encoder can refuse a frame the contract permits. It is never the other way
+// round: the cap is measured on the bytes this artifact actually emits.
 
 package com.envoix.bindings
 
@@ -151,6 +159,26 @@ object EnvoixCommandCodec {
         return decodeCommandFrame(value, "CommandFrame")
     }
 
+    /**
+     * Encodes the one frame a frontend may originate, stamping the schema
+     * envelope and the `submit` body around it and enforcing every bound
+     * [decode] checks. Every failure is a typed [CommandContractException]; an
+     * over-bound frame never leaves the process.
+     */
+    fun encode(body: SubmitView): String {
+        val map = JSONObject()
+        map.put("schema", COMMAND_SCHEMA_ID)
+        map.put(
+            "body",
+            JSONObject().put("kind", "submit").put("value", encodeSubmitView(body)),
+        )
+        val text = map.toString()
+        if (text.toByteArray(Charsets.UTF_8).size > COMMAND_MAX_FRAME_BYTES) {
+            throw CommandContractException(CommandErrorKind.FRAME_TOO_LARGE, "CommandFrame")
+        }
+        return text
+    }
+
     private fun obj(value: Any?, context: String): JSONObject =
         value as? JSONObject ?: throw CommandContractException(CommandErrorKind.SHAPE, context)
 
@@ -207,6 +235,12 @@ object EnvoixCommandCodec {
         }
     }
 
+    private fun encodeInteger(value: Long, max: Long, context: String): Long =
+        integer(value, max, context)
+
+    private fun encodeHexFixed(value: String, chars: Int, context: String): String =
+        hexFixed(value, chars, context)
+
     private fun decodeCommandView(value: Any?, context: String): CommandView = when (value) {
         "pause" -> CommandView.PAUSE
         "cancel" -> CommandView.CANCEL
@@ -215,6 +249,14 @@ object EnvoixCommandCodec {
         "re_pick_source" -> CommandView.RE_PICK_SOURCE
         is String -> throw CommandContractException(CommandErrorKind.UNKNOWN_VARIANT, context)
         else -> throw CommandContractException(CommandErrorKind.SHAPE, context)
+    }
+
+    private fun encodeCommandView(value: CommandView): String = when (value) {
+        CommandView.PAUSE -> "pause"
+        CommandView.CANCEL -> "cancel"
+        CommandView.RESUME -> "resume"
+        CommandView.REMOVE -> "remove"
+        CommandView.RE_PICK_SOURCE -> "re_pick_source"
     }
 
     private fun decodePauseCauseView(value: Any?, context: String): PauseCauseView = when (value) {
@@ -295,6 +337,15 @@ object EnvoixCommandCodec {
             commandId = hexFixed(field(map, "command_id", "SubmitView.command_id"), 32, "SubmitView.command_id"),
             command = decodeCommandView(field(map, "command", "SubmitView.command"), "SubmitView.command"),
         )
+    }
+
+    private fun encodeSubmitView(value: SubmitView): JSONObject {
+        val map = JSONObject()
+        map.put("card", encodeHexFixed(value.card, 16, "SubmitView.card"))
+        map.put("epoch", encodeInteger(value.epoch, Long.MAX_VALUE, "SubmitView.epoch"))
+        map.put("command_id", encodeHexFixed(value.commandId, 32, "SubmitView.command_id"))
+        map.put("command", encodeCommandView(value.command))
+        return map
     }
 
     private fun decodeRejectionView(value: Any?, context: String): RejectionView = when (value) {

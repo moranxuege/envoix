@@ -47,8 +47,8 @@ pub mod command {
 }
 
 pub use model::{
-    Decl, DeclKind, EnumDecl, FieldDecl, FieldTy, RuleValue, SchemaDoc, StructDecl, UnionDecl,
-    UnionVariant,
+    Decl, DeclKind, Direction, EnumDecl, FieldDecl, FieldTy, FrontendBody, RuleValue, SchemaDoc,
+    StructDecl, UnionDecl, UnionVariant,
 };
 pub use parse::{SchemaParseError, parse_schema};
 pub use project::{

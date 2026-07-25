@@ -15,6 +15,10 @@
 
 id = "envoix/binding/command/1"
 root = "CommandFrame"
+# Frontends originate frames on this contract, so every native artifact carries
+# an encoder that enforces the same bounds its decoder checks. Which frames is
+# stated per union arm below (`originator`), not by this key.
+direction = "bidirectional"
 
 [limits]
 max_frame_bytes = 1048576
@@ -127,7 +131,10 @@ fields = [
 kind = "union"
 name = "CommandBody"
 variants = [
-  { name = "submit", payload = "SubmitView" },
+  # The one body a frontend originates. `acceptance` and `completion` are
+  # host observations: no native artifact gets an encoder for them, so a
+  # frontend cannot build one to send, only decode one it was sent.
+  { name = "submit", payload = "SubmitView", originator = "frontend" },
   { name = "acceptance", payload = "CommandAcceptanceView" },
   { name = "completion", payload = "CommandCompletionView" },
 ]

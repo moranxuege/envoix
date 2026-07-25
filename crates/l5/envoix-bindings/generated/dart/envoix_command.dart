@@ -3,6 +3,11 @@
 // Known platform caveat: JSON `-0` decodes as integer 0 here while the Rust
 // reference codec rejects it (benign: every field with a positive minimum
 // still fails its range check).
+// Encoded frames are byte-identical to the Rust reference codec's: object
+// keys are emitted in the sorted order serde_json serializes and `jsonEncode`
+// keeps insertion order. On the JavaScript backend `int` is a double, so
+// values above 2^53 lose precision before the encoder ever sees them; this
+// contract is for the Dart VM (Flutter mobile/desktop).
 
 import 'dart:convert';
 
@@ -250,6 +255,24 @@ CommandFrame decodeCommandFrame(String text) {
   return _decodeCommandFrame(value, 'CommandFrame');
 }
 
+/// Encodes the one frame a frontend may originate, stamping the schema
+/// envelope and the `submit` body around it and enforcing every bound
+/// [decodeCommandFrame] checks. Every failure is a typed
+/// [CommandContractException]; an over-bound frame never leaves the process.
+String encodeCommandFrame(SubmitView body) {
+  final text = jsonEncode(<String, Object?>{
+    'body': <String, Object?>{
+      'kind': 'submit',
+      'value': _encodeSubmitView(body),
+    },
+    'schema': commandSchemaId,
+  });
+  if (utf8.encode(text).length > commandMaxFrameBytes) {
+    throw const CommandContractException(CommandErrorKind.frameTooLarge, 'CommandFrame');
+  }
+  return text;
+}
+
 Map<String, Object?> _object(Object? value, String context) {
   if (value is! Map<String, Object?>) {
     throw CommandContractException(CommandErrorKind.shape, context);
@@ -317,6 +340,12 @@ void _unitPayload(Map<String, Object?> map, String context) {
   }
 }
 
+int _encodeInteger(int value, int max, String context) =>
+    _integer(value, max, context);
+
+String _encodeHexFixed(String value, int chars, String context) =>
+    _hexFixed(value, chars, context);
+
 CommandView _decodeCommandView(Object? value, String context) {
   return switch (value) {
     'pause' => CommandView.pause,
@@ -327,6 +356,16 @@ CommandView _decodeCommandView(Object? value, String context) {
     String() =>
       throw CommandContractException(CommandErrorKind.unknownVariant, context),
     _ => throw CommandContractException(CommandErrorKind.shape, context),
+  };
+}
+
+String _encodeCommandView(CommandView value) {
+  return switch (value) {
+    CommandView.pause => 'pause',
+    CommandView.cancel => 'cancel',
+    CommandView.resume => 'resume',
+    CommandView.remove => 'remove',
+    CommandView.rePickSource => 're_pick_source',
   };
 }
 
@@ -405,6 +444,15 @@ SubmitView _decodeSubmitView(Object? value, String context) {
     commandId: _hexFixed(_field(map, 'command_id', 'SubmitView.command_id'), 32, 'SubmitView.command_id'),
     command: _decodeCommandView(_field(map, 'command', 'SubmitView.command'), 'SubmitView.command'),
   );
+}
+
+Map<String, Object?> _encodeSubmitView(SubmitView value) {
+  return <String, Object?>{
+    'card': _encodeHexFixed(value.card, 16, 'SubmitView.card'),
+    'command': _encodeCommandView(value.command),
+    'command_id': _encodeHexFixed(value.commandId, 32, 'SubmitView.command_id'),
+    'epoch': _encodeInteger(value.epoch, _u63Max, 'SubmitView.epoch'),
+  };
 }
 
 RejectionView _decodeRejectionView(Object? value, String context) {

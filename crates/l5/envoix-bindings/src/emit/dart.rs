@@ -1,12 +1,22 @@
 //! Emits the generated Dart read bindings (`generated/dart/envoix_read.dart`).
 //!
-//! Decode-only: Dart is an observer. The decoder walks `jsonDecode` output
-//! with the same shape/range/bound checks as the Rust reference codec and
-//! throws `ReadContractException` with a typed reason and static context.
+//! The decoder walks `jsonDecode` output with the same shape/range/bound
+//! checks as the Rust reference codec and throws `ReadContractException` with a
+//! typed reason and static context. On a host-to-frontend contract that is all
+//! Dart gets — an observer cannot fabricate an observation. A bidirectional
+//! contract additionally gets an encoder for the one body its frontends may
+//! originate, and every encode helper is the decode predicate itself, so the
+//! two halves cannot check different things.
 
-use crate::model::{Decl, FieldTy, RuleValue, SchemaDoc, StructDecl, UnionDecl};
+use crate::model::{Decl, FieldDecl, FieldTy, RuleValue, SchemaDoc, StructDecl, UnionDecl};
 
-use super::{dart_member, helper_use, is_envelope_field, upper_camel};
+use super::{
+    dart_member, encodable_decls, encode_helper_use, helper_use, is_envelope_field,
+    scalar_predicate, upper_camel,
+};
+
+/// How Dart names 2^63-1 in the generated artifact.
+const U63_MAX: &str = "_u63Max";
 
 pub fn module(doc: &SchemaDoc) -> String {
     let mut out = String::new();
@@ -17,8 +27,18 @@ pub fn module(doc: &SchemaDoc) -> String {
     out.push_str(
         "// Known platform caveat: JSON `-0` decodes as integer 0 here while the Rust\n\
          // reference codec rejects it (benign: every field with a positive minimum\n\
-         // still fails its range check).\n\n",
+         // still fails its range check).\n",
     );
+    if doc.direction.natives_encode() {
+        out.push_str(
+            "// Encoded frames are byte-identical to the Rust reference codec's: object\n\
+             // keys are emitted in the sorted order serde_json serializes and `jsonEncode`\n\
+             // keeps insertion order. On the JavaScript backend `int` is a double, so\n\
+             // values above 2^53 lose precision before the encoder ever sees them; this\n\
+             // contract is for the Dart VM (Flutter mobile/desktop).\n",
+        );
+    }
+    out.push('\n');
     out.push_str("import 'dart:convert';\n\n");
     out.push_str(&format!("const String readSchemaId = '{}';\n", doc.id));
     out.push_str(&format!(
@@ -36,8 +56,12 @@ pub fn module(doc: &SchemaDoc) -> String {
     }
     entry_point(&mut out, doc);
     helpers(&mut out, doc);
+    let encodable = encodable_decls(doc);
     for decl in &doc.decls {
         decode_fn(&mut out, doc, decl);
+        if encodable.contains(&decl.name()) {
+            encode_fn(&mut out, decl);
+        }
     }
     if out.ends_with("\n\n") {
         out.pop();
@@ -240,6 +264,42 @@ fn entry_point(out: &mut String, doc: &SchemaDoc) {
          }}\n\n",
         root = doc.root,
     ));
+    let Some(body) = doc.frontend_body() else {
+        return;
+    };
+    let mut keys = [
+        ("schema".to_owned(), "readSchemaId".to_owned()),
+        (
+            body.field.to_owned(),
+            format!(
+                "<String, Object?>{{\n      'kind': '{}',\n      'value': _encode{}(body),\n    }}",
+                body.variant, body.payload
+            ),
+        ),
+    ];
+    keys.sort_by(|left, right| left.0.cmp(&right.0));
+    let literal = keys
+        .iter()
+        .map(|(key, value)| format!("    '{key}': {value},\n"))
+        .collect::<String>();
+    out.push_str(&format!(
+        "/// Encodes the one frame a frontend may originate, stamping the schema\n\
+         /// envelope and the `{variant}` body around it and enforcing every bound\n\
+         /// [decode{root}] checks. Every failure is a typed\n\
+         /// [ReadContractException]; an over-bound frame never leaves the process.\n\
+         String encode{root}({payload} body) {{\n\
+         \x20 final text = jsonEncode(<String, Object?>{{\n\
+         {literal}\
+         \x20 }});\n\
+         \x20 if (utf8.encode(text).length > readMaxFrameBytes) {{\n\
+         \x20   throw const ReadContractException(ReadErrorKind.frameTooLarge, '{root}');\n\
+         \x20 }}\n\
+         \x20 return text;\n\
+         }}\n\n",
+        root = doc.root,
+        variant = body.variant,
+        payload = body.payload,
+    ));
 }
 
 fn helpers(out: &mut String, doc: &SchemaDoc) {
@@ -413,24 +473,70 @@ fn helpers(out: &mut String, doc: &SchemaDoc) {
              }\n\n",
         );
     }
+    encode_helpers(out, encode_helper_use(doc));
+}
+
+/// The encode half of every helper group the encodable declarations exercise.
+/// Each one *is* the decode predicate — the decode helper's type test is a
+/// tautology for an already-typed value — so the two halves cannot check
+/// different bounds, and no bound is written twice.
+fn encode_helpers(out: &mut String, used: super::HelperUse) {
+    if used.integer {
+        out.push_str(
+            "int _encodeInteger(int value, int max, String context) =>\n\
+             \x20   _integer(value, max, context);\n\n",
+        );
+    }
+    if used.hex_fixed {
+        out.push_str(
+            "String _encodeHexFixed(String value, int chars, String context) =>\n\
+             \x20   _hexFixed(value, chars, context);\n\n",
+        );
+    }
+    if used.hex_variable {
+        out.push_str(
+            "String _encodeHexVariable(String value, int maxChars, String context) =>\n\
+             \x20   _hexVariable(value, maxChars, context);\n\n",
+        );
+    }
+    if used.utf8 {
+        out.push_str(
+            "String _encodeUtf8Bounded(String value, int maxBytes, String context) =>\n\
+             \x20   _utf8Bounded(value, maxBytes, context);\n\n",
+        );
+    }
+    if used.ascii {
+        out.push_str(
+            "String _encodeAsciiBounded(String value, int maxBytes, String context) =>\n\
+             \x20   _asciiBounded(value, maxBytes, context);\n\n",
+        );
+    }
+    if used.list {
+        out.push_str(
+            "List<Object?> _encodeList<T>(\n\
+             \x20 List<T> value,\n\
+             \x20 int maxLen,\n\
+             \x20 String context,\n\
+             \x20 Object? Function(T) encodeElement,\n\
+             ) {\n\
+             \x20 if (value.length > maxLen) {\n\
+             \x20   throw ReadContractException(ReadErrorKind.bound, context);\n\
+             \x20 }\n\
+             \x20 return value.map(encodeElement).toList();\n\
+             }\n\n",
+        );
+    }
 }
 
 fn decode_expr(ty: &FieldTy, json: &str, context: &str) -> String {
-    match ty {
-        FieldTy::U16 => format!("_integer({json}, 65535, {context})"),
-        FieldTy::U32 => format!("_integer({json}, 4294967295, {context})"),
-        FieldTy::U63 => format!("_integer({json}, _u63Max, {context})"),
-        FieldTy::Hex16 => format!("_hexFixed({json}, 16, {context})"),
-        FieldTy::Hex32 => format!("_hexFixed({json}, 32, {context})"),
-        FieldTy::Hex64 => format!("_hexFixed({json}, 64, {context})"),
-        FieldTy::HexVar { max_chars } => format!("_hexVariable({json}, {max_chars}, {context})"),
-        FieldTy::Str { max_bytes } => format!("_utf8Bounded({json}, {max_bytes}, {context})"),
-        FieldTy::Ascii { max_bytes } => format!("_asciiBounded({json}, {max_bytes}, {context})"),
-        FieldTy::Named(name) => format!("_decode{name}({json}, {context})"),
-        FieldTy::Option(_) | FieldTy::List { .. } => {
-            unreachable!("wrapper types are expanded at the field level")
-        }
+    if let FieldTy::Named(name) = ty {
+        return format!("_decode{name}({json}, {context})");
     }
+    let predicate = scalar_predicate(ty, U63_MAX);
+    format!(
+        "_{}({json}, {}, {context})",
+        predicate.stem, predicate.bound
+    )
 }
 
 fn decode_fn(out: &mut String, doc: &SchemaDoc, decl: &Decl) {
@@ -550,4 +656,102 @@ fn decode_union_fn(out: &mut String, decl: &UnionDecl) {
          \x20 }\n\
          }\n\n",
     );
+}
+
+fn encode_expr(ty: &FieldTy, value: &str, context: &str) -> String {
+    if let FieldTy::Named(name) = ty {
+        return format!("_encode{name}({value})");
+    }
+    let predicate = scalar_predicate(ty, U63_MAX);
+    format!(
+        "_{}({value}, {}, {context})",
+        predicate.encode_stem(),
+        predicate.bound
+    )
+}
+
+fn encode_fn(out: &mut String, decl: &Decl) {
+    match decl {
+        Decl::Enum(decl) => {
+            out.push_str(&format!(
+                "String _encode{name}({name} value) {{\n  return switch (value) {{\n",
+                name = decl.name
+            ));
+            for variant in &decl.variants {
+                out.push_str(&format!(
+                    "    {}.{} => '{variant}',\n",
+                    decl.name,
+                    dart_member(variant)
+                ));
+            }
+            out.push_str("  };\n}\n\n");
+        }
+        Decl::Struct(decl) => encode_struct_fn(out, decl),
+        Decl::Union(decl) => encode_union_fn(out, decl),
+    }
+}
+
+/// Keys are emitted in sorted order because `jsonEncode` keeps insertion order
+/// and the Rust reference codec serializes a sorted map: same value, same bytes.
+/// The root frame is never encodable (nothing a frontend originates contains
+/// it), so the envelope is stamped by the entry point alone.
+fn encode_struct_fn(out: &mut String, decl: &StructDecl) {
+    out.push_str(&format!(
+        "Map<String, Object?> _encode{name}({name} value) {{\n\
+         \x20 return <String, Object?>{{\n",
+        name = decl.name
+    ));
+    let mut fields: Vec<&FieldDecl> = decl.fields.iter().collect();
+    fields.sort_by(|left, right| left.name.cmp(&right.name));
+    for field in fields {
+        let context = format!("'{}.{}'", decl.name, field.name);
+        let member = format!("value.{}", dart_member(&field.name));
+        match &field.ty {
+            FieldTy::Option(inner) => {
+                let inner_expr = encode_expr(inner, &format!("{member}!"), &context);
+                out.push_str(&format!(
+                    "    '{name}': {member} == null ? null : {inner_expr},\n",
+                    name = field.name,
+                ));
+            }
+            FieldTy::List { element, max_len } => {
+                let FieldTy::Named(element) = element.as_ref() else {
+                    unreachable!("list elements are named types");
+                };
+                out.push_str(&format!(
+                    "    '{name}': _encodeList({member}, {max_len}, {context}, _encode{element}),\n",
+                    name = field.name,
+                ));
+            }
+            ty => {
+                let expr = encode_expr(ty, &member, &context);
+                out.push_str(&format!("    '{name}': {expr},\n", name = field.name));
+            }
+        }
+    }
+    out.push_str("  };\n}\n\n");
+}
+
+fn encode_union_fn(out: &mut String, decl: &UnionDecl) {
+    out.push_str(&format!(
+        "Map<String, Object?> _encode{name}({name} value) {{\n  return switch (value) {{\n",
+        name = decl.name
+    ));
+    for variant in &decl.variants {
+        let class = format!("{}{}", decl.name, upper_camel(&variant.name));
+        match &variant.payload {
+            Some(payload) => out.push_str(&format!(
+                "    {class}(value: final payload) => <String, Object?>{{\n\
+                 \x20       'kind': '{name}',\n\
+                 \x20       'value': _encode{payload}(payload),\n\
+                 \x20     }},\n",
+                name = variant.name,
+            )),
+            None => out.push_str(&format!(
+                "    {class}() => <String, Object?>{{'kind': '{name}'}},\n",
+                name = variant.name,
+            )),
+        }
+    }
+    out.push_str("  };\n}\n\n");
 }

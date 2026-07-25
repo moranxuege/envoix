@@ -11,10 +11,34 @@ pub struct SchemaDoc {
     pub id: String,
     pub max_frame_bytes: u32,
     pub root: String,
+    /// Who may originate frames on this contract; the emitters read it to
+    /// decide which entry points each artifact gets.
+    pub direction: Direction,
     /// Contract rules stated by the schema and emitted as generated consts in
     /// every artifact, sorted by key (TOML table order).
     pub rules: Vec<(String, RuleValue)>,
     pub decls: Vec<Decl>,
+}
+
+/// Which peers originate frames on a contract. Stated by the schema, so the
+/// per-schema direction policy is a property of the contract rather than a
+/// coincidence of an emitter: the Rust reference codec always encodes and
+/// decodes, and every native artifact always decodes, but only a
+/// [`Bidirectional`](Direction::Bidirectional) contract puts an encoder in the
+/// native artifacts — and hostile bytes at the Rust decoder.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Direction {
+    /// Only the Rust host originates frames; frontends observe them.
+    HostToFrontend,
+    /// Frontends originate frames too, so they must be able to encode.
+    Bidirectional,
+}
+
+impl Direction {
+    /// Whether the Dart/Kotlin/Swift artifacts carry an encoder.
+    pub const fn natives_encode(self) -> bool {
+        matches!(self, Self::Bidirectional)
+    }
 }
 
 /// A contract-rule value; rules freeze semantic guarantees (booleans) and
@@ -42,6 +66,26 @@ pub enum DeclKind {
 impl SchemaDoc {
     pub fn find(&self, name: &str) -> Option<&Decl> {
         self.decls.iter().find(|decl| decl.name() == name)
+    }
+
+    /// The body a frontend may originate, or `None` on an observe-only
+    /// contract. The parser guarantees a bidirectional contract marks exactly
+    /// one union variant and roots it in the frame's single body field.
+    pub fn frontend_body(&self) -> Option<FrontendBody<'_>> {
+        let variant = self.decls.iter().find_map(|decl| {
+            let Decl::Union(decl) = decl else { return None };
+            decl.variants
+                .iter()
+                .find(|variant| variant.frontend_originated)
+        })?;
+        let Some(Decl::Struct(root)) = self.find(&self.root) else {
+            return None;
+        };
+        Some(FrontendBody {
+            field: &root.fields.get(1)?.name,
+            variant: &variant.name,
+            payload: variant.payload.as_deref()?,
+        })
     }
 
     pub fn kind_of(&self, name: &str) -> Option<DeclKind> {
@@ -97,6 +141,21 @@ pub struct UnionVariant {
     /// Name of an earlier enum/struct/union declaration, or none for a unit
     /// variant.
     pub payload: Option<String>,
+    /// Set by `originator = "frontend"`. Direction is per arm, not per
+    /// contract: only this variant's payload gets native encoders, so a
+    /// frontend has no function with which to fabricate an observation.
+    pub frontend_originated: bool,
+}
+
+/// The one frame body a frontend may originate, resolved from the schema.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FrontendBody<'a> {
+    /// The root struct's single non-envelope field: the frame's body key.
+    pub field: &'a str,
+    /// The originable variant's wire name, stamped by the native encoder.
+    pub variant: &'a str,
+    /// The variant's payload declaration — the only type a native may encode.
+    pub payload: &'a str,
 }
 
 /// Field types. Bounds are part of the type, never a decoder policy.

@@ -11,6 +11,46 @@ pub mod swift;
 
 use crate::model::{Decl, FieldTy, SchemaDoc};
 
+/// One scalar predicate, described once for both halves of a native codec.
+///
+/// The decode call is `{stem}(json, bound, context)` and the encode call is
+/// `encode{Stem}(value, bound, context)`; both are rendered from this single
+/// value, so a bound cannot be tightened or loosened on one side only.
+pub(crate) struct ScalarPredicate {
+    /// The decode helper's name.
+    pub stem: &'static str,
+    /// The bound argument, as the target language spells it.
+    pub bound: String,
+}
+
+impl ScalarPredicate {
+    /// `integer` → `encodeInteger`.
+    pub fn encode_stem(&self) -> String {
+        format!("encode{}", upper_camel(self.stem))
+    }
+}
+
+/// The predicate for a scalar field type. `u63_max` is how the target language
+/// names 2^63-1 (the one bound no artifact writes as a literal); every other
+/// bound comes straight from the schema.
+pub(crate) fn scalar_predicate(ty: &FieldTy, u63_max: &str) -> ScalarPredicate {
+    let (stem, bound) = match ty {
+        FieldTy::U16 => ("integer", "65535".to_owned()),
+        FieldTy::U32 => ("integer", "4294967295".to_owned()),
+        FieldTy::U63 => ("integer", u63_max.to_owned()),
+        FieldTy::Hex16 => ("hexFixed", "16".to_owned()),
+        FieldTy::Hex32 => ("hexFixed", "32".to_owned()),
+        FieldTy::Hex64 => ("hexFixed", "64".to_owned()),
+        FieldTy::HexVar { max_chars } => ("hexVariable", max_chars.to_string()),
+        FieldTy::Str { max_bytes } => ("utf8Bounded", max_bytes.to_string()),
+        FieldTy::Ascii { max_bytes } => ("asciiBounded", max_bytes.to_string()),
+        FieldTy::Named(_) | FieldTy::Option(_) | FieldTy::List { .. } => {
+            unreachable!("not a scalar predicate")
+        }
+    };
+    ScalarPredicate { stem, bound }
+}
+
 /// Rust keywords that field names must escape with `r#`. Member names that
 /// cannot be raw identifiers at all (`crate`, `self`, `super`) are rejected by
 /// the schema parser instead.
@@ -310,6 +350,71 @@ pub(crate) fn helper_use(doc: &SchemaDoc) -> HelperUse {
     used
 }
 
+/// The declarations reachable from the frontend-originated body — exactly the
+/// set a native artifact gets encoders for. Every other declaration on the
+/// contract is an observation a frontend may only decode, so it has no encoder
+/// to call rather than a runtime check saying it must not.
+pub(crate) fn encodable_decls(doc: &SchemaDoc) -> Vec<&str> {
+    let Some(body) = doc.frontend_body() else {
+        return Vec::new();
+    };
+    let mut reached = vec![body.payload];
+    let mut index = 0;
+    while index < reached.len() {
+        let found = doc.find(reached[index]);
+        index += 1;
+        match found {
+            Some(Decl::Struct(decl)) => {
+                for field in &decl.fields {
+                    reach_named(&field.ty, &mut reached);
+                }
+            }
+            Some(Decl::Union(decl)) => {
+                for variant in &decl.variants {
+                    if let Some(payload) = &variant.payload {
+                        reach(payload, &mut reached);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    reached
+}
+
+fn reach<'a>(name: &'a str, reached: &mut Vec<&'a str>) {
+    if !reached.contains(&name) {
+        reached.push(name);
+    }
+}
+
+fn reach_named<'a>(ty: &'a FieldTy, reached: &mut Vec<&'a str>) {
+    match ty {
+        FieldTy::Named(name) => reach(name, reached),
+        FieldTy::Option(inner) => reach_named(inner, reached),
+        FieldTy::List { element, .. } => reach_named(element, reached),
+        _ => {}
+    }
+}
+
+/// Which helper groups the encode half needs: the same walk as [`helper_use`],
+/// restricted to [`encodable_decls`]. An artifact never carries an encode
+/// helper no encoder calls.
+pub(crate) fn encode_helper_use(doc: &SchemaDoc) -> HelperUse {
+    let encodable = encodable_decls(doc);
+    let mut used = HelperUse::default();
+    for decl in &doc.decls {
+        let Decl::Struct(decl) = decl else { continue };
+        if !encodable.contains(&decl.name.as_str()) {
+            continue;
+        }
+        for field in &decl.fields {
+            visit_ty(&field.ty, &mut used);
+        }
+    }
+    used
+}
+
 fn visit_ty(ty: &FieldTy, used: &mut HelperUse) {
     match ty {
         FieldTy::U16 => {
@@ -356,6 +461,7 @@ mod tests {
             id: id.to_owned(),
             max_frame_bytes: 1,
             root: "Frame".to_owned(),
+            direction: crate::model::Direction::HostToFrontend,
             rules: Vec::new(),
             decls: Vec::new(),
         }

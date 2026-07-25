@@ -7,7 +7,8 @@
 //! scalar or named type, and `list` elements are named types.
 
 use crate::model::{
-    Decl, EnumDecl, FieldDecl, FieldTy, RuleValue, SchemaDoc, StructDecl, UnionDecl, UnionVariant,
+    Decl, Direction, EnumDecl, FieldDecl, FieldTy, RuleValue, SchemaDoc, StructDecl, UnionDecl,
+    UnionVariant,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -49,7 +50,10 @@ pub fn parse_schema(text: &str) -> Result<SchemaDoc, SchemaParseError> {
         .ok_or_else(|| SchemaParseError::shape("document root"))?;
 
     for key in table.keys() {
-        if !matches!(key.as_str(), "id" | "root" | "limits" | "rules" | "decl") {
+        if !matches!(
+            key.as_str(),
+            "id" | "root" | "direction" | "limits" | "rules" | "decl"
+        ) {
             return Err(SchemaParseError::shape(format!("unknown key {key}")));
         }
     }
@@ -57,6 +61,7 @@ pub fn parse_schema(text: &str) -> Result<SchemaDoc, SchemaParseError> {
     let id = require_str(table.get("id"), "id")?;
     require_schema_id(&id)?;
     let root = require_str(table.get("root"), "root")?;
+    let direction = require_direction(&require_str(table.get("direction"), "direction")?)?;
     let limits = table
         .get("limits")
         .and_then(toml::Value::as_table)
@@ -109,6 +114,7 @@ pub fn parse_schema(text: &str) -> Result<SchemaDoc, SchemaParseError> {
         id,
         max_frame_bytes,
         root,
+        direction,
         rules,
         decls,
     };
@@ -128,7 +134,107 @@ pub fn parse_schema(text: &str) -> Result<SchemaDoc, SchemaParseError> {
             "root struct must lead with an ascii schema field",
         ));
     }
+    require_origination(&doc)?;
+    require_collation_stable_keys(&doc)?;
     Ok(doc)
+}
+
+/// Origination is a property of a union arm, not of a whole contract: a
+/// bidirectional schema names exactly one variant its frontends may originate,
+/// and the native artifacts get encoders for that payload alone. An
+/// observe-only schema names none, so no native can encode anything.
+fn require_origination(doc: &SchemaDoc) -> Result<(), SchemaParseError> {
+    let marked = doc
+        .decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::Union(decl) => Some(decl),
+            _ => None,
+        })
+        .flat_map(|decl| decl.variants.iter())
+        .filter(|variant| variant.frontend_originated)
+        .count();
+    if doc.direction == Direction::HostToFrontend {
+        if marked != 0 {
+            return Err(SchemaParseError::grammar(
+                "an observe-only contract has no frontend-originated body",
+            ));
+        }
+        return Ok(());
+    }
+    if marked != 1 {
+        return Err(SchemaParseError::grammar(
+            "a bidirectional contract names exactly one frontend-originated body",
+        ));
+    }
+    // The originated payload has to be the frame's whole body, so the native
+    // encoder's argument type IS the arm it may originate.
+    let Some(Decl::Struct(root)) = doc.find(&doc.root) else {
+        unreachable!("the root struct is validated above");
+    };
+    let body = match root.fields.as_slice() {
+        [_envelope, body] => body,
+        _ => {
+            return Err(SchemaParseError::grammar(
+                "root of a bidirectional contract is the envelope plus one body field",
+            ));
+        }
+    };
+    let FieldTy::Named(union) = &body.ty else {
+        return Err(SchemaParseError::grammar(
+            "the body field of a bidirectional contract must name a union",
+        ));
+    };
+    let Some(Decl::Union(union)) = doc.find(union) else {
+        return Err(SchemaParseError::grammar(
+            "the body field of a bidirectional contract must name a union",
+        ));
+    };
+    if !union
+        .variants
+        .iter()
+        .any(|variant| variant.frontend_originated)
+    {
+        return Err(SchemaParseError::grammar(
+            "the frontend-originated variant must be an arm of the body union",
+        ));
+    }
+    Ok(())
+}
+
+/// Foundation's `.sortedKeys` orders keys with `NSString.compare` under the
+/// system locale, not by byte value, so the Swift encoder is byte-identical to
+/// the reference codec only while every key pair in a struct orders the same
+/// way under both. A pair decided by two letters — or by one key being a prefix
+/// of the other — always does; digits (numeric collation) and `_`
+/// (punctuation) can reorder, so `a0b`/`a_b` and `a2`/`a10` are rejected here
+/// rather than shipped under a header that claims more than holds.
+fn require_collation_stable_keys(doc: &SchemaDoc) -> Result<(), SchemaParseError> {
+    if doc.direction != Direction::Bidirectional {
+        return Ok(());
+    }
+    for decl in &doc.decls {
+        let Decl::Struct(decl) = decl else { continue };
+        for (index, field) in decl.fields.iter().enumerate() {
+            for other in &decl.fields[index + 1..] {
+                let differing = field
+                    .name
+                    .bytes()
+                    .zip(other.name.bytes())
+                    .find(|(left, right)| left != right);
+                let Some((left, right)) = differing else {
+                    continue;
+                };
+                if !left.is_ascii_lowercase() || !right.is_ascii_lowercase() {
+                    return Err(SchemaParseError::grammar(format!(
+                        "{}: {} and {} may order differently under Foundation collation",
+                        decl.name, field.name, other.name
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn parse_decl(
@@ -220,7 +326,7 @@ fn parse_decl(
                     .as_table()
                     .ok_or_else(|| SchemaParseError::shape(&member_context))?;
                 for key in variant.keys() {
-                    if !matches!(key.as_str(), "name" | "payload") {
+                    if !matches!(key.as_str(), "name" | "payload" | "originator") {
                         return Err(SchemaParseError::shape(format!(
                             "{member_context}: unknown key {key}"
                         )));
@@ -240,9 +346,26 @@ fn parse_decl(
                         Some(payload.to_owned())
                     }
                 };
+                let frontend_originated = match variant.get("originator") {
+                    None => false,
+                    Some(value) if value.as_str() == Some("frontend") => {
+                        if payload.is_none() {
+                            return Err(SchemaParseError::grammar(format!(
+                                "{member_context}: a frontend-originated variant needs a payload"
+                            )));
+                        }
+                        true
+                    }
+                    Some(_) => {
+                        return Err(SchemaParseError::grammar(format!(
+                            "{member_context}: bad originator"
+                        )));
+                    }
+                };
                 parsed.push(UnionVariant {
                     name: variant_name,
                     payload,
+                    frontend_originated,
                 });
             }
             require_non_empty(&parsed, context)?;
@@ -365,6 +488,19 @@ fn require_schema_id(id: &str) -> Result<(), SchemaParseError> {
         return Err(SchemaParseError::grammar(format!("bad schema id {id}")));
     }
     Ok(())
+}
+
+/// Every schema states who originates its frames, so no emitter has to guess
+/// which entry points an artifact needs. There is no default: a contract with
+/// an unstated direction is a parse error, never a silently observe-only one.
+fn require_direction(direction: &str) -> Result<Direction, SchemaParseError> {
+    match direction {
+        "host_to_frontend" => Ok(Direction::HostToFrontend),
+        "bidirectional" => Ok(Direction::Bidirectional),
+        _ => Err(SchemaParseError::grammar(format!(
+            "bad direction {direction}"
+        ))),
+    }
 }
 
 fn require_type_name(name: &str, context: &str) -> Result<(), SchemaParseError> {

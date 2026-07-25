@@ -16,6 +16,9 @@
 
 id = "envoix/binding/read/2"
 root = "ReadFrame"
+# Only the host originates read frames, so the native artifacts are decode-only:
+# a frontend cannot fabricate an observation.
+direction = "host_to_frontend"
 
 [limits]
 max_frame_bytes = 1048576
