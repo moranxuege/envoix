@@ -17,8 +17,7 @@ final class ManifestV2AppUITests: XCTestCase {
         assertCanonicalInventoryControls(
             expectedScanLabel: "Scan QR",
             expectedFileLabel: "Files",
-            expectedFolderLabel: "Folder",
-            expectedPairingGuidance: "Show your receive QR, or scan the other device's send QR."
+            expectedFolderLabel: "Folder"
         )
     }
 
@@ -31,8 +30,7 @@ final class ManifestV2AppUITests: XCTestCase {
         assertCanonicalInventoryControls(
             expectedScanLabel: "扫描二维码",
             expectedFileLabel: "文件",
-            expectedFolderLabel: "文件夹",
-            expectedPairingGuidance: "可以显示本机接收码，也可以扫描另一台设备的发送码。"
+            expectedFolderLabel: "文件夹"
         )
     }
 
@@ -96,7 +94,10 @@ final class ManifestV2AppUITests: XCTestCase {
 
         element("connection_hub").assertExists()
         XCTAssertFalse(element("one_time_room").exists)
-        let accept = app.buttons["Accept"].firstMatch
+        let accept = app.alerts
+            .descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", "Accept"))
+            .firstMatch
         accept.assertExists()
         accept.tap()
 
@@ -123,19 +124,20 @@ final class ManifestV2AppUITests: XCTestCase {
     private func assertCanonicalInventoryControls(
         expectedScanLabel: String,
         expectedFileLabel: String,
-        expectedFolderLabel: String,
-        expectedPairingGuidance: String
+        expectedFolderLabel: String
     ) {
         element("connection_hub").assertExists()
         let scanButton = button("connect_scan_qr")
         scanButton.assertExists()
         XCTAssertEqual(scanButton.label, expectedScanLabel)
-        button("connect_show_qr").assertExists()
         button("connect_enter_code").assertExists()
+        element("room_qr_reveal").assertExists()
+        element("nearby_display_name").assertExists()
+        element("nearby_visibility_menu").assertExists()
 
         button("nearby_peer_card").tap()
         element("one_time_room").assertExists()
-        element("room_one_time_notice").assertExists()
+        element("room_context_authenticated").assertExists()
 
         button("room_add_files").tap()
         element("send_content_scroll").assertExists()
@@ -152,24 +154,15 @@ final class ManifestV2AppUITests: XCTestCase {
 
         button("mobile_sheet_done").tap()
         element("one_time_room").assertExists()
-
-        button("room_receive_files").tap()
-        element("receive_content_scroll").assertExists()
-        element("receive_destination_picker").assertExists()
-        let pairingGuidance = element("receive_pairing_guidance")
-        pairingGuidance.assertExists()
-        XCTAssertEqual(pairingGuidance.label, expectedPairingGuidance)
-        element("receive_start_button").assertExists()
     }
 
     private func openNearbySend() {
         element("connection_hub").assertExists()
         button("nearby_peer_card").tap()
         element("one_time_room").assertExists()
-        element("room_context_unverified").assertExists()
+        element("room_context_authenticated").assertExists()
         button("room_add_files").tap()
         element("send_content_scroll").assertExists()
-        element("nearby_transfer_context").assertExists()
         XCTAssertFalse(element("nearby_invite_delivery_progress").exists)
     }
 
@@ -196,11 +189,17 @@ final class ManifestV2AppUITests: XCTestCase {
     }
 
     private func element(_ identifier: String) -> XCUIElement {
-        app.descendants(matching: .any)[identifier]
+        app.descendants(matching: .any)
+            .matching(identifier: identifier)
+            .firstMatch
     }
 
     private func button(_ identifier: String) -> XCUIElement {
-        app.buttons.matching(identifier: identifier).firstMatch
+        // Xcode 26 can report SwiftUI buttons as PopUpButton through modern
+        // accessibility attributes while the legacy query still says Button.
+        // Query by the app's stable identifier instead of that synthesized
+        // subtype so the same test binary works across simulator runtimes.
+        element(identifier)
     }
 }
 

@@ -18,7 +18,7 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
 
     @Published private(set) var state: NearbyDiscoveryState
 
-    private let identity: LocalNearbyDiscoveryIdentity
+    private var identity: LocalNearbyDiscoveryIdentity
     private let registry: NearbyDiscoveryPeerRegistry
     private let clock: () -> Int64
     private let providerFactory: ProviderFactory
@@ -32,6 +32,7 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
     private var lastLoggedAvailability: [NearbyDiscoverySource: NearbyProviderAvailability] = [:]
     private var generation = 0
     private var started = false
+    private var advertisingEnabled = false
     init(
         identity: LocalNearbyDiscoveryIdentity? = nil,
         identityFactory: (() -> LocalNearbyDiscoveryIdentity)? = nil,
@@ -79,6 +80,8 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
         state.incomingRendezvousOffer = nil
         providers = providerFactory(identity)
         providers.forEach { provider in
+            (provider as? NearbyAdvertisingConfigurable)?
+                .setAdvertisingEnabled(advertisingEnabled)
             provider.start { [weak self] event in
                 guard let self else { return }
                 if Thread.isMainThread {
@@ -120,6 +123,28 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
     func restart() {
         stop()
         start()
+    }
+
+    func configure(displayName: String, advertisingEnabled: Bool) {
+        let resolvedName = NearbyDiscoveryPeerRegistry.sanitizeDisplayName(displayName)
+            ?? identity.displayName
+        let needsRestart = resolvedName != identity.displayName
+            || advertisingEnabled != self.advertisingEnabled
+        guard needsRestart else { return }
+
+        let wasStarted = started
+        if wasStarted {
+            stop()
+        }
+        identity = LocalNearbyDiscoveryIdentity(
+            peerKey: identity.peerKey,
+            displayName: resolvedName
+        )
+        self.advertisingEnabled = advertisingEnabled
+        state.localName = resolvedName
+        if wasStarted {
+            start()
+        }
     }
 
     func offerInvite(
@@ -269,7 +294,9 @@ private final class FixtureNearbyDiscoveryProvider: NearbyDiscoveryProvider, Nea
         completion: @escaping (String?) -> Void
     ) {
         let validPeer = NearbyDiscoveryPeerRegistry.normalizePeerKey(peerKey) != nil
-        let validInvite = invite.lowercased().hasPrefix("envoix://pair/")
+        let normalizedInvite = invite.lowercased()
+        let validInvite = normalizedInvite.hasPrefix("envoix://pair/")
+            || normalizedInvite.hasPrefix("envoix://room/")
         completion(validPeer && validInvite ? nil : "Invalid fixture invitation")
     }
 }

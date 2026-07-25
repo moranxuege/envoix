@@ -101,6 +101,133 @@ final class ConnectionWorkflowTests: XCTestCase {
         )
     }
 
+    func testRoomControlDoesNotOpenRoomBeforeConnectedEvent() async throws {
+        let gateway = RecordingRoomControlGateway()
+        let workflow = ConnectionWorkflowState(
+            gateway: gateway,
+            clock: { Date(timeIntervalSince1970: 1_000) }
+        )
+
+        XCTAssertNil(workflow.startHosting(
+            broker: "",
+            relay: "",
+            displayName: "My iPhone",
+            identityPath: "/tmp/envoix-test-identity",
+            existingActivityIDs: ["old"]
+        ))
+        XCTAssertEqual(workflow.controlPhase, .hosting)
+        XCTAssertNil(workflow.room)
+        await Task.yield()
+
+        gateway.emit(.connected(peerDisplayName: "Other phone", creator: true))
+        await Task.yield()
+
+        XCTAssertEqual(workflow.controlPhase, .connected)
+        XCTAssertEqual(workflow.peerDisplayName, "Other phone")
+        XCTAssertTrue(workflow.isRoomCreator)
+        XCTAssertEqual(workflow.room?.origin, .roomControl)
+    }
+
+    func testRoomIdleExpirySuspendsForActiveTransferAndHonorsKeepOpen() async {
+        let start = Date(timeIntervalSince1970: 2_000)
+        let gateway = RecordingRoomControlGateway()
+        let workflow = ConnectionWorkflowState(gateway: gateway, clock: { start })
+        _ = workflow.startHosting(
+            broker: "",
+            relay: "",
+            displayName: "My iPhone",
+            identityPath: "/tmp/envoix-test-identity",
+            existingActivityIDs: []
+        )
+        await Task.yield()
+        gateway.emit(.connected(peerDisplayName: "Peer", creator: true))
+        await Task.yield()
+        let boundary = start.addingTimeInterval(ConnectionWorkflowPolicy.roomIdleLifetime)
+
+        workflow.tick(now: boundary, hasActiveTransfer: true)
+        XCTAssertEqual(workflow.controlPhase, .connected)
+
+        workflow.setKeepOpen(true)
+        workflow.tick(now: boundary.addingTimeInterval(1), hasActiveTransfer: false)
+        XCTAssertEqual(workflow.controlPhase, .connected)
+        XCTAssertNil(workflow.idleDeadline)
+
+        workflow.setKeepOpen(false)
+        workflow.noteRoomActivity(now: start.addingTimeInterval(1))
+        workflow.tick(now: boundary, hasActiveTransfer: false)
+        XCTAssertEqual(workflow.controlPhase, .connected)
+        workflow.tick(now: boundary.addingTimeInterval(1), hasActiveTransfer: false)
+        XCTAssertEqual(workflow.controlPhase, .ended(.idleExpired))
+    }
+
+    func testEndedRoomIgnoresLateGatewayEventsAndLegacyRoomStartsClean() async {
+        let gateway = RecordingRoomControlGateway()
+        let workflow = ConnectionWorkflowState(gateway: gateway)
+        _ = workflow.startHosting(
+            broker: "",
+            relay: "",
+            displayName: "My iPhone",
+            identityPath: "/tmp/envoix-test-identity",
+            existingActivityIDs: []
+        )
+        await Task.yield()
+
+        workflow.endControl(reason: .userEnded)
+        gateway.emit(.connected(peerDisplayName: "Late peer", creator: true))
+        await Task.yield()
+        XCTAssertNil(workflow.room)
+        XCTAssertEqual(workflow.controlPhase, .ended(.userEnded))
+
+        workflow.openRoom(
+            origin: .pairingCode,
+            pairingInput: "123456-alpha-bravo",
+            existingActivityIDs: []
+        )
+        XCTAssertEqual(workflow.controlPhase, .idle)
+        XCTAssertEqual(workflow.room?.origin, .pairingCode)
+    }
+
+    func testAcceptClaimsIncomingOfferBeforeDeadlineTickCanRejectIt() async throws {
+        let start = Date(timeIntervalSince1970: 3_000)
+        let gateway = RecordingRoomControlGateway()
+        gateway.suspendAcceptance = true
+        let workflow = ConnectionWorkflowState(gateway: gateway, clock: { start })
+        _ = workflow.startHosting(
+            broker: "",
+            relay: "",
+            displayName: "My iPhone",
+            identityPath: "/tmp/envoix-test-identity",
+            existingActivityIDs: []
+        )
+        await Task.yield()
+        gateway.emit(.connected(peerDisplayName: "Peer", creator: true))
+        await Task.yield()
+        gateway.emit(.incomingOffer(RoomControlTransferOffer(
+            id: "offer-at-deadline",
+            transferInvite: "envoix://pair/river-stone-test?role=send",
+            rootNames: ["report.pdf"],
+            itemCount: 1,
+            totalBytes: 1_024
+        )))
+        await Task.yield()
+
+        let acceptance = Task { await workflow.acceptIncomingRoomOffer() }
+        await Task.yield()
+        XCTAssertNil(workflow.incomingRoomOffer)
+
+        workflow.tick(
+            now: start.addingTimeInterval(ConnectionWorkflowPolicy.roomOfferLifetime),
+            hasActiveTransfer: false
+        )
+        XCTAssertEqual(gateway.acceptedOfferIDs, ["offer-at-deadline"])
+        XCTAssertTrue(gateway.rejectedOfferIDs.isEmpty)
+
+        gateway.finishAcceptance()
+        let accepted = await acceptance.value
+        XCTAssertEqual(accepted?.id, "offer-at-deadline")
+        XCTAssertEqual(workflow.controlPhase, .connected)
+    }
+
     private func offer(id: String, invitationID: String = "default") -> NearbyRendezvousOffer {
         NearbyRendezvousOffer(
             requestID: id,
@@ -108,5 +235,74 @@ final class ConnectionWorkflowTests: XCTestCase {
             senderDisplayName: "Nearby phone",
             invite: "envoix://pair/river-stone-\(invitationID)?role=send"
         )
+    }
+}
+
+@MainActor
+private final class RecordingRoomControlGateway: RoomControlGateway {
+    private var eventHandler: ((RoomControlEvent) -> Void)?
+    private var acceptanceContinuation: CheckedContinuation<Void, Never>?
+    var suspendAcceptance = false
+    private(set) var acceptedOfferIDs: [String] = []
+    private(set) var rejectedOfferIDs: [String] = []
+
+    func makeInvitation(broker: String, relay: String, now: Date) throws -> RoomControlInvitation {
+        RoomControlInvitation(
+            code: "R123456-test-room",
+            payload: "envoix://room/R123456-test-room",
+            expiresAt: now.addingTimeInterval(ConnectionWorkflowPolicy.roomInvitationLifetime)
+        )
+    }
+
+    func parseInvitation(
+        _ input: String,
+        broker: String,
+        relay: String,
+        now: Date
+    ) throws -> RoomControlInvitation {
+        try makeInvitation(broker: "", relay: "", now: now)
+    }
+
+    func host(
+        invitation: RoomControlInvitation,
+        displayName: String,
+        identityPath: String,
+        onEvent: @escaping (RoomControlEvent) -> Void
+    ) async throws {
+        eventHandler = onEvent
+    }
+
+    func join(
+        invitation: RoomControlInvitation,
+        displayName: String,
+        identityPath: String,
+        onEvent: @escaping (RoomControlEvent) -> Void
+    ) async throws {
+        eventHandler = onEvent
+    }
+
+    func offerTransfer(_ offer: RoomControlTransferOffer) async throws {}
+    func acceptOffer(id: String) async throws {
+        acceptedOfferIDs.append(id)
+        if suspendAcceptance {
+            await withCheckedContinuation { continuation in
+                acceptanceContinuation = continuation
+            }
+        }
+    }
+
+    func rejectOffer(id: String) async throws {
+        rejectedOfferIDs.append(id)
+    }
+    func setLifetimePolicy(_ policy: RoomControlLifetimePolicy) async throws {}
+    func close(reason: RoomControlCloseReason) {}
+
+    func emit(_ event: RoomControlEvent) {
+        eventHandler?(event)
+    }
+
+    func finishAcceptance() {
+        acceptanceContinuation?.resume()
+        acceptanceContinuation = nil
     }
 }

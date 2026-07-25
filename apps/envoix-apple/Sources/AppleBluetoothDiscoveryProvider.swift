@@ -3,7 +3,8 @@ import CoreBluetooth
 import Foundation
 import OSLog
 
-final class AppleBluetoothDiscoveryProvider: NSObject, NearbyDiscoveryProvider, NearbyRendezvousProvider {
+final class AppleBluetoothDiscoveryProvider: NSObject, NearbyDiscoveryProvider, NearbyRendezvousProvider,
+    NearbyAdvertisingConfigurable {
     let source = NearbyDiscoverySource.bluetooth
 
     private final class OutboundOffer {
@@ -50,6 +51,7 @@ final class AppleBluetoothDiscoveryProvider: NSObject, NearbyDiscoveryProvider, 
     private var advertisingPending = false
     private var rendezvousReady = false
     private var failureDetail: NearbyProviderDetail?
+    private var advertisingEnabled = false
 
     init(identity: LocalNearbyDiscoveryIdentity) {
         self.identity = identity
@@ -81,11 +83,13 @@ final class AppleBluetoothDiscoveryProvider: NSObject, NearbyDiscoveryProvider, 
             queue: .main,
             options: [CBCentralManagerOptionShowPowerAlertKey: false]
         )
-        peripheralManager = CBPeripheralManager(
-            delegate: self,
-            queue: .main,
-            options: [CBPeripheralManagerOptionShowPowerAlertKey: false]
-        )
+        if advertisingEnabled {
+            peripheralManager = CBPeripheralManager(
+                delegate: self,
+                queue: .main,
+                options: [CBPeripheralManagerOptionShowPowerAlertKey: false]
+            )
+        }
     }
 
     func stop() {
@@ -129,7 +133,7 @@ final class AppleBluetoothDiscoveryProvider: NSObject, NearbyDiscoveryProvider, 
             }
             return
         }
-        guard active, rendezvousReady else {
+        guard active, centralManager?.state == .poweredOn else {
             completion("Experimental Bluetooth pairing is not ready")
             return
         }
@@ -163,6 +167,11 @@ final class AppleBluetoothDiscoveryProvider: NSObject, NearbyDiscoveryProvider, 
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.outboundTimeoutSeconds, execute: timeout)
     }
 
+    func setAdvertisingEnabled(_ enabled: Bool) {
+        precondition(!active, "Advertising policy must be configured before discovery starts")
+        advertisingEnabled = enabled
+    }
+
     private func startScanningIfPossible() {
         guard active, !scanning, centralManager?.state == .poweredOn else { return }
         centralManager?.scanForPeripherals(
@@ -174,6 +183,7 @@ final class AppleBluetoothDiscoveryProvider: NSObject, NearbyDiscoveryProvider, 
 
     private func addRendezvousServiceIfPossible() {
         guard active,
+              advertisingEnabled,
               !rendezvousReady,
               writeCharacteristic == nil,
               peripheralManager?.state == .poweredOn else {
@@ -196,6 +206,7 @@ final class AppleBluetoothDiscoveryProvider: NSObject, NearbyDiscoveryProvider, 
 
     private func startAdvertisingIfPossible() {
         guard active,
+              advertisingEnabled,
               rendezvousReady,
               !advertising,
               !advertisingPending,
@@ -251,7 +262,8 @@ final class AppleBluetoothDiscoveryProvider: NSObject, NearbyDiscoveryProvider, 
     private func emitOperationalStatus() {
         guard active else { return }
 
-        let states = [centralManager?.state, peripheralManager?.state].compactMap { $0 }
+        let states = [centralManager?.state, advertisingEnabled ? peripheralManager?.state : nil]
+            .compactMap { $0 }
         if CBManager.authorization == .denied || CBManager.authorization == .restricted
             || states.contains(.unauthorized) {
             emitStatus(.permissionRequired, .bluetoothAccessRequired)
@@ -259,6 +271,8 @@ final class AppleBluetoothDiscoveryProvider: NSObject, NearbyDiscoveryProvider, 
             emitStatus(.unsupported, .bluetoothUnavailable)
         } else if states.contains(.poweredOff) {
             emitStatus(.disabled, .bluetoothOff)
+        } else if scanning && !advertisingEnabled {
+            emitStatus(.ready, .bluetoothScanningOnly)
         } else if scanning && advertising && rendezvousReady {
             emitStatus(.ready, .bluetoothReady)
         } else if scanning && (advertisingPending || (advertising && !rendezvousReady)) {

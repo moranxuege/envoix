@@ -1,4 +1,5 @@
 #if os(iOS)
+import Combine
 import EnvoixCore
 import SwiftUI
 import UniformTypeIdentifiers
@@ -21,9 +22,14 @@ struct MobileConnectionFlowView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("envoix.language") private var language = "en"
+    @AppStorage("envoix.serverURL") private var serverURL = ""
+    @AppStorage("envoix.relayURL") private var relayURL = ""
 
     @StateObject private var nearbyCoordinator = NearbyDiscoveryCoordinator()
-    @StateObject private var workflow = ConnectionWorkflowState()
+    @StateObject private var presence = NearbyPresencePreferences()
+    @StateObject private var workflow = ConnectionWorkflowState(
+        gateway: RoomControlGatewayFactory.make()
+    )
     @State private var page: MobilePage = {
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--ui-testing-start-activity") {
@@ -38,12 +44,20 @@ struct MobileConnectionFlowView: View {
     @State private var pendingSendPairingInput: String?
     @State private var pendingReceivePairingInput: String?
     @State private var transferUsesInboundInvite = false
+    @State private var transferUsesRoomControl = false
     @State private var transferRoomID: UUID?
+    @State private var transferHasStarted = false
+    @State private var transferSheetDismissalBlocked = false
     @State private var roomOwnsSendDraft = false
     @State private var scannerIsPresented = false
     @State private var manualEntryIsPresented = false
     @State private var manualPairingInput = ""
     @State private var isCloseRoomConfirmationPresented = false
+    @State private var roomInvitationIsRevealed = false
+    @State private var now = Date()
+    @State private var pendingRoomReplacement: (() -> Void)?
+    @State private var isRoomReplacementPresented = false
+    @State private var lastRoomActivityUpdate: Date?
     #if DEBUG
     @State private var didStageBackgroundShareFixture = false
     @State private var openInUITestFixtureURL: URL?
@@ -74,6 +88,7 @@ struct MobileConnectionFlowView: View {
                                     .frame(width: 44, height: 44)
                             }
                             .tint(Theme.accentStrong)
+                            .disabled(transferSheetDismissalBlocked)
                             .accessibilityLabel(AppText.value("Close", "关闭", language: language))
                             .accessibilityIdentifier("mobile_sheet_done")
                         }
@@ -81,8 +96,9 @@ struct MobileConnectionFlowView: View {
             }
             .presentationDragIndicator(.visible)
             .presentationDetents([.large])
+            .interactiveDismissDisabled(transferSheetDismissalBlocked)
         }
-        .sheet(isPresented: $scannerIsPresented) {
+        .fullScreenCover(isPresented: $scannerIsPresented) {
             QRCodeScannerSheet(language: language) { value in
                 openPairingRoom(input: value)
             }
@@ -100,15 +116,20 @@ struct MobileConnectionFlowView: View {
             }
         }
         .alert(item: pendingOfferBinding) { pending in
-            Alert(
+            let isRoomInvite = isRoomControlInput(pending.offer.invite)
+            return Alert(
                 title: Text(AppText.value(
-                    "Unverified nearby invitation",
-                    "未经验证的附近设备邀请",
+                    isRoomInvite ? "Nearby room invitation" : "Unverified nearby invitation",
+                    isRoomInvite ? "附近房间邀请" : "未经验证的附近设备邀请",
                     language: language
                 )),
                 message: Text(AppText.value(
-                    "\(pending.offer.senderDisplayName ?? "A nearby device") wants to start a one-time transfer. Confirm on the other device before accepting.",
-                    "\(pending.offer.senderDisplayName ?? "附近设备") 希望开始一次性传输。接受前，请在另一台设备上确认。",
+                    isRoomInvite
+                        ? "\(pending.offer.senderDisplayName ?? "A nearby device") wants to open a room."
+                        : "\(pending.offer.senderDisplayName ?? "A nearby device") wants to start a one-time transfer. Confirm on the other device before accepting.",
+                    isRoomInvite
+                        ? "\(pending.offer.senderDisplayName ?? "附近设备") 希望打开一个房间。"
+                        : "\(pending.offer.senderDisplayName ?? "附近设备") 希望开始一次性传输。接受前，请在另一台设备上确认。",
                     language: language
                 )),
                 primaryButton: .default(Text(AppText.value("Accept", "接受", language: language))) {
@@ -120,17 +141,43 @@ struct MobileConnectionFlowView: View {
             )
         }
         .alert(
-            AppText.value("Close this one-time room?", "关闭这个一次性房间？", language: language),
+            AppText.value("End this room?", "结束这个房间？", language: language),
             isPresented: $isCloseRoomConfirmationPresented
         ) {
             Button(AppText.value("Cancel", "取消", language: language), role: .cancel) {}
-            Button(AppText.value("Close room", "关闭房间", language: language), role: .destructive) {
+            Button(AppText.value("End room", "结束房间", language: language), role: .destructive) {
                 closeRoomNow()
             }
         } message: {
             Text(AppText.value(
                 "Active transfers will continue in Activity. You can monitor or stop them there.",
                 "进行中的传输会继续，并可在“活动”页面中查看或停止。",
+                language: language
+            ))
+        }
+        .alert(
+            AppText.value("A room is already open", "已有一个房间", language: language),
+            isPresented: $isRoomReplacementPresented
+        ) {
+            Button(AppText.value("Return to room", "返回房间", language: language)) {
+                pendingRoomReplacement = nil
+                if workflow.room != nil {
+                    page = .room
+                }
+            }
+            Button(AppText.value("End and replace", "结束并替换", language: language), role: .destructive) {
+                let action = pendingRoomReplacement
+                pendingRoomReplacement = nil
+                workflow.endControl(reason: .userEnded)
+                action?()
+            }
+            Button(AppText.value("Cancel", "取消", language: language), role: .cancel) {
+                pendingRoomReplacement = nil
+            }
+        } message: {
+            Text(AppText.value(
+                "Envoix can keep one room at a time.",
+                "Envoix 一次只能保留一个房间。",
                 language: language
             ))
         }
@@ -150,8 +197,53 @@ struct MobileConnectionFlowView: View {
             #endif
             if phase == .active {
                 presentPendingSendSelection()
+            } else if phase == .background {
+                roomInvitationIsRevealed = false
+                if isControlRoomOpen {
+                    workflow.endControl(reason: .backgrounded)
+                }
             }
             updateDiscoveryLease()
+        }
+        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { date in
+            now = date
+            if presence.expireIfNeeded(now: date) {
+                updateDiscoveryLease()
+            }
+            workflow.tick(now: date, hasActiveTransfer: roomHasActiveTransfers)
+        }
+        .onReceive(model.$activities) { records in
+            guard let room = workflow.room else { return }
+            let latestUpdate = records
+                .filter { room.activityIDs.contains($0.activityId) }
+                .map(\.updatedAt)
+                .max()
+            guard latestUpdate != lastRoomActivityUpdate else { return }
+            lastRoomActivityUpdate = latestUpdate
+            if latestUpdate != nil {
+                workflow.noteRoomActivity()
+            }
+        }
+        .onChange(of: workflow.room?.id) { _ in
+            lastRoomActivityUpdate = nil
+        }
+        .onChange(of: presence.displayName) { _ in updateDiscoveryLease() }
+        .onChange(of: presence.visibility) { _ in updateDiscoveryLease() }
+        .onChange(of: workflow.controlPhase) { phase in
+            if phase == .connected, workflow.room != nil {
+                roomInvitationIsRevealed = false
+                page = .room
+            } else if phase != .hosting {
+                roomInvitationIsRevealed = false
+            }
+            if case .failed(let message) = phase {
+                ToastCenter.shared.show(message)
+            }
+            if isEndedOrFailed(phase),
+               transferRoute != nil,
+               transferUsesRoomControl {
+                transferRoute = nil
+            }
         }
         .onChange(of: nearbyCoordinator.state.incomingRendezvousOffer?.id) { _ in
             captureIncomingNearbyOffer()
@@ -159,8 +251,10 @@ struct MobileConnectionFlowView: View {
         .onChange(of: model.send.transferActivity?.activityId) { activityID in
             guard let activityID,
                   transferRoomID == workflow.room?.id else { return }
+            transferHasStarted = true
             preservedSendSelection = SendSelectionSnapshot()
             workflow.captureActivity(activityID)
+            workflow.noteRoomActivity()
             if transferRoute == .send {
                 transferRoute = nil
             }
@@ -168,7 +262,9 @@ struct MobileConnectionFlowView: View {
         .onChange(of: model.receive.transferActivity?.activityId) { activityID in
             guard let activityID,
                   transferRoomID == workflow.room?.id else { return }
+            transferHasStarted = true
             workflow.captureActivity(activityID)
+            workflow.noteRoomActivity()
             if transferRoute == .receive {
                 transferRoute = nil
             }
@@ -181,13 +277,31 @@ struct MobileConnectionFlowView: View {
         case .connect:
             ConnectionHubView(
                 coordinator: nearbyCoordinator,
+                presence: presence,
                 openInFixtureURL: debugOpenInFixtureURL,
-                onScanQRCode: { scannerIsPresented = true },
-                onShowQRCode: openRoomForShowingCode,
-                onEnterCode: {
-                    manualPairingInput = ""
-                    manualEntryIsPresented = true
+                roomInvitation: workflow.roomInvitation,
+                roomInvitationIsRevealed: roomInvitationIsRevealed,
+                roomInvitationIsStarting: workflow.controlPhase == .joining,
+                onScanQRCode: {
+                    guardRoomReplacement {
+                        scannerIsPresented = true
+                    }
                 },
+                onEnterCode: {
+                    guardRoomReplacement {
+                        manualPairingInput = ""
+                        manualEntryIsPresented = true
+                    }
+                },
+                onRevealRoomInvitation: revealRoomInvitation,
+                onHideRoomInvitation: { roomInvitationIsRevealed = false },
+                onRefreshRoomInvitation: refreshRoomInvitation,
+                onCancelRoomInvitation: {
+                    roomInvitationIsRevealed = false
+                    workflow.endControl(reason: .userEnded)
+                },
+                onSetVisibility: { presence.setVisibility($0) },
+                onRename: updateDisplayName,
                 onSelectPeer: openNearbyRoom
             )
         case .room:
@@ -195,10 +309,19 @@ struct MobileConnectionFlowView: View {
                 OneTimeRoomView(
                     room: room,
                     records: roomActivityRecords(room),
+                    controlPhase: workflow.controlPhase,
+                    peerDisplayName: workflow.peerDisplayName,
+                    incomingOffer: workflow.incomingRoomOffer,
+                    isRoomCreator: workflow.isRoomCreator,
+                    lifetimePolicy: workflow.roomLifetimePolicy,
+                    idleDeadline: workflow.idleDeadline,
+                    now: now,
                     selectedPeerIsVisible: selectedPeerIsVisible(room),
                     discoveryIsActive: nearbyCoordinator.state.isActive,
                     onAddFiles: offerFiles,
-                    onReceiveFiles: receiveFiles,
+                    onAcceptOffer: acceptIncomingRoomOffer,
+                    onRejectOffer: workflow.rejectIncomingRoomOffer,
+                    onSetKeepOpen: workflow.setKeepOpen,
                     onShowActivity: { showPage(.activity) },
                     onClose: requestCloseRoom
                 )
@@ -241,7 +364,19 @@ struct MobileConnectionFlowView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        if page != .connect {
+        if page == .connect {
+            ToolbarItem(placement: .topBarLeading) {
+                Button {
+                    showPage(.activity)
+                } label: {
+                    Image(systemName: "clock.arrow.circlepath")
+                        .font(.body.weight(.semibold))
+                        .frame(width: 40, height: 40)
+                }
+                .accessibilityLabel(AppText.value("Activity", "活动", language: language))
+                .accessibilityIdentifier("open_activity")
+            }
+        } else {
             ToolbarItem(placement: .topBarLeading) {
                 Button(action: navigateBack) {
                     Image(systemName: "chevron.left")
@@ -253,8 +388,9 @@ struct MobileConnectionFlowView: View {
             }
         }
 
-        ToolbarItemGroup(placement: .topBarTrailing) {
-            if page != .activity {
+        if page != .connect {
+            ToolbarItem(placement: .topBarTrailing) {
+                if page != .activity {
                 Button {
                     showPage(.activity)
                 } label: {
@@ -263,8 +399,11 @@ struct MobileConnectionFlowView: View {
                 }
                 .accessibilityLabel(AppText.value("Activity", "活动", language: language))
                 .accessibilityIdentifier("open_activity")
+                }
             }
+        }
 
+        ToolbarItem(placement: .topBarTrailing) {
             if page != .settings {
                 Button {
                     showPage(.settings)
@@ -296,6 +435,12 @@ struct MobileConnectionFlowView: View {
                 initialPairingInput: pendingSendPairingInput,
                 nearbySelection: workflow.room?.nearbySelection,
                 nearbyInviteOffer: nearbyInviteOffer,
+                roomControlOffer: transferUsesRoomControl
+                    ? { offer, completion in
+                        workflow.offerTransfer(offer, onDecision: completion)
+                    }
+                    : nil,
+                onRoomOfferPendingChange: { transferSheetDismissalBlocked = $0 },
                 onInitialPairingInputConsumed: { pendingSendPairingInput = nil },
                 onSwitchToReceive: switchToReceive
             )
@@ -305,6 +450,12 @@ struct MobileConnectionFlowView: View {
                 initialPairingInput: pendingReceivePairingInput,
                 nearbySelection: workflow.room?.nearbySelection,
                 nearbyInviteOffer: nearbyInviteOffer,
+                roomControlTransfer: transferUsesRoomControl && transferUsesInboundInvite,
+                roomControlAccept: transferUsesRoomControl && transferUsesInboundInvite
+                    ? {
+                        await workflow.acceptIncomingRoomOffer() != nil
+                    }
+                    : nil,
                 onInitialPairingInputConsumed: { pendingReceivePairingInput = nil },
                 onSwitchToSend: switchToSend
             )
@@ -314,7 +465,7 @@ struct MobileConnectionFlowView: View {
     private var pageTitle: String {
         switch page {
         case .connect: return "Envoix"
-        case .room: return AppText.value("One-time Room", "一次性房间", language: language)
+        case .room: return AppText.value("Room", "房间", language: language)
         case .activity: return AppText.value("Activity", "活动", language: language)
         case .settings: return AppText.value("Settings", "设置", language: language)
         }
@@ -355,26 +506,29 @@ struct MobileConnectionFlowView: View {
     }
 
     private func openNearbyRoom(_ selection: NearbyPairingSelection) {
-        workflow.discardAllPendingOffers()
-        workflow.openRoom(
-            origin: .nearby(selection),
-            existingActivityIDs: Set(model.activities.map(\.activityId))
-        )
-        resetRoomTransferHandoff()
-        page = .room
+        if workflow.controlPhase == .hosting,
+           let payload = workflow.roomInvitation?.payload {
+            deliverRoomInvitation(payload, to: selection)
+            return
+        }
+        guardRoomReplacement {
+            guard startHostingRoom() else { return }
+            guard let payload = workflow.roomInvitation?.payload else { return }
+            deliverRoomInvitation(payload, to: selection)
+        }
     }
 
-    private func openRoomForShowingCode() {
-        workflow.discardAllPendingOffers()
-        workflow.openRoom(
-            origin: .showCode,
-            suggestedAction: .receiveFiles,
-            existingActivityIDs: Set(model.activities.map(\.activityId))
-        )
-        resetRoomTransferHandoff()
-        page = .room
-        DispatchQueue.main.async {
-            receiveFiles()
+    private func deliverRoomInvitation(
+        _ payload: String,
+        to selection: NearbyPairingSelection
+    ) {
+        nearbyCoordinator.offerInvite(
+            peerKey: selection.discoveryPeerKey,
+            invite: payload
+        ) { error in
+            if let error {
+                ToastCenter.shared.show(error)
+            }
         }
     }
 
@@ -386,6 +540,34 @@ struct MobileConnectionFlowView: View {
                 "请输入 Envoix 配对码。",
                 language: language
             )
+        }
+        if isRoomControlInput(pairingInput) {
+            guard !isRoomOccupied else {
+                return AppText.value(
+                    "End the current room before joining another one.",
+                    "请先结束当前房间，再加入另一个房间。",
+                    language: language
+                )
+            }
+            guard let identityPath = roomIdentityPath else {
+                return AppText.value(
+                    "Application Support is unavailable.",
+                    "无法访问应用支持目录。",
+                    language: language
+                )
+            }
+            let error = workflow.joinRoomControl(
+                input: pairingInput,
+                broker: serverURL,
+                relay: relayURL,
+                displayName: presence.displayName,
+                identityPath: identityPath,
+                existingActivityIDs: Set(model.activities.map(\.activityId))
+            )
+            if error == nil {
+                resetRoomTransferHandoff()
+            }
+            return error
         }
 
         let action: OneTimeRoomAction
@@ -428,6 +610,8 @@ struct MobileConnectionFlowView: View {
     private func offerFiles() {
         guard let room = workflow.room else { return }
         transferRoomID = room.id
+        transferHasStarted = false
+        transferUsesRoomControl = room.origin == .roomControl
         roomOwnsSendDraft = true
         transferUsesInboundInvite = room.pairingInput != nil && room.suggestedAction == .offerFiles
         pendingSendPairingInput = room.suggestedAction == .receiveFiles ? nil : room.pairingInput
@@ -437,6 +621,8 @@ struct MobileConnectionFlowView: View {
     private func receiveFiles() {
         guard let room = workflow.room else { return }
         transferRoomID = room.id
+        transferHasStarted = false
+        transferUsesRoomControl = room.origin == .roomControl
         transferUsesInboundInvite = room.pairingInput != nil && room.suggestedAction == .receiveFiles
         pendingReceivePairingInput = room.suggestedAction == .offerFiles ? nil : room.pairingInput
         transferRoute = .receive
@@ -459,7 +645,10 @@ struct MobileConnectionFlowView: View {
         pendingSendPairingInput = nil
         pendingReceivePairingInput = nil
         transferUsesInboundInvite = false
+        transferUsesRoomControl = false
         transferRoomID = nil
+        transferHasStarted = false
+        transferSheetDismissalBlocked = false
     }
 
     private func requestCloseRoom() {
@@ -484,7 +673,11 @@ struct MobileConnectionFlowView: View {
             _ = model.send.cancelManifestPreparation()
         }
         resetRoomTransferHandoff()
-        workflow.closeRoom()
+        if isControlRoomOpen || workflow.room?.origin == .roomControl {
+            workflow.endControl(reason: .userEnded)
+        } else {
+            workflow.closeRoom()
+        }
         page = .connect
     }
 
@@ -493,7 +686,10 @@ struct MobileConnectionFlowView: View {
         pendingSendPairingInput = nil
         pendingReceivePairingInput = nil
         transferUsesInboundInvite = false
+        transferUsesRoomControl = false
         transferRoomID = nil
+        transferHasStarted = false
+        transferSheetDismissalBlocked = false
         roomOwnsSendDraft = false
     }
 
@@ -525,8 +721,20 @@ struct MobileConnectionFlowView: View {
     }
 
     private func updateDiscoveryLease() {
-        let roomNeedsDiscovery = page == .room && workflow.room?.nearbySelection != nil
-        if scenePhase != .background && (page == .connect || roomNeedsDiscovery) {
+        #if DEBUG
+        // XCTest can report an inactive initial scene for the entire launch.
+        // Fixture providers are process-local and safe to keep active so UI
+        // tests exercise deterministic discovery instead of scene timing.
+        let sceneIsActive = scenePhase == .active
+            || ProcessInfo.processInfo.arguments.contains("--ui-testing")
+        #else
+        let sceneIsActive = scenePhase == .active
+        #endif
+        nearbyCoordinator.configure(
+            displayName: presence.displayName,
+            advertisingEnabled: presence.isAdvertising(sceneIsActive: sceneIsActive)
+        )
+        if sceneIsActive && page == .connect {
             nearbyCoordinator.start()
         } else {
             nearbyCoordinator.stop()
@@ -541,7 +749,8 @@ struct MobileConnectionFlowView: View {
            offer.senderPeerKey != selectedPeerKey {
             return
         }
-        guard (try? parsePairingInvite(input: offer.invite)) != nil else {
+        guard isRoomControlInput(offer.invite)
+                || (try? parsePairingInvite(input: offer.invite)) != nil else {
             ToastCenter.shared.show(AppText.value(
                 "An invalid Bluetooth invitation was rejected.",
                 "已拒绝无效的蓝牙邀请。",
@@ -559,6 +768,32 @@ struct MobileConnectionFlowView: View {
 
     private func acceptPendingOffer(_ pending: PendingNearbyInvitation) {
         workflow.discardAllPendingOffers()
+        let continuesCurrentLegacyRoom = !isRoomControlInput(pending.offer.invite)
+            && workflow.room?.nearbySelection?.discoveryPeerKey == pending.offer.senderPeerKey
+        if continuesCurrentLegacyRoom {
+            acceptPendingOfferNow(pending)
+        } else {
+            guardRoomReplacement {
+                acceptPendingOfferNow(pending)
+            }
+        }
+    }
+
+    private func acceptPendingOfferNow(_ pending: PendingNearbyInvitation) {
+        if isRoomControlInput(pending.offer.invite) {
+            guard let identityPath = roomIdentityPath else { return }
+            if let error = workflow.joinRoomControl(
+                input: pending.offer.invite,
+                broker: serverURL,
+                relay: relayURL,
+                displayName: presence.displayName,
+                identityPath: identityPath,
+                existingActivityIDs: Set(model.activities.map(\.activityId))
+            ) {
+                ToastCenter.shared.show(error)
+            }
+            return
+        }
         guard let parsed = try? parsePairingInvite(input: pending.offer.invite) else { return }
         let selection = NearbyPairingSelection(
             discoveryPeerKey: pending.offer.senderPeerKey,
@@ -586,6 +821,15 @@ struct MobileConnectionFlowView: View {
     private func handleIncomingURL(_ url: URL) {
         if let id = ShareDraftLink.draftID(from: url) {
             presentSharedDraft(preferredID: id)
+            return
+        }
+        let input = url.absoluteString
+        if isRoomControlInput(input) {
+            guardRoomReplacement {
+                if let error = openPairingRoom(input: input) {
+                    ToastCenter.shared.show(error)
+                }
+            }
             return
         }
         guard url.isFileURL else { return }
@@ -636,6 +880,12 @@ struct MobileConnectionFlowView: View {
     }
 
     private func openExternalShareRoom() {
+        if isControlRoomOpen, workflow.room == nil {
+            guardRoomReplacement {
+                openExternalShareRoom()
+            }
+            return
+        }
         if workflow.room == nil {
             workflow.discardAllPendingOffers()
             workflow.openRoom(
@@ -647,7 +897,126 @@ struct MobileConnectionFlowView: View {
         roomOwnsSendDraft = true
         page = .room
         transferRoomID = workflow.room?.id
+        transferHasStarted = false
+        transferUsesRoomControl = workflow.room?.origin == .roomControl
         transferRoute = .send
+    }
+
+    private var isRoomOccupied: Bool {
+        workflow.room != nil || isControlRoomOpen
+    }
+
+    private var isControlRoomOpen: Bool {
+        switch workflow.controlPhase {
+        case .hosting, .joining, .connected:
+            return true
+        case .idle, .ended, .failed:
+            return false
+        }
+    }
+
+    private func guardRoomReplacement(_ action: @escaping () -> Void) {
+        guard isRoomOccupied else {
+            action()
+            return
+        }
+        pendingRoomReplacement = action
+        isRoomReplacementPresented = true
+    }
+
+    private func revealRoomInvitation() {
+        if workflow.roomInvitation != nil {
+            roomInvitationIsRevealed = true
+            return
+        }
+        guardRoomReplacement {
+            if startHostingRoom() {
+                roomInvitationIsRevealed = true
+            }
+        }
+    }
+
+    private func refreshRoomInvitation() {
+        guard workflow.controlPhase == .hosting else {
+            revealRoomInvitation()
+            return
+        }
+        if startHostingRoom() {
+            roomInvitationIsRevealed = true
+        }
+    }
+
+    @discardableResult
+    private func startHostingRoom() -> Bool {
+        guard let identityPath = roomIdentityPath else {
+            ToastCenter.shared.show(AppText.value(
+                "Application Support is unavailable.",
+                "无法访问应用支持目录。",
+                language: language
+            ))
+            return false
+        }
+        let error = workflow.startHosting(
+            broker: serverURL,
+            relay: relayURL,
+            displayName: presence.displayName,
+            identityPath: identityPath,
+            existingActivityIDs: Set(model.activities.map(\.activityId))
+        )
+        if let error {
+            ToastCenter.shared.show(error)
+            return false
+        }
+        return true
+    }
+
+    private var roomIdentityPath: String? {
+        FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first?
+            .appendingPathComponent("envoix", isDirectory: true)
+            .appendingPathComponent("room-control-identity", isDirectory: false)
+            .path
+    }
+
+    private func isRoomControlInput(_ input: String) -> Bool {
+        let normalized = input.trimmed
+        if normalized.lowercased().hasPrefix("envoix://room/") {
+            return true
+        }
+        let characters = Array(normalized)
+        guard characters.count > 8,
+              characters[0].uppercased() == "R",
+              characters[7] == "-" else {
+            return false
+        }
+        return characters[1...6].allSatisfy(\.isNumber)
+    }
+
+    private func isEndedOrFailed(_ phase: RoomControlPhase) -> Bool {
+        switch phase {
+        case .ended, .failed:
+            return true
+        case .idle, .hosting, .joining, .connected:
+            return false
+        }
+    }
+
+    private func updateDisplayName(_ value: String) -> Bool {
+        guard presence.updateDisplayName(value) else { return false }
+        updateDiscoveryLease()
+        return true
+    }
+
+    private func acceptIncomingRoomOffer() {
+        guard let offer = workflow.incomingRoomOffer,
+              let room = workflow.room else { return }
+        transferRoomID = room.id
+        transferUsesInboundInvite = true
+        transferUsesRoomControl = room.origin == .roomControl
+        pendingReceivePairingInput = offer.transferInvite
+        transferRoute = .receive
     }
 
     private func openedSendFileErrorMessage(_ error: OpenedSendFileError) -> String {

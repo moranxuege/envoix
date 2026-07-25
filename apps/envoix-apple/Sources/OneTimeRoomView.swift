@@ -3,13 +3,23 @@ import SwiftUI
 
 struct OneTimeRoomView: View {
     @Environment(\.appLanguage) private var language
+    @AppStorage("envoix.outputDirDisplayName") private var outputDirDisplayName = ""
 
     let room: OneTimeRoomSession
     let records: [TransferActivityRecord]
+    let controlPhase: RoomControlPhase
+    let peerDisplayName: String?
+    let incomingOffer: RoomControlTransferOffer?
+    let isRoomCreator: Bool
+    let lifetimePolicy: RoomControlLifetimePolicy
+    let idleDeadline: Date?
+    let now: Date
     let selectedPeerIsVisible: Bool
     let discoveryIsActive: Bool
     let onAddFiles: () -> Void
-    let onReceiveFiles: () -> Void
+    let onAcceptOffer: () -> Void
+    let onRejectOffer: () -> Void
+    let onSetKeepOpen: (Bool) -> Void
     let onShowActivity: () -> Void
     let onClose: () -> Void
 
@@ -17,13 +27,20 @@ struct OneTimeRoomView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 16) {
                 roomHeader
+                if let incomingOffer {
+                    incomingOfferCard(incomingOffer)
+                }
                 composer
                 timeline
-                roomNotice
-                closeButton
+                if let endedMessage {
+                    endedNotice(endedMessage)
+                }
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 16)
+        }
+        .safeAreaInset(edge: .bottom) {
+            roomControls
         }
         .background(Theme.bg)
         .accessibilityIdentifier("one_time_room")
@@ -43,13 +60,14 @@ struct OneTimeRoomView: View {
                         .font(.title2.bold())
                         .foregroundStyle(Theme.text)
                         .lineLimit(1)
-                    Label(
-                        AppText.value("Unverified", "未经验证", language: language),
-                        systemImage: "exclamationmark.shield"
-                    )
+                    Label(trustLabel, systemImage: "exclamationmark.shield")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(Theme.warning)
-                    .accessibilityIdentifier("room_context_unverified")
+                    .accessibilityIdentifier(
+                        roomWasAuthenticated
+                            ? "room_context_authenticated"
+                            : "room_context_unverified"
+                    )
                 }
                 Spacer(minLength: 8)
             }
@@ -81,24 +99,10 @@ struct OneTimeRoomView: View {
                 .frame(maxWidth: .infinity, minHeight: 44)
             }
             .buttonStyle(PrimaryActionButtonStyle())
+            .disabled(!canOfferFiles)
             .accessibilityIdentifier("room_add_files")
 
-            Button(action: onReceiveFiles) {
-                Label(
-                    AppText.value("Show a room QR", "显示房间二维码", language: language),
-                    systemImage: "qrcode"
-                )
-                .frame(maxWidth: .infinity, minHeight: 42)
-            }
-            .buttonStyle(.bordered)
-            .tint(Theme.accentStrong)
-            .accessibilityIdentifier("room_receive_files")
-
-            Text(AppText.value(
-                "Either device can offer files. An incoming offer always waits for confirmation.",
-                "任一设备都可以发送文件；收到的邀请始终需要确认。",
-                language: language
-            ))
+            Text(composerMessage)
             .font(.footnote)
             .foregroundStyle(Theme.muted)
             .fixedSize(horizontal: false, vertical: true)
@@ -149,6 +153,57 @@ struct OneTimeRoomView: View {
         .accessibilityIdentifier("room_activity")
     }
 
+    private func incomingOfferCard(_ offer: RoomControlTransferOffer) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label(
+                AppText.value("Incoming file offer", "收到文件邀请", language: language),
+                systemImage: "tray.and.arrow.down.fill"
+            )
+            .font(.headline)
+            .foregroundStyle(Theme.text)
+
+            Text(offerSummary(offer))
+                .font(.subheadline)
+                .foregroundStyle(Theme.muted)
+
+            Label(
+                AppText.value(
+                    "Save to \(incomingDestinationName)",
+                    "保存到 \(incomingDestinationName)",
+                    language: language
+                ),
+                systemImage: "folder"
+            )
+            .font(.subheadline)
+            .foregroundStyle(Theme.muted)
+
+            ForEach(Array(offer.rootNames.prefix(3).enumerated()), id: \.offset) { _, name in
+                Label(name, systemImage: "doc")
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.text)
+                    .lineLimit(1)
+            }
+
+            HStack(spacing: 10) {
+                Button(role: .cancel, action: onRejectOffer) {
+                    Text(AppText.value("Reject", "拒绝", language: language))
+                        .frame(maxWidth: .infinity, minHeight: 42)
+                }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("room_offer_reject")
+
+                Button(action: onAcceptOffer) {
+                    Text(AppText.value("Accept", "接受", language: language))
+                        .frame(maxWidth: .infinity, minHeight: 42)
+                }
+                .buttonStyle(PrimaryActionButtonStyle())
+                .accessibilityIdentifier("room_offer_accept")
+            }
+        }
+        .card(raised: true, padding: 16)
+        .accessibilityIdentifier("room_incoming_offer")
+    }
+
     private func compactActivityCard(_ record: TransferActivityRecord) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
@@ -190,35 +245,61 @@ struct OneTimeRoomView: View {
         .accessibilityIdentifier("room_activity_\(record.activityId)")
     }
 
-    private var roomNotice: some View {
-        Label(
-            AppText.value(
-                "This is a one-time room. Each transfer connects and authenticates separately.",
-                "这是一次性房间。每次传输都会单独连接并进行认证。",
-                language: language
-            ),
-            systemImage: "info.circle"
-        )
-        .font(.footnote)
-        .foregroundStyle(Theme.muted)
-        .fixedSize(horizontal: false, vertical: true)
-        .padding(.horizontal, 4)
-        .accessibilityIdentifier("room_one_time_notice")
+    private func endedNotice(_ message: String) -> some View {
+        Label(message, systemImage: "exclamationmark.circle.fill")
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(Theme.danger)
+            .fixedSize(horizontal: false, vertical: true)
+            .card(padding: 14)
+            .accessibilityIdentifier("room_ended_notice")
     }
 
-    private var closeButton: some View {
-        Button(role: .destructive, action: onClose) {
-            Label(
-                AppText.value("Close room", "关闭房间", language: language),
-                systemImage: "xmark.circle"
-            )
-            .frame(maxWidth: .infinity, minHeight: 42)
+    private var roomControls: some View {
+        VStack(spacing: 10) {
+            HStack {
+                Label(roomLifetimeText, systemImage: lifetimePolicy == .untilForegroundEnds ? "infinity" : "timer")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Theme.text)
+                Spacer()
+                if isRoomCreator && controlPhase == .connected {
+                    Toggle(
+                        AppText.value("Keep open", "保持开启", language: language),
+                        isOn: Binding(
+                            get: { lifetimePolicy == .untilForegroundEnds },
+                            set: onSetKeepOpen
+                        )
+                    )
+                    .labelsHidden()
+                    .accessibilityLabel(AppText.value("Keep room open", "保持房间开启", language: language))
+                    .accessibilityIdentifier("room_keep_open")
+                }
+            }
+
+            Button(role: .destructive, action: onClose) {
+                Label(
+                    AppText.value("End room", "结束房间", language: language),
+                    systemImage: "xmark.circle"
+                )
+                .frame(maxWidth: .infinity, minHeight: 42)
+            }
+            .buttonStyle(.bordered)
+            .accessibilityIdentifier("close_one_time_room")
         }
-        .buttonStyle(.bordered)
-        .accessibilityIdentifier("close_one_time_room")
+        .padding(.horizontal, 16)
+        .padding(.top, 12)
+        .padding(.bottom, 8)
+        .background(.regularMaterial)
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(Theme.line.opacity(0.7))
+                .frame(height: 0.5)
+        }
     }
 
     private var roomTitle: String {
+        if let peerDisplayName, !peerDisplayName.trimmed.isEmpty {
+            return peerDisplayName
+        }
         if let displayName = room.nearbySelection?.displayName, !displayName.trimmed.isEmpty {
             return displayName
         }
@@ -226,6 +307,20 @@ struct OneTimeRoomView: View {
     }
 
     private var roomStatus: String {
+        switch controlPhase {
+        case .hosting:
+            return AppText.value("Waiting for another device", "正在等待另一台设备", language: language)
+        case .joining:
+            return AppText.value("Joining room", "正在加入房间", language: language)
+        case .connected:
+            return AppText.value("Connected for this room", "已连接此房间", language: language)
+        case .ended:
+            return AppText.value("Room ended", "房间已结束", language: language)
+        case .failed:
+            return AppText.value("Connection needs attention", "连接需要处理", language: language)
+        case .idle:
+            break
+        }
         switch room.origin {
         case .nearby:
             if selectedPeerIsVisible {
@@ -240,16 +335,122 @@ struct OneTimeRoomView: View {
             return AppText.value("Ready to show a room QR", "可显示房间二维码", language: language)
         case .externalShare:
             return AppText.value("Files ready to offer", "文件已准备发送", language: language)
+        case .roomControl:
+            return AppText.value("Connecting", "正在连接", language: language)
         }
     }
 
     private var statusColor: Color {
+        switch controlPhase {
+        case .connected: return Theme.success
+        case .hosting, .joining: return Theme.warning
+        case .ended, .failed: return Theme.danger
+        case .idle: break
+        }
         switch room.origin {
         case .nearby:
             return selectedPeerIsVisible ? Theme.success : Theme.warning
-        case .pairingCode, .showCode, .externalShare:
+        case .pairingCode, .showCode, .externalShare, .roomControl:
             return Theme.accent
         }
+    }
+
+    private var trustLabel: String {
+        roomWasAuthenticated
+            ? AppText.value("Authenticated for this room", "已为此房间认证", language: language)
+            : AppText.value("Unverified", "未经验证", language: language)
+    }
+
+    private var roomWasAuthenticated: Bool {
+        room.origin == .roomControl && peerDisplayName != nil
+    }
+
+    private var canOfferFiles: Bool {
+        if room.origin == .roomControl {
+            return controlPhase == .connected && incomingOffer == nil
+        }
+        return true
+    }
+
+    private var composerMessage: String {
+        if controlPhase == .connected {
+            return AppText.value(
+                "Either device can offer files. Every incoming offer requires confirmation.",
+                "任一设备都可以发送文件；每个收到的邀请都需要确认。",
+                language: language
+            )
+        }
+        if room.origin == .roomControl {
+            return AppText.value(
+                "File offers become available after the room connection is authenticated.",
+                "房间连接完成认证后即可发送文件。",
+                language: language
+            )
+        }
+        return AppText.value(
+            "This legacy transfer uses a one-time connection.",
+            "此旧版传输使用一次性连接。",
+            language: language
+        )
+    }
+
+    private var roomLifetimeText: String {
+        guard room.origin == .roomControl else {
+            return AppText.value("One-time transfer", "一次性传输", language: language)
+        }
+        if lifetimePolicy == .untilForegroundEnds {
+            return AppText.value("Kept open while Envoix is open", "Envoix 打开时保持房间", language: language)
+        }
+        guard controlPhase == .connected, let idleDeadline else {
+            return AppText.value("15-minute idle limit", "空闲 15 分钟后结束", language: language)
+        }
+        let seconds = max(0, Int(idleDeadline.timeIntervalSince(now)))
+        return AppText.value(
+            "Ends after \(seconds / 60):\(String(format: "%02d", seconds % 60)) idle",
+            "空闲 \(seconds / 60):\(String(format: "%02d", seconds % 60)) 后结束",
+            language: language
+        )
+    }
+
+    private var endedMessage: String? {
+        switch controlPhase {
+        case .ended(let reason):
+            switch reason {
+            case .userEnded:
+                return AppText.value("This room was ended.", "此房间已结束。", language: language)
+            case .idleExpired:
+                return AppText.value("This room ended after 15 minutes without transfer activity.", "此房间在 15 分钟无传输活动后结束。", language: language)
+            case .invitationExpired:
+                return AppText.value("The room invitation expired.", "房间邀请已过期。", language: language)
+            case .peerEnded:
+                return AppText.value("The other device ended this room.", "另一台设备结束了此房间。", language: language)
+            case .backgrounded:
+                return AppText.value("The room ended when Envoix left the foreground.", "Envoix 离开前台后房间已结束。", language: language)
+            case .networkLost:
+                return AppText.value("The room connection was lost.", "房间连接已断开。", language: language)
+            case .protocolFailure:
+                return AppText.value("The room ended because of a connection error.", "房间因连接错误而结束。", language: language)
+            }
+        case .failed(let message):
+            return message
+        default:
+            return nil
+        }
+    }
+
+    private func offerSummary(_ offer: RoomControlTransferOffer) -> String {
+        let itemText = AppText.value(
+            offer.itemCount == 1 ? "1 item" : "\(offer.itemCount) items",
+            "\(offer.itemCount) 个项目",
+            language: language
+        )
+        return "\(itemText) · \(byteString(offer.totalBytes))"
+    }
+
+    private var incomingDestinationName: String {
+        outputDirDisplayName.trimmed.isEmpty
+            ? AppText.value("Envoix / Downloads", "Envoix / Downloads", language: language)
+            : outputDirDisplayName
     }
 
     private func activityTitle(_ record: TransferActivityRecord) -> String {
@@ -279,7 +480,10 @@ struct OneTimeRoomView: View {
         case .saving, .waitingForReceiverSave, .finalizingDelivery:
             return AppText.value("Finishing", "正在完成", language: language)
         case .paused: return AppText.value("Paused", "已暂停", language: language)
-        case .delivered: return AppText.value("Delivered", "已送达", language: language)
+        case .delivered:
+            return record.direction == .send
+                ? AppText.value("Delivered", "已送达", language: language)
+                : AppText.value("Received", "已接收", language: language)
         case .failed: return AppText.value("Needs attention", "需要处理", language: language)
         case .canceled: return AppText.value("Canceled", "已取消", language: language)
         }

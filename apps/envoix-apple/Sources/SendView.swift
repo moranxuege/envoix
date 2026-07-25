@@ -56,10 +56,16 @@ struct SendView: View {
     @State private var selectedSourceAccess: AnyObject?
     @State private var selectedPendingSelectionID: UUID?
     @State private var didApplyInitialPairingInput = false
+    @State private var pendingRoomOfferID: String?
     @StateObject private var nearbyInviteDelivery = NearbyInviteDeliveryController()
     private let initialPairingInput: String?
     private let nearbySelection: NearbyPairingSelection?
     private let nearbyInviteOffer: NearbyInviteOffer?
+    private let roomControlOffer: ((
+        RoomControlTransferOffer,
+        @escaping (Bool) -> Void
+    ) -> Void)?
+    private let onRoomOfferPendingChange: ((Bool) -> Void)?
     private let onInitialPairingInputConsumed: (() -> Void)?
     private let onSwitchToReceive: ((String, SendSelectionSnapshot) -> Void)?
     #if os(iOS)
@@ -79,6 +85,11 @@ struct SendView: View {
         initialPairingInput: String? = nil,
         nearbySelection: NearbyPairingSelection? = nil,
         nearbyInviteOffer: NearbyInviteOffer? = nil,
+        roomControlOffer: ((
+            RoomControlTransferOffer,
+            @escaping (Bool) -> Void
+        ) -> Void)? = nil,
+        onRoomOfferPendingChange: ((Bool) -> Void)? = nil,
         onInitialPairingInputConsumed: (() -> Void)? = nil,
         onSwitchToReceive: ((String, SendSelectionSnapshot) -> Void)? = nil
     ) {
@@ -86,6 +97,8 @@ struct SendView: View {
         self.initialPairingInput = initialPairingInput
         self.nearbySelection = nearbySelection
         self.nearbyInviteOffer = nearbyInviteOffer
+        self.roomControlOffer = roomControlOffer
+        self.onRoomOfferPendingChange = onRoomOfferPendingChange
         self.onInitialPairingInputConsumed = onInitialPairingInputConsumed
         self.onSwitchToReceive = onSwitchToReceive
         _mode = State(initialValue: initialMode)
@@ -177,7 +190,9 @@ struct SendView: View {
                 }
                 #endif
                 fileSection
-                connectionSection
+                if roomControlOffer == nil {
+                    connectionSection
+                }
                 TransferStatusView(viewModel: viewModel)
             }
             .padding(.vertical, 12)
@@ -408,7 +423,9 @@ struct SendView: View {
                     ? "xmark"
                     : (viewModel.isBusy
                         ? "list.bullet.rectangle"
-                        : (nearbyInviteDelivery.isDelivering ? "dot.radiowaves.left.and.right" : "paperplane"))
+                        : ((nearbyInviteDelivery.isDelivering || pendingRoomOfferID != nil)
+                            ? "dot.radiowaves.left.and.right"
+                            : "paperplane"))
             )
                 .frame(maxWidth: .infinity, minHeight: 44)
                 .contentShape(Rectangle())
@@ -420,6 +437,7 @@ struct SendView: View {
                 && (viewModel.isBusy
                     || viewModel.isFinalizing
                     || nearbyInviteDelivery.isDelivering
+                    || pendingRoomOfferID != nil
                     || isPhotoImporting
                     || !canSend
                     || concurrencyBlocked)
@@ -924,6 +942,9 @@ struct SendView: View {
         if nearbyInviteDelivery.isDelivering {
             return AppText.value("Delivering Invitation…", "正在发送邀请码…", language: uiLanguage)
         }
+        if pendingRoomOfferID != nil {
+            return AppText.value("Waiting for acceptance…", "正在等待对方接受…", language: uiLanguage)
+        }
         if viewModel.isBusy { return AppText.value("Managed in Activity", "请在活动中管理", language: uiLanguage) }
         return AppText.value("Send", "发送", language: uiLanguage)
     }
@@ -940,6 +961,9 @@ struct SendView: View {
         guard !selectedItems.isEmpty,
               viewModel.isManifestSelectionReady,
               viewModel.pendingSourceSelections.isEmpty else { return false }
+        if roomControlOffer != nil {
+            return true
+        }
         switch mode {
         case .room:
             return !roomCode.trimmed.isEmpty || pairingInvite != nil
@@ -1366,6 +1390,41 @@ struct SendView: View {
                 candidatesDeny: candidatesDeny,
                 speedLimit: speedLimit
             )
+            if let roomControlOffer {
+                let pairingInvite = try makePairingInvite(
+                    role: .send,
+                    broker: serverURL,
+                    relay: relayURL
+                )
+                let summary = viewModel.preparedInventorySummary
+                let offerID = UUID().uuidString.lowercased()
+                let offer = RoomControlTransferOffer(
+                    id: offerID,
+                    transferInvite: pairingInvite.payload,
+                    rootNames: viewModel.preparedInventoryRoots.prefix(3).map(\.name),
+                    itemCount: (summary?.fileCount ?? 0) + (summary?.directoryCount ?? 0),
+                    totalBytes: summary?.totalPlaintextBytes ?? 0
+                )
+                pendingRoomOfferID = offerID
+                onRoomOfferPendingChange?(true)
+                roomControlOffer(offer) { accepted in
+                    DispatchQueue.main.async {
+                        guard pendingRoomOfferID == offerID else { return }
+                        pendingRoomOfferID = nil
+                        onRoomOfferPendingChange?(false)
+                        guard accepted else {
+                            ToastCenter.shared.show(AppText.value(
+                                "The file offer was declined.",
+                                "对方拒绝了文件邀请。",
+                                language: uiLanguage
+                            ))
+                            return
+                        }
+                        startRoomSend(code: pairingInvite.code, settings: settings)
+                    }
+                }
+                return
+            }
             switch mode {
             case .room:
                 let input = roomCode.trimmed
