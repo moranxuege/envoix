@@ -18,9 +18,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -33,64 +31,47 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import dev.envoix.app.InviteCodec
-import dev.envoix.app.Room
 import dev.envoix.app.Transfer
+import dev.envoix.app.discovery.DiscoverySource
 import dev.envoix.app.discovery.DiscoveryViewModel
+import dev.envoix.app.discovery.NearbyRendezvousOffer
 import dev.envoix.app.isTerminal
 
 @OptIn(ExperimentalComposeUiApi::class, ExperimentalMaterial3Api::class)
 @Composable
 internal fun DeviceRoomScreen(
     draft: DeviceRoomDraft,
+    transferDraft: RoomTransferDraft?,
     transfers: List<Transfer>,
     onBack: () -> Unit,
+    onActivity: () -> Unit,
+    onSettings: () -> Unit,
+    onBeginTransfer: (roleAdapter: String, usesPendingAction: Boolean) -> Unit,
+    onShowRoomQr: () -> Unit,
+    onDismissTransfer: () -> Unit,
+    onTransferStarted: (code: String, consumePendingShares: Boolean) -> Unit,
+    onAcceptIncomingOffer: (NearbyRendezvousOffer) -> Boolean,
     onReceive: (String, String, String, String?, Boolean) -> Unit,
     onSend: (String, String, String, String, String?) -> Unit,
-    onPauseResume: (Long) -> Unit,
-    onApproveReceive: (Long) -> Unit,
-    onCancel: (Long) -> Unit,
-    onRemove: (Long) -> Unit,
-    onOpen: (Transfer) -> Unit,
-    onShare: (Transfer) -> Unit,
     initialSources: List<Uri> = emptyList(),
-    onInitialSourcesConsumed: () -> Unit = {},
     discoveryViewModel: DiscoveryViewModel,
 ) {
     val colors = Envoix.colors
-    val expanded = remember { mutableStateListOf<Long>() }
     val discoveryState by discoveryViewModel.uiState.collectAsStateWithLifecycle()
-    var pairingInput by remember(draft) { mutableStateOf(draft.pairingInput) }
-    var hostedCode by remember(draft) { mutableStateOf(draft.hostedCode) }
-    var hostedPayload by remember(draft) { mutableStateOf(draft.hostedPayload) }
-    val roomIds =
-        remember(draft) {
-            mutableStateListOf<String>().apply {
-                (draft.hostedCode ?: draft.pairingInput?.let(InviteCodec::parse)?.code)?.let { code ->
-                    add(Room(code).id)
-                }
-            }
-        }
-    var setupRole by remember(draft) { mutableStateOf<String?>(null) }
-    var setupUsesPending by remember(draft) { mutableStateOf(false) }
-    var pendingRole by
-        remember(draft) {
-            mutableStateOf(
-                when {
-                    initialSources.isNotEmpty() -> "send"
-                    draft.pairingInput != null || draft.hostedPayload != null ->
-                        draft.directionAdapter.validRoomDirection()
-                    else -> null
-                },
-            )
-        }
-
-    LaunchedEffect(initialSources) {
-        if (initialSources.isNotEmpty()) pendingRole = "send"
-    }
-    val roomTransfers = transfers.filter { Room(it.room).id in roomIds }
+    val setupUsesPending = transferDraft?.usesPendingAction == true
+    val pendingRole = draft.pendingRoleAdapter
+    val roomTransfers = transfers.filter { it.room in draft.transferCodes }
     val active = roomTransfers.filterNot { it.status.isTerminal }
-    val state = roomState(active)
+    val nearbyAvailable =
+        draft.nearbySelection?.discoveryPeerKey?.let { selectedKey ->
+            discoveryState.peers.any { it.peerKey == selectedKey }
+        }
+    val state =
+        roomState(
+            active = active,
+            hasNearbyContext = draft.nearbySelection != null,
+            nearbyAvailable = nearbyAvailable,
+        )
     var confirmLeave by remember { mutableStateOf(false) }
 
     fun requestBack() {
@@ -103,30 +84,6 @@ internal fun DeviceRoomScreen(
 
     BackHandler(onBack = ::requestBack)
 
-    LaunchedEffect(
-        discoveryState.incomingRendezvousOffer?.requestId,
-        setupRole,
-        pendingRole,
-        draft.nearbySelection,
-    ) {
-        val offer = discoveryState.incomingRendezvousOffer ?: return@LaunchedEffect
-        val selectedPeer = draft.nearbySelection ?: return@LaunchedEffect
-        if (offer.senderPeerKey != selectedPeer.discoveryPeerKey ||
-            setupRole != null ||
-            pendingRole != null
-        ) {
-            return@LaunchedEffect
-        }
-        val parsed = InviteCodec.parse(offer.invite)
-        discoveryViewModel.consumeRendezvousOffer(offer.requestId)
-        if (parsed != null) {
-            pairingInput = offer.invite
-            hostedCode = null
-            hostedPayload = null
-            pendingRole = InviteCodec.oppositeRole(parsed.role) ?: "receive"
-        }
-    }
-
     Column(
         Modifier
             .semantics { testTagsAsResourceId = true }
@@ -138,6 +95,8 @@ internal fun DeviceRoomScreen(
             displayName = draft.displayName,
             state = state,
             onBack = ::requestBack,
+            onActivity = onActivity,
+            onSettings = onSettings,
         )
         HorizontalDivider(color = colors.line)
         LazyColumn(
@@ -146,13 +105,22 @@ internal fun DeviceRoomScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             item {
-                Text(
-                    appText("TRANSFERS", "传输"),
-                    color = colors.muted,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 0.8.sp,
-                )
+                androidx.compose.foundation.layout.Row(
+                    modifier = Modifier.fillParentMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                ) {
+                    Text(
+                        appText("ROOM ACTIVITY", "房间活动"),
+                        color = colors.muted,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.8.sp,
+                    )
+                    TextButton(onClick = onActivity) {
+                        Text(appText("All Activity", "全部活动"))
+                    }
+                }
             }
             pendingRole?.let { role ->
                 item {
@@ -160,8 +128,7 @@ internal fun DeviceRoomScreen(
                         role = role,
                         pendingShareCount = initialSources.size,
                         onContinue = {
-                            setupUsesPending = true
-                            setupRole = role
+                            onBeginTransfer(role, true)
                         },
                     )
                 }
@@ -170,26 +137,14 @@ internal fun DeviceRoomScreen(
                 item { EmptyRoomTimeline() }
             } else {
                 items(roomTransfers.sortedByDescending(Transfer::id), key = Transfer::id) { transfer ->
-                    TransferCard(
-                        t = transfer,
-                        expanded = transfer.id in expanded,
-                        onToggleDetail = { id ->
-                            if (id in expanded) expanded.remove(id) else expanded.add(id)
-                        },
-                        onPauseResume = onPauseResume,
-                        onApproveReceive = onApproveReceive,
-                        onCancel = onCancel,
-                        onRemove = onRemove,
-                        onOpen = onOpen,
-                        onShare = onShare,
-                    )
+                    RoomTransferSummary(transfer)
                 }
             }
             item {
                 Text(
                     appText(
-                        "Each transfer connects independently.",
-                        "每次传输都会单独建立连接。",
+                        "This is a one-time room. Each transfer connects and authenticates separately.",
+                        "这是一个一次性房间。每次传输都会单独连接并完成认证。",
                     ),
                     color = colors.muted,
                     fontSize = 11.sp,
@@ -200,66 +155,100 @@ internal fun DeviceRoomScreen(
         }
         RoomActions(
             onAddFiles = {
-                setupUsesPending = false
-                setupRole = "send"
+                onBeginTransfer("send", false)
             },
+            onShowQr = onShowRoomQr,
+            onClose = ::requestBack,
         )
     }
 
-    setupRole?.let { role ->
+    transferDraft?.let { activeDraft ->
+        val role = activeDraft.roleAdapter
+        val nearbySelection =
+            draft.nearbySelection.takeUnless {
+                activeDraft.showQrInitially
+            }
         ModalBottomSheet(
-            onDismissRequest = { setupRole = null },
+            onDismissRequest = onDismissTransfer,
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
             containerColor = colors.surface,
         ) {
             NewTransferSheet(
+                draftId = activeDraft.id,
+                preparationState = activeDraft.preparation,
+                showQrInitially = activeDraft.showQrInitially,
                 initialRole = role,
-                initialPairingInput = pairingInput.takeIf { setupUsesPending },
+                initialPairingInput = draft.pairingInput.takeIf { setupUsesPending },
                 initialSources =
                     if (setupUsesPending && role == "send") {
                         initialSources
                     } else {
                         emptyList()
                     },
-                nearbySelection = draft.nearbySelection,
-                initialHostedCode = hostedCode.takeIf { setupUsesPending },
-                initialHostedPayload = hostedPayload.takeIf { setupUsesPending },
+                nearbySelection = nearbySelection,
+                nearbyDeliveryAvailable = nearbyAvailable != false,
+                initialHostedCode = draft.hostedCode.takeIf { setupUsesPending },
+                initialHostedPayload = draft.hostedPayload.takeIf { setupUsesPending },
                 roomMode = true,
                 onOfferInvite =
-                    draft.nearbySelection?.let { selection ->
-                        { invite, completion ->
-                            discoveryViewModel.offerInvite(
-                                selection.discoveryPeerKey,
-                                invite,
-                                completion,
-                            )
-                        }
-                    },
+                    nearbySelection
+                        ?.takeIf { DiscoverySource.Bluetooth in it.sources }
+                        ?.let { selection ->
+                            { invite, completion ->
+                                discoveryViewModel.offerInvite(
+                                    selection.discoveryPeerKey,
+                                    invite,
+                                    completion,
+                                )
+                            }
+                        },
                 onReceive = { code, broker, relay, qrPayload, copyApproved ->
-                    val consumedPending = setupUsesPending
-                    setupRole = null
-                    if (consumedPending) {
-                        pendingRole = null
-                        pairingInput = null
-                        hostedCode = null
-                        hostedPayload = null
-                    }
-                    Room(code).id.takeUnless(roomIds::contains)?.let(roomIds::add)
                     onReceive(code, broker, relay, qrPayload, copyApproved)
+                    onTransferStarted(code, false)
                 },
                 onSend = { code, broker, relay, jobId, qrPayload ->
-                    val consumedPending = setupUsesPending
-                    setupRole = null
-                    if (consumedPending) {
-                        pendingRole = null
-                        pairingInput = null
-                        hostedCode = null
-                        hostedPayload = null
-                    }
-                    Room(code).id.takeUnless(roomIds::contains)?.let(roomIds::add)
-                    if (consumedPending) onInitialSourcesConsumed()
                     onSend(code, broker, relay, jobId, qrPayload)
+                    onTransferStarted(code, setupUsesPending && initialSources.isNotEmpty())
                 },
+            )
+        }
+    }
+
+    if (transferDraft == null) {
+        discoveryState.incomingRendezvousOffers.firstOrNull()?.let { offer ->
+            AlertDialog(
+                onDismissRequest = {
+                    discoveryViewModel.consumeRendezvousOffer(offer.requestId)
+                },
+                title = { Text(appText("Incoming file offer", "收到文件邀请")) },
+                text = {
+                    Text(
+                        appText(
+                            "Review this unverified experimental Bluetooth invitation before receiving files.",
+                            "接收文件前，请检查此未经验证的实验性蓝牙邀请。",
+                        ),
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            onAcceptIncomingOffer(offer)
+                            discoveryViewModel.consumeRendezvousOffer(offer.requestId)
+                        },
+                        modifier = Modifier.testTag("nearby_offer_accept"),
+                    ) {
+                        Text(appText("Accept", "接受"))
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = { discoveryViewModel.consumeRendezvousOffer(offer.requestId) },
+                        modifier = Modifier.testTag("nearby_offer_reject"),
+                    ) {
+                        Text(appText("Reject", "拒绝"))
+                    }
+                },
+                containerColor = colors.surface,
             )
         }
     }
@@ -267,7 +256,7 @@ internal fun DeviceRoomScreen(
     if (confirmLeave) {
         AlertDialog(
             onDismissRequest = { confirmLeave = false },
-            title = { Text(appText("Leave this room?", "离开这个房间？")) },
+            title = { Text(appText("Close this one-time room?", "关闭这个一次性房间？")) },
             text = {
                 Text(
                     appText(
@@ -283,7 +272,7 @@ internal fun DeviceRoomScreen(
                         onBack()
                     },
                 ) {
-                    Text(appText("Leave room", "离开房间"))
+                    Text(appText("Close room", "关闭房间"))
                 }
             },
             dismissButton = {
@@ -295,5 +284,3 @@ internal fun DeviceRoomScreen(
         )
     }
 }
-
-private fun String.validRoomDirection(): String = if (this == "receive") "receive" else "send"

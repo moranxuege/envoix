@@ -133,6 +133,16 @@ adb_command() {
   fi
 }
 
+matrix_uses_macos() {
+  local direction
+  for direction in "${directions[@]}"; do
+    if [[ "$direction" == macos:* || "$direction" == *:macos ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 print_log_tail() {
   local title="$1"
   local file="$2"
@@ -170,10 +180,12 @@ prepare_builds() {
       return 1
     fi
 
-    echo "build: Mac hosted tests"
-    if ! env ENVOIX_APPLE_CACHE_ROOT="$apple_cache_root" \
-      "$repo_root/scripts/apple-dev.sh" macos-test-build -quiet; then
-      return 1
+    if matrix_uses_macos; then
+      echo "build: Mac hosted tests"
+      if ! env ENVOIX_APPLE_CACHE_ROOT="$apple_cache_root" \
+        "$repo_root/scripts/apple-dev.sh" macos-test-build -quiet; then
+        return 1
+      fi
     fi
   fi
 
@@ -201,8 +213,12 @@ macos_xctestrun=""
 locate_apple_artifacts() {
   ios_xctestrun="$(find "$ios_products" -maxdepth 1 -name 'Envoix-iOS-Hosted_*.xctestrun' -print -quit 2>/dev/null)"
   macos_xctestrun="$(find "$macos_products" -maxdepth 1 -name 'Envoix-macOS-Hosted_*.xctestrun' -print -quit 2>/dev/null)"
-  if [[ -z "$ios_xctestrun" || -z "$macos_xctestrun" ]]; then
-    echo "error: missing Apple xctestrun artifacts under $apple_cache_root" >&2
+  if [[ -z "$ios_xctestrun" ]]; then
+    echo "error: missing iOS xctestrun artifact under $ios_products" >&2
+    return 1
+  fi
+  if matrix_uses_macos && [[ -z "$macos_xctestrun" ]]; then
+    echo "error: missing macOS xctestrun artifact under $macos_products" >&2
     return 1
   fi
 }

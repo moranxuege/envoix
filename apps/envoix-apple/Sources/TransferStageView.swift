@@ -16,6 +16,7 @@ struct TransferStageView: View {
     let onDelete: (String) -> Bool
 
     @Environment(\.appLanguage) private var language
+    @AppStorage("envoix.developerMode") private var developerMode = false
     @State private var expandedActivityIDs: Set<String> = []
 
     var body: some View {
@@ -138,6 +139,16 @@ struct TransferStageView: View {
             }
 
             if isExpanded {
+                if let path = record.connectionPath {
+                    Label(
+                        ConnectionPathPresentationPolicy.label(for: path, language: language),
+                        systemImage: path == .relay ? "point.3.connected.trianglepath.dotted" : "link"
+                    )
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(Theme.muted)
+                    .accessibilityIdentifier("activity_path_\(record.activityId)")
+                }
+
                 if !record.diagnosticMessage.isEmpty {
                     Text(record.diagnosticMessage)
                         .font(.footnote)
@@ -179,43 +190,52 @@ struct TransferStageView: View {
                         }
                     }
                     Spacer()
-                    Menu {
-                        Button(AppText.value("Copy diagnostics", "复制诊断信息", language: language)) {
-                            copyWithToast(
-                                onCopyDiagnostics(record),
-                                AppText.value("Diagnostics copied", "诊断信息已复制", language: language),
-                                language: language
-                            )
-                        }
-                        if let target = onRemoteLogTarget(record) {
-                            Button(AppText.value("Upload diagnostics", "上传诊断信息", language: language)) {
-                                Task {
-                                    try? await RemoteLogUpload.upload(
-                                        server: UserDefaults.standard.string(forKey: "envoix.logServer") ?? defaultLogServer,
-                                        target: target,
-                                        body: onRemoteDiagnosticReport(record)
+                    if developerMode || actions.canDelete {
+                        Menu {
+                            if developerMode {
+                                Button(AppText.value("Copy diagnostics", "复制诊断信息", language: language)) {
+                                    copyWithToast(
+                                        onCopyDiagnostics(record),
+                                        AppText.value("Diagnostics copied", "诊断信息已复制", language: language),
+                                        language: language
+                                    )
+                                }
+                                if let target = onRemoteLogTarget(record) {
+                                    Button(AppText.value("Upload diagnostics", "上传诊断信息", language: language)) {
+                                        Task {
+                                            try? await RemoteLogUpload.upload(
+                                                server: UserDefaults.standard.string(
+                                                    forKey: "envoix.logServer"
+                                                ) ?? defaultLogServer,
+                                                target: target,
+                                                body: onRemoteDiagnosticReport(record)
+                                            )
+                                        }
+                                    }
+                                }
+                                Button(AppText.value("Copy app diagnostics", "复制应用诊断信息", language: language)) {
+                                    copyWithToast(
+                                        onAppDiagnosticReport(),
+                                        AppText.value("Diagnostics copied", "诊断信息已复制", language: language),
+                                        language: language
                                     )
                                 }
                             }
-                        }
-                        Button(AppText.value("Copy app diagnostics", "复制应用诊断信息", language: language)) {
-                            copyWithToast(
-                                onAppDiagnosticReport(),
-                                AppText.value("Diagnostics copied", "诊断信息已复制", language: language),
-                                language: language
-                            )
-                        }
-                        if actions.canDelete {
-                            Button(AppText.localized("activity.remove_record", language: language), role: .destructive) {
-                                _ = onDelete(record.activityId)
+                            if actions.canDelete {
+                                Button(
+                                    AppText.localized("activity.remove_record", language: language),
+                                    role: .destructive
+                                ) {
+                                    _ = onDelete(record.activityId)
+                                }
                             }
+                        } label: {
+                            Image(systemName: "ellipsis.circle")
+                                .frame(width: 32, height: 32)
+                                .contentShape(Rectangle())
                         }
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
-                            .frame(width: 32, height: 32)
-                            .contentShape(Rectangle())
+                        .disabled(pendingRemovalIDs.contains(record.activityId))
                     }
-                    .disabled(pendingRemovalIDs.contains(record.activityId))
                 }
                 .buttonStyle(.bordered)
                 .transition(.opacity.combined(with: .move(edge: .top)))

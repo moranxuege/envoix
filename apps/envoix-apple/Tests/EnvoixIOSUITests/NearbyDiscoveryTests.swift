@@ -209,14 +209,17 @@ final class NearbyDiscoveryTests: XCTestCase {
         XCTAssertTrue(coordinator.state.peers.isEmpty)
     }
 
-    func testCoordinatorRotatesIdentityAcrossPresenceSessions() {
-        var identities = [
-            LocalNearbyDiscoveryIdentity(peerKey: "0011223344556677", displayName: "first"),
-            LocalNearbyDiscoveryIdentity(peerKey: "8899aabbccddeeff", displayName: "second"),
-        ]
+    func testCoordinatorRetainsIdentityAcrossPausedPresenceForRoomContinuity() {
+        var identityFactoryCalls = 0
         var advertisedPeerKeys: [String] = []
         let coordinator = NearbyDiscoveryCoordinator(
-            identityFactory: { identities.removeFirst() },
+            identityFactory: {
+                identityFactoryCalls += 1
+                return LocalNearbyDiscoveryIdentity(
+                    peerKey: "0011223344556677",
+                    displayName: "iPhone"
+                )
+            },
             providerFactory: { identity in
                 advertisedPeerKeys.append(identity.peerKey)
                 return [CountingNearbyDiscoveryProvider(source: .bluetooth)]
@@ -227,8 +230,9 @@ final class NearbyDiscoveryTests: XCTestCase {
         coordinator.stop()
         coordinator.start()
 
-        XCTAssertEqual(advertisedPeerKeys, ["0011223344556677", "8899aabbccddeeff"])
-        XCTAssertEqual(coordinator.state.localName, "second")
+        XCTAssertEqual(identityFactoryCalls, 1)
+        XCTAssertEqual(advertisedPeerKeys, ["0011223344556677", "0011223344556677"])
+        XCTAssertEqual(coordinator.state.localName, "iPhone")
     }
 
     func testRegistryKeepsPeerThroughSourceLossAndMergesReturningSource() throws {

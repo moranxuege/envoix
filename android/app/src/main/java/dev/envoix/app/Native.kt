@@ -74,6 +74,12 @@ object Native {
         rootsJson: String,
     ): String
 
+    /** Cancel an unstarted job before its room-scoped staging is discarded. */
+    external fun cancelManifestV2Job(
+        storeDirectory: String,
+        jobId: String,
+    ): String
+
     external fun resolveManifestV2Source(
         storeDirectory: String,
         jobId: String,

@@ -18,11 +18,17 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Devices
+import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -36,6 +42,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.envoix.app.Status
 import dev.envoix.app.Transfer
+import dev.envoix.app.connectionPathLabel
+import dev.envoix.app.humanBytes
 
 internal data class RoomStatus(
     val label: String,
@@ -47,6 +55,8 @@ internal fun RoomHeader(
     displayName: String,
     state: RoomStatus,
     onBack: () -> Unit,
+    onActivity: () -> Unit,
+    onSettings: () -> Unit,
 ) {
     val colors = Envoix.colors
     Row(
@@ -69,6 +79,13 @@ internal fun RoomHeader(
         Spacer(Modifier.size(11.dp))
         Column(Modifier.weight(1f)) {
             Text(
+                appText("ONE-TIME ROOM · UNVERIFIED", "一次性房间 · 未验证"),
+                color = colors.warning,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.7.sp,
+            )
+            Text(
                 displayName,
                 color = colors.text,
                 fontSize = 18.sp,
@@ -87,8 +104,127 @@ internal fun RoomHeader(
                 )
             }
         }
+        IconButton(
+            onClick = onActivity,
+            modifier = Modifier.testTag("room_activity"),
+        ) {
+            Icon(
+                Icons.Default.History,
+                contentDescription = appText("Activity", "活动"),
+                tint = colors.accent,
+            )
+        }
+        IconButton(
+            onClick = onSettings,
+            modifier = Modifier.testTag("room_settings"),
+        ) {
+            Icon(
+                Icons.Default.Settings,
+                contentDescription = appText("Settings", "设置"),
+                tint = colors.accent,
+            )
+        }
     }
 }
+
+@Composable
+internal fun RoomTransferSummary(transfer: Transfer) {
+    val colors = Envoix.colors
+    val itemCount = transfer.fileCount + transfer.directoryCount
+    val title =
+        when {
+            !transfer.fileName.isNullOrBlank() -> transfer.fileName
+            itemCount == 1 -> appText("1 item", "1 个项目")
+            itemCount > 1 -> appText("$itemCount items", "$itemCount 个项目")
+            transfer.direction == dev.envoix.app.Direction.Send ->
+                appText("Outgoing transfer", "待发送内容")
+            else -> appText("Incoming transfer", "待接收内容")
+        }
+    val progress =
+        when {
+            transfer.status == Status.Delivered -> 1f
+            transfer.total <= 0L -> 0f
+            else -> (transfer.bytes.toFloat() / transfer.total.toFloat()).coerceIn(0f, 1f)
+        }
+
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(colors.surface)
+            .border(1.dp, colors.line, RoundedCornerShape(16.dp))
+            .padding(14.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier.size(38.dp).clip(CircleShape).background(colors.accentSoft),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    if (transfer.direction == dev.envoix.app.Direction.Send) {
+                        Icons.Default.ArrowUpward
+                    } else {
+                        Icons.Default.ArrowDownward
+                    },
+                    contentDescription = null,
+                    tint = colors.accent,
+                    modifier = Modifier.size(19.dp),
+                )
+            }
+            Spacer(Modifier.size(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    title,
+                    color = colors.text,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    roomTransferStatus(transfer.status),
+                    color = if (transfer.status == Status.Failed) colors.danger else colors.muted,
+                    fontSize = 12.sp,
+                )
+            }
+            connectionPathLabel(transfer.pathAddr, LocalAppLanguage.current)?.let { path ->
+                Text(path, color = colors.muted, fontSize = 11.sp)
+            }
+        }
+        if (transfer.total > 0L) {
+            Spacer(Modifier.height(10.dp))
+            LinearProgressIndicator(
+                progress = { progress },
+                modifier = Modifier.fillMaxWidth().height(6.dp).clip(CircleShape),
+                color = if (transfer.status == Status.Failed) colors.danger else colors.accent,
+                trackColor = colors.line.copy(alpha = 0.6f),
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "${humanBytes(transfer.bytes)} / ${humanBytes(transfer.total)}",
+                color = colors.muted,
+                fontSize = 11.sp,
+            )
+        }
+    }
+}
+
+@Composable
+private fun roomTransferStatus(status: Status): String =
+    when (status) {
+        Status.Preparing -> appText("Preparing", "正在准备")
+        Status.WaitingForPeer -> appText("Waiting for the other device", "等待另一台设备")
+        Status.Pairing, Status.Connecting -> appText("Connecting", "正在连接")
+        Status.AwaitingDecision -> appText("Waiting for confirmation", "等待确认")
+        Status.Transferring -> appText("Transferring", "正在传输")
+        Status.Verifying -> appText("Verifying", "正在校验")
+        Status.Saving, Status.WaitingForReceiverSave, Status.FinalizingDelivery ->
+            appText("Finishing", "正在完成")
+        Status.Paused -> appText("Paused", "已暂停")
+        Status.Delivered -> appText("Delivered", "已送达")
+        Status.Failed -> appText("Needs attention", "需要处理")
+        Status.Canceled -> appText("Canceled", "已取消")
+    }
 
 @Composable
 internal fun EmptyRoomTimeline() {
@@ -175,14 +311,19 @@ internal fun PendingRoomAction(
 }
 
 @Composable
-internal fun RoomActions(onAddFiles: () -> Unit) {
+internal fun RoomActions(
+    onAddFiles: () -> Unit,
+    onShowQr: () -> Unit,
+    onClose: () -> Unit,
+) {
     val colors = Envoix.colors
-    Box(
+    Column(
         Modifier
             .fillMaxWidth()
             .background(colors.surface)
             .padding(horizontal = 16.dp, vertical = 12.dp)
             .navigationBarsPadding(),
+        horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         RoomActionButton(
             label = appText("Add files", "添加文件"),
@@ -190,6 +331,14 @@ internal fun RoomActions(onAddFiles: () -> Unit) {
             onClick = onAddFiles,
             modifier = Modifier.fillMaxWidth().testTag("room_add_files"),
         )
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+            TextButton(onClick = onShowQr, modifier = Modifier.testTag("room_show_qr")) {
+                Text(appText("Show a room QR", "显示房间二维码"), color = colors.accent)
+            }
+            TextButton(onClick = onClose, modifier = Modifier.testTag("room_close")) {
+                Text(appText("Close room", "关闭房间"), color = colors.muted)
+            }
+        }
     }
 }
 
@@ -217,7 +366,11 @@ private fun RoomActionButton(
 }
 
 @Composable
-internal fun roomState(active: List<Transfer>): RoomStatus {
+internal fun roomState(
+    active: List<Transfer>,
+    hasNearbyContext: Boolean,
+    nearbyAvailable: Boolean?,
+): RoomStatus {
     val colors = Envoix.colors
     val waiting =
         active.all {
@@ -229,8 +382,15 @@ internal fun roomState(active: List<Transfer>): RoomStatus {
     return when {
         active.isEmpty() ->
             RoomStatus(
-                label = appText("No active transfer", "无进行中的传输"),
-                foreground = colors.muted,
+                label =
+                    when {
+                        hasNearbyContext && nearbyAvailable == true ->
+                            appText("Nearby · unverified", "附近可见 · 未验证")
+                        hasNearbyContext ->
+                            appText("Nearby device not visible", "附近设备当前不可见")
+                        else -> appText("Ready · unverified", "已就绪 · 未验证")
+                    },
+                foreground = if (hasNearbyContext && nearbyAvailable != true) colors.warning else colors.muted,
             )
         waiting ->
             RoomStatus(

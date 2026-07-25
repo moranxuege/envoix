@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -28,9 +29,9 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -53,6 +54,7 @@ import dev.envoix.app.discovery.DiscoveryPermissions
 import dev.envoix.app.discovery.DiscoverySource
 import dev.envoix.app.discovery.DiscoveryViewModel
 import dev.envoix.app.discovery.NearbyPairingSelection
+import dev.envoix.app.discovery.NearbyRendezvousOffer
 import dev.envoix.app.discovery.ProviderAvailability
 
 @OptIn(ExperimentalComposeUiApi::class, ExperimentalMaterial3Api::class)
@@ -61,6 +63,7 @@ internal fun ConnectionHubScreen(
     onOpenRoom: (DeviceRoomDraft) -> Unit,
     onActivity: () -> Unit,
     onSettings: () -> Unit,
+    onAcceptIncomingOffer: (NearbyRendezvousOffer) -> Boolean,
     pendingShareCount: Int = 0,
     discoveryViewModel: DiscoveryViewModel,
 ) {
@@ -76,7 +79,7 @@ internal fun ConnectionHubScreen(
     val nearbyName = appText("Nearby Envoix device", "附近的 Envoix 设备")
     val qrName = appText("Device from QR", "二维码设备")
     val codeName = appText("Device from code", "配对码设备")
-    val waitingName = appText("Transfer room", "传输房间")
+    val waitingName = appText("One-time room", "一次性房间")
     val invalidInvite = appText("That is not a valid Envoix invite.", "这不是有效的 Envoix 邀请。")
 
     fun openInvite(
@@ -95,33 +98,12 @@ internal fun ConnectionHubScreen(
             DeviceRoomDraft(
                 displayName = displayName,
                 pairingInput = normalized,
+                pairingCode = parsed.code,
                 directionAdapter =
                     InviteCodec.oppositeRole(parsed.role)
                         ?: settings.defaultRole.validDirection(),
             ),
         )
-    }
-    LaunchedEffect(state.incomingRendezvousOffer?.requestId) {
-        val offer = state.incomingRendezvousOffer ?: return@LaunchedEffect
-        val parsed = InviteCodec.parse(offer.invite)
-        if (parsed != null) {
-            onOpenRoom(
-                DeviceRoomDraft(
-                    displayName = offer.senderDisplayName ?: nearbyName,
-                    pairingInput = offer.invite,
-                    directionAdapter =
-                        InviteCodec.oppositeRole(parsed.role)
-                            ?: settings.defaultRole.validDirection(),
-                    nearbySelection =
-                        NearbyPairingSelection(
-                            discoveryPeerKey = offer.senderPeerKey,
-                            displayName = offer.senderDisplayName,
-                            sources = setOf(DiscoverySource.Bluetooth),
-                        ),
-                ),
-            )
-        }
-        discoveryViewModel.consumeRendezvousOffer(offer.requestId)
     }
     Column(
         Modifier
@@ -215,6 +197,9 @@ internal fun ConnectionHubScreen(
                     fontWeight = FontWeight.Bold,
                 )
             }
+            item {
+                ProviderSummary(state.statuses)
+            }
             if (state.statuses.values.any { it.availability == ProviderAvailability.PermissionRequired }) {
                 item {
                     Button(
@@ -229,11 +214,7 @@ internal fun ConnectionHubScreen(
             if (state.peers.isEmpty()) {
                 item {
                     Text(
-                        if (state.active) {
-                            appText("Looking for nearby devices…", "正在寻找附近设备…")
-                        } else {
-                            appText("Nearby discovery is paused.", "附近设备发现已暂停。")
-                        },
+                        nearbyEmptyMessage(state.active, state.statuses.values.map { it.availability }),
                         color = colors.muted,
                         fontSize = 14.sp,
                         modifier = Modifier.fillMaxWidth().padding(vertical = 22.dp),
@@ -299,7 +280,124 @@ internal fun ConnectionHubScreen(
             )
         }
     }
+    state.incomingRendezvousOffers.firstOrNull()?.let { offer ->
+        AlertDialog(
+            onDismissRequest = {
+                discoveryViewModel.consumeRendezvousOffer(offer.requestId)
+            },
+            title = { Text(appText("Nearby transfer invitation", "附近传输邀请")) },
+            text = {
+                Text(
+                    appText(
+                        "${offer.senderDisplayName ?: nearbyName} wants to start a one-time transfer. " +
+                            "This experimental Bluetooth invitation is unverified.",
+                        "${offer.senderDisplayName ?: nearbyName} 想要开始一次性传输。" +
+                            "此实验性蓝牙邀请未经验证。",
+                    ),
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        if (!onAcceptIncomingOffer(offer)) error = invalidInvite
+                        discoveryViewModel.consumeRendezvousOffer(offer.requestId)
+                    },
+                    modifier = Modifier.testTag("nearby_offer_accept"),
+                ) {
+                    Text(appText("Accept", "接受"))
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { discoveryViewModel.consumeRendezvousOffer(offer.requestId) },
+                    modifier = Modifier.testTag("nearby_offer_reject"),
+                ) {
+                    Text(appText("Reject", "拒绝"))
+                }
+            },
+            containerColor = colors.surface,
+        )
+    }
 }
+
+@Composable
+private fun ProviderSummary(statuses: Map<DiscoverySource, dev.envoix.app.discovery.ProviderStatus>) {
+    val colors = Envoix.colors
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(colors.surface)
+            .border(1.dp, colors.line, RoundedCornerShape(14.dp))
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(7.dp),
+    ) {
+        DiscoverySource.entries.forEach { source ->
+            val availability = statuses[source]?.availability ?: ProviderAvailability.Stopped
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(source.connectionLabel(), color = colors.text, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                Text(
+                    availability.connectionLabel(),
+                    color =
+                        when (availability) {
+                            ProviderAvailability.Ready -> colors.success
+                            ProviderAvailability.Starting -> colors.accent
+                            ProviderAvailability.Degraded,
+                            ProviderAvailability.TemporarilyUnavailable,
+                            -> colors.warning
+                            ProviderAvailability.Stopped,
+                            ProviderAvailability.Reserved,
+                            ProviderAvailability.Unsupported,
+                            -> colors.muted
+                            else -> colors.danger
+                        },
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DiscoverySource.connectionLabel(): String =
+    when (this) {
+        DiscoverySource.Bluetooth -> appText("Bluetooth", "蓝牙")
+        DiscoverySource.Mdns -> appText("Local network", "局域网")
+        DiscoverySource.WifiAware -> "Wi-Fi Aware"
+    }
+
+@Composable
+private fun ProviderAvailability.connectionLabel(): String =
+    when (this) {
+        ProviderAvailability.Stopped -> appText("Paused", "已暂停")
+        ProviderAvailability.Starting -> appText("Starting", "正在启动")
+        ProviderAvailability.Ready -> appText("Available", "可用")
+        ProviderAvailability.Degraded -> appText("Limited", "受限")
+        ProviderAvailability.PermissionRequired -> appText("Permission needed", "需要权限")
+        ProviderAvailability.Disabled -> appText("Turned off", "未开启")
+        ProviderAvailability.Unsupported -> appText("Unsupported", "不支持")
+        ProviderAvailability.TemporarilyUnavailable -> appText("Unavailable", "暂不可用")
+        ProviderAvailability.Reserved -> appText("Coming later", "暂未开放")
+        ProviderAvailability.Error -> appText("Error", "错误")
+    }
+
+@Composable
+private fun nearbyEmptyMessage(
+    active: Boolean,
+    availability: Collection<ProviderAvailability>,
+): String =
+    when {
+        !active -> appText("Nearby discovery is paused.", "附近设备发现已暂停。")
+        availability.any { it == ProviderAvailability.PermissionRequired } ->
+            appText("Allow nearby access, or use QR/code.", "请允许附近设备访问，或使用二维码/配对码。")
+        availability.any { it == ProviderAvailability.Ready || it == ProviderAvailability.Starting } ->
+            appText("Looking for nearby devices…", "正在寻找附近设备…")
+        availability.any { it == ProviderAvailability.Disabled } ->
+            appText("A nearby connection method is turned off. You can still use QR/code.", "附近连接方式未开启，仍可使用二维码/配对码。")
+        else ->
+            appText("Nearby discovery is unavailable. Use QR or a pairing code.", "附近设备发现不可用，请使用二维码或配对码。")
+    }
 
 @Composable
 private fun NearbyDeviceCard(
@@ -323,7 +421,7 @@ private fun NearbyDeviceCard(
             .clip(RoundedCornerShape(16.dp))
             .background(colors.surface)
             .border(1.dp, colors.line, RoundedCornerShape(16.dp))
-            .clickable(enabled = canPairNearby, onClick = onClick)
+            .clickable(onClick = onClick)
             .padding(15.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -342,12 +440,8 @@ private fun NearbyDeviceCard(
             )
         }
         Text(
-            if (canPairNearby) {
-                appText("Pair", "配对")
-            } else {
-                appText("Use QR/code", "使用二维码/配对码")
-            },
-            color = if (canPairNearby) colors.accent else colors.muted,
+            if (canPairNearby) appText("Unverified ›", "未验证 ›") else appText("Use QR/code", "使用二维码/配对码"),
+            color = if (canPairNearby) colors.warning else colors.muted,
             fontSize = 12.sp,
             fontWeight = FontWeight.SemiBold,
         )

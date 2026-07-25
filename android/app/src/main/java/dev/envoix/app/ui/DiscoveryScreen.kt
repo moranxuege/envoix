@@ -23,15 +23,16 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -74,20 +75,6 @@ internal fun DiscoveryScreen(
         }
     var pairingSelection by remember { mutableStateOf<NearbyPairingSelection?>(null) }
     var initialPairingInput by remember { mutableStateOf<String?>(null) }
-
-    LaunchedEffect(state.incomingRendezvousOffer?.requestId) {
-        val offer = state.incomingRendezvousOffer ?: return@LaunchedEffect
-        if (pairingSelection == null) {
-            pairingSelection =
-                NearbyPairingSelection(
-                    discoveryPeerKey = offer.senderPeerKey,
-                    displayName = offer.senderDisplayName,
-                    sources = setOf(DiscoverySource.Bluetooth),
-                )
-            initialPairingInput = offer.invite
-            discoveryViewModel.consumeRendezvousOffer(offer.requestId)
-        }
-    }
 
     DisposableEffect(lifecycleOwner, discoveryViewModel) {
         val observer =
@@ -236,6 +223,45 @@ internal fun DiscoveryScreen(
                     initialPairingInput = null
                     onSend(code, broker, relay, jobId, qrPayload)
                 },
+            )
+        }
+    }
+
+    if (pairingSelection == null) {
+        state.incomingRendezvousOffers.firstOrNull()?.let { offer ->
+            AlertDialog(
+                onDismissRequest = { discoveryViewModel.consumeRendezvousOffer(offer.requestId) },
+                title = { Text(appText("Nearby transfer invitation", "附近传输邀请")) },
+                text = {
+                    Text(
+                        appText(
+                            "Review this unverified experimental Bluetooth invitation before continuing.",
+                            "继续前，请检查此未经验证的实验性蓝牙邀请。",
+                        ),
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            pairingSelection =
+                                NearbyPairingSelection(
+                                    discoveryPeerKey = offer.senderPeerKey,
+                                    displayName = offer.senderDisplayName,
+                                    sources = setOf(DiscoverySource.Bluetooth),
+                                )
+                            initialPairingInput = offer.invite
+                            discoveryViewModel.consumeRendezvousOffer(offer.requestId)
+                        },
+                    ) {
+                        Text(appText("Accept", "接受"))
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { discoveryViewModel.consumeRendezvousOffer(offer.requestId) }) {
+                        Text(appText("Reject", "拒绝"))
+                    }
+                },
+                containerColor = colors.surface,
             )
         }
     }

@@ -4,6 +4,7 @@ import android.app.Application
 import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import dev.envoix.app.InviteCodec
 import dev.envoix.app.OpLog
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -16,17 +17,25 @@ import kotlinx.coroutines.launch
 internal data class DiscoveryUiState(
     val localName: String,
     val active: Boolean = false,
+    val mode: DiscoveryMode = DiscoveryMode.Off,
     val nowMs: Long = 0,
     val peers: List<DiscoveredPeer> = emptyList(),
     val statuses: Map<DiscoverySource, ProviderStatus> = emptyMap(),
-    val incomingRendezvousOffer: NearbyRendezvousOffer? = null,
+    val incomingRendezvousOffers: List<NearbyRendezvousOffer> = emptyList(),
 )
+
+internal enum class DiscoveryMode {
+    Off,
+    BrowseNearby,
+    SelectedPeer,
+}
 
 internal class DiscoveryViewModel(
     application: Application,
 ) : AndroidViewModel(application) {
-    private var identity = DiscoveryIdentityFactory.create()
+    private val identity = DiscoveryIdentityFactory.create()
     private val registry = DiscoveryPeerRegistry()
+    private val offerQueue = NearbyRendezvousOfferQueue()
     private var providers: List<DiscoveryProvider> = emptyList()
     private val lastLoggedAvailability = mutableMapOf<DiscoverySource, ProviderAvailability>()
 
@@ -40,19 +49,63 @@ internal class DiscoveryViewModel(
         )
     val uiState: StateFlow<DiscoveryUiState> = _uiState.asStateFlow()
 
+    private var foreground = false
+    private var requestedMode = DiscoveryMode.Off
+    private var selectedPeerKey: String? = null
     private var started = false
-    private var hasStarted = false
     private var generation = 0
     private var ticker: Job? = null
 
+    fun setForeground(value: Boolean) {
+        if (foreground == value) return
+        foreground = value
+        reconcile()
+    }
+
+    fun setMode(
+        mode: DiscoveryMode,
+        peerKey: String? = null,
+    ) {
+        require(mode != DiscoveryMode.SelectedPeer || !peerKey.isNullOrBlank()) {
+            "Selected-peer discovery requires a peer key"
+        }
+        if (requestedMode == mode && selectedPeerKey == peerKey) return
+        requestedMode = mode
+        selectedPeerKey = peerKey.takeIf { mode == DiscoveryMode.SelectedPeer }
+        _uiState.value = _uiState.value.copy(mode = mode)
+        if (mode == DiscoveryMode.Off) {
+            offerQueue.clear()
+        } else if (mode == DiscoveryMode.SelectedPeer) {
+            offerQueue.retainSender(requireNotNull(peerKey))
+        }
+        reconcile()
+        publishPeers()
+    }
+
+    /** Compatibility for the retired standalone discovery screen. */
     fun start() {
+        setMode(DiscoveryMode.BrowseNearby)
+        setForeground(true)
+    }
+
+    /** Compatibility for the retired standalone discovery screen. */
+    fun stop() {
+        setForeground(false)
+        setMode(DiscoveryMode.Off)
+    }
+
+    private fun reconcile() {
+        val shouldRun = foreground && requestedMode != DiscoveryMode.Off
+        if (shouldRun) {
+            startProviders()
+        } else {
+            stopProviders()
+        }
+    }
+
+    private fun startProviders() {
         if (started) return
         started = true
-        if (hasStarted) {
-            identity = DiscoveryIdentityFactory.create()
-        } else {
-            hasStarted = true
-        }
         generation += 1
         val activeGeneration = generation
         registry.clear()
@@ -61,7 +114,8 @@ internal class DiscoveryViewModel(
                 localName = identity.displayName,
                 active = true,
                 peers = emptyList(),
-                incomingRendezvousOffer = null,
+                mode = requestedMode,
+                incomingRendezvousOffers = offerQueue.snapshot(SystemClock.elapsedRealtime()),
             )
         providers = createProviders()
         val listener = listener(activeGeneration)
@@ -75,7 +129,7 @@ internal class DiscoveryViewModel(
             }
     }
 
-    fun stop() {
+    private fun stopProviders() {
         if (!started) return
         started = false
         generation += 1
@@ -84,18 +138,19 @@ internal class DiscoveryViewModel(
         providers.forEach(DiscoveryProvider::stop)
         providers = emptyList()
         registry.clear()
+        offerQueue.clear()
         _uiState.value =
             _uiState.value.copy(
                 active = false,
                 peers = emptyList(),
                 statuses = stoppedStatuses(),
-                incomingRendezvousOffer = null,
+                incomingRendezvousOffers = emptyList(),
             )
     }
 
     fun restart() {
-        stop()
-        start()
+        stopProviders()
+        reconcile()
     }
 
     fun offerInvite(
@@ -121,8 +176,11 @@ internal class DiscoveryViewModel(
     }
 
     fun consumeRendezvousOffer(requestId: String) {
-        if (_uiState.value.incomingRendezvousOffer?.requestId == requestId) {
-            _uiState.value = _uiState.value.copy(incomingRendezvousOffer = null)
+        if (offerQueue.remove(requestId)) {
+            _uiState.value =
+                _uiState.value.copy(
+                    incomingRendezvousOffers = offerQueue.snapshot(SystemClock.elapsedRealtime()),
+                )
         }
     }
 
@@ -132,10 +190,19 @@ internal class DiscoveryViewModel(
 
     private fun publishPeers() {
         val now = SystemClock.elapsedRealtime()
+        val peers =
+            registry.peers(now).let { discovered ->
+                if (requestedMode == DiscoveryMode.SelectedPeer) {
+                    discovered.filter { it.peerKey == selectedPeerKey }
+                } else {
+                    discovered
+                }
+            }
         _uiState.value =
             _uiState.value.copy(
                 nowMs = now,
-                peers = registry.peers(now),
+                peers = peers,
+                incomingRendezvousOffers = offerQueue.snapshot(now),
             )
     }
 
@@ -169,7 +236,14 @@ internal class DiscoveryViewModel(
                     if (!started || generation != activeGeneration || offer.senderPeerKey == identity.peerKey) {
                         return@launch
                     }
-                    _uiState.value = _uiState.value.copy(incomingRendezvousOffer = offer)
+                    if (InviteCodec.parse(offer.invite) == null) {
+                        OpLog.add("DISCOVERY provider=bluetooth state=invalid_offer")
+                        return@launch
+                    }
+                    if (requestedMode == DiscoveryMode.SelectedPeer && offer.senderPeerKey != selectedPeerKey) {
+                        return@launch
+                    }
+                    if (offerQueue.add(offer, SystemClock.elapsedRealtime())) publishPeers()
                 }
             }
         }

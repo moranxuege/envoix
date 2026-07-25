@@ -37,6 +37,7 @@ struct TransferActivityRecord: Identifiable {
     var failure: FfiTransferFailure?
     var savedPaths: [String]
     var roomID: String?
+    var connectionPath: FfiDataPathKind?
     var updatedAt: Date
 
     var id: String { activityId }
@@ -237,9 +238,6 @@ final class AppModel: ObservableObject {
         }
         send.restoreActiveManifestSession(direction: .send)
         receive.restoreActiveManifestSession(direction: .receive)
-        if !send.isBusy {
-            send.restorePreparedManifestSelection()
-        }
     }
 
     var isActive: Bool {
@@ -508,6 +506,7 @@ final class TransferViewModel: ObservableObject {
     @Published private(set) var pendingOfferSummary: FfiManifestOfferSummaryV2?
     @Published private(set) var pendingOfferEntries: [FfiManifestOfferEntryV2] = []
     @Published private(set) var pendingSourceSelections: [FfiSourceSelectionV2] = []
+    @Published private(set) var connectionPath: FfiConnectionPathEvent?
 
     weak var appModel: AppModel?
     private var preparedSelection: PreparedSelection?
@@ -609,44 +608,6 @@ final class TransferViewModel: ObservableObject {
         }
     }
 
-    func restorePreparedManifestSelection() {
-        guard preparedSelection == nil, !isBusy else { return }
-        preparationTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            do {
-                let store = try jobStoreDirectory()
-                guard let snapshot = try await listPreparingTransferJobsV2(storeDirectory: store)
-                    .max(by: { $0.updatedUnixMs < $1.updatedUnixMs }) else { return }
-                let job = try await restoreTransferJobV2(
-                    storeDirectory: store,
-                    jobId: snapshot.jobId
-                )
-                var paths: [String] = []
-                for selection in snapshot.selections {
-                    if let path = await job.sourcePathForPreview(itemId: selection.rootItemId) {
-                        paths.append(path)
-                    }
-                }
-                guard !paths.isEmpty else { return }
-                preparedSelection = PreparedSelection(
-                    job: job,
-                    jobID: snapshot.jobId,
-                    sourcePaths: paths,
-                    sessionStateDirectory: try sessionStateDirectory(jobID: snapshot.jobId),
-                    sourceAccess: nil
-                )
-                applyPreparation(
-                    snapshot,
-                    paths: await projectedSourcePaths(job: job, snapshot: snapshot),
-                    roots: await job.listRoots()
-                )
-                statusText = localized("Prepared items restored", "已恢复准备内容")
-            } catch {
-                eventLog.append("restore preparation: \(error.localizedDescription)")
-            }
-        }
-    }
-
     func restoreActiveManifestSession(direction: FfiTransferDirection) {
         guard transferActivity == nil, !isBusy else { return }
         let stored: StoredAppleManifestSessionV2
@@ -683,6 +644,7 @@ final class TransferViewModel: ObservableObject {
             failure: nil,
             savedPaths: [],
             roomID: stored.roomID,
+            connectionPath: nil,
             updatedAt: Date()
         )
         presentationState = transferActivity?.state
@@ -986,6 +948,15 @@ final class TransferViewModel: ObservableObject {
         updateActivity(state: .transferring, diagnostic: localized("Transferring", "正在传输"))
     }
 
+    fileprivate func handleConnectionPath(_ event: FfiConnectionPathEvent) {
+        connectionPath = event
+        guard var record = transferActivity else { return }
+        record.connectionPath = event.pathKind
+        record.updatedAt = Date()
+        transferActivity = record
+        appModel?.upsert(record)
+    }
+
     fileprivate func handlePhase(_ next: FfiManifestV2Phase) {
         let state: TransferActivityState
         let text: String
@@ -1050,21 +1021,30 @@ final class TransferViewModel: ObservableObject {
         requiresExceptionalTransferApproval = false
         failure = value
         statusText = friendlyFailure(value, language: displayLanguage)
+        if !value.diagnosticMessage.isEmpty {
+            eventLog.append("failure: \(value.diagnosticMessage)")
+            if eventLog.count > 240 { eventLog.removeFirst(eventLog.count - 240) }
+        }
         transferActivity?.failure = value
         if value.code == .userCanceled || value.code == .senderCanceled {
-            updateActivity(state: .canceled, diagnostic: value.diagnosticMessage)
+            updateActivity(state: .canceled, diagnostic: statusText)
         } else {
-            updateActivity(state: .failed, diagnostic: value.diagnosticMessage)
+            updateActivity(state: .failed, diagnostic: statusText)
         }
         resourceAccess = nil
     }
 
     fileprivate func handleDiagnostic(_ message: String) {
-        eventLog.append(message)
+        let projectedMessage: String
+        if message.hasPrefix("connected via ") || message.hasPrefix("path changed:") {
+            projectedMessage = connectionPath.map {
+                "connection path=\($0.pathKind) event=\($0.eventKind)"
+            } ?? "connection path updated"
+        } else {
+            projectedMessage = message
+        }
+        eventLog.append(projectedMessage)
         if eventLog.count > 240 { eventLog.removeFirst(eventLog.count - 240) }
-        transferActivity?.diagnosticMessage = message
-        transferActivity?.updatedAt = Date()
-        if let transferActivity { appModel?.upsert(transferActivity) }
     }
 
     private func startSend(
@@ -1366,6 +1346,7 @@ final class TransferViewModel: ObservableObject {
             failure: nil,
             savedPaths: [],
             roomID: roomCode.flatMap(RemoteLogUpload.roomID),
+            connectionPath: nil,
             updatedAt: Date()
         )
         invite = ""
@@ -1380,6 +1361,7 @@ final class TransferViewModel: ObservableObject {
         completedItemURLs = []
         pendingOfferSummary = nil
         pendingOfferEntries = []
+        connectionPath = nil
         requiresExceptionalTransferApproval = false
         rate = RateTracker()
         eventLog = []
@@ -1705,6 +1687,7 @@ final class Observer: TransferObserver, @unchecked Sendable {
     }
     func onCompleted(bytes: UInt64) { hop { $0.handleCompleted(bytes) } }
     func onTransferFailed(failure: FfiTransferFailure) { hop { $0.handleTransferFailed(failure) } }
+    func onConnectionPath(event: FfiConnectionPathEvent) { hop { $0.handleConnectionPath(event) } }
     func onDiagnostic(message: String) { hop { $0.handleDiagnostic(message) } }
 
     private func hop(_ body: @escaping @MainActor (TransferViewModel) -> Void) {
@@ -1795,8 +1778,6 @@ func friendlyFailure(
     case .unsupportedFeature:
         return AppText.value("This transfer request is not supported.", "不支持此传输请求。", language: language)
     case .internalError:
-        return diagnosticMessage.isEmpty
-            ? AppText.value("The transfer failed.", "传输失败。", language: language)
-            : diagnosticMessage
+        return AppText.value("The transfer failed.", "传输失败。", language: language)
     }
 }

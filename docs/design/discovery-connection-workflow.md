@@ -1,113 +1,142 @@
 # Unified discovery and connection workflow
 
-Status: **Issue #59 implementation map; native handoff continuity automated gates complete, physical BLE pending**
+Status: **Focused Issue #59 product contract; persistent Exchange remains deferred**
 
-Last reviewed: 2026-07-24
+Last reviewed: 2026-07-25
 
-This document turns Issue #59 into independently reviewable slices. It does not
-replace the issue's security and acceptance criteria.
+This document defines the graduation-safe part of Issue #59. It does not
+replace the issue's security criteria and does not claim the persistent
+Exchange, trust, or candidate-policy work owned by later issues.
 
 ## Product workflow
 
-Apple and Android use the same product sequence even when their native controls
-look different:
+iOS and Android use the same four product surfaces even when their native
+controls look different:
 
 ```text
-untrusted observation
--> user selects a nearby card
--> explicit Send / Receive / Exchange intent
--> one canonical transfer draft
--> source or destination authorization
--> final Start
--> invitation delivery or accepted incoming invitation
--> #57 authentication and role binding
--> viable connection candidates
--> selected authenticated path
--> #55 Manifest transfer and #56 recovery
+Connect
+├─> One-time Room -> one or more independent Manifest transfers
+├─> Activity
+└─> Settings
 ```
+
+The Connect surface contains only nearby discovery, Scan QR, Show QR, Enter
+code, Activity, and Settings. Selecting a method creates an ephemeral local room
+context. It does not authenticate a device or establish a durable connection.
+
+The One-time Room contains an unverified peer/context header, one file composer,
+incoming-offer confirmation, and a timeline of transfers started while that
+room is open. Either endpoint may offer a file, but every offer still uses an
+independent Invite v1 transfer. The UI therefore says **Unverified** and **Each
+transfer connects separately**. It must not say Connected until a live transfer
+reports an actual connection event.
+
+Activity is a separate full surface containing canonical transfer records. It is
+not embedded in Connect or the room. Closing a room discards only its unstarted
+draft; active transfers continue in Activity.
 
 Discovery metadata never becomes peer identity. A selected card contributes
 only temporary display context and a provider-specific invitation opportunity.
-The in-memory setup draft owns the selected source or destination, role,
-invitation context, and eventual Activity identity. Durable recovery remains
-owned by #56 rather than being implied by discovery state.
+Room codes, display names, network addresses, and foreground presence keys must
+not be used as room or peer identity.
 
-## Slice D0: native handoff continuity
+## Implemented foundation: native handoff continuity
 
-This branch converges Apple on the ordering already used by Android:
+The Manifest v2 foundation already guarantees:
 
-- keep discovery, role selection, and transfer setup inside one stable
-  presentation;
+- keep discovery and transfer setup inside one stable presentation;
 - carry the selected nearby context into Send or Receive;
 - prepare Photos, Files, Folder, or receive destination before BLE delivery;
 - deliver an outbound BLE invitation only from the final Start action;
 - allow one delivery in flight;
 - ignore duplicate or late completion callbacks; and
-- create the canonical transfer Activity only after successful delivery.
+- create the canonical transfer Activity only after successful invitation
+  delivery and local session start.
 
-The slice is complete when hosted delivery tests pass and the iOS simulator can
-open Photos, Files, and Folder after a nearby sender handoff. Physical BLE
-sender gates remain required in both directions because simulator fixtures do
-not prove GATT behavior or security-scoped access on a real device.
+The internal Send/Receive direction remains an Invite v1 compatibility adapter.
+It is not presented as the top-level product workflow.
 
-## Slice D1: shared typed boundaries
+## Current slice: workflow ownership
 
-Add bounded shared models for:
+Each native client owns one explicit workflow state:
 
 ```text
-DiscoveryObservation
-AuthenticatedPeer
-ConnectionCandidate
+Connect
+OneTimeRoom(ephemeralRoomId, untrustedContext, draftId)
+Activity
+Settings
 ```
 
-The Rust/client boundary owns normalization, candidate semantics, privacy-safe
-decision events, and deterministic policy inputs. Swift and Kotlin retain
-permission, provider lifecycle, native endpoints, and platform presentation.
-No address, name, RSSI, presence key, pairing alias, or provider badge may
-construct an `AuthenticatedPeer`.
+Workflow-scoped state, rather than individual views, owns navigation, the
+selected observation, inbound offers, pending external shares, and the active
+transfer draft. Android gives an in-memory draft one stable identifier and
+permits it to start at most once. iOS deliberately does not restore unstarted
+drafts across process death in this slice. Any future job restoration must be
+keyed to an explicit workflow draft; a global "latest preparing job" must never
+leak sources between rooms.
 
-This slice can add model and serialization tests before secure handoff is
-available, but it must not fabricate the identity binding owned by #57.
+Incoming unauthenticated BLE offers are bounded, expire, are deduplicated, and
+always require Accept or Reject. They never navigate on their own.
 
-## Slice D2: deterministic candidate policy
+Discovery is leased by the visible workflow:
 
-Implement pure policy tests before transport integration:
+- Connect browses BLE and mDNS.
+- A nearby room keeps the current provider lease so an invitation can complete,
+  but the workflow exposes only the selected peer and rejects offers from other
+  presence keys. The platform providers still scan broadly underneath this UI
+  filter; a true provider-level selected-peer lease is deferred.
+- QR/manual rooms, Activity, and Settings do not run foreground discovery.
+- Returning from a system picker must reacquire the selected observation before
+  BLE delivery is enabled.
 
-1. validate and reject malformed, expired, unauthenticated, or disallowed
-   candidates;
-2. rank a bounded top tier from injected measurements and cost policy;
-3. produce a bounded staggered attempt plan;
-4. select the first authenticated viable path;
-5. retain a healthy path with hold time, cooldown, hysteresis, and a material
-   improvement threshold; and
-6. emit one typed reason for fallback or upgrade.
+## Current slice: privacy-safe path presentation
 
-IPv4 and IPv6 receive no unconditional family preference. BLE RSSI remains a
-presentation hint and is not a path-quality score.
+The existing Room, mDNS, and iroh Direct/Relay behavior remains unchanged.
+Iroh stays responsible for path selection and upgrade. Existing Connected and
+PathChanged events are projected through the FFI as a structured `Direct`,
+`Relay`, or `Other` path event. Product UI never formats raw IP addresses or
+relay URLs.
 
-## Slice D3: authenticated integration
+## Acceptance target
 
-Integrate candidate attempts only after #57 supplies the authenticated peer and
-role binding. Coordinate retry budgets with #56 so discovery, dialing, and
-recovery cannot multiply attempts. A reconnect, fallback, or upgrade must keep
-the same peer, role, draft, Activity, Manifest, and security transcript.
+Automated state tests and current physical-device evidence must cover:
 
-Direct failure may fall back to Relay. Relay may upgrade only when the policy
-reports a material improvement and the active Manifest session can preserve
-identity and transfer state.
+- iOS to Android and Android to iOS on the same LAN;
+- QR and manual-code entry in both directions;
+- each physically supported BLE invitation direction;
+- incoming-offer accept, reject, deduplication, and expiry;
+- Photos, Files, Folder, Android external-share, and destination continuity;
+- peer loss during a picker and later reacquisition;
+- duplicate Start suppression and draft isolation;
+- Direct/Relay presentation without an address or credential; and
+- discovery stopped on Activity and Settings.
 
-## Slice D4: physical acceptance
+Legacy discovery and transfer runs remain useful downstream evidence, but they
+do not by themselves validate this new room UI. The branch verification ledger
+must distinguish the directions and interactions rerun on these binaries from
+requirements that remain pending.
 
-Record exact build, device, OS, network topology, direction, selected path, and
-privacy-safe failure reason for:
+## Verification ledger: 2026-07-25
 
-- Apple to Android and Android to Apple on the same LAN;
-- unrelated-network Relay fallback;
-- one rejected or failed candidate; and
-- one supported safe path upgrade.
+Passed on the current branch:
 
-The gate also repeats the nearby Photos, Files, Folder, receive-destination, and
-duplicate-Start checks on physical devices.
+- Rust workspace tests and warning-free Clippy;
+- Android JVM tests, ktlint, lint, and debug application/instrumentation builds;
+- the bilingual room workflow on Android model `25060RK16C`, including
+  Hub/Room Activity and Settings round trips, rotation continuity, pending
+  invitation continuity, and both transfer setup sheets;
+- a signed iPhone 15 Pro Max build on iOS 26.5.2, the hosted suite, and five
+  physical UI smoke tests covering both languages, Activity/Settings
+  separation, explicit incoming-offer acceptance, and nearby source pickers;
+- the macOS hosted suite; and
+- Android-to-iOS and iOS-to-Android single-file Manifest transfers, plus local
+  unreadable-Share recovery on each mobile platform.
+
+Still pending physical evidence on this UI generation:
+
+- closing a room while a genuinely live transfer remains pending;
+- complete QR/manual-code and BLE handoff interactions in both directions; and
+- Relay fallback or a safe live path upgrade.
 
 ## Ownership and stop lines
 
@@ -115,12 +144,14 @@ duplicate-Start checks on physical devices.
 - #56 owns recovery authorization, budgets, and cache lifecycle.
 - #57 owns secure invitation, authenticated identity, and explicit roles.
 - #58 owns durable trust and persistent Exchange.
-- #59 owns provider-independent candidate selection, fallback, and upgrade.
+- #59 ultimately owns provider-independent candidate policy, fallback, and
+  upgrade. This focused branch references but does not close it.
 - #60 may add Wi-Fi Aware only as another provider/candidate after its own
   physical capability and interoperability gates pass.
 
-The currently attached Android endpoint does not expose the required Wi-Fi
-Aware pairing capability, and the attached iPhones were offline during this
-slice. Therefore #60 remains hardware-gated. Compile success, simulator state,
-an entitlement, or a discovered name must not be reported as cross-platform
-Wi-Fi Aware support.
+The current slice does not add an authenticated peer model, Invite v2 Exchange,
+automatic acceptance, a candidate planner, persistent room history, or
+room-wide partial-file deletion. The attached Android hardware does not expose
+the required Wi-Fi Aware pairing capability, so #60 remains hardware-gated.
+Compile success, simulator state, an entitlement, or a discovered name must not
+be reported as cross-platform Wi-Fi Aware support.

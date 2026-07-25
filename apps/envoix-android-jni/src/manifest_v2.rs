@@ -15,7 +15,7 @@ use envoix_client::api::{
 };
 use envoix_error::{CoreError, TransferCause};
 use envoix_protocol::manifest_v2::{ManifestEntryKindV2, ManifestV2};
-use envoix_types::PairingStep;
+use envoix_types::{DataPath, PairingStep};
 use jni::JNIEnv;
 use jni::objects::{GlobalRef, JClass, JObject, JString, JValue};
 use jni::sys::{jlong, jstring};
@@ -182,8 +182,11 @@ impl EventSink for AndroidEvents {
             TransferEvent::Connecting => {
                 self.send(json!({"notice":"manifest_v2","state":"connecting"}));
             }
-            TransferEvent::Connected { path } | TransferEvent::PathChanged { path } => {
-                self.send(json!({"notice":"manifest_v2","kind":"path","path":path.to_string()}));
+            TransferEvent::Connected { path } => {
+                self.send(connection_path_event(&path, "selected"));
+            }
+            TransferEvent::PathChanged { path } => {
+                self.send(connection_path_event(&path, "changed"));
             }
             TransferEvent::Progress {
                 bytes_transferred,
@@ -206,6 +209,23 @@ impl EventSink for AndroidEvents {
                 self.send(json!({"notice":"manifest_v2","state":state}));
             }
         }
+    }
+}
+
+fn connection_path_event(path: &DataPath, event_kind: &'static str) -> Value {
+    json!({
+        "notice":"manifest_v2",
+        "kind":"path",
+        "path_kind":data_path_kind(path),
+        "event_kind":event_kind,
+    })
+}
+
+fn data_path_kind(path: &DataPath) -> &'static str {
+    match path {
+        DataPath::Direct { .. } => "direct",
+        DataPath::Relay { .. } => "relay",
+        DataPath::Other { .. } => "other",
     }
 }
 
@@ -415,6 +435,25 @@ pub extern "system" fn Java_dev_envoix_app_Native_prepareManifestV2Job(
             .map_err(|error| error.to_string())?;
             store.save(&job).await.map_err(|error| error.to_string())?;
         }
+        Ok::<_, String>(job_snapshot(&job))
+    });
+    json_result(&mut env, result)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_cancelManifestV2Job(
+    mut env: JNIEnv,
+    _class: JClass,
+    store_directory: JString,
+    job_id: JString,
+) -> jstring {
+    let store_directory = jstr(&mut env, &store_directory);
+    let job_id = jstr(&mut env, &job_id);
+    let result = runtime().block_on(async {
+        let store = TransferJobStore::new(&store_directory);
+        let mut job = load_job(&store, &job_id).await?;
+        job.cancel().map_err(|error| error.to_string())?;
+        store.save(&job).await.map_err(|error| error.to_string())?;
         Ok::<_, String>(job_snapshot(&job))
     });
     json_result(&mut env, result)
@@ -1315,7 +1354,35 @@ fn emit_failed_manifest(
 
 #[cfg(test)]
 mod tests {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
     use super::*;
+
+    #[test]
+    fn android_path_projection_never_contains_endpoint_details() {
+        let direct = DataPath::Direct {
+            addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 42)), 4242),
+        };
+        let relay = DataPath::Relay {
+            url: "https://sensitive-relay.example".into(),
+        };
+        let other = DataPath::Other {
+            description: "sensitive transport details".into(),
+        };
+
+        assert_eq!(data_path_kind(&direct), "direct");
+        assert_eq!(data_path_kind(&relay), "relay");
+        assert_eq!(data_path_kind(&other), "other");
+
+        let event = connection_path_event(&direct, "selected");
+        assert_eq!(event["event_kind"], "selected");
+        assert_eq!(event["path_kind"], "direct");
+        assert!(event.get("path").is_none());
+        assert!(event.get("path_event").is_none());
+        let rendered = event.to_string();
+        assert!(!rendered.contains("198.51.100.42"));
+        assert!(!rendered.contains("4242"));
+    }
 
     #[test]
     fn generic_failures_match_the_apple_recovery_contract() {

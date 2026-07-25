@@ -9,8 +9,13 @@ final class ManifestV2AppUITests: XCTestCase {
     }
 
     func testEnglishSendAndReceiveExposeCanonicalInventoryControls() {
-        launch(language: "en", locale: "en_US")
+        launch(
+            language: "en",
+            locale: "en_US",
+            extraArguments: ["--ui-testing-discovery-fixtures"]
+        )
         assertCanonicalInventoryControls(
+            expectedScanLabel: "Scan QR",
             expectedFileLabel: "Files",
             expectedFolderLabel: "Folder",
             expectedPairingGuidance: "Show your receive QR, or scan the other device's send QR."
@@ -18,8 +23,13 @@ final class ManifestV2AppUITests: XCTestCase {
     }
 
     func testSimplifiedChineseSendAndReceiveExposeCanonicalInventoryControls() {
-        launch(language: "zh-Hans", locale: "zh_CN")
+        launch(
+            language: "zh-Hans",
+            locale: "zh_CN",
+            extraArguments: ["--ui-testing-discovery-fixtures"]
+        )
         assertCanonicalInventoryControls(
+            expectedScanLabel: "扫描二维码",
             expectedFileLabel: "文件",
             expectedFolderLabel: "文件夹",
             expectedPairingGuidance: "可以显示本机接收码，也可以扫描另一台设备的发送码。"
@@ -33,12 +43,11 @@ final class ManifestV2AppUITests: XCTestCase {
             extraArguments: ["--ui-testing-discovery-fixtures"]
         )
 
-        element("transfer_home").assertExists()
-        button("home_nearby").tap()
-        element("nearby_screen").assertExists()
+        element("connection_hub").assertExists()
         button("nearby_peer_card").tap()
-        element("nearby_pairing_context").assertExists()
-        button("nearby_pairing_send").tap()
+        element("one_time_room").assertExists()
+        element("room_context_unverified").assertExists()
+        button("room_add_files").tap()
 
         element("send_content_scroll").assertExists()
         element("nearby_transfer_context").assertExists()
@@ -48,6 +57,58 @@ final class ManifestV2AppUITests: XCTestCase {
         assertPickerCanOpen(from: "send_file_picker")
         assertPickerCanOpen(from: "send_folder_picker", dismissWith: "Open")
         element("send_selection_summary").assertExists()
+    }
+
+    func testActivityAndSettingsAreSeparatePages() {
+        launch(
+            language: "en",
+            locale: "en_US",
+            extraArguments: ["--ui-testing-discovery-fixtures"]
+        )
+
+        element("connection_hub").assertExists()
+        button("open_activity").tap()
+        element("activity_page").assertExists()
+        button("mobile_page_back").tap()
+        element("connection_hub").assertExists()
+
+        button("open_settings").tap()
+        element("settings_page").assertExists()
+        button("mobile_page_back").tap()
+        element("connection_hub").assertExists()
+
+        button("nearby_peer_card").tap()
+        element("one_time_room").assertExists()
+        button("open_activity").tap()
+        element("activity_page").assertExists()
+        button("mobile_page_back").tap()
+        element("one_time_room").assertExists()
+
+        button("open_settings").tap()
+        element("settings_page").assertExists()
+        button("mobile_page_back").tap()
+        element("one_time_room").assertExists()
+    }
+
+    func testUnverifiedNearbyOfferRequiresExplicitAcceptance() {
+        launch(
+            language: "en",
+            locale: "en_US",
+            extraArguments: [
+                "--ui-testing-discovery-fixtures",
+                "--ui-testing-incoming-nearby-offer",
+            ]
+        )
+
+        element("connection_hub").assertExists()
+        XCTAssertFalse(element("one_time_room").exists)
+        let accept = app.buttons["Accept"].firstMatch
+        accept.assertExists()
+        accept.tap()
+
+        element("one_time_room").assertExists()
+        element("room_context_unverified").assertExists()
+        element("receive_content_scroll").assertExists()
     }
 
     private func launch(
@@ -66,13 +127,23 @@ final class ManifestV2AppUITests: XCTestCase {
     }
 
     private func assertCanonicalInventoryControls(
+        expectedScanLabel: String,
         expectedFileLabel: String,
         expectedFolderLabel: String,
         expectedPairingGuidance: String
     ) {
-        element("transfer_home").assertExists()
+        element("connection_hub").assertExists()
+        let scanButton = button("connect_scan_qr")
+        scanButton.assertExists()
+        XCTAssertEqual(scanButton.label, expectedScanLabel)
+        button("connect_show_qr").assertExists()
+        button("connect_enter_code").assertExists()
 
-        button("home_send").tap()
+        button("nearby_peer_card").tap()
+        element("one_time_room").assertExists()
+        element("room_one_time_notice").assertExists()
+
+        button("room_add_files").tap()
         element("send_content_scroll").assertExists()
         element("send_photo_picker").assertExists()
         let filePicker = element("send_file_picker")
@@ -82,13 +153,13 @@ final class ManifestV2AppUITests: XCTestCase {
         folderPicker.assertExists()
         XCTAssertEqual(folderPicker.label, expectedFolderLabel)
         element("send_selection_limit").assertExists()
-        // A prepared draft is intentionally restored across launches.
+        // A new one-time room never adopts another room's unstarted draft.
         element("send_start_button").assertExists()
 
         button("mobile_sheet_done").tap()
-        element("transfer_home").assertExists()
+        element("one_time_room").assertExists()
 
-        button("home_receive").tap()
+        button("room_receive_files").tap()
         element("receive_content_scroll").assertExists()
         element("receive_destination_picker").assertExists()
         let pairingGuidance = element("receive_pairing_guidance")

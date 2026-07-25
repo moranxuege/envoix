@@ -193,7 +193,11 @@ class TransferService : Service() {
                     return
                 }
                 "path" -> {
-                    TransferRepository.update(id) { it.copy(pathAddr = event.optString("path")) }
+                    val kind =
+                        ConnectionPathKind.fromWireOrLegacy(
+                            event.optString("path_kind").ifBlank { event.optString("path") },
+                        )
+                    TransferRepository.update(id) { it.copy(pathAddr = kind?.wire) }
                     return
                 }
             }
@@ -400,7 +404,7 @@ class TransferService : Service() {
                 failureCause = cause,
                 retryable = retryable,
                 recoveryAction = recoveryAction,
-                error = explainFailure(cause, detail),
+                error = explainFailure(cause),
                 log = addLog(it.log, "$cause · $detail"),
             )
         }
@@ -541,15 +545,17 @@ class TransferService : Service() {
         message: String,
     ): List<String> = (current + "${clock.format(Instant.now())}  $message").takeLast(TransferRepository.LOG_CAP)
 
-    private fun explainFailure(
-        cause: String,
-        detail: String,
-    ): String =
+    private fun explainFailure(cause: String): String =
         when (cause) {
             "sender_permission_lost" ->
                 uiText(
                     "The sender lost permission to read a selected item. Reauthorize it and retry.",
                     "发送端已失去所选项目的读取权限。请重新授权后重试。",
+                )
+            "sender_source_unavailable", "sender_item_removed" ->
+                uiText(
+                    "A selected source is no longer available. Review the selection and try again.",
+                    "所选来源已不可用。请检查所选内容后重试。",
                 )
             "sender_source_changed" ->
                 uiText(
@@ -573,8 +579,8 @@ class TransferService : Service() {
                 )
             "receiver_save_failed" ->
                 uiText(
-                    "The receiver could not save the verified files: $detail",
-                    "接收端无法保存已验证的文件：$detail",
+                    "The receiver could not finish saving. Resume to reconcile the destination.",
+                    "接收端未能完成保存。请继续任务以核对目标位置。",
                 )
             "receiver_reused_object_lost" ->
                 uiText(
@@ -596,12 +602,26 @@ class TransferService : Service() {
                     "The peer could not be authenticated. Pair the devices again.",
                     "无法验证对端身份。请重新配对设备。",
                 )
+            "unsupported_feature" ->
+                uiText(
+                    "This transfer request is not supported.",
+                    "不支持此传输请求。",
+                )
+            "discovery" ->
+                uiText(
+                    "The other device could not be reached. Check both devices and resume.",
+                    "无法连接另一台设备。请检查两台设备后继续任务。",
+                )
             "transport" ->
                 uiText(
                     "The connection was interrupted. Resume to continue from verified data.",
                     "连接已中断。继续任务即可从已验证的数据恢复。",
                 )
-            else -> detail
+            else ->
+                uiText(
+                    "The transfer failed. Try again or open Developer mode for details.",
+                    "传输失败。请重试，或打开开发者模式查看详情。",
+                )
         }
 
     private fun uiText(

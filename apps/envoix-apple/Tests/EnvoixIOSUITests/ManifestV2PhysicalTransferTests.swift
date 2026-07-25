@@ -561,6 +561,9 @@ private final class ManifestV2PhysicalObserver: TransferObserver, @unchecked Sen
         locked { recordedFailure = failure.diagnosticMessage }
         marker("failed code=\(failure.code) detail=\(failure.diagnosticMessage)")
     }
+    func onConnectionPath(event: FfiConnectionPathEvent) {
+        marker("path=\(event.pathKind) event=\(event.eventKind)")
+    }
     func onDiagnostic(message: String) { marker("diagnostic=\(message)") }
 
     @discardableResult

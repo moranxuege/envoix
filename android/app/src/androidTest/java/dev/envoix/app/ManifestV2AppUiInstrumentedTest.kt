@@ -32,10 +32,11 @@ class ManifestV2AppUiInstrumentedTest {
                     FlowCopy(
                         connectTitle = "Connect to a device",
                         activity = "Activity",
+                        settings = "Settings",
                         showQr = "Show QR",
                         openRoom = "Open room",
-                        roomSubtitle = "Transfer room",
-                        noActiveTransfer = "No active transfer",
+                        roomSubtitle = "One-time room",
+                        noActiveTransfer = "Ready · unverified",
                         reviewInvite = "Review invite",
                         addFiles = "Add files",
                         inventoryFiles = "ADD FILES",
@@ -51,10 +52,11 @@ class ManifestV2AppUiInstrumentedTest {
                     FlowCopy(
                         connectTitle = "连接设备",
                         activity = "活动",
+                        settings = "设置",
                         showQr = "显示二维码",
                         openRoom = "打开房间",
-                        roomSubtitle = "传输房间",
-                        noActiveTransfer = "无进行中的传输",
+                        roomSubtitle = "一次性房间",
+                        noActiveTransfer = "已就绪 · 未验证",
                         reviewInvite = "查看邀请",
                         addFiles = "添加文件",
                         inventoryFiles = "添加文件",
@@ -63,6 +65,7 @@ class ManifestV2AppUiInstrumentedTest {
                     ),
             )
         } finally {
+            device.setOrientationNatural()
             SettingsStore.update { it.copy(language = originalLanguage) }
             device.pressHome()
         }
@@ -85,6 +88,15 @@ class ManifestV2AppUiInstrumentedTest {
         text(device, copy.noActiveTransfer)
         assertFalse(device.hasObject(By.res(TRANSFER_SHEET)))
 
+        clickResourceUntilText(device, ROOM_ACTIVITY, copy.activity)
+        device.pressBack()
+        text(device, copy.roomSubtitle)
+        clickResourceUntilText(device, ROOM_SETTINGS, copy.settings)
+        device.pressBack()
+        text(device, copy.roomSubtitle)
+
+        assertRoomSurvivesRotation(device, copy)
+
         text(device, copy.reviewInvite)
         var sheet = clickResourceUntilResource(device, ROOM_REVIEW_INVITE, TRANSFER_SHEET)
         textAfterScroll(sheet, copy.saveTo)
@@ -106,6 +118,21 @@ class ManifestV2AppUiInstrumentedTest {
         dismissSheet(device)
         device.pressBack()
         text(device, copy.connectTitle)
+    }
+
+    private fun assertRoomSurvivesRotation(
+        device: UiDevice,
+        copy: FlowCopy,
+    ) {
+        device.setOrientationLeft()
+        SystemClock.sleep(ORIENTATION_SETTLE_MS)
+        text(device, copy.roomSubtitle)
+        text(device, copy.noActiveTransfer)
+
+        device.setOrientationNatural()
+        SystemClock.sleep(ORIENTATION_SETTLE_MS)
+        text(device, copy.roomSubtitle)
+        text(device, copy.reviewInvite)
     }
 
     private fun resource(
@@ -173,11 +200,14 @@ class ManifestV2AppUiInstrumentedTest {
         const val HUB_OPEN_ROOM = "hub_open_room"
         const val ROOM_REVIEW_INVITE = "room_review_invite"
         const val ROOM_ADD_FILES = "room_add_files"
+        const val ROOM_ACTIVITY = "room_activity"
+        const val ROOM_SETTINGS = "room_settings"
         const val TEST_TIMEOUT_MS = 90_000L
         const val WAIT_TIMEOUT_MS = 15_000L
         const val SHORT_WAIT_MS = 500L
         const val CLICK_WAIT_MS = 3_000L
         const val UI_TRANSITION_SETTLE_MS = 750L
+        const val ORIENTATION_SETTLE_MS = 1_250L
         const val CLICK_ATTEMPTS = 3
         const val MAX_SCROLLS = 5
         const val SCROLL_PERCENT = 0.8f
@@ -186,6 +216,7 @@ class ManifestV2AppUiInstrumentedTest {
     private data class FlowCopy(
         val connectTitle: String,
         val activity: String,
+        val settings: String,
         val showQr: String,
         val openRoom: String,
         val roomSubtitle: String,

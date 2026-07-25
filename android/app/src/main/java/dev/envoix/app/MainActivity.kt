@@ -11,27 +11,26 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.setValue
 import androidx.core.content.IntentCompat
+import dev.envoix.app.discovery.DiscoveryMode
 import dev.envoix.app.discovery.DiscoveryViewModel
 import dev.envoix.app.ui.AppText
 import dev.envoix.app.ui.ConnectionHubScreen
-import dev.envoix.app.ui.DeviceRoomDraft
+import dev.envoix.app.ui.ConnectionWorkflowViewModel
 import dev.envoix.app.ui.DeviceRoomScreen
 import dev.envoix.app.ui.EnvoixTheme
 import dev.envoix.app.ui.LocalAppLanguage
 import dev.envoix.app.ui.SettingsScreen
 import dev.envoix.app.ui.TransferActivityScreen
-import kotlinx.coroutines.flow.MutableStateFlow
-
-private enum class Screen { Hub, Room, Activity, Settings }
+import dev.envoix.app.ui.WorkflowScreen
 
 class MainActivity : ComponentActivity() {
     private val vm: TransferViewModel by viewModels()
     private val discoveryVm: DiscoveryViewModel by viewModels()
-    private val sharedUris = MutableStateFlow<List<Uri>>(emptyList())
+    private val workflowVm: ConnectionWorkflowViewModel by viewModels()
 
     private val requestNotif =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
@@ -47,73 +46,87 @@ class MainActivity : ComponentActivity() {
             val settings by SettingsStore.settings.collectAsState()
             CompositionLocalProvider(LocalAppLanguage provides settings.language) {
                 EnvoixTheme {
-                    var screen by androidx.compose.runtime.remember {
-                        androidx.compose.runtime.mutableStateOf(Screen.Hub)
-                    }
-                    var roomDraft by androidx.compose.runtime.remember {
-                        androidx.compose.runtime.mutableStateOf<DeviceRoomDraft?>(null)
-                    }
                     val transfers by vm.transfers.collectAsState()
-                    val incomingShares by sharedUris.collectAsState()
+                    val workflow by workflowVm.uiState.collectAsState()
+                    val selectedPeerKey = workflow.room?.nearbySelection?.discoveryPeerKey
 
-                    fun returnToHub() {
-                        roomDraft = null
-                        screen = Screen.Hub
+                    LaunchedEffect(workflow.screen, selectedPeerKey) {
+                        when {
+                            workflow.screen == WorkflowScreen.Hub ->
+                                discoveryVm.setMode(DiscoveryMode.BrowseNearby)
+                            workflow.screen == WorkflowScreen.Room && selectedPeerKey != null ->
+                                discoveryVm.setMode(DiscoveryMode.SelectedPeer, selectedPeerKey)
+                            else -> discoveryVm.setMode(DiscoveryMode.Off)
+                        }
                     }
 
-                    if (screen != Screen.Hub) BackHandler { returnToHub() }
-                    when (screen) {
-                        Screen.Hub ->
+                    if (workflow.screen != WorkflowScreen.Hub) {
+                        BackHandler { workflowVm.navigateBack() }
+                    }
+                    when (workflow.screen) {
+                        WorkflowScreen.Hub ->
                             ConnectionHubScreen(
-                                onOpenRoom = { draft ->
-                                    roomDraft = draft
-                                    screen = Screen.Room
+                                onOpenRoom = workflowVm::openRoom,
+                                onActivity = workflowVm::openActivity,
+                                onSettings = workflowVm::openSettings,
+                                onAcceptIncomingOffer = { offer ->
+                                    workflowVm.acceptIncomingOffer(
+                                        offer,
+                                        SettingsStore.settings.value.defaultRole,
+                                    )
                                 },
-                                onActivity = { screen = Screen.Activity },
-                                onSettings = { screen = Screen.Settings },
-                                pendingShareCount = incomingShares.size,
+                                pendingShareCount = workflow.pendingShares.size,
                                 discoveryViewModel = discoveryVm,
                             )
-                        Screen.Room -> {
-                            val draft = roomDraft
+                        WorkflowScreen.Room -> {
+                            val draft = workflow.room
                             if (draft == null) {
                                 ConnectionHubScreen(
-                                    onOpenRoom = { selected ->
-                                        roomDraft = selected
-                                        screen = Screen.Room
+                                    onOpenRoom = workflowVm::openRoom,
+                                    onActivity = workflowVm::openActivity,
+                                    onSettings = workflowVm::openSettings,
+                                    onAcceptIncomingOffer = { offer ->
+                                        workflowVm.acceptIncomingOffer(
+                                            offer,
+                                            SettingsStore.settings.value.defaultRole,
+                                        )
                                     },
-                                    onActivity = { screen = Screen.Activity },
-                                    onSettings = { screen = Screen.Settings },
-                                    pendingShareCount = incomingShares.size,
+                                    pendingShareCount = workflow.pendingShares.size,
                                     discoveryViewModel = discoveryVm,
                                 )
                             } else {
                                 DeviceRoomScreen(
                                     draft = draft,
+                                    transferDraft = workflow.transferDraft,
                                     transfers = transfers,
-                                    onBack = ::returnToHub,
-                                    initialSources = incomingShares,
-                                    onInitialSourcesConsumed = { sharedUris.value = emptyList() },
+                                    onBack = workflowVm::returnToHub,
+                                    onActivity = workflowVm::openActivity,
+                                    onSettings = workflowVm::openSettings,
+                                    initialSources = workflow.pendingShares,
+                                    onBeginTransfer = workflowVm::beginTransfer,
+                                    onShowRoomQr = workflowVm::showRoomQr,
+                                    onDismissTransfer = workflowVm::dismissTransferDraft,
+                                    onTransferStarted = workflowVm::completeTransferDraft,
+                                    onAcceptIncomingOffer = { offer ->
+                                        workflowVm.acceptIncomingOffer(
+                                            offer,
+                                            SettingsStore.settings.value.defaultRole,
+                                        )
+                                    },
                                     onReceive = { c, b, r, qr, copyApproved ->
                                         vm.startReceive(c, b, r, qr, copyApproved)
                                     },
                                     onSend = { c, b, r, jobId, qr ->
                                         vm.startSend(c, jobId, b, r, qr)
                                     },
-                                    onPauseResume = { vm.pauseResume(it) },
-                                    onApproveReceive = { vm.approveReceive(it) },
-                                    onCancel = { vm.cancel(it) },
-                                    onRemove = { vm.remove(it) },
-                                    onOpen = { openReceived(it) },
-                                    onShare = { shareReceived(it) },
                                     discoveryViewModel = discoveryVm,
                                 )
                             }
                         }
-                        Screen.Activity ->
+                        WorkflowScreen.Activity ->
                             TransferActivityScreen(
                                 transfers = transfers,
-                                onBack = ::returnToHub,
+                                onBack = workflowVm::navigateBack,
                                 onPauseResume = { vm.pauseResume(it) },
                                 onApproveReceive = { vm.approveReceive(it) },
                                 onCancel = { vm.cancel(it) },
@@ -121,7 +134,7 @@ class MainActivity : ComponentActivity() {
                                 onOpen = { openReceived(it) },
                                 onShare = { shareReceived(it) },
                             )
-                        Screen.Settings -> SettingsScreen(onBack = ::returnToHub)
+                        WorkflowScreen.Settings -> SettingsScreen(onBack = workflowVm::navigateBack)
                     }
                 }
             }
@@ -136,11 +149,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        discoveryVm.start()
+        discoveryVm.setForeground(true)
     }
 
     override fun onStop() {
-        discoveryVm.stop()
+        discoveryVm.setForeground(false)
         super.onStop()
     }
 
@@ -154,7 +167,7 @@ class MainActivity : ComponentActivity() {
                     IntentCompat.getParcelableArrayListExtra(intent, Intent.EXTRA_STREAM, Uri::class.java).orEmpty()
                 else -> emptyList()
             }
-        if (uris.isNotEmpty()) sharedUris.value = uris.distinct()
+        workflowVm.captureSharedUris(uris)
     }
 
     /** Open a received file (a Downloads content Uri) in whatever app handles it. */
