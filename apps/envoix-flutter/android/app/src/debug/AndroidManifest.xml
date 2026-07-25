@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Debug-only: packaged process-death instrumentation drives the service
+         from the adb shell (which needs `adb root`, since the shell UID holds
+         no signature permission of this app). Release keeps exported=false and
+         has no instrumentation bridge at all. -->
+    <permission
+        android:name="${applicationId}.permission.E2E"
+        android:protectionLevel="signature" />
+    <uses-permission android:name="${applicationId}.permission.E2E" />
+
+    <application>
+        <service
+            android:name=".EnvoixHostService"
+            android:exported="true"
+            android:foregroundServiceType="dataSync"
+            android:permission="${applicationId}.permission.E2E"
+            tools:replace="android:exported" />
+    </application>
+</manifest>

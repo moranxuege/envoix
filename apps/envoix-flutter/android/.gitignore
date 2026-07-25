@@ -1,0 +1,6 @@
+.gradle/
+build/
+app/build/
+local.properties
+# cargo-ndk output; rebuilt by scripts/build-jni-libs.sh
+app/src/main/jniLibs/

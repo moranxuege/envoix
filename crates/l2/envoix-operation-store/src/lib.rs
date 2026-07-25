@@ -157,7 +157,15 @@ impl StoreImage {
 /// **exactly one live `OperationStore` per card over a single backend handle**.
 /// Two stores over two backend handles to the same storage root (e.g. two
 /// `LocalStorage::open` of one directory) do not mutually exclude and can lose an
-/// update. The runtime's card registry (P5/RT) owns this exclusivity.
+/// update. A composition root upholds this with a live-store registry that hands
+/// every opener the SAME handle per card — the Android host's `CardStores`, whose
+/// session provider and boot outbox drainer share one store.
+///
+/// **Destructive operations settle in one image.** [`Self::settle_destructive`]
+/// executes the effect and confirms its outbox entry in a single persisted
+/// image, so the executed-but-unconfirmed state — hidden by its own safety
+/// predicate, then re-armed by a re-stage of the same artifact key — is
+/// unrepresentable.
 pub struct OperationStore<S: Storage> {
     storage: S,
     card: RecordId,
@@ -436,22 +444,52 @@ impl<S: Storage> OperationStore<S> {
             .any(|entry| entry.operation == operation && !entry.confirmed)
     }
 
-    /// Durably confirms successful idempotent execution; failures leave the entry pending.
-    pub fn confirm_outbox(
+    /// Durably executes one pending destructive operation AND confirms it in a
+    /// SINGLE persisted image: the discarded or collected possession FACT
+    /// leaves the image (so resume can never see it) and its outbox entry is
+    /// marked confirmed in the same write, guarded by the same last-good-copy
+    /// safety rule as replay.
+    ///
+    /// Executing and confirming as two writes would leave a crash window in
+    /// which the entry is executed but still pending: its safety predicate is
+    /// now false, so it is never replayed and never confirmed — and re-staging
+    /// the same artifact key re-arms it against the fresh bytes. One image
+    /// makes that window unrepresentable; a crash before it lands leaves the
+    /// operation wholly undone and replayable.
+    ///
+    /// Unreferenced artifact bytes become unreachable garbage; physical byte
+    /// collection is a storage-backend concern.
+    pub fn settle_destructive(
         &mut self,
         operation: DestructiveOperation,
     ) -> Result<OutboxStatus, StoreError<S::Error>> {
         self.refresh()?;
-        let mut candidate = self.image.clone();
-        let entry = candidate
+        let entry = self
+            .image
             .outbox
-            .iter_mut()
+            .iter()
             .find(|entry| entry.operation == operation)
             .ok_or(StoreError::UnknownOutboxOperation)?;
         if entry.confirmed {
             return Ok(OutboxStatus::AlreadyConfirmed);
         }
-        entry.confirmed = true;
+        if !self.operation_is_safe(operation) {
+            return Err(StoreError::WouldLoseLastGoodCopy);
+        }
+        let mut candidate = self.image.clone();
+        match operation {
+            DestructiveOperation::DiscardPartial { key, .. }
+            | DestructiveOperation::CollectArtifact { key, .. } => {
+                candidate.possessions.retain(|fact| fact.key != key);
+            }
+            DestructiveOperation::TombstoneCard { .. } => candidate.possessions.clear(),
+        }
+        candidate
+            .outbox
+            .iter_mut()
+            .find(|entry| entry.operation == operation)
+            .expect("the entry was found under the same refreshed image")
+            .confirmed = true;
         self.persist(candidate, None, Durability::Durable)?;
         Ok(OutboxStatus::Confirmed)
     }

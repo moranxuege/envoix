@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use envoix_attempt_api::{AttemptEventKind, AttemptPlan};
+use envoix_attempt_api::{AttemptEventKind, AttemptPlan, RetirementIntent};
 use envoix_evidence::EvidenceRecord;
 use envoix_operation_store::OperationStore;
 use envoix_outcomes::{OutcomeCode, Phase};
@@ -23,7 +23,8 @@ use envoix_product::{
 use envoix_runtime::{
     AcquireError, AttemptExecution, AttemptExecutor, CardUpdateKind, CommandCompletion,
     CommandVerdict, EvidenceSink, EvidenceSinkError, ExecutorSignal, LosslessUpdateKind, Runtime,
-    RuntimeConfig, SessionProvider, ShutdownReport, SubscribeError, TryRecvError, stop_channel,
+    RuntimeConfig, SessionProvider, ShutdownReport, StopSignal, SubscribeError, TryRecvError,
+    stop_channel,
 };
 use envoix_storage_api::Durability;
 use envoix_storage_local::LocalStorage;
@@ -875,4 +876,117 @@ async fn reissued_duty_supersedes_not_accumulates() {
     assert_eq!(duty_count, 1);
 
     runtime.shutdown().await;
+}
+
+// ---- capturing executor: records the signal forwarded down the stop channel ----
+
+#[derive(Clone)]
+struct CapturingExecutor {
+    signal: Arc<Mutex<Option<StopSignal>>>,
+}
+
+impl CapturingExecutor {
+    fn new() -> Self {
+        Self {
+            signal: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    async fn captured(&self) -> StopSignal {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(signal) = *self.signal.lock().unwrap() {
+                    break signal;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the executor should receive a stop signal")
+    }
+}
+
+impl AttemptExecutor for CapturingExecutor {
+    fn start(&self, _plan: AttemptPlan) -> AttemptExecution {
+        let (signal_tx, signals) = mpsc::channel(4);
+        let (stop, token) = stop_channel();
+        let captured = Arc::clone(&self.signal);
+        tokio::spawn(async move {
+            // Reach an active, pausable state so the reducer retires the live worker.
+            let _ = signal_tx
+                .send(ExecutorSignal::Event(AttemptEventKind::Phase(
+                    Phase::Transferring,
+                )))
+                .await;
+            let signal = token.stopped().await;
+            *captured.lock().unwrap() = Some(signal);
+            let _ = signal_tx.send(ExecutorSignal::Stopped).await;
+        });
+        AttemptExecution { signals, stop }
+    }
+}
+
+/// The reducer-authorized retirement intent reaches the executor's stop token
+/// unchanged: the runtime forwards Pause vs Cancel through the L4 stop channel
+/// so a real executor can tell a resume-preserving stop from a discarding one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_intent_reaches_the_executor() {
+    for (command, expected) in [
+        (ProductCommand::Pause, RetirementIntent::Pause),
+        (ProductCommand::Cancel, RetirementIntent::Cancel),
+    ] {
+        let directory = TempDir::new().unwrap();
+        let root = directory.path();
+        let executor = CapturingExecutor::new();
+        let runtime = Runtime::start(
+            config(8),
+            OpStoreProvider {
+                root: root.to_path_buf(),
+            },
+            executor.clone(),
+        );
+
+        let (session, outcome) = create_session(root, Direction::Send, 0x10);
+        let card = session.record().identity.card;
+        runtime.admit(session, outcome).unwrap();
+        // Pause/Cancel only retire a live attempt from an active state.
+        wait_for_state(&runtime, card, ProductState::Transferring).await;
+
+        let commander = runtime
+            .subscribe(card, NonZeroUsize::new(4).unwrap())
+            .unwrap();
+        runtime
+            .submit_command(&commander, CommandId::from_bytes([0xA1; 16]), command)
+            .await
+            .unwrap();
+
+        assert_eq!(executor.captured().await, StopSignal::Retire(expected));
+        runtime.shutdown().await;
+    }
+}
+
+/// Tearing the process down is NOT a transfer cancellation. Shutdown drops the
+/// card's stop handle without any reducer-authorized retirement, and the
+/// executor must see that difference — a `Detached` teardown preserves
+/// resumable state where a `Cancel` would tell the transport to discard it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn teardown_reaches_the_executor_as_detached_not_cancel() {
+    let directory = TempDir::new().unwrap();
+    let root = directory.path();
+    let executor = CapturingExecutor::new();
+    let runtime = Runtime::start(
+        config(8),
+        OpStoreProvider {
+            root: root.to_path_buf(),
+        },
+        executor.clone(),
+    );
+
+    let (session, outcome) = create_session(root, Direction::Send, 0x11);
+    let card = session.record().identity.card;
+    runtime.admit(session, outcome).unwrap();
+    wait_for_state(&runtime, card, ProductState::Transferring).await;
+
+    runtime.shutdown().await;
+    assert_eq!(executor.captured().await, StopSignal::Detached);
 }

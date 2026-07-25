@@ -73,8 +73,8 @@ pub use envoix_product::{
 };
 pub use error::{AcquireError, CommandRejected};
 pub use port::{
-    AttemptExecution, AttemptExecutor, ExecutorSignal, SessionProvider, StopHandle, StopToken,
-    stop_channel,
+    AttemptExecution, AttemptExecutor, ExecutorSignal, SessionProvider, StopHandle, StopSignal,
+    StopToken, stop_channel,
 };
 pub use runtime::{Runtime, ShutdownReport};
 pub use subscription::{

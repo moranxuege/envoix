@@ -935,6 +935,14 @@ async fn transfer_sender(
                 {
                     return sender_wait_exit(state, exit, clock);
                 }
+                // Complete is sent but not acknowledged: the confirm window is
+                // open, so the product's confirm-timeout/mailbox fallback (P6)
+                // must be reachable from here.
+                emit(
+                    events,
+                    plan.stamp,
+                    AttemptEventKind::Phase(Phase::Confirming),
+                );
                 let ack = match receive_interruptible(
                     link,
                     MAX_FRAME_SIZE,

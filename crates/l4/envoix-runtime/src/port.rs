@@ -1,4 +1,4 @@
-use envoix_attempt_api::{AttemptEventKind, AttemptPlan};
+use envoix_attempt_api::{AttemptEventKind, AttemptPlan, RetirementIntent};
 use envoix_product::{CommittedSession, RecordStore};
 use envoix_types::RecordId;
 use tokio::sync::{mpsc, oneshot};
@@ -47,38 +47,58 @@ pub enum ExecutorSignal {
     Stopped,
 }
 
+/// Why an executor is being stopped.
+///
+/// A process/card teardown is NOT a transfer cancellation: the two must stay
+/// distinguishable at the executor, or shutting the host down would tell a
+/// live transport to discard resumable state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StopSignal {
+    /// The reducer authorized this retirement (pause, cancel, or finalize).
+    Retire(RetirementIntent),
+    /// The card actor or the process is going away with no authorized
+    /// retirement: stop, but preserve everything resumable.
+    Detached,
+}
+
 /// Requests an executor stop. Dropping it also requests a stop, so a torn-down
 /// card never leaves its executor running.
 #[derive(Debug)]
 pub struct StopHandle {
-    signal: Option<oneshot::Sender<()>>,
+    signal: Option<oneshot::Sender<StopSignal>>,
 }
 
 impl StopHandle {
-    /// Requests the paired executor stop. Idempotent.
-    pub fn stop(&mut self) {
-        if let Some(signal) = self.signal.take() {
-            let _ = signal.send(());
+    /// Requests the paired executor stop with the reducer-authorized intent.
+    /// Idempotent.
+    pub fn stop(&mut self, intent: RetirementIntent) {
+        self.send(StopSignal::Retire(intent));
+    }
+
+    fn send(&mut self, signal: StopSignal) {
+        if let Some(sender) = self.signal.take() {
+            let _ = sender.send(signal);
         }
     }
 }
 
 impl Drop for StopHandle {
     fn drop(&mut self) {
-        self.stop();
+        self.send(StopSignal::Detached);
     }
 }
 
 /// The executor's side of a stop channel.
 #[derive(Debug)]
 pub struct StopToken {
-    signal: oneshot::Receiver<()>,
+    signal: oneshot::Receiver<StopSignal>,
 }
 
 impl StopToken {
-    /// Resolves when a stop is requested (or the handle is dropped).
-    pub async fn stopped(self) {
-        let _ = self.signal.await;
+    /// Resolves to the requested stop. A dropped runtime handle is a teardown,
+    /// never an authorized cancellation.
+    pub async fn stopped(self) -> StopSignal {
+        self.signal.await.unwrap_or(StopSignal::Detached)
     }
 }
 

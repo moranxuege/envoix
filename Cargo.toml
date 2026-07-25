@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/*/*", "hosts/*", "apps/*", "tools/*"]
-exclude = ["legacy"]
+exclude = ["legacy", "apps/envoix-flutter"]
 
 [workspace.package]
 version = "0.2.0"

@@ -351,7 +351,7 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
                 match self.current.as_mut() {
                     // Live worker: ask it to stop; ack when it reports Stopped so
                     // the lease is proven released before the reducer sees the ack.
-                    Some(meta) if meta.stamp == stamp => meta.stop.stop(),
+                    Some(meta) if meta.stamp == stamp => meta.stop.stop(intent),
                     // No live worker (already gone): the ack is safe to mint now.
                     _ => self.try_ack(stamp),
                 }

@@ -315,16 +315,66 @@ fn durable_outbox_replays_a_destructive_op_after_crash() {
     let mut retry = open(&root, card);
     assert_eq!(retry.replayable_outbox(), vec![operation]);
     assert_eq!(
-        retry.confirm_outbox(operation).unwrap(),
+        retry.settle_destructive(operation).unwrap(),
         OutboxStatus::Confirmed
     );
     assert_eq!(
-        retry.confirm_outbox(operation).unwrap(),
+        retry.settle_destructive(operation).unwrap(),
         OutboxStatus::AlreadyConfirmed
     );
     drop(retry);
 
     assert!(open(&root, card).replayable_outbox().is_empty());
+}
+
+/// Executing a destructive operation and confirming it are ONE durable image,
+/// so there is no window in which the fact is gone but the entry is still
+/// pending: such an entry is hidden by its own safety predicate (never
+/// replayed, never confirmable) and re-arms itself the moment the same
+/// artifact key is staged again, destroying the fresh bytes.
+#[test]
+fn destructive_settlement_is_one_image_and_never_resurrects() {
+    let root = tempfile::tempdir().unwrap();
+    let card = RecordId::new(51);
+    let key = artifact_key(51);
+    let operation = DestructiveOperation::DiscardPartial { card, key };
+    let mut store = open(&root, card);
+    stage(&mut store, key, "partial.bin", b"partial");
+    store.queue_discard_partial(key).unwrap();
+
+    // Executed and confirmed in a single durable transaction: the backend
+    // revision advances exactly once (two writes would leave a crash window).
+    let before = durable_revision(&root, card);
+    assert_eq!(
+        store.settle_destructive(operation).unwrap(),
+        OutboxStatus::Confirmed
+    );
+    assert_eq!(
+        durable_revision(&root, card),
+        before + 1,
+        "execute and confirm are one durable write"
+    );
+    assert_eq!(
+        store.settle_destructive(operation).unwrap(),
+        OutboxStatus::AlreadyConfirmed
+    );
+    drop(store);
+
+    // The next boot sees BOTH halves: the possession fact is gone and nothing
+    // is left to replay.
+    let mut reopened = open(&root, card);
+    assert!(reopened.possession(key).is_none());
+    assert!(!reopened.outbox_is_pending(operation));
+    assert!(reopened.replayable_outbox().is_empty());
+
+    // Re-staging the same identity restores the discard's safety predicate. A
+    // settled entry must not become replayable again.
+    stage(&mut reopened, key, "partial.bin", b"fresh-partial");
+    assert!(
+        reopened.replayable_outbox().is_empty(),
+        "a settled discard never resurrects against freshly staged bytes"
+    );
+    assert!(reopened.possession(key).is_some());
 }
 
 #[test]
@@ -416,7 +466,7 @@ fn artifact_key(seed: u8) -> ArtifactKey {
     }
 }
 
-fn stage(store: &mut OperationStore<LocalStorage>, key: ArtifactKey, name: &str, bytes: &[u8]) {
+fn stage<S: Storage>(store: &mut OperationStore<S>, key: ArtifactKey, name: &str, bytes: &[u8]) {
     assert!(matches!(
         store.stage_artifact(key, OfferedName::from_untrusted(name), bytes),
         Ok(ArtifactCommit::Staged { .. })
@@ -438,6 +488,17 @@ fn current_revision(root: &TempDir, card: RecordId) -> PathBuf {
     let card_root = root.path().join("cards").join(card.get().to_string());
     let revision = fs::read_to_string(card_root.join("current")).unwrap();
     card_root.join("revisions").join(revision.trim())
+}
+
+/// The backend's published revision counter for a card: it advances once per
+/// committed transaction, so it counts durable WRITES rather than facts.
+fn durable_revision(root: &TempDir, card: RecordId) -> u64 {
+    let card_root = root.path().join("cards").join(card.get().to_string());
+    fs::read_to_string(card_root.join("current"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
 }
 
 struct AmbiguousStorage {

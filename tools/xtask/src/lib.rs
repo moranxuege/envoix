@@ -275,11 +275,100 @@ fn extract_identifier(root: &Path, entry: &CatalogIdentifier) -> CheckResult<Ext
         )
         .map(|value| Extraction::Values(vec![value]));
     }
+    if let Some(property) = entry.extract.strip_prefix("gradle-property:") {
+        return extract_gradle_property(&owner_path, property);
+    }
+    if let Some(flavor) = entry.extract.strip_prefix("gradle-variant-application-id:") {
+        return extract_gradle_application_id(&owner_path, flavor);
+    }
+    if entry.extract == "android-manifest-provider-authority:generated-per-variant" {
+        return extract_manifest_provider_authorities(&owner_path);
+    }
 
-    extract_compiled_owner(entry)
+    extract_compiled_owner(root, entry)
 }
 
-fn extract_compiled_owner(entry: &CatalogIdentifier) -> CheckResult<Extraction> {
+/// `namespace = "com.example"` style single-value gradle properties. The
+/// property name's last segment is the gradle key (`android.namespace` ->
+/// `namespace`).
+fn extract_gradle_property(path: &Path, property: &str) -> CheckResult<Extraction> {
+    let key = property.rsplit('.').next().unwrap_or(property);
+    let text = fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    for line in text.lines() {
+        if let Some(value) = gradle_assignment(line, key) {
+            return Ok(Extraction::Values(vec![value]));
+        }
+    }
+    Err(format!("{} has no `{key} = \"…\"`", path.display()))
+}
+
+/// The full applicationId assigned inside `create("<flavor>") { … }`.
+fn extract_gradle_application_id(path: &Path, flavor: &str) -> CheckResult<Extraction> {
+    let text = fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let mut in_flavor = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with(&format!("create(\"{flavor}\")")) {
+            in_flavor = true;
+            continue;
+        }
+        if in_flavor {
+            if let Some(value) = gradle_assignment(line, "applicationId") {
+                return Ok(Extraction::Values(vec![value]));
+            }
+            if trimmed == "}" {
+                break;
+            }
+        }
+    }
+    Err(format!(
+        "{} has no applicationId for flavor {flavor}",
+        path.display()
+    ))
+}
+
+/// The `${applicationId}.files`-style provider authority, expanded to one
+/// concrete value per gradle variant applicationId.
+fn extract_manifest_provider_authorities(path: &Path) -> CheckResult<Extraction> {
+    let text = fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let marker = "android:authorities=\"";
+    let start = text
+        .find(marker)
+        .ok_or_else(|| format!("{} declares no provider authority", path.display()))?
+        + marker.len();
+    let end = start
+        + text[start..]
+            .find('"')
+            .ok_or_else(|| format!("{}: unterminated authority", path.display()))?;
+    let template = &text[start..end];
+    let gradle = path
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .map(|app| app.join("build.gradle.kts"))
+        .ok_or_else(|| format!("{}: no sibling gradle file", path.display()))?;
+    let mut values = Vec::new();
+    for flavor in ["dev", "prod", "qa"] {
+        let Extraction::Values(ids) = extract_gradle_application_id(&gradle, flavor)? else {
+            return Err(format!("{}: pending applicationId", gradle.display()));
+        };
+        for id in ids {
+            values.push(template.replace("${applicationId}", &id));
+        }
+    }
+    Ok(Extraction::Values(values))
+}
+
+/// `key = "value"` on one gradle line, tolerant of leading/trailing noise.
+fn gradle_assignment(line: &str, key: &str) -> Option<String> {
+    let trimmed = line.trim();
+    let rest = trimmed.strip_prefix(key)?.trim_start();
+    let rest = rest.strip_prefix('=')?.trim_start();
+    let rest = rest.strip_prefix('"')?;
+    rest.split('"').next().map(str::to_owned)
+}
+
+fn extract_compiled_owner(root: &Path, entry: &CatalogIdentifier) -> CheckResult<Extraction> {
     use envoix_auth::identifiers as auth;
     use envoix_evidence::identifiers as evidence;
     use envoix_invite::identifiers as invite;
@@ -388,9 +477,25 @@ fn extract_compiled_owner(entry: &CatalogIdentifier) -> CheckResult<Extraction> 
             one(operation_store::OPERATION_STORE_STATE_SCHEMA_ID)
         }
         ("crate:envoix-platform-android", "rust-function:internal_action_identifiers") => {
-            return Ok(Extraction::Pending(
-                "depends on pending Android applicationId owner".into(),
-            ));
+            let gradle = root.join("apps/envoix-flutter/android/app/build.gradle.kts");
+            if !gradle.exists() {
+                return Ok(Extraction::Pending(
+                    "depends on pending Android applicationId owner".into(),
+                ));
+            }
+            let mut values = Vec::new();
+            for flavor in ["dev", "prod", "qa"] {
+                let Extraction::Values(ids) = extract_gradle_application_id(&gradle, flavor)?
+                else {
+                    return Err("gradle applicationId unexpectedly pending".into());
+                };
+                for id in ids {
+                    values.extend(
+                        envoix_platform_android::identifiers::internal_action_identifiers(&id),
+                    );
+                }
+            }
+            values
         }
         ("crate:envoix-platform-android", "rust-const:PRIVATE_STORAGE_ROOT") => {
             one(envoix_platform_android::identifiers::PRIVATE_STORAGE_ROOT)

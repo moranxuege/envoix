@@ -329,7 +329,7 @@ key = "android.application_id.test"
 owner = "manifest:flutter-android-gradle"
 owner_path = "apps/envoix-flutter/android/app/build.gradle.kts"
 collision_scope = "android-application-id"
-extract = "gradle-variant-application-id:test"
+extract = "gradle-variant-application-id:qa"
 
 [[identifier]]
 key = "android.file_provider_authority"

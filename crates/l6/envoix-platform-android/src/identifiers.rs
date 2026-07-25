@@ -12,6 +12,10 @@ const ACTIONS: &[&str] = &[
     "remove",
     "restore-all",
     "reverify",
+    // Debug-only instrumentation (the debug source set's E2eBridge). The names
+    // are reserved here so nothing else can claim them.
+    "e2e-create",
+    "e2e-probe",
 ];
 
 /// Android actions are derived from the variant application ID owned by Gradle.

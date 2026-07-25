@@ -9,7 +9,7 @@ use envoix_attempt_api::{
     AttemptEvent, AttemptEventKind, AttemptPlan, AttemptStamp, AttemptSupervisor, EventAdmission,
     OpenResult, ResumeIntent, RetirementIntent,
 };
-use envoix_outcomes::OutcomeCode;
+use envoix_outcomes::{OutcomeCode, Phase};
 use envoix_pairing::{
     DataPlaneToken, EntropyError, EntropySource, PairingCode, SystemEntropy, initiator_start,
     responder_respond,
@@ -703,4 +703,91 @@ async fn iroh_receiver_retries_a_failed_pairing() {
         sink.sealed(plan(Direction::Receive, 1, ResumeIntent::Fresh).transfer),
         bytes
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sender_emits_confirming_between_complete_and_ack() {
+    let bytes = (0..8 * 1024)
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    let source = MemorySource {
+        bytes: Arc::new(bytes.clone()),
+    };
+    let sink = MemorySink::default();
+    let sender_supervisor: SharedAttemptSupervisor = Arc::new(Mutex::new(AttemptSupervisor::new()));
+    let receiver_supervisor: SharedAttemptSupervisor =
+        Arc::new(Mutex::new(AttemptSupervisor::new()));
+    let links = link_pair(None);
+    let (sender_token, receiver_token) = token_pair();
+    let mut sender = spawn_sender(
+        plan(Direction::Send, 1, ResumeIntent::Fresh),
+        spec(&bytes),
+        sender_token,
+        source,
+        links.sender,
+        sender_supervisor,
+        TestEntropy::new(0x30),
+    )
+    .unwrap();
+    let mut receiver = spawn_receiver(
+        plan(Direction::Receive, 1, ResumeIntent::Fresh),
+        spec(&bytes),
+        receiver_token,
+        sink,
+        links.receiver,
+        receiver_supervisor,
+        TestEntropy::new(0xa0),
+    )
+    .unwrap();
+    let sender_control = sender.control();
+    let receiver_control = receiver.control();
+
+    let receiver_run = terminal_outcome(&mut receiver);
+    let sender_run = async {
+        let mut kinds = Vec::new();
+        loop {
+            let event = sender.next_event().await.unwrap();
+            let terminal = matches!(event.kind, AttemptEventKind::Terminal(_));
+            kinds.push(event.kind);
+            if terminal {
+                return kinds;
+            }
+        }
+    };
+    let (kinds, receiver_outcome) = tokio::join!(sender_run, receiver_run);
+    assert_eq!(receiver_outcome, OutcomeCode::Completed);
+
+    let confirming = kinds
+        .iter()
+        .position(|kind| matches!(kind, AttemptEventKind::Phase(Phase::Confirming)))
+        .expect("sender emits Phase(Confirming) once Complete is sent");
+    let last_progress = kinds
+        .iter()
+        .rposition(|kind| matches!(kind, AttemptEventKind::Progress { .. }))
+        .expect("sender emits progress");
+    let terminal = kinds.len() - 1;
+    assert!(
+        last_progress < confirming,
+        "Confirming follows the final chunk"
+    );
+    assert!(confirming < terminal, "Confirming precedes the terminal");
+    assert!(matches!(
+        kinds[terminal],
+        AttemptEventKind::Terminal(OutcomeCode::Completed)
+    ));
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|kind| matches!(kind, AttemptEventKind::Phase(Phase::Confirming)))
+            .count(),
+        1,
+        "the confirm window opens exactly once"
+    );
+
+    sender_control.request(RetirementIntent::Finalize).unwrap();
+    receiver_control
+        .request(RetirementIntent::Finalize)
+        .unwrap();
+    sender.wait_ack().await.unwrap();
+    receiver.wait_ack().await.unwrap();
 }

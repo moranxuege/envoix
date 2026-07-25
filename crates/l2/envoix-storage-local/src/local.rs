@@ -53,6 +53,28 @@ impl LocalStorage {
         Ok(storage)
     }
 
+    /// The cards present in this storage root, in unspecified order.
+    ///
+    /// A host composition root uses this to restore and drain every durable
+    /// card at boot; nothing in the storage contract itself needs enumeration.
+    pub fn cards(&self) -> Result<Vec<RecordId>, LocalStorageError> {
+        let mut cards = Vec::new();
+        for entry in fs::read_dir(self.cards_root())? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            if let Some(value) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<u64>().ok())
+            {
+                cards.push(RecordId::new(value));
+            }
+        }
+        Ok(cards)
+    }
+
     fn recover(&self) -> Result<u64, LocalStorageError> {
         let mut maximum_revision = 0;
         for entry in fs::read_dir(self.cards_root())? {
