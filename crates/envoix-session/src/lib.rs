@@ -6,6 +6,7 @@ mod endpoint;
 mod identity;
 mod manifest_v2_session;
 mod room;
+mod room_control;
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -56,6 +57,10 @@ pub use manifest_v2_session::{
     receive_manifest_v2_offer, send_manifest_v2_manual, send_manifest_v2_to_endpoint_addr,
 };
 pub use room::{receive_manifest_v2_offer_via_room, send_manifest_v2_via_room};
+pub use room_control::{
+    ROOM_CONTROL_ALPN, RoomCloseReason, RoomControlEvent, RoomControlInvite, RoomControlSession,
+    RoomLifetimePolicy, RoomOfferRejection, RoomTransferOffer, connect_room_control,
+};
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_AUTH_FAILURES: u32 = 50;
