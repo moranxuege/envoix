@@ -42,6 +42,8 @@ const TICKET_LEN: usize = 32;
 const COMMITMENT_LEN: usize = 32;
 const ROOM_ID_LEN: usize = 6;
 const ROOM_SECRET_LEN: usize = 8;
+const REMEMBERED_ROOM_ID_PREFIX: &str = "r1_";
+const REMEMBERED_ROOM_ID_ENCODED_LEN: usize = 43;
 
 const FULL_CONTROL_PASSWORD_INFO: &[u8] = b"envoix invite v2 full-ticket control password";
 const ROOM_CONTROL_PASSWORD_INFO: &[u8] = b"envoix invite v2 room-code control password";
@@ -533,6 +535,21 @@ impl InvitationControlContext {
             selected_bootstrap_method,
             creator_transfer_role,
             joiner_transfer_role,
+        })
+    }
+
+    /// Construct the fixed role mapping for a remembered-device rendezvous.
+    ///
+    /// The receiver advertises as the responder and the sender joins as the
+    /// initiator. The high-entropy locator is derived from the remembered
+    /// credential rather than from an invitation.
+    pub fn remembered(room_id: String) -> Result<Self, InvitationError> {
+        validate_remembered_room_id(&room_id)?;
+        Ok(Self {
+            room_id,
+            selected_bootstrap_method: BootstrapKind::FullTicket,
+            creator_transfer_role: TransferRole::Receiver,
+            joiner_transfer_role: TransferRole::Sender,
         })
     }
 
@@ -1366,6 +1383,21 @@ fn validate_room_id(value: &str) -> Result<(), InvitationError> {
         Ok(())
     } else {
         Err(malformed("room_id must contain exactly six digits"))
+    }
+}
+
+fn validate_remembered_room_id(value: &str) -> Result<(), InvitationError> {
+    let Some(encoded) = value.strip_prefix(REMEMBERED_ROOM_ID_PREFIX) else {
+        return Err(malformed("remembered room_id has an invalid prefix"));
+    };
+    if encoded.len() == REMEMBERED_ROOM_ID_ENCODED_LEN
+        && encoded
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        Ok(())
+    } else {
+        Err(malformed("remembered room_id is invalid"))
     }
 }
 

@@ -310,7 +310,7 @@ impl SendArgs {
             let token = self
                 .token
                 .expect("clap ensures --token is present with --enable-mdns");
-            let source = api::PeerSource::Mdns { token: Some(token) };
+            let source = api::PeerSource::mdns(Some(token))?;
             (source, Some("discovering receiver over mDNS...".into()))
         } else {
             let peer = self.peer.ok_or_else(|| {
@@ -319,7 +319,7 @@ impl SendArgs {
             let token = self
                 .token
                 .expect("clap ensures --token is present without --invite");
-            (api::PeerSource::Manual { peer, token }, None)
+            (api::PeerSource::manual(peer, token)?, None)
         };
 
         Ok(TransferPlan {
@@ -377,13 +377,13 @@ impl ReceiveArgs {
                 Some(format!("waiting for sender via rendezvous {broker}...")),
             )
         } else if self.enable_mdns {
-            let source = api::PeerSource::Mdns { token: self.token };
+            let source = api::PeerSource::mdns(self.token)?;
             (source, Some("waiting for sender...".into()))
         } else {
             let token = self
                 .token
                 .expect("clap requires --token unless --enable-mdns is set");
-            (api::PeerSource::ShowManual { token: Some(token) }, None)
+            (api::PeerSource::show_manual(Some(token))?, None)
         };
 
         Ok(TransferPlan {

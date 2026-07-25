@@ -226,6 +226,10 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
             invite: "",
             code: scenarioCode,
             token: scenarioCode,
+            rememberConsent: false,
+            rememberedCredentialRef: "",
+            rememberedGeneration: 0,
+            rememberedPreviousGeneration: nil,
             broker: defaultRendezvousBroker,
             relay: defaultRelayURL,
             configPath: "",
@@ -562,6 +566,7 @@ private final class ManifestV2PhysicalObserver: TransferObserver, @unchecked Sen
         marker("failed code=\(failure.code) detail=\(failure.diagnosticMessage)")
     }
     func onDiagnostic(message: String) { marker("diagnostic=\(message)") }
+    func onRememberedCredential(opaqueCredential _: Data, generation _: UInt64) -> Bool { false }
 
     @discardableResult
     private func locked<T>(_ operation: () -> T) -> T {

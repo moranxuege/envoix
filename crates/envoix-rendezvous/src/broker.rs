@@ -26,6 +26,8 @@ const JOIN_TIMEOUT: Duration = Duration::from_secs(10);
 const CLOSE_GRACE: Duration = Duration::from_secs(10);
 /// InviteV2 broker locators are exactly six decimal digits.
 const ROOM_ID_LEN: usize = 6;
+const REMEMBERED_ROOM_ID_PREFIX: &str = "r1_";
+const REMEMBERED_ROOM_ID_ENCODED_LEN: usize = 43;
 /// Cap on concurrently waiting (unpaired) rooms, to bound memory under abuse.
 const MAX_WAITING_ROOMS: usize = 4096;
 
@@ -84,10 +86,15 @@ impl RoomRegistry {
             .map_err(|_| RendezvousError::Rejected("no join received within timeout"))??;
         validate_join(&join)?;
         let room_id = join.room_id.clone();
+        let room_log_label = if is_remembered_room_id(&room_id) {
+            "<remembered>"
+        } else {
+            room_id.as_str()
+        };
         // Record the room id onto the ambient connection span (set up by the
         // transport layer), so every event below - and the peer-address line the
         // transport emits asynchronously - correlates by room without repeating it.
-        tracing::Span::current().record("room", tracing::field::display(&room_id));
+        tracing::Span::current().record("room", tracing::field::display(room_log_label));
         tracing::info!(
             side = ?join.invitation_side,
             transfer_role = ?join.transfer_role,
@@ -262,22 +269,34 @@ fn validate_join(join: &Join) -> Result<(), RendezvousError> {
     if join.version != RENDEZVOUS_PROTOCOL_VERSION {
         return Err(RendezvousError::Rejected("unsupported join version"));
     }
-    if join.room_id.len() != ROOM_ID_LEN || !join.room_id.bytes().all(|byte| byte.is_ascii_digit())
-    {
+    let invitation_room =
+        join.room_id.len() == ROOM_ID_LEN && join.room_id.bytes().all(|byte| byte.is_ascii_digit());
+    let remembered_room = is_remembered_room_id(&join.room_id);
+    if !invitation_room && !remembered_room {
         return Err(RendezvousError::Rejected("invalid room locator"));
     }
     match join.invitation_side {
         InvitationSide::Creator => {
-            if join.bootstrap_methods != [BootstrapKind::FullTicket, BootstrapKind::RoomCode]
-                || join.selected_bootstrap_method.is_some()
-            {
+            let valid_methods = if remembered_room {
+                join.bootstrap_methods == [BootstrapKind::FullTicket]
+                    && join.transfer_role == crate::TransferRole::Receiver
+            } else {
+                join.bootstrap_methods == [BootstrapKind::FullTicket, BootstrapKind::RoomCode]
+            };
+            if !valid_methods || join.selected_bootstrap_method.is_some() {
                 return Err(RendezvousError::Rejected(
                     "invalid creator bootstrap advertisement",
                 ));
             }
         }
         InvitationSide::Joiner => {
-            if !join.bootstrap_methods.is_empty() || join.selected_bootstrap_method.is_none() {
+            let valid_selection = if remembered_room {
+                join.selected_bootstrap_method == Some(BootstrapKind::FullTicket)
+                    && join.transfer_role == crate::TransferRole::Sender
+            } else {
+                join.selected_bootstrap_method.is_some()
+            };
+            if !join.bootstrap_methods.is_empty() || !valid_selection {
                 return Err(RendezvousError::Rejected(
                     "invalid joiner bootstrap selection",
                 ));
@@ -285,6 +304,17 @@ fn validate_join(join: &Join) -> Result<(), RendezvousError> {
         }
     }
     Ok(())
+}
+
+fn is_remembered_room_id(value: &str) -> bool {
+    value
+        .strip_prefix(REMEMBERED_ROOM_ID_PREFIX)
+        .is_some_and(|encoded| {
+            encoded.len() == REMEMBERED_ROOM_ID_ENCODED_LEN
+                && encoded
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        })
 }
 
 fn joins_match(first: &Join, second: &Join) -> Option<BootstrapKind> {

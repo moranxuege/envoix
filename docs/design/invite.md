@@ -162,8 +162,9 @@ accepted before confirmation.
 
 The optional Remember hook extends the same confirmation exchange. Only after
 mutual consent does each peer contribute a fresh 256-bit value; the combined
-result is returned to the caller and is not persisted. Issue 58 owns the UI,
-storage, and rotation policy.
+result is returned to the caller. The caller may persist only that versioned
+opaque result in protected storage; invitation material is never promoted into
+the remembered credential.
 
 ## Secret handling
 
@@ -174,7 +175,8 @@ platform extras, accessibility descriptions, and diagnostics do not expose
 the complete payload. The payload is visible only at the intentional initial
 QR/share presentation.
 
-The private secret-store reference remains necessary for relaunch. Mobile
-production backends must be Keychain/Keystore-backed, and desktop development
-must use a restrictive private backend. Global durable broker consumption and
-abuse counters remain Issue 57B.
+Invitation secret-store references are process-only, so an unauthenticated
+pending invitation is discarded on relaunch. Remembered relationships use
+random durable metadata references backed by Keychain/Keystore on mobile and
+an owner-only file backend for desktop development. Global durable broker
+consumption and abuse counters remain Issue 57B.

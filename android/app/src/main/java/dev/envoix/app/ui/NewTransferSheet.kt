@@ -25,6 +25,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -61,6 +63,8 @@ import dev.envoix.app.ManifestV2StageResult
 import dev.envoix.app.Native
 import dev.envoix.app.PreparedManifestV2Source
 import dev.envoix.app.R
+import dev.envoix.app.RememberedPeerStore
+import dev.envoix.app.RememberedPeerSummary
 import dev.envoix.app.SettingsStore
 import dev.envoix.app.TransferService
 import dev.envoix.app.discovery.DiscoverySource
@@ -79,8 +83,24 @@ import org.json.JSONObject
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun NewTransferSheet(
-    onReceive: (code: String, broker: String, relay: String, qrPayload: String?, copyApproved: Boolean) -> Unit,
-    onSend: (code: String, broker: String, relay: String, jobId: String, qrPayload: String?) -> Unit,
+    onReceive: (
+        code: String,
+        broker: String,
+        relay: String,
+        qrPayload: String?,
+        copyApproved: Boolean,
+        rememberLabel: String?,
+        rememberedRelationshipId: String?,
+    ) -> Unit,
+    onSend: (
+        code: String,
+        broker: String,
+        relay: String,
+        jobId: String,
+        qrPayload: String?,
+        rememberLabel: String?,
+        rememberedRelationshipId: String?,
+    ) -> Unit,
     nearbySelection: NearbyPairingSelection? = null,
     initialPairingInput: String? = null,
     initialSources: List<android.net.Uri> = emptyList(),
@@ -119,9 +139,21 @@ fun NewTransferSheet(
     var topMode by remember { mutableStateOf("closed") } // "closed" | "show" | "scan"
     var rendezvousBusy by remember { mutableStateOf(false) }
     var rendezvousError by remember { mutableStateOf<String?>(null) }
+    val rememberedPeers = remember { mutableStateListOf<RememberedPeerSummary>() }
+    var selectedRememberedPeer by remember { mutableStateOf<RememberedPeerSummary?>(null) }
+    var rememberAfterPairing by remember { mutableStateOf(false) }
+    var rememberLabel by remember { mutableStateOf("") }
 
     val preparationScope = rememberCoroutineScope()
     val preparationMutex = remember { Mutex() }
+
+    LaunchedEffect(Unit) {
+        rememberedPeers.clear()
+        rememberedPeers +=
+            withContext(Dispatchers.IO) {
+                RememberedPeerStore.get(context).peers()
+            }
+    }
 
     fun addSources(sources: List<ManifestV2Source>) {
         if (sources.isEmpty()) return
@@ -378,7 +410,11 @@ fun NewTransferSheet(
     val roomCodeValid = typed.isNotBlank() && InviteCodec.normalizeRoomCode(typed) != null
     val ready =
         !rendezvousBusy &&
-            (if (joining) invitationInput != null || roomCodeValid else generated != null) &&
+            (
+                selectedRememberedPeer != null ||
+                    (if (joining) invitationInput != null || roomCodeValid else generated != null)
+            ) &&
+            (!rememberAfterPairing || selectedRememberedPeer != null || rememberLabel.trim().isNotEmpty()) &&
             when (role) {
                 "send" ->
                     preparedSources.isNotEmpty() &&
@@ -588,6 +624,54 @@ fun NewTransferSheet(
             )
             Spacer(Modifier.height(6.dp))
 
+            if (rememberedPeers.isNotEmpty()) {
+                rememberedPeers.forEach { peer ->
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(
+                                if (selectedRememberedPeer?.relationshipId == peer.relationshipId) {
+                                    colors.accentSoft
+                                } else {
+                                    colors.surface
+                                },
+                            ).clickable {
+                                selectedRememberedPeer =
+                                    peer.takeUnless {
+                                        selectedRememberedPeer?.relationshipId == peer.relationshipId
+                                    }
+                            }.padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            peer.label,
+                            color = colors.text,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Icon(
+                            Icons.Default.Delete,
+                            contentDescription = text("Forget device", "忘记设备"),
+                            tint = colors.danger,
+                            modifier =
+                                Modifier
+                                    .clip(CircleShape)
+                                    .clickable {
+                                        RememberedPeerStore.get(context).delete(peer.relationshipId)
+                                        rememberedPeers.remove(peer)
+                                        if (selectedRememberedPeer == peer) {
+                                            selectedRememberedPeer = null
+                                        }
+                                    }.padding(6.dp)
+                                    .size(18.dp),
+                        )
+                    }
+                    Spacer(Modifier.height(6.dp))
+                }
+                Spacer(Modifier.height(6.dp))
+            }
+
             // ---- top pane: show my QR vs scan one ----
             Row(
                 Modifier
@@ -678,6 +762,31 @@ fun NewTransferSheet(
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
+
+            if (selectedRememberedPeer == null) {
+                Spacer(Modifier.height(12.dp))
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable { rememberAfterPairing = !rememberAfterPairing },
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Checkbox(
+                        checked = rememberAfterPairing,
+                        onCheckedChange = { rememberAfterPairing = it },
+                    )
+                    Text(text("Remember this device", "记住此设备"), color = colors.text)
+                }
+                if (rememberAfterPairing) {
+                    OutlinedTextField(
+                        value = rememberLabel,
+                        onValueChange = { rememberLabel = it },
+                        placeholder = { Text(text("Device label", "设备名称")) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
         }
 
         // ---- start ----
@@ -690,6 +799,30 @@ fun NewTransferSheet(
                 .clip(RoundedCornerShape(14.dp))
                 .background(colors.accent.copy(alpha = if (ready) 1f else 0.4f))
                 .clickable(enabled = ready) {
+                    selectedRememberedPeer?.let { peer ->
+                        if (role == "send") {
+                            onSend(
+                                peer.label,
+                                peer.broker,
+                                peer.relay,
+                                preparedJobId!!,
+                                null,
+                                null,
+                                peer.relationshipId,
+                            )
+                        } else {
+                            onReceive(
+                                peer.label,
+                                peer.broker,
+                                peer.relay,
+                                null,
+                                true,
+                                null,
+                                peer.relationshipId,
+                            )
+                        }
+                        return@clickable
+                    }
                     val prepared =
                         if (joining) {
                             InviteCodec.parseForRole(invitationInput ?: typed, role)
@@ -715,9 +848,25 @@ fun NewTransferSheet(
                     val qr = if (joining) null else generated?.payload
                     val startLocal = {
                         if (role == "send") {
-                            onSend(c, useBroker, useRelay, preparedJobId!!, qr)
+                            onSend(
+                                c,
+                                useBroker,
+                                useRelay,
+                                preparedJobId!!,
+                                qr,
+                                rememberLabel.trim().takeIf { rememberAfterPairing },
+                                null,
+                            )
                         } else {
-                            onReceive(c, useBroker, useRelay, qr, true)
+                            onReceive(
+                                c,
+                                useBroker,
+                                useRelay,
+                                qr,
+                                true,
+                                rememberLabel.trim().takeIf { rememberAfterPairing },
+                                null,
+                            )
                         }
                     }
                     val offer = onOfferInvite

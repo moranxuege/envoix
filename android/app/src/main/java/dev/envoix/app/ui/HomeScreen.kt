@@ -102,8 +102,24 @@ fun HomeScreen(
     transfers: List<Transfer>,
     initialSharedUris: List<android.net.Uri> = emptyList(),
     onSharedUrisConsumed: () -> Unit = {},
-    onReceive: (code: String, broker: String, relay: String, qrPayload: String?, copyApproved: Boolean) -> Unit,
-    onSend: (code: String, broker: String, relay: String, jobId: String, qrPayload: String?) -> Unit,
+    onReceive: (
+        code: String,
+        broker: String,
+        relay: String,
+        qrPayload: String?,
+        copyApproved: Boolean,
+        rememberLabel: String?,
+        rememberedRelationshipId: String?,
+    ) -> Unit,
+    onSend: (
+        code: String,
+        broker: String,
+        relay: String,
+        jobId: String,
+        qrPayload: String?,
+        rememberLabel: String?,
+        rememberedRelationshipId: String?,
+    ) -> Unit,
     onPauseResume: (Long) -> Unit,
     onApproveReceive: (Long) -> Unit,
     onCancel: (Long) -> Unit,
@@ -226,14 +242,14 @@ fun HomeScreen(
                 initialRole = initialRole,
                 initialSources = initialSharedUris,
                 initialPairingInput = initialPairingInput,
-                onReceive = { c, b, r, qr, copyApproved ->
+                onReceive = { c, b, r, qr, copyApproved, rememberLabel, rememberedRelationshipId ->
                     sheetRole = null
-                    onReceive(c, b, r, qr, copyApproved)
+                    onReceive(c, b, r, qr, copyApproved, rememberLabel, rememberedRelationshipId)
                 },
-                onSend = { c, b, r, jobId, qr ->
+                onSend = { c, b, r, jobId, qr, rememberLabel, rememberedRelationshipId ->
                     sheetRole = null
                     onSharedUrisConsumed()
-                    onSend(c, b, r, jobId, qr)
+                    onSend(c, b, r, jobId, qr, rememberLabel, rememberedRelationshipId)
                 },
             )
         }

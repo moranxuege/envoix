@@ -61,8 +61,24 @@ import dev.envoix.app.discovery.ProviderStatus
 @Composable
 internal fun DiscoveryScreen(
     onBack: () -> Unit,
-    onReceive: (code: String, broker: String, relay: String, qrPayload: String?, copyApproved: Boolean) -> Unit,
-    onSend: (code: String, broker: String, relay: String, jobId: String, qrPayload: String?) -> Unit,
+    onReceive: (
+        code: String,
+        broker: String,
+        relay: String,
+        qrPayload: String?,
+        copyApproved: Boolean,
+        rememberLabel: String?,
+        rememberedRelationshipId: String?,
+    ) -> Unit,
+    onSend: (
+        code: String,
+        broker: String,
+        relay: String,
+        jobId: String,
+        qrPayload: String?,
+        rememberLabel: String?,
+        rememberedRelationshipId: String?,
+    ) -> Unit,
     discoveryViewModel: DiscoveryViewModel = viewModel(),
 ) {
     val colors = Envoix.colors
@@ -219,15 +235,47 @@ internal fun DiscoveryScreen(
                 nearbySelection = selection,
                 initialPairingInput = initialPairingInput,
                 onOfferInvite = null,
-                onReceive = { code, broker, relay, qrPayload, copyApproved ->
+                onReceive = {
+                    code,
+                    broker,
+                    relay,
+                    qrPayload,
+                    copyApproved,
+                    rememberLabel,
+                    rememberedRelationshipId,
+                    ->
                     pairingSelection = null
                     initialPairingInput = null
-                    onReceive(code, broker, relay, qrPayload, copyApproved)
+                    onReceive(
+                        code,
+                        broker,
+                        relay,
+                        qrPayload,
+                        copyApproved,
+                        rememberLabel,
+                        rememberedRelationshipId,
+                    )
                 },
-                onSend = { code, broker, relay, jobId, qrPayload ->
+                onSend = {
+                    code,
+                    broker,
+                    relay,
+                    jobId,
+                    qrPayload,
+                    rememberLabel,
+                    rememberedRelationshipId,
+                    ->
                     pairingSelection = null
                     initialPairingInput = null
-                    onSend(code, broker, relay, jobId, qrPayload)
+                    onSend(
+                        code,
+                        broker,
+                        relay,
+                        jobId,
+                        qrPayload,
+                        rememberLabel,
+                        rememberedRelationshipId,
+                    )
                 },
             )
         }

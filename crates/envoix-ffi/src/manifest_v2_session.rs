@@ -5,15 +5,20 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use envoix_client::api::{
-    DestinationDecisionV2, DestinationRequestV2, EventSink, PairingConfig, PeerSource,
-    PendingManifestV2Receive, SessionError, TransferCancelToken, TransferEvent, acquire_invitation,
-    parse_broker_addr, receive_manifest_v2_offer_enable_mdns, receive_manifest_v2_offer_via_room,
+    AuthenticationHandler, AuthenticationOutcome, DestinationDecisionV2, DestinationRequestV2,
+    EventSink, PairingConfig, PeerSource, PendingManifestV2Receive, SessionError,
+    TransferCancelToken, TransferEvent, acquire_invitation, acquire_remembered_credential,
+    acquire_shared_token, parse_broker_addr, receive_manifest_v2_offer_enable_mdns,
+    receive_manifest_v2_offer_via_remembered,
+    receive_manifest_v2_offer_via_room_with_authentication,
     receive_manifest_v2_offer_with_bound_peer, send_manifest_v2_enable_mdns,
-    send_manifest_v2_manual, send_manifest_v2_via_room,
+    send_manifest_v2_manual, send_manifest_v2_via_remembered,
+    send_manifest_v2_via_room_with_authentication,
 };
 use envoix_types::PairingStep;
 use tokio::sync::Mutex;
@@ -210,6 +215,65 @@ struct NativeSessionEvents {
     observer: Arc<dyn TransferObserver>,
 }
 
+struct NativeAuthentication {
+    observer: Arc<dyn TransferObserver>,
+    remember_consent: bool,
+    rotation: Option<(Vec<u8>, u64)>,
+    persisted: AtomicBool,
+}
+
+impl NativeAuthentication {
+    fn invitation(observer: Arc<dyn TransferObserver>, remember_consent: bool) -> Self {
+        Self {
+            observer,
+            remember_consent,
+            rotation: None,
+            persisted: AtomicBool::new(false),
+        }
+    }
+
+    fn rotation(
+        observer: Arc<dyn TransferObserver>,
+        opaque_credential: Vec<u8>,
+        next_generation: u64,
+    ) -> Self {
+        Self {
+            observer,
+            remember_consent: false,
+            rotation: Some((opaque_credential, next_generation)),
+            persisted: AtomicBool::new(false),
+        }
+    }
+
+    fn persisted(&self) -> bool {
+        self.persisted.load(Ordering::Acquire)
+    }
+}
+
+impl AuthenticationHandler for NativeAuthentication {
+    fn remember_consent(&self) -> bool {
+        self.remember_consent
+    }
+
+    fn on_authenticated(&self, outcome: AuthenticationOutcome) -> Result<(), SessionError> {
+        let credential = if let Some(secret) = outcome.remember_secret {
+            Some((secret.into_credential().to_opaque(), 0))
+        } else {
+            self.rotation.clone()
+        };
+        let Some((opaque, generation)) = credential else {
+            return Ok(());
+        };
+        if !self.observer.on_remembered_credential(opaque, generation) {
+            return Err(SessionError::Storage(
+                "protected remembered credential could not be persisted".into(),
+            ));
+        }
+        self.persisted.store(true, Ordering::Release);
+        Ok(())
+    }
+}
+
 impl EventSink for NativeSessionEvents {
     fn on_event(&self, event: TransferEvent) {
         match event {
@@ -303,6 +367,8 @@ pub async fn send_transfer_job_v2(
                 events,
                 &cancellation.token,
                 options.relay.as_deref(),
+                observer.clone(),
+                request.remember_consent,
             )
             .await;
             match result {
@@ -516,6 +582,7 @@ async fn receive_one_offer_attempt(
         observer,
         cancel,
         options.relay.as_deref(),
+        request.remember_consent,
     )
     .await
 }
@@ -528,10 +595,13 @@ async fn send_attempt(
     events: Arc<dyn EventSink>,
     cancel: &TransferCancelToken,
     relay: Option<&str>,
+    observer: Arc<dyn TransferObserver>,
+    remember_consent: bool,
 ) -> Result<envoix_client::api::SenderManifestV2SessionSummary, SessionError> {
     match source {
-        PeerSource::Manual { peer, token } => {
-            let pairing = PairingConfig::spake2_shared_token(token.clone())?;
+        PeerSource::Manual { peer, token_ref } => {
+            let token = acquire_shared_token(token_ref).map_err(op_err_core)?;
+            let pairing = PairingConfig::spake2_shared_token(token)?;
             send_manifest_v2_manual(
                 peer.clone(),
                 job,
@@ -548,7 +618,8 @@ async fn send_attempt(
         } => {
             let mut lease = acquire_invitation(secret_ref).map_err(op_err_core)?;
             let broker = parse_broker_addr(broker, relay)?;
-            let result = send_manifest_v2_via_room(
+            let authentication = NativeAuthentication::invitation(observer, remember_consent);
+            let result = send_manifest_v2_via_room_with_authentication(
                 broker,
                 lease.bootstrap().clone(),
                 job,
@@ -556,6 +627,7 @@ async fn send_attempt(
                 config,
                 events,
                 cancel,
+                &authentication,
             )
             .await;
             if result.is_ok() {
@@ -563,8 +635,58 @@ async fn send_attempt(
             }
             result
         }
-        PeerSource::Mdns { token: Some(token) } => {
-            let pairing = PairingConfig::spake2_shared_token(token.clone())?;
+        PeerSource::Remembered {
+            credential_ref,
+            generation,
+            previous_generation,
+            broker,
+        } => {
+            let credential = acquire_remembered_credential(credential_ref).map_err(op_err_core)?;
+            let broker_addr = parse_broker_addr(broker, relay)?;
+            // Keep joining the receiver's fallback window before trying our
+            // own previous generation.
+            let mut generations = vec![*generation, *generation];
+            if let Some(previous) = previous_generation {
+                generations.push(*previous);
+            }
+            let mut last_error = None;
+            for generation in generations {
+                let next_generation = generation.checked_add(1).ok_or_else(|| {
+                    SessionError::InvalidInput(
+                        "remembered credential generation is exhausted".into(),
+                    )
+                })?;
+                let authentication = NativeAuthentication::rotation(
+                    observer.clone(),
+                    credential.to_opaque(),
+                    next_generation,
+                );
+                let result = send_manifest_v2_via_remembered(
+                    broker_addr.clone(),
+                    broker.clone(),
+                    credential.derive_session(generation),
+                    job,
+                    state_directory.clone(),
+                    config.clone(),
+                    events.clone(),
+                    cancel,
+                    &authentication,
+                )
+                .await;
+                if result.is_ok() || authentication.persisted() || cancel.is_cancelled() {
+                    return result;
+                }
+                last_error = result.err();
+            }
+            Err(last_error.unwrap_or_else(|| {
+                SessionError::InvalidInput("remembered credential has no usable generation".into())
+            }))
+        }
+        PeerSource::Mdns {
+            token_ref: Some(token_ref),
+        } => {
+            let token = acquire_shared_token(token_ref).map_err(op_err_core)?;
+            let pairing = PairingConfig::spake2_shared_token(token)?;
             send_manifest_v2_enable_mdns(
                 job.clone(),
                 state_directory,
@@ -588,16 +710,18 @@ async fn receive_offer_attempt(
     observer: Arc<dyn TransferObserver>,
     cancel: &TransferCancelToken,
     relay: Option<&str>,
+    remember_consent: bool,
 ) -> Result<PendingManifestV2Receive, SessionError> {
     let listen = config.clone();
     match source {
-        PeerSource::ShowManual { token } => {
-            let token = token.clone().ok_or_else(|| {
+        PeerSource::ShowManual { token_ref } => {
+            let token_ref = token_ref.as_ref().ok_or_else(|| {
                 SessionError::InvalidInput(
                     "manual receiver display requires a caller-owned pairing token".into(),
                 )
             })?;
-            let pairing = PairingConfig::spake2_shared_token(token.clone())?;
+            let token = acquire_shared_token(token_ref).map_err(op_err_core)?;
+            let pairing = PairingConfig::spake2_shared_token(token)?;
             receive_manifest_v2_offer_with_bound_peer(
                 listen_addrs(&listen),
                 config,
@@ -610,12 +734,11 @@ async fn receive_offer_attempt(
             )
             .await
         }
-        PeerSource::Mdns { token } => {
-            let token = token
-                .clone()
-                .map(Ok)
-                .unwrap_or_else(generate_token)
-                .map_err(op_err_core)?;
+        PeerSource::Mdns { token_ref } => {
+            let token = token_ref
+                .as_ref()
+                .map(|token_ref| acquire_shared_token(token_ref).map_err(op_err_core))
+                .unwrap_or_else(generate_token)?;
             let pairing = PairingConfig::spake2_shared_token(token.clone())?;
             receive_manifest_v2_offer_enable_mdns(
                 listen_addrs(&listen),
@@ -634,19 +757,78 @@ async fn receive_offer_attempt(
         } => {
             let mut lease = acquire_invitation(secret_ref).map_err(op_err_core)?;
             let broker = parse_broker_addr(broker, relay)?;
-            let result = receive_manifest_v2_offer_via_room(
+            let authentication = NativeAuthentication::invitation(observer, remember_consent);
+            let result = receive_manifest_v2_offer_via_room_with_authentication(
                 broker,
                 lease.bootstrap().clone(),
                 listen_addrs(&listen),
                 config,
                 events,
                 cancel,
+                &authentication,
             )
             .await;
             if result.is_ok() {
                 lease.consume();
             }
             result
+        }
+        PeerSource::Remembered {
+            credential_ref,
+            generation,
+            previous_generation,
+            broker,
+        } => {
+            let credential = acquire_remembered_credential(credential_ref).map_err(op_err_core)?;
+            let broker_addr = parse_broker_addr(broker, relay)?;
+            // Offset the sender's current/current/previous schedule so either
+            // side of a one-generation crash can rendezvous.
+            let mut generations = vec![*generation];
+            if let Some(previous) = previous_generation {
+                generations.push(*previous);
+                generations.push(*generation);
+            }
+            let last_index = generations.len() - 1;
+            let mut last_error = None;
+            for (index, generation) in generations.into_iter().enumerate() {
+                let next_generation = generation.checked_add(1).ok_or_else(|| {
+                    SessionError::InvalidInput(
+                        "remembered credential generation is exhausted".into(),
+                    )
+                })?;
+                let authentication = NativeAuthentication::rotation(
+                    observer.clone(),
+                    credential.to_opaque(),
+                    next_generation,
+                );
+                let receive = receive_manifest_v2_offer_via_remembered(
+                    broker_addr.clone(),
+                    broker.clone(),
+                    credential.derive_session(generation),
+                    listen_addrs(&listen),
+                    config.clone(),
+                    events.clone(),
+                    cancel,
+                    &authentication,
+                );
+                let result = if index < last_index {
+                    match tokio::time::timeout(std::time::Duration::from_secs(35), receive).await {
+                        Ok(result) => result,
+                        Err(_) => Err(SessionError::Transport(
+                            "current remembered generation did not find the peer".into(),
+                        )),
+                    }
+                } else {
+                    receive.await
+                };
+                if result.is_ok() || authentication.persisted() || cancel.is_cancelled() {
+                    return result;
+                }
+                last_error = result.err();
+            }
+            Err(last_error.unwrap_or_else(|| {
+                SessionError::InvalidInput("remembered credential has no usable generation".into())
+            }))
         }
         _ => Err(SessionError::InvalidInput(
             "selected route cannot listen for a canonical sender".into(),

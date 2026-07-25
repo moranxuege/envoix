@@ -22,9 +22,10 @@ use envoix_types::{TransferDirection, TransferId};
 
 use crate::connection::IrohFrameConnection;
 use crate::{
-    BoundEndpoint, EventSink, PairingConfig, PeerDescriptor, SessionConfig, SessionError,
-    TransferCancelToken, TransferProtocol, auth_bounded, authenticate_receiver,
-    authenticate_sender, dial_peer_addr_for_protocol, interrupted_error, peer_addr_from_descriptor,
+    AuthenticationHandler, BoundEndpoint, EventSink, NoopAuthenticationHandler, PairingConfig,
+    PeerDescriptor, SessionConfig, SessionError, TransferCancelToken, TransferProtocol,
+    auth_bounded, authenticate_receiver_with_remember, authenticate_sender_with_remember,
+    dial_peer_addr_for_protocol, interrupted_error, peer_addr_from_descriptor,
 };
 
 struct SessionManifestV2Progress {
@@ -194,6 +195,30 @@ pub async fn send_manifest_v2_to_endpoint_addr(
     events: Arc<dyn EventSink>,
     cancel: &TransferCancelToken,
 ) -> Result<SenderManifestV2SessionSummary, SessionError> {
+    send_manifest_v2_to_endpoint_addr_with_authentication(
+        peer_addr,
+        job,
+        state_directory,
+        config,
+        pairing,
+        events,
+        cancel,
+        &NoopAuthenticationHandler,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn send_manifest_v2_to_endpoint_addr_with_authentication(
+    peer_addr: iroh::EndpointAddr,
+    job: &CanonicalTransferJob,
+    state_directory: PathBuf,
+    config: SessionConfig,
+    pairing: &PairingConfig,
+    events: Arc<dyn EventSink>,
+    cancel: &TransferCancelToken,
+    authentication: &dyn AuthenticationHandler,
+) -> Result<SenderManifestV2SessionSummary, SessionError> {
     let manifest = job.manifest().ok_or_else(|| {
         CoreError::InvalidInput("transfer job must be sealed before dialing".into())
     })?;
@@ -235,7 +260,24 @@ pub async fn send_manifest_v2_to_endpoint_addr(
         }
     };
     connection.watch_path(events.clone());
-    if let Err(error) = auth_bounded(authenticate_sender(&mut connection, pairing), cancel).await {
+    let outcome = match auth_bounded(
+        authenticate_sender_with_remember(
+            &mut connection,
+            pairing,
+            authentication.remember_consent(),
+        ),
+        cancel,
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let _ = ManifestV2FrameConnection::close(&mut connection).await;
+            local_endpoint.close().await;
+            return Err(error);
+        }
+    };
+    if let Err(error) = authentication.on_authenticated(outcome) {
         let _ = ManifestV2FrameConnection::close(&mut connection).await;
         local_endpoint.close().await;
         return Err(error);
@@ -310,6 +352,23 @@ pub async fn receive_manifest_v2_offer(
     events: Arc<dyn EventSink>,
     cancel: &TransferCancelToken,
 ) -> Result<PendingManifestV2Receive, SessionError> {
+    receive_manifest_v2_offer_with_authentication(
+        bound_endpoint,
+        pairing,
+        events,
+        cancel,
+        &NoopAuthenticationHandler,
+    )
+    .await
+}
+
+pub async fn receive_manifest_v2_offer_with_authentication(
+    bound_endpoint: BoundEndpoint,
+    pairing: &PairingConfig,
+    events: Arc<dyn EventSink>,
+    cancel: &TransferCancelToken,
+    authentication: &dyn AuthenticationHandler,
+) -> Result<PendingManifestV2Receive, SessionError> {
     let mut connection_failures = 0_u32;
     let mut authentication_failures = 0_u32;
     let mut connection = loop {
@@ -340,8 +399,23 @@ pub async fn receive_manifest_v2_offer(
             ));
         }
         connection.watch_path(events.clone());
-        match auth_bounded(authenticate_receiver(&mut connection, pairing), cancel).await {
-            Ok(()) => break connection,
+        match auth_bounded(
+            authenticate_receiver_with_remember(
+                &mut connection,
+                pairing,
+                authentication.remember_consent(),
+            ),
+            cancel,
+        )
+        .await
+        {
+            Ok(outcome) => match authentication.on_authenticated(outcome) {
+                Ok(()) => break connection,
+                Err(error) => {
+                    let _ = ManifestV2FrameConnection::close(&mut connection).await;
+                    return Err(error);
+                }
+            },
             Err(error) if cancel.is_cancelled() => {
                 let _ = ManifestV2FrameConnection::close(&mut connection).await;
                 return Err(error);

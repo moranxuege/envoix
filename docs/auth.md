@@ -48,8 +48,22 @@ role changes, method downgrade, and exporter substitution fail confirmation.
 Remember is an optional extension of the existing confirmation exchange, not a
 third handshake. Each peer advertises consent. Only if both consent does each
 send a fresh 256-bit contribution; both contributions and the invitation
-binding are combined into the returned value. The authentication crate does
-not persist it. Issue 58 owns user consent, secure storage, and rotation.
+binding are combined into the returned value. The authentication crate returns
+that value only after exporter-bound authentication and before any Manifest
+frame. Apple stores the versioned opaque credential in a this-device-only
+Keychain item; Android wraps it with a non-exportable Android Keystore AES-GCM
+key; the desktop development backend uses an owner-only (`0600`) file.
+
+For generation `n`, the core derives separate high-entropy room and control
+values with the labels `envoix room id` and `envoix room auth`. The receiver
+advertises as responder and the sender joins as initiator. The authenticated
+control exchange is bound into a fresh data-plane password. Successful
+authentication advances to generation `n + 1`; one previous generation is
+retained for bounded crash recovery.
+
+Invitation tickets, Room Codes, and developer shared tokens remain
+process-only. Serialized peer sources and active-session records contain only
+random references, never those raw values.
 
 ## Compatibility developer modes
 

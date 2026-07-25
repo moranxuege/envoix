@@ -54,13 +54,29 @@ class MainActivity : ComponentActivity() {
                         Screen.Discovery ->
                             DiscoveryScreen(
                                 onBack = { screen = Screen.Home },
-                                onReceive = { c, b, r, qr, copyApproved ->
+                                onReceive = { c, b, r, qr, copyApproved, rememberLabel, rememberedRelationshipId ->
                                     screen = Screen.Home
-                                    vm.startReceive(c, b, r, qr, copyApproved)
+                                    vm.startReceive(
+                                        c,
+                                        b,
+                                        r,
+                                        qr,
+                                        copyApproved,
+                                        rememberLabel,
+                                        rememberedRelationshipId,
+                                    )
                                 },
-                                onSend = { c, b, r, jobId, qr ->
+                                onSend = { c, b, r, jobId, qr, rememberLabel, rememberedRelationshipId ->
                                     screen = Screen.Home
-                                    vm.startSend(c, jobId, b, r, qr)
+                                    vm.startSend(
+                                        c,
+                                        jobId,
+                                        b,
+                                        r,
+                                        qr,
+                                        rememberLabel,
+                                        rememberedRelationshipId,
+                                    )
                                 },
                             )
                         Screen.Logs -> LogScreen(onBack = { screen = Screen.Home })
@@ -72,13 +88,29 @@ class MainActivity : ComponentActivity() {
                                 transfers = transfers,
                                 initialSharedUris = incomingShares,
                                 onSharedUrisConsumed = { sharedUris.value = emptyList() },
-                                onReceive = { c, b, r, qr, copyApproved ->
+                                onReceive = { c, b, r, qr, copyApproved, rememberLabel, rememberedRelationshipId ->
                                     inboundInvite = null
-                                    vm.startReceive(c, b, r, qr, copyApproved)
+                                    vm.startReceive(
+                                        c,
+                                        b,
+                                        r,
+                                        qr,
+                                        copyApproved,
+                                        rememberLabel,
+                                        rememberedRelationshipId,
+                                    )
                                 },
-                                onSend = { c, b, r, jobId, qr ->
+                                onSend = { c, b, r, jobId, qr, rememberLabel, rememberedRelationshipId ->
                                     inboundInvite = null
-                                    vm.startSend(c, jobId, b, r, qr)
+                                    vm.startSend(
+                                        c,
+                                        jobId,
+                                        b,
+                                        r,
+                                        qr,
+                                        rememberLabel,
+                                        rememberedRelationshipId,
+                                    )
                                 },
                                 onPauseResume = { vm.pauseResume(it) },
                                 onApproveReceive = { vm.approveReceive(it) },

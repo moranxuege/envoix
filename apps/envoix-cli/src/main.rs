@@ -233,8 +233,10 @@ async fn send_job(
     relay: Option<&str>,
 ) -> Result<api::SenderManifestV2SessionSummary, api::SessionError> {
     match source {
-        PeerSource::Manual { peer, token } => {
-            let pairing = PairingConfig::spake2_shared_token(token.clone())?;
+        PeerSource::Manual { peer, token_ref } => {
+            let token = api::acquire_shared_token(token_ref)
+                .map_err(|error| api::SessionError::InvalidInput(error.to_string()))?;
+            let pairing = PairingConfig::spake2_shared_token(token)?;
             api::send_manifest_v2_manual(
                 peer.clone(),
                 job,
@@ -267,8 +269,12 @@ async fn send_job(
             }
             result
         }
-        PeerSource::Mdns { token: Some(token) } => {
-            let pairing = PairingConfig::spake2_shared_token(token.clone())?;
+        PeerSource::Mdns {
+            token_ref: Some(token_ref),
+        } => {
+            let token = api::acquire_shared_token(token_ref)
+                .map_err(|error| api::SessionError::InvalidInput(error.to_string()))?;
+            let pairing = PairingConfig::spake2_shared_token(token)?;
             api::send_manifest_v2_enable_mdns(
                 job.clone(),
                 state_directory,
@@ -294,12 +300,14 @@ async fn receive_offer(
     relay: Option<&str>,
 ) -> Result<PendingManifestV2Receive, api::SessionError> {
     match source {
-        PeerSource::ShowManual { token } => {
-            let token = token
-                .clone()
-                .map(Ok)
-                .unwrap_or_else(generate_token)
-                .map_err(|error| api::SessionError::InvalidInput(error.to_string()))?;
+        PeerSource::ShowManual { token_ref } => {
+            let token = token_ref
+                .as_ref()
+                .map(|token_ref| {
+                    api::acquire_shared_token(token_ref)
+                        .map_err(|error| api::SessionError::InvalidInput(error.to_string()))
+                })
+                .unwrap_or_else(generate_token)?;
             let pairing = PairingConfig::spake2_shared_token(token.clone())?;
             api::receive_manifest_v2_offer_with_bound_peer(
                 listen_addrs.clone(),
@@ -311,12 +319,14 @@ async fn receive_offer(
             )
             .await
         }
-        PeerSource::Mdns { token } => {
-            let token = token
-                .clone()
-                .map(Ok)
-                .unwrap_or_else(generate_token)
-                .map_err(|error| api::SessionError::InvalidInput(error.to_string()))?;
+        PeerSource::Mdns { token_ref } => {
+            let token = token_ref
+                .as_ref()
+                .map(|token_ref| {
+                    api::acquire_shared_token(token_ref)
+                        .map_err(|error| api::SessionError::InvalidInput(error.to_string()))
+                })
+                .unwrap_or_else(generate_token)?;
             let pairing = PairingConfig::spake2_shared_token(token.clone())?;
             api::receive_manifest_v2_offer_enable_mdns(
                 listen_addrs.clone(),

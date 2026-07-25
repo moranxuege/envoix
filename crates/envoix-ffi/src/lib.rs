@@ -11,8 +11,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use envoix_client::PeerDescriptor;
 use envoix_client::api::{
     Capabilities, Client, CreatedInvitation, InvitationBootstrap, InvitationError,
-    InvitationErrorCode, InviteV2, PathPolicy, PeerSource, RoomCode, TransferOptions, TransferRole,
-    ValidatedInvitation,
+    InvitationErrorCode, InviteV2, PathPolicy, PeerSource, RememberedCredentialRef, RoomCode,
+    TransferOptions, TransferRole, ValidatedInvitation, register_remembered_credential,
 };
 
 uniffi::setup_scaffolding!();
@@ -25,7 +25,7 @@ pub use manifest_v2_session::*;
 const DEFAULT_RENDEZVOUS_BROKER: &str =
     "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445";
 const DEFAULT_RELAY_URL: &str = "https://envoix.chkxwlyh.us:8444";
-const ENVOIX_FFI_API_VERSION: u32 = 4;
+const ENVOIX_FFI_API_VERSION: u32 = 5;
 
 static FFI_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static CREATED_INVITATIONS: OnceLock<Mutex<HashMap<(String, TransferRole), InvitationBootstrap>>> =
@@ -193,6 +193,7 @@ pub enum FfiTransferDirection {
 pub enum FfiTransferMode {
     Manual,
     Invite,
+    Remembered,
     ShowManual,
     ShowInvite,
     Mdns,
@@ -233,6 +234,10 @@ pub struct FfiTransferRequest {
     pub invite: String,
     pub code: String,
     pub token: String,
+    pub remember_consent: bool,
+    pub remembered_credential_ref: String,
+    pub remembered_generation: u64,
+    pub remembered_previous_generation: Option<u64>,
     pub broker: String,
     pub relay: String,
     pub config_path: String,
@@ -250,6 +255,13 @@ impl std::fmt::Debug for FfiTransferRequest {
             .field("invite", &"<redacted>")
             .field("code", &"<redacted>")
             .field("token", &"<redacted>")
+            .field("remember_consent", &self.remember_consent)
+            .field("remembered_credential_ref", &"<redacted>")
+            .field("remembered_generation", &self.remembered_generation)
+            .field(
+                "remembered_previous_generation",
+                &self.remembered_previous_generation,
+            )
             .field("broker", &self.broker)
             .field("relay", &self.relay)
             .field("config_path", &self.config_path)
@@ -355,6 +367,10 @@ pub trait TransferObserver: Send + Sync {
     fn on_completed(&self, bytes: u64);
     fn on_transfer_failed(&self, failure: FfiTransferFailure);
     fn on_diagnostic(&self, message: String);
+    /// Called only on the native worker at the authenticated persistence
+    /// boundary. Implementations store these bytes immediately and must never
+    /// project or log them.
+    fn on_remembered_credential(&self, opaque_credential: Vec<u8>, generation: u64) -> bool;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
@@ -374,6 +390,7 @@ pub fn envoix_core_info() -> FfiCoreInfo {
             "manifest_v2_session".into(),
             "paged_transfer_inventory_v2".into(),
             "delivery_proof_v2".into(),
+            "remembered_devices_v1".into(),
         ],
     }
 }
@@ -428,6 +445,17 @@ pub fn normalize_room_code(input: String) -> Result<String, EnvoixError> {
     RoomCode::parse(&input)
         .map(|code| code.to_string())
         .map_err(invitation_err)
+}
+
+/// Validate protected bytes loaded by the platform and retain them behind a
+/// process-only handle for subsequent transfer requests.
+#[uniffi::export]
+pub fn register_protected_remembered_credential(
+    opaque_credential: Vec<u8>,
+) -> Result<String, EnvoixError> {
+    register_remembered_credential(&opaque_credential)
+        .map(|reference| reference.as_str().to_string())
+        .map_err(op_err)
 }
 
 impl FfiPairingInvite {
@@ -508,12 +536,15 @@ pub(crate) fn peer_sources_for_request(
         }])
     };
     match request.mode {
-        FfiTransferMode::Manual => single(PeerSource::Manual {
-            peer: required(&request.peer_descriptor, "peer_descriptor")?
-                .parse::<PeerDescriptor>()
-                .map_err(op_err)?,
-            token: required(&request.token, "token")?.to_string(),
-        }),
+        FfiTransferMode::Manual => single(
+            PeerSource::manual(
+                required(&request.peer_descriptor, "peer_descriptor")?
+                    .parse::<PeerDescriptor>()
+                    .map_err(op_err)?,
+                required(&request.token, "token")?.to_string(),
+            )
+            .map_err(op_err)?,
+        ),
         FfiTransferMode::Invite => {
             let invite = InviteV2::parse_for_role(
                 required(&request.invite, "invite")?,
@@ -524,9 +555,34 @@ pub(crate) fn peer_sources_for_request(
             let broker = invite.invitation().public_context.broker.clone();
             single(PeerSource::invitation(invite.into_bootstrap(), broker).map_err(op_err)?)
         }
-        FfiTransferMode::ShowManual => single(PeerSource::ShowManual {
-            token: non_empty(&request.token).map(str::to_string),
-        }),
+        FfiTransferMode::Remembered => {
+            if !request.rendezvous.use_room || !request.rendezvous.internet_available {
+                return Err(EnvoixError::Operation {
+                    reason: "remembered devices require an available rendezvous broker".into(),
+                });
+            }
+            let credential_ref = RememberedCredentialRef::from_process_handle(
+                required(
+                    &request.remembered_credential_ref,
+                    "remembered_credential_ref",
+                )?
+                .to_string(),
+            );
+            let broker = non_empty(&request.broker)
+                .or_else(|| non_empty(&settings.server_url))
+                .unwrap_or(DEFAULT_RENDEZVOUS_BROKER)
+                .to_string();
+            single(PeerSource::remembered_registered(
+                credential_ref,
+                request.remembered_generation,
+                request.remembered_previous_generation,
+                broker,
+            ))
+        }
+        FfiTransferMode::ShowManual => single(
+            PeerSource::show_manual(non_empty(&request.token).map(str::to_string))
+                .map_err(op_err)?,
+        ),
         FfiTransferMode::ShowInvite => {
             let broker = non_empty(&request.broker)
                 .or_else(|| non_empty(&settings.server_url))
@@ -547,9 +603,9 @@ pub(crate) fn peer_sources_for_request(
             .map_err(invitation_err)?;
             single(PeerSource::invitation(created.into_bootstrap(), broker).map_err(op_err)?)
         }
-        FfiTransferMode::Mdns => single(PeerSource::Mdns {
-            token: non_empty(&request.token).map(str::to_string),
-        }),
+        FfiTransferMode::Mdns => {
+            single(PeerSource::mdns(non_empty(&request.token).map(str::to_string)).map_err(op_err)?)
+        }
         FfiTransferMode::Room => {
             let room_code =
                 RoomCode::parse(required(&request.code, "code")?).map_err(invitation_err)?;

@@ -7,8 +7,11 @@
 //! connection - to exchange sealed peer descriptors. Same code-to-key primitive,
 //! two planes: this one binds to the channel it authenticates.
 
+use base64::Engine as _;
 use envoix_error::CoreError;
-use envoix_invite::{InvitationAuthContext, SecretString, TransferRole};
+use envoix_invite::{
+    Commitment, InvitationAuthContext, InvitationControlContext, SecretString, TransferRole,
+};
 use envoix_protocol::{
     AuthFrame, Frame, FrameConnection, Spake2Confirm, Spake2Message, Spake2Start,
 };
@@ -23,6 +26,8 @@ pub use envoix_types::MIN_SHARED_TOKEN_LEN;
 pub const SPAKE2_DOMAIN: &[u8] = b"envoix-auth-spake2-v1";
 /// V2 exporter label and transcript domain.
 pub const INVITE_V2_SPAKE2_DOMAIN: &[u8] = b"envoix-auth-invite-v2";
+/// Remembered-session exporter label and transcript domain.
+pub const REMEMBERED_V1_SPAKE2_DOMAIN: &[u8] = b"envoix-auth-remembered-v1";
 
 /// User-facing warning for the current SPAKE2 backend.
 pub const SPAKE2_EXPERIMENTAL_WARNING: &str = "warning: SPAKE2 shared-token pairing is experimental; the Rust SPAKE2 dependency is not independently audited";
@@ -34,6 +39,12 @@ const EXPORTER_CONTEXT: &[u8] = b"pairing";
 const SENDER_CONFIRM_LABEL: &[u8] = b"sender-confirm";
 const RECEIVER_CONFIRM_LABEL: &[u8] = b"receiver-confirm";
 const REMEMBER_COMBINE_DOMAIN: &[u8] = b"envoix invite v2 remember combine";
+const REMEMBERED_CREDENTIAL_MAGIC: &[u8; 4] = b"ENVR";
+const REMEMBERED_CREDENTIAL_VERSION: u8 = 1;
+const REMEMBERED_CREDENTIAL_LEN: usize = 4 + 1 + 32;
+const REMEMBERED_ROOM_ID_LABEL: &[u8] = b"envoix room id";
+const REMEMBERED_ROOM_AUTH_LABEL: &[u8] = b"envoix room auth";
+const REMEMBERED_DATA_AUTH_LABEL: &[u8] = b"envoix remembered data auth";
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -49,6 +60,12 @@ impl RememberSecret {
     pub fn into_bytes(self) -> [u8; 32] {
         self.0
     }
+
+    /// Convert the mutually negotiated value into the versioned credential
+    /// owned by the Rust core.
+    pub fn into_credential(self) -> RememberedCredential {
+        RememberedCredential { secret: self.0 }
+    }
 }
 
 impl std::fmt::Debug for RememberSecret {
@@ -61,6 +78,171 @@ impl std::fmt::Debug for RememberSecret {
 #[derive(Debug, Eq, PartialEq)]
 pub struct AuthenticationOutcome {
     pub remember_secret: Option<RememberSecret>,
+}
+
+/// Versioned long-term secret for one remembered relationship.
+#[derive(Clone, Eq, PartialEq)]
+pub struct RememberedCredential {
+    secret: [u8; 32],
+}
+
+impl RememberedCredential {
+    /// Parse the opaque credential bytes loaded by a platform secure store.
+    pub fn from_opaque(bytes: &[u8]) -> Result<Self, AuthError> {
+        if bytes.len() != REMEMBERED_CREDENTIAL_LEN
+            || &bytes[..REMEMBERED_CREDENTIAL_MAGIC.len()] != REMEMBERED_CREDENTIAL_MAGIC
+        {
+            return Err(CoreError::Storage(
+                "remembered credential is corrupt or unsupported".into(),
+            ));
+        }
+        if bytes[REMEMBERED_CREDENTIAL_MAGIC.len()] != REMEMBERED_CREDENTIAL_VERSION {
+            return Err(CoreError::Storage(
+                "remembered credential version is unsupported".into(),
+            ));
+        }
+        let secret = bytes[REMEMBERED_CREDENTIAL_MAGIC.len() + 1..]
+            .try_into()
+            .expect("credential length checked");
+        Ok(Self { secret })
+    }
+
+    /// Serialize for opaque platform storage. Callers must never decode or log
+    /// the returned bytes.
+    pub fn to_opaque(&self) -> Vec<u8> {
+        let mut output = Vec::with_capacity(REMEMBERED_CREDENTIAL_LEN);
+        output.extend_from_slice(REMEMBERED_CREDENTIAL_MAGIC);
+        output.push(REMEMBERED_CREDENTIAL_VERSION);
+        output.extend_from_slice(&self.secret);
+        output
+    }
+
+    /// Derive the unlinkable locator and control authenticator for one
+    /// credential generation.
+    pub fn derive_session(&self, generation: u64) -> RememberedSession {
+        let room_id =
+            derive_remembered_value(&self.secret, generation, REMEMBERED_ROOM_ID_LABEL, &[]);
+        let room_auth =
+            derive_remembered_value(&self.secret, generation, REMEMBERED_ROOM_AUTH_LABEL, &[]);
+        RememberedSession {
+            generation,
+            room_id: format!(
+                "r1_{}",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(room_id)
+            ),
+            room_auth,
+        }
+    }
+}
+
+impl std::fmt::Debug for RememberedCredential {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("RememberedCredential(<redacted>)")
+    }
+}
+
+/// Per-generation remembered rendezvous material.
+#[derive(Clone, Eq, PartialEq)]
+pub struct RememberedSession {
+    generation: u64,
+    room_id: String,
+    room_auth: [u8; 32],
+}
+
+impl RememberedSession {
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn room_id(&self) -> &str {
+        &self.room_id
+    }
+
+    pub fn control_context(&self) -> Result<InvitationControlContext, AuthError> {
+        InvitationControlContext::remembered(self.room_id.clone())
+            .map_err(|error| CoreError::InvalidInput(error.to_string()))
+    }
+
+    /// Base64 is only the SPAKE2 input encoding. It is never a user-facing or
+    /// durable representation.
+    pub fn control_password(&self) -> String {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(self.room_auth)
+    }
+
+    /// Derive a fresh data-plane password from the authenticated control
+    /// exchange, then bind it to the remembered generation and broker.
+    pub fn finish_pairing(
+        &self,
+        broker: String,
+        control_key: &[u8],
+        control_transcript_hash: Commitment,
+    ) -> Result<PairingConfig, AuthError> {
+        let context = RememberedAuthContext {
+            generation: self.generation,
+            room_id: self.room_id.clone(),
+            broker,
+            control_transcript_hash,
+        };
+        let binding = context.framed_binding();
+        let mut extra = Vec::new();
+        append_len_prefixed(&mut extra, control_key);
+        append_len_prefixed(&mut extra, control_transcript_hash.as_bytes());
+        append_len_prefixed(&mut extra, &binding);
+        let password =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(derive_remembered_value(
+                &self.room_auth,
+                self.generation,
+                REMEMBERED_DATA_AUTH_LABEL,
+                &extra,
+            ));
+        PairingConfig::remembered_v1(password, context)
+    }
+}
+
+impl std::fmt::Debug for RememberedSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RememberedSession")
+            .field("generation", &self.generation)
+            .field("room_id", &"<redacted>")
+            .field("room_auth", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Immutable data-plane binding for a remembered session.
+#[derive(Clone, Eq, PartialEq)]
+pub struct RememberedAuthContext {
+    pub generation: u64,
+    pub room_id: String,
+    pub broker: String,
+    pub control_transcript_hash: Commitment,
+}
+
+impl RememberedAuthContext {
+    pub fn framed_binding(&self) -> Vec<u8> {
+        let mut output = Vec::new();
+        append_len_prefixed(&mut output, b"remembered-peer-v1");
+        output.extend_from_slice(&self.generation.to_be_bytes());
+        append_len_prefixed(&mut output, self.room_id.as_bytes());
+        append_len_prefixed(&mut output, self.broker.as_bytes());
+        append_len_prefixed(&mut output, b"receiver-responder");
+        append_len_prefixed(&mut output, b"sender-initiator");
+        append_len_prefixed(&mut output, self.control_transcript_hash.as_bytes());
+        output
+    }
+}
+
+impl std::fmt::Debug for RememberedAuthContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RememberedAuthContext")
+            .field("generation", &self.generation)
+            .field("room_id", &"<redacted>")
+            .field("broker", &self.broker)
+            .field("control_transcript_hash", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Pairing method selected for a session.
@@ -77,6 +259,12 @@ pub enum PairingConfig {
         password: SecretString,
         context: InvitationAuthContext,
     },
+    /// Remembered-device authentication, freshly derived for one generation
+    /// and the authenticated control exchange that disclosed the endpoint.
+    RememberedV1 {
+        password: String,
+        context: RememberedAuthContext,
+    },
 }
 
 impl std::fmt::Debug for PairingConfig {
@@ -88,6 +276,11 @@ impl std::fmt::Debug for PairingConfig {
                 .finish(),
             Self::InvitationV2 { context, .. } => formatter
                 .debug_struct("InvitationV2")
+                .field("password", &"<redacted>")
+                .field("context", context)
+                .finish(),
+            Self::RememberedV1 { context, .. } => formatter
+                .debug_struct("RememberedV1")
                 .field("password", &"<redacted>")
                 .field("context", context)
                 .finish(),
@@ -114,6 +307,15 @@ impl PairingConfig {
         Ok(config)
     }
 
+    pub fn remembered_v1(
+        password: String,
+        context: RememberedAuthContext,
+    ) -> Result<Self, AuthError> {
+        let config = Self::RememberedV1 { password, context };
+        config.validate()?;
+        Ok(config)
+    }
+
     /// Validates pairing config invariants that are independent of transport.
     pub fn validate(&self) -> Result<(), AuthError> {
         match self {
@@ -130,6 +332,16 @@ impl PairingConfig {
             }
             Self::InvitationV2 { .. } => Err(CoreError::InvalidInput(
                 "invalid InviteV2 authentication context".into(),
+            )),
+            Self::RememberedV1 { password, context }
+                if is_valid_shared_token(password)
+                    && context.room_id.starts_with("r1_")
+                    && !context.broker.is_empty() =>
+            {
+                Ok(())
+            }
+            Self::RememberedV1 { .. } => Err(CoreError::InvalidInput(
+                "invalid remembered-device authentication context".into(),
             )),
         }
     }
@@ -343,19 +555,29 @@ fn auth_profile(config: &PairingConfig) -> AuthProfile<'_> {
                 invitation_binding: binding,
             }
         }
+        PairingConfig::RememberedV1 { password, context } => {
+            let binding = context.framed_binding();
+            AuthProfile {
+                password,
+                domain: REMEMBERED_V1_SPAKE2_DOMAIN,
+                exporter_context: binding.clone(),
+                invitation_binding: binding,
+            }
+        }
     }
 }
 
 fn validate_data_role(config: &PairingConfig, local_role: TransferRole) -> Result<(), AuthError> {
-    let PairingConfig::InvitationV2 { context, .. } = config else {
-        return Ok(());
-    };
-    if context.creator_transfer_role == local_role || context.joiner_transfer_role == local_role {
-        Ok(())
-    } else {
-        Err(CoreError::InvalidInput(
-            "InviteV2 authentication role conflict".into(),
-        ))
+    match config {
+        PairingConfig::InvitationV2 { context, .. }
+            if context.creator_transfer_role != local_role
+                && context.joiner_transfer_role != local_role =>
+        {
+            Err(CoreError::InvalidInput(
+                "InviteV2 authentication role conflict".into(),
+            ))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -538,4 +760,176 @@ fn combine_remember(
 fn update_len_prefixed(mac: &mut HmacSha256, bytes: &[u8]) {
     mac.update(&(bytes.len() as u64).to_be_bytes());
     mac.update(bytes);
+}
+
+fn append_len_prefixed(output: &mut Vec<u8>, bytes: &[u8]) {
+    output.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+    output.extend_from_slice(bytes);
+}
+
+fn derive_remembered_value(secret: &[u8], generation: u64, label: &[u8], extra: &[u8]) -> [u8; 32] {
+    let mut mac =
+        HmacSha256::new_from_slice(secret).expect("HMAC-SHA256 accepts keys of any length");
+    update_len_prefixed(&mut mac, label);
+    mac.update(&generation.to_be_bytes());
+    update_len_prefixed(&mut mac, extra);
+    mac.finalize().into_bytes().into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use envoix_invite::{BootstrapKind, Capabilities, InviteV2};
+    use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+
+    struct ChannelConnection {
+        outgoing: UnboundedSender<Frame>,
+        incoming: UnboundedReceiver<Frame>,
+    }
+
+    fn connection_pair() -> (ChannelConnection, ChannelConnection) {
+        let (left_to_right, right_incoming) = unbounded_channel();
+        let (right_to_left, left_incoming) = unbounded_channel();
+        (
+            ChannelConnection {
+                outgoing: left_to_right,
+                incoming: left_incoming,
+            },
+            ChannelConnection {
+                outgoing: right_to_left,
+                incoming: right_incoming,
+            },
+        )
+    }
+
+    #[async_trait]
+    impl FrameConnection for ChannelConnection {
+        async fn send_frame(&mut self, frame: Frame) -> Result<(), CoreError> {
+            self.outgoing
+                .send(frame)
+                .map_err(|_| CoreError::Transport("test peer closed".into()))
+        }
+
+        async fn recv_frame(&mut self) -> Result<Frame, CoreError> {
+            self.incoming
+                .recv()
+                .await
+                .ok_or_else(|| CoreError::Transport("test peer closed".into()))
+        }
+
+        fn export_keying_material(
+            &self,
+            _label: &[u8],
+            _context: &[u8],
+        ) -> Result<[u8; 32], CoreError> {
+            Ok([0x91; 32])
+        }
+
+        async fn close(&mut self) -> Result<(), CoreError> {
+            Ok(())
+        }
+    }
+
+    fn invitation_config() -> PairingConfig {
+        let bootstrap = InviteV2::create(
+            "2cfu7vzc7zhqv6w3k7m2kkwqvwzppmzvv53lmst6xm7ubjx5qnya@127.0.0.1:8445".into(),
+            Vec::new(),
+            TransferRole::Receiver,
+            Capabilities::current(),
+            1,
+        )
+        .expect("create invitation")
+        .into_bootstrap();
+        let (password, context) = bootstrap
+            .finish_control(
+                BootstrapKind::FullTicket,
+                None,
+                &[0x33; 32],
+                Commitment::sha256(b"control transcript"),
+                1,
+            )
+            .expect("finish control");
+        PairingConfig::invitation_v2(password, context).expect("pairing config")
+    }
+
+    fn credential() -> RememberedCredential {
+        RememberSecret([0x5a; 32]).into_credential()
+    }
+
+    #[test]
+    fn opaque_credential_round_trips_without_debug_disclosure() {
+        let credential = credential();
+        let opaque = credential.to_opaque();
+        assert_eq!(
+            RememberedCredential::from_opaque(&opaque).expect("decode credential"),
+            credential
+        );
+        assert_eq!(
+            format!("{credential:?}"),
+            "RememberedCredential(<redacted>)"
+        );
+        assert!(!format!("{credential:?}").contains("5a"));
+    }
+
+    #[test]
+    fn opaque_credential_rejects_wrong_version_and_size() {
+        let mut opaque = credential().to_opaque();
+        opaque[4] = 2;
+        assert!(RememberedCredential::from_opaque(&opaque).is_err());
+        assert!(RememberedCredential::from_opaque(&opaque[..opaque.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn generations_and_kdf_labels_are_separated() {
+        let credential = credential();
+        let current = credential.derive_session(7);
+        let next = credential.derive_session(8);
+
+        assert_ne!(current.room_id, next.room_id);
+        assert_ne!(current.room_auth, next.room_auth);
+        assert_ne!(&current.room_id["r1_".len()..], current.control_password());
+        assert_eq!(current.room_id.len(), 46);
+    }
+
+    #[tokio::test]
+    async fn remember_secret_exists_only_after_mutual_authenticated_consent() {
+        let config = invitation_config();
+        let (mut sender, mut receiver) = connection_pair();
+        let (sender_result, receiver_result) = tokio::join!(
+            authenticate_sender_with_remember(&mut sender, &config, true),
+            authenticate_receiver_with_remember(&mut receiver, &config, true),
+        );
+        let sender_credential = sender_result
+            .expect("sender authenticates")
+            .remember_secret
+            .expect("sender remembers")
+            .into_credential()
+            .to_opaque();
+        let receiver_credential = receiver_result
+            .expect("receiver authenticates")
+            .remember_secret
+            .expect("receiver remembers")
+            .into_credential()
+            .to_opaque();
+        assert_eq!(sender_credential, receiver_credential);
+
+        let (mut sender, mut receiver) = connection_pair();
+        let (sender_result, receiver_result) = tokio::join!(
+            authenticate_sender_with_remember(&mut sender, &config, true),
+            authenticate_receiver_with_remember(&mut receiver, &config, false),
+        );
+        assert!(
+            sender_result
+                .expect("sender authenticates")
+                .remember_secret
+                .is_none()
+        );
+        assert!(
+            receiver_result
+                .expect("receiver authenticates")
+                .remember_secret
+                .is_none()
+        );
+    }
 }

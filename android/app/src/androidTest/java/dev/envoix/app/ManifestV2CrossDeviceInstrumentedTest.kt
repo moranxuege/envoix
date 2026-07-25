@@ -314,6 +314,11 @@ class ManifestV2CrossDeviceInstrumentedTest {
         override fun onPlanRequired(requestJson: String): String =
             requireNotNull(plan) { "sender unexpectedly requested a destination plan" }(requestJson)
 
+        override fun onRememberedCredential(
+            opaqueCredential: ByteArray,
+            generation: Long,
+        ): Boolean = false
+
         fun awaitTerminal(timeoutMs: Long) {
             assertTrue(
                 "Manifest v2 physical transfer timed out after ${timeoutMs}ms",

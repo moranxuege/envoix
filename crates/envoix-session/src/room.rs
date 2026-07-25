@@ -5,7 +5,9 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use envoix_error::CoreError;
-use envoix_invite::{InvitationBootstrap, InvitationError, TransferRole};
+use envoix_invite::{
+    BootstrapKind, InvitationBootstrap, InvitationError, InvitationSide, TransferRole,
+};
 use envoix_protocol::manifest_v2_frames::JobGenerationV2;
 use envoix_rendezvous::{Join, RENDEZVOUS_PROTOCOL_VERSION};
 use envoix_rendezvous_iroh::{
@@ -17,10 +19,11 @@ use envoix_types::PairingStep;
 use iroh::{Endpoint, EndpointAddr, SecretKey};
 
 use crate::{
-    BindAddrs, BoundEndpoint, CanonicalTransferJob, EventSink, PairingConfig,
-    PendingManifestV2Receive, SenderManifestV2SessionSummary, SessionConfig, SessionError,
-    TransferCancelToken, TransferEvent, bind_iroh_manifest_v2_endpoint, receive_manifest_v2_offer,
-    send_manifest_v2_to_endpoint_addr,
+    AuthenticationHandler, BindAddrs, BoundEndpoint, CanonicalTransferJob, EventSink,
+    NoopAuthenticationHandler, PairingConfig, PendingManifestV2Receive, RememberedSession,
+    SenderManifestV2SessionSummary, SessionConfig, SessionError, TransferCancelToken,
+    TransferEvent, bind_iroh_manifest_v2_endpoint, receive_manifest_v2_offer_with_authentication,
+    send_manifest_v2_to_endpoint_addr_with_authentication,
 };
 
 const SEND_ROOM_PAIRING_TIMEOUT: Duration = Duration::from_secs(35);
@@ -95,6 +98,65 @@ async fn authenticate_in_room_retrying(
     Err(last.expect("at least one pairing attempt failed"))
 }
 
+async fn authenticate_remembered_in_room_retrying(
+    rdz: &Endpoint,
+    broker: &EndpointAddr,
+    remembered: &RememberedSession,
+    local_role: TransferRole,
+    events: &dyn EventSink,
+) -> Result<AuthenticatedControl, SessionError> {
+    const ATTEMPTS: usize = 4;
+    const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(8);
+    let (invitation_side, bootstrap_methods, selected_bootstrap_method) = match local_role {
+        TransferRole::Sender => (
+            InvitationSide::Joiner,
+            Vec::new(),
+            Some(BootstrapKind::FullTicket),
+        ),
+        TransferRole::Receiver => (
+            InvitationSide::Creator,
+            vec![BootstrapKind::FullTicket],
+            None,
+        ),
+    };
+    let context = remembered.control_context()?;
+    let password = remembered.control_password();
+    let mut last = None;
+    for _ in 0..ATTEMPTS {
+        events.on_event(TransferEvent::Pairing {
+            step: PairingStep::Joining,
+        });
+        let session = join_invitation(
+            rdz,
+            broker.clone(),
+            Join {
+                version: RENDEZVOUS_PROTOCOL_VERSION,
+                room_id: remembered.room_id().to_string(),
+                invitation_side,
+                transfer_role: local_role,
+                bootstrap_methods: bootstrap_methods.clone(),
+                selected_bootstrap_method,
+            },
+        )
+        .await
+        .map_err(|error| CoreError::Transport(error.to_string()))?;
+        events.on_event(TransferEvent::Pairing {
+            step: PairingStep::Matched,
+        });
+        match tokio::time::timeout(
+            EXCHANGE_TIMEOUT,
+            authenticate_invitation(session, &password, &context, None),
+        )
+        .await
+        {
+            Ok(Ok(pairing)) => return Ok(pairing),
+            Ok(Err(error)) => last = Some(CoreError::Transport(error.to_string())),
+            Err(_) => last = Some(CoreError::Transport("rendezvous pairing stalled".into())),
+        }
+    }
+    Err(last.expect("at least one pairing attempt failed"))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn pair_or_cancel(
     rdz: &Endpoint,
@@ -126,6 +188,38 @@ async fn pair_or_cancel(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn pair_remembered_or_cancel(
+    rdz: &Endpoint,
+    broker: &EndpointAddr,
+    remembered: &RememberedSession,
+    local_role: TransferRole,
+    cancel: &TransferCancelToken,
+    events: &dyn EventSink,
+    timeout: Option<Duration>,
+) -> Result<AuthenticatedControl, SessionError> {
+    let pairing =
+        authenticate_remembered_in_room_retrying(rdz, broker, remembered, local_role, events);
+    let result = if let Some(timeout) = timeout {
+        tokio::select! {
+            result = pairing => result,
+            _ = cancel.cancelled() => Err(CoreError::Cancelled),
+            _ = tokio::time::sleep(timeout) => {
+                Err(CoreError::Transport("remembered rendezvous pairing timed out".into()))
+            }
+        }
+    } else {
+        tokio::select! {
+            result = pairing => result,
+            _ = cancel.cancelled() => Err(CoreError::Cancelled),
+        }
+    };
+    if result.is_err() {
+        rdz.close().await;
+    }
+    result
+}
+
 /// Receives an authenticated Manifest V2 offer. Invitation authentication and
 /// context validation complete before the data endpoint is created.
 pub async fn receive_manifest_v2_offer_via_room(
@@ -135,6 +229,28 @@ pub async fn receive_manifest_v2_offer_via_room(
     config: SessionConfig,
     events: Arc<dyn EventSink>,
     cancel: &TransferCancelToken,
+) -> Result<PendingManifestV2Receive, SessionError> {
+    receive_manifest_v2_offer_via_room_with_authentication(
+        broker,
+        bootstrap,
+        listen_addrs,
+        config,
+        events,
+        cancel,
+        &NoopAuthenticationHandler,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn receive_manifest_v2_offer_via_room_with_authentication(
+    broker: EndpointAddr,
+    bootstrap: InvitationBootstrap,
+    listen_addrs: impl Into<BindAddrs>,
+    config: SessionConfig,
+    events: Arc<dyn EventSink>,
+    cancel: &TransferCancelToken,
+    authentication: &dyn AuthenticationHandler,
 ) -> Result<PendingManifestV2Receive, SessionError> {
     require_bootstrap_role(&bootstrap, TransferRole::Receiver)?;
     let (rdz, control) =
@@ -174,7 +290,73 @@ pub async fn receive_manifest_v2_offer_via_room(
         }
     };
     rdz.close().await;
-    receive_manifest_v2_offer(bound, &auth, events, cancel).await
+    receive_manifest_v2_offer_with_authentication(bound, &auth, events, cancel, authentication)
+        .await
+}
+
+/// Receives through a high-entropy remembered-device rendezvous. The receiver
+/// always advertises as the control responder.
+#[allow(clippy::too_many_arguments)]
+pub async fn receive_manifest_v2_offer_via_remembered(
+    broker: EndpointAddr,
+    broker_binding: String,
+    remembered: RememberedSession,
+    listen_addrs: impl Into<BindAddrs>,
+    config: SessionConfig,
+    events: Arc<dyn EventSink>,
+    cancel: &TransferCancelToken,
+    authentication: &dyn AuthenticationHandler,
+) -> Result<PendingManifestV2Receive, SessionError> {
+    let rdz = rendezvous_endpoint(&config.relay).await?;
+    let control = pair_remembered_or_cancel(
+        &rdz,
+        &broker,
+        &remembered,
+        TransferRole::Receiver,
+        cancel,
+        events.as_ref(),
+        None,
+    )
+    .await?;
+    let bound = match bind_iroh_manifest_v2_endpoint(
+        listen_addrs,
+        &config.identity,
+        &config.data_relay(),
+        config.relay_only,
+        &config.candidates,
+        config.data_stream_window,
+    )
+    .await
+    {
+        Ok(bound) => bound,
+        Err(error) => {
+            rdz.close().await;
+            return Err(error);
+        }
+    };
+    let my_addr = bound
+        .ready_endpoint_addr(config.data_relay().is_some())
+        .await;
+    let pairing = match exchange_descriptor_or_cancel(control, Some(&my_addr), cancel).await {
+        Ok(pairing) => pairing,
+        Err(error) => {
+            bound.local_endpoint.close().await;
+            rdz.close().await;
+            return Err(error);
+        }
+    };
+    events.on_event(TransferEvent::Pairing {
+        step: PairingStep::Exchanged,
+    });
+    events.on_event(TransferEvent::Connecting);
+    let auth = remembered.finish_pairing(
+        broker_binding,
+        pairing.control_key(),
+        pairing.control_transcript_hash,
+    )?;
+    rdz.close().await;
+    receive_manifest_v2_offer_with_authentication(bound, &auth, events, cancel, authentication)
+        .await
 }
 
 async fn complete_receiver_pairing(
@@ -207,9 +389,33 @@ pub async fn send_manifest_v2_via_room(
     events: Arc<dyn EventSink>,
     cancel: &TransferCancelToken,
 ) -> Result<SenderManifestV2SessionSummary, SessionError> {
+    send_manifest_v2_via_room_with_authentication(
+        broker,
+        bootstrap,
+        job,
+        state_directory,
+        config,
+        events,
+        cancel,
+        &NoopAuthenticationHandler,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn send_manifest_v2_via_room_with_authentication(
+    broker: EndpointAddr,
+    bootstrap: InvitationBootstrap,
+    job: &CanonicalTransferJob,
+    state_directory: PathBuf,
+    config: SessionConfig,
+    events: Arc<dyn EventSink>,
+    cancel: &TransferCancelToken,
+    authentication: &dyn AuthenticationHandler,
+) -> Result<SenderManifestV2SessionSummary, SessionError> {
     require_bootstrap_role(&bootstrap, TransferRole::Sender)?;
     let pairing = pair_room_sender(broker, &bootstrap, &config, events.as_ref(), cancel).await?;
-    let first_attempt = send_manifest_v2_to_endpoint_addr(
+    let first_attempt = send_manifest_v2_to_endpoint_addr_with_authentication(
         pairing.peer.clone(),
         job,
         state_directory.clone(),
@@ -217,6 +423,7 @@ pub async fn send_manifest_v2_via_room(
         &pairing.auth,
         events.clone(),
         cancel,
+        authentication,
     )
     .await;
     let error = match first_attempt {
@@ -232,7 +439,7 @@ pub async fn send_manifest_v2_via_room(
     });
     let mut relay_config = config;
     relay_config.relay_only = true;
-    send_manifest_v2_to_endpoint_addr(
+    send_manifest_v2_to_endpoint_addr_with_authentication(
         pairing.peer,
         job,
         state_directory,
@@ -240,6 +447,58 @@ pub async fn send_manifest_v2_via_room(
         &pairing.auth,
         events,
         cancel,
+        authentication,
+    )
+    .await
+}
+
+/// Sends through a high-entropy remembered-device rendezvous. The sender
+/// always joins as the control initiator.
+#[allow(clippy::too_many_arguments)]
+pub async fn send_manifest_v2_via_remembered(
+    broker: EndpointAddr,
+    broker_binding: String,
+    remembered: RememberedSession,
+    job: &CanonicalTransferJob,
+    state_directory: PathBuf,
+    config: SessionConfig,
+    events: Arc<dyn EventSink>,
+    cancel: &TransferCancelToken,
+    authentication: &dyn AuthenticationHandler,
+) -> Result<SenderManifestV2SessionSummary, SessionError> {
+    let rdz = rendezvous_endpoint(&config.relay).await?;
+    let control = pair_remembered_or_cancel(
+        &rdz,
+        &broker,
+        &remembered,
+        TransferRole::Sender,
+        cancel,
+        events.as_ref(),
+        Some(SEND_ROOM_PAIRING_TIMEOUT),
+    )
+    .await?;
+    let pairing = exchange_descriptor_or_cancel::<EndpointAddr>(control, None, cancel).await?;
+    rdz.close().await;
+    events.on_event(TransferEvent::Pairing {
+        step: PairingStep::Exchanged,
+    });
+    let auth = remembered.finish_pairing(
+        broker_binding,
+        pairing.control_key(),
+        pairing.control_transcript_hash,
+    )?;
+    let peer = pairing
+        .peer
+        .ok_or_else(|| CoreError::Protocol("receiver omitted endpoint descriptor".into()))?;
+    send_manifest_v2_to_endpoint_addr_with_authentication(
+        peer,
+        job,
+        state_directory,
+        config,
+        &auth,
+        events,
+        cancel,
+        authentication,
     )
     .await
 }

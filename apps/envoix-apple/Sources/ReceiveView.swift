@@ -8,7 +8,7 @@ struct ReceiveView: View {
     // Remembered across launches. Empty means "use the platform default".
     @AppStorage("envoix.outputDir") private var outputDirPath: String = ""
     @AppStorage("envoix.outputDirDisplayName") private var outputDirDisplayName: String = ""
-    @AppStorage("envoix.token") private var token: String = ""
+    @State private var token = ""
     @AppStorage("envoix.concurrentTransfers") private var concurrentTransfers = true
     @AppStorage("envoix.language") private var language = "en"
     @AppStorage("envoix.serverURL") private var serverURL = ""
@@ -18,6 +18,10 @@ struct ReceiveView: View {
     @AppStorage("envoix.speedLimit") private var speedLimit = 40
     @AppStorage("envoix.destinationSaveMode") private var destinationSaveMode = "direct"
     @State private var mode: PairingMode = .room
+    @State private var rememberedPeers: [RememberedPeerSummary] = []
+    @State private var selectedRememberedPeer: RememberedPeerSummary?
+    @State private var rememberAfterPairing = false
+    @State private var rememberLabel = ""
     @State private var roomCode = newRoomCode()
     @State private var joinRoomCode = ""
     @State private var joiningInvite = ""
@@ -110,6 +114,7 @@ struct ReceiveView: View {
             }
         }
         .onAppear(perform: applyInitialPairingInputIfNeeded)
+        .onAppear(perform: refreshRememberedPeers)
         #else
         VStack(spacing: 0) {
             scrollContent
@@ -118,6 +123,7 @@ struct ReceiveView: View {
                 .padding(.top, 12)
         }
         .onAppear(perform: applyInitialPairingInputIfNeeded)
+        .onAppear(perform: refreshRememberedPeers)
         #endif
     }
 
@@ -158,14 +164,74 @@ struct ReceiveView: View {
     }
 
     @ViewBuilder private var connectionSection: some View {
-        if mode == .invite {
-            inviteSection
-        } else if mode == .room {
-            roomSection
-        } else {
-            TokenField(token: $token, disabled: viewModel.isBusy)
-                .card(padding: 14)
+        VStack(alignment: .leading, spacing: 12) {
+            if !rememberedPeers.isEmpty {
+                rememberedPeerSection
+            }
+            if mode == .invite {
+                inviteSection
+            } else if mode == .room {
+                roomSection
+            } else if mode == .remembered {
+                EmptyView()
+            } else {
+                TokenField(token: $token, disabled: viewModel.isBusy)
+                    .card(padding: 14)
+            }
+            if mode == .room || mode == .invite {
+                rememberConsentSection
+            }
         }
+    }
+
+    private var rememberedPeerSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(AppText.value("Remembered devices", "已记住的设备", language: uiLanguage))
+                .font(.headline.weight(.semibold))
+            ForEach(rememberedPeers) { peer in
+                HStack {
+                    Button {
+                        selectedRememberedPeer = peer
+                        mode = .remembered
+                    } label: {
+                        Label(peer.label, systemImage: selectedRememberedPeer?.id == peer.id
+                            ? "checkmark.circle.fill"
+                            : "laptopcomputer.and.iphone")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(viewModel.isBusy)
+                    Button(role: .destructive) {
+                        try? RememberedPeerStore.shared.delete(peer)
+                        refreshRememberedPeers()
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .disabled(viewModel.isBusy)
+                    .accessibilityLabel(AppText.value("Forget device", "忘记设备", language: uiLanguage))
+                }
+            }
+        }
+        .card(padding: 14)
+    }
+
+    private var rememberConsentSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle(
+                AppText.value("Remember this device", "记住此设备", language: uiLanguage),
+                isOn: $rememberAfterPairing
+            )
+            .disabled(viewModel.isBusy)
+            if rememberAfterPairing {
+                TextField(
+                    AppText.value("Device label", "设备名称", language: uiLanguage),
+                    text: $rememberLabel
+                )
+                .textFieldStyle(.roundedBorder)
+                .disabled(viewModel.isBusy)
+            }
+        }
+        .card(padding: 14)
     }
 
     @ViewBuilder private var footerMessage: some View {
@@ -632,6 +698,11 @@ struct ReceiveView: View {
     }
 
     private var canStart: Bool {
+        if rememberAfterPairing,
+           (mode == .room || mode == .invite),
+           rememberLabel.trimmed.isEmpty {
+            return false
+        }
         switch mode {
         case .room:
             return !joinRoomCode.trimmed.isEmpty || !roomCode.trimmed.isEmpty
@@ -639,6 +710,8 @@ struct ReceiveView: View {
             return !joiningInvite.isEmpty
         case .token:
             return token.trimmed.count >= minTokenLength
+        case .remembered:
+            return selectedRememberedPeer != nil
         }
     }
 
@@ -804,6 +877,8 @@ struct ReceiveView: View {
             startReceiveWithInvite()
         case .token:
             startReceiveWithToken()
+        case .remembered:
+            startReceiveWithRememberedPeer()
         }
     }
 
@@ -847,7 +922,8 @@ struct ReceiveView: View {
                 outputDir: prepared.url.path,
                 code: code,
                 settings: settings,
-                destinationAccess: prepared.access
+                destinationAccess: prepared.access,
+                rememberLabel: rememberAfterPairing ? rememberLabel : nil
             )
         } catch {
             viewModel.handleFailed(error.localizedDescription)
@@ -871,10 +947,44 @@ struct ReceiveView: View {
                 outputDir: prepared.url.path,
                 invite: joiningInvite,
                 settings: settings,
+                destinationAccess: prepared.access,
+                rememberLabel: rememberAfterPairing ? rememberLabel : nil
+            )
+        } catch {
+            viewModel.handleFailed(error.localizedDescription)
+        }
+    }
+
+    private func startReceiveWithRememberedPeer() {
+        guard let peer = selectedRememberedPeer else { return }
+        do {
+            let prepared = try prepareOutputDir()
+            let settings = try RuntimeSettingsProvider.make(
+                concurrentTransfers: concurrentTransfers,
+                language: language,
+                serverURL: peer.broker,
+                relayURL: peer.relay,
+                candidatesAllow: candidatesAllow,
+                candidatesDeny: candidatesDeny,
+                speedLimit: speedLimit
+            )
+            viewModel.startReceivingFromRememberedPeer(
+                outputDir: prepared.url.path,
+                peer: peer,
+                settings: settings,
                 destinationAccess: prepared.access
             )
         } catch {
             viewModel.handleFailed(error.localizedDescription)
+        }
+    }
+
+    private func refreshRememberedPeers() {
+        rememberedPeers = (try? RememberedPeerStore.shared.peers()) ?? []
+        if let selectedRememberedPeer,
+           !rememberedPeers.contains(where: { $0.id == selectedRememberedPeer.id }) {
+            self.selectedRememberedPeer = nil
+            if mode == .remembered { mode = .room }
         }
     }
 

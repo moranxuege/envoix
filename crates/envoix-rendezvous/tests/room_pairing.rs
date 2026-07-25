@@ -43,6 +43,20 @@ fn joiner_join(room_id: &str, role: TransferRole) -> Join {
     }
 }
 
+fn remembered_creator_join(room_id: &str) -> Join {
+    Join {
+        bootstrap_methods: vec![BootstrapKind::FullTicket],
+        ..creator_join(room_id, TransferRole::Receiver)
+    }
+}
+
+fn remembered_joiner_join(room_id: &str) -> Join {
+    Join {
+        selected_bootstrap_method: Some(BootstrapKind::FullTicket),
+        ..joiner_join(room_id, TransferRole::Sender)
+    }
+}
+
 fn control_context(room_id: &str) -> envoix_invite::InvitationControlContext {
     envoix_invite::InvitationControlContext::new(
         room_id.to_string(),
@@ -158,6 +172,65 @@ async fn two_peers_pair_and_exchange_descriptors() {
 
     s1.await.unwrap().expect("broker serves A");
     s2.await.unwrap().expect("broker serves B");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remembered_locator_pairs_only_the_fixed_complementary_roles() {
+    let registry = Arc::new(RoomRegistry::with_ttl(Duration::from_secs(5)));
+    let room = format!("r1_{}", "A".repeat(43));
+    let (receiver, broker_receiver) = tokio::io::duplex(4096);
+    let (sender, broker_sender) = tokio::io::duplex(4096);
+
+    let receiver_registry = registry.clone();
+    let receiver_serve =
+        tokio::spawn(async move { receiver_registry.serve(broker_conn(broker_receiver)).await });
+    let sender_registry = registry.clone();
+    let sender_serve =
+        tokio::spawn(async move { sender_registry.serve(broker_conn(broker_sender)).await });
+
+    let receiver_join = remembered_creator_join(&room);
+    let sender_join = remembered_joiner_join(&room);
+    let receiver = tokio::spawn(async move { join_only(receiver, receiver_join).await });
+    let sender = tokio::spawn(async move { join_only(sender, sender_join).await });
+
+    let Reply::Paired(receiver) = receiver.await.unwrap().unwrap() else {
+        panic!("receiver was not paired");
+    };
+    let Reply::Paired(sender) = sender.await.unwrap().unwrap() else {
+        panic!("sender was not paired");
+    };
+    assert_eq!(receiver.role, Role::Responder);
+    assert_eq!(sender.role, Role::Initiator);
+    assert_eq!(
+        receiver.selected_bootstrap_method,
+        BootstrapKind::FullTicket
+    );
+
+    receiver_serve.await.unwrap().expect("serve receiver");
+    sender_serve.await.unwrap().expect("serve sender");
+}
+
+#[tokio::test]
+async fn remembered_locator_rejects_reversed_roles() {
+    let registry = Arc::new(RoomRegistry::new());
+    let (mut client, broker) = tokio::io::duplex(4096);
+    let serve = tokio::spawn(async move { registry.serve(broker_conn(broker)).await });
+    let room = format!("r1_{}", "B".repeat(43));
+    let (_reader, mut writer) = tokio::io::split(&mut client);
+    write_framed(
+        &mut writer,
+        &Join {
+            transfer_role: TransferRole::Sender,
+            ..remembered_creator_join(&room)
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        serve.await.unwrap(),
+        Err(envoix_rendezvous::RendezvousError::Rejected(_))
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

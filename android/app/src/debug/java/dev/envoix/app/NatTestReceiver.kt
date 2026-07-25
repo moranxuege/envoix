@@ -50,6 +50,8 @@ class NatTestReceiver : BroadcastReceiver() {
             relay = relay,
             qrPayload = null,
             destinationCopyApproved = true,
+            rememberLabel = null,
+            rememberedRelationshipId = null,
         )
         resultCode = Activity.RESULT_OK
         resultData = roomCode
@@ -89,6 +91,8 @@ class NatTestReceiver : BroadcastReceiver() {
             relay = intent.getStringExtra(EXTRA_RELAY).orEmpty(),
             jobId = jobId,
             qrPayload = null,
+            rememberLabel = null,
+            rememberedRelationshipId = null,
         )
         resultCode = Activity.RESULT_OK
         resultData = "started"

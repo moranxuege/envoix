@@ -9,6 +9,13 @@ interface ManifestV2Callback {
     fun onPlanRequired(requestJson: String): String
 
     fun onSaveRequired(requestJson: String): String
+
+    /** Persist a negotiated or rotated opaque relationship credential before
+     * the core sends any Manifest frame. */
+    fun onRememberedCredential(
+        opaqueCredential: ByteArray,
+        generation: Long,
+    ): Boolean
 }
 
 /** Sink for the core's `tracing` log lines. */
@@ -63,6 +70,9 @@ object Native {
 
     /** Strictly normalize a canonical or separator-free Room Code. */
     external fun normalizeRoomCode(input: String): String
+
+    /** Validate protected bytes and return a process-only core reference. */
+    external fun registerRememberedCredential(opaqueCredential: ByteArray): String
 
     /** Create the durable canonical job as soon as the first source is chosen. */
     external fun createManifestV2Job(
