@@ -84,7 +84,23 @@ enum RuntimeSettingsProvider {
 }
 
 func newRoomCode() -> String {
-    (try? generateRoomCode()) ?? friendlyToken()
+    (try? generateRoomCode()) ?? ""
+}
+
+func formatRoomCodeInput(_ input: String) -> String {
+    if input.lowercased().hasPrefix("envoix:") {
+        return input
+    }
+    let compact = input.filter { $0 != "-" }.prefix(14)
+    guard compact.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) }) else {
+        return input
+    }
+    return String(compact.enumerated().reduce(into: "") { result, item in
+        if item.offset == 6 || item.offset == 10 {
+            result.append("-")
+        }
+        result.append(contentsOf: item.element.lowercased())
+    })
 }
 
 struct RuntimeSettingsError: LocalizedError {
@@ -255,7 +271,13 @@ struct RoomCodeField: View {
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(Theme.muted)
             HStack(spacing: 8) {
-                TextField(placeholder, text: $code)
+                TextField(
+                    placeholder,
+                    text: Binding(
+                        get: { code },
+                        set: { code = formatRoomCodeInput($0) }
+                    )
+                )
                     .textFieldStyle(.plain)
                     .font(.body.monospaced())
                     .foregroundStyle(Theme.text)
@@ -307,7 +329,13 @@ struct RoomCodeField: View {
                 .foregroundStyle(Theme.muted)
 
             HStack(spacing: 8) {
-                TextField(placeholder, text: $code)
+                TextField(
+                    placeholder,
+                    text: Binding(
+                        get: { code },
+                        set: { code = formatRoomCodeInput($0) }
+                    )
+                )
                     .textFieldStyle(.plain)
                     .font(.body.monospaced())
                     .foregroundStyle(Theme.text)

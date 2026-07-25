@@ -1,19 +1,16 @@
-//! Room rendezvous transfer: pair two peers via the rendezvous broker using a
-//! short code, then transfer one canonical Manifest v2 job over iroh.
-//!
-//! The rendezvous only finds + authenticates the peers and exchanges their iroh
-//! addresses. The data session is authenticated with a token derived from the
-//! pairing key, so SPAKE2 remains channel-bound after rendezvous.
+//! Directional InviteV2 rendezvous and authenticated descriptor exchange.
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use envoix_error::CoreError;
+use envoix_invite::{InvitationBootstrap, InvitationError, TransferRole};
 use envoix_protocol::manifest_v2_frames::JobGenerationV2;
+use envoix_rendezvous::{Join, RENDEZVOUS_PROTOCOL_VERSION};
 use envoix_rendezvous_iroh::{
-    JoinIntent, RoomPairing, build_endpoint_with_dns, drive_pairing, join_room_with_intent,
-    split_code,
+    AuthenticatedControl, RoomPairing, authenticate_invitation, build_endpoint_with_dns,
+    join_invitation,
 };
 use envoix_transfer::{SenderDeliveryStoreV2, SenderTransferPhaseV2};
 use envoix_types::PairingStep;
@@ -28,8 +25,6 @@ use crate::{
 
 const SEND_ROOM_PAIRING_TIMEOUT: Duration = Duration::from_secs(35);
 
-/// An ephemeral iroh endpoint used only to reach the rendezvous broker, routed
-/// through `relay` (a relay URL) when set so it can reach a NATed broker.
 async fn rendezvous_endpoint(relay: &Option<String>) -> Result<Endpoint, SessionError> {
     #[cfg(any(target_os = "ios", target_os = "android"))]
     let dns_resolver = Some(crate::endpoint::platform_system_dns_resolver());
@@ -46,25 +41,13 @@ async fn rendezvous_endpoint(relay: &Option<String>) -> Result<Endpoint, Session
     .map_err(|error| CoreError::Transport(error.to_string()))
 }
 
-/// Pair in a room, re-joining if the broker matched us with a stale dead peer.
-/// `join_room` blocks until the broker matches us, so it never cuts an honest
-/// wait short. Once matched, the SPAKE2 exchange with a live partner takes
-/// milliseconds, so if it stalls past `EXCHANGE_TIMEOUT` the partner is a dead
-/// peer left by an earlier run (iroh has not yet noticed its connection is gone).
-/// We drop it and re-join - that failed match already consumed the dead peer, so
-/// the next join reaches a live partner (or parks to wait for one).
-async fn pair_in_room_retrying<T>(
+async fn authenticate_in_room_retrying(
     rdz: &Endpoint,
     broker: &EndpointAddr,
-    room_id: &str,
-    password: &str,
-    mine: &T,
-    intent: JoinIntent,
+    bootstrap: &InvitationBootstrap,
+    public_context: Option<&[u8]>,
     events: &dyn EventSink,
-) -> Result<RoomPairing<T>, SessionError>
-where
-    T: serde::Serialize + serde::de::DeserializeOwned,
-{
+) -> Result<AuthenticatedControl, SessionError> {
     const ATTEMPTS: usize = 4;
     const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(8);
     let mut last: Option<SessionError> = None;
@@ -72,50 +55,60 @@ where
         events.on_event(TransferEvent::Pairing {
             step: PairingStep::Joining,
         });
-        let session = join_room_with_intent(rdz, broker.clone(), room_id, Some(intent))
-            .await
-            .map_err(|error| CoreError::Transport(error.to_string()))?;
+        let session = join_invitation(
+            rdz,
+            broker.clone(),
+            Join {
+                version: RENDEZVOUS_PROTOCOL_VERSION,
+                room_id: bootstrap.room_id().to_string(),
+                invitation_side: bootstrap.side(),
+                transfer_role: bootstrap.local_role(),
+                bootstrap_methods: bootstrap.advertised_methods(),
+                selected_bootstrap_method: bootstrap.selected_method(),
+            },
+        )
+        .await
+        .map_err(|error| CoreError::Transport(error.to_string()))?;
         events.on_event(TransferEvent::Pairing {
             step: PairingStep::Matched,
         });
-        match tokio::time::timeout(EXCHANGE_TIMEOUT, drive_pairing(session, password, mine)).await {
+        let selected = session.selected_bootstrap_method;
+        let context = bootstrap
+            .control_context(selected)
+            .map_err(invitation_error)?;
+        let password = bootstrap
+            .control_pake_password(selected)
+            .map_err(invitation_error)?;
+        match tokio::time::timeout(
+            EXCHANGE_TIMEOUT,
+            authenticate_invitation(session, password.expose(), &context, public_context),
+        )
+        .await
+        {
             Ok(Ok(pairing)) => {
-                events.on_event(TransferEvent::Pairing {
-                    step: PairingStep::Exchanged,
-                });
                 return Ok(pairing);
             }
             Ok(Err(error)) => last = Some(CoreError::Transport(error.to_string())),
             Err(_) => last = Some(CoreError::Transport("rendezvous pairing stalled".into())),
         }
     }
-    Err(last.expect("at least one attempt failed"))
+    Err(last.expect("at least one pairing attempt failed"))
 }
 
-/// Run the room pairing but abandon it - closing the rendezvous endpoint - if
-/// cancellation is requested. `join_room` blocks until the broker matches a
-/// partner (up to the room TTL) and that wait does not otherwise watch the
-/// cancel token, so a Ctrl-C while waiting for a partner would hang; this lets
-/// it exit promptly and cleanly instead. `rdz` is also closed on a pairing
-/// error so it never drops without a graceful close.
 #[allow(clippy::too_many_arguments)]
-async fn pair_or_cancel<T>(
+async fn pair_or_cancel(
     rdz: &Endpoint,
     broker: &EndpointAddr,
-    room_id: &str,
-    password: &str,
-    mine: &T,
-    intent: JoinIntent,
+    bootstrap: &InvitationBootstrap,
+    public_context: Option<&[u8]>,
     cancel: &TransferCancelToken,
     events: &dyn EventSink,
     timeout: Option<Duration>,
-) -> Result<RoomPairing<T>, SessionError>
-where
-    T: serde::Serialize + serde::de::DeserializeOwned,
-{
+) -> Result<AuthenticatedControl, SessionError> {
+    let pairing = authenticate_in_room_retrying(rdz, broker, bootstrap, public_context, events);
     let result = if let Some(timeout) = timeout {
         tokio::select! {
-            result = pair_in_room_retrying(rdz, broker, room_id, password, mine, intent, events) => result,
+            result = pairing => result,
             _ = cancel.cancelled() => Err(CoreError::Cancelled),
             _ = tokio::time::sleep(timeout) => {
                 Err(CoreError::Transport("rendezvous pairing timed out".into()))
@@ -123,7 +116,7 @@ where
         }
     } else {
         tokio::select! {
-            result = pair_in_room_retrying(rdz, broker, room_id, password, mine, intent, events) => result,
+            result = pairing => result,
             _ = cancel.cancelled() => Err(CoreError::Cancelled),
         }
     };
@@ -133,76 +126,21 @@ where
     result
 }
 
-async fn pair_room_receiver(
-    bound: &BoundEndpoint,
-    broker: EndpointAddr,
-    code: &str,
-    config: &SessionConfig,
-    events: &dyn EventSink,
-    cancel: &TransferCancelToken,
-) -> Result<PairingConfig, SessionError> {
-    let (room_id, password) = split_code(code);
-    // With direct-only the data endpoint has no relay home, so wait for a direct
-    // addr rather than a relay home; otherwise wait for the relay home as usual.
-    let my_addr = bound
-        .ready_endpoint_addr(config.data_relay().is_some())
-        .await;
-
-    let rdz = match rendezvous_endpoint(&config.relay).await {
-        Ok(rdz) => rdz,
-        Err(error) => {
-            bound.local_endpoint.close().await;
-            return Err(error);
-        }
-    };
-    let pairing = match pair_or_cancel(
-        &rdz,
-        &broker,
-        room_id,
-        password,
-        &my_addr,
-        JoinIntent::Receive,
-        cancel,
-        events,
-        None,
-    )
-    .await
-    {
-        Ok(pairing) => pairing,
-        Err(error) => {
-            // Pairing was cancelled or failed (e.g. room expiry); close both the
-            // rendezvous endpoint and our data listener so neither drops without
-            // a graceful close.
-            rdz.close().await;
-            bound.local_endpoint.close().await;
-            return Err(error);
-        }
-    };
-    // The rendezvous endpoint is only needed for the broker handshake; close it
-    // so it does not linger (and log) while the data transfer runs.
-    rdz.close().await;
-
-    events.on_event(TransferEvent::Connecting);
-    // Accept with retries: a stray or wrong-token dial must not kill the
-    // transfer before the legitimate sender connects.
-    let auth = PairingConfig::Spake2SharedToken {
-        token: pairing.token,
-    };
-    Ok(auth)
-}
-
-/// Receives an authenticated Manifest v2 offer through room pairing. No
-/// destination or payload effect occurs until the returned pending offer is
-/// explicitly continued.
+/// Receives an authenticated Manifest V2 offer. Invitation authentication and
+/// context validation complete before the data endpoint is created.
 pub async fn receive_manifest_v2_offer_via_room(
     broker: EndpointAddr,
-    code: &str,
+    bootstrap: InvitationBootstrap,
     listen_addrs: impl Into<BindAddrs>,
     config: SessionConfig,
     events: Arc<dyn EventSink>,
     cancel: &TransferCancelToken,
 ) -> Result<PendingManifestV2Receive, SessionError> {
-    let bound = bind_iroh_manifest_v2_endpoint(
+    require_bootstrap_role(&bootstrap, TransferRole::Receiver)?;
+    let (rdz, control) =
+        authenticate_room(broker, &bootstrap, &config, events.as_ref(), cancel, None).await?;
+    validate_authenticated_context(&bootstrap, &control)?;
+    let bound = match bind_iroh_manifest_v2_endpoint(
         listen_addrs,
         &config.identity,
         &config.data_relay(),
@@ -210,32 +148,73 @@ pub async fn receive_manifest_v2_offer_via_room(
         &config.candidates,
         config.data_stream_window,
     )
-    .await?;
-    let auth = pair_room_receiver(&bound, broker, code, &config, events.as_ref(), cancel).await?;
+    .await
+    {
+        Ok(bound) => bound,
+        Err(error) => {
+            rdz.close().await;
+            return Err(error);
+        }
+    };
+    let auth = match complete_receiver_pairing(
+        control,
+        &bound,
+        &bootstrap,
+        &config,
+        events.as_ref(),
+        cancel,
+    )
+    .await
+    {
+        Ok(auth) => auth,
+        Err(error) => {
+            bound.local_endpoint.close().await;
+            rdz.close().await;
+            return Err(error);
+        }
+    };
+    rdz.close().await;
     receive_manifest_v2_offer(bound, &auth, events, cancel).await
 }
 
-/// Sends a sealed canonical job through room pairing and returns only after
-/// the receiver's durable save proof is committed.
+async fn complete_receiver_pairing(
+    control: AuthenticatedControl,
+    bound: &BoundEndpoint,
+    bootstrap: &InvitationBootstrap,
+    config: &SessionConfig,
+    events: &dyn EventSink,
+    cancel: &TransferCancelToken,
+) -> Result<PairingConfig, SessionError> {
+    let my_addr = bound
+        .ready_endpoint_addr(config.data_relay().is_some())
+        .await;
+    let pairing = exchange_descriptor_or_cancel(control, Some(&my_addr), cancel).await?;
+    events.on_event(TransferEvent::Pairing {
+        step: PairingStep::Exchanged,
+    });
+    events.on_event(TransferEvent::Connecting);
+    finish_invitation_pairing(bootstrap, &pairing)
+}
+
+/// Sends a sealed canonical Manifest V2 job through an authenticated
+/// directional invitation.
 pub async fn send_manifest_v2_via_room(
     broker: EndpointAddr,
-    code: &str,
+    bootstrap: InvitationBootstrap,
     job: &CanonicalTransferJob,
     state_directory: PathBuf,
     config: SessionConfig,
     events: Arc<dyn EventSink>,
     cancel: &TransferCancelToken,
 ) -> Result<SenderManifestV2SessionSummary, SessionError> {
-    let pairing = pair_room_sender(broker, code, &config, events.as_ref(), cancel).await?;
-    let auth = PairingConfig::Spake2SharedToken {
-        token: pairing.token,
-    };
+    require_bootstrap_role(&bootstrap, TransferRole::Sender)?;
+    let pairing = pair_room_sender(broker, &bootstrap, &config, events.as_ref(), cancel).await?;
     let first_attempt = send_manifest_v2_to_endpoint_addr(
         pairing.peer.clone(),
         job,
         state_directory.clone(),
         config.clone(),
-        &auth,
+        &pairing.auth,
         events.clone(),
         cancel,
     )
@@ -258,7 +237,7 @@ pub async fn send_manifest_v2_via_room(
         job,
         state_directory,
         relay_config,
-        &auth,
+        &pairing.auth,
         events,
         cancel,
     )
@@ -297,46 +276,150 @@ async fn sender_delivery_phase(
         .map(|record| record.phase())
 }
 
-#[cfg(test)]
-#[path = "room_tests.rs"]
-mod tests;
+struct AuthenticatedRoomPairing<T> {
+    peer: T,
+    auth: PairingConfig,
+}
 
 async fn pair_room_sender(
     broker: EndpointAddr,
-    code: &str,
+    bootstrap: &InvitationBootstrap,
     config: &SessionConfig,
     events: &dyn EventSink,
     cancel: &TransferCancelToken,
-) -> Result<RoomPairing<EndpointAddr>, SessionError> {
-    let (room_id, password) = split_code(code);
-    let rdz = rendezvous_endpoint(&config.relay).await?;
-    // The receiver ignores the sender's payload (the sender only dials), so any
-    // valid endpoint address works as a placeholder.
-    let placeholder = rdz.addr();
+) -> Result<AuthenticatedRoomPairing<EndpointAddr>, SessionError> {
+    let (rdz, control) = authenticate_room(
+        broker,
+        bootstrap,
+        config,
+        events,
+        cancel,
+        Some(SEND_ROOM_PAIRING_TIMEOUT),
+    )
+    .await?;
+    validate_authenticated_context(bootstrap, &control)?;
+    let pairing = exchange_descriptor_or_cancel::<EndpointAddr>(control, None, cancel).await?;
+    rdz.close().await;
+    events.on_event(TransferEvent::Pairing {
+        step: PairingStep::Exchanged,
+    });
+    let auth = finish_invitation_pairing(bootstrap, &pairing)?;
+    Ok(AuthenticatedRoomPairing {
+        peer: pairing
+            .peer
+            .ok_or_else(|| CoreError::Protocol("receiver omitted endpoint descriptor".into()))?,
+        auth,
+    })
+}
 
-    let pairing = match pair_or_cancel(
+async fn authenticate_room(
+    broker: EndpointAddr,
+    bootstrap: &InvitationBootstrap,
+    config: &SessionConfig,
+    events: &dyn EventSink,
+    cancel: &TransferCancelToken,
+    timeout: Option<Duration>,
+) -> Result<(Endpoint, AuthenticatedControl), SessionError> {
+    let rdz = rendezvous_endpoint(&config.relay).await?;
+    let public_context = bootstrap
+        .creator_public_context()
+        .map_err(invitation_error)?;
+    let control = match pair_or_cancel(
         &rdz,
         &broker,
-        room_id,
-        password,
-        &placeholder,
-        JoinIntent::Send,
+        bootstrap,
+        public_context.as_deref(),
         cancel,
         events,
-        Some(SEND_ROOM_PAIRING_TIMEOUT),
+        timeout,
     )
     .await
     {
-        Ok(pairing) => pairing,
+        Ok(control) => control,
         Err(error) => {
-            // Close the rendezvous endpoint before returning so a pairing
-            // failure does not drop it ungracefully.
             rdz.close().await;
             return Err(error);
         }
     };
-    // The rendezvous endpoint is only needed for the broker handshake; close it
-    // so it does not linger (and log) while the data transfer runs.
-    rdz.close().await;
-    Ok(pairing)
+    Ok((rdz, control))
 }
+
+fn validate_authenticated_context(
+    bootstrap: &InvitationBootstrap,
+    control: &AuthenticatedControl,
+) -> Result<(), SessionError> {
+    bootstrap
+        .validate_control_context(
+            control.selected_bootstrap_method,
+            control.peer_public_context.as_deref(),
+            unix_now()?,
+        )
+        .map_err(invitation_error)
+}
+
+async fn exchange_descriptor_or_cancel<T>(
+    control: AuthenticatedControl,
+    mine: Option<&T>,
+    cancel: &TransferCancelToken,
+) -> Result<RoomPairing<Option<T>>, SessionError>
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    tokio::select! {
+        result = control.exchange_descriptor(mine) => {
+            result.map_err(|error| CoreError::Transport(error.to_string()))
+        }
+        _ = cancel.cancelled() => {
+            Err(CoreError::Cancelled)
+        }
+        _ = tokio::time::sleep(Duration::from_secs(8)) => {
+            Err(CoreError::Transport("rendezvous descriptor exchange stalled".into()))
+        }
+    }
+}
+
+fn finish_invitation_pairing<T>(
+    bootstrap: &InvitationBootstrap,
+    pairing: &RoomPairing<T>,
+) -> Result<PairingConfig, SessionError> {
+    let (password, context) = bootstrap
+        .finish_control(
+            pairing.selected_bootstrap_method,
+            pairing.peer_public_context.as_deref(),
+            pairing.control_key(),
+            pairing.control_transcript_hash,
+            unix_now()?,
+        )
+        .map_err(invitation_error)?;
+    PairingConfig::invitation_v2(password, context)
+}
+
+fn require_bootstrap_role(
+    bootstrap: &InvitationBootstrap,
+    expected: TransferRole,
+) -> Result<(), SessionError> {
+    if bootstrap.local_role() == expected {
+        Ok(())
+    } else {
+        Err(CoreError::InvalidInput(
+            "invitation transfer role conflicts with selected operation".into(),
+        ))
+    }
+}
+
+fn invitation_error(error: InvitationError) -> SessionError {
+    CoreError::InvalidInput(format!("invitation {}: {error}", error.code().as_str()))
+}
+
+fn unix_now() -> Result<u64, SessionError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .map_err(|error| {
+            CoreError::InvalidInput(format!("system clock before Unix epoch: {error}"))
+        })
+}
+
+#[cfg(test)]
+#[path = "room_tests.rs"]
+mod tests;

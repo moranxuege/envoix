@@ -9,7 +9,8 @@ use envoix_pairing::{
     Confirm, PakeResponse, PakeStart, initiator_start, open_json, responder_respond, seal_json,
 };
 use envoix_rendezvous::{
-    Join, JoinIntent, PeerConn, Reply, Role, RoomRegistry, read_framed, write_framed,
+    BootstrapKind, InvitationSide, Join, PeerConn, RENDEZVOUS_PROTOCOL_VERSION, Reply, Role,
+    RoomRegistry, TransferRole, read_framed, write_framed,
 };
 use tokio::io::DuplexStream;
 
@@ -20,6 +21,38 @@ fn broker_conn(stream: DuplexStream) -> PeerConn {
     PeerConn::new(writer, reader, ())
 }
 
+fn creator_join(room_id: &str, role: TransferRole) -> Join {
+    Join {
+        version: RENDEZVOUS_PROTOCOL_VERSION,
+        room_id: room_id.to_string(),
+        invitation_side: InvitationSide::Creator,
+        transfer_role: role,
+        bootstrap_methods: vec![BootstrapKind::FullTicket, BootstrapKind::RoomCode],
+        selected_bootstrap_method: None,
+    }
+}
+
+fn joiner_join(room_id: &str, role: TransferRole) -> Join {
+    Join {
+        version: RENDEZVOUS_PROTOCOL_VERSION,
+        room_id: room_id.to_string(),
+        invitation_side: InvitationSide::Joiner,
+        transfer_role: role,
+        bootstrap_methods: Vec::new(),
+        selected_bootstrap_method: Some(BootstrapKind::RoomCode),
+    }
+}
+
+fn control_context(room_id: &str) -> envoix_invite::InvitationControlContext {
+    envoix_invite::InvitationControlContext::new(
+        room_id.to_string(),
+        BootstrapKind::RoomCode,
+        TransferRole::Receiver,
+        TransferRole::Sender,
+    )
+    .unwrap()
+}
+
 /// Drive the initiator client over `stream`; returns the role the broker
 /// assigned and the peer descriptor recovered from the other side.
 async fn run_initiator(
@@ -27,23 +60,15 @@ async fn run_initiator(
     room: &str,
     code: &str,
     my_descriptor: &str,
-    intent: Option<JoinIntent>,
 ) -> Result<(Role, String), Box<dyn std::error::Error + Send + Sync>> {
     let (mut reader, mut writer) = tokio::io::split(stream);
-    write_framed(
-        &mut writer,
-        &Join {
-            room_id: room.to_string(),
-            intent,
-        },
-    )
-    .await?;
+    write_framed(&mut writer, &joiner_join(room, TransferRole::Sender)).await?;
     let reply: Reply = read_framed(&mut reader).await?;
     let Reply::Paired(paired) = reply else {
         panic!("expected Paired, got {reply:?}");
     };
 
-    let (pending, start) = initiator_start(code)?;
+    let (pending, start) = initiator_start(code, &control_context(room))?;
     write_framed(&mut writer, &start).await?;
     let response: PakeResponse = read_framed(&mut reader).await?;
     let (confirming, confirm) = pending.finish(&response)?;
@@ -68,24 +93,16 @@ async fn run_responder(
     room: &str,
     code: &str,
     my_descriptor: &str,
-    intent: Option<JoinIntent>,
 ) -> Result<(Role, String), Box<dyn std::error::Error + Send + Sync>> {
     let (mut reader, mut writer) = tokio::io::split(stream);
-    write_framed(
-        &mut writer,
-        &Join {
-            room_id: room.to_string(),
-            intent,
-        },
-    )
-    .await?;
+    write_framed(&mut writer, &creator_join(room, TransferRole::Receiver)).await?;
     let reply: Reply = read_framed(&mut reader).await?;
     let Reply::Paired(paired) = reply else {
         panic!("expected Paired, got {reply:?}");
     };
 
     let start: PakeStart = read_framed(&mut reader).await?;
-    let (confirming, response) = responder_respond(code, &start)?;
+    let (confirming, response) = responder_respond(code, &control_context(room), &start)?;
     write_framed(&mut writer, &response).await?;
     let initiator_confirm: Confirm = read_framed(&mut reader).await?;
     let (key, confirm) = confirming.verify(&initiator_confirm)?;
@@ -103,18 +120,10 @@ async fn run_responder(
 
 async fn join_only(
     stream: DuplexStream,
-    room: &str,
-    intent: Option<JoinIntent>,
+    join: Join,
 ) -> Result<Reply, Box<dyn std::error::Error + Send + Sync>> {
     let (mut reader, mut writer) = tokio::io::split(stream);
-    write_framed(
-        &mut writer,
-        &Join {
-            room_id: room.to_string(),
-            intent,
-        },
-    )
-    .await?;
+    write_framed(&mut writer, &join).await?;
     Ok(read_framed(&mut reader).await?)
 }
 
@@ -129,28 +138,13 @@ async fn two_peers_pair_and_exchange_descriptors() {
     let r2 = registry.clone();
     let s2 = tokio::spawn(async move { r2.serve(broker_conn(broker_b)).await });
 
-    // First joiner becomes the initiator. Give A a small head start so the
-    // role assignment is deterministic.
+    // Connection roles follow invitation side, not arrival order.
     let a = tokio::spawn(async move {
-        run_initiator(
-            client_a,
-            "room-42",
-            "12-orange-tiger",
-            "endpoint-A",
-            Some(JoinIntent::Send),
-        )
-        .await
+        run_initiator(client_a, "420042", "12-orange-tiger", "endpoint-A").await
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
     let b = tokio::spawn(async move {
-        run_responder(
-            client_b,
-            "room-42",
-            "12-orange-tiger",
-            "endpoint-B",
-            Some(JoinIntent::Receive),
-        )
-        .await
+        run_responder(client_b, "420042", "12-orange-tiger", "endpoint-B").await
     });
 
     let (role_a, a_got) = a.await.unwrap().expect("initiator pairs");
@@ -175,15 +169,9 @@ async fn lone_peer_expires() {
 
     // Join a room nobody else joins.
     let (mut reader, mut writer) = tokio::io::split(&mut client);
-    write_framed(
-        &mut writer,
-        &Join {
-            room_id: "empty".to_string(),
-            intent: Some(JoinIntent::Receive),
-        },
-    )
-    .await
-    .unwrap();
+    write_framed(&mut writer, &creator_join("100001", TransferRole::Receiver))
+        .await
+        .unwrap();
 
     // The broker gives up after the TTL.
     let result = serve.await.unwrap();
@@ -208,15 +196,13 @@ async fn same_direction_peers_do_not_match() {
     let registry_b = registry.clone();
     let serve_b = tokio::spawn(async move { registry_b.serve(broker_conn(broker_b)).await });
 
-    let first =
-        tokio::spawn(
-            async move { join_only(sender_a, "senders-only", Some(JoinIntent::Send)).await },
-        );
+    let first = tokio::spawn(async move {
+        join_only(sender_a, creator_join("200002", TransferRole::Sender)).await
+    });
     tokio::time::sleep(Duration::from_millis(20)).await;
-    let second =
-        tokio::spawn(
-            async move { join_only(sender_b, "senders-only", Some(JoinIntent::Send)).await },
-        );
+    let second = tokio::spawn(async move {
+        join_only(sender_b, joiner_join("200002", TransferRole::Sender)).await
+    });
 
     assert_eq!(first.await.unwrap().unwrap(), Reply::Expired);
     assert_eq!(second.await.unwrap().unwrap(), Reply::Expired);
@@ -241,7 +227,7 @@ async fn over_long_room_id_is_rejected() {
         &mut writer,
         &Join {
             room_id: "x".repeat(1024),
-            intent: Some(JoinIntent::Send),
+            ..creator_join("300003", TransferRole::Sender)
         },
     )
     .await
@@ -269,15 +255,9 @@ async fn dead_waiter_is_evicted_and_next_two_peers_pair() {
     let serve_a = tokio::spawn(async move { ra.serve(broker_conn(a_broker)).await });
     {
         let (_reader, mut writer) = tokio::io::split(a_client);
-        write_framed(
-            &mut writer,
-            &Join {
-                room_id: "room-dead".to_string(),
-                intent: Some(JoinIntent::Send),
-            },
-        )
-        .await
-        .unwrap();
+        write_framed(&mut writer, &creator_join("400004", TransferRole::Receiver))
+            .await
+            .unwrap();
     } // a_client dropped here
 
     // A's serve task must end promptly with an eviction error - well before
@@ -300,25 +280,11 @@ async fn dead_waiter_is_evicted_and_next_two_peers_pair() {
     let sc = tokio::spawn(async move { rc.serve(broker_conn(broker_c)).await });
 
     let b = tokio::spawn(async move {
-        run_initiator(
-            client_b,
-            "room-dead",
-            "12-kelp-coral",
-            "endpoint-B",
-            Some(JoinIntent::Send),
-        )
-        .await
+        run_initiator(client_b, "400004", "12-kelp-coral", "endpoint-B").await
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
     let c = tokio::spawn(async move {
-        run_responder(
-            client_c,
-            "room-dead",
-            "12-kelp-coral",
-            "endpoint-C",
-            Some(JoinIntent::Receive),
-        )
-        .await
+        run_responder(client_c, "400004", "12-kelp-coral", "endpoint-C").await
     });
 
     let (role_b, b_got) = b.await.unwrap().expect("B pairs despite the corpse");

@@ -9,7 +9,9 @@ anyhow.workspace = true
 async-trait.workspace = true
 envoix-auth.workspace = true
 envoix-error.workspace = true
+envoix-invite.workspace = true
 envoix-protocol.workspace = true
+envoix-rendezvous.workspace = true
 envoix-rendezvous-iroh.workspace = true
 envoix-transfer.workspace = true
 if-addrs.workspace = true
@@ -29,5 +31,4 @@ n0-error.workspace = true
 
 [dev-dependencies]
 blake3.workspace = true
-envoix-rendezvous.workspace = true
 tempfile.workspace = true

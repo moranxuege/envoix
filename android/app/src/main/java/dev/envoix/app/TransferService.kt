@@ -619,6 +619,7 @@ class TransferService : Service() {
         JSONObject()
             .put("direction", if (direction == Direction.Send) "send" else "receive")
             .put("room", room)
+            .apply { if (useRoom) put("invitation_ref", room) }
             .put("broker", broker)
             .put("relay", relay)
             .put("use_room", useRoom)
@@ -799,8 +800,8 @@ class TransferService : Service() {
                     putExtra(EXTRA_QR, qrPayload)
                     putExtra(EXTRA_JOB_ID, jobId)
                     putExtra(EXTRA_COPY_APPROVED, copyApproved)
-                    putExtra(EXTRA_USE_ROOM, SettingsStore.settings.value.useRoom)
-                    putExtra(EXTRA_USE_MDNS, SettingsStore.settings.value.useMdns)
+                    putExtra(EXTRA_USE_ROOM, true)
+                    putExtra(EXTRA_USE_MDNS, false)
                 },
             )
         }
@@ -879,7 +880,8 @@ private data class ManifestSpec(
             .put("broker", broker)
             .put("relay", relay)
             .put("job_id", jobId)
-            .put("qr", qrPayload)
+            // InviteV2 credentials are process-memory-only pending state.
+            .put("qr", JSONObject.NULL)
             .put("destination_copy_approved", destinationCopyApproved)
             .put("use_room", useRoom)
             .put("use_mdns", useMdns)

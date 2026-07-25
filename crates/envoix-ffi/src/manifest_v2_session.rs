@@ -5,16 +5,16 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use envoix_client::api::{
     DestinationDecisionV2, DestinationRequestV2, EventSink, PairingConfig, PeerSource,
-    PendingManifestV2Receive, SessionError, TransferCancelToken, TransferEvent, parse_broker_addr,
-    receive_manifest_v2_offer_enable_mdns, receive_manifest_v2_offer_via_room,
+    PendingManifestV2Receive, SessionError, TransferCancelToken, TransferEvent, acquire_invitation,
+    parse_broker_addr, receive_manifest_v2_offer_enable_mdns, receive_manifest_v2_offer_via_room,
     receive_manifest_v2_offer_with_bound_peer, send_manifest_v2_enable_mdns,
-    send_manifest_v2_manual, send_manifest_v2_to_endpoint_addr, send_manifest_v2_via_room,
+    send_manifest_v2_manual, send_manifest_v2_via_room,
 };
-use envoix_qr::{QrInvitePayload, generate_token};
 use envoix_types::PairingStep;
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
@@ -543,21 +543,25 @@ async fn send_attempt(
             )
             .await
         }
-        PeerSource::Invite { invite } => {
-            let payload = QrInvitePayload::decode(invite).map_err(op_err_core)?;
-            payload.validate(now_unix_seconds()).map_err(op_err_core)?;
-            let pairing = PairingConfig::spake2_shared_token(payload.token.clone())?;
-            let endpoint = payload.endpoint_addr().map_err(op_err_core)?;
-            send_manifest_v2_to_endpoint_addr(
-                endpoint,
+        PeerSource::Invitation {
+            secret_ref, broker, ..
+        } => {
+            let mut lease = acquire_invitation(secret_ref).map_err(op_err_core)?;
+            let broker = parse_broker_addr(broker, relay)?;
+            let result = send_manifest_v2_via_room(
+                broker,
+                lease.bootstrap().clone(),
                 job,
                 state_directory,
                 config,
-                &pairing,
                 events,
                 cancel,
             )
-            .await
+            .await;
+            if result.is_ok() {
+                lease.consume();
+            }
+            result
         }
         PeerSource::Mdns { token: Some(token) } => {
             let pairing = PairingConfig::spake2_shared_token(token.clone())?;
@@ -570,11 +574,6 @@ async fn send_attempt(
                 cancel.clone(),
             )
             .await
-        }
-        PeerSource::Room { code, broker } => {
-            let broker = parse_broker_addr(broker, relay)?;
-            send_manifest_v2_via_room(broker, code, job, state_directory, config, events, cancel)
-                .await
         }
         _ => Err(SessionError::InvalidInput(
             "selected route cannot dial a canonical receiver".into(),
@@ -611,37 +610,6 @@ async fn receive_offer_attempt(
             )
             .await
         }
-        PeerSource::ShowInvite { token, ttl_secs } => {
-            let token = token
-                .clone()
-                .map(Ok)
-                .unwrap_or_else(generate_token)
-                .map_err(op_err_core)?;
-            let pairing = PairingConfig::spake2_shared_token(token.clone())?;
-            let expires_at = now_unix_seconds().saturating_add(*ttl_secs);
-            receive_manifest_v2_offer_with_bound_peer(
-                listen_addrs(&listen),
-                config,
-                &pairing,
-                events,
-                move |peer, relay_urls| {
-                    observer.on_invite_ready(
-                        QrInvitePayload {
-                            version: envoix_qr::PAYLOAD_VERSION,
-                            protocol_version: envoix_types::PROTOCOL_VERSION,
-                            token,
-                            peer,
-                            relay_urls,
-                            expires_at,
-                            flags: 0,
-                        }
-                        .encode(),
-                    );
-                },
-                cancel,
-            )
-            .await
-        }
         PeerSource::Mdns { token } => {
             let token = token
                 .clone()
@@ -649,41 +617,36 @@ async fn receive_offer_attempt(
                 .unwrap_or_else(generate_token)
                 .map_err(op_err_core)?;
             let pairing = PairingConfig::spake2_shared_token(token.clone())?;
-            let expires_at = now_unix_seconds().saturating_add(300);
             receive_manifest_v2_offer_enable_mdns(
                 listen_addrs(&listen),
                 config,
                 &pairing,
                 events,
-                move |peer, relay_urls| {
-                    observer.on_invite_ready(
-                        QrInvitePayload {
-                            version: envoix_qr::PAYLOAD_VERSION,
-                            protocol_version: envoix_types::PROTOCOL_VERSION,
-                            token,
-                            peer,
-                            relay_urls,
-                            expires_at,
-                            flags: 0,
-                        }
-                        .encode(),
-                    );
+                move |peer, _relay_urls| {
+                    observer.on_invite_ready(peer.to_string());
                 },
                 cancel,
             )
             .await
         }
-        PeerSource::Room { code, broker } => {
+        PeerSource::Invitation {
+            secret_ref, broker, ..
+        } => {
+            let mut lease = acquire_invitation(secret_ref).map_err(op_err_core)?;
             let broker = parse_broker_addr(broker, relay)?;
-            receive_manifest_v2_offer_via_room(
+            let result = receive_manifest_v2_offer_via_room(
                 broker,
-                code,
+                lease.bootstrap().clone(),
                 listen_addrs(&listen),
                 config,
                 events,
                 cancel,
             )
-            .await
+            .await;
+            if result.is_ok() {
+                lease.consume();
+            }
+            result
         }
         _ => Err(SessionError::InvalidInput(
             "selected route cannot listen for a canonical sender".into(),
@@ -783,11 +746,11 @@ fn encode_job_id(job_id: envoix_client::api::JobIdV2) -> String {
     job_id.0.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn now_unix_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+fn generate_token() -> Result<String, SessionError> {
+    let mut bytes = [0_u8; 18];
+    getrandom::fill(&mut bytes)
+        .map_err(|error| SessionError::Crypto(format!("token entropy unavailable: {error}")))?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
 fn report_v2_failure(

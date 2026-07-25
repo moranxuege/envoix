@@ -7,6 +7,8 @@ readonly PACKAGE="dev.envoix.app"
 readonly ACTIVITY="$PACKAGE/.MainActivity"
 readonly SERVICE="$PACKAGE/.TransferService"
 readonly ACTION_START="$PACKAGE.START"
+readonly ACTION_CREATE_RECEIVER_INVITE="$PACKAGE.NAT_TEST_CREATE_RECEIVER_INVITE"
+readonly NAT_TEST_RECEIVER="$PACKAGE/.NatTestReceiver"
 readonly DEVICE_INPUT="/data/user/0/$PACKAGE/cache/nat-test-input"
 readonly DEVICE_OUTPUT_DIR="/sdcard/Download/Envoix"
 readonly TRANSFER_RATE_KBITS=4194 # Approximately 512 KiB/s.
@@ -434,6 +436,41 @@ wait_for_validation() {
     done
 }
 
+wait_for_wifi_route() {
+    local serial="$1"
+    local gateway="$2"
+    local expected_subnet="$3"
+    local deadline=$((SECONDS + 15))
+    local retried=0
+
+    until "$adb" -s "$serial" shell ip -4 route show table all 2>/dev/null |
+        grep -q "^default via $gateway dev wlan0"; do
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            if [ "$retried" -eq 0 ]; then
+                printf '[wifi] %s has no Wi-Fi default route; reconnecting once...\n' "$serial"
+                wait_for_wifi "$serial" "$expected_subnet"
+                retried=1
+                deadline=$((SECONDS + 15))
+            else
+                capture_startup_diagnostics "wifi-route-timeout"
+                die "$serial did not install its TAP-backed Wi-Fi default route; see $log_dir/startup-*"
+            fi
+        fi
+        sleep 1
+    done
+}
+
+configure_test_validation() {
+    local serial="$1"
+
+    # The broker and relay live on the isolated simulated WAN. Public Google
+    # captive-portal probes are unrelated to the path under test and make
+    # startup depend on the host's current Internet/DNS behavior. These AVDs
+    # are disposable, so tell Android to trust the test Wi-Fi for this boot.
+    "$adb" -s "$serial" shell settings put global captive_portal_mode 0
+    "$adb" -s "$serial" shell settings put global private_dns_mode off
+}
+
 capture_startup_diagnostics() {
     local reason="$1"
     local serial role
@@ -469,6 +506,9 @@ capture_startup_diagnostics() {
         in_namespace "$ns_b" ip -details -brief address
         in_namespace "$ns_b" ip -4 route show table all
         in_namespace "$ns_b" ip -6 route show table all
+        printf '\n== host forwarding ==\n'
+        privileged iptables -S FORWARD
+        privileged iptables -t nat -S POSTROUTING
     } >"$log_dir/startup-host-network.log" 2>&1 || true
 
     if [ "$verbose" -eq 1 ]; then
@@ -516,6 +556,7 @@ set_device_ipv6() {
     # Android's existing IpClient session does not restart SLAAC merely because
     # disable_ipv6 changes. Reconnect Wi-Fi so IpClient processes the RAs again.
     wait_for_wifi "$serial" "$expected_ipv4_subnet"
+    wait_for_wifi_route "$serial" "${expected_ipv4_subnet}1" "$expected_ipv4_subnet"
     wait_for_validation "$serial"
     deadline=$((SECONDS + 30))
     until "$adb" -s "$serial" shell \
@@ -566,6 +607,38 @@ start_transfer() {
         --es broker "$broker_endpoint" --es relay "$relay_url" \
         --es data_stream_window "$DATA_STREAM_WINDOW" \
         --es receipt_server "''" >/dev/null
+}
+
+start_creator_receiver() {
+    local output room
+
+    output="$("$adb" -s "$SERIAL_B" shell am broadcast \
+        -n "$NAT_TEST_RECEIVER" -a "$ACTION_CREATE_RECEIVER_INVITE" \
+        --es broker "$broker_endpoint" --es relay "$relay_url" \
+        --es data_stream_window "$DATA_STREAM_WINDOW" 2>&1)"
+    room="$(printf '%s\n' "$output" |
+        sed -n 's/.*result=-1, data="\([^"]*\)".*/\1/p' |
+        tail -n 1)"
+    if ! [[ "$room" =~ ^[0-9]{6}-[a-z0-9]{4}-[a-z0-9]{4}$ ]]; then
+        die "failed to create receiver InviteV2 on $SERIAL_B: $output"
+    fi
+    printf '%s\n' "$room"
+}
+
+wait_for_transfer_record() {
+    local serial="$1"
+    local role="$2"
+    local profile="$3"
+    local deadline=$((SECONDS + 15))
+
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if [ -n "$(record_state "$serial" || true)" ]; then
+            return
+        fi
+        sleep 1
+    done
+    capture_diagnostics "$profile"
+    die "$serial $role session did not create a durable record; see $log_dir/$profile-$role-*"
 }
 
 device_hashes() {
@@ -937,7 +1010,7 @@ run_test() {
     local room deadline actual app_uid sender_state receiver_state
     local sender_peer_type receiver_peer_type failure_reason
 
-    room="$(printf '%06d' $((RANDOM % 1000000)))-nat-test"
+    room=""
     actual=""
     sender_state=""
     receiver_state=""
@@ -969,11 +1042,13 @@ run_test() {
     "$adb" -s "$SERIAL_A" shell \
         "cp /data/local/tmp/nat-test-input '$DEVICE_INPUT'; chown $app_uid:$app_uid '$DEVICE_INPUT'"
 
-    start_transfer "$SERIAL_B" receive "$room" unused
+    room="$(start_creator_receiver)"
+    wait_for_transfer_record "$SERIAL_B" receiver "$profile"
     sleep 2
     printf '[%s] Limiting sender Wi-Fi to approximately 512 KiB/s...\n' "$profile"
     limit_bandwidth "$SERIAL_A"
     start_transfer "$SERIAL_A" send "$room" "$DEVICE_INPUT"
+    wait_for_transfer_record "$SERIAL_A" sender "$profile"
 
     deadline=$((SECONDS + timeout))
     while [ "$SECONDS" -lt "$deadline" ]; do
@@ -1175,8 +1250,12 @@ root_device "$SERIAL_A"
 root_device "$SERIAL_B"
 "$adb" -s "$SERIAL_A" shell 'command -v tc >/dev/null' ||
     die "$SERIAL_A does not provide the tc traffic-control utility"
+configure_test_validation "$SERIAL_A"
+configure_test_validation "$SERIAL_B"
 wait_for_wifi "$SERIAL_A" 192.168.101.
 wait_for_wifi "$SERIAL_B" 192.168.102.
+wait_for_wifi_route "$SERIAL_A" 192.168.101.1 192.168.101.
+wait_for_wifi_route "$SERIAL_B" 192.168.102.1 192.168.102.
 wait_for_validation "$SERIAL_A"
 wait_for_validation "$SERIAL_B"
 printf 'Wi-Fi addresses: A=%s B=%s\n' \

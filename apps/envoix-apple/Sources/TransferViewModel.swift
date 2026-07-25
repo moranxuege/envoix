@@ -658,6 +658,11 @@ final class TransferViewModel: ObservableObject {
             guard request.direction == direction else {
                 throw RuntimeSettingsError("Stored transfer direction does not match its session slot.")
             }
+            if isEphemeralInvitationMode(request.mode) {
+                clearStoredManifestSession(direction: direction)
+                eventLog.append("discarded pending invitation session after relaunch")
+                return
+            }
         } catch {
             clearStoredManifestSession(direction: direction)
             eventLog.append("discarded invalid saved session: \(error.localizedDescription)")
@@ -851,13 +856,19 @@ final class TransferViewModel: ObservableObject {
 
     func startReceivingWithInvite(
         outputDir: String,
+        invite: String,
         settings: EnvoixRuntimeSettings,
         destinationAccess: AnyObject? = nil
     ) {
         startReceive(
             targetDirectory: outputDir,
             settings: settings,
-            request: request(direction: .receive, mode: .showInvite, settings: settings),
+            request: request(
+                direction: .receive,
+                mode: .invite,
+                settings: settings,
+                invite: invite
+            ),
             destinationAccess: destinationAccess
         )
     }
@@ -1418,6 +1429,10 @@ final class TransferViewModel: ObservableObject {
     }
 
     private func persistActiveSend(_ operation: SendOperation) throws {
+        if isEphemeralInvitationMode(operation.request.mode) {
+            clearStoredManifestSession(direction: .send)
+            return
+        }
         guard let activity = transferActivity else {
             throw RuntimeSettingsError("Cannot persist a sender session without an activity.")
         }
@@ -1454,6 +1469,10 @@ final class TransferViewModel: ObservableObject {
     }
 
     private func persistActiveReceive(_ operation: ReceiveOperation) throws {
+        if isEphemeralInvitationMode(operation.request.mode) {
+            clearStoredManifestSession(direction: .receive)
+            return
+        }
         guard let activity = transferActivity else {
             throw RuntimeSettingsError("Cannot persist a receiver session without an activity.")
         }
@@ -1511,6 +1530,15 @@ final class TransferViewModel: ObservableObject {
             ? Self.activeSendSessionFileName
             : Self.activeReceiveSessionFileName
         return try manifestRootDirectory().appendingPathComponent(fileName, isDirectory: false)
+    }
+
+    private func isEphemeralInvitationMode(_ mode: FfiTransferMode) -> Bool {
+        switch mode {
+        case .invite, .room, .showInvite:
+            return true
+        case .manual, .showManual, .mdns:
+            return false
+        }
     }
 
     private func restoreSourceAccess(_ stored: StoredAppleManifestSessionV2) throws -> AnyObject? {

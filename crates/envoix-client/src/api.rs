@@ -14,9 +14,14 @@ pub use envoix_protocol::manifest_v2_frames::RootPlanV2;
 pub use envoix_session::*;
 
 pub use error::TransferError;
-pub use invite::{Invite, Role};
+pub use invite::{
+    BootstrapKind, Capabilities, CreatedInvitation, InvitationAuthContext, InvitationBootstrap,
+    InvitationError, InvitationErrorCode, InvitationPublicContext, InvitationSide, InviteV2,
+    RoomCode, TransferRole, ValidatedInvitation, create_invitation, parse_invitation_for_role,
+    parse_invitation_for_routing, parse_room_code,
+};
 pub use options::{PathPolicy, TransferOptions};
-pub use source::{PeerSource, TransferMode};
+pub use source::{InvitationLease, InviteSecretRef, PeerSource, TransferMode, acquire_invitation};
 
 /// Runtime settings shared by every Manifest v2 route.
 #[derive(Clone, Debug)]

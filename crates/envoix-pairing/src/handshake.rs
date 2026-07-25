@@ -1,120 +1,118 @@
-//! SPAKE2 handshake + key confirmation, as a transport-agnostic state machine.
+//! Invitation-bound SPAKE2 control handshake and key confirmation.
 //!
-//! The initiator opens (`initiator_start`); the responder replies
-//! (`responder_respond`); both derive the shared key `K`. Then each proves
-//! possession of `K` with a **keyed-BLAKE3** MAC over a transcript of the
-//! handshake (the codebase's keyed-MAC primitive, not HMAC). Proofs are compared
-//! with constant-time `blake3::Hash` equality. There is no transport channel
-//! binding: confidentiality of what follows comes from `K` (see `bundle`).
-//!
-//! The caller drives the message exchange over whatever transport carries the
-//! rendezvous mailbox; this module never touches sockets.
+//! The invitation joiner is always the initiator and the creator is always the
+//! responder. HMAC-SHA256 confirmation binds the selected bootstrap, locator,
+//! transfer roles, both nonces, and both Ed25519 SPAKE2 contributions.
 
+use envoix_invite::{Commitment, InvitationControlContext};
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use spake2::{Ed25519Group, Identity, Password, Spake2};
 
 use crate::PairingError;
 
-/// Per-protocol domain separation, woven into the confirmation transcript.
-const DOMAIN: &[u8] = b"envoix-pairing-spake2-v1";
-/// SPAKE2 identity strings (same order on both sides; role set by start_a/b).
-const INITIATOR_ID: &[u8] = b"envoix pairing initiator";
-const RESPONDER_ID: &[u8] = b"envoix pairing responder";
-/// BLAKE3 KDF context for the confirmation key (distinct from the bundle key).
-const CONFIRM_KEY_CONTEXT: &str = "envoix-pairing confirm key v1";
-/// Role labels so the two confirmation proofs can't be swapped.
-const INITIATOR_CONFIRM_LABEL: &[u8] = b"initiator-confirm";
-const RESPONDER_CONFIRM_LABEL: &[u8] = b"responder-confirm";
+const DOMAIN: &[u8] = b"envoix-invite-control-spake2-v2";
+const INITIATOR_ID: &[u8] = b"envoix invitation joiner";
+const RESPONDER_ID: &[u8] = b"envoix invitation creator";
+const INITIATOR_CONFIRM_LABEL: &[u8] = b"joiner-confirm";
+const RESPONDER_CONFIRM_LABEL: &[u8] = b"creator-confirm";
+const NONCE_LEN: usize = 32;
 
-/// Confirmation nonce length (128 bits).
-const NONCE_LEN: usize = 16;
+type HmacSha256 = Hmac<Sha256>;
 
-/// Initiator's opening message: its nonce and SPAKE2 message.
+/// Invitation joiner's opening message.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct PakeStart {
     pub nonce: Vec<u8>,
     pub msg: Vec<u8>,
 }
 
-/// Responder's reply: its nonce and SPAKE2 message.
+/// Invitation creator's reply.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct PakeResponse {
     pub nonce: Vec<u8>,
     pub msg: Vec<u8>,
 }
 
-/// A key-confirmation proof (a keyed-BLAKE3 tag).
+/// A role-separated HMAC-SHA256 confirmation proof.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Confirm {
     pub mac: Vec<u8>,
 }
 
-/// The confirmed shared key. The caller uses it to seal/open bundles.
+/// Confirmed control-plane key and its authenticated PAKE transcript hash.
 pub struct Paired {
     key: Vec<u8>,
+    transcript_hash: Commitment,
 }
 
 impl Paired {
-    /// The SPAKE2 shared key `K`.
     pub fn key(&self) -> &[u8] {
         &self.key
+    }
+
+    pub fn transcript_hash(&self) -> Commitment {
+        self.transcript_hash
     }
 }
 
 fn random_nonce() -> Result<Vec<u8>, PairingError> {
-    let mut nonce = vec![0u8; NONCE_LEN];
+    let mut nonce = vec![0_u8; NONCE_LEN];
     getrandom::fill(&mut nonce).map_err(|_| PairingError::Entropy)?;
     Ok(nonce)
 }
 
-/// Length-prefixed transcript over the whole handshake (no exporter).
-fn transcript(initiator: &PakeStart, responder: &PakeResponse) -> Vec<u8> {
-    let mut t = Vec::new();
+fn transcript(
+    context: &InvitationControlContext,
+    initiator: &PakeStart,
+    responder: &PakeResponse,
+) -> Vec<u8> {
+    let binding = context.framed_binding();
+    let mut output = Vec::new();
     for part in [
         DOMAIN,
         INITIATOR_ID,
         RESPONDER_ID,
+        binding.as_slice(),
         &initiator.nonce,
         &responder.nonce,
         &initiator.msg,
         &responder.msg,
     ] {
-        t.extend_from_slice(&(part.len() as u64).to_be_bytes());
-        t.extend_from_slice(part);
+        append_len_prefixed(&mut output, part);
     }
-    t
+    output
 }
 
-/// keyed-BLAKE3(confirm_key(K), transcript || label).
-fn proof(key: &[u8], transcript: &[u8], label: &[u8]) -> blake3::Hash {
-    let confirm_key = blake3::derive_key(CONFIRM_KEY_CONTEXT, key);
-    let mut h = blake3::Hasher::new_keyed(&confirm_key);
-    h.update(transcript);
-    h.update(&(label.len() as u64).to_be_bytes());
-    h.update(label);
-    h.finalize()
+fn proof(key: &[u8], transcript: &[u8], label: &[u8]) -> Vec<u8> {
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC-SHA256 accepts keys of any length");
+    mac.update(transcript);
+    update_len_prefixed(&mut mac, label);
+    mac.finalize().into_bytes().to_vec()
 }
 
-/// Constant-time check that `received` is the expected proof.
 fn verify(
     key: &[u8],
     transcript: &[u8],
     label: &[u8],
     received: &[u8],
 ) -> Result<(), PairingError> {
-    let received: [u8; 32] = received.try_into().map_err(|_| PairingError::Confirm)?;
-    // blake3::Hash equality is constant-time.
-    if proof(key, transcript, label) == blake3::Hash::from_bytes(received) {
-        Ok(())
-    } else {
-        Err(PairingError::Confirm)
-    }
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC-SHA256 accepts keys of any length");
+    mac.update(transcript);
+    update_len_prefixed(&mut mac, label);
+    mac.verify_slice(received)
+        .map_err(|_| PairingError::Confirm)
 }
 
-// --- initiator ---
-
-/// Begin pairing as the initiator. Send the returned [`PakeStart`] to the peer.
-pub fn initiator_start(password: &str) -> Result<(InitiatorPending, PakeStart), PairingError> {
+/// Begin pairing as the invitation joiner.
+pub fn initiator_start(
+    password: &str,
+    context: &InvitationControlContext,
+) -> Result<(InitiatorPending, PakeStart), PairingError> {
     let nonce = random_nonce()?;
     let (spake, msg) = Spake2::<Ed25519Group>::start_a(
         &Password::new(password.as_bytes()),
@@ -126,66 +124,64 @@ pub fn initiator_start(password: &str) -> Result<(InitiatorPending, PakeStart), 
         InitiatorPending {
             spake,
             start: start.clone(),
+            context: context.clone(),
         },
         start,
     ))
 }
 
-/// Initiator state awaiting the responder's [`PakeResponse`].
 pub struct InitiatorPending {
     spake: Spake2<Ed25519Group>,
     start: PakeStart,
+    context: InvitationControlContext,
 }
 
 impl InitiatorPending {
-    /// Finish SPAKE2 and produce the initiator's [`Confirm`] to send.
     pub fn finish(
         self,
         response: &PakeResponse,
     ) -> Result<(InitiatorConfirming, Confirm), PairingError> {
         if response.nonce.len() != NONCE_LEN {
-            return Err(PairingError::BadMessage("responder nonce length".into()));
+            return Err(PairingError::BadMessage("creator nonce length".into()));
         }
         let key = self
             .spake
             .finish(&response.msg)
-            .map_err(|e| PairingError::Spake2(format!("{e:?}")))?;
-        let transcript = transcript(&self.start, response);
-        let mac = proof(&key, &transcript, INITIATOR_CONFIRM_LABEL)
-            .as_bytes()
-            .to_vec();
+            .map_err(|error| PairingError::Spake2(format!("{error:?}")))?;
+        let transcript = transcript(&self.context, &self.start, response);
+        let mac = proof(&key, &transcript, INITIATOR_CONFIRM_LABEL);
         Ok((InitiatorConfirming { key, transcript }, Confirm { mac }))
     }
 }
 
-/// Initiator state awaiting the responder's confirmation.
 pub struct InitiatorConfirming {
     key: Vec<u8>,
     transcript: Vec<u8>,
 }
 
 impl InitiatorConfirming {
-    /// Verify the responder's [`Confirm`]; on success the key is confirmed.
-    pub fn verify(self, responder_confirm: &Confirm) -> Result<Paired, PairingError> {
+    pub fn verify(self, creator_confirm: &Confirm) -> Result<Paired, PairingError> {
         verify(
             &self.key,
             &self.transcript,
             RESPONDER_CONFIRM_LABEL,
-            &responder_confirm.mac,
+            &creator_confirm.mac,
         )?;
-        Ok(Paired { key: self.key })
+        Ok(Paired {
+            key: self.key,
+            transcript_hash: Commitment::sha256(&self.transcript),
+        })
     }
 }
 
-// --- responder ---
-
-/// Respond to an initiator's [`PakeStart`]. Send the returned [`PakeResponse`].
+/// Respond as the invitation creator.
 pub fn responder_respond(
     password: &str,
+    context: &InvitationControlContext,
     start: &PakeStart,
 ) -> Result<(ResponderConfirming, PakeResponse), PairingError> {
     if start.nonce.len() != NONCE_LEN {
-        return Err(PairingError::BadMessage("initiator nonce length".into()));
+        return Err(PairingError::BadMessage("joiner nonce length".into()));
     }
     let nonce = random_nonce()?;
     let (spake, msg) = Spake2::<Ed25519Group>::start_b(
@@ -195,33 +191,44 @@ pub fn responder_respond(
     );
     let key = spake
         .finish(&start.msg)
-        .map_err(|e| PairingError::Spake2(format!("{e:?}")))?;
+        .map_err(|error| PairingError::Spake2(format!("{error:?}")))?;
     let response = PakeResponse { nonce, msg };
-    let transcript = transcript(start, &response);
+    let transcript = transcript(context, start, &response);
     Ok((ResponderConfirming { key, transcript }, response))
 }
 
-/// Responder state awaiting the initiator's confirmation.
 pub struct ResponderConfirming {
     key: Vec<u8>,
     transcript: Vec<u8>,
 }
 
 impl ResponderConfirming {
-    /// Verify the initiator's [`Confirm`]; on success return the responder's own
-    /// [`Confirm`] to send back and the confirmed key.
-    pub fn verify(self, initiator_confirm: &Confirm) -> Result<(Paired, Confirm), PairingError> {
+    pub fn verify(self, joiner_confirm: &Confirm) -> Result<(Paired, Confirm), PairingError> {
         verify(
             &self.key,
             &self.transcript,
             INITIATOR_CONFIRM_LABEL,
-            &initiator_confirm.mac,
+            &joiner_confirm.mac,
         )?;
-        let mac = proof(&self.key, &self.transcript, RESPONDER_CONFIRM_LABEL)
-            .as_bytes()
-            .to_vec();
-        Ok((Paired { key: self.key }, Confirm { mac }))
+        let mac = proof(&self.key, &self.transcript, RESPONDER_CONFIRM_LABEL);
+        Ok((
+            Paired {
+                key: self.key,
+                transcript_hash: Commitment::sha256(&self.transcript),
+            },
+            Confirm { mac },
+        ))
     }
+}
+
+fn append_len_prefixed(output: &mut Vec<u8>, bytes: &[u8]) {
+    output.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+    output.extend_from_slice(bytes);
+}
+
+fn update_len_prefixed(mac: &mut HmacSha256, bytes: &[u8]) {
+    mac.update(&(bytes.len() as u64).to_be_bytes());
+    mac.update(bytes);
 }
 
 #[cfg(test)]

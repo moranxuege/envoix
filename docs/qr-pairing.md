@@ -6,6 +6,10 @@ Status: complete
 
 ---
 
+> Historical document. Directional InviteV2 supersedes this format. Current
+> builds generate only `envoix://invite/v2/<payload>` and reject the `envoix:`
+> payload described below. See `docs/design/invite.md`.
+
 ## Goal
 
 Replace the manual token + address copy-paste workflow with a single QR code that the receiver prints to the terminal. The sender pastes the encoded invite string (or scans the QR image on mobile in a future milestone) and connects automatically.

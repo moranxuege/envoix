@@ -45,17 +45,24 @@ object Native {
     /** Wire the Android VM + app context into the Rust network stack. Call once. */
     external fun initContext(context: android.content.Context)
 
-    /** Generate a room invite for [role] ("send"/"receive"). Returns JSON
-     *  `{"code":..,"payload":..}` (payload = the QR string), or `{"error":..}`. */
+    /** Generate a directional InviteV2 for [role] ("send"/"receive"). */
     external fun generateInvite(
         role: String,
         broker: String,
         relay: String,
     ): String
 
-    /** Parse a typed code or a scanned `envoix://` payload. Returns JSON
-     *  `{"code":..,"broker":..,"relay":..,"role":..}`, or `{"error":..}`. */
+    /** Parse a complete InviteV2 for deep-link routing. */
     external fun parseInvite(input: String): String
+
+    /** Validate a complete invitation or Room Code for an active flow. */
+    external fun parseInviteForRole(
+        input: String,
+        role: String,
+    ): String
+
+    /** Strictly normalize a canonical or separator-free Room Code. */
+    external fun normalizeRoomCode(input: String): String
 
     /** Create the durable canonical job as soon as the first source is chosen. */
     external fun createManifestV2Job(

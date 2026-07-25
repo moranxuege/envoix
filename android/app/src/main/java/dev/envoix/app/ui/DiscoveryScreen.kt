@@ -194,8 +194,8 @@ internal fun DiscoveryScreen(
             item {
                 Text(
                     appText(
-                        "BLE sends the Envoix invitation only after you tap Start. It does not prove that the selected device is the intended peer.",
-                        "只有点击开始后，BLE 才会发送 Envoix 邀请；BLE 本身不能证明所选设备就是预期的对端。",
+                        "Bluetooth invitation handoff is disabled. Use the selected device context, then scan a QR code or enter a Room Code.",
+                        "蓝牙邀请交接已禁用。选择设备后，请扫描二维码或输入房间码。",
                     ),
                     color = colors.muted,
                     fontSize = 12.sp,
@@ -218,14 +218,7 @@ internal fun DiscoveryScreen(
             NewTransferSheet(
                 nearbySelection = selection,
                 initialPairingInput = initialPairingInput,
-                onOfferInvite =
-                    if (DiscoverySource.Bluetooth in selection.sources && initialPairingInput == null) {
-                        { invite, completion ->
-                            discoveryViewModel.offerInvite(selection.discoveryPeerKey, invite, completion)
-                        }
-                    } else {
-                        null
-                    },
+                onOfferInvite = null,
                 onReceive = { code, broker, relay, qrPayload, copyApproved ->
                     pairingSelection = null
                     initialPairingInput = null

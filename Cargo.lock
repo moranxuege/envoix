@@ -997,6 +997,7 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "envoix-error",
+ "envoix-invite",
  "envoix-protocol",
  "envoix-types",
  "getrandom 0.3.4",
@@ -1010,10 +1011,12 @@ dependencies = [
 name = "envoix-cli"
 version = "0.2.0"
 dependencies = [
+ "base64",
  "clap",
  "envoix-client",
  "envoix-protocol",
  "envoix-qr",
+ "getrandom 0.3.4",
  "serde_json",
  "tempfile",
  "tokio",
@@ -1025,11 +1028,14 @@ dependencies = [
 name = "envoix-client"
 version = "0.2.0"
 dependencies = [
+ "base64",
  "envoix-auth",
  "envoix-error",
+ "envoix-invite",
  "envoix-protocol",
  "envoix-session",
  "envoix-types",
+ "getrandom 0.3.4",
  "serde",
  "toml 0.8.23",
 ]
@@ -1045,10 +1051,12 @@ dependencies = [
 name = "envoix-ffi"
 version = "0.2.0"
 dependencies = [
+ "base64",
  "envoix-client",
  "envoix-qr",
  "envoix-rendezvous-iroh",
  "envoix-types",
+ "getrandom 0.3.4",
  "jni 0.21.1",
  "ndk-context",
  "thiserror 2.0.18",
@@ -1058,14 +1066,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "envoix-invite"
+version = "0.2.0"
+dependencies = [
+ "base64",
+ "getrandom 0.3.4",
+ "hkdf",
+ "iroh",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "envoix-pairing"
 version = "0.2.0"
 dependencies = [
  "blake3",
  "chacha20poly1305",
+ "envoix-invite",
  "getrandom 0.3.4",
+ "hmac",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "spake2",
  "thiserror 2.0.18",
 ]
@@ -1090,21 +1115,14 @@ dependencies = [
 name = "envoix-qr"
 version = "0.2.0"
 dependencies = [
- "base64",
- "envoix-protocol",
- "envoix-types",
- "getrandom 0.3.4",
- "iroh",
  "qrcode",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "envoix-rendezvous"
 version = "0.2.0"
 dependencies = [
+ "envoix-invite",
  "envoix-pairing",
  "serde",
  "serde_json",
@@ -1118,7 +1136,7 @@ name = "envoix-rendezvous-iroh"
 version = "0.2.0"
 dependencies = [
  "anyhow",
- "blake3",
+ "envoix-invite",
  "envoix-pairing",
  "envoix-protocol",
  "envoix-rendezvous",
@@ -1158,6 +1176,7 @@ dependencies = [
  "blake3",
  "envoix-auth",
  "envoix-error",
+ "envoix-invite",
  "envoix-protocol",
  "envoix-rendezvous",
  "envoix-rendezvous-iroh",

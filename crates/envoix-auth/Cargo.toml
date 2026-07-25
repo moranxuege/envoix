@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 envoix-error.workspace = true
+envoix-invite.workspace = true
 envoix-protocol.workspace = true
 envoix-types.workspace = true
 getrandom.workspace = true

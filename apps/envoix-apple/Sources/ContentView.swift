@@ -100,6 +100,12 @@ struct ContentView: View {
             #else
             desktopContent
             #endif
+
+            #if os(iOS)
+            if scenePhase != .active {
+                Theme.bg.ignoresSafeArea()
+            }
+            #endif
         }
         .toastHost()
         .preferredColorScheme(appearance.colorScheme)
@@ -466,97 +472,46 @@ struct ContentView: View {
               let invite = try? parsePairingInvite(input: nearbyInboundInvite) else {
             return nil
         }
-        switch invite.role {
-        case .send: return .receive
-        case .receive: return .send
-        case .unknown: return nil
-        }
+        return invite.joinerRole
     }
 
     private func presentIncomingNearbyOfferIfNeeded() {
         guard let offer = nearbyCoordinator.state.incomingRendezvousOffer else { return }
         defer { nearbyCoordinator.consumeRendezvousOffer(id: offer.id) }
-        guard (try? parsePairingInvite(input: offer.invite)) != nil else {
-            ToastCenter.shared.show(AppText.value(
-                "An invalid Bluetooth invitation was rejected.",
-                "已拒绝无效的蓝牙邀请。",
-                language: language
-            ))
-            return
-        }
-        nearbyPairingSelection = NearbyPairingSelection(
-            discoveryPeerKey: offer.senderPeerKey,
-            displayName: offer.senderDisplayName,
-            sources: [.bluetooth]
-        )
-        nearbyInboundInvite = offer.invite
-        nearbyPairingError = nil
-        mobileSheet = .nearbyPairing
+        ToastCenter.shared.show(AppText.value(
+            "Bluetooth invitation handoff is disabled. Use a QR code or Room Code.",
+            "蓝牙邀请交接已禁用。请使用二维码或房间码。",
+            language: language
+        ))
     }
 
     private func beginNearbyPairing(role: FfiInviteRole) {
-        guard !nearbyPairingBusy, let selection = nearbyPairingSelection else { return }
-        if let inbound = nearbyInboundInvite {
-            guard nearbyAllowedRole == role else {
-                nearbyPairingError = AppText.value(
-                    "Choose the opposite role advertised by the other device.",
-                    "请选择与对方设备相反的角色。",
-                    language: language
-                )
-                return
-            }
-            nearbyInboundInvite = nil
-            nearbyCoordinator.stop()
-            if role == .send {
-                pendingSendPairingInput = inbound
-                replaceMobileSheet(with: .send)
-            } else {
-                pendingReceivePairingInput = inbound
-                replaceMobileSheet(with: .receive)
-            }
-            return
-        }
-
-        guard selection.sources.contains(.bluetooth) else {
-            nearbyPairingError = AppText.value(
-                "This device is no longer reachable over Bluetooth.",
-                "当前已无法通过蓝牙连接此设备。",
-                language: language
-            )
-            return
-        }
-        do {
-            let invite = try makePairingInvite(
-                role: role,
-                broker: nearbyServerURL,
-                relay: nearbyRelayURL
-            )
-            nearbyPairingBusy = true
-            nearbyPairingError = nil
-            nearbyCoordinator.offerInvite(
-                peerKey: selection.discoveryPeerKey,
-                invite: invite.payload
-            ) { error in
-                nearbyPairingBusy = false
-                if let error {
-                    nearbyPairingError = error
-                    return
-                }
-                nearbyCoordinator.stop()
-                if role == .send {
-                    pendingSendPairingInput = invite.code
-                    replaceMobileSheet(with: .send)
-                } else {
-                    pendingReceivePairingInput = invite.code
-                    replaceMobileSheet(with: .receive)
-                }
-            }
-        } catch {
-            nearbyPairingError = error.localizedDescription
-        }
+        _ = role
+        nearbyPairingError = AppText.value(
+            "Bluetooth invitation handoff is disabled. Use a QR code or Room Code.",
+            "蓝牙邀请交接已禁用。请使用二维码或房间码。",
+            language: language
+        )
     }
 
     private func handleIncomingURL(_ url: URL) {
+        let incoming = url.absoluteString
+        if incoming.hasPrefix("envoix://invite/v2/") {
+            do {
+                let parsed = try parsePairingInvite(input: incoming)
+                switch parsed.joinerRole {
+                case .send:
+                    pendingSendPairingInput = incoming
+                    replaceMobileSheet(with: .send)
+                case .receive:
+                    pendingReceivePairingInput = incoming
+                    replaceMobileSheet(with: .receive)
+                }
+            } catch {
+                ToastCenter.shared.show(error.localizedDescription)
+            }
+            return
+        }
         if let id = ShareDraftLink.draftID(from: url) {
             presentSharedDraft(preferredID: id)
             return

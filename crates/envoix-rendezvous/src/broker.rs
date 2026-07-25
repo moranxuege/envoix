@@ -10,7 +10,8 @@ use tokio::sync::oneshot;
 
 use crate::RendezvousError;
 use crate::peer::PeerConn;
-use crate::protocol::{Join, JoinIntent, Paired, Reply, Role};
+use crate::protocol::{Join, Paired, RENDEZVOUS_PROTOCOL_VERSION, Reply, Role};
+use crate::{BootstrapKind, InvitationSide};
 
 /// How long a first peer waits in a room for its partner.
 const DEFAULT_ROOM_TTL: Duration = Duration::from_secs(300);
@@ -23,8 +24,8 @@ const JOIN_TIMEOUT: Duration = Duration::from_secs(10);
 /// Grace period to wait for peers to close after relaying, so buffered data is
 /// delivered before the transports are dropped.
 const CLOSE_GRACE: Duration = Duration::from_secs(10);
-/// Reject a join whose room id is longer than this; room ids are short codes.
-const MAX_ROOM_ID_LEN: usize = 128;
+/// InviteV2 broker locators are exactly six decimal digits.
+const ROOM_ID_LEN: usize = 6;
 /// Cap on concurrently waiting (unpaired) rooms, to bound memory under abuse.
 const MAX_WAITING_ROOMS: usize = 4096;
 
@@ -34,9 +35,14 @@ const MAX_WAITING_ROOMS: usize = 4096;
 /// TTL alone); `ready` is the slot through which the second peer hands over
 /// its connection, after which the parked task drives the relay.
 struct Waiter {
-    ready: oneshot::Sender<PeerConn>,
+    ready: oneshot::Sender<MatchedPeer>,
     id: u64,
-    intent: Option<JoinIntent>,
+    join: Join,
+}
+
+struct MatchedPeer {
+    conn: PeerConn,
+    join: Join,
 }
 
 /// Matches peers into rooms. Cheap to share behind an `Arc` across connections.
@@ -73,23 +79,26 @@ impl RoomRegistry {
     /// and drives the relay once the second hands its connection over; the
     /// second peer's task returns after the handoff.
     pub async fn serve(&self, mut conn: PeerConn) -> Result<(), RendezvousError> {
-        let Join { room_id, intent } = tokio::time::timeout(JOIN_TIMEOUT, conn.read_control())
+        let join: Join = tokio::time::timeout(JOIN_TIMEOUT, conn.read_control())
             .await
             .map_err(|_| RendezvousError::Rejected("no join received within timeout"))??;
-        if room_id.is_empty() || room_id.len() > MAX_ROOM_ID_LEN {
-            return Err(RendezvousError::Rejected("room id length out of range"));
-        }
+        validate_join(&join)?;
+        let room_id = join.room_id.clone();
         // Record the room id onto the ambient connection span (set up by the
         // transport layer), so every event below - and the peer-address line the
         // transport emits asynchronously - correlates by room without repeating it.
         tracing::Span::current().record("room", tracing::field::display(&room_id));
-        tracing::info!(?intent, "joined");
+        tracing::info!(
+            side = ?join.invitation_side,
+            transfer_role = ?join.transfer_role,
+            "joined"
+        );
 
         // Decide under the lock (no await held), then act once it's released, so
         // two peers arriving at once can't both park and miss each other.
         enum Decision {
             Matched(Waiter),
-            Parked(oneshot::Receiver<PeerConn>, u64),
+            Parked(oneshot::Receiver<MatchedPeer>, u64),
             Rejected(&'static str),
         }
         loop {
@@ -98,7 +107,7 @@ impl RoomRegistry {
                 let matching_waiter = waiting.get(&room_id).and_then(|waiters| {
                     waiters
                         .iter()
-                        .position(|waiter| intents_match(waiter.intent, intent))
+                        .position(|waiter| joins_match(&waiter.join, &join).is_some())
                 });
                 if let Some(index) = matching_waiter {
                     let (first, room_is_empty) = {
@@ -118,9 +127,9 @@ impl RoomRegistry {
                     waiting.entry(room_id.clone()).or_default().push(Waiter {
                         ready: ready_tx,
                         id,
-                        intent,
+                        join: join.clone(),
                     });
-                    tracing::debug!(id, ?intent, "parked (waiting for compatible partner)");
+                    tracing::debug!(id, "parked (waiting for compatible partner)");
                     Decision::Parked(ready_rx, id)
                 } else {
                     Decision::Rejected("too many waiting rooms")
@@ -133,21 +142,26 @@ impl RoomRegistry {
                 // the map removal and the handoff (its connection died at that
                 // instant), loop around and park ourselves instead of failing a
                 // live peer against a corpse.
-                Decision::Matched(first) => match first.ready.send(conn) {
+                Decision::Matched(first) => match first.ready.send(MatchedPeer {
+                    conn,
+                    join: join.clone(),
+                }) {
                     Ok(()) => {
                         tracing::info!("matched two peers");
                         return Ok(());
                     }
                     Err(returned) => {
                         tracing::debug!("waiter left during handoff; retrying");
-                        conn = returned;
+                        conn = returned.conn;
                         continue;
                     }
                 },
                 // We are the first peer: wait for a partner while watching our
                 // own connection, or expire.
                 Decision::Parked(ready_rx, id) => {
-                    return self.wait_for_partner(conn, ready_rx, id, &room_id).await;
+                    return self
+                        .wait_for_partner(conn, join, ready_rx, id, &room_id)
+                        .await;
                 }
                 Decision::Rejected(reason) => {
                     tracing::warn!(reason, "rejected");
@@ -167,7 +181,8 @@ impl RoomRegistry {
     async fn wait_for_partner(
         &self,
         mut conn: PeerConn,
-        mut ready_rx: oneshot::Receiver<PeerConn>,
+        join: Join,
+        mut ready_rx: oneshot::Receiver<MatchedPeer>,
         id: u64,
         room_id: &str,
     ) -> Result<(), RendezvousError> {
@@ -177,7 +192,7 @@ impl RoomRegistry {
             handoff = &mut ready_rx => match handoff {
                 Ok(partner) => {
                     tracing::info!("matched two peers");
-                    run_pair(conn, partner).await
+                    run_pair(conn, &join, partner.conn, &partner.join).await
                 }
                 // The sender half only drops without a send if the registry
                 // itself is being torn down.
@@ -191,7 +206,7 @@ impl RoomRegistry {
                     // evicting. Serve it rather than dropping it; if our side is
                     // truly dead the relay fails fast and the partner sees a
                     // clean error instead of a silent orphan.
-                    return run_pair(conn, partner).await;
+                    return run_pair(conn, &join, partner.conn, &partner.join).await;
                 }
                 match probe {
                     Ok(_) => {
@@ -208,7 +223,7 @@ impl RoomRegistry {
                 if !self.evict(room_id, id)
                     && let Ok(partner) = ready_rx.try_recv()
                 {
-                    return run_pair(conn, partner).await;
+                    return run_pair(conn, &join, partner.conn, &partner.join).await;
                 }
                 // Tell the peer *why* we are closing, so it can report "no peer
                 // joined" instead of a bare connection drop. Best-effort: if it
@@ -243,16 +258,49 @@ impl RoomRegistry {
     }
 }
 
-/// New clients must only match a peer with the opposite transfer direction.
-/// A missing intent comes from a pre-upgrade client, which retains the former
-/// room-only matching behavior until all clients have been updated.
-fn intents_match(first: Option<JoinIntent>, second: Option<JoinIntent>) -> bool {
-    matches!(
-        (first, second),
-        (Some(JoinIntent::Send), Some(JoinIntent::Receive))
-            | (Some(JoinIntent::Receive), Some(JoinIntent::Send))
-    ) || first.is_none()
-        || second.is_none()
+fn validate_join(join: &Join) -> Result<(), RendezvousError> {
+    if join.version != RENDEZVOUS_PROTOCOL_VERSION {
+        return Err(RendezvousError::Rejected("unsupported join version"));
+    }
+    if join.room_id.len() != ROOM_ID_LEN || !join.room_id.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(RendezvousError::Rejected("invalid room locator"));
+    }
+    match join.invitation_side {
+        InvitationSide::Creator => {
+            if join.bootstrap_methods != [BootstrapKind::FullTicket, BootstrapKind::RoomCode]
+                || join.selected_bootstrap_method.is_some()
+            {
+                return Err(RendezvousError::Rejected(
+                    "invalid creator bootstrap advertisement",
+                ));
+            }
+        }
+        InvitationSide::Joiner => {
+            if !join.bootstrap_methods.is_empty() || join.selected_bootstrap_method.is_none() {
+                return Err(RendezvousError::Rejected(
+                    "invalid joiner bootstrap selection",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn joins_match(first: &Join, second: &Join) -> Option<BootstrapKind> {
+    let (creator, joiner) = match (first.invitation_side, second.invitation_side) {
+        (InvitationSide::Creator, InvitationSide::Joiner) => (first, second),
+        (InvitationSide::Joiner, InvitationSide::Creator) => (second, first),
+        _ => return None,
+    };
+    if creator.transfer_role.complement() != joiner.transfer_role {
+        return None;
+    }
+    let selected = joiner.selected_bootstrap_method?;
+    creator
+        .bootstrap_methods
+        .contains(&selected)
+        .then_some(selected)
 }
 
 impl Default for RoomRegistry {
@@ -264,21 +312,38 @@ impl Default for RoomRegistry {
 /// Tell each peer its role, then relay raw bytes both ways until both sides
 /// close (or the relay deadline elapses). The keep-alive handles are held for
 /// the whole relay so the transports stay open.
-async fn run_pair(initiator: PeerConn, responder: PeerConn) -> Result<(), RendezvousError> {
-    let (mut iw, mut ir, i_close) = initiator.into_parts();
-    let (mut rw, mut rr, r_close) = responder.into_parts();
+async fn run_pair(
+    first: PeerConn,
+    first_join: &Join,
+    second: PeerConn,
+    second_join: &Join,
+) -> Result<(), RendezvousError> {
+    let selected = joins_match(first_join, second_join)
+        .ok_or(RendezvousError::Rejected("incompatible invitation joins"))?;
+    let first_role = match first_join.invitation_side {
+        InvitationSide::Creator => Role::Responder,
+        InvitationSide::Joiner => Role::Initiator,
+    };
+    let second_role = match second_join.invitation_side {
+        InvitationSide::Creator => Role::Responder,
+        InvitationSide::Joiner => Role::Initiator,
+    };
+    let (mut iw, mut ir, i_close) = first.into_parts();
+    let (mut rw, mut rr, r_close) = second.into_parts();
 
     crate::io::write_framed(
         &mut iw,
         &Reply::Paired(Paired {
-            role: Role::Initiator,
+            role: first_role,
+            selected_bootstrap_method: selected,
         }),
     )
     .await?;
     crate::io::write_framed(
         &mut rw,
         &Reply::Paired(Paired {
-            role: Role::Responder,
+            role: second_role,
+            selected_bootstrap_method: selected,
         }),
     )
     .await?;

@@ -5,11 +5,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 use async_trait::async_trait;
 use envoix_client::api::{
     CanonicalTransferJob, Client, CompressionPolicyV2, DestinationDecisionV2, DestinationRequestV2,
-    EventSink, JobIdV2, JobLifecycle, LocalSourceOrigin, ManifestV2DataError,
-    ManifestV2ProgressPhase, ManifestV2ResultGate, PairingConfig, PendingManifestV2Receive,
-    ProviderSourceIssue, RootPlanV2, SavedEntryV2, SenderManifestV2SessionSummary, SourceDecision,
-    SourceIssueKind, SourceItemId, SourceSelectionState, TransferCancelToken, TransferEvent,
-    TransferJobStore, TransferOptions, local_allocatable_bytes, parse_broker_addr,
+    EventSink, InvitationBootstrap, InviteSecretRef, JobIdV2, JobLifecycle, LocalSourceOrigin,
+    ManifestV2DataError, ManifestV2ProgressPhase, ManifestV2ResultGate, PairingConfig,
+    PendingManifestV2Receive, ProviderSourceIssue, RootPlanV2, SavedEntryV2,
+    SenderManifestV2SessionSummary, SourceDecision, SourceIssueKind, SourceItemId,
+    SourceSelectionState, TransferCancelToken, TransferEvent, TransferJobStore, TransferOptions,
+    acquire_invitation, local_allocatable_bytes, parse_broker_addr,
     receive_manifest_v2_offer_enable_mdns, receive_manifest_v2_offer_via_room,
     send_manifest_v2_enable_mdns, send_manifest_v2_via_room,
 };
@@ -66,6 +67,8 @@ impl From<CompressionChoice> for CompressionPolicyV2 {
 struct StartParams {
     direction: String,
     room: String,
+    #[serde(default)]
+    invitation_ref: Option<InviteSecretRef>,
     broker: String,
     relay: String,
     state_directory: String,
@@ -675,6 +678,20 @@ async fn run_session(
         .use_room
         .then(|| parse_broker_addr(&params.broker, options.relay.as_deref()))
         .transpose()?;
+    let mut invitation_lease = params
+        .invitation_ref
+        .as_ref()
+        .map(acquire_invitation)
+        .transpose()
+        .map_err(|error| CoreError::InvalidInput(error.to_string()))?;
+    let invitation = invitation_lease
+        .as_ref()
+        .map(|lease| lease.bootstrap().clone());
+    if params.use_room && invitation.is_none() {
+        return Err(CoreError::InvalidInput(
+            "Room rendezvous requires validated invitation private state".into(),
+        ));
+    }
     let events: Arc<dyn EventSink> = Arc::new(AndroidEvents {
         vm: vm.clone(),
         callback: callback.clone(),
@@ -700,6 +717,7 @@ async fn run_session(
             EnabledSendRoutes {
                 broker,
                 code: &params.room,
+                invitation,
                 use_mdns: params.use_mdns,
             },
             &job,
@@ -709,6 +727,9 @@ async fn run_session(
             cancel,
         )
         .await?;
+        if let Some(lease) = invitation_lease.as_mut() {
+            lease.consume();
+        }
         emit(
             vm.as_ref(),
             callback.as_ref(),
@@ -720,6 +741,7 @@ async fn run_session(
     let pending = receive_from_enabled_routes(
         broker,
         &params.room,
+        invitation,
         params.use_room,
         params.use_mdns,
         config,
@@ -727,6 +749,9 @@ async fn run_session(
         cancel,
     )
     .await?;
+    if let Some(lease) = invitation_lease.as_mut() {
+        lease.consume();
+    }
     let manifest = &pending.offer().manifest;
     let inventory = manifest
         .entries
@@ -865,6 +890,7 @@ async fn run_session(
 struct EnabledSendRoutes<'a> {
     broker: Option<envoix_client::EndpointAddr>,
     code: &'a str,
+    invitation: Option<InvitationBootstrap>,
     use_mdns: bool,
 }
 
@@ -878,9 +904,14 @@ async fn send_with_enabled_routes(
 ) -> Result<SenderManifestV2SessionSummary, CoreError> {
     let mut last_error = None;
     if let Some(broker) = routes.broker {
+        let invitation = routes.invitation.ok_or_else(|| {
+            CoreError::InvalidInput(
+                "Room rendezvous requires validated invitation private state".into(),
+            )
+        })?;
         match send_manifest_v2_via_room(
             broker,
-            routes.code,
+            invitation,
             job,
             state_directory.clone(),
             config.clone(),
@@ -922,6 +953,7 @@ async fn send_with_enabled_routes(
 async fn receive_from_enabled_routes(
     broker: Option<envoix_client::EndpointAddr>,
     code: &str,
+    invitation: Option<InvitationBootstrap>,
     use_room: bool,
     use_mdns: bool,
     config: envoix_client::api::SessionConfig,
@@ -931,9 +963,14 @@ async fn receive_from_enabled_routes(
     if use_room && !use_mdns {
         let broker = broker
             .ok_or_else(|| CoreError::InvalidInput("Room rendezvous requires a broker".into()))?;
+        let invitation = invitation.ok_or_else(|| {
+            CoreError::InvalidInput(
+                "Room rendezvous requires validated invitation private state".into(),
+            )
+        })?;
         return receive_manifest_v2_offer_via_room(
             broker,
-            code,
+            invitation,
             envoix_client::BindAddrs::dual_stack(0),
             config,
             events,
@@ -956,18 +993,22 @@ async fn receive_from_enabled_routes(
 
     let broker = broker
         .ok_or_else(|| CoreError::InvalidInput("Room rendezvous requires a broker".into()))?;
+    let invitation = invitation.ok_or_else(|| {
+        CoreError::InvalidInput(
+            "Room rendezvous requires validated invitation private state".into(),
+        )
+    })?;
     let room_cancel = TransferCancelToken::new();
     let mdns_cancel = TransferCancelToken::new();
     let mut routes = JoinSet::new();
     {
-        let code = code.to_string();
         let config = config.clone();
         let events = events.clone();
         let route_cancel = room_cancel.clone();
         routes.spawn(async move {
             let result = receive_manifest_v2_offer_via_room(
                 broker,
-                &code,
+                invitation,
                 envoix_client::BindAddrs::dual_stack(0),
                 config,
                 events,

@@ -81,6 +81,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.envoix.app.Diagnostics
 import dev.envoix.app.Direction
+import dev.envoix.app.InviteCodec
 import dev.envoix.app.LogUpload
 import dev.envoix.app.R
 import dev.envoix.app.Room
@@ -112,6 +113,7 @@ fun HomeScreen(
     onOpenSettings: () -> Unit,
     onOpen: (Transfer) -> Unit,
     onShare: (Transfer) -> Unit,
+    initialPairingInput: String? = null,
 ) {
     val colors = Envoix.colors
     var sheetRole by remember { mutableStateOf<String?>(null) }
@@ -125,6 +127,12 @@ fun HomeScreen(
     }
     LaunchedEffect(initialSharedUris) {
         if (initialSharedUris.isNotEmpty()) sheetRole = "send"
+    }
+    LaunchedEffect(initialPairingInput) {
+        initialPairingInput
+            ?.takeIf(String::isNotBlank)
+            ?.let(InviteCodec::parseForRouting)
+            ?.let { sheetRole = it.joinerRole }
     }
     val active =
         transfers.count { !it.status.isTerminal }
@@ -217,6 +225,7 @@ fun HomeScreen(
             NewTransferSheet(
                 initialRole = initialRole,
                 initialSources = initialSharedUris,
+                initialPairingInput = initialPairingInput,
                 onReceive = { c, b, r, qr, copyApproved ->
                     sheetRole = null
                     onReceive(c, b, r, qr, copyApproved)
