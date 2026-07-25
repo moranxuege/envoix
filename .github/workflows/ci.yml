@@ -4,6 +4,17 @@ name: ci
 # suite, and the xtask registry gates (identifier-check + arch-check). The old
 # Android tree lives frozen under legacy/ and is not linted here; an Android
 # lint job returns with the Flutter host at BN4.
+#
+# The release trust gate has two halves and they run in two places. Its ARTIFACT
+# half (`xtask release-gate`) judges signed release artifacts, which this
+# workflow cannot produce — the signing key is deliberately not available to a
+# public repository's CI — so it is wired into the release task graph instead:
+# `:app:assembleRelease` and `:app:bundleRelease` both depend on `:app:releaseGate`.
+# Its IDENTITY half runs HERE, inside `cargo test`: `release_trust` compares the
+# checked-in declaration, the flat policy projection, the packaged build-manifest
+# asset and the payload record against what this build actually compiles, and
+# `release_cdylib_omits_debug_instrumentation` builds the host cdylib and asserts
+# its exported symbols equal the release allow-list.
 on:
   push:
     branches: ['**']

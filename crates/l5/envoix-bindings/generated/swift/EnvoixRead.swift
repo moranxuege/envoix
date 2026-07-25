@@ -8,7 +8,7 @@
 
 import Foundation
 
-public let readSchemaId = "envoix/binding/read/1"
+public let readSchemaId = "envoix/binding/read/2"
 public let readMaxFrameBytes = 1048576
 private let u63Max: Int64 = 9_223_372_036_854_775_807
 
@@ -279,6 +279,7 @@ public struct ProtocolManifestView: Equatable {
 
 public struct AbiSchemaManifestView: Equatable {
     public let readBindingSchemaId: String
+    public let commandBindingSchemaId: String
     public let evidenceRustAbiId: String
     public let evidenceTimelineSchemaId: String
     public let mailboxReceiptSchemaId: String
@@ -1019,14 +1020,16 @@ public enum EnvoixReadCodec {
 
     private static func decodeAbiSchemaManifestView(_ value: Any?, _ context: String) throws -> AbiSchemaManifestView {
         let map = try object(value, context)
-        try knownKeys(map, ["read_binding_schema_id", "evidence_rust_abi_id", "evidence_timeline_schema_id", "mailbox_receipt_schema_id", "operation_envelope_schema_id"], context)
+        try knownKeys(map, ["read_binding_schema_id", "command_binding_schema_id", "evidence_rust_abi_id", "evidence_timeline_schema_id", "mailbox_receipt_schema_id", "operation_envelope_schema_id"], context)
         let readBindingSchemaId = try asciiBounded(try field(map, "read_binding_schema_id", "AbiSchemaManifestView.read_binding_schema_id"), 64, "AbiSchemaManifestView.read_binding_schema_id")
+        let commandBindingSchemaId = try asciiBounded(try field(map, "command_binding_schema_id", "AbiSchemaManifestView.command_binding_schema_id"), 64, "AbiSchemaManifestView.command_binding_schema_id")
         let evidenceRustAbiId = try asciiBounded(try field(map, "evidence_rust_abi_id", "AbiSchemaManifestView.evidence_rust_abi_id"), 64, "AbiSchemaManifestView.evidence_rust_abi_id")
         let evidenceTimelineSchemaId = try asciiBounded(try field(map, "evidence_timeline_schema_id", "AbiSchemaManifestView.evidence_timeline_schema_id"), 64, "AbiSchemaManifestView.evidence_timeline_schema_id")
         let mailboxReceiptSchemaId = try asciiBounded(try field(map, "mailbox_receipt_schema_id", "AbiSchemaManifestView.mailbox_receipt_schema_id"), 64, "AbiSchemaManifestView.mailbox_receipt_schema_id")
         let operationEnvelopeSchemaId = try asciiBounded(try field(map, "operation_envelope_schema_id", "AbiSchemaManifestView.operation_envelope_schema_id"), 64, "AbiSchemaManifestView.operation_envelope_schema_id")
         return AbiSchemaManifestView(
             readBindingSchemaId: readBindingSchemaId,
+            commandBindingSchemaId: commandBindingSchemaId,
             evidenceRustAbiId: evidenceRustAbiId,
             evidenceTimelineSchemaId: evidenceTimelineSchemaId,
             mailboxReceiptSchemaId: mailboxReceiptSchemaId,

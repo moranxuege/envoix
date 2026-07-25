@@ -11,6 +11,13 @@ role = "composition-root"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# The debug-only `E2eBridge` JNI entry points. Off by default, so a
+# release-shaped build cannot compile them and the release cdylib exports no
+# instrumentation symbol at all. `scripts/build-jni-libs.sh` enables it for the
+# debug payload only.
+e2e-instrumentation = []
+
 [dependencies]
 envoix-attempt-api = { path = "../../crates/l1/envoix-attempt-api" }
 envoix-attempt-iroh = { path = "../../crates/l2/envoix-attempt-iroh" }
@@ -24,10 +31,12 @@ envoix-runtime = { path = "../../crates/l4/envoix-runtime" }
 envoix-storage-api = { path = "../../crates/l1/envoix-storage-api" }
 envoix-storage-local = { path = "../../crates/l2/envoix-storage-local" }
 envoix-types = { path = "../../crates/l0/envoix-types" }
-tokio = { workspace = true }
-
-[target.'cfg(target_os = "android")'.dependencies]
+# The JNI lane compiles on every host, not only when cross-compiling for
+# Android: the release gate proves the absence of the instrumentation entry
+# points by BUILDING this cdylib and reading its exported symbols, and a claim
+# about a compiled artifact is worth more than one about source text.
 jni = "0.21"
+tokio = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

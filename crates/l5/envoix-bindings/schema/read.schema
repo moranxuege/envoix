@@ -14,7 +14,7 @@
 # There is deliberately no bytes/blob type and no handle/path/URI type, so bulk
 # payload bytes and OS handles cannot be represented in a read frame.
 
-id = "envoix/binding/read/1"
+id = "envoix/binding/read/2"
 root = "ReadFrame"
 
 [limits]
@@ -352,11 +352,15 @@ fields = [
   { name = "data_wire_version", type = "u16" },
 ]
 
+# The complete ABI/schema identity. The two binding schema ids are composed
+# here rather than in the L4 manifest: L5 depends on L4, so only this layer can
+# see both the L4 identities and the generated contract ids at once.
 [[decl]]
 kind = "struct"
 name = "AbiSchemaManifestView"
 fields = [
   { name = "read_binding_schema_id", type = "ascii(64)" },
+  { name = "command_binding_schema_id", type = "ascii(64)" },
   { name = "evidence_rust_abi_id", type = "ascii(64)" },
   { name = "evidence_timeline_schema_id", type = "ascii(64)" },
   { name = "mailbox_receipt_schema_id", type = "ascii(64)" },

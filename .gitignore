@@ -34,3 +34,14 @@ android/app/build/
 # native libs are built by cargo-ndk (see .github/workflows/release.yml); not tracked
 android/app/src/main/jniLibs/*/libenvoix_jni.so
 android/.kotlin/
+
+# Release signing material — never commit (repo is PUBLIC)
+*.jks
+*.keystore
+keystore.properties
+signing.properties
+
+# The flat release policy the packaging side reads. A build artifact, rendered
+# from registry/release-ledger.toml by `xtask record-payload`; keeping it out of
+# the tree also keeps the release signer fingerprint in exactly one tracked file.
+registry/release-policy.properties

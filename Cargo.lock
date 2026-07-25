@@ -4616,6 +4616,7 @@ version = "0.2.0"
 dependencies = [
  "cargo_metadata",
  "envoix-auth",
+ "envoix-bindings",
  "envoix-evidence",
  "envoix-invite",
  "envoix-operation-store",
@@ -4629,6 +4630,8 @@ dependencies = [
  "envoix-session-iroh",
  "envoix-storage-api",
  "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "toml",
 ]
 

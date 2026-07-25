@@ -299,6 +299,26 @@ owner_path = "crates/l5/envoix-bindings/schema/command.schema"
 collision_scope = "binding-schema-id"
 extract = "binding-schema-header:id"
 
+# The release signing identity. Only the certificate FINGERPRINT is public and
+# checked in; the keystore and its passwords live outside this repository.
+[[identifier]]
+key = "android.release_signer_sha256"
+owner = "manifest:release-ledger"
+owner_path = "registry/release-ledger.toml"
+collision_scope = "android-signing-identity"
+extract = "toml-key:policy.signer_sha256"
+
+# The shipped app version. It is spelled once in gradle and once in Cargo, so
+# the catalog BINDS the two: `must-equal` exempts the pair from the collision
+# rule (they are supposed to be equal) and makes a difference the violation.
+[[identifier]]
+key = "android.version_name"
+owner = "manifest:flutter-android-gradle"
+owner_path = "apps/envoix-flutter/android/app/build.gradle.kts"
+collision_scope = "workspace-package-version"
+comparison = "must-equal:build.workspace_package_version"
+extract = "gradle-property:android.versionName"
+
 # -----------------------------------------------------------------------------
 # Android, Apple, CLI, and key-storage namespaces
 # -----------------------------------------------------------------------------

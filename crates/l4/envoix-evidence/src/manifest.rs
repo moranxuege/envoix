@@ -15,6 +15,10 @@ pub struct ProtocolManifest {
 }
 
 /// Native ABI and L1 schema identifiers compiled into this build.
+///
+/// The generated read/command binding schema ids are deliberately NOT here:
+/// they belong to L5, which depends on this layer. The complete identity set
+/// is the L5 projection of this manifest, which composes both.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct AbiSchemaManifest {
     pub evidence_rust_abi_id: &'static str,

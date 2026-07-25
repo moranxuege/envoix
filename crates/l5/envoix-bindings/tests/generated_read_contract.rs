@@ -2,13 +2,14 @@
 
 use std::num::NonZeroUsize;
 
+use envoix_bindings::command::COMMAND_SCHEMA_ID;
 use envoix_bindings::read::{
-    CapabilityActionView, CardUpdateKindView, CardView, DirectionView, DutyKindView, EpochGate,
-    EvidenceValueView, GateDecision, LosslessKindView, OutcomeCodeView, OutcomeView,
-    PauseOriginView, PausedView, PhaseView, ProductStateView, QuiescenceView, READ_MAX_FRAME_BYTES,
-    READ_SCHEMA_ID, ReadBody, ReadError, ReadFrame, RecoveryView, RedactedIdKindView,
-    RedactedIdView, RetirementIntentView, RetiringView, RetryabilityView, RunningView,
-    SubscribeRejectionView, WorkerKindView, decode_read_frame, encode_read_frame,
+    AbiSchemaManifestView, CapabilityActionView, CardUpdateKindView, CardView, DirectionView,
+    DutyKindView, EpochGate, EvidenceValueView, GateDecision, LosslessKindView, OutcomeCodeView,
+    OutcomeView, PauseOriginView, PausedView, PhaseView, ProductStateView, QuiescenceView,
+    READ_MAX_FRAME_BYTES, READ_SCHEMA_ID, ReadBody, ReadError, ReadFrame, RecoveryView,
+    RedactedIdKindView, RedactedIdView, RetirementIntentView, RetiringView, RetryabilityView,
+    RunningView, SubscribeRejectionView, WorkerKindView, decode_read_frame, encode_read_frame,
 };
 use envoix_bindings::{
     FieldTy, build_manifest_frame, card_update_frame, closed_frame, emit, evidence_frame,
@@ -260,13 +261,17 @@ fn generated_read_schema_roundtrip_and_containment() {
     let stamped: serde_json::Value = serde_json::from_slice(&base).expect("frame json");
     assert_eq!(stamped["schema"], serde_json::json!(READ_SCHEMA_ID));
 
-    // The manifest projection self-describes this read contract.
+    // The manifest projection self-describes both generated contracts.
     let ReadBody::BuildManifest(manifest_view) = &frames[10].body else {
         panic!("build manifest frame expected");
     };
     assert_eq!(
         manifest_view.abi_schema.read_binding_schema_id,
         READ_SCHEMA_ID
+    );
+    assert_eq!(
+        manifest_view.abi_schema.command_binding_schema_id,
+        COMMAND_SCHEMA_ID
     );
 
     // Every leaf enum variant round-trips, driven by the generated `ALL`
@@ -374,7 +379,7 @@ fn generated_read_schema_roundtrip_and_containment() {
 
     // Unknown or missing schema versions fail explicitly.
     let future = tamper(&base, |value| {
-        value["schema"] = serde_json::json!("envoix/binding/read/2");
+        value["schema"] = serde_json::json!("envoix/binding/read/3");
     });
     assert_eq!(decode_read_frame(&future), Err(ReadError::UnknownSchema));
     let missing = tamper(&base, |value| {
@@ -622,7 +627,7 @@ fn duplicate_json_keys_are_rejected() {
     let text = String::from_utf8(base).expect("utf8 frame");
     let dup_schema = text.replacen(
         "\"schema\":",
-        "\"schema\":\"envoix/binding/read/1\",\"schema\":",
+        "\"schema\":\"envoix/binding/read/2\",\"schema\":",
         1,
     );
     assert_ne!(dup_schema, text, "schema key found");
@@ -636,7 +641,7 @@ fn duplicate_json_keys_are_rejected() {
 fn schema_parser_rejects_unbounded_or_malformed_grammar() {
     let minimal = |body: &str| {
         format!(
-            "id = \"envoix/binding/read/1\"\nroot = \"ReadFrame\"\n\n[limits]\nmax_frame_bytes = 1024\n\n{body}"
+            "id = \"envoix/binding/read/2\"\nroot = \"ReadFrame\"\n\n[limits]\nmax_frame_bytes = 1024\n\n{body}"
         )
     };
     let valid = minimal(
@@ -710,7 +715,7 @@ fn schema_parser_rejects_unbounded_or_malformed_grammar() {
         "envoix/binding//1",
         "envoix/binding/read/x",
         "envoix/binding/read",
-        "envoix/binding/read/1/extra",
+        "envoix/binding/read/2/extra",
     ] {
         let bad = format!(
             "id = \"{bad_id}\"\nroot = \"ReadFrame\"\n\n[limits]\nmax_frame_bytes = 1024\n\n\
@@ -752,7 +757,7 @@ fn schema_parser_rejects_unbounded_or_malformed_grammar() {
 fn native_artifacts_carry_schema_and_types() {
     let doc = parse_schema(read_schema_text()).expect("schema parses");
     for (path, content) in artifacts(&doc) {
-        assert!(content.contains("envoix/binding/read/1"), "{path}");
+        assert!(content.contains("envoix/binding/read/2"), "{path}");
         assert!(!content.contains("TODO"), "{path}");
     }
     let dart = emit::dart::module(&doc);
@@ -764,4 +769,63 @@ fn native_artifacts_carry_schema_and_types() {
     let swift = emit::swift::module(&doc);
     assert!(swift.contains("public enum ReadBody"));
     assert!(swift.contains("public static func decode(_ data: Data) throws -> ReadFrame"));
+}
+
+/// Manifest coherence: the projected manifest names EVERY identity this build
+/// speaks — the four L4 ids plus both generated binding contracts — and none of
+/// them crosses empty. The view is destructured, so an identity added to the
+/// contract fails to compile here until it is accounted for; `project.rs`
+/// destructures the L4 manifest for the same reason in the other direction.
+#[test]
+fn projected_manifest_names_every_identity() {
+    let frame = build_manifest_frame(&BUILD_TRUST_MANIFEST);
+    let ReadBody::BuildManifest(view) = &frame.body else {
+        panic!("build manifest frame expected");
+    };
+    let AbiSchemaManifestView {
+        read_binding_schema_id,
+        command_binding_schema_id,
+        evidence_rust_abi_id,
+        evidence_timeline_schema_id,
+        mailbox_receipt_schema_id,
+        operation_envelope_schema_id,
+    } = &view.abi_schema;
+    let compiled = BUILD_TRUST_MANIFEST.abi_schema;
+    for (name, projected, source) in [
+        (
+            "read_binding_schema_id",
+            read_binding_schema_id,
+            READ_SCHEMA_ID,
+        ),
+        (
+            "command_binding_schema_id",
+            command_binding_schema_id,
+            COMMAND_SCHEMA_ID,
+        ),
+        (
+            "evidence_rust_abi_id",
+            evidence_rust_abi_id,
+            compiled.evidence_rust_abi_id,
+        ),
+        (
+            "evidence_timeline_schema_id",
+            evidence_timeline_schema_id,
+            compiled.evidence_timeline_schema_id,
+        ),
+        (
+            "mailbox_receipt_schema_id",
+            mailbox_receipt_schema_id,
+            compiled.mailbox_receipt_schema_id,
+        ),
+        (
+            "operation_envelope_schema_id",
+            operation_envelope_schema_id,
+            compiled.operation_envelope_schema_id,
+        ),
+    ] {
+        assert!(!source.is_empty(), "{name} has no compiled value");
+        assert_eq!(projected, source, "{name} disagrees with its source");
+    }
+    assert_eq!(view.package_version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(view.protocol.set_id, BUILD_TRUST_MANIFEST.protocol.set_id);
 }

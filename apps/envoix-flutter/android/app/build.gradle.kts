@@ -1,8 +1,81 @@
+import java.security.MessageDigest
+import java.util.Properties
+import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
+import java.util.zip.ZipOutputStream
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jlleitschuh.gradle.ktlint")
 }
+
+/** The repository root; this project lives at apps/envoix-flutter/android/app. */
+val repositoryRoot: File = rootProject.projectDir.parentFile.parentFile.parentFile
+
+/**
+ * The release policy, as the ONE flat projection the packaging side is allowed
+ * to read. It is generated from `registry/release-ledger.toml` and parsed here
+ * by `java.util.Properties` — a real parser over a document with no nesting, so
+ * this build script cannot resolve a smuggled table into a different value than
+ * the Rust gate does. `xtask release-gate` re-derives this text from the ledger
+ * and fails on any divergence, so a hand-edited copy is a violation rather than
+ * an invisible second opinion.
+ */
+val policyFile = File(repositoryRoot, "registry/release-policy.properties")
+val releasePolicy =
+    Properties().apply {
+        if (!policyFile.isFile) {
+            throw GradleException("missing $policyFile: run scripts/build-jni-libs.sh")
+        }
+        policyFile.inputStream().use(::load)
+    }
+
+fun policy(key: String): String = releasePolicy.getProperty(key) ?: throw GradleException("the release policy has no $key")
+
+fun policyList(key: String): List<String> = policy(key).split(',').filter(String::isNotEmpty)
+
+val expectedSigner = policy("signer_sha256")
+val requiredAbis = policyList("required_abis")
+
+/** The one library the app loads; anything else in jniLibs is dead weight. */
+val hostSoname = policy("native_library")
+
+/** The complete exported surface a release payload may have, in both directions. */
+val allowedNativeSymbols = policyList("allowed_native_symbols").toSet()
+val forbiddenNativeSymbols = policyList("forbidden_native_symbols")
+val allowedPackageEntries = policyList("allowed_package_entries")
+val forbiddenManifestMarkers = policyList("forbidden_manifest_markers")
+val forbiddenReleaseClasses = policyList("forbidden_release_classes")
+
+/** `(applicationId, versionCode)` pairs that have already been released. */
+val releasedVersions = policyList("released").toSet()
+
+/**
+ * The typed distribution decision, never the spelling of the enum variant: the
+ * Rust side owns what "public" implies and projects only the consequence.
+ */
+val trustRootRequired = policy("trust_root_required").toBoolean()
+val declaredTrustRoot = policy("identity_trust_root")
+val compiledPackageVersion = policy("identity_package_version")
+val compiledBuildManifest = policy("build_manifest_sha256")
+
+/**
+ * Release signing credentials. They live in ~/.gradle/gradle.properties,
+ * OUTSIDE this (public) repository, and never appear in any file inside it.
+ * When any of them is absent the release signing config is simply not created:
+ * a release build then fails in `requireReleaseSigning` rather than silently
+ * degrading to the debug key. Debug builds are unaffected.
+ */
+val signingPropertyNames =
+    listOf(
+        "envoixReleaseStoreFile",
+        "envoixReleaseKeyAlias",
+        "envoixReleaseStorePassword",
+        "envoixReleaseKeyPassword",
+    )
+val signingProperties = signingPropertyNames.associateWith { providers.gradleProperty(it).orNull }
+val missingSigningProperties = signingPropertyNames.filter { signingProperties[it].isNullOrBlank() }
 
 android {
     namespace = "app.envoix.host"
@@ -12,10 +85,13 @@ android {
         minSdk = 29 // Android 10: scoped storage + MediaStore.Downloads
         targetSdk = 34
         versionCode = 1
+        // Catalogued as android.version_name and bound to the Cargo workspace
+        // version, so the two literals cannot drift apart in silence; the
+        // release assertions re-check the agreement on the packaged artifact.
         versionName = "0.2.0"
         ndk {
-            // Only the ABIs the Rust host is cross-compiled for.
-            abiFilters += listOf("x86_64", "arm64-v8a")
+            // Only the ABIs the release policy requires.
+            abiFilters += requiredAbis
         }
     }
 
@@ -37,11 +113,23 @@ android {
         }
     }
 
+    signingConfigs {
+        if (missingSigningProperties.isEmpty()) {
+            create("release") {
+                storeFile = File(signingProperties.getValue("envoixReleaseStoreFile")!!)
+                storePassword = signingProperties.getValue("envoixReleaseStorePassword")
+                keyAlias = signingProperties.getValue("envoixReleaseKeyAlias")
+                keyPassword = signingProperties.getValue("envoixReleaseKeyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // BN5 owns release trust/signing; nothing release-shaped ships
-            // from BN4. Debug builds only.
             isMinifyEnabled = false
+            // Never `signingConfigs.getByName("debug")`: an unsigned release is
+            // a loud failure, a debug-signed one would be a silent lie.
+            signingConfig = signingConfigs.findByName("release")
         }
     }
 
@@ -56,47 +144,114 @@ android {
     sourceSets {
         getByName("main") {
             kotlin.srcDir("src/main/kotlin")
-            // Populated by scripts/build-jni-libs.sh (cargo-ndk); gradle
-            // never invokes cargo, so the two toolchains stay decoupled.
-            jniLibs.srcDir("src/main/jniLibs")
         }
-        // The e2e instrumentation bridge exists only in debug; release
-        // compiles the no-op twin.
-        getByName("debug") { kotlin.srcDir("src/debug/kotlin") }
-        getByName("release") { kotlin.srcDir("src/release/kotlin") }
+        // The instrumentation seam is shaped by source set: only debug has a
+        // bridge class and only debug binds the JNI instrumentation lane.
+        // jniLibs is per build type for the same reason: the debug payload is
+        // built WITH the host crate's `e2e-instrumentation` feature and the
+        // release payload without it, so the instrumentation entry points are
+        // not merely unbound in a release artifact, they were never compiled.
+        getByName("debug") {
+            kotlin.srcDir("src/debug/kotlin")
+            jniLibs.srcDir("src/debug/jniLibs")
+        }
+        getByName("release") {
+            kotlin.srcDir("src/release/kotlin")
+            jniLibs.srcDir("src/release/jniLibs")
+        }
     }
 }
 
-dependencies {
-    // FileProvider only; the host app has no UI (F1/F2 add frontends).
-    implementation("androidx.core:core:1.13.1")
-}
+/** apksigner and aapt2 ship with the build tools this project already resolves. */
+val buildToolsDirectory = File(android.sdkDirectory, "build-tools/${android.buildToolsVersion}")
 
-/** The one library the app loads; anything else in jniLibs is dead weight. */
-val hostSoname = "libenvoix_host_android.so"
-val hostAbis = listOf("arm64-v8a", "x86_64")
+/** keytool reports an app bundle's JAR signer; it ships with the JDK gradle runs on. */
+val keytoolExecutable = File(System.getProperty("java.home"), "bin/keytool")
 
 /**
- * Guards the packaged native payload. cargo-ndk copies every .so it finds, so
- * scripts/build-jni-libs.sh curates the directory and this task refuses to
- * assemble an APK that carries strays. It also warns when jniLibs is older
- * than the Rust sources — gradle never invokes cargo, so a stale .so would
- * otherwise ship silently.
+ * `llvm-nm` reads a packaged library's dynamic symbol table, which is the
+ * precise statement about what an artifact exports. It ships with the NDK that
+ * cross-compiled the payload, so it is located there rather than on PATH.
  */
-val verifyJniLibs =
-    tasks.register("verifyJniLibs") {
+val llvmNmExecutable: File by lazy {
+    val ndk =
+        System.getenv("ANDROID_NDK_HOME")?.let(::File)?.takeIf(File::isDirectory)
+            ?: File(android.sdkDirectory, "ndk")
+                .listFiles(File::isDirectory)
+                .orEmpty()
+                .maxByOrNull(File::getName)
+            ?: throw GradleException("no Android NDK under ${android.sdkDirectory}/ndk")
+    File(ndk, "toolchains/llvm/prebuilt")
+        .listFiles(File::isDirectory)
+        .orEmpty()
+        .map { host -> File(host, "bin/llvm-nm") }
+        .firstOrNull(File::canExecute)
+        ?: throw GradleException("$ndk carries no llvm-nm toolchain")
+}
+
+fun sha256(bytes: ByteArray): String =
+    MessageDigest
+        .getInstance("SHA-256")
+        .digest(bytes)
+        .joinToString("") { byte -> "%02x".format(byte) }
+
+/** Runs one build tool and returns everything it printed. */
+fun toolOutput(
+    tool: File,
+    vararg arguments: String,
+): String {
+    if (!tool.canExecute()) {
+        throw GradleException("$tool is not available")
+    }
+    val process =
+        ProcessBuilder(listOf(tool.absolutePath) + arguments)
+            .redirectErrorStream(true)
+            .start()
+    val output = process.inputStream.bufferedReader().readText()
+    if (process.waitFor() != 0) {
+        throw GradleException("${tool.name} ${arguments.joinToString(" ")} failed:\n$output")
+    }
+    return output
+}
+
+/**
+ * The symbols a shared object DEFINES in its dynamic symbol table — the exact
+ * set a caller could bind to, where scanning the bytes could only guess.
+ */
+fun definedSymbols(library: File): List<String> =
+    toolOutput(llvmNmExecutable, "-D", "--defined-only", library.absolutePath)
+        .lineSequence()
+        .mapNotNull { line -> line.trim().substringAfterLast(' ').takeIf(String::isNotEmpty) }
+        .toList()
+
+/**
+ * Guards one build type's packaged native payload against the record
+ * `scripts/build-jni-libs.sh` wrote. Gradle never invokes cargo, so without
+ * this the packaged `.so` would be an unaccountable prebuilt: a HARD failure
+ * here is what keeps "the sources declare X" and "the shipped binary was built
+ * from X" the same statement.
+ */
+fun registerJniLibsGuard(buildType: String) =
+    tasks.register("verify${buildType.replaceFirstChar(Char::uppercase)}JniLibs") {
+        inputs.file(policyFile)
         doLast {
-            val repositoryRoot = rootProject.projectDir.parentFile.parentFile.parentFile
             val newestSource =
                 fileTree(repositoryRoot) {
-                    include("crates/**/*.rs", "hosts/**/*.rs")
+                    include(
+                        "Cargo.toml",
+                        "Cargo.lock",
+                        "crates/**/*.rs",
+                        "crates/**/Cargo.toml",
+                        "crates/l5/envoix-bindings/schema/*.schema",
+                        "crates/l5/envoix-bindings/generated/**",
+                        "hosts/**/*.rs",
+                        "hosts/**/Cargo.toml",
+                    )
+                    exclude("target/**", "legacy/**", ".git/**")
                 }.files
                     .maxOfOrNull { it.lastModified() } ?: 0L
-            for (abi in hostAbis) {
-                val directory = file("src/main/jniLibs/$abi")
-                if (!directory.isDirectory) {
-                    throw GradleException("$directory is missing: run scripts/build-jni-libs.sh")
-                }
+            for (abi in requiredAbis) {
+                val directory = file("src/$buildType/jniLibs/$abi")
                 val libraries =
                     directory
                         .listFiles { candidate -> candidate.name.endsWith(".so") }
@@ -105,18 +260,456 @@ val verifyJniLibs =
                         .sorted()
                 if (libraries != listOf(hostSoname)) {
                     throw GradleException(
-                        "$abi jniLibs must contain exactly [$hostSoname], found $libraries: " +
+                        "$buildType $abi jniLibs must contain exactly [$hostSoname], found $libraries: " +
                             "re-run scripts/build-jni-libs.sh",
                     )
                 }
-                if (newestSource > file("$directory/$hostSoname").lastModified()) {
-                    logger.warn(
-                        "warning: $abi/$hostSoname is older than the Rust sources; " +
-                            "re-run scripts/build-jni-libs.sh",
+                val library = File(directory, hostSoname)
+                if (newestSource > library.lastModified()) {
+                    throw GradleException(
+                        "$buildType/$abi/$hostSoname is older than the sources it must be built " +
+                            "from: re-run scripts/build-jni-libs.sh",
+                    )
+                }
+                val recorded = policy("payload_${buildType}_${abi}_sha256")
+                val observed = sha256(library.readBytes())
+                if (observed != recorded) {
+                    throw GradleException(
+                        "$buildType/$abi/$hostSoname hashes to $observed, but the payload record " +
+                            "accounts for $recorded: re-run scripts/build-jni-libs.sh",
                     )
                 }
             }
         }
     }
 
-tasks.named("preBuild") { dependsOn(verifyJniLibs) }
+val jniLibsGuards = listOf("debug", "release").associateWith { registerJniLibsGuard(it) }
+
+androidComponents.onVariants { variant ->
+    val guard = jniLibsGuards[variant.buildType] ?: return@onVariants
+    val prepare = "pre${variant.name.replaceFirstChar(Char::uppercase)}Build"
+    tasks.matching { it.name == prepare }.configureEach { dependsOn(guard) }
+}
+
+/**
+ * A release artifact must be signed by the real key or not exist. This runs
+ * before packaging, so an unconfigured machine fails immediately instead of
+ * producing something nobody can trust — and it guards the app bundle exactly
+ * as it guards the APK.
+ */
+val requireReleaseSigning =
+    tasks.register("requireReleaseSigning") {
+        doLast {
+            if (missingSigningProperties.isNotEmpty()) {
+                throw GradleException(
+                    "release signing is not configured: set " +
+                        missingSigningProperties.joinToString() +
+                        " in ~/.gradle/gradle.properties (never inside this repository)",
+                )
+            }
+            if (!File(signingProperties.getValue("envoixReleaseStoreFile")!!).isFile) {
+                throw GradleException("the configured release keystore does not exist")
+            }
+            if (android.buildTypes
+                    .getByName("release")
+                    .signingConfig
+                    ?.name != "release"
+            ) {
+                throw GradleException("the release build type is not bound to the release signing identity")
+            }
+        }
+    }
+
+/** Where one artifact's packaging facts land for the Rust gate to re-judge. */
+fun releaseTrustFacts(
+    variant: String,
+    kind: String,
+): File =
+    File(
+        layout.buildDirectory
+            .dir("outputs/envoix-release-trust")
+            .get()
+            .asFile,
+        "$variant-$kind.toml",
+    )
+
+/**
+ * Empties the facts directory once per build, so a flavor that was not built
+ * this time cannot leave a stale green verdict behind for the Rust gate. Each
+ * facts file is a declared OUTPUT of the task that writes it, so emptying the
+ * directory also takes every release packaging task out of date: what the gate
+ * judges is always what this build produced.
+ */
+val prepareReleaseTrust =
+    tasks.register("prepareReleaseTrust") {
+        doLast {
+            layout.buildDirectory
+                .dir("outputs/envoix-release-trust")
+                .get()
+                .asFile
+                .deleteRecursively()
+        }
+    }
+
+/** The signer certificates an artifact carries, lowercase hex, in signer order. */
+fun packagedSigners(
+    artifact: File,
+    kind: String,
+): List<String> =
+    if (kind == "apk") {
+        Regex("Signer #(\\d+) certificate SHA-256 digest: ([0-9a-fA-F]{64})")
+            .findAll(
+                toolOutput(
+                    File(buildToolsDirectory, "apksigner"),
+                    "verify",
+                    "--print-certs",
+                    artifact.absolutePath,
+                ),
+            ).associate { match -> match.groupValues[1] to match.groupValues[2].lowercase() }
+            .toSortedMap()
+            .values
+            .toList()
+    } else {
+        // An app bundle is JAR-signed, which apksigner does not read.
+        toolOutput(keytoolExecutable, "-printcert", "-jarfile", artifact.absolutePath)
+            .split("Signer #")
+            .drop(1)
+            .mapNotNull { signer ->
+                Regex("SHA256:\\s*([0-9A-Fa-f:]{95})")
+                    .find(signer)
+                    ?.groupValues
+                    ?.get(1)
+                    ?.replace(":", "")
+                    ?.lowercase()
+            }
+    }
+
+/** `*` stands for any run of characters inside one path segment. */
+fun entryAllowed(entry: String): Boolean =
+    allowedPackageEntries.any { pattern ->
+        val segments = entry.split('/')
+        val globs = pattern.split('/')
+        segments.size == globs.size &&
+            segments.zip(globs).all { (segment, glob) ->
+                Regex(glob.split('*').joinToString(".*") { Regex.escape(it) }).matches(segment)
+            }
+    }
+
+/**
+ * Wraps a packaged app manifest in the one-entry container aapt2 insists on, so
+ * the same reader handles an APK's binary XML and a bundle's proto XML.
+ */
+fun manifestContainer(
+    scratch: File,
+    bytes: ByteArray,
+): File {
+    val container = File(scratch, "manifest-container.zip")
+    ZipOutputStream(container.outputStream()).use { archive ->
+        archive.putNextEntry(ZipEntry("AndroidManifest.xml"))
+        archive.write(bytes)
+        archive.closeEntry()
+    }
+    return container
+}
+
+/** PEM trust material, whether it sits in an asset, a resource or a string pool. */
+fun carriesPem(bytes: ByteArray): Boolean =
+    listOf(Charsets.US_ASCII, Charsets.UTF_16LE, Charsets.UTF_16BE).any { charset ->
+        val needle = "-----BEGIN ".toByteArray(charset)
+        (0..bytes.size - needle.size).any { start ->
+            needle.indices.all { index -> bytes[start + index] == needle[index] }
+        }
+    }
+
+/**
+ * Verifies one packaged release artifact against the policy and records what it
+ * saw for `cargo run -p xtask -- release-gate`, which re-reads and re-hashes the
+ * same file before judging the same facts.
+ *
+ * This runs as the artifact-producing task's own final action, not as a sibling
+ * task: there is no `-x` that drops the assertions and keeps the artifact.
+ */
+fun verifyReleaseArtifact(
+    flavor: String,
+    variant: String,
+    kind: String,
+) {
+    val directory =
+        layout.buildDirectory
+            .dir(if (kind == "apk") "outputs/apk/$flavor/release" else "outputs/bundle/$variant")
+            .get()
+            .asFile
+    val suffix = if (kind == "apk") ".apk" else ".aab"
+    val artifact =
+        directory
+            .listFiles { candidate -> candidate.name.endsWith(suffix) }
+            .orEmpty()
+            .singleOrNull()
+            ?: throw GradleException("expected exactly one release $suffix in $directory")
+    val prefix = if (kind == "apk") "" else "base/"
+    val scratch =
+        layout.buildDirectory
+            .dir("release-trust-scratch/$variant-$kind")
+            .get()
+            .asFile
+    scratch.deleteRecursively()
+    scratch.mkdirs()
+
+    val abis = sortedSetOf<String>()
+    val entries = mutableListOf<String>()
+    val payload = mutableListOf<Triple<String, String, List<String>>>()
+    val trustMaterial = mutableListOf<String>()
+    val releaseClasses = sortedSetOf<String>()
+    var shippedManifest: String? = null
+    var manifestBytes: ByteArray? = null
+    ZipFile(artifact).use { archive ->
+        for (entry in archive.entries()) {
+            val name = entry.name
+            entries += name
+            val bytes = archive.getInputStream(entry).use { it.readBytes() }
+            if (carriesPem(bytes)) {
+                trustMaterial += name
+            }
+            when (name) {
+                "${prefix}assets/envoix-build-manifest.json" -> shippedManifest = sha256(bytes)
+                if (kind == "apk") "AndroidManifest.xml" else "base/manifest/AndroidManifest.xml" ->
+                    manifestBytes = bytes
+            }
+            if (name.endsWith(".dex")) {
+                releaseClasses +=
+                    forbiddenReleaseClasses.filter { forbidden ->
+                        String(bytes, Charsets.US_ASCII).contains(forbidden)
+                    }
+            }
+            // EVERY shared object, wherever it sits: one dropped in assets/ and
+            // System.load()ed is a native entry point just the same.
+            if (!name.endsWith(".so")) {
+                continue
+            }
+            name.removePrefix(prefix).split('/').let { segments ->
+                if (segments.size == 3 && segments[0] == "lib") {
+                    abis += segments[1]
+                }
+            }
+            val extracted = File(scratch, name.replace('/', '-'))
+            extracted.writeBytes(bytes)
+            payload += Triple(name, sha256(bytes), definedSymbols(extracted))
+        }
+    }
+
+    // The packaged app manifest is the artifact's OWN declaration, so the
+    // version, the applicationId and any debug marker are read back out of the
+    // bytes it ships rather than from what the build script or AGP's metadata
+    // claims. An app bundle keeps its manifest proto-encoded under base/, which
+    // aapt2 reads once it is handed the entry under its conventional name.
+    val manifest =
+        toolOutput(
+            File(buildToolsDirectory, "aapt2"),
+            "dump",
+            "xmltree",
+            "--file",
+            "AndroidManifest.xml",
+            manifestContainer(
+                scratch,
+                manifestBytes
+                    ?: throw GradleException("$variant packages no app manifest"),
+            ).absolutePath,
+        )
+
+    fun manifestAttribute(
+        name: String,
+        pattern: String,
+    ): String =
+        Regex("$name(?:\\(0x[0-9a-f]+\\))?=$pattern")
+            .find(manifest)
+            ?.groupValues
+            ?.get(1)
+            ?: throw GradleException("$variant packages a manifest that declares no $name")
+
+    val versionCode = manifestAttribute("versionCode", "([0-9]+)").toLong()
+    val versionName = manifestAttribute("versionName", "\"([^\"]*)\"")
+    val applicationId = manifestAttribute("package", "\"([^\"]*)\"")
+    val manifestMarkers = forbiddenManifestMarkers.filter(manifest::contains)
+    val signers = packagedSigners(artifact, kind)
+
+    val artifactPath = repositoryRoot.toURI().relativize(artifact.toURI()).path
+    val facts = releaseTrustFacts(variant, kind)
+    facts.parentFile.mkdirs()
+    facts.writeText(
+        buildString {
+            appendLine("# @generated by the $variant $kind packaging assertions.")
+            appendLine("[facts]")
+            appendLine("variant = \"$variant\"")
+            appendLine("kind = \"$kind\"")
+            appendLine("application_id = \"$applicationId\"")
+            appendLine("artifact = \"$artifactPath\"")
+            appendLine("artifact_sha256 = \"${sha256(artifact.readBytes())}\"")
+            appendLine("version_code = $versionCode")
+            appendLine("version_name = \"$versionName\"")
+            appendLine("signers = [${signers.joinToString { "\"$it\"" }}]")
+            appendLine("abis = [${abis.joinToString { "\"$it\"" }}]")
+            appendLine("entries = [${entries.sorted().joinToString { "\"$it\"" }}]")
+            appendLine("manifest_markers = [${manifestMarkers.joinToString { "\"$it\"" }}]")
+            appendLine("trust_material = [${trustMaterial.joinToString { "\"$it\"" }}]")
+            appendLine(
+                shippedManifest?.let { "build_manifest_sha256 = \"$it\"" }
+                    ?: "# build_manifest_sha256: the artifact carries no build manifest",
+            )
+            appendLine("release_classes = [${releaseClasses.joinToString { "\"$it\"" }}]")
+            for ((entry, digest, symbols) in payload) {
+                appendLine()
+                appendLine("[[facts.payload]]")
+                appendLine("artifact = \"$entry\"")
+                appendLine("sha256 = \"$digest\"")
+                appendLine("symbols = [${symbols.joinToString { "\"$it\"" }}]")
+            }
+        },
+    )
+
+    val failures = mutableListOf<String>()
+    if ("$applicationId:$versionCode" in releasedVersions) {
+        failures += "$variant packages $applicationId versionCode $versionCode, already released"
+    }
+    releasedVersions
+        .mapNotNull { released ->
+            released.substringBeforeLast(':').takeIf { it == applicationId }?.let {
+                released.substringAfterLast(':').toLong()
+            }
+        }.maxOrNull()
+        ?.let { lastReleased ->
+            if (versionCode < lastReleased) {
+                failures += "$variant packages versionCode $versionCode, but $lastReleased is already released"
+            }
+        }
+    if (versionName != compiledPackageVersion) {
+        failures +=
+            "$variant packages versionName $versionName, but the build compiled " +
+            "package version $compiledPackageVersion"
+    }
+    if (signers.size != 1) {
+        failures += "$variant carries ${signers.size} signers, but a release has exactly one"
+    }
+    for (signer in signers) {
+        if (signer != expectedSigner) {
+            failures += "$variant is signed by $signer, but the release identity is $expectedSigner"
+        }
+    }
+    for (abi in requiredAbis - abis) {
+        failures += "$variant ships no $abi payload, but the release requires it"
+    }
+    for (abi in abis - requiredAbis.toSet()) {
+        failures += "$variant ships an $abi payload the release does not claim"
+    }
+    val expectedLibraries = requiredAbis.map { abi -> "${prefix}lib/$abi/$hostSoname" }
+    for (expected in expectedLibraries - payload.map { it.first }.toSet()) {
+        failures += "$variant packages no $expected, but the release requires it"
+    }
+    for ((entry, digest, symbols) in payload) {
+        if (entry !in expectedLibraries) {
+            failures += "$variant packages $entry, which the release does not claim"
+        } else {
+            val abi = entry.split('/')[if (kind == "apk") 1 else 2]
+            val recorded = policy("payload_release_${abi}_sha256")
+            if (digest != recorded) {
+                failures +=
+                    "$variant packages $entry hashing to $digest, but the payload record " +
+                    "accounts for $recorded"
+            }
+        }
+        for (symbol in symbols - allowedNativeSymbols) {
+            failures +=
+                if (forbiddenNativeSymbols.any(symbol::startsWith)) {
+                    "$variant packages $entry, which exports the debug-only symbol $symbol"
+                } else {
+                    "$variant packages $entry, which exports $symbol, an entry point the release does not allow"
+                }
+        }
+        for (symbol in allowedNativeSymbols - symbols.toSet()) {
+            failures += "$variant packages $entry, which does not export the required entry point $symbol"
+        }
+    }
+    if (kind == "apk") {
+        for (entry in entries.filterNot(::entryAllowed)) {
+            failures += "$variant packages $entry, which the release surface does not allow"
+        }
+    }
+    when (shippedManifest) {
+        null -> failures += "$variant carries no build-manifest asset to identify itself by"
+        compiledBuildManifest -> Unit
+        else ->
+            failures +=
+                "$variant ships build manifest $shippedManifest, but this build compiles $compiledBuildManifest"
+    }
+    for (marker in manifestMarkers) {
+        failures += "$variant declares $marker, which only a debug build may carry"
+    }
+    for (entry in trustMaterial) {
+        failures += "$variant packages $entry, which carries PEM trust material"
+    }
+    for (className in releaseClasses) {
+        failures += "$variant defines $className, which only a debug build may define"
+    }
+    if (trustRootRequired && declaredTrustRoot == "unprovisioned") {
+        failures += "$variant is a public release, but the deployment trust root slot is unprovisioned"
+    }
+    if (failures.isNotEmpty()) {
+        throw GradleException(failures.joinToString(separator = "\n- ", prefix = "release trust failed:\n- "))
+    }
+}
+
+/**
+ * The Rust half of the same question, wired into the release graph: gradle owns
+ * what only the packaging side can see, and this owns the identity agreement no
+ * build script can compute. Release builds already require the cargo toolchain
+ * that produced the payload, so this costs debug builds nothing.
+ */
+val releaseGate =
+    tasks.register<Exec>("releaseGate") {
+        workingDir = repositoryRoot
+        commandLine("cargo", "run", "-q", "-p", "xtask", "--", "release-gate")
+    }
+
+androidComponents.onVariants { variant ->
+    if (variant.buildType != "release") {
+        return@onVariants
+    }
+    val name = variant.name
+    val flavor = variant.flavorName.orEmpty()
+    val capitalized = name.replaceFirstChar(Char::uppercase)
+    afterEvaluate {
+        // Every task that can emit a release artifact requires the real key —
+        // the bundle path included, where an unsigned .aab used to build fine.
+        for (producer in listOf(
+            "package$capitalized",
+            "package${capitalized}Bundle",
+            "sign${capitalized}Bundle",
+            "package${capitalized}UniversalApk",
+        )) {
+            tasks.named(producer) { dependsOn(requireReleaseSigning) }
+        }
+        // The assertions belong to the tasks that PRODUCE the artifacts, so
+        // they cannot be excluded without also excluding the artifact.
+        tasks.named("package$capitalized") {
+            dependsOn(prepareReleaseTrust)
+            inputs.file(policyFile)
+            outputs.file(releaseTrustFacts(name, "apk"))
+            doLast { verifyReleaseArtifact(flavor, name, "apk") }
+        }
+        tasks.named("sign${capitalized}Bundle") {
+            dependsOn(prepareReleaseTrust)
+            inputs.file(policyFile)
+            outputs.file(releaseTrustFacts(name, "bundle"))
+            doLast { verifyReleaseArtifact(flavor, name, "bundle") }
+        }
+        releaseGate.configure {
+            mustRunAfter("package$capitalized", "sign${capitalized}Bundle")
+        }
+        tasks.named("assemble$capitalized") { dependsOn(releaseGate) }
+        tasks.named("bundle$capitalized") { dependsOn(releaseGate) }
+    }
+}
+
+dependencies {
+    // FileProvider only; the host app has no UI (F1/F2 add frontends).
+    implementation("androidx.core:core:1.13.1")
+}

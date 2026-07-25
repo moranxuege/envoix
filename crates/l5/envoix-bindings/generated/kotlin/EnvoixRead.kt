@@ -13,7 +13,7 @@ import org.json.JSONException
 import org.json.JSONObject
 import org.json.JSONTokener
 
-const val READ_SCHEMA_ID: String = "envoix/binding/read/1"
+const val READ_SCHEMA_ID: String = "envoix/binding/read/2"
 const val READ_MAX_FRAME_BYTES: Int = 1048576
 
 enum class ReadErrorKind {
@@ -281,6 +281,7 @@ data class ProtocolManifestView(
 
 data class AbiSchemaManifestView(
     val readBindingSchemaId: String,
+    val commandBindingSchemaId: String,
     val evidenceRustAbiId: String,
     val evidenceTimelineSchemaId: String,
     val mailboxReceiptSchemaId: String,
@@ -972,9 +973,10 @@ object EnvoixReadCodec {
 
     private fun decodeAbiSchemaManifestView(value: Any?, context: String): AbiSchemaManifestView {
         val map = obj(value, context)
-        knownKeys(map, setOf("read_binding_schema_id", "evidence_rust_abi_id", "evidence_timeline_schema_id", "mailbox_receipt_schema_id", "operation_envelope_schema_id"), context)
+        knownKeys(map, setOf("read_binding_schema_id", "command_binding_schema_id", "evidence_rust_abi_id", "evidence_timeline_schema_id", "mailbox_receipt_schema_id", "operation_envelope_schema_id"), context)
         return AbiSchemaManifestView(
             readBindingSchemaId = asciiBounded(field(map, "read_binding_schema_id", "AbiSchemaManifestView.read_binding_schema_id"), 64, "AbiSchemaManifestView.read_binding_schema_id"),
+            commandBindingSchemaId = asciiBounded(field(map, "command_binding_schema_id", "AbiSchemaManifestView.command_binding_schema_id"), 64, "AbiSchemaManifestView.command_binding_schema_id"),
             evidenceRustAbiId = asciiBounded(field(map, "evidence_rust_abi_id", "AbiSchemaManifestView.evidence_rust_abi_id"), 64, "AbiSchemaManifestView.evidence_rust_abi_id"),
             evidenceTimelineSchemaId = asciiBounded(field(map, "evidence_timeline_schema_id", "AbiSchemaManifestView.evidence_timeline_schema_id"), 64, "AbiSchemaManifestView.evidence_timeline_schema_id"),
             mailboxReceiptSchemaId = asciiBounded(field(map, "mailbox_receipt_schema_id", "AbiSchemaManifestView.mailbox_receipt_schema_id"), 64, "AbiSchemaManifestView.mailbox_receipt_schema_id"),

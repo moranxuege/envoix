@@ -44,9 +44,9 @@ class EnvoixHostService : Service() {
         startId: Int,
     ): Int {
         // Instrumentation actions (the derived <applicationId>.action.e2e-*
-        // namespace) live in the debug source set only; the release twin of
-        // E2eBridge ignores every intent.
-        intent?.let { E2eBridge.handle(it, packageName) }
+        // namespace) live in the debug source set only; the release source set
+        // has no bridge, no JNI binding and no class by that name at all.
+        intent?.let { handleInstrumentation(it, packageName) }
         return START_STICKY
     }
 

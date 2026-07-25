@@ -6,9 +6,9 @@ import android.util.Log
 /**
  * Debug-only instrumentation for `packaged_process_death_preserves_cards`.
  *
- * It exists ONLY in the debug source set — the release variant compiles the
- * no-op twin, so neither the intent handler nor these JNI bindings exist in a
- * release-shaped build. The debug manifest additionally puts the exported
+ * It exists ONLY in the debug source set — the release variant's own
+ * `handleInstrumentation` forwards to nothing, so neither this class nor these
+ * JNI bindings are in a release dex at all. The debug manifest puts the exported
  * service behind a signature-level permission, so no other installed app can
  * reach it (the shell needs `adb root`).
  */

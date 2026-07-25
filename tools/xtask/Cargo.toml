@@ -11,9 +11,12 @@ role = "tool"
 [dependencies]
 cargo_metadata = "0.18"
 serde = { version = "1", features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = "0.10"
 toml = "0.8"
 
 envoix-auth = { path = "../../crates/l2/envoix-auth" }
+envoix-bindings = { path = "../../crates/l5/envoix-bindings" }
 envoix-evidence = { path = "../../crates/l4/envoix-evidence" }
 envoix-invite = { path = "../../crates/l1/envoix-invite" }
 envoix-operation-store = { path = "../../crates/l2/envoix-operation-store" }

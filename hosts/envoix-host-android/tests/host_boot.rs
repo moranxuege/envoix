@@ -307,7 +307,7 @@ fn created_card_survives_reboot_and_reattaches() {
     for _ in 0..100 {
         if let Some(bytes) = host.poll_frame() {
             let text = String::from_utf8(bytes).expect("frames are UTF-8 JSON");
-            assert!(text.contains("envoix/binding/read/1"));
+            assert!(text.contains("envoix/binding/read/2"));
             saw_frame = true;
             break;
         }

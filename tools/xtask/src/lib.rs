@@ -5,6 +5,10 @@ use std::path::{Component, Path, PathBuf};
 use cargo_metadata::{DependencyKind, MetadataCommand, Package};
 use serde::Deserialize;
 
+pub mod release;
+
+pub use release::{ReleaseGateReport, record_payload, release_gate};
+
 pub type CheckResult<T> = Result<T, String>;
 
 #[derive(Debug)]
@@ -177,6 +181,7 @@ fn validate_live_identifiers(
 ) {
     let mut fresh_by_scope: HashMap<(&str, &str), &str> = HashMap::new();
     let mut crypto_values: HashMap<&str, &str> = HashMap::new();
+    let bound = validate_bound_identifiers(live, violations);
 
     for identifier in live {
         let mut own_values = HashSet::new();
@@ -187,6 +192,8 @@ fn validate_live_identifiers(
             let scoped = (identifier.collision_scope.as_str(), value.as_str());
             if let Some(first) = fresh_by_scope.insert(scoped, &identifier.key)
                 && first != identifier.key
+                && !bound.contains(&(first, identifier.key.as_str()))
+                && !bound.contains(&(identifier.key.as_str(), first))
             {
                 violations.push(format!(
                     "fresh collision in scope {}: {} and {} both resolve to {:?}",
@@ -224,6 +231,43 @@ fn validate_live_identifiers(
             }
         }
     }
+}
+
+/// `comparison = "must-equal:<key>"` binds two owners to the same value — an
+/// app version spelled once in gradle and once in Cargo, say. The pair is
+/// therefore exempt from the collision rule (they are SUPPOSED to be equal) and
+/// a DIFFERENCE is the violation instead.
+fn validate_bound_identifiers<'a>(
+    live: &'a [LiveIdentifier],
+    violations: &mut Vec<String>,
+) -> HashSet<(&'a str, &'a str)> {
+    let by_key: HashMap<&str, &LiveIdentifier> = live
+        .iter()
+        .map(|identifier| (identifier.key.as_str(), identifier))
+        .collect();
+    let mut bound = HashSet::new();
+    for identifier in live {
+        let Some(target) = identifier
+            .comparison
+            .as_deref()
+            .and_then(|comparison| comparison.strip_prefix("must-equal:"))
+        else {
+            continue;
+        };
+        bound.insert((identifier.key.as_str(), target));
+        match by_key.get(target) {
+            None => violations.push(format!(
+                "{}: must-equal target {target} is not a catalogued identifier",
+                identifier.key
+            )),
+            Some(other) if other.values != identifier.values => violations.push(format!(
+                "{} and {target} must agree, but resolve to {:?} and {:?}",
+                identifier.key, identifier.values, other.values
+            )),
+            Some(_) => {}
+        }
+    }
+    bound
 }
 
 fn approved_scoped_reuse(

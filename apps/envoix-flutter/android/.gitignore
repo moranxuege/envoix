@@ -3,4 +3,5 @@ build/
 app/build/
 local.properties
 # cargo-ndk output; rebuilt by scripts/build-jni-libs.sh
-app/src/main/jniLibs/
+app/src/debug/jniLibs/
+app/src/release/jniLibs/

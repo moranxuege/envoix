@@ -1,0 +1,108 @@
+# The release trust ledger: the policy a release-shaped Envoix artifact is held
+# to. Hand-maintained and reviewed; every value here is PUBLIC by design (a
+# certificate fingerprint identifies a key, it does not unlock one). The
+# keystore and its passwords live outside the repository and are never named
+# by any file in it.
+#
+# This file is the SOLE source of release policy, and it is read by exactly one
+# parser: `cargo run -p xtask -- release-gate` deserializes it into
+# `envoix_evidence::release::ReleaseLedger` (every level rejects an unknown
+# field, so a smuggled table is a parse error, not a silent second opinion) and
+# projects it into `registry/release-policy.properties`, which is the only
+# release constant the packaging side ever reads. Nothing hand-parses TOML.
+#
+# Every list except `forbidden_*` is an ALLOW-list: the gate judges what the
+# artifact contains against what the release claims, in both directions, so an
+# entry point or a packaged file nobody reviewed fails by construction rather
+# than by a missing deny entry.
+
+[policy]
+# SHA-256 of the release signing certificate, lowercase hex without separators.
+# An artifact signed by anything else — notably the debug key — fails the gate,
+# and so does one carrying a second signer.
+signer_sha256 = "afcc5006f88b1bdd274153a7356667d77a3832057fb35822ab224b7ecacedb38"
+
+# The ABIs a release artifact must ship — exactly these, no more and no fewer.
+required_abis = ["arm64-v8a", "x86_64"]
+
+# The only native library a release artifact may package, once per required
+# ABI, at `lib/<abi>/` (`base/lib/<abi>/` in an app bundle) and nowhere else.
+native_library = "libenvoix_host_android.so"
+
+# The COMPLETE exported surface of the release payload: the six JNI entry
+# points the Kotlin `NativeHost` binds. The gate compares the packaged
+# library's dynamic symbol table against this set in BOTH directions, so an
+# entry point that is merely renamed — or registered from `JNI_OnLoad` with no
+# exported name at all — is a failure, not a gap in a prefix rule.
+allowed_native_symbols = [
+    "Java_app_envoix_host_NativeHost_boot",
+    "Java_app_envoix_host_NativeHost_pollFrame",
+    "Java_app_envoix_host_NativeHost_pollWork",
+    "Java_app_envoix_host_NativeHost_reportDuty",
+    "Java_app_envoix_host_NativeHost_shutdown",
+    "Java_app_envoix_host_NativeHost_submit",
+]
+
+# Recognised debug/instrumentation exports. NOT the rule — the allow-list above
+# already rejects anything it does not name — only the half that lets the
+# message say what it recognised. Nothing else belongs here: `JNI_OnLoad`, for
+# instance, needs no deny entry, because a library that registers its natives
+# at load time exports a symbol the allow-list does not name and is rejected
+# for that reason alone.
+forbidden_native_symbols = ["Java_app_envoix_host_E2eBridge_"]
+
+# The COMPLETE packaged surface of a release APK, as patterns where `*` stands
+# for any run of characters inside one path segment. Anything else in the
+# archive is rejected by name, which is what a deny-list of certificate
+# extensions can never do: an extension-less trust root, a `.der`, a `.pfx` or
+# a PEM hidden in a text asset all fail here simply for not being claimed.
+allowed_package_entries = [
+    "AndroidManifest.xml",
+    "DebugProbesKt.bin",
+    "classes.dex",
+    "kotlin-tooling-metadata.json",
+    "resources.arsc",
+    "assets/dexopt/baseline.prof",
+    "assets/dexopt/baseline.profm",
+    "assets/envoix-build-manifest.json",
+    "kotlin/*.kotlin_builtins",
+    "kotlin/*/*.kotlin_builtins",
+    "lib/*/libenvoix_host_android.so",
+    "META-INF/*.version",
+    "META-INF/com/android/build/gradle/app-metadata.properties",
+    "META-INF/services/kotlinx.coroutines.*",
+    "META-INF/version-control-info.textproto",
+    "res/*.png",
+    "res/*.xml",
+]
+
+# Substrings of the packaged app manifest, as `aapt2 dump xmltree` renders it,
+# that only a debug-shaped build may carry: the debuggable/testOnly flags, the
+# debug-only instrumentation permission and the component it guards, and any
+# network-security-config reference (that is where a debug trust override would
+# have to be declared to have any effect).
+forbidden_manifest_markers = [":debuggable(", ":testOnly(", ".permission.E2E", ":networkSecurityConfig("]
+
+# Class names the release dex may never define. The debug instrumentation
+# bridge exists only in the debug source set, so a release APK that still
+# defines it was built from the wrong sources.
+forbidden_release_classes = ["E2eBridge"]
+
+# "internal": signed with the real key but not distributed to anyone (what BN5
+# builds). "public": additionally requires a provisioned deployment trust root,
+# so flipping this before D1 has provisioned `deploy/environments.toml` fails
+# every release build. D2 owns the flip. Both enforcers read the DECISION this
+# implies (`trust_root_required` in the projection), never the spelling.
+distribution = "internal"
+
+# Append-only record of what has actually been released, one row per
+# (applicationId, versionCode). The release action appends a row; nothing ever
+# edits one. A build whose pair is already present fails, and so does one whose
+# versionCode regresses below its applicationId's highest released number —
+# three applicationIds share this file but never share a number.
+#
+# Empty: nothing has been released yet (BN5 is a trust gate, D2 publishes).
+#
+# [[released]]
+# application_id = "app.envoix.host"
+# version_code = 1

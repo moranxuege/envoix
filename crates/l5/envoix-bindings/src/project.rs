@@ -8,8 +8,8 @@
 //! without holding a live subscription type.
 
 use envoix_evidence::{
-    BuildTrustManifest, DiagnosticsStatus, EvidenceValue, RedactedIdKind, SessionTimeline,
-    TrustRootFingerprintSlot,
+    AbiSchemaManifest, BuildTrustManifest, DiagnosticsStatus, EvidenceValue, RedactedIdKind,
+    SessionTimeline, TrustRootFingerprintSlot,
 };
 use envoix_outcomes::{Outcome, OutcomeCode, Phase, Recovery, Retryability};
 use envoix_runtime::{
@@ -18,6 +18,7 @@ use envoix_runtime::{
 };
 use envoix_types::{Direction, RecordId};
 
+use crate::command::COMMAND_SCHEMA_ID;
 use crate::read::{
     AbiSchemaManifestView, BuildManifestView, CapabilityActionView, CardUpdateKindView,
     CardUpdateView, CardView, ClosedView, DegradedView, DiagnosticsStatusView, DirectionView,
@@ -121,8 +122,22 @@ pub fn evidence_frame(timeline: &SessionTimeline) -> ReadFrame {
     }))
 }
 
-/// The static build/trust manifest as a read frame.
+/// The static build/trust manifest as a read frame — the COMPLETE build
+/// identity.
+///
+/// The L4 manifest cannot name the generated binding contracts (L5 depends on
+/// L4, never the reverse), so this projection composes them: the L4
+/// identities plus the read and command schema ids taken straight from the
+/// generated modules, where they cannot drift from what the codecs speak. The
+/// L4 half is destructured rather than field-accessed, so a new identity added
+/// to `AbiSchemaManifest` fails to compile until it is projected here.
 pub fn build_manifest_frame(manifest: &BuildTrustManifest) -> ReadFrame {
+    let AbiSchemaManifest {
+        evidence_rust_abi_id,
+        evidence_timeline_schema_id,
+        mailbox_receipt_schema_id,
+        operation_envelope_schema_id,
+    } = manifest.abi_schema;
     frame(ReadBody::BuildManifest(BuildManifestView {
         package_version: manifest.package_version.to_owned(),
         protocol: ProtocolManifestView {
@@ -133,13 +148,11 @@ pub fn build_manifest_frame(manifest: &BuildTrustManifest) -> ReadFrame {
         },
         abi_schema: AbiSchemaManifestView {
             read_binding_schema_id: READ_SCHEMA_ID.to_owned(),
-            evidence_rust_abi_id: manifest.abi_schema.evidence_rust_abi_id.to_owned(),
-            evidence_timeline_schema_id: manifest.abi_schema.evidence_timeline_schema_id.to_owned(),
-            mailbox_receipt_schema_id: manifest.abi_schema.mailbox_receipt_schema_id.to_owned(),
-            operation_envelope_schema_id: manifest
-                .abi_schema
-                .operation_envelope_schema_id
-                .to_owned(),
+            command_binding_schema_id: COMMAND_SCHEMA_ID.to_owned(),
+            evidence_rust_abi_id: evidence_rust_abi_id.to_owned(),
+            evidence_timeline_schema_id: evidence_timeline_schema_id.to_owned(),
+            mailbox_receipt_schema_id: mailbox_receipt_schema_id.to_owned(),
+            operation_envelope_schema_id: operation_envelope_schema_id.to_owned(),
         },
         trust_root: match manifest.trust_root {
             TrustRootFingerprintSlot::Unprovisioned => TrustRootView::Unprovisioned,

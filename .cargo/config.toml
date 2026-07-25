@@ -1,0 +1,15 @@
+# The Android payload's link policy.
+#
+# A cdylib must export the JNI entry points it declares and NOTHING else. By
+# default the linker re-exports global symbols from the static libraries it
+# links, so a C dependency leaks into the dynamic symbol table — blake3's
+# portable aarch64 path does exactly that — and the release gate's
+# exported-surface allow-list rejects it, correctly but after the fact.
+# Excluding archive symbols from automatic export removes them at the link,
+# which is where they come from. The crate's own entry points are unaffected:
+# they are compiled into the cdylib's own objects, not into an archive.
+[target.aarch64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,--exclude-libs,ALL"]
+
+[target.x86_64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,--exclude-libs,ALL"]

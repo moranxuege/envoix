@@ -1,10 +1,13 @@
 use std::process::ExitCode;
 
-use xtask::{arch_check, identifier_check, workspace_root};
+use xtask::{arch_check, identifier_check, record_payload, release_gate, workspace_root};
 
 fn main() -> ExitCode {
     let Some(command) = std::env::args().nth(1) else {
-        eprintln!("usage: cargo run -p xtask -- <identifier-check|arch-check>");
+        eprintln!(
+            "usage: cargo run -p xtask -- \
+             <identifier-check|arch-check|release-gate|record-payload>"
+        );
         return ExitCode::FAILURE;
     };
     let root = workspace_root();
@@ -29,6 +32,24 @@ fn main() -> ExitCode {
                 report.violations.len()
             );
             report.ensure_success()
+        }),
+        "release-gate" => release_gate(&root).map(|report| {
+            println!(
+                "release-gate: artifacts={} identities={} distribution={} disagreements={}",
+                report.artifacts,
+                report.identities,
+                report.distribution.as_str(),
+                report.disagreements.len()
+            );
+            report.ensure_success()
+        }),
+        "record-payload" => record_payload(&root).map(|record| {
+            println!(
+                "record-payload: libraries={} manifest={}",
+                record.library.len(),
+                record.build_manifest_sha256
+            );
+            Ok(())
         }),
         _ => {
             eprintln!("unknown xtask subcommand: {command}");

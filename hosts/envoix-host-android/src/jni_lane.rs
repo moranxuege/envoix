@@ -13,7 +13,7 @@ use std::sync::{OnceLock, RwLock};
 
 use jni::JNIEnv;
 use jni::objects::{JByteArray, JClass, JString};
-use jni::sys::{jboolean, jbyteArray, jlong, jstring};
+use jni::sys::{jboolean, jbyteArray};
 
 use crate::host::Host;
 
@@ -114,50 +114,6 @@ pub extern "system" fn Java_app_envoix_host_NativeHost_reportDuty(
     u8::from(with_host(|host| host.report_duty(&bytes)).unwrap_or(false))
 }
 
-/// `E2eBridge.createForE2e(name, totalBytes): Long` — the debug-only Kotlin
-/// bridge (there is no release binding); gives packaged process-death
-/// instrumentation real durable state. Returns 0 on failure (a real RecordId
-/// is never zero).
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_app_envoix_host_E2eBridge_createForE2e(
-    mut env: JNIEnv<'_>,
-    _class: JClass<'_>,
-    name: JString<'_>,
-    total_bytes: jlong,
-) -> jlong {
-    let Ok(name) = env.get_string(&name) else {
-        return 0;
-    };
-    let name: String = name.into();
-    let Ok(total) = u64::try_from(total_bytes) else {
-        return 0;
-    };
-    with_host(|host| {
-        host.create_for_e2e(&name, total)
-            .map_or(0, |card| card.get() as jlong)
-    })
-    .unwrap_or(0)
-}
-
-/// `E2eBridge.liveCards(): String` — the debug-only restore probe: the cards
-/// this process generation actually brought back, as comma-separated 16-digit
-/// hex ids (empty when none).
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_app_envoix_host_E2eBridge_liveCards(
-    env: JNIEnv<'_>,
-    _class: JClass<'_>,
-) -> jstring {
-    let mut cards: Vec<String> = with_host(Host::live_cards)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|card| format!("{:016x}", card.get()))
-        .collect();
-    cards.sort();
-    env.new_string(cards.join(","))
-        .map(|text| text.into_raw())
-        .unwrap_or(std::ptr::null_mut())
-}
-
 /// `NativeHost.shutdown()`
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_app_envoix_host_NativeHost_shutdown(
@@ -170,5 +126,64 @@ pub extern "system" fn Java_app_envoix_host_NativeHost_shutdown(
         .take();
     if let Some(host) = host {
         host.shutdown();
+    }
+}
+
+/// The packaged process-death instrumentation lane, compiled ONLY under the
+/// `e2e-instrumentation` feature.
+///
+/// The feature is off by default, so these exported symbols do not exist in a
+/// release-shaped cdylib — not stripped afterwards, never compiled. The Kotlin
+/// `E2eBridge` that binds them likewise lives in the debug source set only.
+#[cfg(feature = "e2e-instrumentation")]
+mod e2e {
+    use jni::JNIEnv;
+    use jni::objects::{JClass, JString};
+    use jni::sys::{jlong, jstring};
+
+    use super::with_host;
+    use crate::host::Host;
+
+    /// `E2eBridge.createForE2e(name, totalBytes): Long` — gives the packaged
+    /// instrumentation real durable state. Returns 0 on failure (a real
+    /// RecordId is never zero).
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_app_envoix_host_E2eBridge_createForE2e(
+        mut env: JNIEnv<'_>,
+        _class: JClass<'_>,
+        name: JString<'_>,
+        total_bytes: jlong,
+    ) -> jlong {
+        let Ok(name) = env.get_string(&name) else {
+            return 0;
+        };
+        let name: String = name.into();
+        let Ok(total) = u64::try_from(total_bytes) else {
+            return 0;
+        };
+        with_host(|host| {
+            host.create_for_e2e(&name, total)
+                .map_or(0, |card| card.get() as jlong)
+        })
+        .unwrap_or(0)
+    }
+
+    /// `E2eBridge.liveCards(): String` — the restore probe: the cards this
+    /// process generation actually brought back, as comma-separated 16-digit
+    /// hex ids (empty when none).
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_app_envoix_host_E2eBridge_liveCards(
+        env: JNIEnv<'_>,
+        _class: JClass<'_>,
+    ) -> jstring {
+        let mut cards: Vec<String> = with_host(Host::live_cards)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|card| format!("{:016x}", card.get()))
+            .collect();
+        cards.sort();
+        env.new_string(cards.join(","))
+            .map(|text| text.into_raw())
+            .unwrap_or(std::ptr::null_mut())
     }
 }

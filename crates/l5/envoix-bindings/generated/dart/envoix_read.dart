@@ -6,7 +6,7 @@
 
 import 'dart:convert';
 
-const String readSchemaId = 'envoix/binding/read/1';
+const String readSchemaId = 'envoix/binding/read/2';
 const int readMaxFrameBytes = 1048576;
 const int _u63Max = 9223372036854775807;
 
@@ -504,6 +504,7 @@ final class ProtocolManifestView {
 final class AbiSchemaManifestView {
   const AbiSchemaManifestView({
     required this.readBindingSchemaId,
+    required this.commandBindingSchemaId,
     required this.evidenceRustAbiId,
     required this.evidenceTimelineSchemaId,
     required this.mailboxReceiptSchemaId,
@@ -511,6 +512,7 @@ final class AbiSchemaManifestView {
   });
 
   final String readBindingSchemaId;
+  final String commandBindingSchemaId;
   final String evidenceRustAbiId;
   final String evidenceTimelineSchemaId;
   final String mailboxReceiptSchemaId;
@@ -1328,9 +1330,10 @@ ProtocolManifestView _decodeProtocolManifestView(Object? value, String context) 
 
 AbiSchemaManifestView _decodeAbiSchemaManifestView(Object? value, String context) {
   final map = _object(value, context);
-  _knownKeys(map, const {'read_binding_schema_id', 'evidence_rust_abi_id', 'evidence_timeline_schema_id', 'mailbox_receipt_schema_id', 'operation_envelope_schema_id'}, context);
+  _knownKeys(map, const {'read_binding_schema_id', 'command_binding_schema_id', 'evidence_rust_abi_id', 'evidence_timeline_schema_id', 'mailbox_receipt_schema_id', 'operation_envelope_schema_id'}, context);
   return AbiSchemaManifestView(
     readBindingSchemaId: _asciiBounded(_field(map, 'read_binding_schema_id', 'AbiSchemaManifestView.read_binding_schema_id'), 64, 'AbiSchemaManifestView.read_binding_schema_id'),
+    commandBindingSchemaId: _asciiBounded(_field(map, 'command_binding_schema_id', 'AbiSchemaManifestView.command_binding_schema_id'), 64, 'AbiSchemaManifestView.command_binding_schema_id'),
     evidenceRustAbiId: _asciiBounded(_field(map, 'evidence_rust_abi_id', 'AbiSchemaManifestView.evidence_rust_abi_id'), 64, 'AbiSchemaManifestView.evidence_rust_abi_id'),
     evidenceTimelineSchemaId: _asciiBounded(_field(map, 'evidence_timeline_schema_id', 'AbiSchemaManifestView.evidence_timeline_schema_id'), 64, 'AbiSchemaManifestView.evidence_timeline_schema_id'),
     mailboxReceiptSchemaId: _asciiBounded(_field(map, 'mailbox_receipt_schema_id', 'AbiSchemaManifestView.mailbox_receipt_schema_id'), 64, 'AbiSchemaManifestView.mailbox_receipt_schema_id'),

@@ -25,7 +25,6 @@ mod provider;
 mod store;
 mod stores;
 
-#[cfg(target_os = "android")]
 #[allow(unsafe_code)]
 mod jni_lane;
 
