@@ -12,6 +12,8 @@ use envoix_rendezvous_iroh::generate_code;
 
 uniffi::setup_scaffolding!();
 
+mod datagram_transport;
+pub use datagram_transport::*;
 mod manifest_v2_job;
 pub use manifest_v2_job::*;
 mod manifest_v2_session;

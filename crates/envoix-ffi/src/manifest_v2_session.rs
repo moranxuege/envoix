@@ -11,10 +11,12 @@ use envoix_client::api::{
     DestinationDecisionV2, DestinationRequestV2, EventSink, PairingConfig, PeerSource,
     PendingManifestV2Receive, PendingNativeManifestV2Receive, SessionError, TransferCancelToken,
     TransferEvent, parse_broker_addr, receive_manifest_v2_offer_enable_mdns,
+    receive_manifest_v2_offer_over_datagram_transport,
     receive_manifest_v2_offer_over_native_transport, receive_manifest_v2_offer_via_room,
     receive_manifest_v2_offer_with_bound_peer, send_manifest_v2_enable_mdns,
-    send_manifest_v2_manual, send_manifest_v2_over_native_transport,
-    send_manifest_v2_to_endpoint_addr, send_manifest_v2_via_room,
+    send_manifest_v2_manual, send_manifest_v2_over_datagram_transport,
+    send_manifest_v2_over_native_transport, send_manifest_v2_to_endpoint_addr,
+    send_manifest_v2_via_room,
 };
 use envoix_qr::{QrInvitePayload, generate_token};
 use envoix_types::PairingStep;
@@ -23,10 +25,11 @@ use tokio::task::JoinSet;
 
 use super::{
     EnvoixError, EnvoixRuntimeSettings, FfiFailureCategory, FfiFailureCode, FfiFailureOrigin,
-    FfiFailurePhase, FfiManifestV2Phase, FfiNativeDuplexTransport, FfiRecoveryAction,
-    FfiTransferDirection, FfiTransferFailure, FfiTransferJobV2, FfiTransferRequest,
-    TransferObserver, build_client_for_request, core_native_transport, on_ffi_runtime, op_err,
-    peer_sources_for_request, spawn_on_ffi_runtime, transfer_options_for_request,
+    FfiFailurePhase, FfiManifestV2Phase, FfiNativeDatagramTransport, FfiNativeDuplexTransport,
+    FfiRecoveryAction, FfiTransferDirection, FfiTransferFailure, FfiTransferJobV2,
+    FfiTransferRequest, TransferObserver, build_client_for_request, core_datagram_transport,
+    core_native_transport, on_ffi_runtime, op_err, peer_sources_for_request, spawn_on_ffi_runtime,
+    transfer_options_for_request,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -139,6 +142,14 @@ pub struct FfiPendingManifestV2Receive {
 enum CorePendingManifestV2Receive {
     Iroh(Box<PendingManifestV2Receive>),
     Native(Box<PendingNativeManifestV2Receive>),
+}
+
+enum FfiPlatformManifestTransport {
+    Datagram {
+        transport: Arc<dyn FfiNativeDatagramTransport>,
+        maximum_datagram_size: u32,
+    },
+    Stream(Arc<dyn FfiNativeDuplexTransport>),
 }
 
 impl CorePendingManifestV2Receive {
@@ -411,6 +422,51 @@ pub async fn send_transfer_job_v2_over_native_transport(
     cancellation: Arc<FfiManifestV2Cancellation>,
     observer: Arc<dyn TransferObserver>,
 ) -> Result<FfiNativeManifestV2Completion, EnvoixError> {
+    send_transfer_job_v2_over_platform_transport(
+        job,
+        pairing_token,
+        state_directory,
+        FfiPlatformManifestTransport::Stream(transport),
+        cancellation,
+        observer,
+    )
+    .await
+}
+
+/// Runs the canonical sender over iroh QUIC carried by a
+/// platform-established Wi-Fi Aware datagram channel.
+#[uniffi::export]
+pub async fn send_transfer_job_v2_over_datagram_transport(
+    job: Arc<FfiTransferJobV2>,
+    pairing_token: String,
+    state_directory: String,
+    transport: Arc<dyn FfiNativeDatagramTransport>,
+    maximum_datagram_size: u32,
+    cancellation: Arc<FfiManifestV2Cancellation>,
+    observer: Arc<dyn TransferObserver>,
+) -> Result<FfiNativeManifestV2Completion, EnvoixError> {
+    send_transfer_job_v2_over_platform_transport(
+        job,
+        pairing_token,
+        state_directory,
+        FfiPlatformManifestTransport::Datagram {
+            transport,
+            maximum_datagram_size,
+        },
+        cancellation,
+        observer,
+    )
+    .await
+}
+
+async fn send_transfer_job_v2_over_platform_transport(
+    job: Arc<FfiTransferJobV2>,
+    pairing_token: String,
+    state_directory: String,
+    transport: FfiPlatformManifestTransport,
+    cancellation: Arc<FfiManifestV2Cancellation>,
+    observer: Arc<dyn TransferObserver>,
+) -> Result<FfiNativeManifestV2Completion, EnvoixError> {
     spawn_on_ffi_runtime(async move {
         let state_directory = required_directory(state_directory, "state_directory")?;
         let pairing = PairingConfig::spake2_shared_token(pairing_token).map_err(op_err)?;
@@ -426,16 +482,35 @@ pub async fn send_transfer_job_v2_over_native_transport(
         let events: Arc<dyn EventSink> = Arc::new(NativeSessionEvents {
             observer: observer.clone(),
         });
-        let summary = match send_manifest_v2_over_native_transport(
-            core_native_transport(transport),
-            &job,
-            state_directory,
-            &pairing,
-            events,
-            &cancellation.token,
-        )
-        .await
-        {
+        let result = match transport {
+            FfiPlatformManifestTransport::Datagram {
+                transport,
+                maximum_datagram_size,
+            } => {
+                send_manifest_v2_over_datagram_transport(
+                    core_datagram_transport(transport),
+                    maximum_datagram_size,
+                    &job,
+                    state_directory,
+                    &pairing,
+                    events,
+                    &cancellation.token,
+                )
+                .await
+            }
+            FfiPlatformManifestTransport::Stream(transport) => {
+                send_manifest_v2_over_native_transport(
+                    core_native_transport(transport),
+                    &job,
+                    state_directory,
+                    &pairing,
+                    events,
+                    &cancellation.token,
+                )
+                .await
+            }
+        };
+        let summary = match result {
             Ok(summary) => summary,
             Err(error) => {
                 report_v2_failure(
@@ -504,19 +579,77 @@ pub async fn receive_transfer_offer_v2_over_native_transport(
     cancellation: Arc<FfiManifestV2Cancellation>,
     observer: Arc<dyn TransferObserver>,
 ) -> Result<Arc<FfiPendingManifestV2Receive>, EnvoixError> {
+    receive_transfer_offer_v2_over_platform_transport(
+        pairing_token,
+        state_directory,
+        FfiPlatformManifestTransport::Stream(transport),
+        cancellation,
+        observer,
+    )
+    .await
+}
+
+/// Authenticates and projects a canonical receiver offer over iroh QUIC
+/// carried by a platform-established Wi-Fi Aware datagram channel.
+#[uniffi::export]
+pub async fn receive_transfer_offer_v2_over_datagram_transport(
+    pairing_token: String,
+    state_directory: String,
+    transport: Arc<dyn FfiNativeDatagramTransport>,
+    maximum_datagram_size: u32,
+    cancellation: Arc<FfiManifestV2Cancellation>,
+    observer: Arc<dyn TransferObserver>,
+) -> Result<Arc<FfiPendingManifestV2Receive>, EnvoixError> {
+    receive_transfer_offer_v2_over_platform_transport(
+        pairing_token,
+        state_directory,
+        FfiPlatformManifestTransport::Datagram {
+            transport,
+            maximum_datagram_size,
+        },
+        cancellation,
+        observer,
+    )
+    .await
+}
+
+async fn receive_transfer_offer_v2_over_platform_transport(
+    pairing_token: String,
+    state_directory: String,
+    transport: FfiPlatformManifestTransport,
+    cancellation: Arc<FfiManifestV2Cancellation>,
+    observer: Arc<dyn TransferObserver>,
+) -> Result<Arc<FfiPendingManifestV2Receive>, EnvoixError> {
     spawn_on_ffi_runtime(async move {
         let state_directory = required_directory(state_directory, "state_directory")?;
         let pairing = PairingConfig::spake2_shared_token(pairing_token).map_err(op_err)?;
         let events: Arc<dyn EventSink> = Arc::new(NativeSessionEvents {
             observer: observer.clone(),
         });
-        let pending = receive_manifest_v2_offer_over_native_transport(
-            core_native_transport(transport),
-            &pairing,
-            events,
-            &cancellation.token,
-        )
-        .await
+        let pending = match transport {
+            FfiPlatformManifestTransport::Datagram {
+                transport,
+                maximum_datagram_size,
+            } => receive_manifest_v2_offer_over_datagram_transport(
+                core_datagram_transport(transport),
+                maximum_datagram_size,
+                &pairing,
+                events,
+                &cancellation.token,
+            )
+            .await
+            .map(|pending| CorePendingManifestV2Receive::Iroh(Box::new(pending))),
+            FfiPlatformManifestTransport::Stream(transport) => {
+                receive_manifest_v2_offer_over_native_transport(
+                    core_native_transport(transport),
+                    &pairing,
+                    events,
+                    &cancellation.token,
+                )
+                .await
+                .map(|pending| CorePendingManifestV2Receive::Native(Box::new(pending)))
+            }
+        }
         .map_err(|error| {
             report_v2_failure(
                 observer.as_ref(),
@@ -527,7 +660,7 @@ pub async fn receive_transfer_offer_v2_over_native_transport(
             op_err(error)
         })?;
         Ok(Arc::new(project_pending_offer(
-            CorePendingManifestV2Receive::Native(Box::new(pending)),
+            pending,
             state_directory,
             cancellation,
             FfiSelectedDataPath::WifiAware,

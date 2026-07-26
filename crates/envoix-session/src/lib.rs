@@ -2,6 +2,7 @@
 
 mod candidates;
 mod connection;
+mod datagram_transport;
 mod endpoint;
 mod identity;
 mod manifest_v2_session;
@@ -43,6 +44,7 @@ use n0_future::StreamExt;
 
 pub use candidates::CandidateFilter;
 use connection::IrohFrameConnection;
+pub use datagram_transport::PlatformDatagramTransport;
 pub use endpoint::{
     BindAddrs, BoundEndpoint, DEFAULT_DATA_STREAM_WINDOW, MAX_DATA_STREAM_WINDOW,
     MIN_DATA_STREAM_WINDOW, parse_broker_addr,
@@ -55,8 +57,10 @@ pub use identity::{IdentityConfig, MemoryIdentity};
 pub use manifest_v2_session::{
     PendingManifestV2Receive, PendingNativeManifestV2Receive, ReceiverManifestV2SessionSummary,
     SenderManifestV2SessionSummary, receive_manifest_v2_offer,
+    receive_manifest_v2_offer_over_datagram_transport,
     receive_manifest_v2_offer_over_native_transport, send_manifest_v2_manual,
-    send_manifest_v2_over_native_transport, send_manifest_v2_to_endpoint_addr,
+    send_manifest_v2_over_datagram_transport, send_manifest_v2_over_native_transport,
+    send_manifest_v2_to_endpoint_addr,
 };
 pub use native_transport::{
     NATIVE_TRANSPORT_IO_CHUNK_BYTES, NativeFrameConnection, NativeTransportRead,

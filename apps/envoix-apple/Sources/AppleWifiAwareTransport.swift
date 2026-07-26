@@ -1,6 +1,6 @@
 import Foundation
 
-let envoixWifiAwareTransferService = "_envoix-transfer._tcp"
+let envoixWifiAwareTransferService = "_envoix._udp"
 
 #if os(iOS) && canImport(WiFiAware)
 import EnvoixCore
@@ -15,12 +15,47 @@ enum AppleWifiAwareTransportError: Error {
     case serviceNotDeclared
     case listenerFinishedWithoutResult
     case invalidReadBound
+    case datagramExceedsBound
+    case datagramChannelClosed
+    case concurrentReceive
+    case connectionReadyTimedOut
+    case insufficientDatagramSize
     case noWifiAwarePath
 }
+
+@available(iOS 26.0, *)
+enum AppleWifiAwarePerformanceStage: String, Sendable {
+    case ready
+    case completed
+}
+
+@available(iOS 26.0, *)
+struct AppleWifiAwarePerformanceSample: Sendable {
+    let stage: AppleWifiAwarePerformanceStage
+    let maximumDatagramSize: Int
+    let throughputCeilingMbps: Double?
+    let throughputCapacityMbps: Double?
+    let throughputCapacityRatio: Double?
+    let signalStrength: Double?
+}
+
+@available(iOS 26.0, *)
+typealias AppleWifiAwarePerformanceObserver =
+    @Sendable (AppleWifiAwarePerformanceSample) -> Void
 
 /// Apple requires matching performance modes on both endpoints. Keep the
 /// system-recommended bulk mode explicit and retain the default best-effort
 /// service class for file transfer.
+@available(iOS 26.0, *)
+func envoixWifiAwareUDPParameters() -> NWParametersBuilder<UDP> {
+    .parameters {
+        UDP()
+    }
+    .wifiAware { $0.performanceMode = .bulk }
+}
+
+/// Diagnostic-only parameters for reproducing Apple's Wi-Fi Aware TCP
+/// `ENOBUFS` failure. Canonical transfers use UDP above.
 @available(iOS 26.0, *)
 func envoixWifiAwareTCPParameters() -> NWParametersBuilder<TCP> {
     .parameters {
@@ -33,10 +68,6 @@ func envoixWifiAwareTCPParameters() -> NWParametersBuilder<TCP> {
 /// canonical Rust transfer session.
 @available(iOS 26.0, *)
 enum AppleWifiAwareTransportSession {
-    private enum PublisherFinished: Error {
-        case completed
-    }
-
     private static let logger = Logger(
         subsystem: "com.envoix.app.ios",
         category: "wifi-aware-transport"
@@ -61,15 +92,20 @@ enum AppleWifiAwareTransportSession {
         pairingToken: String,
         stateDirectory: String,
         cancellation: FfiManifestV2Cancellation,
-        observer: TransferObserver
+        observer: TransferObserver,
+        performanceObserver: AppleWifiAwarePerformanceObserver? = nil
     ) async throws -> FfiNativeManifestV2Completion {
         let device = try await pairedDevice(sourceScopedID: sourceScopedDeviceID)
-        return try await withSenderTransport(device: device) { transport in
-            try await sendTransferJobV2OverNativeTransport(
+        return try await withSenderTransport(
+            device: device,
+            performanceObserver: performanceObserver
+        ) { transport, maximumDatagramSize in
+            try await sendTransferJobV2OverDatagramTransport(
                 job: job,
                 pairingToken: pairingToken,
                 stateDirectory: stateDirectory,
                 transport: transport,
+                maximumDatagramSize: maximumDatagramSize,
                 cancellation: cancellation,
                 observer: observer
             )
@@ -82,16 +118,21 @@ enum AppleWifiAwareTransportSession {
         stateDirectory: String,
         cancellation: FfiManifestV2Cancellation,
         observer: TransferObserver,
+        performanceObserver: AppleWifiAwarePerformanceObserver? = nil,
         destinationDecision: @escaping @Sendable (
             FfiPendingManifestV2Receive
         ) async throws -> FfiDestinationRequestV2
     ) async throws -> FfiManifestV2Completion {
         let device = try await pairedDevice(sourceScopedID: sourceScopedDeviceID)
-        return try await withReceiverTransport(device: device) { transport in
-            let pending = try await receiveTransferOfferV2OverNativeTransport(
+        return try await withReceiverTransport(
+            device: device,
+            performanceObserver: performanceObserver
+        ) { transport, maximumDatagramSize in
+            let pending = try await receiveTransferOfferV2OverDatagramTransport(
                 pairingToken: pairingToken,
                 stateDirectory: stateDirectory,
                 transport: transport,
+                maximumDatagramSize: maximumDatagramSize,
                 cancellation: cancellation,
                 observer: observer
             )
@@ -100,58 +141,96 @@ enum AppleWifiAwareTransportSession {
         }
     }
 
-    /// Receiver role: publish the declared TCP service and retain the listener
+    /// Receiver role: publish the declared UDP service and retain the listener
     /// until Rust has completed or failed the Manifest v2 session.
     static func withReceiverTransport<Result: Sendable>(
         device: WAPairedDevice,
-        operation: @escaping @Sendable (FfiNativeDuplexTransport) async throws -> Result
+        performanceObserver: AppleWifiAwarePerformanceObserver? = nil,
+        operation: @escaping @Sendable (
+            FfiNativeDatagramTransport,
+            UInt32
+        ) async throws -> Result
     ) async throws -> Result {
         guard let service = WAPublishableService.allServices[envoixWifiAwareTransferService] else {
             throw AppleWifiAwareTransportError.serviceNotDeclared
         }
-        let listener: NetworkListener<TCP> = try NetworkListener(
+        let listener: NetworkListener<UDP> = try NetworkListener(
             for: .wifiAware(.connecting(to: service, from: .selected([device]))),
-            using: envoixWifiAwareTCPParameters()
+            using: envoixWifiAwareUDPParameters()
         )
         .newConnectionLimit(1)
         .onStateUpdate { _, state in
             Self.logListenerState(state)
         }
-        let result = PublisherResult<Result>()
+        let (results, continuation) = AsyncThrowingStream<Result, Error>.makeStream()
+
+        let listenerTask = Task {
+            do {
+                try await listener.run { connection in
+                    connection.onStateUpdate { connection, state in
+                        Self.logConnectionState(
+                            state,
+                            role: "receiver",
+                            connection: connection
+                        )
+                    }
+                    let transport = AppleWifiAwareDatagramTransport(connection)
+                    do {
+                        try await awaitReady(connection, role: "receiver")
+                        try await requireWifiAwarePath(connection)
+                        let maximumDatagramSize = try requireDatagramCapacity(connection)
+                        await reportPerformance(
+                            connection,
+                            role: "receiver",
+                            stage: .ready,
+                            observer: performanceObserver
+                        )
+                        let result = try await operation(transport, maximumDatagramSize)
+                        await reportPerformance(
+                            connection,
+                            role: "receiver",
+                            stage: .completed,
+                            observer: performanceObserver
+                        )
+                        continuation.yield(result)
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+                continuation.finish()
+            } catch is CancellationError {
+                continuation.finish()
+            } catch {
+                continuation.finish(throwing: error)
+            }
+        }
 
         do {
-            try await listener.run { connection in
-                connection.onStateUpdate { connection, state in
-                    Self.logConnectionState(
-                        state,
-                        role: "receiver",
-                        connection: connection
-                    )
-                }
-                Self.logConnectionState(
-                    connection.state,
-                    role: "receiver",
-                    connection: connection
-                )
-                let value = try await operation(AppleWifiAwareNativeTransport(connection))
-                try await requireWifiAwarePath(connection)
-                await result.store(value)
-                throw PublisherFinished.completed
+            for try await value in results {
+                listenerTask.cancel()
+                _ = await listenerTask.result
+                return value
             }
-        } catch PublisherFinished.completed {
-            guard let value = await result.take() else {
-                throw AppleWifiAwareTransportError.listenerFinishedWithoutResult
-            }
-            return value
+        } catch {
+            listenerTask.cancel()
+            _ = await listenerTask.result
+            throw error
         }
+        listenerTask.cancel()
+        _ = await listenerTask.result
         throw AppleWifiAwareTransportError.listenerFinishedWithoutResult
     }
 
-    /// Sender role: browse the selected paired device, then retain its TCP
+    /// Sender role: browse the selected paired device, then retain its UDP
     /// connection until Rust has completed or failed the Manifest v2 session.
     static func withSenderTransport<Result: Sendable>(
         device: WAPairedDevice,
-        operation: @escaping @Sendable (FfiNativeDuplexTransport) async throws -> Result
+        performanceObserver: AppleWifiAwarePerformanceObserver? = nil,
+        operation: @escaping @Sendable (
+            FfiNativeDatagramTransport,
+            UInt32
+        ) async throws -> Result
     ) async throws -> Result {
         guard let service = WASubscribableService.allServices[envoixWifiAwareTransferService] else {
             throw AppleWifiAwareTransportError.serviceNotDeclared
@@ -170,9 +249,9 @@ enum AppleWifiAwareTransportSession {
             }
             return .finish(endpoint)
         }
-        let connection: NetworkConnection<TCP> = NetworkConnection(
+        let connection: NetworkConnection<UDP> = NetworkConnection(
             to: endpoint,
-            using: envoixWifiAwareTCPParameters()
+            using: envoixWifiAwareUDPParameters()
         )
         .onStateUpdate { connection, state in
             Self.logConnectionState(
@@ -181,12 +260,103 @@ enum AppleWifiAwareTransportSession {
                 connection: connection
             )
         }
-        let value = try await operation(AppleWifiAwareNativeTransport(connection))
+        let transport = AppleWifiAwareDatagramTransport(connection)
+        try await awaitReady(connection, role: "sender")
         try await requireWifiAwarePath(connection)
-        return value
+        let maximumDatagramSize = try requireDatagramCapacity(connection)
+        await reportPerformance(
+            connection,
+            role: "sender",
+            stage: .ready,
+            observer: performanceObserver
+        )
+        let result = try await operation(transport, maximumDatagramSize)
+        await reportPerformance(
+            connection,
+            role: "sender",
+            stage: .completed,
+            observer: performanceObserver
+        )
+        return result
     }
 
-    private static func logListenerState(_ state: NetworkListener<TCP>.State) {
+    private static func awaitReady(
+        _ connection: NetworkConnection<UDP>,
+        role: String
+    ) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: connectionReadyTimeout)
+        while clock.now < deadline {
+            switch connection.state {
+            case .ready:
+                let message = "role=\(role) max_datagram=\(connection.maximumDatagramSize)"
+                logger.info("\(message, privacy: .public)")
+                return
+            case .failed(let error):
+                throw error
+            case .cancelled:
+                throw CancellationError()
+            case .setup, .waiting, .preparing:
+                try await Task<Never, Never>.sleep(for: connectionReadyPollInterval)
+            @unknown default:
+                try await Task<Never, Never>.sleep(for: connectionReadyPollInterval)
+            }
+        }
+        throw AppleWifiAwareTransportError.connectionReadyTimedOut
+    }
+
+    private static func requireDatagramCapacity(
+        _ connection: NetworkConnection<UDP>
+    ) throws -> UInt32 {
+        guard connection.maximumDatagramSize >= minimumQUICDatagramSize,
+              let maximumDatagramSize = UInt32(exactly: connection.maximumDatagramSize)
+        else {
+            throw AppleWifiAwareTransportError.insufficientDatagramSize
+        }
+        return maximumDatagramSize
+    }
+
+    private static let minimumQUICDatagramSize = 1_200
+    private static let connectionReadyTimeout: Duration = .seconds(20)
+    private static let connectionReadyPollInterval: Duration = .milliseconds(50)
+
+    private static func reportPerformance(
+        _ connection: NetworkConnection<UDP>,
+        role: String,
+        stage: AppleWifiAwarePerformanceStage,
+        observer: AppleWifiAwarePerformanceObserver?
+    ) async {
+        guard let path = connection.currentPath,
+              let wifiAwarePath = try? await path.wifiAware
+        else {
+            let message = "role=\(role) performance_stage=\(stage.rawValue) report=unavailable"
+            logger.info("\(message, privacy: .public)")
+            return
+        }
+        let report = wifiAwarePath.performance
+        let sample = AppleWifiAwarePerformanceSample(
+            stage: stage,
+            maximumDatagramSize: connection.maximumDatagramSize,
+            throughputCeilingMbps: report.throughputCeiling,
+            throughputCapacityMbps: report.throughputCapacity,
+            throughputCapacityRatio: report.throughputCapacityRatio,
+            signalStrength: report.signalStrength
+        )
+        let message = "role=\(role) performance_stage=\(stage.rawValue) " +
+            "max_datagram=\(sample.maximumDatagramSize) " +
+            "ceiling_mbps=\(metric(sample.throughputCeilingMbps)) " +
+            "capacity_mbps=\(metric(sample.throughputCapacityMbps)) " +
+            "capacity_ratio=\(metric(sample.throughputCapacityRatio)) " +
+            "signal_strength=\(metric(sample.signalStrength))"
+        logger.info("\(message, privacy: .public)")
+        observer?(sample)
+    }
+
+    private static func metric(_ value: Double?) -> String {
+        value.map { String($0) } ?? "unavailable"
+    }
+
+    private static func logListenerState(_ state: NetworkListener<UDP>.State) {
         let detail: String
         switch state {
         case .setup: detail = "setup"
@@ -213,9 +383,9 @@ enum AppleWifiAwareTransportSession {
     }
 
     private static func logConnectionState(
-        _ state: NetworkChannel<TCP>.State,
+        _ state: NetworkChannel<UDP>.State,
         role: String,
-        connection: NetworkConnection<TCP>
+        connection: NetworkConnection<UDP>
     ) {
         let path = connection.currentPath
         let detail: String
@@ -258,7 +428,7 @@ enum AppleWifiAwareTransportSession {
     }
 
     private static func requireWifiAwarePath(
-        _ connection: NetworkConnection<TCP>
+        _ connection: NetworkConnection<UDP>
     ) async throws {
         guard let path = connection.currentPath,
               try await path.wifiAware != nil
@@ -268,34 +438,39 @@ enum AppleWifiAwareTransportSession {
     }
 }
 
+/// Message-preserving UDP adapter. Rust owns iroh QUIC, SPAKE2, Manifest v2,
+/// recovery, and final delivery authority.
 @available(iOS 26.0, *)
-private actor PublisherResult<Value: Sendable> {
-    private var value: Value?
-
-    func store(_ value: Value) {
-        self.value = value
-    }
-
-    func take() -> Value? {
-        defer { value = nil }
-        return value
-    }
-}
-
-/// Raw TCP adapter only. Rust owns TLS, SPAKE2, Manifest v2 framing, recovery,
-/// and final delivery authority.
-@available(iOS 26.0, *)
-private actor AppleWifiAwareNativeTransport: FfiNativeDuplexTransport {
-    private let connection: NetworkConnection<TCP>
+private actor AppleWifiAwareDatagramTransport: FfiNativeDatagramTransport {
+    private let connection: NetworkConnection<UDP>
+    private let inbox: AppleWifiAwareDatagramInbox
+    private var receiveTask: Task<Void, Never>?
     private var closed = false
 
-    init(_ connection: NetworkConnection<TCP>) {
+    init(_ connection: NetworkConnection<UDP>) {
         self.connection = connection
+        let inbox = AppleWifiAwareDatagramInbox()
+        self.inbox = inbox
+        receiveTask = Task {
+            do {
+                for try await message in connection.messages {
+                    await inbox.deliver(message.content)
+                }
+                await inbox.finish(reason: nil)
+            } catch is CancellationError {
+                await inbox.finish(reason: nil)
+            } catch {
+                await inbox.finish(reason: String(describing: error))
+            }
+        }
     }
 
-    func send(bytes: Data) async throws {
+    func sendDatagram(bytes: Data) async throws {
         guard !closed else {
             throw FfiNativeTransportError.Operation(reason: "Wi-Fi Aware transport is closed")
+        }
+        guard bytes.count <= connection.maximumDatagramSize else {
+            throw Self.project(AppleWifiAwareTransportError.datagramExceedsBound)
         }
         do {
             try await connection.send(bytes)
@@ -304,21 +479,15 @@ private actor AppleWifiAwareNativeTransport: FfiNativeDuplexTransport {
         }
     }
 
-    func receive(maxBytes: UInt32) async throws -> FfiNativeTransportRead {
+    func receiveDatagram(maxBytes: UInt32) async throws -> FfiNativeDatagram {
         guard !closed else {
-            return FfiNativeTransportRead(bytes: Data(), endOfStream: true)
+            throw Self.project(AppleWifiAwareTransportError.datagramChannelClosed)
         }
         guard maxBytes > 0, let bound = Int(exactly: maxBytes) else {
-            throw FfiNativeTransportError.Operation(
-                reason: String(describing: AppleWifiAwareTransportError.invalidReadBound)
-            )
+            throw Self.project(AppleWifiAwareTransportError.invalidReadBound)
         }
         do {
-            let message = try await connection.receive(atMost: bound)
-            return FfiNativeTransportRead(
-                bytes: message.content,
-                endOfStream: message.metadata.endOfStream
-            )
+            return FfiNativeDatagram(bytes: try await inbox.receive(maxBytes: bound))
         } catch {
             throw Self.project(error)
         }
@@ -327,15 +496,114 @@ private actor AppleWifiAwareNativeTransport: FfiNativeDuplexTransport {
     func close() async throws {
         guard !closed else { return }
         closed = true
-        do {
-            try await connection.send(Data(), endOfStream: true)
-        } catch {
-            throw Self.project(error)
-        }
+        receiveTask?.cancel()
+        receiveTask = nil
+        await inbox.finish(reason: nil)
     }
 
     nonisolated private static func project(_ error: Error) -> FfiNativeTransportError {
         .Operation(reason: String(describing: error))
+    }
+}
+
+@available(iOS 26.0, *)
+private actor AppleWifiAwareDatagramInbox {
+    private struct Waiter {
+        let maxBytes: Int
+        let continuation: CheckedContinuation<Data, Error>
+    }
+
+    private struct PendingDelivery {
+        let datagram: Data
+        let continuation: CheckedContinuation<Void, Never>
+    }
+
+    private static let queueCapacity = 256
+
+    private var queued: [Data] = []
+    private var waiter: Waiter?
+    private var pendingDelivery: PendingDelivery?
+    private var finished = false
+    private var failureReason: String?
+
+    func deliver(_ datagram: Data) async {
+        guard !finished else { return }
+        guard let waiter else {
+            if queued.count < Self.queueCapacity {
+                queued.append(datagram)
+                return
+            }
+            await withCheckedContinuation { continuation in
+                pendingDelivery = PendingDelivery(
+                    datagram: datagram,
+                    continuation: continuation
+                )
+            }
+            return
+        }
+        self.waiter = nil
+        if datagram.count <= waiter.maxBytes {
+            waiter.continuation.resume(returning: datagram)
+        } else {
+            waiter.continuation.resume(
+                throwing: AppleWifiAwareTransportError.datagramExceedsBound
+            )
+        }
+    }
+
+    func finish(reason: String?) {
+        guard !finished else { return }
+        finished = true
+        failureReason = reason
+        if let waiter {
+            self.waiter = nil
+            waiter.continuation.resume(throwing: terminalError())
+        }
+        if let pendingDelivery {
+            self.pendingDelivery = nil
+            pendingDelivery.continuation.resume()
+        }
+    }
+
+    func receive(maxBytes: Int) async throws -> Data {
+        if !queued.isEmpty {
+            let datagram = queued.removeFirst()
+            resumePendingDelivery()
+            guard datagram.count <= maxBytes else {
+                throw AppleWifiAwareTransportError.datagramExceedsBound
+            }
+            return datagram
+        }
+        if finished {
+            throw terminalError()
+        }
+        guard waiter == nil else {
+            throw AppleWifiAwareTransportError.concurrentReceive
+        }
+        return try await withCheckedThrowingContinuation { continuation in
+            waiter = Waiter(maxBytes: maxBytes, continuation: continuation)
+        }
+    }
+
+    private func resumePendingDelivery() {
+        guard !finished,
+              queued.count < Self.queueCapacity,
+              let pendingDelivery
+        else {
+            return
+        }
+        self.pendingDelivery = nil
+        queued.append(pendingDelivery.datagram)
+        pendingDelivery.continuation.resume()
+    }
+
+    private func terminalError() -> FfiNativeTransportError {
+        if let failureReason {
+            return .Operation(reason: failureReason)
+        }
+        return .Operation(
+            reason: String(describing: AppleWifiAwareTransportError.datagramChannelClosed)
+        )
     }
 }
 #endif

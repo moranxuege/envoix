@@ -2,7 +2,9 @@ use envoix_error::CoreError;
 use envoix_protocol::{PeerDescriptor, TransferProtocol};
 #[cfg(any(target_os = "ios", target_os = "android"))]
 use iroh::dns::{BoxIter, DnsError, DnsResolver, Resolver, TxtRecordData};
-use iroh::endpoint::{BindOpts, QuicTransportConfig, RelayMode, VarInt, presets};
+use iroh::endpoint::{
+    BindOpts, QuicTransportConfig, QuicTransportConfigBuilder, RelayMode, VarInt, presets,
+};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMap, RelayUrl, TransportAddr, Watcher as _};
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 #[cfg(any(target_os = "ios", target_os = "android"))]
@@ -730,15 +732,29 @@ pub const MAX_DATA_STREAM_WINDOW: u32 = 128 * 1024 * 1024;
 /// `window` is frozen per session (carried on [`crate::SessionConfig`]), never a
 /// global: it never enters the wire header, resume state, or any hash, so it
 /// affects throughput only — concurrent sessions each keep their own value.
-fn data_transport_config(window: u32) -> QuicTransportConfig {
-    let builder = QuicTransportConfig::builder()
+pub(crate) fn data_transport_config(window: u32) -> QuicTransportConfig {
+    data_transport_config_builder(window).build()
+}
+
+pub(crate) fn fixed_mtu_data_transport_config(
+    window: u32,
+    maximum_datagram_size: u16,
+) -> QuicTransportConfig {
+    data_transport_config_builder(window)
+        .initial_mtu(maximum_datagram_size)
+        .min_mtu(maximum_datagram_size)
+        .mtu_discovery_config(None)
+        .build()
+}
+
+fn data_transport_config_builder(window: u32) -> QuicTransportConfigBuilder {
+    QuicTransportConfig::builder()
         .stream_receive_window(VarInt::from_u32(window))
-        .send_window(window as u64);
+        .send_window(window as u64)
     // Keep noq's stable CUBIC default. noq-proto 1.0.x BBRv3 can underflow in
     // `inflight_at_loss` on a lossy path and panic the whole mobile process.
     // BBRv3 must not be re-enabled until that upstream invariant is fixed and
     // covered by a lossy-link regression test.
-    builder.build()
 }
 
 // Endpoint knobs are independent flags/handles; the v2 accept/dial wrappers

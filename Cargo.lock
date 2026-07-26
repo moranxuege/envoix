@@ -1230,9 +1230,12 @@ dependencies = [
  "if-addrs",
  "ipnet",
  "iroh",
+ "iroh-base",
  "iroh-mdns-address-lookup",
  "n0-error",
  "n0-future",
+ "n0-watcher",
+ "noq-udp",
  "rcgen",
  "rustls",
  "serde",
@@ -1240,6 +1243,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tracing",
 ]
 
@@ -1269,6 +1273,7 @@ name = "envoix-types"
 version = "0.2.0"
 dependencies = [
  "serde",
+ "serde_json",
 ]
 
 [[package]]

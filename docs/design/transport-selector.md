@@ -1,6 +1,6 @@
 # Transport provider selector
 
-Status: **Wi-Fi Aware byte-stream adapter implemented; product selection remains peer-specific**
+Status: **Apple Wi-Fi Aware UDP/QUIC adapter physically validated; product selection remains peer-specific**
 
 Last reviewed: 2026-07-24
 
@@ -17,20 +17,24 @@ Envoix has three independent routing axes:
 
 The selector must never encode Wi-Fi Aware as “iroh direct.” An Apple
 `WAEndpoint` is an opaque Network.framework endpoint, and a future raw USB
-bulk/accessory channel is not an IP path at all. Both therefore remain
-independent providers that converge on the existing Rust `FrameConnection`
-protocol boundary.
+bulk/accessory channel is not an IP path at all. They remain independent
+providers even though the Apple adapter now reuses iroh's QUIC engine over a
+custom, platform-owned datagram transport.
 
 ```text
 PeerSource / nearby-device identity
                  ↓
        TransportSelector
       ↙          ↓          ↘
-  Wired      Wi-Fi Aware     iroh
-      \          ↓          /
-       provider connection adapter
-                 ↓
-          FrameConnection
+  Wired      Wi-Fi Aware      iroh
+     ↓             ↓            ↓
+ raw stream   platform UDP   IP/relay
+     ↓             ↓            ↓
+ native frame   iroh custom transport
+     connection       \        /
+                       QUIC
+                        ↓
+                FrameConnection
                  ↓
  auth → protocol → transfer → Activity
 
@@ -64,33 +68,39 @@ pairing and channel gates pass.
 | Provider | Compiled status | Current behavior |
 | --- | --- | --- |
 | iroh | `ready` | Existing Manual/Invite/mDNS/Room send and receive functions; existing `PathPolicy` preserved |
-| Wi-Fi Aware | adapter implemented | Apple Network.framework and Android `WifiAwareNetworkSpecifier` provide a raw TCP stream; Rust owns TLS 1.3, SPAKE2 authentication, Manifest v2, recovery, and delivery proof |
+| Wi-Fi Aware | adapter implemented | Apple Network.framework provides connected UDP; Rust runs iroh QUIC, SPAKE2, Manifest v2, recovery, and delivery proof over a custom transport. Android currently provides a raw TCP stream with Rust-owned TLS 1.3 and the same upper layers |
 | wired | `implementation_pending` | Reserved for a future raw wired provider; never treated as an iroh/IP path |
 
 Wi-Fi Aware readiness is supplied for the selected paired device, not inferred
-from a global hardware probe. Apple calls the additive UniFFI native-transport
-entry points while retaining the publisher/listener or subscriber/connection
-scope for the complete session. Android calls the additive JNI entry point
-after its Wi-Fi Aware network callback has produced a TCP socket. Existing
-iroh APIs are unchanged, so `Prefer(WifiAware)` may retry through iroh without
-creating another job or transfer protocol.
+from a global hardware probe. Apple calls the additive UniFFI datagram entry
+points while retaining the publisher/listener or subscriber/connection scope
+for the complete session. The Rust custom transport disables ordinary IP and
+relay transports, exchanges ephemeral iroh endpoint IDs over a bounded,
+retrying bootstrap, and reports the selected path as `wifi_aware`. Android
+calls the additive JNI stream entry point after its Wi-Fi Aware network
+callback has produced a TCP socket. Existing iroh APIs are unchanged, so
+`Prefer(WifiAware)` may retry through ordinary iroh without creating another
+job or transfer protocol.
 
-The native TLS server certificate is ephemeral and intentionally does not claim
-Envoix identity. Immediately after TLS, mutual SPAKE2 authenticates the
-invitation secret and binds it to the TLS exporter. A TLS MITM therefore cannot
-authenticate either substituted connection without the invitation secret and
-the matching exporter. Platform code never implements protocol frames or file
-semantics.
+On Apple, iroh's ephemeral QUIC endpoint identity protects the transport and
+mutual SPAKE2 authenticates the invitation secret over that connection. On the
+Android stream adapter, the native TLS server certificate is ephemeral and
+intentionally does not claim Envoix identity; SPAKE2 binds the invitation
+secret to the TLS exporter. In both cases, platform code never implements
+protocol frames or file semantics.
 
 ## Validation gates
 
-1. Fragmented in-memory streams must complete TLS, exporter binding, SPAKE2,
-   Manifest v2 file delivery, receiver save, and matching delivery proof.
+1. In-memory datagram and fragmented-stream adapters must complete their
+   transport handshake, SPAKE2, Manifest v2 file delivery, receiver save, and
+   matching delivery proof. Datagram bootstrap must survive a lost first
+   packet without starting concurrent foreign receives.
 2. Apple simulator compilation and Android JVM/JNI checks validate the foreign
    transport contracts without consuming physical test devices.
-3. Final release evidence remains hardware-gated: Apple ↔ Android must complete
-   both directions on actual Wi-Fi Aware hardware, including cancellation,
-   network loss, and `Prefer` fallback.
+3. Apple ↔ Apple has passed both directions on actual hardware. Final
+   cross-platform release evidence remains hardware-gated: Apple ↔ Android
+   must complete both directions, including cancellation, network loss, and
+   `Prefer` fallback.
 4. Register the production Wi-Fi Aware service names with IANA before release;
    the current names satisfy Apple's syntax and 15-character label limit.
 5. A future wired adapter may register another peer-specific candidate. It may
@@ -102,30 +112,53 @@ side effects live outside it.
 
 ### Apple physical validation status
 
-Apple-to-Apple discovery and pairing passed on 2026-07-24 with one paired
-device visible at each endpoint. Re-pairing from an empty inventory, fully
-rebooting both devices, and retesting over physical Mac connections did not
-make the data plane usable on the tested iPhone 15 Pro Max (iOS 26.5, 23F77)
-and iPad Air 5 (iPadOS 26.5.2, 23F84):
+Apple-to-Apple discovery, pairing, raw UDP, and canonical transfer passed on
+2026-07-24 between an iPhone 15 Pro Max and an iPad Air 5, both running
+26.5.2 (23F84). The final hardware gate used Apple's documented `bulk` mode
+with the default `bestEffort` service class:
 
-- with Apple's documented `bulk` mode and default `bestEffort` service class,
-  the publisher became ready on `nan0` with Wi-Fi Aware connection metadata
-  present;
-- the subscriber became ready with Wi-Fi Aware metadata present but its
-  underlying path was assigned to cellular `pdp_ip0`. Its first 40-byte TCP
-  frame failed below the application with Darwin `ENOBUFS` (55), followed by
-  `lost nexus assignment, error Wi-Fi Aware`;
-- the system reported zero-length Wi-Fi Aware custom path metadata on the
-  subscriber and the publisher reported that it could not reclassify the
-  Wi-Fi Aware client;
-- requiring a Wi-Fi interface prevented that invalid cellular route, but the
-  subscriber remained `preparing` with no interface or local endpoint while
-  the publisher listener was ready.
+- connected UDP reached `ready` in both roles with
+  `NWPath.wifiAware` present;
+- the current iPhone sender path reported `maximumDatagramSize == 1402` while
+  the receiver reported 1452. Bootstrap v2 exchanges both limits, selects the
+  smaller value, and pins iroh's QUIC MTU to it with discovery disabled so an
+  oversized probe cannot black-hole the authentication stream;
+- the receiver path used the private `nan0` interface, while the sender could
+  initially report ordinary Wi-Fi during `preparing` and then expose valid
+  Wi-Fi Aware connection metadata at `ready`;
+- iroh negotiated `envoix/manifest/2`, mutual SPAKE2 authenticated the shared
+  token, and Manifest v2 completed verification, save, and delivery proof;
+- iPhone → iPad and iPad → iPhone each transferred and saved 8,388,608 bytes
+  with zero XCTest failures; and
+- after the MTU negotiation fix, the same iOS/iPadOS 26.5.2 (`23F84`) pair
+  transferred and verified 268,435,456 bytes in each direction. Payload
+  goodput was 192.8 Mbit/s from iPhone to iPad and 156.8 Mbit/s from iPad to
+  iPhone; and
+- an observed lost first bootstrap datagram is covered by retransmission and a
+  regression test that models both a cancelled foreign receive lingering
+  across UniFFI and asymmetric 1402/1452-byte platform limits.
 
-`NWPath.availableInterfaces` and the private `nan0` name are diagnostic
-details, not Apple's Wi-Fi Aware path contract. The adapter therefore uses
-Apple's default `bulk` plus `bestEffort` configuration without an interface
-type constraint, and validates successful sessions through `NWPath.wifiAware`.
-Manifest v2 physical transfer is not claimed as passing until the corrected raw
-TCP probe succeeds. Repeat the raw probe after both endpoints run the same
-current stable OS before closing the Manifest v2 hardware gate.
+The same devices still reproduce Darwin `ENOBUFS` (55) on the first TCP frame
+after the Wi-Fi Aware connection becomes ready. Full device reboot, re-pairing,
+and the 26.5.2 update did not change that result. Apple also prints
+`reclassify can't find client` immediately before successful UDP transfers in
+both directions, so that line alone is not a transfer failure.
+
+`NWPath.availableInterfaces` and the private `nan0` name remain diagnostic
+details rather than the path contract. Production Apple transfers therefore
+use connected UDP without an interface-type constraint, require
+`NWPath.wifiAware`, require a QUIC-capable datagram size, and keep TCP only as a
+diagnostic reproducer. Milestone evidence was captured by
+`WifiAwarePhysicalTransferTests.testManifestV2TransferServicePath` in all four
+direction/role combinations; its `.xcresult` bundles are regenerable test
+artifacts rather than durable project data.
+
+The physical test accepts `ENVOIX_WIFI_AWARE_PAYLOAD_MIB` in the range
+1–1024 (default 8). `ENVOIX_WIFI_AWARE_TIMEOUT_SECONDS` may override the
+size-scaled timeout in the range 30–7200 seconds. Payload generation and
+verification use bounded 1 MiB buffers so benchmark size does not become an
+artificial memory-pressure test. Each connection records Wi-Fi Aware
+throughput ceiling, current capacity, capacity ratio, signal strength, and
+maximum datagram size at ready and completion. Transfer progress is sampled at
+25 percent intervals and reports payload goodput separately from discovery,
+handshake, verification, and save time.

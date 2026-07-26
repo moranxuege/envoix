@@ -24,13 +24,18 @@ use envoix_transfer::{
 use envoix_types::{DataPath, TransferDirection, TransferId};
 
 use crate::connection::IrohFrameConnection;
+use crate::datagram_transport::{
+    DatagramTransportBridge, DatagramTransportRole, PlatformDatagramTransport,
+    bind_datagram_endpoint,
+};
 use crate::native_transport::{
     NativeFrameConnection, NativeTransportRole, PlatformDuplexTransport,
 };
 use crate::{
-    BoundEndpoint, EventSink, PairingConfig, PeerDescriptor, SessionConfig, SessionError,
-    TransferCancelToken, TransferProtocol, auth_bounded, authenticate_receiver,
-    authenticate_sender, dial_peer_addr_for_protocol, interrupted_error, peer_addr_from_descriptor,
+    BoundEndpoint, DEFAULT_DATA_STREAM_WINDOW, EventSink, PairingConfig, PeerDescriptor,
+    SessionConfig, SessionError, TransferCancelToken, TransferProtocol, auth_bounded,
+    authenticate_receiver, authenticate_sender, dial_peer_addr_for_protocol, interrupted_error,
+    peer_addr_from_descriptor,
 };
 
 struct SessionManifestV2Progress {
@@ -103,6 +108,7 @@ pub struct PendingManifestV2Receive {
     offer: ManifestOfferV2,
     resume_request: Option<ResumeRequestV2>,
     events: Arc<dyn EventSink>,
+    datagram_bridge: Option<DatagramTransportBridge>,
 }
 
 /// An authenticated Wi-Fi Aware offer backed by a platform-owned byte stream.
@@ -173,6 +179,9 @@ impl PendingManifestV2Receive {
             }
         }
         self.bound_endpoint.local_endpoint.close().await;
+        if let Some(bridge) = self.datagram_bridge.take() {
+            bridge.close().await;
+        }
         result
     }
 }
@@ -332,6 +341,58 @@ pub async fn send_manifest_v2_over_native_transport(
     result
 }
 
+/// Runs the canonical sender over iroh QUIC carried by a platform-established
+/// Wi-Fi Aware datagram channel.
+pub async fn send_manifest_v2_over_datagram_transport(
+    transport: Arc<dyn PlatformDatagramTransport>,
+    maximum_datagram_size: u32,
+    job: &CanonicalTransferJob,
+    state_directory: PathBuf,
+    pairing: &PairingConfig,
+    events: Arc<dyn EventSink>,
+    cancel: &TransferCancelToken,
+) -> Result<SenderManifestV2SessionSummary, SessionError> {
+    sealed_manifest(job)?;
+    events.on_event(envoix_transfer::TransferEvent::Connecting);
+    let datagram = bind_datagram_endpoint(
+        transport,
+        DatagramTransportRole::Client,
+        maximum_datagram_size,
+        DEFAULT_DATA_STREAM_WINDOW,
+        cancel,
+    )
+    .await?;
+    let local_endpoint = datagram.bound_endpoint.local_endpoint.clone();
+    let mut connection = match dial_peer_addr_for_protocol(
+        local_endpoint.clone(),
+        datagram.peer_addr,
+        TransferProtocol::ManifestV2,
+    )
+    .await
+    {
+        Ok(connection) => connection,
+        Err(error) => {
+            local_endpoint.close().await;
+            datagram.bridge.close().await;
+            return Err(error);
+        }
+    };
+    connection.watch_path(events.clone());
+    let result = send_manifest_v2_over_connection(
+        job,
+        state_directory,
+        pairing,
+        events,
+        cancel,
+        &mut connection,
+    )
+    .await;
+    let _ = ManifestV2FrameConnection::close(&mut connection).await;
+    local_endpoint.close().await;
+    datagram.bridge.close().await;
+    result
+}
+
 async fn send_manifest_v2_over_connection<Connection>(
     job: &CanonicalTransferJob,
     state_directory: PathBuf,
@@ -486,7 +547,40 @@ pub async fn receive_manifest_v2_offer(
         offer,
         resume_request,
         events,
+        datagram_bridge: None,
     })
+}
+
+/// Authenticates and returns a pending Manifest v2 offer over iroh QUIC
+/// carried by a platform-established Wi-Fi Aware datagram channel.
+pub async fn receive_manifest_v2_offer_over_datagram_transport(
+    transport: Arc<dyn PlatformDatagramTransport>,
+    maximum_datagram_size: u32,
+    pairing: &PairingConfig,
+    events: Arc<dyn EventSink>,
+    cancel: &TransferCancelToken,
+) -> Result<PendingManifestV2Receive, SessionError> {
+    events.on_event(envoix_transfer::TransferEvent::Connecting);
+    let datagram = bind_datagram_endpoint(
+        transport,
+        DatagramTransportRole::Server,
+        maximum_datagram_size,
+        DEFAULT_DATA_STREAM_WINDOW,
+        cancel,
+    )
+    .await?;
+    let local_endpoint = datagram.bound_endpoint.local_endpoint.clone();
+    match receive_manifest_v2_offer(datagram.bound_endpoint, pairing, events, cancel).await {
+        Ok(mut pending) => {
+            pending.datagram_bridge = Some(datagram.bridge);
+            Ok(pending)
+        }
+        Err(error) => {
+            local_endpoint.close().await;
+            datagram.bridge.close().await;
+            Err(error)
+        }
+    }
 }
 
 pub async fn receive_manifest_v2_offer_over_native_transport(
