@@ -156,6 +156,32 @@ final class WifiAwareCapabilityTests: XCTestCase {
         }
     }
 
+    @available(iOS 26.0, *)
+    func testNearbyFallbackOnlyAdmitsWifiAwareTransportFailures() {
+        XCTAssertTrue(
+            AppleWifiAwareTransportSession.isRecoverableWifiAwareFailure(
+                AppleWifiAwareTransportError.connectionReadyTimedOut
+            )
+        )
+        XCTAssertTrue(
+            AppleWifiAwareTransportSession.isRecoverableWifiAwareFailure(
+                WifiAwareFallbackTestError(
+                    "transport error: Wi-Fi Aware datagram bootstrap timed out"
+                )
+            )
+        )
+        XCTAssertFalse(
+            AppleWifiAwareTransportSession.isRecoverableWifiAwareFailure(
+                WifiAwareFallbackTestError("transport error: early eof")
+            )
+        )
+        XCTAssertFalse(
+            AppleWifiAwareTransportSession.isRecoverableWifiAwareFailure(
+                CancellationError()
+            )
+        )
+    }
+
     func testPhysicalDeviceReportsWifiAwarePairingCapability() async throws {
         #if targetEnvironment(simulator)
         throw XCTSkip("Wi-Fi Aware requires supported physical hardware")
@@ -203,5 +229,13 @@ final class WifiAwareCapabilityTests: XCTestCase {
             pairingSupported: pairingSupported,
             pairedDeviceCount: pairedDeviceCount
         )
+    }
+}
+
+private struct WifiAwareFallbackTestError: Error, CustomDebugStringConvertible {
+    let debugDescription: String
+
+    init(_ debugDescription: String) {
+        self.debugDescription = debugDescription
     }
 }

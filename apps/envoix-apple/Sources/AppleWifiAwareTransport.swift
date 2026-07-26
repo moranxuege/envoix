@@ -14,6 +14,7 @@ enum AppleWifiAwareTransportError: Error {
     case pairedDeviceUnavailable
     case serviceNotDeclared
     case listenerFinishedWithoutResult
+    case receiverConnectionReadyTimedOut
     case invalidReadBound
     case datagramExceedsBound
     case datagramChannelClosed
@@ -96,20 +97,42 @@ enum AppleWifiAwareTransportSession {
         observer: TransferObserver,
         performanceObserver: AppleWifiAwarePerformanceObserver? = nil
     ) async throws -> FfiManifestV2Completion {
-        let device = try await pairedDevice(sourceScopedID: sourceScopedDeviceID)
-        return try await withSenderTransport(
-            device: device,
-            performanceObserver: performanceObserver
-        ) { transport, maximumDatagramSize in
-            try await sendTransferJobV2NearbyHybrid(
+        let fallbackObserver = AppleWifiAwareFallbackObserver(downstream: observer)
+        do {
+            let device = try await pairedDevice(sourceScopedID: sourceScopedDeviceID)
+            return try await withSenderTransport(
+                device: device,
+                performanceObserver: performanceObserver
+            ) { transport, maximumDatagramSize in
+                try await sendTransferJobV2NearbyHybrid(
+                    job: job,
+                    settings: settings,
+                    request: request,
+                    stateDirectory: stateDirectory,
+                    transport: transport,
+                    maximumDatagramSize: maximumDatagramSize,
+                    cancellation: cancellation,
+                    observer: fallbackObserver
+                )
+            }
+        } catch {
+            guard shouldFallbackToIroh(
+                after: error,
+                cancellation: cancellation,
+                observer: fallbackObserver
+            ) else {
+                fallbackObserver.forwardSuppressedFailure()
+                throw error
+            }
+            observer.onDiagnostic(message: Self.fallbackDiagnostic)
+            fallbackObserver.activateFallback()
+            return try await sendTransferJobV2(
                 job: job,
                 settings: settings,
                 request: request,
                 stateDirectory: stateDirectory,
-                transport: transport,
-                maximumDatagramSize: maximumDatagramSize,
                 cancellation: cancellation,
-                observer: observer
+                observer: fallbackObserver
             )
         }
     }
@@ -126,24 +149,83 @@ enum AppleWifiAwareTransportSession {
             FfiPendingManifestV2Receive
         ) async throws -> FfiDestinationRequestV2
     ) async throws -> FfiManifestV2Completion {
-        let device = try await pairedDevice(sourceScopedID: sourceScopedDeviceID)
-        return try await withReceiverTransport(
-            device: device,
-            performanceObserver: performanceObserver
-        ) { transport, maximumDatagramSize in
-            let pending = try await receiveTransferOfferV2NearbyHybrid(
+        let fallbackObserver = AppleWifiAwareFallbackObserver(downstream: observer)
+        do {
+            let device = try await pairedDevice(sourceScopedID: sourceScopedDeviceID)
+            return try await withReceiverTransport(
+                device: device,
+                performanceObserver: performanceObserver
+            ) { transport, maximumDatagramSize in
+                let pending = try await receiveTransferOfferV2NearbyHybrid(
+                    settings: settings,
+                    request: request,
+                    stateDirectory: stateDirectory,
+                    transport: transport,
+                    maximumDatagramSize: maximumDatagramSize,
+                    cancellation: cancellation,
+                    observer: fallbackObserver
+                )
+                fallbackObserver.crossFallbackBoundary()
+                let destination = try await destinationDecision(pending)
+                return try await pending.receive(
+                    destination: destination,
+                    observer: fallbackObserver
+                )
+            }
+        } catch {
+            guard shouldFallbackToIroh(
+                after: error,
+                cancellation: cancellation,
+                observer: fallbackObserver
+            ) else {
+                fallbackObserver.forwardSuppressedFailure()
+                throw error
+            }
+            observer.onDiagnostic(message: Self.fallbackDiagnostic)
+            fallbackObserver.activateFallback()
+            let pending = try await receiveTransferOfferV2(
                 settings: settings,
                 request: request,
                 stateDirectory: stateDirectory,
-                transport: transport,
-                maximumDatagramSize: maximumDatagramSize,
                 cancellation: cancellation,
-                observer: observer
+                observer: fallbackObserver
             )
             let destination = try await destinationDecision(pending)
-            return try await pending.receive(destination: destination, observer: observer)
+            return try await pending.receive(
+                destination: destination,
+                observer: fallbackObserver
+            )
         }
     }
+
+    static func isRecoverableWifiAwareFailure(_ error: Error) -> Bool {
+        guard !(error is CancellationError) else { return false }
+        if error is AppleWifiAwareTransportError || error is NWError {
+            return true
+        }
+        let description = String(reflecting: error)
+        return Self.recoverableFailureMarkers.contains {
+            description.localizedCaseInsensitiveContains($0)
+        }
+    }
+
+    private static func shouldFallbackToIroh(
+        after error: Error,
+        cancellation: FfiManifestV2Cancellation,
+        observer: AppleWifiAwareFallbackObserver
+    ) -> Bool {
+        !cancellation.isCancelled() &&
+            !observer.sawTerminalCancellation &&
+            !observer.crossedFallbackBoundary &&
+            isRecoverableWifiAwareFailure(error)
+    }
+
+    private static let fallbackDiagnostic =
+        "Wi-Fi Aware path unavailable; continuing over authenticated iroh direct/relay"
+    private static let recoverableFailureMarkers = [
+        "Wi-Fi Aware datagram bootstrap timed out",
+        "platform Wi-Fi Aware datagram transport failed",
+    ]
 
     static func send(
         sourceScopedDeviceID: String,
@@ -222,6 +304,9 @@ enum AppleWifiAwareTransportSession {
             Self.logListenerState(state)
         }
         let (results, continuation) = AsyncThrowingStream<Result, Error>.makeStream()
+        let (readyConnections, readyContinuation) = AsyncThrowingStream<Void, Error>.makeStream(
+            bufferingPolicy: .bufferingNewest(1)
+        )
 
         let listenerTask = Task {
             do {
@@ -238,6 +323,8 @@ enum AppleWifiAwareTransportSession {
                         try await awaitReady(connection, role: "receiver")
                         try await requireWifiAwarePath(connection)
                         let maximumDatagramSize = try requireDatagramCapacity(connection)
+                        readyContinuation.yield()
+                        readyContinuation.finish()
                         await reportPerformance(
                             connection,
                             role: "receiver",
@@ -251,21 +338,28 @@ enum AppleWifiAwareTransportSession {
                             stage: .completed,
                             observer: performanceObserver
                         )
+                        try? await transport.close()
                         continuation.yield(result)
                         continuation.finish()
                     } catch {
+                        try? await transport.close()
+                        readyContinuation.finish(throwing: error)
                         continuation.finish(throwing: error)
                     }
                 }
+                readyContinuation.finish()
                 continuation.finish()
             } catch is CancellationError {
+                readyContinuation.finish()
                 continuation.finish()
             } catch {
+                readyContinuation.finish(throwing: error)
                 continuation.finish(throwing: error)
             }
         }
 
         do {
+            try await awaitReceiverConnectionReady(readyConnections)
             for try await value in results {
                 listenerTask.cancel()
                 _ = await listenerTask.result
@@ -279,6 +373,27 @@ enum AppleWifiAwareTransportSession {
         listenerTask.cancel()
         _ = await listenerTask.result
         throw AppleWifiAwareTransportError.listenerFinishedWithoutResult
+    }
+
+    private static func awaitReceiverConnectionReady(
+        _ readyConnections: AsyncThrowingStream<Void, Error>
+    ) async throws {
+        try await withThrowingTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                for try await _ in readyConnections {
+                    return true
+                }
+                return false
+            }
+            group.addTask {
+                try await Task<Never, Never>.sleep(for: connectionReadyTimeout)
+                return false
+            }
+            defer { group.cancelAll() }
+            guard try await group.next() == true else {
+                throw AppleWifiAwareTransportError.receiverConnectionReadyTimedOut
+            }
+        }
     }
 
     /// Sender role: browse the selected paired device, then retain its UDP
@@ -320,23 +435,29 @@ enum AppleWifiAwareTransportSession {
             )
         }
         let transport = AppleWifiAwareDatagramTransport(connection)
-        try await awaitReady(connection, role: "sender")
-        try await requireWifiAwarePath(connection)
-        let maximumDatagramSize = try requireDatagramCapacity(connection)
-        await reportPerformance(
-            connection,
-            role: "sender",
-            stage: .ready,
-            observer: performanceObserver
-        )
-        let result = try await operation(transport, maximumDatagramSize)
-        await reportPerformance(
-            connection,
-            role: "sender",
-            stage: .completed,
-            observer: performanceObserver
-        )
-        return result
+        do {
+            try await awaitReady(connection, role: "sender")
+            try await requireWifiAwarePath(connection)
+            let maximumDatagramSize = try requireDatagramCapacity(connection)
+            await reportPerformance(
+                connection,
+                role: "sender",
+                stage: .ready,
+                observer: performanceObserver
+            )
+            let result = try await operation(transport, maximumDatagramSize)
+            await reportPerformance(
+                connection,
+                role: "sender",
+                stage: .completed,
+                observer: performanceObserver
+            )
+            try? await transport.close()
+            return result
+        } catch {
+            try? await transport.close()
+            throw error
+        }
     }
 
     private static func awaitReady(
@@ -512,7 +633,8 @@ private actor AppleWifiAwareDatagramTransport: FfiNativeDatagramTransport {
         self.inbox = inbox
         receiveTask = Task {
             do {
-                for try await message in connection.messages {
+                while !Task.isCancelled {
+                    let message = try await connection.receive()
                     await inbox.deliver(message.content)
                 }
                 await inbox.finish(reason: nil)
@@ -555,13 +677,120 @@ private actor AppleWifiAwareDatagramTransport: FfiNativeDatagramTransport {
     func close() async throws {
         guard !closed else { return }
         closed = true
-        receiveTask?.cancel()
+        let task = receiveTask
         receiveTask = nil
+        task?.cancel()
+        _ = await task?.result
         await inbox.finish(reason: nil)
     }
 
     nonisolated private static func project(_ error: Error) -> FfiNativeTransportError {
         .Operation(reason: String(describing: error))
+    }
+}
+
+@available(iOS 26.0, *)
+private final class AppleWifiAwareFallbackObserver: TransferObserver, @unchecked Sendable {
+    private let downstream: TransferObserver
+    private let lock = NSLock()
+    private var suppressedFailure: FfiTransferFailure?
+    private var terminalCancellation = false
+    private var fallbackBoundaryCrossed = false
+    private var fallbackActive = false
+    private var startedForwarded = false
+
+    init(downstream: TransferObserver) {
+        self.downstream = downstream
+    }
+
+    var sawTerminalCancellation: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return terminalCancellation
+    }
+
+    var crossedFallbackBoundary: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return fallbackBoundaryCrossed
+    }
+
+    func crossFallbackBoundary() {
+        lock.lock()
+        fallbackBoundaryCrossed = true
+        lock.unlock()
+    }
+
+    func activateFallback() {
+        lock.lock()
+        fallbackActive = true
+        suppressedFailure = nil
+        lock.unlock()
+    }
+
+    func forwardSuppressedFailure() {
+        lock.lock()
+        let failure = suppressedFailure
+        suppressedFailure = nil
+        lock.unlock()
+        if let failure {
+            downstream.onTransferFailed(failure: failure)
+        }
+    }
+
+    func onInviteReady(invite: String) {
+        downstream.onInviteReady(invite: invite)
+    }
+
+    func onStarted(itemCount: UInt32, totalBytes: UInt64) {
+        lock.lock()
+        let shouldForward = !startedForwarded
+        startedForwarded = true
+        lock.unlock()
+        if shouldForward {
+            downstream.onStarted(itemCount: itemCount, totalBytes: totalBytes)
+        }
+    }
+
+    func onPhase(phase: FfiManifestV2Phase) {
+        if phase != .pairing && phase != .connecting {
+            crossFallbackBoundary()
+        }
+        downstream.onPhase(phase: phase)
+    }
+
+    func onProgress(transferred: UInt64, total: UInt64) {
+        downstream.onProgress(transferred: transferred, total: total)
+    }
+
+    func onCompleted(bytes: UInt64) {
+        downstream.onCompleted(bytes: bytes)
+    }
+
+    func onTransferFailed(failure: FfiTransferFailure) {
+        if failure.code == .userCanceled || failure.code == .senderCanceled {
+            lock.lock()
+            terminalCancellation = true
+            lock.unlock()
+            downstream.onTransferFailed(failure: failure)
+            return
+        }
+        lock.lock()
+        let shouldForward = fallbackActive
+        if !shouldForward {
+            suppressedFailure = failure
+        }
+        lock.unlock()
+        if shouldForward {
+            downstream.onTransferFailed(failure: failure)
+        }
+    }
+
+    func onDiagnostic(message: String) {
+        if message.hasPrefix("connected via ") {
+            crossFallbackBoundary()
+        }
+        downstream.onDiagnostic(message: message)
     }
 }
 
