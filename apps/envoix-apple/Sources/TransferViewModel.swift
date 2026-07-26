@@ -474,6 +474,7 @@ final class TransferViewModel: ObservableObject {
         let request: FfiTransferRequest
         let stateDirectory: String
         let sourceAccess: AnyObject?
+        let nearbyWifiAwareDeviceID: String?
     }
 
     private struct ReceiveOperation {
@@ -482,6 +483,7 @@ final class TransferViewModel: ObservableObject {
         let stateDirectory: String
         let targetDirectory: String
         let destinationAccess: AnyObject?
+        let nearbyWifiAwareDeviceID: String?
     }
 
     /// The one lifecycle state rendered by setup, Activity, and menu-bar
@@ -514,10 +516,13 @@ final class TransferViewModel: ObservableObject {
     private var activeSend: SendOperation?
     private var activeReceive: ReceiveOperation?
     private var pendingReceive: FfiPendingManifestV2Receive?
+    private var pendingNearbyHybridDestination:
+        CheckedContinuation<FfiDestinationRequestV2, Error>?
     private var cancellation: FfiManifestV2Cancellation?
     private var task: Task<Void, Never>?
     private var preparationTask: Task<Void, Never>?
     private var resourceAccess: AnyObject?
+    private var stagedNearbyWifiAwareDeviceID: String?
     private var rate = RateTracker()
     private var observedTransferred: UInt64 = 0
     private var observedTotal: UInt64 = 0
@@ -537,6 +542,19 @@ final class TransferViewModel: ObservableObject {
         return (activeSend?.sourceAccess as? ShareDraftLease)?.id
     }
     #endif
+
+    func stageNearbyWifiAwareDeviceID(_ sourceScopedID: String?) {
+        stagedNearbyWifiAwareDeviceID = sourceScopedID
+    }
+
+    func clearStagedNearbyWifiAwareDeviceID() {
+        stagedNearbyWifiAwareDeviceID = nil
+    }
+
+    private func consumeStagedNearbyWifiAwareDeviceID() -> String? {
+        defer { stagedNearbyWifiAwareDeviceID = nil }
+        return stagedNearbyWifiAwareDeviceID
+    }
 
     var progressFraction: Double { total > 0 ? Double(transferred) / Double(total) : 0 }
     var etaSeconds: Double? {
@@ -710,7 +728,8 @@ final class TransferViewModel: ObservableObject {
                         settings: stored.settings.value,
                         request: request,
                         stateDirectory: stored.stateDirectory,
-                        sourceAccess: sourceAccess
+                        sourceAccess: sourceAccess,
+                        nearbyWifiAwareDeviceID: nil
                     ))
                 } else {
                     guard let targetDirectory = stored.targetDirectory else {
@@ -726,7 +745,8 @@ final class TransferViewModel: ObservableObject {
                         request: request,
                         stateDirectory: stored.stateDirectory,
                         targetDirectory: restored.path,
-                        destinationAccess: restored.access
+                        destinationAccess: restored.access,
+                        nearbyWifiAwareDeviceID: nil
                     ))
                 }
             } catch {
@@ -776,6 +796,7 @@ final class TransferViewModel: ObservableObject {
         settings: EnvoixRuntimeSettings,
         sourceAccess: AnyObject? = nil
     ) {
+        clearStagedNearbyWifiAwareDeviceID()
         startSend(
             selectedPaths: selectedPaths,
             settings: settings,
@@ -790,12 +811,14 @@ final class TransferViewModel: ObservableObject {
         settings: EnvoixRuntimeSettings,
         sourceAccess: AnyObject? = nil
     ) {
+        let nearbyWifiAwareDeviceID = consumeStagedNearbyWifiAwareDeviceID()
         startSend(
             selectedPaths: selectedPaths,
             settings: settings,
             request: request(direction: .send, mode: .room, settings: settings, code: code),
             sourceAccess: sourceAccess,
-            roomCode: code
+            roomCode: code,
+            nearbyWifiAwareDeviceID: nearbyWifiAwareDeviceID
         )
     }
 
@@ -806,6 +829,7 @@ final class TransferViewModel: ObservableObject {
         pathPolicy: FfiPathPolicy = .auto,
         sourceAccess: AnyObject? = nil
     ) {
+        clearStagedNearbyWifiAwareDeviceID()
         startSend(
             selectedPaths: selectedPaths,
             settings: settings,
@@ -826,6 +850,7 @@ final class TransferViewModel: ObservableObject {
         settings: EnvoixRuntimeSettings,
         destinationAccess: AnyObject? = nil
     ) {
+        clearStagedNearbyWifiAwareDeviceID()
         startReceive(
             targetDirectory: outputDir,
             settings: settings,
@@ -840,12 +865,14 @@ final class TransferViewModel: ObservableObject {
         settings: EnvoixRuntimeSettings,
         destinationAccess: AnyObject? = nil
     ) {
+        let nearbyWifiAwareDeviceID = consumeStagedNearbyWifiAwareDeviceID()
         startReceive(
             targetDirectory: outputDir,
             settings: settings,
             request: request(direction: .receive, mode: .room, settings: settings, code: code),
             destinationAccess: destinationAccess,
-            roomCode: code
+            roomCode: code,
+            nearbyWifiAwareDeviceID: nearbyWifiAwareDeviceID
         )
     }
 
@@ -854,6 +881,7 @@ final class TransferViewModel: ObservableObject {
         settings: EnvoixRuntimeSettings,
         destinationAccess: AnyObject? = nil
     ) {
+        clearStagedNearbyWifiAwareDeviceID()
         startReceive(
             targetDirectory: outputDir,
             settings: settings,
@@ -866,9 +894,23 @@ final class TransferViewModel: ObservableObject {
     func approveExceptionalTransfer() -> Bool {
         guard presentationState == .awaitingDecision,
               requiresExceptionalTransferApproval,
-              let pendingReceive,
               let operation = activeReceive else { return false }
         requiresExceptionalTransferApproval = false
+        if let continuation = pendingNearbyHybridDestination {
+            pendingNearbyHybridDestination = nil
+            do {
+                continuation.resume(
+                    returning: try destinationRequest(
+                        operation: operation,
+                        exceptionalApproved: true
+                    )
+                )
+            } catch {
+                continuation.resume(throwing: error)
+            }
+            return true
+        }
+        guard let pendingReceive else { return false }
         continueReceive(pendingReceive, operation: operation, exceptionalApproved: true)
         return true
     }
@@ -881,6 +923,7 @@ final class TransferViewModel: ObservableObject {
         }
         pausedByUser = true
         cancellation?.cancel()
+        cancelPendingNearbyHybridDestination()
         operationID = UUID()
         publishObservedProgress()
         pendingReceive = nil
@@ -927,6 +970,7 @@ final class TransferViewModel: ObservableObject {
         }
         pausedByUser = false
         cancellation?.cancel()
+        cancelPendingNearbyHybridDestination()
         operationID = UUID()
         publishObservedProgress()
         pendingReceive = nil
@@ -1045,6 +1089,7 @@ final class TransferViewModel: ObservableObject {
 
     fileprivate func handleTransferFailed(_ value: FfiTransferFailure) {
         if pausedByUser { return }
+        cancelPendingNearbyHybridDestination()
         publishObservedProgress()
         pendingReceive = nil
         requiresExceptionalTransferApproval = false
@@ -1072,7 +1117,8 @@ final class TransferViewModel: ObservableObject {
         settings: EnvoixRuntimeSettings,
         request: FfiTransferRequest,
         sourceAccess: AnyObject?,
-        roomCode: String? = nil
+        roomCode: String? = nil,
+        nearbyWifiAwareDeviceID: String? = nil
     ) {
         let paths = normalizedPaths(selectedPaths)
         guard !paths.isEmpty else {
@@ -1099,7 +1145,8 @@ final class TransferViewModel: ObservableObject {
                     settings: settings,
                     request: request,
                     stateDirectory: preparedSelection.sessionStateDirectory,
-                    sourceAccess: sourceAccess ?? preparedSelection.sourceAccess
+                    sourceAccess: sourceAccess ?? preparedSelection.sourceAccess,
+                    nearbyWifiAwareDeviceID: nearbyWifiAwareDeviceID
                 ))
             }
             return
@@ -1115,7 +1162,8 @@ final class TransferViewModel: ObservableObject {
             settings: settings,
             request: request,
             stateDirectory: preparedSelection.sessionStateDirectory,
-            sourceAccess: sourceAccess ?? preparedSelection.sourceAccess
+            sourceAccess: sourceAccess ?? preparedSelection.sourceAccess,
+            nearbyWifiAwareDeviceID: nearbyWifiAwareDeviceID
         ))
     }
 
@@ -1150,18 +1198,42 @@ final class TransferViewModel: ObservableObject {
                     pendingSourceSelections = []
                     isManifestSelectionReady = false
                 }
-                _ = try await sendTransferJobV2(
-                    job: operation.job,
-                    settings: operation.settings,
-                    request: operation.request,
-                    stateDirectory: operation.stateDirectory,
-                    cancellation: token,
-                    observer: observer
-                )
+                try await performSend(operation, cancellation: token, observer: observer)
             } catch {
                 if !pausedByUser { handleFailed(error.localizedDescription) }
             }
         }
+    }
+
+    private func performSend(
+        _ operation: SendOperation,
+        cancellation: FfiManifestV2Cancellation,
+        observer: Observer
+    ) async throws {
+        #if os(iOS) && canImport(WiFiAware)
+        if #available(iOS 26.0, *),
+           let deviceID = operation.nearbyWifiAwareDeviceID {
+            handleDiagnostic("Nearby hybrid admitted Wi-Fi Aware device \(deviceID)")
+            _ = try await AppleWifiAwareTransportSession.sendNearbyHybrid(
+                sourceScopedDeviceID: deviceID,
+                job: operation.job,
+                settings: operation.settings,
+                request: operation.request,
+                stateDirectory: operation.stateDirectory,
+                cancellation: cancellation,
+                observer: observer
+            )
+            return
+        }
+        #endif
+        _ = try await sendTransferJobV2(
+            job: operation.job,
+            settings: operation.settings,
+            request: operation.request,
+            stateDirectory: operation.stateDirectory,
+            cancellation: cancellation,
+            observer: observer
+        )
     }
 
     private func startReceive(
@@ -1169,7 +1241,8 @@ final class TransferViewModel: ObservableObject {
         settings: EnvoixRuntimeSettings,
         request: FfiTransferRequest,
         destinationAccess: AnyObject?,
-        roomCode: String? = nil
+        roomCode: String? = nil,
+        nearbyWifiAwareDeviceID: String? = nil
     ) {
         displayLanguage = settings.language
         beginActivity(direction: .receive, mode: request.mode, roomCode: roomCode)
@@ -1179,7 +1252,8 @@ final class TransferViewModel: ObservableObject {
                 request: request,
                 stateDirectory: try receiveStateDirectory(activityID: transferActivity!.activityId),
                 targetDirectory: targetDirectory,
-                destinationAccess: destinationAccess
+                destinationAccess: destinationAccess,
+                nearbyWifiAwareDeviceID: nearbyWifiAwareDeviceID
             )
             activeReceive = operation
             activeSend = nil
@@ -1200,36 +1274,104 @@ final class TransferViewModel: ObservableObject {
             guard let self else { return }
             do {
                 try persistActiveReceive(operation)
-                let pending = try await receiveTransferOfferV2(
-                    settings: operation.settings,
-                    request: operation.request,
-                    stateDirectory: operation.stateDirectory,
+                if let completion = try await receiveNearbyHybrid(
+                    operation,
+                    cancellation: token,
+                    observer: observer
+                ) {
+                    applyReceiveCompletion(completion)
+                    return
+                }
+                let pending = try await receiveOffer(
+                    operation,
                     cancellation: token,
                     observer: observer
                 )
-                pendingReceive = pending
-                let summary = pending.summary()
-                pendingOfferSummary = summary
-                pendingOfferEntries = pending.listEntries(offset: 0, limit: 512).entries
-                total = summary.totalPlaintextBytes
-                transferActivity?.itemCount = summary.fileCount + summary.directoryCount
-                transferActivity?.totalBytes = total
-                let available = try allocatableBytes(at: operation.targetDirectory)
-                let exceptional = summary.exceptionalOffer || total > available / 2
-                if exceptional {
-                    requiresExceptionalTransferApproval = true
-                    statusText = localized(
-                        "Review this unusually large transfer before receiving",
-                        "请先确认这个异常大的传输"
-                    )
-                    updateActivity(state: .awaitingDecision, diagnostic: statusText)
-                } else {
+                if try !presentPendingOffer(pending, operation: operation) {
                     continueReceive(pending, operation: operation, exceptionalApproved: false)
                 }
             } catch {
                 if !pausedByUser { handleFailed(error.localizedDescription) }
             }
         }
+    }
+
+    private func receiveOffer(
+        _ operation: ReceiveOperation,
+        cancellation: FfiManifestV2Cancellation,
+        observer: Observer
+    ) async throws -> FfiPendingManifestV2Receive {
+        return try await receiveTransferOfferV2(
+            settings: operation.settings,
+            request: operation.request,
+            stateDirectory: operation.stateDirectory,
+            cancellation: cancellation,
+            observer: observer
+        )
+    }
+
+    private func receiveNearbyHybrid(
+        _ operation: ReceiveOperation,
+        cancellation: FfiManifestV2Cancellation,
+        observer: Observer
+    ) async throws -> FfiManifestV2Completion? {
+        #if os(iOS) && canImport(WiFiAware)
+        if #available(iOS 26.0, *),
+           let deviceID = operation.nearbyWifiAwareDeviceID {
+            handleDiagnostic("Nearby hybrid admitted Wi-Fi Aware device \(deviceID)")
+            return try await AppleWifiAwareTransportSession.receiveNearbyHybrid(
+                sourceScopedDeviceID: deviceID,
+                settings: operation.settings,
+                request: operation.request,
+                stateDirectory: operation.stateDirectory,
+                cancellation: cancellation,
+                observer: observer
+            ) { [weak self] pending in
+                guard let self else { throw CancellationError() }
+                return try await self.awaitNearbyHybridDestination(
+                    pending,
+                    operation: operation
+                )
+            }
+        }
+        #endif
+        return nil
+    }
+
+    private func awaitNearbyHybridDestination(
+        _ pending: FfiPendingManifestV2Receive,
+        operation: ReceiveOperation
+    ) async throws -> FfiDestinationRequestV2 {
+        if try !presentPendingOffer(pending, operation: operation) {
+            return try destinationRequest(operation: operation, exceptionalApproved: false)
+        }
+        return try await withCheckedThrowingContinuation { continuation in
+            pendingNearbyHybridDestination = continuation
+        }
+    }
+
+    private func presentPendingOffer(
+        _ pending: FfiPendingManifestV2Receive,
+        operation: ReceiveOperation
+    ) throws -> Bool {
+        pendingReceive = pending
+        let summary = pending.summary()
+        pendingOfferSummary = summary
+        pendingOfferEntries = pending.listEntries(offset: 0, limit: 512).entries
+        total = summary.totalPlaintextBytes
+        transferActivity?.itemCount = summary.fileCount + summary.directoryCount
+        transferActivity?.totalBytes = total
+        let available = try allocatableBytes(at: operation.targetDirectory)
+        let exceptional = summary.exceptionalOffer || total > available / 2
+        if exceptional {
+            requiresExceptionalTransferApproval = true
+            statusText = localized(
+                "Review this unusually large transfer before receiving",
+                "请先确认这个异常大的传输"
+            )
+            updateActivity(state: .awaitingDecision, diagnostic: statusText)
+        }
+        return exceptional
     }
 
     private func continueReceive(
@@ -1241,43 +1383,63 @@ final class TransferViewModel: ObservableObject {
         task = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                let available = try allocatableBytes(at: operation.targetDirectory)
-                let decision = destinationDecision
-                let copyDirectory: String?
-                let copyAvailable: UInt64?
-                if decision == .copyAfterVerify {
-                    let directory = URL(fileURLWithPath: operation.targetDirectory, isDirectory: true)
-                        .appendingPathComponent(".envoix-copy-staging-v2", isDirectory: true)
-                    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-                    copyDirectory = directory.path
-                    copyAvailable = try allocatableBytes(at: directory.path)
-                } else {
-                    copyDirectory = nil
-                    copyAvailable = nil
-                }
                 let completion = try await pending.receive(
-                    destination: FfiDestinationRequestV2(
-                        targetDirectory: operation.targetDirectory,
-                        copyStagingDirectory: copyDirectory,
-                        decision: decision,
-                        targetAllocatableBytes: available,
-                        stagingAllocatableBytes: copyAvailable,
-                        stableObjectIdentity: true,
-                        exceptionalTransferApproved: exceptionalApproved
+                    destination: try destinationRequest(
+                        operation: operation,
+                        exceptionalApproved: exceptionalApproved
                     ),
                     observer: observer
                 )
-                completedItemURLs = completion.savedPaths.map { URL(fileURLWithPath: $0) }
-                completedFileURL = completedItemURLs.count == 1 ? completedItemURLs[0] : nil
-                transferActivity?.savedPaths = completion.savedPaths
-                pendingReceive = nil
-                pendingOfferSummary = nil
-                pendingOfferEntries = []
-                requiresExceptionalTransferApproval = false
+                applyReceiveCompletion(completion)
             } catch {
                 if !pausedByUser { handleFailed(error.localizedDescription) }
             }
         }
+    }
+
+    private func destinationRequest(
+        operation: ReceiveOperation,
+        exceptionalApproved: Bool
+    ) throws -> FfiDestinationRequestV2 {
+        let available = try allocatableBytes(at: operation.targetDirectory)
+        let decision = destinationDecision
+        let copyDirectory: String?
+        let copyAvailable: UInt64?
+        if decision == .copyAfterVerify {
+            let directory = URL(fileURLWithPath: operation.targetDirectory, isDirectory: true)
+                .appendingPathComponent(".envoix-copy-staging-v2", isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            copyDirectory = directory.path
+            copyAvailable = try allocatableBytes(at: directory.path)
+        } else {
+            copyDirectory = nil
+            copyAvailable = nil
+        }
+        return FfiDestinationRequestV2(
+            targetDirectory: operation.targetDirectory,
+            copyStagingDirectory: copyDirectory,
+            decision: decision,
+            targetAllocatableBytes: available,
+            stagingAllocatableBytes: copyAvailable,
+            stableObjectIdentity: true,
+            exceptionalTransferApproved: exceptionalApproved
+        )
+    }
+
+    private func applyReceiveCompletion(_ completion: FfiManifestV2Completion) {
+        completedItemURLs = completion.savedPaths.map { URL(fileURLWithPath: $0) }
+        completedFileURL = completedItemURLs.count == 1 ? completedItemURLs[0] : nil
+        transferActivity?.savedPaths = completion.savedPaths
+        pendingReceive = nil
+        pendingOfferSummary = nil
+        pendingOfferEntries = []
+        requiresExceptionalTransferApproval = false
+    }
+
+    private func cancelPendingNearbyHybridDestination() {
+        let continuation = pendingNearbyHybridDestination
+        pendingNearbyHybridDestination = nil
+        continuation?.resume(throwing: CancellationError())
     }
 
     private func resolveSource(rootItemID: UInt64, decision: FfiSourceDecisionV2, path: String?) {
@@ -1352,6 +1514,7 @@ final class TransferViewModel: ObservableObject {
         clearStoredManifestSession(direction: direction)
         task?.cancel()
         cancellation?.cancel()
+        cancelPendingNearbyHybridDestination()
         operationID = UUID()
         let activityID = UUID().uuidString
         transferActivity = TransferActivityRecord(

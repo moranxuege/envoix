@@ -143,6 +143,14 @@ struct NearbyPairedDevice: Equatable, Identifiable {
     }
 }
 
+/// Returns a Wi-Fi Aware route only when the snapshot is unambiguous. Paired
+/// device names are not stable identities, so multiple devices must never be
+/// guessed or matched by display text.
+func uniqueNearbyWifiAwareDeviceID(in devices: [NearbyPairedDevice]) -> String? {
+    let wifiAwareDevices = devices.filter { $0.source == .wifiAware }
+    return wifiAwareDevices.count == 1 ? wifiAwareDevices[0].sourceScopedID : nil
+}
+
 /// UI context carried from public discovery into the authenticated pairing
 /// flow. It intentionally excludes endpoint and credential material: selecting
 /// a discovery card never authorizes a connection by itself.

@@ -488,6 +488,28 @@ final class NearbyDiscoveryTests: XCTestCase {
         XCTAssertEqual(selection.displayName, "Nearby phone")
         XCTAssertEqual(selection.sources, [.bluetooth, .mdns])
     }
+
+    func testWifiAwareRouteRequiresExactlyOnePairedDevice() throws {
+        let wifiAware = try XCTUnwrap(NearbyPairedDevice(
+            sourceScopedID: "0000000000000001",
+            source: .wifiAware
+        ))
+        let secondWifiAware = try XCTUnwrap(NearbyPairedDevice(
+            sourceScopedID: "0000000000000002",
+            source: .wifiAware
+        ))
+        let bluetooth = try XCTUnwrap(NearbyPairedDevice(
+            sourceScopedID: "ble-peer",
+            source: .bluetooth
+        ))
+
+        XCTAssertNil(uniqueNearbyWifiAwareDeviceID(in: []))
+        XCTAssertEqual(
+            uniqueNearbyWifiAwareDeviceID(in: [bluetooth, wifiAware]),
+            wifiAware.sourceScopedID
+        )
+        XCTAssertNil(uniqueNearbyWifiAwareDeviceID(in: [wifiAware, secondWifiAware]))
+    }
 }
 
 private final class CountingNearbyDiscoveryProvider: NearbyDiscoveryProvider {

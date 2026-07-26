@@ -82,12 +82,20 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
     }
 
     func testManifestV2TransferServicePath() async throws {
+        try await runManifestV2Transfer(mode: .customOnly)
+    }
+
+    func testNearbyHybridManifestV2TransferServicePath() async throws {
+        try await runManifestV2Transfer(mode: .nearbyHybrid)
+    }
+
+    private func runManifestV2Transfer(mode: WifiAwarePhysicalManifestMode) async throws {
         let context = try requirePhysicalContext()
         let timeline = WifiAwarePhysicalTimeline(
             runID: context.runID,
             role: context.role.rawValue
         )
-        timeline.mark("test_started payload_bytes=\(context.payloadBytes)")
+        timeline.mark("test_started mode=\(mode.rawValue) payload_bytes=\(context.payloadBytes)")
         guard #available(iOS 26.0, *) else {
             throw XCTSkip("Wi-Fi Aware requires iOS or iPadOS 26")
         }
@@ -124,65 +132,109 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
             timeline.mark("job_sealed")
 
             timeline.mark("session_start")
-            let completion = try await withProbeTimeout(context.manifestTimeout) {
-                try await AppleWifiAwareTransportSession.send(
-                    sourceScopedDeviceID: sourceScopedID,
-                    job: job,
-                    pairingToken: context.pairingToken,
-                    stateDirectory: stateDirectory.path,
-                    cancellation: FfiManifestV2Cancellation(),
-                    observer: observer,
-                    performanceObserver: { sample in
-                        timeline.record(sample)
-                    }
+            let completion: FfiManifestV2Completion
+            switch mode {
+            case .customOnly:
+                let nativeCompletion = try await withProbeTimeout(context.manifestTimeout) {
+                    try await AppleWifiAwareTransportSession.send(
+                        sourceScopedDeviceID: sourceScopedID,
+                        job: job,
+                        pairingToken: context.pairingToken,
+                        stateDirectory: stateDirectory.path,
+                        cancellation: FfiManifestV2Cancellation(),
+                        observer: observer,
+                        performanceObserver: { sample in
+                            timeline.record(sample)
+                        }
+                    )
+                }
+                XCTAssertEqual(nativeCompletion.selectedPath, .wifiAware)
+                completion = nativeCompletion.transfer
+            case .nearbyHybrid:
+                let route = try Self.nearbyHybridRoute(
+                    direction: .send,
+                    code: context.pairingToken
                 )
+                completion = try await withProbeTimeout(context.manifestTimeout) {
+                    try await AppleWifiAwareTransportSession.sendNearbyHybrid(
+                        sourceScopedDeviceID: sourceScopedID,
+                        job: job,
+                        settings: route.settings,
+                        request: route.request,
+                        stateDirectory: stateDirectory.path,
+                        cancellation: FfiManifestV2Cancellation(),
+                        observer: observer,
+                        performanceObserver: { sample in
+                            timeline.record(sample)
+                        }
+                    )
+                }
+                XCTAssertTrue(observer.sawWifiAwarePath)
             }
             timeline.mark("session_completed")
-            XCTAssertEqual(completion.selectedPath, .wifiAware)
-            XCTAssertEqual(completion.transfer.entryCount, 1)
-            XCTAssertEqual(completion.transfer.totalPlaintextBytes, context.payloadBytes)
-            XCTAssertEqual(completion.transfer.deliveryProofDigest.count, Self.deliveryProofDigestBytes)
-            XCTAssertTrue(completion.transfer.savedPaths.isEmpty)
+            XCTAssertEqual(completion.entryCount, 1)
+            XCTAssertEqual(completion.totalPlaintextBytes, context.payloadBytes)
+            XCTAssertEqual(completion.deliveryProofDigest.count, Self.deliveryProofDigestBytes)
+            XCTAssertTrue(completion.savedPaths.isEmpty)
             XCTAssertNil(observer.failure)
             Self.marker(
                 "manifest sender completed run=\(context.runID) " +
-                    "bytes=\(completion.transfer.totalPlaintextBytes) path=wifi_aware"
+                    "bytes=\(completion.totalPlaintextBytes) mode=\(mode.rawValue)"
             )
         case .receive:
             let destination = root.appendingPathComponent("received", isDirectory: true)
             try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
             timeline.mark("receiver_waiting")
-            let completion = try await withProbeTimeout(context.manifestTimeout) {
-                try await AppleWifiAwareTransportSession.receive(
-                    sourceScopedDeviceID: sourceScopedID,
-                    pairingToken: context.pairingToken,
-                    stateDirectory: stateDirectory.path,
-                    cancellation: FfiManifestV2Cancellation(),
-                    observer: observer,
-                    performanceObserver: { sample in
-                        timeline.record(sample)
+            let completion: FfiManifestV2Completion
+            switch mode {
+            case .customOnly:
+                completion = try await withProbeTimeout(context.manifestTimeout) {
+                    try await AppleWifiAwareTransportSession.receive(
+                        sourceScopedDeviceID: sourceScopedID,
+                        pairingToken: context.pairingToken,
+                        stateDirectory: stateDirectory.path,
+                        cancellation: FfiManifestV2Cancellation(),
+                        observer: observer,
+                        performanceObserver: { sample in
+                            timeline.record(sample)
+                        }
+                    ) { pending in
+                        try Self.destinationRequest(
+                            for: pending,
+                            at: destination,
+                            context: context,
+                            timeline: timeline,
+                            requireStaticWifiAwarePath: true
+                        )
                     }
-                ) { pending in
-                    guard pending.selectedPath() == .wifiAware else {
-                        throw WifiAwarePhysicalTestError.unexpectedPath
-                    }
-                    let summary = pending.summary()
-                    guard summary.fileCount == 1,
-                          summary.totalPlaintextBytes == context.payloadBytes
-                    else {
-                        throw WifiAwarePhysicalTestError.unexpectedOffer
-                    }
-                    timeline.mark("offer_received")
-                    return FfiDestinationRequestV2(
-                        targetDirectory: destination.path,
-                        copyStagingDirectory: nil,
-                        decision: .saveDirectly,
-                        targetAllocatableBytes: try Self.availableCapacity(at: destination),
-                        stagingAllocatableBytes: nil,
-                        stableObjectIdentity: true,
-                        exceptionalTransferApproved: false
-                    )
                 }
+            case .nearbyHybrid:
+                let route = try Self.nearbyHybridRoute(
+                    direction: .receive,
+                    code: context.pairingToken
+                )
+                completion = try await withProbeTimeout(context.manifestTimeout) {
+                    try await AppleWifiAwareTransportSession.receiveNearbyHybrid(
+                        sourceScopedDeviceID: sourceScopedID,
+                        settings: route.settings,
+                        request: route.request,
+                        stateDirectory: stateDirectory.path,
+                        cancellation: FfiManifestV2Cancellation(),
+                        observer: observer,
+                        performanceObserver: { sample in
+                            timeline.record(sample)
+                        }
+                    ) { pending in
+                        try Self.destinationRequest(
+                            for: pending,
+                            at: destination,
+                            context: context,
+                            timeline: timeline,
+                            requireStaticWifiAwarePath: false
+                        )
+                    }
+                }
+                XCTAssertTrue(observer.sawWifiAwarePath)
             }
             timeline.mark("session_completed")
             XCTAssertEqual(completion.entryCount, 1)
@@ -197,9 +249,72 @@ final class WifiAwarePhysicalTransferTests: XCTestCase {
             XCTAssertNil(observer.failure)
             Self.marker(
                 "manifest receiver saved run=\(context.runID) " +
-                    "bytes=\(completion.totalPlaintextBytes) path=wifi_aware"
+                    "bytes=\(completion.totalPlaintextBytes) mode=\(mode.rawValue)"
             )
         }
+    }
+
+    private static func destinationRequest(
+        for pending: FfiPendingManifestV2Receive,
+        at destination: URL,
+        context: WifiAwarePhysicalContext,
+        timeline: WifiAwarePhysicalTimeline,
+        requireStaticWifiAwarePath: Bool
+    ) throws -> FfiDestinationRequestV2 {
+        if requireStaticWifiAwarePath, pending.selectedPath() != .wifiAware {
+            throw WifiAwarePhysicalTestError.unexpectedPath
+        }
+        let summary = pending.summary()
+        guard summary.fileCount == 1,
+              summary.totalPlaintextBytes == context.payloadBytes
+        else {
+            throw WifiAwarePhysicalTestError.unexpectedOffer
+        }
+        timeline.mark("offer_received")
+        return FfiDestinationRequestV2(
+            targetDirectory: destination.path,
+            copyStagingDirectory: nil,
+            decision: .saveDirectly,
+            targetAllocatableBytes: try availableCapacity(at: destination),
+            stagingAllocatableBytes: nil,
+            stableObjectIdentity: true,
+            exceptionalTransferApproved: false
+        )
+    }
+
+    private static func nearbyHybridRoute(
+        direction: FfiTransferDirection,
+        code: String
+    ) throws -> (settings: EnvoixRuntimeSettings, request: FfiTransferRequest) {
+        let defaults = try makePairingInvite(role: .unknown, broker: "", relay: "")
+        let settings = EnvoixRuntimeSettings(
+            concurrentTransfers: false,
+            language: "en",
+            serverUrl: defaults.broker,
+            relayUrl: defaults.relay,
+            configPath: "",
+            speedLimitMbps: 0
+        )
+        return (
+            settings,
+            FfiTransferRequest(
+                direction: direction,
+                mode: .room,
+                peerDescriptor: "",
+                invite: "",
+                code: code,
+                token: "",
+                broker: defaults.broker,
+                relay: defaults.relay,
+                configPath: "",
+                pathPolicy: .auto,
+                rendezvous: FfiRendezvousPlan(
+                    useRoom: true,
+                    useMdns: false,
+                    internetAvailable: true
+                )
+            )
+        )
     }
 
     private func requirePhysicalContext() throws -> WifiAwarePhysicalContext {
@@ -606,6 +721,11 @@ private enum WifiAwarePhysicalRole: String {
     case receive
 }
 
+private enum WifiAwarePhysicalManifestMode: String {
+    case customOnly = "custom_only"
+    case nearbyHybrid = "nearby_hybrid"
+}
+
 private struct WifiAwarePhysicalContext {
     let role: WifiAwarePhysicalRole
     let peerHint: String
@@ -686,6 +806,7 @@ private final class WifiAwarePhysicalObserver: TransferObserver, @unchecked Send
     private let lock = NSLock()
     private let timeline: WifiAwarePhysicalTimeline
     private var recordedFailure: String?
+    private var observedWifiAwarePath = false
     private var firstPayloadProgressAt: TimeInterval?
     private var nextProgressPercent = 0
 
@@ -697,6 +818,12 @@ private final class WifiAwarePhysicalObserver: TransferObserver, @unchecked Send
         lock.lock()
         defer { lock.unlock() }
         return recordedFailure
+    }
+
+    var sawWifiAwarePath: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return observedWifiAwarePath
     }
 
     func onInviteReady(invite _: String) {}
@@ -749,6 +876,11 @@ private final class WifiAwarePhysicalObserver: TransferObserver, @unchecked Send
         timeline.mark("failed code=\(failure.code) detail=\(failure.diagnosticMessage)")
     }
     func onDiagnostic(message: String) {
+        if message.contains("wifi_aware") {
+            lock.lock()
+            observedWifiAwarePath = true
+            lock.unlock()
+        }
         timeline.mark("diagnostic=\(message)")
     }
 }

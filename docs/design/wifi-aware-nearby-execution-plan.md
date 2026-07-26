@@ -1,8 +1,8 @@
 # Wi-Fi Aware as a nearby-activated iroh path
 
-Status: **approved architecture; implementation pending**
+Status: **Nearby hybrid path passes scoped no-device gates; Apple physical gate awaiting approval**
 
-Last reviewed: 2026-07-25
+Last reviewed: 2026-07-26
 
 ## 1. Decision
 
@@ -17,9 +17,10 @@ non-Nearby transfer
     -> iroh chooses IP direct or relay
 
 user selects a peer in Nearby Discovery
-    -> resolve an exact peer-specific Wi-Fi Aware channel
+    -> admit one unambiguous Wi-Fi Aware paired-device candidate
     -> when ready, add it to the same iroh endpoint as a custom path
-    -> also retain ordinary IP and relay paths
+    -> cryptographically bind it to the Room peer before payload
+    -> iroh validates an ordinary IP backup on that connection
     -> iroh chooses and migrates paths for one QUIC connection
 ```
 
@@ -27,10 +28,10 @@ The rule is:
 
 - only the user-initiated Nearby Discovery flow may activate a Wi-Fi Aware
   custom path;
-- Manual, QR, Invite, Room, and standalone mDNS transfers continue to create
-  ordinary iroh endpoints without Wi-Fi Aware;
-- when Nearby cannot establish an eligible Wi-Fi Aware channel before the
-  endpoint is built, the transfer proceeds through ordinary iroh; and
+- Manual, QR, Invite, standalone Room, and standalone mDNS transfers continue
+  to create ordinary iroh endpoints without Wi-Fi Aware;
+- when Nearby has no unambiguous paired Wi-Fi Aware device, the transfer
+  proceeds through ordinary iroh; and
 - once a hybrid endpoint exists, Envoix does not run a second provider-level
   fallback state machine. iroh owns path selection and migration.
 
@@ -53,23 +54,27 @@ peer EndpointAddr -> iroh QUIC+-> ordinary IP direct
                            SPAKE2 -> Manifest v2
 ```
 
-The remote `EndpointAddr` contains the same `EndpointId` with all usable
-transport addresses:
+Room pairing supplies the authenticated peer `EndpointAddr` with ordinary
+addresses. The sender verifies that its `EndpointId` equals the Wi-Fi Aware
+bootstrap ID, then deliberately starts the QUIC connection with only the
+custom address:
 
 ```text
 EndpointAddr {
     id: expected_peer_id,
     addrs: [
         TransportAddr::Custom(wifi_aware_addr),
-        TransportAddr::Ip(...),
-        TransportAddr::Relay(...),
     ],
 }
 ```
 
-The existing iroh address lookup remains enabled for ordinary direct/relay
-addresses. The Wi-Fi Aware custom address is added only for the selected
-Nearby peer.
+This prevents an ordinary path from winning the initial handshake before the
+custom path is validated. Both endpoints still bind their ordinary IP
+transports; once the custom connection exists, iroh's NAT traversal exchanges
+the IP candidates and opens the backup on the same connection. The endpoint's
+relay transport remains configured, but iroh 1.0.3 cannot safely inject the
+Room relay address after this custom-first connection is bound. A prevalidated
+relay backup is therefore not claimed by this milestone.
 
 Swift must still use Apple's WiFiAware and Network.framework APIs to:
 
@@ -109,10 +114,14 @@ MTU negotiated before QUIC. `PathStats` exposes RTT, congestion window,
 cumulative loss, black-hole count, and current MTU, but a production policy
 must interpret those values and their deltas explicitly.
 
-## 4. Current Envoix gap
+The Nearby hybrid endpoint does not use that default selector. Its construction
+and small deterministic policy are described in section 9: the first hop is
+custom-only, so an ordinary path cannot win the initial handshake race.
 
-The preserved Apple-to-Apple implementation already runs iroh QUIC over a
-Wi-Fi Aware connected datagram channel, but it is isolated:
+## 4. Implemented Envoix integration
+
+The preserved custom-only diagnostic still runs iroh QUIC over an isolated
+Wi-Fi Aware connected datagram channel:
 
 ```rust
 Endpoint::builder(...)
@@ -122,18 +131,26 @@ Endpoint::builder(...)
     .add_custom_transport(wifi_aware)
 ```
 
-It also generates a fresh endpoint secret for that custom-only endpoint. This
-proves the Wi-Fi Aware path and Manifest v2 data plane, but it prevents iroh
-from seeing alternative IP or relay paths.
+The Nearby production path now differs intentionally:
 
-Full integration requires:
+1. `ENVXWA02` exchanges the endpoint IDs and datagram limits over the
+   Apple-owned connected UDP channel;
+2. one fresh endpoint secret owns Wi-Fi Aware custom, IP direct, and optional
+   relay transports;
+3. the receiver advertises its authenticated endpoint address through Room
+   pairing;
+4. the sender requires the Room peer ID to equal the Wi-Fi Aware bootstrap ID;
+5. the sender dials the custom address first and iroh NAT traversal opens the
+   ordinary IP backup;
+6. one QUIC connection runs one SPAKE2 and Manifest v2 session; and
+7. the custom bridge remains alive until the sender finishes or the receiver's
+   pending offer completes its destination save.
 
-1. using the same session identity for custom, IP, and relay paths;
-2. retaining ordinary transports and address lookup;
-3. adding the Wi-Fi Aware custom address to the same remote `EndpointAddr`;
-4. using one QUIC connection and observing its selected path; and
-5. making custom-path lifetime changes visible without terminating the whole
-   endpoint while another path remains usable.
+The sender initially supplies only the custom address, so Wi-Fi Aware can be
+selected immediately. iroh's NAT traversal then validates the ordinary IP
+candidate on that same connection and retains it as backup.
+
+Ordinary endpoint builders and non-Nearby callers remain unchanged.
 
 ## 5. Nearby activation boundary
 
@@ -144,19 +161,24 @@ A Wi-Fi Aware path may be added only when:
 
 1. the local platform and signed application have the required Wi-Fi Aware
    capabilities, entitlement, and service declarations;
-2. the user selected a concrete peer from the current foreground Nearby
+2. the user selected a concrete BLE peer from the current foreground Nearby
    generation;
-3. that selection resolves to the intended `WAPairedDevice` without
-   display-name substring matching;
+3. the current Apple snapshot contains exactly one Wi-Fi Aware paired device;
 4. the remote peer has an active compatible Nearby/Wi-Fi Aware context;
 5. the connected UDP channel reports Wi-Fi Aware path metadata;
 6. both endpoints exchange and verify the expected iroh endpoint IDs; and
 7. the negotiated datagram capacity is at least 1,200 bytes.
 
-BLE and discovery-only mDNS identities are untrusted and ephemeral. They are
-not silently treated as a cryptographic binding to a paired Apple device. If
-the exact association cannot be established, the custom address is omitted and
-iroh continues with its ordinary paths.
+BLE and discovery-only mDNS identities are untrusted and ephemeral. The
+one-day integration therefore never guesses between paired devices and never
+matches display names: zero or multiple paired Wi-Fi Aware devices omit the
+custom path. With exactly one candidate, Room authentication still must bind
+its endpoint ID to the bootstrap ID before dialing. A wrong candidate fails
+closed rather than reaching payload.
+
+This is deliberately narrower than a future peer-registry association. It is
+safe for the current two-device test topology and does not claim that BLE and
+Apple paired-device identifiers are intrinsically equivalent.
 
 No Wi-Fi Aware pairing prompt, publisher, listener, or connection is created
 for a non-Nearby entry point.
@@ -169,18 +191,23 @@ already-bound endpoint.
 
 The first implementation therefore uses a per-session hybrid endpoint:
 
-1. start ordinary iroh address preparation;
-2. concurrently attempt peer-specific Wi-Fi Aware enrichment within a bounded
-   setup deadline;
-3. if the Apple channel becomes ready, exchange expected endpoint IDs and MTU;
-4. build one endpoint with IP, relay, address lookup, and the custom transport;
-5. connect with an `EndpointAddr` containing all known addresses; or
-6. if enrichment is unavailable by the deadline, build the unchanged ordinary
-   iroh endpoint.
+1. Nearby captures the only eligible Apple paired-device ID before its
+   discovery generation stops;
+2. Swift establishes and validates the connected Wi-Fi Aware UDP channel;
+3. Rust exchanges endpoint IDs and MTU through `ENVXWA02`;
+4. Rust builds one endpoint with IP, configured relay transport, and the custom
+   transport;
+5. Room pairing exchanges the receiver address and authenticates its endpoint
+   ID;
+6. the sender verifies Room/bootstrap identity equality and initially dials
+   only the custom address; and
+7. iroh NAT traversal validates the ordinary IP backup on that connection.
 
-A late Wi-Fi Aware result after endpoint construction is closed and ignored for
-that transfer. It may be used by the next Nearby transfer. This prevents a
-stale Nearby generation from mutating an active session.
+When the paired-device snapshot is absent or ambiguous, no Apple channel is
+opened and the existing ordinary Room path runs. Once a unique candidate has
+entered native setup, setup errors are currently explicit failures rather than
+an uncoordinated one-sided fallback. A coordinated pre-admission timeout is a
+follow-up reliability item; it must not retry after authentication or payload.
 
 A long-lived custom-transport registry capable of attaching channels to an
 already-bound shared endpoint would remove the setup wait, but it introduces
@@ -189,20 +216,24 @@ per-session hybrid endpoint is proven.
 
 ## 7. Identity and bootstrap
 
-The current `ENVXWA02` bootstrap remains useful, but it must exchange the
-endpoint IDs selected by the ordinary iroh session rather than generating a
-separate Wi-Fi Aware identity.
+`ENVXWA02` exchanges the fresh endpoint IDs and datagram limits before the
+hybrid endpoints are bound. Those same secrets then own the custom, IP, and
+optional relay transports.
 
-The bootstrap must reject:
+The bootstrap rejects:
 
-- a peer ID that differs from the selected invitation/paired-peer context;
 - a reflected local endpoint ID;
 - a malformed version, role, or frame length;
 - an invalid datagram limit; and
-- a stale response from another Nearby generation.
+- frames that do not carry the expected bootstrap magic and role.
+
+After Room pairing, the sender additionally requires the authenticated Room
+peer ID to equal the bootstrapped Wi-Fi Aware peer ID. BLE display names are
+never used as an identity check.
 
 The custom address uses the private Envoix Wi-Fi Aware transport ID and is
-associated with the same remote `EndpointId` used by IP and relay.
+associated with the same remote `EndpointId` later used by the validated IP
+backup.
 
 QUIC authenticates path migration within the same connection. SPAKE2 and
 Manifest v2 run once above it; changing the selected physical path does not
@@ -231,53 +262,40 @@ milestone and must not precede migration correctness.
 
 ## 9. Guarded iroh path policy
 
-The default selector is a reference implementation and test oracle, not the
-unqualified production policy. iroh remains the path-selection and migration
-engine, while Envoix divides its guard into two parts:
+iroh remains the path-validation and migration engine. Envoix installs one
+small `PreferWifiAwarePath` policy only on Nearby hybrid endpoints:
 
-1. `GuardedNearbyPathAdmission` decides whether the peer-bound Wi-Fi Aware
-   custom address may be exposed to iroh at all.
-2. `GuardedNearbyPathSelector`, installed through iroh's `PathSelector`
-   interface, makes deterministic choices among paths that iroh has already
-   validated.
+1. the authenticated sender initially dials only the already-ready Wi-Fi Aware
+   custom address;
+2. whenever a validated Wi-Fi Aware path is open, select it;
+3. iroh NAT traversal independently validates an ordinary IP candidate on that
+   same connection; and
+4. if Wi-Fi Aware disappears, prefer an open IP or other direct path over a
+   relay, then choose the lowest RTT within that class.
 
-This split is required by the pinned iroh 1.0.3 API. `PathSelector::select` is
-invoked on path lifecycle events, not on a periodic sampling schedule. It
-therefore cannot truthfully implement a continuous goodput/no-progress
-controller by itself. The admission guard owns the healthy observation window,
-peer binding, negotiated MTU, native queue-pressure checks, and cooldown before
-the custom address enters the endpoint.
+The custom-only first hop is necessary because an IP-first experiment confirmed
+that iroh 1.0.3 cannot attach a still-unvalidated custom path after the QUIC
+handshake has finished. The production construction removes that race instead
+of relying on address order. The deterministic loopback regression starts
+custom-only, observes selected Wi-Fi Aware plus the IP backup opened by NAT
+traversal, cuts both custom bridges, and proves the same QUIC connection and
+bidirectional stream continue over IP.
 
-Once admitted:
+The policy does not claim to estimate bulk throughput, signal quality, energy,
+or native queue pressure. Those inputs remain future optimization work. The
+current correctness controls are:
 
-- relay remains a backup while a validated primary path exists;
-- the current path remains sticky across short RTT jitter;
-- selector decisions use only the current lifecycle snapshot, never pretend
-  cumulative counters are interval samples;
-- hybrid QUIC uses a 2-second per-path keepalive and 6-second per-path idle
-  timeout, giving three failed observations before iroh abandons the path and
-  invokes selection again;
-- MTU is fixed at 1,200 bytes across every hybrid path; and
-- every observed switch records the old path, new path, health evidence, and
-  reason.
-
-The first selector version does not claim to infer bulk throughput from RTT.
-H1 and H5 establish measured thresholds as named constants; no unexplained
-magic values are introduced. If the available iroh statistics cannot support a
-stable decision, the selector falls back to deterministic priority with health
-gating rather than pretending to estimate capacity.
-
-Nearby activates Wi-Fi Aware eligibility. It does not guarantee that Wi-Fi
-Aware wins when another healthy primary path is measurably preferable. Any
-future policy that always prefers Wi-Fi Aware is a separate, evidence-backed
-product decision.
+- fixed 1,200-byte hybrid MTU;
+- 2-second path keepalive and 6-second path idle timeout;
+- actual path changes reported through the existing transfer event stream; and
+- no provider-level second connection or payload retry.
 
 Existing path policy is interpreted as follows:
 
 | Policy | Paths exposed to iroh |
 | --- | --- |
-| Auto | Wi-Fi Aware when Nearby-ready, IP direct, and relay |
-| DirectOnly | Wi-Fi Aware when Nearby-ready and IP direct; no relay |
+| Auto | Wi-Fi Aware first; IP direct validated by NAT traversal; relay transport configured but no prevalidated remote relay path |
+| DirectOnly | Wi-Fi Aware first and IP direct via NAT traversal; no relay |
 | RelayOnly | relay only; do not activate Wi-Fi Aware |
 
 The activity and UI report the actual selected path, not merely the set of
@@ -290,9 +308,13 @@ There are two distinct stages:
 
 ### Before the hybrid endpoint exists
 
-If Wi-Fi Aware is unsupported, unpaired, unavailable, times out, or has an
-invalid MTU, omit its custom address and build the ordinary iroh endpoint. This
-is path enrichment failure, not a second transfer attempt.
+If the Nearby snapshot contains zero or multiple Wi-Fi Aware paired devices,
+omit the custom path and run the existing ordinary Room transfer.
+
+After one unique device has been staged and native setup begins, an unavailable
+device, setup timeout, invalid MTU, or identity mismatch is currently an
+explicit failure. The two peers do not independently guess whether to retry an
+ordinary session; a coordinated pre-admission fallback remains follow-up work.
 
 Do not continue after:
 
@@ -303,8 +325,8 @@ Do not continue after:
 
 ### After one iroh connection exists
 
-If the selected custom path disappears, iroh should validate and migrate to
-another IP or relay path within the same QUIC connection. The Manifest job,
+If the selected custom path disappears, iroh should migrate to the already
+validated IP path within the same QUIC connection. The Manifest job,
 SPAKE2 session, stream, progress, and activity remain the same.
 
 If no alternative path is usable before QUIC's connection deadline, return the
@@ -327,7 +349,8 @@ activity-scoped identity, while dialers and Room peers use ephemeral identities.
 
 ## 11. Recovery baseline
 
-The clean worktree is `feat/wifi-aware` at `acd36fe`. Source from the previous
+The clean worktree is `feat/wifi-aware`; the restored checkpoint is
+`286018c`. Source from the previous
 detached working directory is preserved at:
 
 ```text
@@ -345,8 +368,9 @@ Persistent physical evidence is stored at:
 /Users/moranxuege/SJTU_JI/2026SU/ECE4410J/WiFiAwareEvidence/2026-07-24
 ```
 
-It proves custom-only Wi-Fi Aware in both Apple directions. Hybrid path
-selection and migration remain unproven until the gates below pass.
+It proves custom-only Wi-Fi Aware in both Apple directions. Hybrid selection
+and Wi-Fi-Aware-to-IP migration are proven in memory; Apple physical hybrid
+selection and migration remain gated on explicit approval.
 
 ## 12. Execution phases
 
@@ -368,8 +392,9 @@ Verification:
 
 ### H1 — Prove mixed iroh paths in memory
 
-- build endpoints containing test custom, IP, and optional relay transports;
-- use one endpoint identity and one mixed `EndpointAddr`;
+- build endpoints containing test custom and IP transports;
+- use one endpoint identity, a custom-only first hop, and iroh NAT traversal
+  for the IP backup;
 - verify the default selector can choose custom or IP according to RTT;
 - model admission and selection separately against jitter, cumulative-counter
   rollover, black-hole, MTU, loss, cooldown, and stale-stat sequences;
@@ -386,15 +411,19 @@ Verification:
 Current H1 evidence:
 
 - `mixed_endpoint_migrates_from_wifi_aware_to_ip_on_same_connection` builds one
-  endpoint pair with simultaneous custom and IP paths;
+  endpoint pair with deterministic custom and IPv4 loopback paths;
+- Wi-Fi Aware is selected immediately, after which iroh NAT traversal opens and
+  retains IP as backup;
 - cutting both custom bridges preserves the original QUIC connection and
   bidirectional stream, then continues the second payload over IP;
-- iroh's stock 5-second keepalive / 15-second path-idle policy migrated in
-  15.21 seconds; and
-- the Nearby hybrid 2-second / 6-second policy migrated in 6.23 seconds.
+- the Nearby hybrid 2-second / 6-second policy migrates in approximately
+  6.2 seconds; and
+- the deterministic regression passed five consecutive runs, followed by the
+  complete session test suite.
 
-Reverse IP-to-custom migration, relay coexistence, repeated identity teardown,
-and fault/counter model coverage remain open H1 gates.
+Reverse IP-to-custom recovery, physical relay coexistence, and longer repeated
+teardown remain reliability gates. They are not represented as completed
+features.
 
 This phase is the go/no-go gate for full integration. If same-connection
 migration cannot be made reliable with the pinned iroh API, retain the proven
@@ -409,7 +438,8 @@ Device use: none.
 - remove `clear_ip_transports()` and `clear_relay_transports()` only for the
   hybrid builder;
 - retain existing address lookup and relay configuration;
-- merge the custom address into the expected peer `EndpointAddr`;
+- verify the Room peer ID, then use the custom address as the initial dial
+  address so IP cannot win the first handshake race;
 - keep the ordinary endpoint builder byte-for-byte behaviorally compatible
   when no Wi-Fi Aware channel is supplied; and
 - preserve cancellation and bounded datagram queues;
@@ -428,11 +458,16 @@ Verification:
 
 Device use: none.
 
+Status: complete locally. Ordinary and hybrid builders share the builder
+implementation without changing ordinary transport configuration. Candidate
+filtering preserves non-IP addresses, Room rejects endpoint identity mismatch,
+and the hybrid connection learns its IP backup through iroh NAT traversal.
+
 ### H3 — Gate activation from Nearby Discovery
 
 - make the Nearby orchestrator the only production caller allowed to supply a
   Wi-Fi Aware custom channel to the hybrid builder;
-- resolve the exact selected paired device;
+- never guess among multiple paired devices or use display-name matching;
 - reject stale discovery generations and name-only matches;
 - close late or unused native channels;
 - leave Manual, QR, Invite, Room, and standalone mDNS callers unchanged; and
@@ -444,10 +479,15 @@ Verification:
 - non-Nearby tests never construct or probe a Wi-Fi Aware transport;
 - Nearby without peer-specific readiness builds an ordinary endpoint;
 - Nearby with readiness builds a hybrid endpoint;
-- selecting peer A cannot attach peer B's custom channel;
+- a candidate whose bootstrap ID differs from the Room peer fails before
+  payload;
 - RelayOnly never starts Wi-Fi Aware.
 
 Device use: none until the final H3 gate.
+
+Status: complete locally for the two-device topology. Only the Nearby BLE flow
+can stage a Wi-Fi Aware device ID. Zero or multiple Apple paired devices use
+ordinary iroh; non-Nearby entry points never stage the route.
 
 ### H4 — No-device quality gate
 
@@ -462,6 +502,24 @@ Run serially through `scripts/with-build-cache-guard.sh`:
 
 Do not start Simulator and do not use an Android device.
 
+Status: passed on 2026-07-26:
+
+- `envoix-session`: 27/27 tests;
+- `envoix-ffi`: 3/3 tests;
+- strict Clippy with `-D warnings`;
+- Rust formatting and `git diff --check`;
+- generic arm64 iOS app build; and
+- generic arm64 iOS `build-for-testing`, including the hybrid physical-test
+  entry point.
+
+The test build emits one pre-existing Swift 6 actor-isolation warning in
+`WifiAwareCapabilityTests`; the new Nearby hybrid sources compile without a
+new warning.
+
+No Simulator or Android device was started. The Android compatibility run was
+deferred to avoid occupying the device and build branch already in use by the
+separate Android work.
+
 ### H5 — Batched Apple physical gate
 
 Prebuild once, install the same signed product on both devices, and use
@@ -473,8 +531,8 @@ Required scenarios:
 | --- | --- |
 | Wi-Fi Aware custom-only diagnostic, both directions | selected path is Wi-Fi Aware |
 | Nearby hybrid Auto, both directions | one iroh connection; selected path accurately reported |
-| Wi-Fi Aware disabled before endpoint build | ordinary iroh connection |
-| Wi-Fi Aware custom path lost during payload | same QUIC connection migrates to IP or relay |
+| no unambiguous Wi-Fi Aware device in Nearby snapshot | ordinary iroh connection |
+| Wi-Fi Aware custom path lost during payload | same QUIC connection migrates to validated IP |
 | ordinary IP path lost while Wi-Fi Aware remains | same connection continues on Wi-Fi Aware |
 | Manual / QR / Invite / Room while paired | no Wi-Fi Aware custom path exists |
 | endpoint-ID or pairing mismatch | fail without ordinary fallback |
@@ -489,6 +547,9 @@ Payload gates:
 
 Use the iPad through wireless CoreDevice where possible so the Android device
 and its USB port remain available to the other branch.
+
+Status: not started. The user requested that both-Apple testing wait for
+explicit approval.
 
 ### H6 — Reliability and performance
 
@@ -528,6 +589,11 @@ safe.
 
 Existing ordinary iroh APIs and behavior must remain unchanged when no custom
 channel is supplied.
+
+The additive UniFFI surface is advertised as API version 6 with capability
+`wifi_aware_nearby_hybrid_v1`. Existing transport functions remain exported;
+the new entry points are `send_transfer_job_v2_nearby_hybrid` and
+`receive_transfer_offer_v2_nearby_hybrid`.
 
 ## 14. Commit sequence
 

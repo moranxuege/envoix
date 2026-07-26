@@ -13,10 +13,10 @@ use envoix_client::api::{
     TransferEvent, parse_broker_addr, receive_manifest_v2_offer_enable_mdns,
     receive_manifest_v2_offer_over_datagram_transport,
     receive_manifest_v2_offer_over_native_transport, receive_manifest_v2_offer_via_room,
-    receive_manifest_v2_offer_with_bound_peer, send_manifest_v2_enable_mdns,
-    send_manifest_v2_manual, send_manifest_v2_over_datagram_transport,
-    send_manifest_v2_over_native_transport, send_manifest_v2_to_endpoint_addr,
-    send_manifest_v2_via_room,
+    receive_manifest_v2_offer_via_room_hybrid, receive_manifest_v2_offer_with_bound_peer,
+    send_manifest_v2_enable_mdns, send_manifest_v2_manual,
+    send_manifest_v2_over_datagram_transport, send_manifest_v2_over_native_transport,
+    send_manifest_v2_to_endpoint_addr, send_manifest_v2_via_room, send_manifest_v2_via_room_hybrid,
 };
 use envoix_qr::{QrInvitePayload, generate_token};
 use envoix_types::PairingStep;
@@ -26,10 +26,10 @@ use tokio::task::JoinSet;
 use super::{
     EnvoixError, EnvoixRuntimeSettings, FfiFailureCategory, FfiFailureCode, FfiFailureOrigin,
     FfiFailurePhase, FfiManifestV2Phase, FfiNativeDatagramTransport, FfiNativeDuplexTransport,
-    FfiRecoveryAction, FfiTransferDirection, FfiTransferFailure, FfiTransferJobV2,
-    FfiTransferRequest, TransferObserver, build_client_for_request, core_datagram_transport,
-    core_native_transport, on_ffi_runtime, op_err, peer_sources_for_request, spawn_on_ffi_runtime,
-    transfer_options_for_request,
+    FfiPathPolicy, FfiRecoveryAction, FfiTransferDirection, FfiTransferFailure, FfiTransferJobV2,
+    FfiTransferMode, FfiTransferRequest, TransferObserver, build_client_for_request,
+    core_datagram_transport, core_native_transport, on_ffi_runtime, op_err,
+    peer_sources_for_request, spawn_on_ffi_runtime, transfer_options_for_request,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -411,6 +411,75 @@ pub async fn send_transfer_job_v2(
     .await
 }
 
+/// Runs a Nearby Room transfer on one iroh endpoint carrying Wi-Fi Aware,
+/// direct IP, and relay candidates. The authenticated Room peer must be the
+/// same endpoint discovered during Wi-Fi Aware bootstrap.
+#[allow(clippy::too_many_arguments)]
+#[uniffi::export]
+pub async fn send_transfer_job_v2_nearby_hybrid(
+    job: Arc<FfiTransferJobV2>,
+    settings: EnvoixRuntimeSettings,
+    request: FfiTransferRequest,
+    state_directory: String,
+    transport: Arc<dyn FfiNativeDatagramTransport>,
+    maximum_datagram_size: u32,
+    cancellation: Arc<FfiManifestV2Cancellation>,
+    observer: Arc<dyn TransferObserver>,
+) -> Result<FfiManifestV2Completion, EnvoixError> {
+    spawn_on_ffi_runtime(async move {
+        if request.direction != FfiTransferDirection::Send {
+            return Err(EnvoixError::Operation {
+                reason: "send_transfer_job_v2_nearby_hybrid requires a send request".into(),
+            });
+        }
+        let state_directory = required_directory(state_directory, "state_directory")?;
+        let (broker, code, config) = nearby_hybrid_room_context(&settings, &request)?;
+        let job = job.clone_sealed_job().await?;
+        let manifest = job
+            .manifest()
+            .expect("clone_sealed_job guarantees a manifest")
+            .clone();
+        observer.on_started(
+            u32::try_from(manifest.entries.len()).unwrap_or(u32::MAX),
+            manifest.totals.total_plaintext_bytes,
+        );
+        let events: Arc<dyn EventSink> = Arc::new(NativeSessionEvents {
+            observer: observer.clone(),
+        });
+        let summary = send_manifest_v2_via_room_hybrid(
+            core_datagram_transport(transport),
+            maximum_datagram_size,
+            broker,
+            &code,
+            &job,
+            state_directory,
+            config,
+            events,
+            &cancellation.token,
+        )
+        .await
+        .map_err(|error| {
+            report_v2_failure(
+                observer.as_ref(),
+                &error,
+                FfiTransferDirection::Send,
+                FfiFailurePhase::Transferring,
+            );
+            op_err(error)
+        })?;
+        observer.on_phase(FfiManifestV2Phase::Delivered);
+        observer.on_completed(manifest.totals.total_plaintext_bytes);
+        Ok(FfiManifestV2Completion {
+            job_id: encode_job_id(manifest.job_id),
+            entry_count: u32::try_from(summary.data_plane.entry_results.len()).unwrap_or(u32::MAX),
+            total_plaintext_bytes: manifest.totals.total_plaintext_bytes,
+            delivery_proof_digest: summary.delivery_proof_digest.0.to_vec(),
+            saved_paths: Vec::new(),
+        })
+    })
+    .await
+}
+
 /// Runs the canonical sender over a platform-established Wi-Fi Aware stream.
 /// The invitation token still authenticates both peers inside Rust.
 #[uniffi::export]
@@ -564,6 +633,59 @@ pub async fn receive_transfer_offer_v2(
             observer,
         )
         .await
+    })
+    .await
+}
+
+/// Receives a Nearby Room offer on one iroh endpoint carrying Wi-Fi Aware,
+/// direct IP, and relay candidates.
+#[uniffi::export]
+pub async fn receive_transfer_offer_v2_nearby_hybrid(
+    settings: EnvoixRuntimeSettings,
+    request: FfiTransferRequest,
+    state_directory: String,
+    transport: Arc<dyn FfiNativeDatagramTransport>,
+    maximum_datagram_size: u32,
+    cancellation: Arc<FfiManifestV2Cancellation>,
+    observer: Arc<dyn TransferObserver>,
+) -> Result<Arc<FfiPendingManifestV2Receive>, EnvoixError> {
+    spawn_on_ffi_runtime(async move {
+        if request.direction != FfiTransferDirection::Receive {
+            return Err(EnvoixError::Operation {
+                reason: "receive_transfer_offer_v2_nearby_hybrid requires a receive request".into(),
+            });
+        }
+        let state_directory = required_directory(state_directory, "state_directory")?;
+        let (broker, code, config) = nearby_hybrid_room_context(&settings, &request)?;
+        let events: Arc<dyn EventSink> = Arc::new(NativeSessionEvents {
+            observer: observer.clone(),
+        });
+        let pending = receive_manifest_v2_offer_via_room_hybrid(
+            core_datagram_transport(transport),
+            maximum_datagram_size,
+            broker,
+            &code,
+            listen_addrs(&config),
+            config,
+            events,
+            &cancellation.token,
+        )
+        .await
+        .map_err(|error| {
+            report_v2_failure(
+                observer.as_ref(),
+                &error,
+                FfiTransferDirection::Receive,
+                FfiFailurePhase::Connecting,
+            );
+            op_err(error)
+        })?;
+        Ok(Arc::new(project_pending_offer(
+            CorePendingManifestV2Receive::Iroh(Box::new(pending)),
+            state_directory,
+            cancellation,
+            FfiSelectedDataPath::Unknown,
+        )))
     })
     .await
 }
@@ -813,6 +935,48 @@ async fn receive_one_offer_attempt(
         options.relay.as_deref(),
     )
     .await
+}
+
+fn nearby_hybrid_room_context(
+    settings: &EnvoixRuntimeSettings,
+    request: &FfiTransferRequest,
+) -> Result<
+    (
+        envoix_client::api::EndpointAddr,
+        String,
+        envoix_client::api::SessionConfig,
+    ),
+    EnvoixError,
+> {
+    if request.mode != FfiTransferMode::Room {
+        return Err(EnvoixError::Operation {
+            reason: "Nearby hybrid transport requires Room pairing".into(),
+        });
+    }
+    if request.path_policy == FfiPathPolicy::RelayOnly {
+        return Err(EnvoixError::Operation {
+            reason: "Nearby hybrid transport is incompatible with relay-only routing".into(),
+        });
+    }
+    if !request.rendezvous.use_room || !request.rendezvous.internet_available {
+        return Err(EnvoixError::Operation {
+            reason: "Nearby hybrid transport requires an available Room rendezvous route".into(),
+        });
+    }
+    let source = peer_sources_for_request(settings, request)?
+        .into_iter()
+        .find_map(|attempt| match attempt.source {
+            PeerSource::Room { code, broker } => Some((code, broker)),
+            _ => None,
+        })
+        .ok_or_else(|| EnvoixError::Operation {
+            reason: "Nearby hybrid transport has no Room rendezvous route".into(),
+        })?;
+    let options = transfer_options_for_request(settings, request, None)?;
+    let client = build_client_for_request(settings, request)?;
+    let config = client.session_config(&options);
+    let broker = parse_broker_addr(&source.1, options.relay.as_deref()).map_err(op_err)?;
+    Ok((broker, source.0, config))
 }
 
 async fn send_attempt(
@@ -1321,6 +1485,26 @@ fn op_err_core(error: impl std::fmt::Display) -> SessionError {
 mod tests {
     use super::*;
 
+    fn nearby_request() -> FfiTransferRequest {
+        FfiTransferRequest {
+            direction: FfiTransferDirection::Send,
+            mode: FfiTransferMode::Room,
+            peer_descriptor: String::new(),
+            invite: String::new(),
+            code: "test-room-code".into(),
+            token: String::new(),
+            broker: String::new(),
+            relay: String::new(),
+            config_path: String::new(),
+            path_policy: FfiPathPolicy::Auto,
+            rendezvous: super::super::FfiRendezvousPlan {
+                use_room: true,
+                use_mdns: true,
+                internet_available: true,
+            },
+        }
+    }
+
     #[test]
     fn room_joining_keeps_the_platform_waiting_state() {
         assert_eq!(pairing_phase(PairingStep::Joining), None);
@@ -1344,5 +1528,21 @@ mod tests {
             io_failure_recovery(FfiTransferDirection::Send),
             FfiRecoveryAction::Retry
         );
+    }
+
+    #[test]
+    fn nearby_hybrid_rejects_non_room_and_relay_only_requests() {
+        let settings = EnvoixRuntimeSettings::default();
+        let mut request = nearby_request();
+        request.mode = FfiTransferMode::Mdns;
+        assert!(nearby_hybrid_room_context(&settings, &request).is_err());
+
+        request = nearby_request();
+        request.path_policy = FfiPathPolicy::RelayOnly;
+        assert!(nearby_hybrid_room_context(&settings, &request).is_err());
+
+        request = nearby_request();
+        request.rendezvous.internet_available = false;
+        assert!(nearby_hybrid_room_context(&settings, &request).is_err());
     }
 }

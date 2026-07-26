@@ -147,6 +147,7 @@ struct ContentView: View {
                     ToolbarItemGroup(placement: .topBarTrailing) {
                         NavigationLink {
                             NearbyDiscoveryView(coordinator: nearbyCoordinator) { selection in
+                                clearStagedNearbyWifiAwareDeviceIDs()
                                 nearbyPairingSelection = selection
                                 nearbyInboundInvite = nil
                                 nearbyPairingError = nil
@@ -443,17 +444,20 @@ struct ContentView: View {
     }
 
     private func switchMobileToReceive(_ input: String, selection: SendSelectionSnapshot) {
+        clearStagedNearbyWifiAwareDeviceIDs()
         preservedSendSelection = selection
         pendingReceivePairingInput = input
         replaceMobileSheet(with: .receive)
     }
 
     private func openNearbyDevicesFromSend(_ selection: SendSelectionSnapshot) {
+        clearStagedNearbyWifiAwareDeviceIDs()
         preservedSendSelection = selection
         replaceMobileSheet(with: .nearbyDevices)
     }
 
     private func selectNearbyPeer(_ selection: NearbyPairingSelection) {
+        clearStagedNearbyWifiAwareDeviceIDs()
         nearbyPairingSelection = selection
         nearbyInboundInvite = nil
         nearbyPairingError = nil
@@ -461,6 +465,7 @@ struct ContentView: View {
     }
 
     private func switchMobileToSend(_ input: String) {
+        clearStagedNearbyWifiAwareDeviceIDs()
         pendingSendPairingInput = input
         replaceMobileSheet(with: .send)
     }
@@ -478,6 +483,28 @@ struct ContentView: View {
         nearbyInboundInvite = nil
         nearbyPairingBusy = false
         nearbyPairingError = nil
+        clearStagedNearbyWifiAwareDeviceIDs()
+    }
+
+    private func clearStagedNearbyWifiAwareDeviceIDs() {
+        model.send.clearStagedNearbyWifiAwareDeviceID()
+        model.receive.clearStagedNearbyWifiAwareDeviceID()
+    }
+
+    private var nearbyWifiAwareRouteDeviceID: String? {
+        uniqueNearbyWifiAwareDeviceID(in: nearbyCoordinator.state.pairedDevices)
+    }
+
+    private func stageNearbyWifiAwareDeviceID(_ sourceScopedID: String?, role: FfiInviteRole) {
+        clearStagedNearbyWifiAwareDeviceIDs()
+        switch role {
+        case .send:
+            model.send.stageNearbyWifiAwareDeviceID(sourceScopedID)
+        case .receive:
+            model.receive.stageNearbyWifiAwareDeviceID(sourceScopedID)
+        case .unknown:
+            break
+        }
     }
 
     private var nearbyAllowedRole: FfiInviteRole? {
@@ -503,6 +530,7 @@ struct ContentView: View {
             ))
             return
         }
+        clearStagedNearbyWifiAwareDeviceIDs()
         nearbyPairingSelection = NearbyPairingSelection(
             discoveryPeerKey: offer.senderPeerKey,
             displayName: offer.senderDisplayName,
@@ -515,6 +543,7 @@ struct ContentView: View {
 
     private func beginNearbyPairing(role: FfiInviteRole) {
         guard !nearbyPairingBusy, let selection = nearbyPairingSelection else { return }
+        let wifiAwareDeviceID = nearbyWifiAwareRouteDeviceID
         if let inbound = nearbyInboundInvite {
             guard nearbyAllowedRole == role else {
                 nearbyPairingError = AppText.value(
@@ -525,6 +554,7 @@ struct ContentView: View {
                 return
             }
             nearbyInboundInvite = nil
+            stageNearbyWifiAwareDeviceID(wifiAwareDeviceID, role: role)
             nearbyCoordinator.stop()
             if role == .send {
                 pendingSendPairingInput = inbound
@@ -561,6 +591,7 @@ struct ContentView: View {
                     nearbyPairingError = error
                     return
                 }
+                stageNearbyWifiAwareDeviceID(wifiAwareDeviceID, role: role)
                 nearbyCoordinator.stop()
                 if role == .send {
                     pendingSendPairingInput = invite.code

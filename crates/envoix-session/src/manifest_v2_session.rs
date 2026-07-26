@@ -22,6 +22,7 @@ use envoix_transfer::{
     SenderTransferPhaseV2, TransferJobError, sender_resume_intent,
 };
 use envoix_types::{DataPath, TransferDirection, TransferId};
+use iroh::Endpoint;
 
 use crate::connection::IrohFrameConnection;
 use crate::datagram_transport::{
@@ -129,6 +130,10 @@ impl std::fmt::Debug for PendingManifestV2Receive {
 }
 
 impl PendingManifestV2Receive {
+    pub(crate) fn attach_datagram_bridge(&mut self, bridge: DatagramTransportBridge) {
+        self.datagram_bridge = Some(bridge);
+    }
+
     pub fn offer(&self) -> &ManifestOfferV2 {
         &self.offer
     }
@@ -276,7 +281,6 @@ pub async fn send_manifest_v2_to_endpoint_addr(
     cancel: &TransferCancelToken,
 ) -> Result<SenderManifestV2SessionSummary, SessionError> {
     sealed_manifest(job)?;
-    events.on_event(envoix_transfer::TransferEvent::Connecting);
     let local_endpoint = super::build_dial_endpoint(
         &config.identity,
         &config.data_relay(),
@@ -285,6 +289,29 @@ pub async fn send_manifest_v2_to_endpoint_addr(
         config.data_stream_window,
     )
     .await?;
+    send_manifest_v2_from_endpoint(
+        local_endpoint,
+        peer_addr,
+        job,
+        state_directory,
+        pairing,
+        events,
+        cancel,
+    )
+    .await
+}
+
+pub(crate) async fn send_manifest_v2_from_endpoint(
+    local_endpoint: Endpoint,
+    peer_addr: iroh::EndpointAddr,
+    job: &CanonicalTransferJob,
+    state_directory: PathBuf,
+    pairing: &PairingConfig,
+    events: Arc<dyn EventSink>,
+    cancel: &TransferCancelToken,
+) -> Result<SenderManifestV2SessionSummary, SessionError> {
+    sealed_manifest(job)?;
+    events.on_event(envoix_transfer::TransferEvent::Connecting);
     let mut connection = match dial_peer_addr_for_protocol(
         local_endpoint.clone(),
         peer_addr,
@@ -572,7 +599,7 @@ pub async fn receive_manifest_v2_offer_over_datagram_transport(
     let local_endpoint = datagram.bound_endpoint.local_endpoint.clone();
     match receive_manifest_v2_offer(datagram.bound_endpoint, pairing, events, cancel).await {
         Ok(mut pending) => {
-            pending.datagram_bridge = Some(datagram.bridge);
+            pending.attach_datagram_bridge(datagram.bridge);
             Ok(pending)
         }
         Err(error) => {

@@ -19,10 +19,12 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::PollSender;
 
-use crate::endpoint::fixed_mtu_data_transport_config;
+use crate::endpoint::{
+    HYBRID_DATA_MTU, build_manifest_v2_hybrid_endpoint, fixed_mtu_data_transport_config,
+};
 use crate::{
-    BoundEndpoint, CandidateFilter, SessionError, TransferCancelToken, TransferProtocol,
-    interrupted_error,
+    BindAddrs, BoundEndpoint, CandidateFilter, SessionConfig, SessionError, TransferCancelToken,
+    TransferProtocol, interrupted_error,
 };
 
 /// Private iroh transport identifier derived from the ASCII bytes `envoix`.
@@ -122,6 +124,73 @@ pub(crate) async fn bind_datagram_endpoint(
         bound_endpoint: BoundEndpoint {
             local_endpoint: endpoint,
             candidates: CandidateFilter::default(),
+        },
+        peer_addr,
+        bridge,
+    })
+}
+
+pub(crate) async fn bind_hybrid_datagram_endpoint(
+    transport: Arc<dyn PlatformDatagramTransport>,
+    role: DatagramTransportRole,
+    maximum_datagram_size: u32,
+    local_listen_addrs: Option<BindAddrs>,
+    config: &SessionConfig,
+    cancel: &TransferCancelToken,
+) -> Result<BoundDatagramEndpoint, SessionError> {
+    if config.relay_only {
+        return Err(CoreError::InvalidInput(
+            "Wi-Fi Aware hybrid transport is incompatible with relay-only routing".into(),
+        ));
+    }
+    let maximum_datagram_size = validate_maximum_datagram_size(maximum_datagram_size)?;
+    let secret_key = SecretKey::generate();
+    let local_id = secret_key.public();
+    let (remote_id, negotiated_datagram_size) = match exchange_endpoint_ids(
+        transport.clone(),
+        role,
+        local_id,
+        maximum_datagram_size,
+        cancel,
+    )
+    .await
+    {
+        Ok(exchange) => exchange,
+        Err(error) => {
+            close_platform_transport(transport).await;
+            return Err(error);
+        }
+    };
+    let local_addr = custom_addr(local_id);
+    let remote_addr = custom_addr(remote_id);
+    let (custom_transport, bridge) = DatagramCustomTransport::start(
+        transport,
+        role,
+        local_addr,
+        remote_addr.clone(),
+        negotiated_datagram_size.min(HYBRID_DATA_MTU),
+    );
+    let endpoint = match build_manifest_v2_hybrid_endpoint(
+        local_listen_addrs,
+        secret_key,
+        &config.data_relay(),
+        &config.candidates,
+        config.data_stream_window,
+        custom_transport,
+    )
+    .await
+    {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            bridge.close().await;
+            return Err(error);
+        }
+    };
+    let peer_addr = EndpointAddr::from_parts(remote_id, [TransportAddr::Custom(remote_addr)]);
+    Ok(BoundDatagramEndpoint {
+        bound_endpoint: BoundEndpoint {
+            local_endpoint: endpoint,
+            candidates: config.candidates.clone(),
         },
         peer_addr,
         bridge,
@@ -682,13 +751,13 @@ mod tests {
         CanonicalTransferJob, DestinationDecisionV2, DestinationRequestV2, EventSink,
         POST_SAVE_RESERVE_BYTES, TransferEvent,
     };
-    use iroh::endpoint::transports::{Addr, PathSelection, PathSelectionContext, PathSelector};
+    use iroh::endpoint::transports::PathSelector;
     use tempfile::tempdir;
     use tokio::fs;
     use tokio::sync::Mutex as AsyncMutex;
 
     use super::*;
-    use crate::endpoint::{HYBRID_DATA_MTU, hybrid_data_transport_config};
+    use crate::endpoint::{HYBRID_DATA_MTU, PreferWifiAwarePath, hybrid_data_transport_config};
     use crate::{
         DEFAULT_DATA_STREAM_WINDOW, PairingConfig,
         receive_manifest_v2_offer_over_datagram_transport,
@@ -696,34 +765,8 @@ mod tests {
     };
 
     const HYBRID_TEST_ALPN: &[u8] = b"envoix/test/wifi-aware-hybrid/1";
+    const HYBRID_TEST_PATH_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
     const HYBRID_TEST_MIGRATION_TIMEOUT: Duration = Duration::from_secs(12);
-
-    #[derive(Debug)]
-    struct PreferWifiAwarePath;
-
-    impl PathSelector for PreferWifiAwarePath {
-        fn select(&self, context: &PathSelectionContext<'_>) -> PathSelection {
-            let mut selection = PathSelection::none();
-            if let Some(path) = context.paths().find(|path| {
-                matches!(
-                    path.network_path().remote(),
-                    Addr::Custom(addr) if addr.id() == WIFI_AWARE_TRANSPORT_ID
-                )
-            }) {
-                selection.set(&path);
-                return selection;
-            }
-            if let Some(path) = context
-                .paths()
-                .filter_map(|path| path.stats().map(|stats| (path, stats.rtt)))
-                .min_by_key(|(_, rtt)| *rtt)
-                .map(|(path, _)| path)
-            {
-                selection.set(&path);
-            }
-            selection
-        }
-    }
 
     struct MemoryDatagramTransport {
         outbound: mpsc::Sender<Vec<u8>>,
@@ -1082,6 +1125,9 @@ mod tests {
             .clear_relay_transports()
             .add_custom_transport(client_custom)
             .path_selector(selector.clone())
+            .clear_ip_transports()
+            .bind_addr((std::net::Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
             .bind()
             .await
             .unwrap();
@@ -1093,32 +1139,16 @@ mod tests {
             .clear_relay_transports()
             .add_custom_transport(server_custom)
             .path_selector(selector)
+            .clear_ip_transports()
+            .bind_addr((std::net::Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
             .bind()
             .await
             .unwrap();
-        let server_addr = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let direct_addrs = server_endpoint
-                    .addr()
-                    .ip_addrs()
-                    .copied()
-                    .collect::<Vec<_>>();
-                if !direct_addrs.is_empty() {
-                    break EndpointAddr::from_parts(
-                        server_id,
-                        direct_addrs
-                            .into_iter()
-                            .map(TransportAddr::Ip)
-                            .chain(std::iter::once(TransportAddr::Custom(
-                                server_custom_addr.clone(),
-                            ))),
-                    );
-                }
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-        })
-        .await
-        .expect("server endpoint did not publish a direct IP address");
+        let server_addr = EndpointAddr::from_parts(
+            server_id,
+            [TransportAddr::Custom(server_custom_addr.clone())],
+        );
 
         let server = tokio::spawn({
             let server_endpoint = server_endpoint.clone();
@@ -1147,7 +1177,7 @@ mod tests {
         receive.read_exact(&mut before).await.unwrap();
         assert_eq!(&before, b"before");
 
-        let mixed_paths_settled = tokio::time::timeout(Duration::from_secs(5), async {
+        let mixed_paths_settled = tokio::time::timeout(HYBRID_TEST_PATH_DISCOVERY_TIMEOUT, async {
             loop {
                 let paths = connection.paths();
                 let has_ip = paths.iter().any(|path| path.remote_addr().is_ip());

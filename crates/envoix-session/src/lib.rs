@@ -66,7 +66,10 @@ pub use native_transport::{
     NATIVE_TRANSPORT_IO_CHUNK_BYTES, NativeFrameConnection, NativeTransportRead,
     NativeTransportRole, PlatformDuplexTransport,
 };
-pub use room::{receive_manifest_v2_offer_via_room, send_manifest_v2_via_room};
+pub use room::{
+    receive_manifest_v2_offer_via_room, receive_manifest_v2_offer_via_room_hybrid,
+    send_manifest_v2_via_room, send_manifest_v2_via_room_hybrid,
+};
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_AUTH_FAILURES: u32 = 50;

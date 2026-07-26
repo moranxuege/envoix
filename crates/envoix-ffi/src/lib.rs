@@ -25,7 +25,7 @@ const DEFAULT_RENDEZVOUS_BROKER: &str =
     "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445";
 const DEFAULT_RELAY_URL: &str = "https://envoix.chkxwlyh.us:8444";
 const INVITE_TTL_SECS: u64 = 300;
-const ENVOIX_FFI_API_VERSION: u32 = 5;
+const ENVOIX_FFI_API_VERSION: u32 = 6;
 
 static FFI_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
@@ -304,6 +304,7 @@ pub fn envoix_core_info() -> FfiCoreInfo {
             "delivery_proof_v2".into(),
             "native_duplex_transport_v1".into(),
             "wifi_aware_manifest_v2".into(),
+            "wifi_aware_nearby_hybrid_v1".into(),
         ],
     }
 }

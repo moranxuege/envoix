@@ -86,6 +86,65 @@ enum AppleWifiAwareTransportSession {
         return device
     }
 
+    static func sendNearbyHybrid(
+        sourceScopedDeviceID: String,
+        job: FfiTransferJobV2,
+        settings: EnvoixRuntimeSettings,
+        request: FfiTransferRequest,
+        stateDirectory: String,
+        cancellation: FfiManifestV2Cancellation,
+        observer: TransferObserver,
+        performanceObserver: AppleWifiAwarePerformanceObserver? = nil
+    ) async throws -> FfiManifestV2Completion {
+        let device = try await pairedDevice(sourceScopedID: sourceScopedDeviceID)
+        return try await withSenderTransport(
+            device: device,
+            performanceObserver: performanceObserver
+        ) { transport, maximumDatagramSize in
+            try await sendTransferJobV2NearbyHybrid(
+                job: job,
+                settings: settings,
+                request: request,
+                stateDirectory: stateDirectory,
+                transport: transport,
+                maximumDatagramSize: maximumDatagramSize,
+                cancellation: cancellation,
+                observer: observer
+            )
+        }
+    }
+
+    static func receiveNearbyHybrid(
+        sourceScopedDeviceID: String,
+        settings: EnvoixRuntimeSettings,
+        request: FfiTransferRequest,
+        stateDirectory: String,
+        cancellation: FfiManifestV2Cancellation,
+        observer: TransferObserver,
+        performanceObserver: AppleWifiAwarePerformanceObserver? = nil,
+        destinationDecision: @escaping @Sendable (
+            FfiPendingManifestV2Receive
+        ) async throws -> FfiDestinationRequestV2
+    ) async throws -> FfiManifestV2Completion {
+        let device = try await pairedDevice(sourceScopedID: sourceScopedDeviceID)
+        return try await withReceiverTransport(
+            device: device,
+            performanceObserver: performanceObserver
+        ) { transport, maximumDatagramSize in
+            let pending = try await receiveTransferOfferV2NearbyHybrid(
+                settings: settings,
+                request: request,
+                stateDirectory: stateDirectory,
+                transport: transport,
+                maximumDatagramSize: maximumDatagramSize,
+                cancellation: cancellation,
+                observer: observer
+            )
+            let destination = try await destinationDecision(pending)
+            return try await pending.receive(destination: destination, observer: observer)
+        }
+    }
+
     static func send(
         sourceScopedDeviceID: String,
         job: FfiTransferJobV2,
