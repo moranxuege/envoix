@@ -2,6 +2,7 @@ use std::fmt;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use qrcode::{Color, QrCode};
 use serde::{Deserialize, Serialize};
 
 use crate::code::{MAX_ROOM_CODE_LENGTH, RoomCode, looks_like_bare_room_code};
@@ -167,6 +168,47 @@ struct VersionProbe {
 
 pub fn encode_qr(invite: &Invite) -> Result<String, InviteError> {
     Ok(format!("{QR_OUTER_PREFIX}{}", encode_payload(invite)?))
+}
+
+/// One invite as the square a camera reads: `width` modules per side, and one
+/// bool per module in row-major order.
+///
+/// A MATRIX rather than an image, because the two sides of this want different
+/// things and neither wants a bitmap. Rendering belongs to whoever is drawing —
+/// a frontend already scales, themes and pads it — while WHAT the square says
+/// is the invite grammar's, exactly as `encode_qr` is. Handing over pixels
+/// would decide the first and hide the second.
+pub fn encode_qr_matrix(invite: &Invite) -> Result<QrMatrix, InviteError> {
+    let text = encode_qr(invite)?;
+    // The invite is ASCII by construction (base64url after a fixed prefix), so
+    // the encoder never has to choose an exotic mode for it.
+    let code = QrCode::new(text.as_bytes()).map_err(|_| InviteError::EncodingFailed)?;
+    let width = code.width();
+    let modules = code
+        .into_colors()
+        .into_iter()
+        .map(|colour| colour == Color::Dark)
+        .collect();
+    Ok(QrMatrix { width, modules })
+}
+
+/// A QR code as data: `width * width` modules, row-major, `true` where dark.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QrMatrix {
+    width: usize,
+    modules: Vec<bool>,
+}
+
+impl QrMatrix {
+    /// Modules per side. A QR is always square.
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
+    /// Row-major modules, `true` where dark. Length is always `width * width`.
+    pub fn modules(&self) -> &[bool] {
+        &self.modules
+    }
 }
 
 pub fn encode_deep_link(invite: &Invite) -> Result<String, InviteError> {

@@ -10,5 +10,6 @@ role = "library"
 
 [dependencies]
 base64.workspace = true
+qrcode.workspace = true
 serde.workspace = true
 serde_json.workspace = true

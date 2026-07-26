@@ -319,3 +319,53 @@ fn the_payload_skeleton_is_the_one_serde_writes() {
 fn encoded_json(json: &str) -> String {
     URL_SAFE_NO_PAD.encode(json.as_bytes())
 }
+
+/// Not every invite this grammar can produce fits in a QR code, and the two
+/// limits are set by different authorities: ours is the payload skeleton, QR's
+/// is version 40. The payload is base64url, whose `-` and `_` are outside QR's
+/// alphanumeric alphabet, so it encodes as BINARY — 2953 bytes at the most
+/// forgiving error correction, against a link this grammar can take to 5481.
+///
+/// This test exists to state the frontier rather than discover it in the field:
+/// a card whose invite is too long has no square to show, and that has to be a
+/// drawn answer rather than a blank space where a QR was expected.
+#[test]
+fn the_qr_frontier_is_narrower_than_the_invite_grammar() {
+    let longest_code = format!("000123-{}-{}", "a".repeat(16), "b".repeat(16));
+    let mut widest_encodable = 0;
+    let mut narrowest_refused = usize::MAX;
+    for relay_length in 1..=MAX_RELAY_LENGTH {
+        let relay = "\"".repeat(relay_length);
+        let Ok(invite) = Invite::new(&longest_code, BROKER, &relay, Role::Send) else {
+            continue;
+        };
+        let Ok(text) = encode_qr(&invite) else {
+            continue;
+        };
+        match crate::encode_qr_matrix(&invite) {
+            Ok(matrix) => {
+                widest_encodable = widest_encodable.max(text.len());
+                assert_eq!(
+                    matrix.modules().len(),
+                    matrix.width() * matrix.width(),
+                    "a QR is square and fully populated"
+                );
+                assert!(matrix.width() <= 177, "version 40 is 177 modules a side");
+            }
+            Err(_) => narrowest_refused = narrowest_refused.min(text.len()),
+        }
+    }
+    assert!(
+        widest_encodable > 0,
+        "an ordinary invite must produce a square"
+    );
+    assert!(
+        narrowest_refused > widest_encodable,
+        "the frontier must be a single boundary, not a hole"
+    );
+    println!(
+        "QR frontier: widest encodable {widest_encodable} bytes, \
+         narrowest refused {narrowest_refused}, link bound {}",
+        crate::MAX_INVITE_LINK_LENGTH
+    );
+}
