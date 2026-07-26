@@ -139,6 +139,13 @@ impl TimelineStore {
         self.lock().sessions.len()
     }
 
+    /// Every session this store still retains, oldest first. A reader that
+    /// needs to re-publish what is held asks the store rather than mirroring
+    /// its eviction bookkeeping.
+    pub fn sessions(&self) -> Vec<SessionKey> {
+        self.lock().insertion_order.iter().copied().collect()
+    }
+
     pub fn snapshot(&self, session: SessionKey) -> Option<SessionTimeline> {
         let state = self.lock();
         let retained = state.sessions.get(&session)?;

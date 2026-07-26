@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -9,8 +9,11 @@ use envoix_bindings::bridge::{
 };
 use envoix_bindings::command::encode_command_frame;
 use envoix_bindings::read::encode_read_frame;
-use envoix_bindings::{card_update_frame, closed_frame, lag_frame, subscribe_rejected_frame};
+use envoix_bindings::{
+    card_update_frame, closed_frame, evidence_frame, lag_frame, subscribe_rejected_frame,
+};
 use envoix_capabilities::{Admission, DutyLedger, Registration};
+use envoix_evidence::{EvidenceRecord, EvidenceSink, EvidenceSinkError, SessionKey, TimelineStore};
 use envoix_platform_android::{DutyAdapter, IssueDecision, WorkOrder, WorkReport, platform_work};
 use envoix_product::{
     ApplyOutcome, CommittedSession, IdentityError, NewTransfer, SystemIdentitySource,
@@ -30,6 +33,12 @@ use crate::stores::CardStores;
 /// How often the frame pump polls its subscriptions. A host lane, not a UI
 /// animation clock: latency here only delays observer refresh.
 const PUMP_INTERVAL: Duration = Duration::from_millis(50);
+
+/// How much diagnostics one process keeps. Bounded on both axes, and overflow
+/// is not silence: the timeline says `degraded` and counts what it dropped, so
+/// an observer can never mistake a trimmed timeline for a complete one.
+const EVIDENCE_ENTRIES_PER_SESSION: usize = 64;
+const EVIDENCE_SESSIONS: usize = 16;
 
 /// Why the host could not boot.
 #[derive(Debug)]
@@ -92,6 +101,75 @@ pub struct Host {
 
 struct Shared {
     state: Mutex<SharedState>,
+    evidence: Arc<Evidence>,
+}
+
+/// The host's diagnostics projection (RT3) and the sessions the current
+/// attachment has not been told about yet.
+///
+/// Evidence is downstream truth — it never re-enters the reducer — and it
+/// reaches the frontend the way card updates do: coalesced by the pump, one
+/// frame per changed session rather than one per record.
+///
+/// No thread ever holds the store lock and this one at the same time. The
+/// runtime's evidence worker takes the store's, then this one; both readers
+/// below take this one, let it go, and only then ask the store.
+struct Evidence {
+    store: TimelineStore,
+    unpublished: Mutex<HashSet<SessionKey>>,
+}
+
+impl Evidence {
+    fn new() -> Self {
+        Self {
+            store: TimelineStore::new(
+                NonZeroUsize::new(EVIDENCE_ENTRIES_PER_SESSION).expect("nonzero"),
+                NonZeroUsize::new(EVIDENCE_SESSIONS).expect("nonzero"),
+            ),
+            unpublished: Mutex::new(HashSet::new()),
+        }
+    }
+
+    fn unpublished(&self) -> MutexGuard<'_, HashSet<SessionKey>> {
+        self.unpublished
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Marks every retained session for publication. A fresh attachment has
+    /// been told nothing, and the timelines it needs were recorded long before
+    /// it opened.
+    fn reseed(&self) {
+        let sessions = self.store.sessions();
+        self.unpublished().extend(sessions);
+    }
+
+    /// The sessions to publish now, in a stable order.
+    fn take_unpublished(&self) -> Vec<SessionKey> {
+        let mut sessions: Vec<SessionKey> = std::mem::take(&mut *self.unpublished())
+            .into_iter()
+            .collect();
+        sessions.sort_unstable_by_key(|session| (session.card.get(), session.generation.get()));
+        sessions
+    }
+}
+
+/// The runtime's write-only end of the evidence lane.
+struct EvidenceIntake(Arc<Evidence>);
+
+impl EvidenceSink for EvidenceIntake {
+    fn record(&self, record: EvidenceRecord) -> Result<(), EvidenceSinkError> {
+        let session = record.session();
+        self.0.store.record(record)?;
+        self.0.unpublished().insert(session);
+        Ok(())
+    }
+
+    fn evict_card(&self, card: RecordId) -> Result<(), EvidenceSinkError> {
+        self.0.store.evict_card(card)?;
+        self.0.unpublished().retain(|session| session.card != card);
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -147,12 +225,14 @@ impl Host {
         );
         let stores = CardStores::new(root.to_path_buf());
         let provider = HostProvider::new(stores.clone(), NonZeroUsize::new(3).expect("nonzero"));
+        let evidence = Arc::new(Evidence::new());
         let runtime = {
             let _guard = tokio.enter();
-            Arc::new(Runtime::start(
+            Arc::new(Runtime::start_with_evidence(
                 config,
                 provider,
                 PreparedIrohExecutor::default(),
+                EvidenceIntake(Arc::clone(&evidence)),
             ))
         };
         let host = Self {
@@ -161,6 +241,7 @@ impl Host {
             stores,
             shared: Arc::new(Shared {
                 state: Mutex::new(SharedState::default()),
+                evidence,
             }),
         };
 
@@ -240,6 +321,11 @@ impl Host {
         let mut state = self.shared.lock();
         state.attachment = AttachmentToken(state.attachment.0 + 1);
         state.frames.clear();
+        // The diagnostics this process holds are older than this attachment,
+        // so nothing would ever re-state them: an observer that saw only what
+        // changed after it arrived would show an empty log next to a card with
+        // a whole history.
+        self.shared.evidence.reseed();
         for (card, subscription) in fresh {
             install(&mut state, card, subscription);
         }
@@ -502,6 +588,16 @@ fn pump_once(shared: &Shared) {
     for (card, epoch) in closed {
         subscriptions.remove(&card);
         if let Ok(bytes) = encode_read_frame(&closed_frame(epoch, card)) {
+            push_bounded(frames, bytes);
+        }
+    }
+    for session in shared.evidence.take_unpublished() {
+        // A session the store has since evicted has no timeline left to state,
+        // and the contract carries no "forgotten" frame — inventing one would
+        // be telling the observer something the authority never said.
+        if let Some(timeline) = shared.evidence.store.snapshot(session)
+            && let Ok(bytes) = encode_read_frame(&evidence_frame(&timeline))
+        {
             push_bounded(frames, bytes);
         }
     }

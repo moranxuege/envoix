@@ -65,6 +65,18 @@ void main(List<String> arguments) {
     SubscribeRejectionView.unknownCard,
   );
 
+  // 2b. The diagnostics the host recorded before this attachment existed reach
+  //     it as a session timeline — the content of the logs screen, decoded from
+  //     what a real host actually emitted.
+  equal('timelines surfaced', attached.timelines.length, 1);
+  final EvidenceTimelineView evidence = attached.timelines.single;
+  equal('timeline session', evidence.session.card, card);
+  check('the timeline has entries', evidence.entries.isNotEmpty);
+  check(
+    'nothing was dropped, so the timeline is complete',
+    evidence.status is DiagnosticsStatusViewComplete,
+  );
+
   // 3. An update at this attachment's epoch is admitted; one from another
   //    epoch is dropped as stale and changes nothing.
   attached.ingest(frame('progress.frame'));

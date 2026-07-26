@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 
 use envoix_bindings::lag_frame;
 use envoix_bindings::read::{
-    CardUpdateKindView, CardUpdateView, ReadBody, ReadFrame, decode_read_frame, encode_read_frame,
+    CardUpdateKindView, CardUpdateView, DiagnosticsStatusView, EvidenceTimelineView, ReadBody,
+    ReadFrame, decode_read_frame, encode_read_frame,
 };
 use envoix_host_android::{AttachmentToken, FramePoll, Host};
 use envoix_runtime::LosslessUpdateKind;
@@ -47,7 +48,12 @@ fn flutter_attaches_and_decodes_live_frames() {
     // An attach the runtime must refuse: it holds no projection for this card,
     // so the lane carries the typed reason rather than nothing at all.
     host.attach(RecordId::new(0xf1b));
-    let live = drain(&host, token);
+    // The card's diagnostics were recorded before this attachment existed, so
+    // waiting for them here is also what proves they are re-stated to it.
+    let live = drain_until(&host, token, |frames| {
+        frames.iter().any(|frame| is_snapshot(frame))
+            && frames.iter().any(|frame| timeline(frame).is_some())
+    });
     let opening = live
         .iter()
         .find_map(|frame| match decoded(frame).body {
@@ -170,35 +176,101 @@ fn a_superseded_attachment_cannot_consume_a_frame() {
     assert_eq!(host.poll_frame(replaced), FramePoll::Superseded);
 }
 
-/// Every frame the attachment has queued, as UTF-8 text. The pump ticks every
-/// 50 ms, so this waits for the epoch's opening snapshot rather than racing it.
+/// A card's diagnostics outlive the frontend that watched them.
+///
+/// Evidence is recorded whenever the authority commits, which is almost never
+/// while an observer happens to be attached — the card here is created before
+/// any attachment exists, and the second attachment sees nothing new happen at
+/// all. An observer told only about changes made after it arrived would show an
+/// empty log beside a card with a whole history, so a fresh attachment is
+/// re-told every timeline the host still holds.
+#[test]
+fn a_fresh_attachment_is_told_the_diagnostics_it_missed() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let host = Host::boot(root.path()).expect("the host boots");
+    let card = host
+        .create_for_e2e(OFFERED_NAME, TOTAL_BYTES)
+        .expect("a durable card is created");
+
+    let mut seen = Vec::new();
+    for _ in 0..2 {
+        let token = host.open_lane();
+        let frames = drain_until(&host, token, |frames| {
+            frames.iter().any(|frame| timeline(frame).is_some())
+        });
+        let evidence = frames
+            .iter()
+            .find_map(|frame| timeline(frame))
+            .expect("the lane carries the card's timeline");
+        assert_eq!(evidence.session.card, format!("{:016x}", card.get()));
+        assert!(
+            !evidence.entries.is_empty(),
+            "a timeline with no entries states nothing"
+        );
+        assert_eq!(
+            evidence.status,
+            DiagnosticsStatusView::Complete,
+            "nothing was dropped, so nothing may be claimed dropped"
+        );
+        seen.push(evidence);
+    }
+    assert_eq!(
+        seen[0].entries.len(),
+        seen[1].entries.len(),
+        "re-attaching re-states the timeline; it does not restart or extend it"
+    );
+}
+
+/// Every frame the attachment has queued, as UTF-8 text, drained until the
+/// epoch's opening snapshot has arrived.
 fn drain(host: &Host, token: AttachmentToken) -> Vec<String> {
+    drain_until(host, token, |frames| {
+        frames.iter().any(|frame| is_snapshot(frame))
+    })
+}
+
+/// Drains the lane until `ready` accepts what has arrived. The pump ticks every
+/// 50 ms and evidence crosses an asynchronous worker before it is published, so
+/// a test waits for the frame it asserts about rather than racing it.
+fn drain_until(
+    host: &Host,
+    token: AttachmentToken,
+    ready: impl Fn(&[String]) -> bool,
+) -> Vec<String> {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut frames = Vec::new();
-    let mut opened = false;
     while Instant::now() < deadline {
         match host.poll_frame(token) {
             FramePoll::Frame(bytes) => {
-                let text = String::from_utf8(bytes).expect("frames are UTF-8");
-                opened |= matches!(
-                    decoded(&text).body,
-                    ReadBody::CardUpdate(CardUpdateView {
-                        kind: CardUpdateKindView::Snapshot(_),
-                        ..
-                    })
-                );
-                frames.push(text);
+                frames.push(String::from_utf8(bytes).expect("frames are UTF-8"));
             }
-            FramePoll::Drained if opened => break,
+            FramePoll::Drained if ready(&frames) => break,
             FramePoll::Drained => std::thread::sleep(Duration::from_millis(25)),
             FramePoll::Superseded => panic!("the attachment under test was superseded"),
         }
     }
     assert!(
-        opened,
-        "an attachment must deliver the snapshot its epoch opened with"
+        ready(&frames),
+        "the lane never delivered what this attachment was waiting for"
     );
     frames
+}
+
+fn is_snapshot(frame: &str) -> bool {
+    matches!(
+        decoded(frame).body,
+        ReadBody::CardUpdate(CardUpdateView {
+            kind: CardUpdateKindView::Snapshot(_),
+            ..
+        })
+    )
+}
+
+fn timeline(frame: &str) -> Option<EvidenceTimelineView> {
+    match decoded(frame).body {
+        ReadBody::Evidence(timeline) => Some(timeline),
+        _ => None,
+    }
 }
 
 fn decoded(frame: &str) -> ReadFrame {

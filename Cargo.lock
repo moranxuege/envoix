@@ -961,6 +961,7 @@ dependencies = [
  "envoix-attempt-iroh",
  "envoix-bindings",
  "envoix-capabilities",
+ "envoix-evidence",
  "envoix-operation-store",
  "envoix-outcomes",
  "envoix-platform-android",

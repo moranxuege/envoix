@@ -23,6 +23,7 @@ envoix-attempt-api = { path = "../../crates/l1/envoix-attempt-api" }
 envoix-attempt-iroh = { path = "../../crates/l2/envoix-attempt-iroh" }
 envoix-bindings = { path = "../../crates/l5/envoix-bindings" }
 envoix-capabilities = { path = "../../crates/l1/envoix-capabilities" }
+envoix-evidence = { path = "../../crates/l4/envoix-evidence" }
 envoix-operation-store = { path = "../../crates/l2/envoix-operation-store" }
 envoix-outcomes = { path = "../../crates/l0/envoix-outcomes" }
 envoix-platform-android = { path = "../../crates/l6/envoix-platform-android" }

@@ -42,6 +42,10 @@ class CardRow {
   /// Which lossless class the lag dropped, when [status] is
   /// [StreamStatus.lagged].
   LosslessKindView? missed;
+
+  /// The last platform duty the host issued for this card. It is the service's
+  /// work order — shown here as something observed, never as something to do.
+  DutyFrameView? duty;
 }
 
 /// One frontend attachment: the epoch gates it opened and the rows they fed.
@@ -58,20 +62,49 @@ class Attachment {
   final Map<String, CardRow> _rows = <String, CardRow>{};
   final Map<String, SubscribeRejectionView> _refusals =
       <String, SubscribeRejectionView>{};
+  final Map<(String, int), EvidenceTimelineView> _timelines =
+      <(String, int), EvidenceTimelineView>{};
+  BuildManifestView? _build;
   final Map<FrameRejection, int> _rejected = <FrameRejection, int>{
     for (final FrameRejection kind in FrameRejection.values) kind: 0,
   };
 
-  /// Every card this attachment has seen, in id order.
-  List<CardRow> get cards {
-    final List<CardRow> rows = _rows.values.toList();
-    rows.sort((CardRow left, CardRow right) => left.card.compareTo(right.card));
-    return rows;
-  }
+  /// Every card this attachment has seen, most recently observed first.
+  ///
+  /// This is **observation order, not creation order**. Within one attachment
+  /// it is a real arrival order — the row this attachment learned about last is
+  /// first, and a later frame for a card it already knows does not move it.
+  /// Across attachments it is not: `open_lane` re-subscribes every known card
+  /// from a `BTreeSet<RecordId>`, so a re-attached frontend observes them in id
+  /// order, and `RecordId` is minted at random.
+  ///
+  /// UI01's newest-first therefore needs a fact the read contract does not
+  /// carry — a monotonic creation ordinal on the record — and inferring one
+  /// here would be the frontend minting transfer truth. Named as a gap rather
+  /// than guessed at.
+  List<CardRow> get cards =>
+      _rows.values.toList(growable: false).reversed.toList(growable: false);
 
   /// Cards the runtime refused to attach, and why. Typed truth, not an error.
   Map<String, SubscribeRejectionView> get refusals =>
       Map<String, SubscribeRejectionView>.unmodifiable(_refusals);
+
+  /// The session timelines this attachment has been told, newest generation of
+  /// each card last. One per session key, because a re-attached frontend is
+  /// re-told a timeline it already has rather than sent the difference.
+  List<EvidenceTimelineView> get timelines {
+    final List<(String, int)> keys = _timelines.keys.toList()
+      ..sort(((String, int) left, (String, int) right) {
+        final int card = left.$1.compareTo(right.$1);
+        return card != 0 ? card : left.$2.compareTo(right.$2);
+      });
+    return <EvidenceTimelineView>[
+      for (final (String, int) key in keys) _timelines[key]!,
+    ];
+  }
+
+  /// What the core says it is: protocol, schemas and trust root.
+  BuildManifestView? get build => _build;
 
   int rejected(FrameRejection kind) => _rejected[kind]!;
 
@@ -106,10 +139,16 @@ class Attachment {
       case final ReadBodySubscribeRejected body:
         _refusals[body.value.card] = body.value.reason;
         return true;
-      case ReadBodyEvidence():
-      case ReadBodyBuildManifest():
-        // Neither is published on the card lane; F1c asks for them by name.
-        return false;
+      case final ReadBodyEvidence body:
+        // Evidence is downstream truth about a session, not a frame of a card's
+        // stream: it carries no epoch, so the gates have no verdict to give and
+        // it is kept exactly as the authority stated it.
+        final SessionKeyView session = body.value.session;
+        _timelines[(session.card, session.generation)] = body.value;
+        return true;
+      case final ReadBodyBuildManifest body:
+        _build = body.value;
+        return true;
     }
   }
 
@@ -128,20 +167,22 @@ class Attachment {
   }
 
   void _apply(CardUpdateView update) {
+    final CardRow row = _rows.putIfAbsent(
+      update.card,
+      () => CardRow(update.card),
+    );
+    row.epoch = update.epoch;
     switch (update.kind) {
       case CardUpdateKindViewSnapshot(:final CardView value):
       case CardUpdateKindViewProgress(:final CardView value):
       case CardUpdateKindViewState(:final CardView value):
       case CardUpdateKindViewTerminal(:final CardView value):
-        final CardRow row = _rows.putIfAbsent(
-          update.card,
-          () => CardRow(update.card),
-        );
-        row.epoch = update.epoch;
         row.view = value;
-      case CardUpdateKindViewCapabilityDuty():
-        // A duty is the service's work order, never an observer's business.
-        break;
+      case CardUpdateKindViewCapabilityDuty(:final DutyFrameView value):
+        // A duty is the service's work order. An observer may say that the
+        // host asked for it; it must not act on it, and it is not card truth,
+        // so it never touches [CardRow.view].
+        row.duty = value;
     }
   }
 

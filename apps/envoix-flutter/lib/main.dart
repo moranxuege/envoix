@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
 
 import 'attachment.dart';
-import 'bindings/envoix_read.dart';
+import 'home.dart';
 import 'lane.dart';
+import 'logs.dart';
 
 void main() => runApp(const EnvoixApp());
 
@@ -15,23 +16,51 @@ class EnvoixApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) => MaterialApp(
         title: 'Envoix',
-        theme: ThemeData.dark(useMaterial3: true),
-        home: CardsScreen(lane: lane),
+        theme: envoixTheme(Brightness.light),
+        darkTheme: envoixTheme(Brightness.dark),
+        home: Shell(lane: lane),
       );
 }
 
-/// One screen: every card this attachment can see.
-class CardsScreen extends StatefulWidget {
-  const CardsScreen({required this.lane, super.key});
+/// Light and dark are one design at two brightnesses, not two palettes that
+/// drift apart: Material 3 derives every on-colour from the seed, which is what
+/// keeps text readable in both without a hand-tuned pair per surface.
+ThemeData envoixTheme(Brightness brightness) => ThemeData(
+      useMaterial3: true,
+      colorScheme: ColorScheme.fromSeed(
+        seedColor: const Color(0xff2f6b5f),
+        brightness: brightness,
+      ),
+    );
+
+/// UI06 — the shell: one attachment, two destinations onto it.
+///
+/// Both destinations read the same immutable [Attachment], so there is exactly
+/// one subscription to the lane and exactly one thing that rebuilds when a
+/// frame arrives.
+///
+/// Home is the shell's own root, and Logs is a destination within it rather
+/// than a pushed route — a second route would need a second listener on a lane
+/// that is single-subscription, and a second listener is a second attachment
+/// waiting to happen. That makes the system Back button this widget's problem:
+/// without [PopScope] it would pop the only route there is and leave the app,
+/// which is not "return from a secondary screen".
+class Shell extends StatefulWidget {
+  const Shell({required this.lane, super.key});
 
   final LaneSource lane;
 
   @override
-  State<CardsScreen> createState() => _CardsScreenState();
+  State<Shell> createState() => _ShellState();
 }
 
-class _CardsScreenState extends State<CardsScreen> {
+class _ShellState extends State<Shell> {
   late LaneAttachment _lane = LaneAttachment.open(widget.lane);
+
+  /// Which destination is on screen. It belongs to the state rather than to the
+  /// build, so a frame arriving cannot move the reader off what they are
+  /// reading — the whole shell rebuilds on every accepted frame.
+  int _destination = 0;
 
   /// Opens a fresh attachment. Every card's stream restarts at a new epoch, so
   /// the gates of the attachment being replaced can never admit anything again
@@ -40,6 +69,8 @@ class _CardsScreenState extends State<CardsScreen> {
   /// the platform side hears exactly one detach per re-attach.
   void _attach() => setState(() => _lane = LaneAttachment.open(widget.lane));
 
+  void _showHome() => setState(() => _destination = 0);
+
   /// The screen is a function of the lane: [StreamBuilder] rebuilds on every
   /// frame the attachment accepted, so "ingested but never rendered" is not a
   /// state this can be in.
@@ -47,145 +78,83 @@ class _CardsScreenState extends State<CardsScreen> {
   Widget build(BuildContext context) => StreamBuilder<Attachment>(
         stream: _lane.frames,
         builder: (BuildContext context, AsyncSnapshot<Attachment> frames) =>
-            _screen(context, frames.error),
+            _shell(frames.error),
       );
 
-  Widget _screen(BuildContext context, Object? fault) {
-    final List<CardRow> cards = _lane.attachment.cards;
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Envoix'),
-        actions: <Widget>[
-          // Re-attaching is an observer action, not a command: it opens a new
-          // epoch and touches nothing the host is doing. The icon font is
-          // deliberately not packaged, so this is text.
-          TextButton(onPressed: _attach, child: const Text('Re-attach')),
-        ],
-      ),
-      body: ListView(
-        padding: const EdgeInsets.all(12),
-        children: <Widget>[
-          if (fault != null) _FaultBanner(fault: fault),
-          for (final MapEntry<String, SubscribeRejectionView> refusal
-              in _lane.attachment.refusals.entries)
-            _RefusalTile(card: refusal.key, reason: refusal.value),
-          if (cards.isEmpty && fault == null)
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 24),
-              child: Text('No transfers yet.'),
+  Widget _shell(Object? fault) {
+    final bool home = _destination == 0;
+    return PopScope(
+      // Back out of Logs returns Home; back out of Home is the system's own,
+      // so the user is never trapped in the app either.
+      canPop: home,
+      onPopInvokedWithResult: (bool didPop, Object? result) {
+        if (!didPop) {
+          _showHome();
+        }
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          // A gesture-navigation device has no on-screen Back button, so the
+          // way out of Logs is also on the screen it is a way out of.
+          leading: home
+              ? null
+              : TextButton(onPressed: _showHome, child: const Text('Back')),
+          leadingWidth: home ? null : 72,
+          title: Text(home ? 'Envoix' : 'Logs'),
+          actions: <Widget>[
+            // Re-attaching is an observer action, not a command: it opens a
+            // new epoch and touches nothing the host is doing.
+            TextButton(onPressed: _attach, child: const Text('Re-attach')),
+          ],
+        ),
+        body: home
+            ? HomeScreen(attachment: _lane.attachment, fault: fault)
+            : LogsScreen(attachment: _lane.attachment),
+        bottomNavigationBar: NavigationBar(
+          selectedIndex: _destination,
+          onDestinationSelected: (int value) =>
+              setState(() => _destination = value),
+          destinations: const <NavigationDestination>[
+            NavigationDestination(
+              icon: _Dot(filled: false),
+              selectedIcon: _Dot(filled: true),
+              label: 'Transfers',
             ),
-          for (final CardRow row in cards) CardTile(row: row),
-          _Counters(attachment: _lane.attachment),
-        ],
+            NavigationDestination(
+              icon: _Dot(filled: false),
+              selectedIcon: _Dot(filled: true),
+              label: 'Logs',
+            ),
+          ],
+        ),
       ),
     );
   }
 }
 
-/// One card, as the host last described it.
-class CardTile extends StatelessWidget {
-  const CardTile({required this.row, super.key});
+/// A destination's indicator, drawn rather than set in a font.
+///
+/// No icon font is packaged (the release gate's package inventory is an
+/// allow-list and a 1.6 MB font is not on it), and a glyph borrowed from the
+/// device's own fonts is a coverage gamble on hardware this step cannot test.
+/// A drawn dot needs neither. The label beside it is what a screen reader
+/// announces.
+class _Dot extends StatelessWidget {
+  const _Dot({required this.filled});
 
-  final CardRow row;
+  final bool filled;
 
   @override
   Widget build(BuildContext context) {
-    final CardView? view = row.view;
-    reportRendered(row);
-    return Card(
-      child: ListTile(
-        title: Text(view?.offeredName ?? row.card),
-        subtitle: Text(
-          <String>[
-            'card ${row.card}',
-            'epoch ${row.epoch}',
-            if (view != null) describeState(view.state),
-            if (view != null) '${view.bytes}/${view.total} bytes',
-            if (view != null) view.direction.name,
-            if (row.status != StreamStatus.live)
-              '${row.status.name}${row.missed == null ? '' : ' (${row.missed!.name})'}',
-          ].join(' · '),
-        ),
+    final Color color = Theme.of(context).colorScheme.onSurfaceVariant;
+    return Container(
+      width: 12,
+      height: 12,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: filled ? color : null,
+        border: Border.all(color: color, width: 2),
       ),
     );
-  }
-}
-
-class _RefusalTile extends StatelessWidget {
-  const _RefusalTile({required this.card, required this.reason});
-
-  final String card;
-  final SubscribeRejectionView reason;
-
-  @override
-  Widget build(BuildContext context) => Card(
-        color: Theme.of(context).colorScheme.errorContainer,
-        child: ListTile(
-          title: Text('card $card is not observable'),
-          subtitle: Text(reason.name),
-        ),
-      );
-}
-
-class _FaultBanner extends StatelessWidget {
-  const _FaultBanner({required this.fault});
-
-  final Object fault;
-
-  @override
-  Widget build(BuildContext context) => Card(
-        color: Theme.of(context).colorScheme.errorContainer,
-        child: ListTile(
-          title: const Text('The lane is not delivering'),
-          subtitle: Text('$fault'),
-        ),
-      );
-}
-
-class _Counters extends StatelessWidget {
-  const _Counters({required this.attachment});
-
-  final Attachment attachment;
-
-  @override
-  Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.only(top: 16),
-        child: Text(
-          <String>[
-            for (final FrameRejection kind in FrameRejection.values)
-              '${kind.name} ${attachment.rejected(kind)}',
-          ].join(' · '),
-          style: Theme.of(context).textTheme.bodySmall,
-        ),
-      );
-}
-
-/// The closed product state, spelled for a human.
-String describeState(ProductStateView state) => switch (state) {
-      ProductStateViewPreparing() => 'preparing',
-      ProductStateViewWaiting() => 'waiting',
-      ProductStateViewConnecting() => 'connecting',
-      ProductStateViewVerifying() => 'verifying',
-      ProductStateViewTransferring() => 'transferring',
-      ProductStateViewConfirming() => 'confirming',
-      ProductStateViewPaused(:final PausedView value) =>
-        'paused (${value.origin.name})',
-      ProductStateViewUnconfirmed() => 'unconfirmed',
-      ProductStateViewCompleted() => 'completed',
-      ProductStateViewFailed() => 'failed',
-      ProductStateViewCancelled() => 'cancelled',
-    };
-
-/// Every line already reported, so a rebuild does not repeat one.
-final Set<String> rendered = <String>{};
-
-/// What the on-device instrumentation reads: one line per distinct thing this
-/// app has actually PUT ON SCREEN, emitted from the tile that drew it — a
-/// claim about the screen rather than about the model behind it.
-void reportRendered(CardRow row) {
-  final String line = 'envoix-f1b rendered card=${row.card} '
-      'epoch=${row.epoch} status=${row.status.name}';
-  if (rendered.add(line)) {
-    debugPrint(line);
   }
 }
