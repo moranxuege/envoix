@@ -9,6 +9,13 @@ interface ManifestV2Callback {
     fun onPlanRequired(requestJson: String): String
 
     fun onSaveRequired(requestJson: String): String
+
+    /** Persist a negotiated or rotated opaque relationship credential before
+     * the core sends any Manifest frame. */
+    fun onRememberedCredential(
+        opaqueCredential: ByteArray,
+        generation: Long,
+    ): Boolean
 }
 
 /** Sink for the core's `tracing` log lines. */
@@ -45,17 +52,27 @@ object Native {
     /** Wire the Android VM + app context into the Rust network stack. Call once. */
     external fun initContext(context: android.content.Context)
 
-    /** Generate a room invite for [role] ("send"/"receive"). Returns JSON
-     *  `{"code":..,"payload":..}` (payload = the QR string), or `{"error":..}`. */
+    /** Generate a directional InviteV2 for [role] ("send"/"receive"). */
     external fun generateInvite(
         role: String,
         broker: String,
         relay: String,
     ): String
 
-    /** Parse a typed code or a scanned `envoix://` payload. Returns JSON
-     *  `{"code":..,"broker":..,"relay":..,"role":..}`, or `{"error":..}`. */
+    /** Parse a complete InviteV2 for deep-link routing. */
     external fun parseInvite(input: String): String
+
+    /** Validate a complete invitation or Room Code for an active flow. */
+    external fun parseInviteForRole(
+        input: String,
+        role: String,
+    ): String
+
+    /** Strictly normalize a canonical or separator-free Room Code. */
+    external fun normalizeRoomCode(input: String): String
+
+    /** Validate protected bytes and return a process-only core reference. */
+    external fun registerRememberedCredential(opaqueCredential: ByteArray): String
 
     /** Create the durable canonical job as soon as the first source is chosen. */
     external fun createManifestV2Job(

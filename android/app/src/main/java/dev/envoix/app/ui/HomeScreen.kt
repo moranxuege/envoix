@@ -81,6 +81,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.envoix.app.Diagnostics
 import dev.envoix.app.Direction
+import dev.envoix.app.InviteCodec
 import dev.envoix.app.LogUpload
 import dev.envoix.app.R
 import dev.envoix.app.Room
@@ -101,8 +102,24 @@ fun HomeScreen(
     transfers: List<Transfer>,
     initialSharedUris: List<android.net.Uri> = emptyList(),
     onSharedUrisConsumed: () -> Unit = {},
-    onReceive: (code: String, broker: String, relay: String, qrPayload: String?, copyApproved: Boolean) -> Unit,
-    onSend: (code: String, broker: String, relay: String, jobId: String, qrPayload: String?) -> Unit,
+    onReceive: (
+        code: String,
+        broker: String,
+        relay: String,
+        qrPayload: String?,
+        copyApproved: Boolean,
+        rememberLabel: String?,
+        rememberedRelationshipId: String?,
+    ) -> Unit,
+    onSend: (
+        code: String,
+        broker: String,
+        relay: String,
+        jobId: String,
+        qrPayload: String?,
+        rememberLabel: String?,
+        rememberedRelationshipId: String?,
+    ) -> Unit,
     onPauseResume: (Long) -> Unit,
     onApproveReceive: (Long) -> Unit,
     onCancel: (Long) -> Unit,
@@ -112,6 +129,7 @@ fun HomeScreen(
     onOpenSettings: () -> Unit,
     onOpen: (Transfer) -> Unit,
     onShare: (Transfer) -> Unit,
+    initialPairingInput: String? = null,
 ) {
     val colors = Envoix.colors
     var sheetRole by remember { mutableStateOf<String?>(null) }
@@ -125,6 +143,12 @@ fun HomeScreen(
     }
     LaunchedEffect(initialSharedUris) {
         if (initialSharedUris.isNotEmpty()) sheetRole = "send"
+    }
+    LaunchedEffect(initialPairingInput) {
+        initialPairingInput
+            ?.takeIf(String::isNotBlank)
+            ?.let(InviteCodec::parseForRouting)
+            ?.let { sheetRole = it.joinerRole }
     }
     val active =
         transfers.count { !it.status.isTerminal }
@@ -217,14 +241,15 @@ fun HomeScreen(
             NewTransferSheet(
                 initialRole = initialRole,
                 initialSources = initialSharedUris,
-                onReceive = { c, b, r, qr, copyApproved ->
+                initialPairingInput = initialPairingInput,
+                onReceive = { c, b, r, qr, copyApproved, rememberLabel, rememberedRelationshipId ->
                     sheetRole = null
-                    onReceive(c, b, r, qr, copyApproved)
+                    onReceive(c, b, r, qr, copyApproved, rememberLabel, rememberedRelationshipId)
                 },
-                onSend = { c, b, r, jobId, qr ->
+                onSend = { c, b, r, jobId, qr, rememberLabel, rememberedRelationshipId ->
                     sheetRole = null
                     onSharedUrisConsumed()
-                    onSend(c, b, r, jobId, qr)
+                    onSend(c, b, r, jobId, qr, rememberLabel, rememberedRelationshipId)
                 },
             )
         }

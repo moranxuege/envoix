@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use iroh::SecretKey;
 
-use envoix_rendezvous::RoomRegistry;
+use envoix_rendezvous::{BrokerConfig, RateLimitConfig, RoomRegistry};
 use envoix_rendezvous_iroh::{PeerLocator, build_endpoint, relay_mode_from_url, serve_endpoint};
 
 mod geoip;
@@ -39,6 +39,96 @@ struct Cli {
     /// expires. The first peer is dropped with an expiry notice after this.
     #[arg(long, default_value_t = 300)]
     room_ttl: u64,
+    /// How long (seconds) expired/exhausted Room tombstones remain unavailable.
+    #[arg(long, default_value_t = 300)]
+    room_tombstone_ttl: u64,
+    /// Cumulative matched-attempt budget for a short Room Code.
+    #[arg(long, default_value_t = 6)]
+    room_attempt_limit: u32,
+    /// Per-Room matched-attempt token refill count.
+    #[arg(long, default_value_t = 6)]
+    room_rate_events: u32,
+    /// Per-Room matched-attempt refill period in seconds.
+    #[arg(long, default_value_t = 300)]
+    room_rate_period: u64,
+    /// Per-Room matched-attempt burst.
+    #[arg(long, default_value_t = 2)]
+    room_rate_burst: u32,
+    /// Per-EndpointId Join token refill count.
+    #[arg(long, default_value_t = 10)]
+    endpoint_rate_events: u32,
+    /// Per-EndpointId Join refill period in seconds.
+    #[arg(long, default_value_t = 60)]
+    endpoint_rate_period: u64,
+    /// Per-EndpointId Join burst.
+    #[arg(long, default_value_t = 20)]
+    endpoint_rate_burst: u32,
+    /// Per-IP Join token refill count when a direct address is observed.
+    #[arg(long, default_value_t = 30)]
+    ip_rate_events: u32,
+    /// Per-IP Join refill period in seconds.
+    #[arg(long, default_value_t = 60)]
+    ip_rate_period: u64,
+    /// Per-IP Join burst.
+    #[arg(long, default_value_t = 60)]
+    ip_rate_burst: u32,
+    /// Per-/24 (IPv4) or /64 (IPv6) Join token refill count.
+    #[arg(long, default_value_t = 120)]
+    subnet_rate_events: u32,
+    /// Per-subnet Join refill period in seconds.
+    #[arg(long, default_value_t = 60)]
+    subnet_rate_period: u64,
+    /// Per-subnet Join burst.
+    #[arg(long, default_value_t = 240)]
+    subnet_rate_burst: u32,
+    /// Maximum live iroh connections.
+    #[arg(long, default_value_t = 256)]
+    max_connections: usize,
+    /// Maximum live connections for one authenticated EndpointId.
+    #[arg(long, default_value_t = 8)]
+    max_connections_per_endpoint: usize,
+    /// Maximum live creator/joiner connections for one Room.
+    #[arg(long, default_value_t = 2)]
+    max_connections_per_room: usize,
+    /// Maximum live and tombstoned Room states.
+    #[arg(long, default_value_t = 8192)]
+    max_room_states: usize,
+    /// Maximum parked creators.
+    #[arg(long, default_value_t = 4096)]
+    max_waiting_creators: usize,
+    /// Maximum EndpointId, IP, and subnet limiter records combined.
+    #[arg(long, default_value_t = 8192)]
+    max_source_states: usize,
+    /// Idle lifetime (seconds) for an unused source limiter record.
+    #[arg(long, default_value_t = 600)]
+    source_state_ttl: u64,
+    /// Handshake and stream-open deadline in seconds.
+    #[arg(long, default_value_t = 10)]
+    handshake_timeout: u64,
+    /// First Join-frame deadline in seconds.
+    #[arg(long, default_value_t = 10)]
+    join_timeout: u64,
+    /// Hard lifetime of a matched relay in seconds.
+    #[arg(long, default_value_t = 120)]
+    relay_ttl: u64,
+    /// Maximum idle time between post-match frames in seconds.
+    #[arg(long, default_value_t = 30)]
+    relay_idle_timeout: u64,
+    /// Maximum time to read or write one post-match frame in seconds.
+    #[arg(long, default_value_t = 10)]
+    slow_frame_timeout: u64,
+    /// Graceful transport close deadline in seconds.
+    #[arg(long, default_value_t = 10)]
+    close_grace: u64,
+    /// Maximum Join or post-match frame body in bytes.
+    #[arg(long, default_value_t = 64 * 1024)]
+    max_frame_body: usize,
+    /// Maximum retry_after value returned by the broker in seconds.
+    #[arg(long, default_value_t = 300)]
+    max_retry_after: u64,
+    /// Retry guidance for temporarily unavailable creator/Room slots, in seconds.
+    #[arg(long, default_value_t = 1)]
+    unavailable_retry_after: u64,
     /// Log output format: `pretty` human lines, or `json` (one object per line)
     /// for log aggregators and campaign correlation.
     #[arg(long, value_enum, default_value_t = LogFormat::Pretty)]
@@ -91,6 +181,7 @@ enum LogFormat {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let broker_config = cli.broker_config()?;
 
     // Pin the process-level rustls provider before anything touches TLS; with
     // both iroh and axum-server in the tree the automatic choice is ambiguous.
@@ -239,10 +330,63 @@ async fn main() -> Result<()> {
 
     serve_endpoint(
         endpoint,
-        Arc::new(RoomRegistry::with_ttl(Duration::from_secs(cli.room_ttl))),
+        Arc::new(
+            RoomRegistry::with_config(broker_config)
+                .map_err(|error| anyhow::anyhow!("invalid broker configuration: {error}"))?,
+        ),
         locate,
     )
     .await
+}
+
+impl Cli {
+    fn broker_config(&self) -> Result<BrokerConfig> {
+        let config = BrokerConfig {
+            room_ttl: Duration::from_secs(self.room_ttl),
+            room_tombstone_ttl: Duration::from_secs(self.room_tombstone_ttl),
+            room_attempt_limit: self.room_attempt_limit,
+            room_attempt_rate: RateLimitConfig {
+                events: self.room_rate_events,
+                period: Duration::from_secs(self.room_rate_period),
+                burst: self.room_rate_burst,
+            },
+            endpoint_join_rate: RateLimitConfig {
+                events: self.endpoint_rate_events,
+                period: Duration::from_secs(self.endpoint_rate_period),
+                burst: self.endpoint_rate_burst,
+            },
+            ip_join_rate: RateLimitConfig {
+                events: self.ip_rate_events,
+                period: Duration::from_secs(self.ip_rate_period),
+                burst: self.ip_rate_burst,
+            },
+            subnet_join_rate: RateLimitConfig {
+                events: self.subnet_rate_events,
+                period: Duration::from_secs(self.subnet_rate_period),
+                burst: self.subnet_rate_burst,
+            },
+            max_connections: self.max_connections,
+            max_connections_per_endpoint: self.max_connections_per_endpoint,
+            max_connections_per_room: self.max_connections_per_room,
+            max_room_states: self.max_room_states,
+            max_waiting_creators: self.max_waiting_creators,
+            max_source_states: self.max_source_states,
+            source_state_ttl: Duration::from_secs(self.source_state_ttl),
+            handshake_timeout: Duration::from_secs(self.handshake_timeout),
+            join_timeout: Duration::from_secs(self.join_timeout),
+            relay_ttl: Duration::from_secs(self.relay_ttl),
+            relay_idle_timeout: Duration::from_secs(self.relay_idle_timeout),
+            slow_frame_timeout: Duration::from_secs(self.slow_frame_timeout),
+            close_grace: Duration::from_secs(self.close_grace),
+            max_frame_body: self.max_frame_body,
+            max_retry_after: Duration::from_secs(self.max_retry_after),
+            unavailable_retry_after: Duration::from_secs(self.unavailable_retry_after),
+        };
+        config
+            .validate()
+            .map_err(|error| anyhow::anyhow!("invalid broker configuration: {error}"))?;
+        Ok(config)
+    }
 }
 
 /// Load the server's secret key from `path`, creating a fresh one if the file

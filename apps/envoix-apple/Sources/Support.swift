@@ -26,7 +26,7 @@ let deprecatedLogServers: Set<String> = [
     "http://envoix.chkxwlyh.us:8460",
 ]
 
-let expectedCoreFFIAPIVersion: UInt32 = 4
+let expectedCoreFFIAPIVersion: UInt32 = 5
 let appDebugBuildLabel = "Debug build 2026.07.08.19"
 
 /// Generates a short, memorable, easy-to-type pairing token of the form
@@ -46,6 +46,7 @@ func friendlyToken() -> String {
 enum PairingMode: Hashable {
     case room    // Android-compatible QR/code, broker-assisted pairing
     case invite  // direct endpoint invite
+    case remembered
     case token   // shared-token mDNS route; not exposed in the primary Apple UI
 }
 
@@ -83,8 +84,24 @@ enum RuntimeSettingsProvider {
     }
 }
 
-func newRoomCode() -> String {
-    (try? generateRoomCode()) ?? friendlyToken()
+func newRoomCode() -> String? {
+    try? generateRoomCode()
+}
+
+func formatRoomCodeInput(_ input: String) -> String {
+    if input.lowercased().hasPrefix("envoix:") {
+        return input
+    }
+    let compact = input.filter { $0 != "-" }.prefix(14)
+    guard compact.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) }) else {
+        return input
+    }
+    return String(compact.enumerated().reduce(into: "") { result, item in
+        if item.offset == 6 || item.offset == 10 {
+            result.append("-")
+        }
+        result.append(contentsOf: item.element.lowercased())
+    })
 }
 
 struct RuntimeSettingsError: LocalizedError {
@@ -255,7 +272,13 @@ struct RoomCodeField: View {
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(Theme.muted)
             HStack(spacing: 8) {
-                TextField(placeholder, text: $code)
+                TextField(
+                    placeholder,
+                    text: Binding(
+                        get: { code },
+                        set: { code = formatRoomCodeInput($0) }
+                    )
+                )
                     .textFieldStyle(.plain)
                     .font(.body.monospaced())
                     .foregroundStyle(Theme.text)
@@ -263,8 +286,7 @@ struct RoomCodeField: View {
                     .accessibilityIdentifier(accessibilityIdentifier)
                 if canGenerate {
                     Button {
-                        code = newRoomCode()
-                        ToastCenter.shared.show(AppText.value("Room code generated", "接收码已生成", language: language))
+                        generateCode()
                     } label: {
                         Label(generateLabel, systemImage: "wand.and.stars")
                             .frame(minHeight: 34)
@@ -307,7 +329,13 @@ struct RoomCodeField: View {
                 .foregroundStyle(Theme.muted)
 
             HStack(spacing: 8) {
-                TextField(placeholder, text: $code)
+                TextField(
+                    placeholder,
+                    text: Binding(
+                        get: { code },
+                        set: { code = formatRoomCodeInput($0) }
+                    )
+                )
                     .textFieldStyle(.plain)
                     .font(.body.monospaced())
                     .foregroundStyle(Theme.text)
@@ -349,8 +377,7 @@ struct RoomCodeField: View {
                 HStack(spacing: 8) {
                     if canGenerate {
                         Button {
-                            code = newRoomCode()
-                            ToastCenter.shared.show(AppText.value("Room code generated", "接收码已生成", language: language))
+                            generateCode()
                         } label: {
                             Label(generateLabel, systemImage: "wand.and.stars")
                                 .frame(maxWidth: .infinity, minHeight: 36)
@@ -382,6 +409,24 @@ struct RoomCodeField: View {
         .tint(Theme.accentStrong)
     }
     #endif
+
+    private func generateCode() {
+        guard let generated = newRoomCode() else {
+            code = ""
+            ToastCenter.shared.show(AppText.value(
+                "Could not generate a Room Code",
+                "无法生成接收码",
+                language: language
+            ))
+            return
+        }
+        code = generated
+        ToastCenter.shared.show(AppText.value(
+            "Room code generated",
+            "接收码已生成",
+            language: language
+        ))
+    }
 }
 
 /// Renders a string into a crisp QR code image.

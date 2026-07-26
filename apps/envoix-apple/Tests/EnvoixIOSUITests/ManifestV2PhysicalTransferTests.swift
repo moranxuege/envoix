@@ -141,10 +141,16 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
         }
 
         let observer = ManifestV2PhysicalObserver()
+        let pairingInvite = try makePairingInvite(
+            role: .receive,
+            broker: defaultRendezvousBroker,
+            relay: defaultRelayURL
+        )
+        Self.marker("pairing_code=\(pairingInvite.roomCode)")
         Self.marker("\(Self.platformName) receiver ready scenario=\(fixture.scenario.rawValue)")
         let pending = try await receiveTransferOfferV2(
             settings: Self.settings,
-            request: Self.request(direction: .receive),
+            request: Self.request(direction: .receive, code: pairingInvite.roomCode),
             stateDirectory: stateDirectory.path,
             cancellation: FfiManifestV2Cancellation(),
             observer: observer
@@ -218,14 +224,21 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
         return UInt64(capacity)
     }
 
-    private static func request(direction: FfiTransferDirection) -> FfiTransferRequest {
+    private static func request(
+        direction: FfiTransferDirection,
+        code: String = scenarioCode
+    ) -> FfiTransferRequest {
         FfiTransferRequest(
             direction: direction,
             mode: .room,
             peerDescriptor: "",
             invite: "",
-            code: scenarioCode,
-            token: scenarioCode,
+            code: code,
+            token: code,
+            rememberConsent: false,
+            rememberedCredentialRef: "",
+            rememberedGeneration: 0,
+            rememberedPreviousGeneration: nil,
             broker: defaultRendezvousBroker,
             relay: defaultRelayURL,
             configPath: "",
@@ -562,6 +575,7 @@ private final class ManifestV2PhysicalObserver: TransferObserver, @unchecked Sen
         marker("failed code=\(failure.code) detail=\(failure.diagnosticMessage)")
     }
     func onDiagnostic(message: String) { marker("diagnostic=\(message)") }
+    func onRememberedCredential(opaqueCredential _: Data, generation _: UInt64) -> Bool { false }
 
     @discardableResult
     private func locked<T>(_ operation: () -> T) -> T {

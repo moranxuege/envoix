@@ -61,8 +61,24 @@ import dev.envoix.app.discovery.ProviderStatus
 @Composable
 internal fun DiscoveryScreen(
     onBack: () -> Unit,
-    onReceive: (code: String, broker: String, relay: String, qrPayload: String?, copyApproved: Boolean) -> Unit,
-    onSend: (code: String, broker: String, relay: String, jobId: String, qrPayload: String?) -> Unit,
+    onReceive: (
+        code: String,
+        broker: String,
+        relay: String,
+        qrPayload: String?,
+        copyApproved: Boolean,
+        rememberLabel: String?,
+        rememberedRelationshipId: String?,
+    ) -> Unit,
+    onSend: (
+        code: String,
+        broker: String,
+        relay: String,
+        jobId: String,
+        qrPayload: String?,
+        rememberLabel: String?,
+        rememberedRelationshipId: String?,
+    ) -> Unit,
     discoveryViewModel: DiscoveryViewModel = viewModel(),
 ) {
     val colors = Envoix.colors
@@ -194,8 +210,8 @@ internal fun DiscoveryScreen(
             item {
                 Text(
                     appText(
-                        "BLE sends the Envoix invitation only after you tap Start. It does not prove that the selected device is the intended peer.",
-                        "只有点击开始后，BLE 才会发送 Envoix 邀请；BLE 本身不能证明所选设备就是预期的对端。",
+                        "Bluetooth invitation handoff is disabled. Use the selected device context, then scan a QR code or enter a Room Code.",
+                        "蓝牙邀请交接已禁用。选择设备后，请扫描二维码或输入房间码。",
                     ),
                     color = colors.muted,
                     fontSize = 12.sp,
@@ -218,23 +234,48 @@ internal fun DiscoveryScreen(
             NewTransferSheet(
                 nearbySelection = selection,
                 initialPairingInput = initialPairingInput,
-                onOfferInvite =
-                    if (DiscoverySource.Bluetooth in selection.sources && initialPairingInput == null) {
-                        { invite, completion ->
-                            discoveryViewModel.offerInvite(selection.discoveryPeerKey, invite, completion)
-                        }
-                    } else {
-                        null
-                    },
-                onReceive = { code, broker, relay, qrPayload, copyApproved ->
+                onOfferInvite = null,
+                onReceive = {
+                    code,
+                    broker,
+                    relay,
+                    qrPayload,
+                    copyApproved,
+                    rememberLabel,
+                    rememberedRelationshipId,
+                    ->
                     pairingSelection = null
                     initialPairingInput = null
-                    onReceive(code, broker, relay, qrPayload, copyApproved)
+                    onReceive(
+                        code,
+                        broker,
+                        relay,
+                        qrPayload,
+                        copyApproved,
+                        rememberLabel,
+                        rememberedRelationshipId,
+                    )
                 },
-                onSend = { code, broker, relay, jobId, qrPayload ->
+                onSend = {
+                    code,
+                    broker,
+                    relay,
+                    jobId,
+                    qrPayload,
+                    rememberLabel,
+                    rememberedRelationshipId,
+                    ->
                     pairingSelection = null
                     initialPairingInput = null
-                    onSend(code, broker, relay, jobId, qrPayload)
+                    onSend(
+                        code,
+                        broker,
+                        relay,
+                        jobId,
+                        qrPayload,
+                        rememberLabel,
+                        rememberedRelationshipId,
+                    )
                 },
             )
         }

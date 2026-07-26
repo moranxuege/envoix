@@ -34,7 +34,7 @@ struct SendView: View {
     @EnvironmentObject private var model: AppModel
     @ObservedObject var viewModel: TransferViewModel
     @State private var selectedItems: [URL]
-    @AppStorage("envoix.token") private var token: String = ""
+    @State private var token = ""
     @AppStorage("envoix.concurrentTransfers") private var concurrentTransfers = true
     @AppStorage("envoix.language") private var language = "en"
     @AppStorage("envoix.serverURL") private var serverURL = ""
@@ -48,6 +48,10 @@ struct SendView: View {
     @State private var roomQRCodeImage: PlatformImage?
     @State private var roomQRCodePayload = ""
     @State private var mode: PairingMode = .room
+    @State private var rememberedPeers: [RememberedPeerSummary] = []
+    @State private var selectedRememberedPeer: RememberedPeerSummary?
+    @State private var rememberAfterPairing = false
+    @State private var rememberLabel = ""
     @State private var pairingPanel: PairingPanelMode = .show
     @State private var dropTargeted = false
     @State private var filePathInput = ""
@@ -131,6 +135,7 @@ struct SendView: View {
         .onAppear(perform: adoptSharedSelectionIfAvailable)
         .onAppear(perform: applyInitialPairingInputIfNeeded)
         .onAppear(perform: prepareCurrentSelectionIfNeeded)
+        .onAppear(perform: refreshRememberedPeers)
         .onChange(of: model.pendingSendSelection?.id) { _ in
             adoptSharedSelectionIfAvailable()
         }
@@ -147,6 +152,7 @@ struct SendView: View {
         }
         .onAppear(perform: applyInitialPairingInputIfNeeded)
         .onAppear(perform: prepareCurrentSelectionIfNeeded)
+        .onAppear(perform: refreshRememberedPeers)
         .onChange(of: viewModel.preparedManifestSourcePaths) { paths in
             adoptPreparedManifestPaths(paths)
         }
@@ -174,17 +180,86 @@ struct SendView: View {
         }
         .onChange(of: serverURL) { _ in refreshPairingInviteForSettingsChange() }
         .onChange(of: relayURL) { _ in refreshPairingInviteForSettingsChange() }
+        .onChange(of: viewModel.isBusy) { isBusy in
+            if isBusy {
+                invite = ""
+                roomCode = ""
+                pairingInvite = nil
+                roomQRCodeImage = nil
+                roomQRCodePayload = ""
+            }
+        }
     }
 
     @ViewBuilder private var connectionSection: some View {
-        if mode == .invite {
-            inviteSection
-        } else if mode == .room {
-            roomModeSection
-        } else {
-            TokenField(token: $token, disabled: viewModel.isBusy)
-                .card(padding: 14)
+        VStack(alignment: .leading, spacing: 12) {
+            if !rememberedPeers.isEmpty {
+                rememberedPeerSection
+            }
+            if mode == .invite {
+                inviteSection
+            } else if mode == .room {
+                roomModeSection
+            } else if mode == .remembered {
+                EmptyView()
+            } else {
+                TokenField(token: $token, disabled: viewModel.isBusy)
+                    .card(padding: 14)
+            }
+            if mode == .room || mode == .invite {
+                rememberConsentSection
+            }
         }
+    }
+
+    private var rememberedPeerSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(AppText.value("Remembered devices", "已记住的设备", language: uiLanguage))
+                .font(.headline.weight(.semibold))
+            ForEach(rememberedPeers) { peer in
+                HStack {
+                    Button {
+                        selectedRememberedPeer = peer
+                        mode = .remembered
+                    } label: {
+                        Label(peer.label, systemImage: selectedRememberedPeer?.id == peer.id
+                            ? "checkmark.circle.fill"
+                            : "laptopcomputer.and.iphone")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(viewModel.isBusy)
+                    Button(role: .destructive) {
+                        try? RememberedPeerStore.shared.delete(peer)
+                        refreshRememberedPeers()
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .disabled(viewModel.isBusy)
+                    .accessibilityLabel(AppText.value("Forget device", "忘记设备", language: uiLanguage))
+                }
+            }
+        }
+        .card(padding: 14)
+    }
+
+    private var rememberConsentSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle(
+                AppText.value("Remember this device", "记住此设备", language: uiLanguage),
+                isOn: $rememberAfterPairing
+            )
+            .disabled(viewModel.isBusy)
+            if rememberAfterPairing {
+                TextField(
+                    AppText.value("Device label", "设备名称", language: uiLanguage),
+                    text: $rememberLabel
+                )
+                .textFieldStyle(.roundedBorder)
+                .disabled(viewModel.isBusy)
+            }
+        }
+        .card(padding: 14)
     }
 
     @ViewBuilder private var roomModeSection: some View {
@@ -250,11 +325,11 @@ struct SendView: View {
                             qrPlaceholder
                         }
                         LinkRow(
-                            text: pairingInvite?.code ?? AppText.value("Send code", "发送码", language: uiLanguage),
+                            text: pairingInvite?.roomCode ?? AppText.value("Send code", "发送码", language: uiLanguage),
                             displaysFullText: true
                         ) {
                             Button {
-                                copyWithToast(pairingInvite?.code ?? "", AppText.value("Send code copied", "发送码已复制", language: uiLanguage), language: uiLanguage)
+                                copyWithToast(pairingInvite?.roomCode ?? "", AppText.value("Send code copied", "发送码已复制", language: uiLanguage), language: uiLanguage)
                             } label: {
                                 Label(AppText.value("Copy", "复制", language: uiLanguage), systemImage: "doc.on.doc")
                                     .frame(minHeight: 40)
@@ -304,12 +379,12 @@ struct SendView: View {
             }
 
             LinkRow(
-                text: pairingInvite?.code ?? AppText.value("Send code", "发送码", language: uiLanguage),
+                text: pairingInvite?.roomCode ?? AppText.value("Send code", "发送码", language: uiLanguage),
                 textIdentifier: "send_room_code",
                 displaysFullText: true
             ) {
                 Button {
-                    copyWithToast(pairingInvite?.code ?? "", AppText.value("Send code copied", "发送码已复制", language: uiLanguage), language: uiLanguage)
+                    copyWithToast(pairingInvite?.roomCode ?? "", AppText.value("Send code copied", "发送码已复制", language: uiLanguage), language: uiLanguage)
                 } label: {
                     Label(AppText.value("Copy", "复制", language: uiLanguage), systemImage: "doc.on.doc")
                         .frame(minHeight: 34)
@@ -692,15 +767,13 @@ struct SendView: View {
                     .foregroundStyle(Theme.muted)
             }
             HStack(alignment: .top, spacing: 8) {
-                TextField("envoix:… / envoix://pair/…", text: $invite, axis: .vertical)
+                SecureField("envoix://invite/v2/…", text: $invite)
                     .textFieldStyle(.plain)
                     .font(.body.monospaced())
                     .foregroundStyle(Theme.text)
-                    .lineLimit(1...3)
                     .disabled(viewModel.isBusy)
                 Button {
-                    invite = pasteboardString()?.trimmed ?? invite
-                    ToastCenter.shared.show(AppText.value("Invite pasted", "邀请已粘贴", language: uiLanguage))
+                    pastePairingInput()
                 } label: {
                     Label(AppText.value("Paste", "粘贴", language: uiLanguage), systemImage: "doc.on.clipboard")
                         .frame(minHeight: 34)
@@ -768,54 +841,27 @@ struct SendView: View {
     @discardableResult
     private func applyPairingInput(_ value: String, source: PairingInputSource) -> String? {
         let input = value.trimmed
-        let lowercased = input.lowercased()
-        if lowercased.hasPrefix("envoix:") && !lowercased.hasPrefix("envoix://pair/") {
-            invite = input
-            mode = .invite
-            ToastCenter.shared.show(AppText.value("Legacy invite loaded", "已载入旧版邀请", language: uiLanguage))
-            return nil
-        }
-
         do {
-            let parsed = try parsePairingInvite(input: input)
-            if parsed.role == .send, let onSwitchToReceive {
-                onSwitchToReceive(
-                    input,
-                    SendSelectionSnapshot(
-                        items: selectedItems,
-                        sourceAccess: selectedSourceAccess,
-                        pendingSelectionID: selectedPendingSelectionID
-                    )
-                )
-                ToastCenter.shared.show(AppText.value(
-                    "Switching to Receive",
-                    "正在切换到接收",
-                    language: uiLanguage
-                ))
-                return nil
+            if input.lowercased().hasPrefix("envoix:") {
+                let parsed = try parsePairingInviteForRole(input: input, localRole: .send)
+                invite = input
+                roomCode = ""
+                if !parsed.broker.trimmed.isEmpty {
+                    serverURL = parsed.broker.trimmed
+                }
+                if let relay = parsed.relayUrls.first, !relay.trimmed.isEmpty {
+                    relayURL = relay.trimmed
+                }
+                mode = .invite
+            } else {
+                roomCode = try normalizeRoomCode(input: input)
+                pairingPanel = .show
+                mode = .room
+                invite = ""
             }
-            guard parsed.role != .send else {
-                let message = AppText.value(
-                    "Scan a receiver code or share your send code.",
-                    "请扫描接收端的码，或分享你的发送码。",
-                    language: uiLanguage
-                )
-                ToastCenter.shared.show(message)
-                return message
-            }
-            roomCode = parsed.code
-            pairingPanel = .show
-            if !parsed.broker.trimmed.isEmpty {
-                serverURL = parsed.broker.trimmed
-            }
-            if !parsed.relay.trimmed.isEmpty {
-                relayURL = parsed.relay.trimmed
-            }
-            mode = .room
-            invite = ""
             let message = source == .scan
                 ? AppText.value("QR scanned", "二维码已扫描", language: uiLanguage)
-                : AppText.value("Pairing code pasted", "配对码已粘贴", language: uiLanguage)
+                : AppText.value("Invitation pasted", "邀请已粘贴", language: uiLanguage)
             ToastCenter.shared.show(message)
             return nil
         } catch {
@@ -860,7 +906,7 @@ struct SendView: View {
 
     private func activeSendRoomCode() throws -> String {
         if let invite = pairingInvite {
-            let code = invite.code.trimmed
+            let code = invite.roomCode.trimmed
             if !code.isEmpty {
                 updateRoomQRCode(for: invite.payload)
                 return code
@@ -869,7 +915,7 @@ struct SendView: View {
         let invite = try makePairingInvite(role: .send, broker: serverURL, relay: relayURL)
         pairingInvite = invite
         updateRoomQRCode(for: invite.payload)
-        return invite.code
+        return invite.roomCode
     }
 
     private func updateRoomQRCode(for payload: String) {
@@ -883,7 +929,7 @@ struct SendView: View {
             concurrentTransfers: concurrentTransfers,
             language: language,
             serverURL: parsed.broker.trimmed.isEmpty ? serverURL : parsed.broker,
-            relayURL: parsed.relay.trimmed.isEmpty ? relayURL : parsed.relay,
+            relayURL: parsed.relayUrls.first.flatMap { $0.trimmed.isEmpty ? nil : $0 } ?? relayURL,
             candidatesAllow: candidatesAllow,
             candidatesDeny: candidatesDeny,
             speedLimit: speedLimit
@@ -910,6 +956,11 @@ struct SendView: View {
         guard !selectedItems.isEmpty,
               viewModel.isManifestSelectionReady,
               viewModel.pendingSourceSelections.isEmpty else { return false }
+        if rememberAfterPairing,
+           (mode == .room || mode == .invite),
+           rememberLabel.trimmed.isEmpty {
+            return false
+        }
         switch mode {
         case .room:
             return !roomCode.trimmed.isEmpty || pairingInvite != nil
@@ -917,6 +968,8 @@ struct SendView: View {
             return !invite.trimmed.isEmpty
         case .token:
             return token.trimmed.count >= minTokenLength
+        case .remembered:
+            return selectedRememberedPeer != nil
         }
     }
 
@@ -1285,7 +1338,8 @@ struct SendView: View {
             selectedPaths: selectedItems.map(\.path),
             code: code,
             settings: settings,
-            sourceAccess: access
+            sourceAccess: access,
+            rememberLabel: rememberAfterPairing ? rememberLabel : nil
         )
     }
 
@@ -1295,7 +1349,8 @@ struct SendView: View {
             selectedPaths: selectedItems.map(\.path),
             invite: invite,
             settings: settings,
-            sourceAccess: access
+            sourceAccess: access,
+            rememberLabel: rememberAfterPairing ? rememberLabel : nil
         )
     }
 
@@ -1333,66 +1388,59 @@ struct SendView: View {
             switch mode {
             case .room:
                 let input = roomCode.trimmed
-                let lowercasedInput = input.lowercased()
                 if input.isEmpty {
                     startRoomSend(
                         code: try activeSendRoomCode(),
                         settings: settings
                     )
-                } else if lowercasedInput.hasPrefix("envoix:")
-                    && !lowercasedInput.hasPrefix("envoix://pair/") {
-                    invite = input
-                    mode = .invite
-                    startInviteSend(
-                        invite: input,
-                        settings: settings
-                    )
                 } else {
-                    let parsed = try parsePairingInvite(input: input)
-                    guard parsed.role != .send else {
-                        throw RuntimeSettingsError(AppText.value(
-                            "Scan a receiver code or share your send code.",
-                            "请扫描接收端的码，或分享你的发送码。",
-                            language: uiLanguage
-                        ))
-                    }
-                    roomCode = parsed.code
+                    let normalized = try normalizeRoomCode(input: input)
+                    roomCode = normalized
                     startRoomSend(
-                        code: parsed.code,
-                        settings: try runtimeSettings(for: parsed)
+                        code: normalized,
+                        settings: settings
                     )
                 }
             case .invite:
-                if invite.trimmed.lowercased().hasPrefix("envoix://pair/") {
-                    let parsed = try parsePairingInvite(input: invite.trimmed)
-                    guard parsed.role != .send else {
-                        throw RuntimeSettingsError(AppText.value(
-                            "Scan a receiver code or share your send code.",
-                            "请扫描接收端的码，或分享你的发送码。",
-                            language: uiLanguage
-                        ))
-                    }
-                    mode = .room
-                    roomCode = parsed.code
-                    let roomSettings = try runtimeSettings(for: parsed)
-                    startRoomSend(
-                        code: parsed.code,
-                        settings: roomSettings
-                    )
-                } else {
-                    startInviteSend(
-                        invite: invite.trimmed,
-                        settings: settings
-                    )
-                }
+                let parsed = try parsePairingInviteForRole(input: invite.trimmed, localRole: .send)
+                startInviteSend(
+                    invite: invite.trimmed,
+                    settings: try runtimeSettings(for: parsed)
+                )
             case .token:
                 startTokenSend(
                     token: token.trimmed,
                     settings: settings
                 )
+            case .remembered:
+                guard let peer = selectedRememberedPeer else { return }
+                let rememberedSettings = try RuntimeSettingsProvider.make(
+                    concurrentTransfers: concurrentTransfers,
+                    language: language,
+                    serverURL: peer.broker,
+                    relayURL: peer.relay,
+                    candidatesAllow: candidatesAllow,
+                    candidatesDeny: candidatesDeny,
+                    speedLimit: speedLimit
+                )
+                viewModel.startSendingManifestToRememberedPeer(
+                    selectedPaths: selectedItems.map(\.path),
+                    peer: peer,
+                    settings: rememberedSettings,
+                    sourceAccess: selectedSourceAccessForTransfer()
+                )
             }
         } catch {
             viewModel.handleFailed(error.localizedDescription)
+        }
+    }
+
+    private func refreshRememberedPeers() {
+        rememberedPeers = (try? RememberedPeerStore.shared.peers()) ?? []
+        if let selectedRememberedPeer,
+           !rememberedPeers.contains(where: { $0.id == selectedRememberedPeer.id }) {
+            self.selectedRememberedPeer = nil
+            if mode == .remembered { mode = .room }
         }
     }
 }

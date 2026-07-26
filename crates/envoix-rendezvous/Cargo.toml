@@ -6,6 +6,7 @@ license.workspace = true
 description = "Room rendezvous broker: match two peers by room id and blindly relay their end-to-end pairing handshake. Untrusted; never sees plaintext."
 
 [dependencies]
+envoix-invite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

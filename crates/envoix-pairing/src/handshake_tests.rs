@@ -3,10 +3,21 @@ use crate::{open_json, seal_json};
 
 const PW: &str = "42-galaxy-pencil";
 
+fn context() -> envoix_invite::InvitationControlContext {
+    envoix_invite::InvitationControlContext::new(
+        "123456".to_string(),
+        envoix_invite::BootstrapKind::RoomCode,
+        envoix_invite::TransferRole::Sender,
+        envoix_invite::TransferRole::Receiver,
+    )
+    .unwrap()
+}
+
 /// Drive a full successful handshake; returns both confirmed keys.
 fn run(initiator_pw: &str, responder_pw: &str) -> Result<(Vec<u8>, Vec<u8>), PairingError> {
-    let (initiator, start) = initiator_start(initiator_pw)?;
-    let (responder, response) = responder_respond(responder_pw, &start)?;
+    let context = context();
+    let (initiator, start) = initiator_start(initiator_pw, &context)?;
+    let (responder, response) = responder_respond(responder_pw, &context, &start)?;
     let (initiator_confirming, initiator_conf) = initiator.finish(&response)?;
     let (responder_paired, responder_conf) = responder.verify(&initiator_conf)?;
     let initiator_paired = initiator_confirming.verify(&responder_conf)?;
@@ -25,8 +36,9 @@ fn matching_password_agrees_on_key() {
 
 #[test]
 fn key_seals_a_bundle_both_ways() {
-    let (initiator, start) = initiator_start(PW).unwrap();
-    let (responder, response) = responder_respond(PW, &start).unwrap();
+    let context = context();
+    let (initiator, start) = initiator_start(PW, &context).unwrap();
+    let (responder, response) = responder_respond(PW, &context, &start).unwrap();
     let (initiator_confirming, initiator_conf) = initiator.finish(&response).unwrap();
     let (responder_paired, responder_conf) = responder.verify(&initiator_conf).unwrap();
     let initiator_paired = initiator_confirming.verify(&responder_conf).unwrap();
@@ -44,8 +56,9 @@ fn key_seals_a_bundle_both_ways() {
 fn wrong_password_fails_confirmation() {
     // SPAKE2 finish still succeeds (different K each side); confirmation
     // is what catches the mismatch.
-    let (initiator, start) = initiator_start(PW).unwrap();
-    let (responder, response) = responder_respond("99-wrong-words-here", &start).unwrap();
+    let context = context();
+    let (initiator, start) = initiator_start(PW, &context).unwrap();
+    let (responder, response) = responder_respond("99-wrong-words-here", &context, &start).unwrap();
     let (_c, initiator_conf) = initiator.finish(&response).unwrap();
     assert!(matches!(
         responder.verify(&initiator_conf),
@@ -55,8 +68,9 @@ fn wrong_password_fails_confirmation() {
 
 #[test]
 fn tampered_initiator_confirm_rejected() {
-    let (initiator, start) = initiator_start(PW).unwrap();
-    let (responder, response) = responder_respond(PW, &start).unwrap();
+    let context = context();
+    let (initiator, start) = initiator_start(PW, &context).unwrap();
+    let (responder, response) = responder_respond(PW, &context, &start).unwrap();
     let (_c, mut initiator_conf) = initiator.finish(&response).unwrap();
     initiator_conf.mac[0] ^= 0x01;
     assert!(matches!(
@@ -67,8 +81,9 @@ fn tampered_initiator_confirm_rejected() {
 
 #[test]
 fn tampered_responder_confirm_rejected_by_initiator() {
-    let (initiator, start) = initiator_start(PW).unwrap();
-    let (responder, response) = responder_respond(PW, &start).unwrap();
+    let context = context();
+    let (initiator, start) = initiator_start(PW, &context).unwrap();
+    let (responder, response) = responder_respond(PW, &context, &start).unwrap();
     let (initiator_confirming, initiator_conf) = initiator.finish(&response).unwrap();
     let (_paired, mut responder_conf) = responder.verify(&initiator_conf).unwrap();
     responder_conf.mac[0] ^= 0x01;
@@ -80,10 +95,30 @@ fn tampered_responder_confirm_rejected_by_initiator() {
 
 #[test]
 fn bad_nonce_length_rejected() {
-    let (_initiator, mut start) = initiator_start(PW).unwrap();
+    let context = context();
+    let (_initiator, mut start) = initiator_start(PW, &context).unwrap();
     start.nonce.truncate(4);
     assert!(matches!(
-        responder_respond(PW, &start),
+        responder_respond(PW, &context, &start),
         Err(PairingError::BadMessage(_))
+    ));
+}
+
+#[test]
+fn changed_invitation_context_fails_confirmation() {
+    let initiator_context = context();
+    let responder_context = envoix_invite::InvitationControlContext::new(
+        "654321".to_string(),
+        envoix_invite::BootstrapKind::RoomCode,
+        envoix_invite::TransferRole::Sender,
+        envoix_invite::TransferRole::Receiver,
+    )
+    .unwrap();
+    let (initiator, start) = initiator_start(PW, &initiator_context).unwrap();
+    let (responder, response) = responder_respond(PW, &responder_context, &start).unwrap();
+    let (_confirming, proof) = initiator.finish(&response).unwrap();
+    assert!(matches!(
+        responder.verify(&proof),
+        Err(PairingError::Confirm)
     ));
 }

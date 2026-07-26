@@ -12,8 +12,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub use envoix_auth::{PairingConfig, authenticate_receiver, authenticate_sender};
+pub use envoix_auth::{
+    AuthenticationOutcome, PairingConfig, RememberedCredential, RememberedSession,
+    authenticate_receiver, authenticate_receiver_with_remember, authenticate_sender,
+    authenticate_sender_with_remember,
+};
 use envoix_error::CoreError;
+pub use envoix_error::RendezvousCause;
 use envoix_protocol::PeerDescriptor;
 pub use envoix_protocol::TransferProtocol;
 pub use envoix_rendezvous_iroh::{generate_code, split_code};
@@ -53,9 +58,15 @@ use endpoint::{
 pub use identity::{IdentityConfig, MemoryIdentity};
 pub use manifest_v2_session::{
     PendingManifestV2Receive, ReceiverManifestV2SessionSummary, SenderManifestV2SessionSummary,
-    receive_manifest_v2_offer, send_manifest_v2_manual, send_manifest_v2_to_endpoint_addr,
+    receive_manifest_v2_offer, receive_manifest_v2_offer_with_authentication,
+    send_manifest_v2_manual, send_manifest_v2_to_endpoint_addr,
+    send_manifest_v2_to_endpoint_addr_with_authentication,
 };
-pub use room::{receive_manifest_v2_offer_via_room, send_manifest_v2_via_room};
+pub use room::{
+    receive_manifest_v2_offer_via_remembered, receive_manifest_v2_offer_via_room,
+    receive_manifest_v2_offer_via_room_with_authentication, send_manifest_v2_via_remembered,
+    send_manifest_v2_via_room, send_manifest_v2_via_room_with_authentication,
+};
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_AUTH_FAILURES: u32 = 50;
@@ -64,6 +75,49 @@ const MDNS_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 const MDNS_CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
 
 pub type SessionError = CoreError;
+
+/// Secure persistence hook invoked after data-plane authentication and before
+/// any Manifest frame.
+pub trait AuthenticationHandler: Send + Sync {
+    /// Only InviteV2 sessions may request the mutual Remember extension.
+    fn remember_consent(&self) -> bool {
+        false
+    }
+
+    /// Persist a negotiated credential or remembered-generation rotation.
+    /// Returning an error closes the authenticated connection before transfer.
+    fn on_authenticated(&self, outcome: AuthenticationOutcome) -> Result<(), SessionError>;
+}
+
+/// Default handler for sessions that do not create or rotate relationships.
+pub struct NoopAuthenticationHandler;
+
+impl AuthenticationHandler for NoopAuthenticationHandler {
+    fn on_authenticated(&self, _outcome: AuthenticationOutcome) -> Result<(), SessionError> {
+        Ok(())
+    }
+}
+
+/// Client retry policy for broker-owned Room outcomes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RendezvousRetryPolicy {
+    /// PAKE/control attempts after a creator and joiner have been matched.
+    pub pairing_attempts: usize,
+    /// Rejections with acceptable server retry guidance that may be retried.
+    pub server_retries: usize,
+    /// A larger server delay ends the operation instead of retrying early.
+    pub max_retry_after: Duration,
+}
+
+impl Default for RendezvousRetryPolicy {
+    fn default() -> Self {
+        Self {
+            pairing_attempts: 4,
+            server_retries: 4,
+            max_retry_after: Duration::from_secs(30),
+        }
+    }
+}
 
 /// Runtime transport policy. Manifest block size and compression belong to the
 /// sealed job and are deliberately absent from this session configuration.
@@ -75,6 +129,7 @@ pub struct SessionConfig {
     pub direct_only: bool,
     pub candidates: CandidateFilter,
     pub data_stream_window: u32,
+    pub rendezvous_retry: RendezvousRetryPolicy,
 }
 
 impl SessionConfig {
@@ -350,10 +405,10 @@ pub(crate) async fn dial_peer_addr_for_protocol(
     ))
 }
 
-pub(crate) async fn auth_bounded(
-    auth: impl Future<Output = Result<(), SessionError>>,
+pub(crate) async fn auth_bounded<T>(
+    auth: impl Future<Output = Result<T, SessionError>>,
     cancel: &TransferCancelToken,
-) -> Result<(), SessionError> {
+) -> Result<T, SessionError> {
     tokio::select! {
         result = tokio::time::timeout(AUTH_TIMEOUT, auth) => match result {
             Ok(result) => result,

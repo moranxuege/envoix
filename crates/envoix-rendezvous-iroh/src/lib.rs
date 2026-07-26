@@ -17,21 +17,24 @@ use iroh::{Endpoint, EndpointAddr, RelayMap, RelayUrl, SecretKey, TransportAddr}
 
 use tracing::Instrument;
 
-pub use envoix_rendezvous::JoinIntent;
-use envoix_rendezvous::{
-    CloseWaiter, Join, PeerConn, Reply, Role, RoomRegistry, read_framed, write_framed,
+pub use envoix_invite::{
+    BootstrapKind, Commitment, InvitationControlContext, InvitationSide, TransferRole,
 };
+use envoix_rendezvous::{
+    BrokerOutcome, BrokerRejection, CloseWaiter, Join, PeerConn, PeerSource, Reply, Role,
+    RoomRegistry, read_framed, write_framed,
+};
+use serde::{Deserialize, Serialize};
 
 mod code;
 pub use code::{generate_code, split_code};
 
-/// BLAKE3 KDF context separating the data-plane token from any other use of K.
-const DATA_TOKEN_CONTEXT: &str = "envoix rendezvous data-plane token v1";
-
 /// AEAD associated data binding a sealed descriptor to the sender's role, so a
 /// relay cannot reflect one peer's ciphertext back as the other's.
-const INITIATOR_SEAL_AAD: &[u8] = b"envoix-pairing seal initiator v1";
-const RESPONDER_SEAL_AAD: &[u8] = b"envoix-pairing seal responder v1";
+const JOINER_CONTEXT_AAD: &[u8] = b"envoix-invite control context joiner v2";
+const CREATOR_CONTEXT_AAD: &[u8] = b"envoix-invite control context creator v2";
+const JOINER_DESCRIPTOR_AAD: &[u8] = b"envoix-invite endpoint descriptor joiner v2";
+const CREATOR_DESCRIPTOR_AAD: &[u8] = b"envoix-invite endpoint descriptor creator v2";
 
 /// Cap on the post-exchange graceful close, so a misbehaving peer or broker
 /// cannot hang the pairing after the descriptors are already exchanged.
@@ -41,10 +44,31 @@ const CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 pub struct RoomPairing<T> {
     /// The peer's payload (for Envoix, its iroh `PeerDescriptor` to dial).
     pub peer: T,
-    /// A strong shared token derived from the SPAKE2 key, so the existing
-    /// data-plane pairing (`envoix-auth` SPAKE2 over the iroh connection) can
-    /// run unchanged - both peers derive the same one.
-    pub token: String,
+    /// Sealed public context sent by the invitation creator.
+    pub peer_public_context: Option<Vec<u8>>,
+    pub selected_bootstrap_method: BootstrapKind,
+    control_key: Vec<u8>,
+    /// Hash of the authenticated PAKE and both sealed control bundles.
+    pub control_transcript_hash: Commitment,
+}
+
+impl<T> RoomPairing<T> {
+    /// Control key for immediate Room-path data-password derivation.
+    pub fn control_key(&self) -> &[u8] {
+        &self.control_key
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ContextBundle {
+    public_context: Option<Vec<u8>>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DescriptorBundle<T> {
+    peer: Option<T>,
 }
 
 /// Lets the broker wait for an iroh peer to close before dropping the relay.
@@ -61,7 +85,7 @@ impl CloseWaiter for IrohClose {
 /// ALPN for the rendezvous protocol (distinct from the data-plane `envoix/1`).
 pub const RENDEZVOUS_ALPN: &[u8] = b"envoix-rendezvous/1";
 
-/// Reason string the broker signals (and `join_room` returns) when a room's
+/// Reason string the broker signals (and [`join_invitation`] returns) when a room's
 /// wait window elapses with no partner - distinct from a network failure.
 pub const ROOM_EXPIRED: &str = "no peer joined the room within the wait window";
 
@@ -138,31 +162,26 @@ pub fn endpoint_addr(endpoint: &Endpoint) -> EndpointAddr {
     )
 }
 
-/// Cap on connections served at once, so a flood cannot exhaust the broker.
-const MAX_CONCURRENT_CONNECTIONS: usize = 256;
-
-/// Cap on a fresh connection's handshake + pairing-stream open before Join, so a
-/// half-open idle connection cannot hold a connection slot indefinitely.
-const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
 /// Accept pairing connections forever, serving each through `registry`, up to
-/// MAX_CONCURRENT_CONNECTIONS at a time (excess incoming connections are dropped).
+/// the configured global connection cap (excess incoming connections are dropped).
 pub async fn serve_endpoint(
     endpoint: Endpoint,
     registry: Arc<RoomRegistry>,
     locate: Option<PeerLocator>,
 ) -> Result<()> {
-    let limit = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+    let limit = Arc::new(tokio::sync::Semaphore::new(
+        registry.config().max_connections,
+    ));
     while let Some(incoming) = endpoint.accept().await {
         let Ok(permit) = limit.clone().try_acquire_owned() else {
+            registry.record_transport_busy();
             tracing::warn!("rendezvous connection limit reached; dropping incoming");
             continue;
         };
         let registry = registry.clone();
         let locate = locate.clone();
         tokio::spawn(async move {
-            let _permit = permit;
-            if let Err(error) = serve_incoming(incoming, &registry, locate.as_ref()).await {
+            if let Err(error) = serve_incoming(incoming, registry, locate.as_ref(), permit).await {
                 tracing::debug!(%error, "rendezvous connection ended");
             }
         });
@@ -172,16 +191,18 @@ pub async fn serve_endpoint(
 
 async fn serve_incoming(
     incoming: Incoming,
-    registry: &RoomRegistry,
+    registry: Arc<RoomRegistry>,
     locate: Option<&PeerLocator>,
+    permit: tokio::sync::OwnedSemaphorePermit,
 ) -> Result<()> {
     // Bound the pre-Join setup so a connection that half-opens and then goes idle
     // cannot pin a connection slot; the registry separately bounds the first
     // control-frame read.
-    let connection = tokio::time::timeout(HANDSHAKE_TIMEOUT, incoming)
+    let handshake_timeout = registry.config().handshake_timeout;
+    let connection = tokio::time::timeout(handshake_timeout, incoming)
         .await
         .context("rendezvous connection handshake timed out")??;
-    let (send, recv) = tokio::time::timeout(HANDSHAKE_TIMEOUT, connection.accept_bi())
+    let (send, recv) = tokio::time::timeout(handshake_timeout, connection.accept_bi())
         .await
         .context("rendezvous pairing stream not opened in time")??;
     // Correlation span for this connection. `room` is filled in by the broker
@@ -195,11 +216,23 @@ async fn serve_incoming(
         peer = tracing::field::Empty,
         geo = tracing::field::Empty,
     );
-    spawn_peer_locator(connection.clone(), locate.cloned(), span.clone());
+    let direct_addr = observed_addr(&connection);
+    spawn_peer_locator(
+        connection.clone(),
+        locate.cloned(),
+        span.clone(),
+        registry.clone(),
+        direct_addr.is_some(),
+    );
     // The Connection is the close-waiter: the broker keeps it open until the
     // peer closes, then drops it.
-    let conn = PeerConn::new(send, recv, IrohClose(connection));
-    registry.serve(conn).instrument(span).await?;
+    let source = PeerSource::new(
+        *connection.remote_id().as_bytes(),
+        direct_addr.map(|addr| addr.ip()),
+    );
+    let mut conn = PeerConn::new(send, recv, IrohClose(connection));
+    conn.hold(permit);
+    registry.serve_from(conn, source).instrument(span).await?;
     Ok(())
 }
 
@@ -211,10 +244,19 @@ const PEER_LOCATE_ATTEMPTS: usize = 40;
 /// it - annotated via `locate` when set - onto `span` and emit one `peer
 /// located` line. Gives up quietly if the connection closes first or never
 /// punches direct (a purely relay-reached peer).
-fn spawn_peer_locator(connection: Connection, locate: Option<PeerLocator>, span: tracing::Span) {
+fn spawn_peer_locator(
+    connection: Connection,
+    locate: Option<PeerLocator>,
+    span: tracing::Span,
+    registry: Arc<RoomRegistry>,
+    direct_ip_already_debited: bool,
+) {
     tokio::spawn(async move {
         for _ in 0..PEER_LOCATE_ATTEMPTS {
             if let Some(addr) = observed_addr(&connection) {
+                if !direct_ip_already_debited && registry.observe_direct_ip(addr.ip()).is_err() {
+                    connection.close(0_u32.into(), b"source rate limited");
+                }
                 let geo = locate.as_ref().and_then(|locate| locate(addr.ip()));
                 span.record("peer", tracing::field::display(&addr));
                 if let Some(geo) = &geo {
@@ -258,98 +300,62 @@ pub struct BrokerSession {
     pub send: SendStream,
     pub recv: RecvStream,
     pub role: Role,
+    pub selected_bootstrap_method: BootstrapKind,
 }
 
-/// Connect to the broker, open the pairing stream, join `room_id`, and return
-/// the streams + assigned role to drive the pairing over.
-pub async fn join_room(
+/// Join the strict directional rendezvous protocol.
+pub async fn join_invitation(
     endpoint: &Endpoint,
     broker: EndpointAddr,
-    room_id: &str,
-) -> Result<BrokerSession> {
-    join_room_with_intent(endpoint, broker, room_id, None).await
-}
-
-/// Intent-aware variant of [`join_room`]. New clients declare the transfer
-/// direction so the broker cannot pair two senders or two receivers sharing a
-/// room id. Passing `None` preserves legacy room-only matching.
-pub async fn join_room_with_intent(
-    endpoint: &Endpoint,
-    broker: EndpointAddr,
-    room_id: &str,
-    intent: Option<JoinIntent>,
+    join: Join,
 ) -> Result<BrokerSession> {
     let connection = endpoint.connect(broker, RENDEZVOUS_ALPN).await?;
     let (mut send, mut recv) = connection.open_bi().await?;
-    write_framed(
-        &mut send,
-        &Join {
-            room_id: room_id.to_string(),
-            intent,
-        },
-    )
-    .await?;
+    write_framed(&mut send, &join).await?;
     let reply: Reply = read_framed(&mut recv).await?;
-    let role = match reply {
-        Reply::Paired(paired) => paired.role,
-        Reply::Expired => anyhow::bail!(ROOM_EXPIRED),
+    let paired = match reply {
+        Reply::Paired(paired) => paired,
+        Reply::Rejected(rejection) => return Err(anyhow::Error::new(rejection)),
+        Reply::Expired => {
+            return Err(anyhow::Error::new(BrokerRejection {
+                outcome: BrokerOutcome::RoomExpired,
+                retry_after: None,
+            }));
+        }
     };
     Ok(BrokerSession {
         connection,
         send,
         recv,
-        role,
+        role: paired.role,
+        selected_bootstrap_method: paired.selected_bootstrap_method,
     })
 }
 
-/// Pair with a peer in `room_id` over the broker: run SPAKE2 with `password`,
-/// then swap payloads sealed under the derived key. Returns the peer's payload
-/// (for Envoix, each side passes its iroh `PeerDescriptor`, so the result is the
-/// address to dial). The broker only relays ciphertext - it can neither read
-/// nor forge the exchanged payload.
-pub async fn pair_in_room<T>(
-    endpoint: &Endpoint,
-    broker: EndpointAddr,
-    room_id: &str,
-    password: &str,
-    mine: &T,
-) -> Result<RoomPairing<T>>
-where
-    T: serde::Serialize + serde::de::DeserializeOwned,
-{
-    let session = join_room(endpoint, broker, room_id).await?;
-    drive_pairing(session, password, mine).await
+/// Authenticated control channel after the PAKE and sealed public-context
+/// delivery, but before either side creates or discloses a data endpoint.
+pub struct AuthenticatedControl {
+    connection: Connection,
+    send: SendStream,
+    recv: RecvStream,
+    role: Role,
+    pub selected_bootstrap_method: BootstrapKind,
+    control_key: Vec<u8>,
+    pake_transcript_hash: Commitment,
+    pub peer_public_context: Option<Vec<u8>>,
+    my_context_sealed: Vec<u8>,
+    peer_context_sealed: Vec<u8>,
 }
 
-/// Intent-aware variant of [`pair_in_room`].
-pub async fn pair_in_room_with_intent<T>(
-    endpoint: &Endpoint,
-    broker: EndpointAddr,
-    room_id: &str,
-    password: &str,
-    mine: &T,
-    intent: JoinIntent,
-) -> Result<RoomPairing<T>>
-where
-    T: serde::Serialize + serde::de::DeserializeOwned,
-{
-    let session = join_room_with_intent(endpoint, broker, room_id, Some(intent)).await?;
-    drive_pairing(session, password, mine).await
-}
-
-/// Drive the end-to-end pairing over an already-joined [`BrokerSession`]: run
-/// SPAKE2 with `password`, then swap payloads sealed under the derived key.
-/// Split from [`pair_in_room`] so a caller can time-box just this phase - with a
-/// live partner it completes in milliseconds, so a stall means the broker
-/// matched us with a stale/dead peer and the caller should re-join.
-pub async fn drive_pairing<T>(
+/// Authenticate the selected invitation bootstrap and deliver sealed public
+/// context. Endpoint descriptors are exchanged separately only after callers
+/// validate this result.
+pub async fn authenticate_invitation(
     session: BrokerSession,
     password: &str,
-    mine: &T,
-) -> Result<RoomPairing<T>>
-where
-    T: serde::Serialize + serde::de::DeserializeOwned,
-{
+    context: &InvitationControlContext,
+    public_context: Option<&[u8]>,
+) -> Result<AuthenticatedControl> {
     use envoix_pairing::{
         Confirm, PakeResponse, PakeStart, initiator_start, open_json, responder_respond, seal_json,
     };
@@ -359,11 +365,15 @@ where
         mut send,
         mut recv,
         role,
+        selected_bootstrap_method,
     } = session;
+    if selected_bootstrap_method != context.selected_bootstrap_method {
+        anyhow::bail!("broker selected a different invitation bootstrap method");
+    }
 
     let key = match role {
         Role::Initiator => {
-            let (pending, start) = initiator_start(password)?;
+            let (pending, start) = initiator_start(password, context)?;
             write_framed(&mut send, &start).await?;
             let response: PakeResponse = read_framed(&mut recv).await?;
             let (confirming, confirm) = pending.finish(&response)?;
@@ -373,7 +383,7 @@ where
         }
         Role::Responder => {
             let start: PakeStart = read_framed(&mut recv).await?;
-            let (confirming, response) = responder_respond(password, &start)?;
+            let (confirming, response) = responder_respond(password, context, &start)?;
             write_framed(&mut send, &response).await?;
             let initiator_confirm: Confirm = read_framed(&mut recv).await?;
             let (key, confirm) = confirming.verify(&initiator_confirm)?;
@@ -382,39 +392,141 @@ where
         }
     };
 
-    // Bind each sealed descriptor to the sender's role (AEAD aad); we seal with
-    // our role and open with the peer's, so a reflected ciphertext fails to open.
+    // Bind each sealed context to invitation side, so reflection fails.
     let (my_aad, peer_aad): (&[u8], &[u8]) = match role {
-        Role::Initiator => (INITIATOR_SEAL_AAD, RESPONDER_SEAL_AAD),
-        Role::Responder => (RESPONDER_SEAL_AAD, INITIATOR_SEAL_AAD),
+        Role::Initiator => (JOINER_CONTEXT_AAD, CREATOR_CONTEXT_AAD),
+        Role::Responder => (CREATOR_CONTEXT_AAD, JOINER_CONTEXT_AAD),
     };
-    write_framed(&mut send, &seal_json(key.key(), my_aad, mine)?).await?;
-    let sealed: Vec<u8> = read_framed(&mut recv).await?;
-    let peer: T = open_json(key.key(), peer_aad, &sealed)?;
+    let my_bundle = ContextBundle {
+        public_context: public_context.map(<[u8]>::to_vec),
+    };
+    let my_sealed = seal_json(key.key(), my_aad, &my_bundle)?;
+    write_framed(&mut send, &my_sealed).await?;
+    let peer_sealed: Vec<u8> = read_framed(&mut recv).await?;
+    let peer_bundle: ContextBundle = open_json(key.key(), peer_aad, &peer_sealed)?;
 
-    // Derive a strong data-plane token from K (both peers get the same one).
-    let token = hex(&blake3::derive_key(DATA_TOKEN_CONTEXT, key.key()));
-
-    // Graceful close: finish + wait for the broker to ack our FIN (so it is
-    // delivered through the relay), then drain our recv to EOF before dropping.
-    // Bounded by CLOSE_TIMEOUT so a stalled peer cannot hang a done pairing.
-    let _ = send.finish();
-    let _ = tokio::time::timeout(CLOSE_TIMEOUT, async {
-        let _ = send.stopped().await;
-        let _ = recv.read_to_end(1024).await;
+    Ok(AuthenticatedControl {
+        connection,
+        send,
+        recv,
+        role,
+        selected_bootstrap_method,
+        control_key: key.key().to_vec(),
+        pake_transcript_hash: key.transcript_hash(),
+        peer_public_context: peer_bundle.public_context,
+        my_context_sealed: my_sealed,
+        peer_context_sealed: peer_sealed,
     })
-    .await;
-    drop(connection);
-
-    Ok(RoomPairing { peer, token })
 }
 
-/// Lowercase hex of `bytes`.
-fn hex(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        let _ = write!(out, "{b:02x}");
+impl AuthenticatedControl {
+    /// Exchange optional endpoint descriptors after the caller has validated
+    /// the sealed invitation context.
+    pub async fn exchange_descriptor<T>(
+        mut self,
+        mine: Option<&T>,
+    ) -> Result<RoomPairing<Option<T>>>
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        use envoix_pairing::{open_json, seal_json};
+
+        let (my_aad, peer_aad): (&[u8], &[u8]) = match self.role {
+            Role::Initiator => (JOINER_DESCRIPTOR_AAD, CREATOR_DESCRIPTOR_AAD),
+            Role::Responder => (CREATOR_DESCRIPTOR_AAD, JOINER_DESCRIPTOR_AAD),
+        };
+        let my_sealed = seal_json(&self.control_key, my_aad, &DescriptorBundle { peer: mine })?;
+        write_framed(&mut self.send, &my_sealed).await?;
+        let peer_sealed: Vec<u8> = read_framed(&mut self.recv).await?;
+        let peer_bundle: DescriptorBundle<T> =
+            open_json(&self.control_key, peer_aad, &peer_sealed)?;
+        let control_transcript_hash = complete_control_transcript_hash(
+            self.pake_transcript_hash,
+            self.role,
+            &self.my_context_sealed,
+            &self.peer_context_sealed,
+            &my_sealed,
+            &peer_sealed,
+        );
+
+        let _ = self.send.finish();
+        let _ = tokio::time::timeout(CLOSE_TIMEOUT, async {
+            let _ = self.send.stopped().await;
+            let _ = self.recv.read_to_end(1024).await;
+        })
+        .await;
+        drop(self.connection);
+
+        Ok(RoomPairing {
+            peer: peer_bundle.peer,
+            peer_public_context: self.peer_public_context,
+            selected_bootstrap_method: self.selected_bootstrap_method,
+            control_key: self.control_key,
+            control_transcript_hash,
+        })
     }
-    out
+}
+
+/// Convenience wrapper for callers which already have a descriptor before
+/// authenticating. Transfer sessions use the split API so validation precedes
+/// data-endpoint creation.
+pub async fn drive_pairing<T>(
+    session: BrokerSession,
+    password: &str,
+    context: &InvitationControlContext,
+    mine: &T,
+    public_context: Option<&[u8]>,
+) -> Result<RoomPairing<T>>
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    let pairing = authenticate_invitation(session, password, context, public_context)
+        .await?
+        .exchange_descriptor(Some(mine))
+        .await?;
+    Ok(RoomPairing {
+        peer: pairing
+            .peer
+            .ok_or_else(|| anyhow::anyhow!("peer omitted its endpoint descriptor"))?,
+        peer_public_context: pairing.peer_public_context,
+        selected_bootstrap_method: pairing.selected_bootstrap_method,
+        control_key: pairing.control_key,
+        control_transcript_hash: pairing.control_transcript_hash,
+    })
+}
+
+fn complete_control_transcript_hash(
+    pake_transcript_hash: Commitment,
+    role: Role,
+    my_context_sealed: &[u8],
+    peer_context_sealed: &[u8],
+    my_descriptor_sealed: &[u8],
+    peer_descriptor_sealed: &[u8],
+) -> Commitment {
+    let (creator_context, joiner_context, creator_descriptor, joiner_descriptor) = match role {
+        Role::Initiator => (
+            peer_context_sealed,
+            my_context_sealed,
+            peer_descriptor_sealed,
+            my_descriptor_sealed,
+        ),
+        Role::Responder => (
+            my_context_sealed,
+            peer_context_sealed,
+            my_descriptor_sealed,
+            peer_descriptor_sealed,
+        ),
+    };
+    let mut transcript = Vec::new();
+    for value in [
+        pake_transcript_hash.as_bytes().as_slice(),
+        creator_context,
+        joiner_context,
+        creator_descriptor,
+        joiner_descriptor,
+    ] {
+        transcript.extend_from_slice(&(value.len() as u64).to_be_bytes());
+        transcript.extend_from_slice(value);
+    }
+    Commitment::sha256(&transcript)
 }

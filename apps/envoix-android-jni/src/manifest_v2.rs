@@ -1,18 +1,25 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
 use envoix_client::api::{
-    CanonicalTransferJob, Client, CompressionPolicyV2, DestinationDecisionV2, DestinationRequestV2,
-    EventSink, JobIdV2, JobLifecycle, LocalSourceOrigin, ManifestV2DataError,
-    ManifestV2ProgressPhase, ManifestV2ResultGate, PairingConfig, PendingManifestV2Receive,
-    ProviderSourceIssue, RootPlanV2, SavedEntryV2, SenderManifestV2SessionSummary, SourceDecision,
+    AuthenticationHandler, AuthenticationOutcome, CanonicalTransferJob, Client,
+    CompressionPolicyV2, DestinationDecisionV2, DestinationRequestV2, EventSink,
+    InvitationBootstrap, InvitationConsumption, InviteSecretRef, JobIdV2, JobLifecycle,
+    LocalSourceOrigin, ManifestV2DataError, ManifestV2ProgressPhase, ManifestV2ResultGate,
+    PairingConfig, PendingManifestV2Receive, ProviderSourceIssue, RememberedCredentialRef,
+    RootPlanV2, SavedEntryV2, SenderManifestV2SessionSummary, SessionError, SourceDecision,
     SourceIssueKind, SourceItemId, SourceSelectionState, TransferCancelToken, TransferEvent,
-    TransferJobStore, TransferOptions, local_allocatable_bytes, parse_broker_addr,
-    receive_manifest_v2_offer_enable_mdns, receive_manifest_v2_offer_via_room,
-    send_manifest_v2_enable_mdns, send_manifest_v2_via_room,
+    TransferJobStore, TransferOptions, acquire_invitation, acquire_remembered_credential,
+    local_allocatable_bytes, parse_broker_addr, receive_manifest_v2_offer_enable_mdns,
+    receive_manifest_v2_offer_via_remembered,
+    receive_manifest_v2_offer_via_room_with_authentication, send_manifest_v2_enable_mdns,
+    send_manifest_v2_via_remembered, send_manifest_v2_via_room_with_authentication,
 };
+#[cfg(test)]
+use envoix_error::RendezvousCause;
 use envoix_error::{CoreError, TransferCause};
 use envoix_protocol::manifest_v2::{ManifestEntryKindV2, ManifestV2};
 use envoix_types::PairingStep;
@@ -65,7 +72,19 @@ impl From<CompressionChoice> for CompressionPolicyV2 {
 #[serde(deny_unknown_fields)]
 struct StartParams {
     direction: String,
+    #[serde(default = "invitation_mode")]
+    mode: String,
     room: String,
+    #[serde(default)]
+    invitation_ref: Option<InviteSecretRef>,
+    #[serde(default)]
+    remember_consent: bool,
+    #[serde(default)]
+    remembered_credential_ref: Option<RememberedCredentialRef>,
+    #[serde(default)]
+    remembered_generation: u64,
+    #[serde(default)]
+    remembered_previous_generation: Option<u64>,
     broker: String,
     relay: String,
     state_directory: String,
@@ -74,6 +93,10 @@ struct StartParams {
     job_id: Option<String>,
     use_room: bool,
     use_mdns: bool,
+}
+
+fn invitation_mode() -> String {
+    "invitation".into()
 }
 
 #[derive(Deserialize)]
@@ -158,6 +181,85 @@ struct SavedRoot {
 struct AndroidEvents {
     vm: Arc<JavaVM>,
     callback: Arc<GlobalRef>,
+}
+
+struct AndroidAuthentication {
+    vm: Arc<JavaVM>,
+    callback: Arc<GlobalRef>,
+    remember_consent: bool,
+    rotation: Option<(Vec<u8>, u64)>,
+    invitation_consumption: Option<InvitationConsumption>,
+    persisted: AtomicBool,
+}
+
+impl AndroidAuthentication {
+    fn invitation(
+        vm: Arc<JavaVM>,
+        callback: Arc<GlobalRef>,
+        remember_consent: bool,
+        invitation_consumption: Option<InvitationConsumption>,
+    ) -> Self {
+        Self {
+            vm,
+            callback,
+            remember_consent,
+            rotation: None,
+            invitation_consumption,
+            persisted: AtomicBool::new(false),
+        }
+    }
+
+    fn rotation(
+        vm: Arc<JavaVM>,
+        callback: Arc<GlobalRef>,
+        opaque_credential: Vec<u8>,
+        next_generation: u64,
+    ) -> Self {
+        Self {
+            vm,
+            callback,
+            remember_consent: false,
+            rotation: Some((opaque_credential, next_generation)),
+            invitation_consumption: None,
+            persisted: AtomicBool::new(false),
+        }
+    }
+
+    fn persisted(&self) -> bool {
+        self.persisted.load(Ordering::Acquire)
+    }
+}
+
+impl AuthenticationHandler for AndroidAuthentication {
+    fn remember_consent(&self) -> bool {
+        self.remember_consent
+    }
+
+    fn on_authenticated(&self, outcome: AuthenticationOutcome) -> Result<(), SessionError> {
+        if let Some(consumption) = &self.invitation_consumption {
+            consumption.consume();
+        }
+        let credential = if let Some(secret) = outcome.remember_secret {
+            Some((secret.into_credential().to_opaque(), 0))
+        } else {
+            self.rotation.clone()
+        };
+        let Some((opaque, generation)) = credential else {
+            return Ok(());
+        };
+        if !call_remembered_credential(
+            self.vm.as_ref(),
+            self.callback.as_ref(),
+            &opaque,
+            generation,
+        ) {
+            return Err(SessionError::Storage(
+                "protected remembered credential could not be persisted".into(),
+            ));
+        }
+        self.persisted.store(true, Ordering::Release);
+        Ok(())
+    }
 }
 
 impl AndroidEvents {
@@ -671,10 +773,50 @@ async fn run_session(
             "at least one rendezvous route must be enabled".into(),
         ));
     }
+    if params.mode != "invitation" && params.mode != "remembered" {
+        return Err(CoreError::InvalidInput(
+            "Manifest v2 pairing mode is invalid".into(),
+        ));
+    }
+    if params.mode == "remembered" && (!params.use_room || params.use_mdns) {
+        return Err(CoreError::InvalidInput(
+            "remembered pairing requires the room rendezvous route only".into(),
+        ));
+    }
     let broker = params
         .use_room
         .then(|| parse_broker_addr(&params.broker, options.relay.as_deref()))
         .transpose()?;
+    let invitation_lease = if params.mode == "invitation" {
+        params
+            .invitation_ref
+            .as_ref()
+            .map(acquire_invitation)
+            .transpose()
+            .map_err(|error| CoreError::InvalidInput(error.to_string()))?
+    } else {
+        None
+    };
+    let invitation = invitation_lease
+        .as_ref()
+        .map(|lease| lease.bootstrap().clone());
+    let invitation_consumption = invitation_lease.as_ref().map(|lease| lease.consumption());
+    if params.mode == "invitation" && params.use_room && invitation.is_none() {
+        return Err(CoreError::InvalidInput(
+            "Room rendezvous requires validated invitation private state".into(),
+        ));
+    }
+    let remembered_credential = if params.mode == "remembered" {
+        let reference = params.remembered_credential_ref.as_ref().ok_or_else(|| {
+            CoreError::InvalidInput("remembered credential reference is missing".into())
+        })?;
+        Some(
+            acquire_remembered_credential(reference)
+                .map_err(|error| CoreError::InvalidInput(error.to_string()))?,
+        )
+    } else {
+        None
+    };
     let events: Arc<dyn EventSink> = Arc::new(AndroidEvents {
         vm: vm.clone(),
         callback: callback.clone(),
@@ -696,19 +838,46 @@ async fn run_session(
                 .await
                 .map_err(|error| CoreError::Storage(error.to_string()))?;
         }
-        send_with_enabled_routes(
-            EnabledSendRoutes {
-                broker,
-                code: &params.room,
-                use_mdns: params.use_mdns,
-            },
-            &job,
-            PathBuf::from(&params.state_directory),
-            config,
-            events,
-            cancel,
-        )
-        .await?;
+        if let Some(credential) = remembered_credential {
+            send_remembered(
+                params,
+                broker.ok_or_else(|| {
+                    CoreError::InvalidInput("remembered pairing requires a broker".into())
+                })?,
+                credential,
+                &job,
+                PathBuf::from(&params.state_directory),
+                config,
+                events,
+                vm.clone(),
+                callback.clone(),
+                cancel,
+            )
+            .await?;
+        } else {
+            let authentication = Arc::new(AndroidAuthentication::invitation(
+                vm.clone(),
+                callback.clone(),
+                params.remember_consent,
+                invitation_consumption,
+            ));
+            let result = send_with_enabled_routes(
+                EnabledSendRoutes {
+                    broker,
+                    code: &params.room,
+                    invitation,
+                    use_mdns: params.use_mdns,
+                },
+                &job,
+                PathBuf::from(&params.state_directory),
+                config,
+                events,
+                cancel,
+                authentication.clone(),
+            )
+            .await;
+            result?;
+        }
         emit(
             vm.as_ref(),
             callback.as_ref(),
@@ -717,16 +886,43 @@ async fn run_session(
         return Ok(());
     }
 
-    let pending = receive_from_enabled_routes(
-        broker,
-        &params.room,
-        params.use_room,
-        params.use_mdns,
-        config,
-        events,
-        cancel,
-    )
-    .await?;
+    let pending = if let Some(credential) = remembered_credential {
+        receive_remembered(
+            params,
+            broker.ok_or_else(|| {
+                CoreError::InvalidInput("remembered pairing requires a broker".into())
+            })?,
+            credential,
+            config,
+            events,
+            vm.clone(),
+            callback.clone(),
+            cancel,
+        )
+        .await?
+    } else {
+        let authentication = Arc::new(AndroidAuthentication::invitation(
+            vm.clone(),
+            callback.clone(),
+            params.remember_consent,
+            invitation_consumption,
+        ));
+        let result = receive_from_enabled_routes(
+            EnabledReceiveRoutes {
+                broker,
+                code: &params.room,
+                invitation,
+                use_room: params.use_room,
+                use_mdns: params.use_mdns,
+            },
+            config,
+            events,
+            cancel,
+            authentication.clone(),
+        )
+        .await;
+        result?
+    };
     let manifest = &pending.offer().manifest;
     let inventory = manifest
         .entries
@@ -862,9 +1058,130 @@ async fn run_session(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn send_remembered(
+    params: &StartParams,
+    broker: envoix_client::EndpointAddr,
+    credential: envoix_client::api::RememberedCredential,
+    job: &CanonicalTransferJob,
+    state_directory: PathBuf,
+    config: envoix_client::api::SessionConfig,
+    events: Arc<dyn EventSink>,
+    vm: Arc<JavaVM>,
+    callback: Arc<GlobalRef>,
+    cancel: &TransferCancelToken,
+) -> Result<SenderManifestV2SessionSummary, CoreError> {
+    // Keep joining the receiver's fallback window before trying our own
+    // previous generation.
+    let mut generations = vec![params.remembered_generation, params.remembered_generation];
+    if let Some(previous) = params.remembered_previous_generation {
+        generations.push(previous);
+    }
+    let mut last_error = None;
+    for generation in generations {
+        let next_generation = generation.checked_add(1).ok_or_else(|| {
+            CoreError::InvalidInput("remembered credential generation is exhausted".into())
+        })?;
+        let authentication = AndroidAuthentication::rotation(
+            vm.clone(),
+            callback.clone(),
+            credential.to_opaque(),
+            next_generation,
+        );
+        let result = send_manifest_v2_via_remembered(
+            broker.clone(),
+            params.broker.clone(),
+            credential.derive_session(generation),
+            job,
+            state_directory.clone(),
+            config.clone(),
+            events.clone(),
+            cancel,
+            &authentication,
+        )
+        .await;
+        if result.is_ok() || authentication.persisted() || cancel.is_cancelled() {
+            return result;
+        }
+        last_error = result.err();
+    }
+    Err(last_error.unwrap_or_else(|| {
+        CoreError::InvalidInput("remembered credential has no usable generation".into())
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn receive_remembered(
+    params: &StartParams,
+    broker: envoix_client::EndpointAddr,
+    credential: envoix_client::api::RememberedCredential,
+    config: envoix_client::api::SessionConfig,
+    events: Arc<dyn EventSink>,
+    vm: Arc<JavaVM>,
+    callback: Arc<GlobalRef>,
+    cancel: &TransferCancelToken,
+) -> Result<PendingManifestV2Receive, CoreError> {
+    // Offset the sender's current/current/previous schedule so either side of
+    // a one-generation crash can rendezvous.
+    let mut generations = vec![params.remembered_generation];
+    if let Some(previous) = params.remembered_previous_generation {
+        generations.push(previous);
+        generations.push(params.remembered_generation);
+    }
+    let last_index = generations.len() - 1;
+    let mut last_error = None;
+    for (index, generation) in generations.into_iter().enumerate() {
+        let next_generation = generation.checked_add(1).ok_or_else(|| {
+            CoreError::InvalidInput("remembered credential generation is exhausted".into())
+        })?;
+        let authentication = AndroidAuthentication::rotation(
+            vm.clone(),
+            callback.clone(),
+            credential.to_opaque(),
+            next_generation,
+        );
+        let receive = receive_manifest_v2_offer_via_remembered(
+            broker.clone(),
+            params.broker.clone(),
+            credential.derive_session(generation),
+            envoix_client::BindAddrs::dual_stack(0),
+            config.clone(),
+            events.clone(),
+            cancel,
+            &authentication,
+        );
+        let result = if index < last_index {
+            match tokio::time::timeout(std::time::Duration::from_secs(35), receive).await {
+                Ok(result) => result,
+                Err(_) => Err(CoreError::Transport(
+                    "current remembered generation did not find the peer".into(),
+                )),
+            }
+        } else {
+            receive.await
+        };
+        if result.is_ok() || authentication.persisted() || cancel.is_cancelled() {
+            return result;
+        }
+        last_error = result.err();
+    }
+    Err(last_error.unwrap_or_else(|| {
+        CoreError::InvalidInput("remembered credential has no usable generation".into())
+    }))
+}
+
 struct EnabledSendRoutes<'a> {
     broker: Option<envoix_client::EndpointAddr>,
     code: &'a str,
+    invitation: Option<InvitationBootstrap>,
+    use_mdns: bool,
+}
+
+struct EnabledReceiveRoutes<'a> {
+    broker: Option<envoix_client::EndpointAddr>,
+    code: &'a str,
+    invitation: Option<InvitationBootstrap>,
+    use_room: bool,
     use_mdns: bool,
 }
 
@@ -875,21 +1192,29 @@ async fn send_with_enabled_routes(
     config: envoix_client::api::SessionConfig,
     events: Arc<dyn EventSink>,
     cancel: &TransferCancelToken,
+    authentication: Arc<dyn AuthenticationHandler>,
 ) -> Result<SenderManifestV2SessionSummary, CoreError> {
     let mut last_error = None;
     if let Some(broker) = routes.broker {
-        match send_manifest_v2_via_room(
+        let invitation = routes.invitation.ok_or_else(|| {
+            CoreError::InvalidInput(
+                "Room rendezvous requires validated invitation private state".into(),
+            )
+        })?;
+        match send_manifest_v2_via_room_with_authentication(
             broker,
-            routes.code,
+            invitation,
             job,
             state_directory.clone(),
             config.clone(),
             events.clone(),
             cancel,
+            authentication.as_ref(),
         )
         .await
         {
             Ok(summary) => return Ok(summary),
+            Err(error @ CoreError::InvitationConsumed(_)) => return Err(error),
             Err(error) if !cancel.is_cancelled() => {
                 events.on_event(TransferEvent::Diagnostic {
                     message: format!("Room route failed; trying another enabled route: {error}"),
@@ -920,24 +1245,35 @@ async fn send_with_enabled_routes(
 }
 
 async fn receive_from_enabled_routes(
-    broker: Option<envoix_client::EndpointAddr>,
-    code: &str,
-    use_room: bool,
-    use_mdns: bool,
+    routes: EnabledReceiveRoutes<'_>,
     config: envoix_client::api::SessionConfig,
     events: Arc<dyn EventSink>,
     cancel: &TransferCancelToken,
+    authentication: Arc<dyn AuthenticationHandler>,
 ) -> Result<PendingManifestV2Receive, CoreError> {
+    let EnabledReceiveRoutes {
+        broker,
+        code,
+        invitation,
+        use_room,
+        use_mdns,
+    } = routes;
     if use_room && !use_mdns {
         let broker = broker
             .ok_or_else(|| CoreError::InvalidInput("Room rendezvous requires a broker".into()))?;
-        return receive_manifest_v2_offer_via_room(
+        let invitation = invitation.ok_or_else(|| {
+            CoreError::InvalidInput(
+                "Room rendezvous requires validated invitation private state".into(),
+            )
+        })?;
+        return receive_manifest_v2_offer_via_room_with_authentication(
             broker,
-            code,
+            invitation,
             envoix_client::BindAddrs::dual_stack(0),
             config,
             events,
             cancel,
+            authentication.as_ref(),
         )
         .await;
     }
@@ -956,22 +1292,28 @@ async fn receive_from_enabled_routes(
 
     let broker = broker
         .ok_or_else(|| CoreError::InvalidInput("Room rendezvous requires a broker".into()))?;
+    let invitation = invitation.ok_or_else(|| {
+        CoreError::InvalidInput(
+            "Room rendezvous requires validated invitation private state".into(),
+        )
+    })?;
     let room_cancel = TransferCancelToken::new();
     let mdns_cancel = TransferCancelToken::new();
-    let mut routes = JoinSet::new();
+    let mut route_tasks = JoinSet::new();
     {
-        let code = code.to_string();
         let config = config.clone();
         let events = events.clone();
         let route_cancel = room_cancel.clone();
-        routes.spawn(async move {
-            let result = receive_manifest_v2_offer_via_room(
+        let authentication = authentication.clone();
+        route_tasks.spawn(async move {
+            let result = receive_manifest_v2_offer_via_room_with_authentication(
                 broker,
-                &code,
+                invitation,
                 envoix_client::BindAddrs::dual_stack(0),
                 config,
                 events,
                 &route_cancel,
+                authentication.as_ref(),
             )
             .await;
             (0_usize, result)
@@ -981,7 +1323,7 @@ async fn receive_from_enabled_routes(
         let pairing = PairingConfig::spake2_shared_token(code.to_string())?;
         let events = events.clone();
         let route_cancel = mdns_cancel.clone();
-        routes.spawn(async move {
+        route_tasks.spawn(async move {
             let result = receive_manifest_v2_offer_enable_mdns(
                 envoix_client::BindAddrs::dual_stack(0),
                 config,
@@ -1001,32 +1343,38 @@ async fn receive_from_enabled_routes(
             () = cancel.cancelled() => {
                 room_cancel.cancel();
                 mdns_cancel.cancel();
-                while routes.join_next().await.is_some() {}
+                while route_tasks.join_next().await.is_some() {}
                 return Err(CoreError::Cancelled);
             }
-            joined = routes.join_next() => match joined {
+            joined = route_tasks.join_next() => match joined {
                 Some(Ok((winner, Ok(pending)))) => {
                     if winner == 0 { mdns_cancel.cancel(); } else { room_cancel.cancel(); }
-                    while routes.join_next().await.is_some() {}
+                    while route_tasks.join_next().await.is_some() {}
                     return Ok(pending);
+                }
+                Some(Ok((_, Err(error @ CoreError::InvitationConsumed(_))))) => {
+                    room_cancel.cancel();
+                    mdns_cancel.cancel();
+                    while route_tasks.join_next().await.is_some() {}
+                    return Err(error);
                 }
                 Some(Ok((_, Err(error)))) => {
                     events.on_event(TransferEvent::Diagnostic {
                         message: format!("Receive route failed; keeping the other route active: {error}"),
                     });
                     last_error = Some(error);
-                    if routes.is_empty() { break; }
+                    if route_tasks.is_empty() { break; }
                 }
                 Some(Err(error)) => {
                     last_error = Some(CoreError::Transfer(format!("receive route task failed: {error}")));
-                    if routes.is_empty() { break; }
+                    if route_tasks.is_empty() { break; }
                 }
                 None => break,
             },
             () = cancel.cancelled() => {
                 room_cancel.cancel();
                 mdns_cancel.cancel();
-                while routes.join_next().await.is_some() {}
+                while route_tasks.join_next().await.is_some() {}
                 return Err(CoreError::Cancelled);
             }
         }
@@ -1049,6 +1397,38 @@ fn call_plan_required(
     request: &str,
 ) -> Result<String, ManifestV2DataError> {
     call_string_callback(vm, callback, "onPlanRequired", request)
+}
+
+fn call_remembered_credential(
+    vm: &JavaVM,
+    callback: &GlobalRef,
+    opaque: &[u8],
+    generation: u64,
+) -> bool {
+    let Ok(mut env) = vm.attach_current_thread() else {
+        return false;
+    };
+    let Ok(bytes) = env.byte_array_from_slice(opaque) else {
+        return false;
+    };
+    let bytes_object = JObject::from(bytes);
+    let Ok(generation) = i64::try_from(generation) else {
+        return false;
+    };
+    match env.call_method(
+        callback.as_obj(),
+        "onRememberedCredential",
+        "([BJ)Z",
+        &[JValue::Object(&bytes_object), JValue::Long(generation)],
+    ) {
+        Ok(value) => value.z().unwrap_or(false),
+        Err(_) => {
+            if env.exception_check().unwrap_or(false) {
+                let _ = env.exception_clear();
+            }
+            false
+        }
+    }
 }
 
 fn call_string_callback(
@@ -1253,11 +1633,13 @@ struct FailureFact {
 fn error_fact(error: &CoreError, direction: &str) -> FailureFact {
     let (cause, detail) = match error {
         CoreError::Cause { cause, detail } => (cause.code(), detail.clone()),
+        CoreError::Rendezvous { cause, .. } => (cause.code(), error.to_string()),
         CoreError::Cancelled => ("user_canceled", "operation cancelled".into()),
         CoreError::InvalidInput(detail) => ("unsupported_feature", detail.clone()),
         CoreError::Transport(detail) => ("transport", detail.clone()),
         CoreError::Protocol(detail) => ("protocol_or_integrity_failure", detail.clone()),
         CoreError::Crypto(detail) => ("authentication_failed", detail.clone()),
+        CoreError::InvitationConsumed(detail) => ("authentication_failed", detail.clone()),
         CoreError::Io(detail) | CoreError::Storage(detail) if direction == "send" => {
             ("sender_source_unavailable", detail.clone())
         }
@@ -1279,6 +1661,13 @@ fn error_fact(error: &CoreError, direction: &str) -> FailureFact {
 fn failure_recovery(cause: &str) -> (bool, &'static str) {
     match cause {
         "transport" | "discovery" => (true, "resume"),
+        "room_not_found"
+        | "room_full"
+        | "room_rate_limited"
+        | "endpoint_rate_limited"
+        | "ip_rate_limited"
+        | "server_busy" => (true, "retry"),
+        "room_expired" | "room_under_attack" => (true, "re_pair"),
         "authentication_failed" => (true, "re_pair"),
         "sender_source_unavailable" | "sender_source_changed" | "transfer" => (true, "retry"),
         "sender_permission_lost" => (true, "open_settings"),
@@ -1335,6 +1724,13 @@ mod tests {
                 "re_pair",
             ),
             (
+                CoreError::InvitationConsumed("connection lost".into()),
+                "send",
+                "authentication_failed",
+                true,
+                "re_pair",
+            ),
+            (
                 CoreError::Io("source gone".into()),
                 "send",
                 "sender_source_unavailable",
@@ -1380,6 +1776,30 @@ mod tests {
             failure_recovery("protocol_or_integrity_failure"),
             (false, "none")
         );
+    }
+
+    #[test]
+    fn rendezvous_failures_keep_machine_causes_and_recovery() {
+        let rate_limited = error_fact(
+            &CoreError::Rendezvous {
+                cause: RendezvousCause::IpRateLimited,
+                retry_after: Some(5),
+            },
+            "send",
+        );
+        assert_eq!(rate_limited.cause, "ip_rate_limited");
+        assert!(rate_limited.retryable);
+        assert_eq!(rate_limited.recovery_action, "retry");
+
+        let closed = error_fact(
+            &CoreError::Rendezvous {
+                cause: RendezvousCause::RoomUnderAttack,
+                retry_after: None,
+            },
+            "receive",
+        );
+        assert_eq!(closed.cause, "room_under_attack");
+        assert_eq!(closed.recovery_action, "re_pair");
     }
 
     #[test]

@@ -22,6 +22,9 @@ type PublicError = CoreError;
 struct RuntimeConfig {
     data_stream_window: Option<String>,
     candidates: Option<CandidatesConfig>,
+    rendezvous_pairing_attempts: Option<usize>,
+    rendezvous_server_retries: Option<usize>,
+    rendezvous_max_retry_after_seconds: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]

@@ -8,7 +8,7 @@ struct ReceiveView: View {
     // Remembered across launches. Empty means "use the platform default".
     @AppStorage("envoix.outputDir") private var outputDirPath: String = ""
     @AppStorage("envoix.outputDirDisplayName") private var outputDirDisplayName: String = ""
-    @AppStorage("envoix.token") private var token: String = ""
+    @State private var token = ""
     @AppStorage("envoix.concurrentTransfers") private var concurrentTransfers = true
     @AppStorage("envoix.language") private var language = "en"
     @AppStorage("envoix.serverURL") private var serverURL = ""
@@ -18,13 +18,16 @@ struct ReceiveView: View {
     @AppStorage("envoix.speedLimit") private var speedLimit = 40
     @AppStorage("envoix.destinationSaveMode") private var destinationSaveMode = "direct"
     @State private var mode: PairingMode = .room
-    @State private var roomCode = newRoomCode()
+    @State private var rememberedPeers: [RememberedPeerSummary] = []
+    @State private var selectedRememberedPeer: RememberedPeerSummary?
+    @State private var rememberAfterPairing = false
+    @State private var rememberLabel = ""
+    @State private var roomCode = newRoomCode() ?? ""
     @State private var joinRoomCode = ""
+    @State private var joiningInvite = ""
     @State private var pairingInvite: FfiPairingInvite?
     @State private var roomQRCodeImage: PlatformImage?
     @State private var roomQRCodePayload = ""
-    @State private var inviteQRCodeImage: PlatformImage?
-    @State private var inviteQRCodePayload = ""
     @State private var pairingPanel: PairingPanelMode = .show
     @State private var revealAddress = false
     @State private var didApplyInitialPairingInput = false
@@ -111,6 +114,7 @@ struct ReceiveView: View {
             }
         }
         .onAppear(perform: applyInitialPairingInputIfNeeded)
+        .onAppear(perform: refreshRememberedPeers)
         #else
         VStack(spacing: 0) {
             scrollContent
@@ -119,6 +123,7 @@ struct ReceiveView: View {
                 .padding(.top, 12)
         }
         .onAppear(perform: applyInitialPairingInputIfNeeded)
+        .onAppear(perform: refreshRememberedPeers)
         #endif
     }
 
@@ -144,20 +149,89 @@ struct ReceiveView: View {
                 refreshPairingInviteIfNeeded()
             }
         }
-        .onChange(of: viewModel.invite) { invite in updateInviteQRCode(for: invite) }
         .onChange(of: serverURL) { _ in refreshPairingInviteForSettingsChange() }
         .onChange(of: relayURL) { _ in refreshPairingInviteForSettingsChange() }
+        .onChange(of: viewModel.isBusy) { isBusy in
+            if isBusy {
+                joiningInvite = ""
+                joinRoomCode = ""
+                roomCode = ""
+                pairingInvite = nil
+                roomQRCodeImage = nil
+                roomQRCodePayload = ""
+            }
+        }
     }
 
     @ViewBuilder private var connectionSection: some View {
-        if mode == .invite {
-            inviteSection
-        } else if mode == .room {
-            roomSection
-        } else {
-            TokenField(token: $token, disabled: viewModel.isBusy)
-                .card(padding: 14)
+        VStack(alignment: .leading, spacing: 12) {
+            if !rememberedPeers.isEmpty {
+                rememberedPeerSection
+            }
+            if mode == .invite {
+                inviteSection
+            } else if mode == .room {
+                roomSection
+            } else if mode == .remembered {
+                EmptyView()
+            } else {
+                TokenField(token: $token, disabled: viewModel.isBusy)
+                    .card(padding: 14)
+            }
+            if mode == .room || mode == .invite {
+                rememberConsentSection
+            }
         }
+    }
+
+    private var rememberedPeerSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(AppText.value("Remembered devices", "已记住的设备", language: uiLanguage))
+                .font(.headline.weight(.semibold))
+            ForEach(rememberedPeers) { peer in
+                HStack {
+                    Button {
+                        selectedRememberedPeer = peer
+                        mode = .remembered
+                    } label: {
+                        Label(peer.label, systemImage: selectedRememberedPeer?.id == peer.id
+                            ? "checkmark.circle.fill"
+                            : "laptopcomputer.and.iphone")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(viewModel.isBusy)
+                    Button(role: .destructive) {
+                        try? RememberedPeerStore.shared.delete(peer)
+                        refreshRememberedPeers()
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .disabled(viewModel.isBusy)
+                    .accessibilityLabel(AppText.value("Forget device", "忘记设备", language: uiLanguage))
+                }
+            }
+        }
+        .card(padding: 14)
+    }
+
+    private var rememberConsentSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle(
+                AppText.value("Remember this device", "记住此设备", language: uiLanguage),
+                isOn: $rememberAfterPairing
+            )
+            .disabled(viewModel.isBusy)
+            if rememberAfterPairing {
+                TextField(
+                    AppText.value("Device label", "设备名称", language: uiLanguage),
+                    text: $rememberLabel
+                )
+                .textFieldStyle(.roundedBorder)
+                .disabled(viewModel.isBusy)
+            }
+        }
+        .card(padding: 14)
     }
 
     @ViewBuilder private var footerMessage: some View {
@@ -362,53 +436,28 @@ struct ReceiveView: View {
         }
         switch mode {
         case .invite:
-            return AppText.value("Create Link and Wait", "创建链接并等待", language: uiLanguage)
+            return AppText.value("Start Receiving", "开始接收", language: uiLanguage)
         default:
             return AppText.value("Start Receiving", "开始接收", language: uiLanguage)
         }
     }
 
-    /// The invite (QR + string) is the pairing artifact meant to be shared, so
-    /// it is shown directly.
     @ViewBuilder private var inviteSection: some View {
-        VStack(spacing: 16) {
-            VStack(spacing: 4) {
-                Text(AppText.value("Share this QR or invite link", "分享二维码或邀请链接", language: uiLanguage))
-                    .font(.title2.weight(.semibold))
-                    .foregroundStyle(Theme.text)
-                Text(AppText.value("Create the invite and keep this receiver waiting for the sender.", "创建邀请，并让此接收端等待发送方连接。", language: uiLanguage))
-                    .font(.body)
-                    .foregroundStyle(Theme.muted)
-                    .multilineTextAlignment(.center)
-            }
-
-            if let image = inviteQRCodeImage, !viewModel.invite.isEmpty {
-                QRCard(image: image, size: 208)
-                    .accessibilityLabel(AppText.value("Receive invite QR code", "接收邀请二维码", language: uiLanguage))
-            } else {
-                qrPlaceholder
-            }
-            LinkRow(text: viewModel.invite.isEmpty ? AppText.value("Invite link", "邀请链接", language: uiLanguage) : viewModel.invite) {
-                Button {
-                    copyWithToast(viewModel.invite, AppText.value("Invite copied", "邀请已复制", language: uiLanguage), language: uiLanguage)
-                } label: {
-                    Label(AppText.value("Copy", "复制", language: uiLanguage), systemImage: "doc.on.doc")
-                        .frame(minHeight: 34)
-                        .contentShape(Rectangle())
-                }
-                .disabled(viewModel.invite.isEmpty)
-                Button {
-                    primaryAction()
-                } label: {
-                    Label(viewModel.invite.isEmpty
-                          ? AppText.value("Create and Wait", "创建并等待", language: uiLanguage)
-                          : AppText.value("Create New Invite", "创建新邀请", language: uiLanguage),
-                          systemImage: "arrow.clockwise")
-                        .frame(minHeight: 34)
-                        .contentShape(Rectangle())
-                }
-                .disabled(viewModel.isBusy)
-            }
+        VStack(spacing: 12) {
+            Image(systemName: "checkmark.shield.fill")
+                .font(.system(size: 42))
+                .foregroundStyle(Theme.success)
+            Text(AppText.value("InviteV2 verified", "InviteV2 已验证", language: uiLanguage))
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(Theme.text)
+            Text(AppText.value(
+                "This invitation assigns this device the Receive role.",
+                "此邀请已将本设备指定为接收端。",
+                language: uiLanguage
+            ))
+            .font(.body)
+            .foregroundStyle(Theme.muted)
+            .multilineTextAlignment(.center)
         }
         .card(raised: true, padding: 18)
     }
@@ -649,13 +698,20 @@ struct ReceiveView: View {
     }
 
     private var canStart: Bool {
+        if rememberAfterPairing,
+           (mode == .room || mode == .invite),
+           rememberLabel.trimmed.isEmpty {
+            return false
+        }
         switch mode {
         case .room:
             return !joinRoomCode.trimmed.isEmpty || !roomCode.trimmed.isEmpty
         case .invite:
-            return true
+            return !joiningInvite.isEmpty
         case .token:
             return token.trimmed.count >= minTokenLength
+        case .remembered:
+            return selectedRememberedPeer != nil
         }
     }
 
@@ -690,7 +746,7 @@ struct ReceiveView: View {
         do {
             let invite = try makePairingInvite(role: .receive, broker: serverURL, relay: relayURL)
             pairingInvite = invite
-            roomCode = invite.code
+            roomCode = invite.roomCode
             joinRoomCode = ""
             updateRoomQRCode(for: invite.payload)
         } catch {
@@ -704,7 +760,7 @@ struct ReceiveView: View {
             return try roomCodeFromJoinInput(joinedCode)
         }
         if let invite = pairingInvite {
-            let code = invite.code.trimmed
+            let code = invite.roomCode.trimmed
             if !code.isEmpty {
                 updateRoomQRCode(for: invite.payload)
                 return code
@@ -712,31 +768,13 @@ struct ReceiveView: View {
         }
         let invite = try makePairingInvite(role: .receive, broker: serverURL, relay: relayURL)
         pairingInvite = invite
-        roomCode = invite.code
+        roomCode = invite.roomCode
         updateRoomQRCode(for: invite.payload)
-        return invite.code
+        return invite.roomCode
     }
 
     private func roomCodeFromJoinInput(_ input: String) throws -> String {
-        let lowercasedInput = input.lowercased()
-        if lowercasedInput.hasPrefix("envoix:") && !lowercasedInput.hasPrefix("envoix://pair/") {
-            throw RuntimeSettingsError(AppText.value(
-                "Legacy invite links are for senders. Use Room pairing for this receive flow.",
-                "旧版邀请链接供发送端使用。当前接收流程请使用 Room 配对。",
-                language: uiLanguage
-            ))
-        }
-        let parsed = try parsePairingInvite(input: input)
-        guard parsed.role != .receive else {
-            throw RuntimeSettingsError(AppText.value(
-                "Scan a sender code or share your receive code.",
-                "请扫描发送端的码，或分享你的接收码。",
-                language: uiLanguage
-            ))
-        }
-        applyRuntimeSettings(from: parsed)
-        joinRoomCode = parsed.code
-        return parsed.code
+        try normalizeRoomCode(input: input)
     }
 
     private func handleScannedInvite(_ value: String) -> String? {
@@ -760,28 +798,21 @@ struct ReceiveView: View {
     private func applyPairingInput(_ value: String, source: PairingInputSource) -> String? {
         let input = value.trimmed
         do {
-            let lowercasedInput = input.lowercased()
-            if lowercasedInput.hasPrefix("envoix:")
-                && !lowercasedInput.hasPrefix("envoix://pair/") {
-                _ = try roomCodeFromJoinInput(input)
+            if input.lowercased().hasPrefix("envoix:") {
+                let parsed = try parsePairingInviteForRole(input: input, localRole: .receive)
+                applyRuntimeSettings(from: parsed)
+                joiningInvite = input
+                joinRoomCode = ""
+                mode = .invite
+            } else {
+                joinRoomCode = try roomCodeFromJoinInput(input)
+                joiningInvite = ""
+                pairingPanel = .show
+                mode = .room
             }
-            let parsed = try parsePairingInvite(input: input)
-            if parsed.role == .receive, let onSwitchToSend {
-                onSwitchToSend(input)
-                ToastCenter.shared.show(AppText.value(
-                    "Switching to Send",
-                    "正在切换到发送",
-                    language: uiLanguage
-                ))
-                return nil
-            }
-            let code = try roomCodeFromJoinInput(input)
-            joinRoomCode = code
-            pairingPanel = .show
-            mode = .room
             let message = source == .scan
                 ? AppText.value("QR scanned", "二维码已扫描", language: uiLanguage)
-                : AppText.value("Pairing code pasted", "配对码已粘贴", language: uiLanguage)
+                : AppText.value("Invitation pasted", "邀请已粘贴", language: uiLanguage)
             ToastCenter.shared.show(message)
             return nil
         } catch {
@@ -812,8 +843,8 @@ struct ReceiveView: View {
         if !parsed.broker.trimmed.isEmpty {
             serverURL = parsed.broker.trimmed
         }
-        if !parsed.relay.trimmed.isEmpty {
-            relayURL = parsed.relay.trimmed
+        if let relay = parsed.relayUrls.first, !relay.trimmed.isEmpty {
+            relayURL = relay.trimmed
         }
     }
 
@@ -821,12 +852,6 @@ struct ReceiveView: View {
         guard roomQRCodePayload != payload else { return }
         roomQRCodePayload = payload
         roomQRCodeImage = payload.isEmpty ? nil : QRCode.image(from: payload)
-    }
-
-    private func updateInviteQRCode(for invite: String) {
-        guard inviteQRCodePayload != invite else { return }
-        inviteQRCodePayload = invite
-        inviteQRCodeImage = invite.isEmpty ? nil : QRCode.image(from: invite)
     }
 
     private func primaryAction() {
@@ -852,6 +877,8 @@ struct ReceiveView: View {
             startReceiveWithInvite()
         case .token:
             startReceiveWithToken()
+        case .remembered:
+            startReceiveWithRememberedPeer()
         }
     }
 
@@ -880,8 +907,8 @@ struct ReceiveView: View {
 
     private func startReceiveWithRoom() {
         do {
-            let prepared = try prepareOutputDir()
             let code = try activeRoomCode()
+            let prepared = try prepareOutputDir()
             let settings = try RuntimeSettingsProvider.make(
                 concurrentTransfers: concurrentTransfers,
                 language: language,
@@ -895,28 +922,17 @@ struct ReceiveView: View {
                 outputDir: prepared.url.path,
                 code: code,
                 settings: settings,
-                destinationAccess: prepared.access
+                destinationAccess: prepared.access,
+                rememberLabel: rememberAfterPairing ? rememberLabel : nil
             )
-            prepareNextRoomAfterStart()
         } catch {
             viewModel.handleFailed(error.localizedDescription)
         }
     }
 
-    private func prepareNextRoomAfterStart() {
-        guard let invite = try? makePairingInvite(
-            role: .receive,
-            broker: serverURL,
-            relay: relayURL
-        ) else { return }
-        pairingInvite = invite
-        roomCode = invite.code
-        joinRoomCode = ""
-        updateRoomQRCode(for: invite.payload)
-    }
-
     private func startReceiveWithInvite() {
         do {
+            _ = try parsePairingInviteForRole(input: joiningInvite, localRole: .receive)
             let prepared = try prepareOutputDir()
             let settings = try RuntimeSettingsProvider.make(
                 concurrentTransfers: concurrentTransfers,
@@ -929,11 +945,46 @@ struct ReceiveView: View {
             )
             viewModel.startReceivingWithInvite(
                 outputDir: prepared.url.path,
+                invite: joiningInvite,
+                settings: settings,
+                destinationAccess: prepared.access,
+                rememberLabel: rememberAfterPairing ? rememberLabel : nil
+            )
+        } catch {
+            viewModel.handleFailed(error.localizedDescription)
+        }
+    }
+
+    private func startReceiveWithRememberedPeer() {
+        guard let peer = selectedRememberedPeer else { return }
+        do {
+            let prepared = try prepareOutputDir()
+            let settings = try RuntimeSettingsProvider.make(
+                concurrentTransfers: concurrentTransfers,
+                language: language,
+                serverURL: peer.broker,
+                relayURL: peer.relay,
+                candidatesAllow: candidatesAllow,
+                candidatesDeny: candidatesDeny,
+                speedLimit: speedLimit
+            )
+            viewModel.startReceivingFromRememberedPeer(
+                outputDir: prepared.url.path,
+                peer: peer,
                 settings: settings,
                 destinationAccess: prepared.access
             )
         } catch {
             viewModel.handleFailed(error.localizedDescription)
+        }
+    }
+
+    private func refreshRememberedPeers() {
+        rememberedPeers = (try? RememberedPeerStore.shared.peers()) ?? []
+        if let selectedRememberedPeer,
+           !rememberedPeers.contains(where: { $0.id == selectedRememberedPeer.id }) {
+            self.selectedRememberedPeer = nil
+            if mode == .remembered { mode = .room }
         }
     }
 

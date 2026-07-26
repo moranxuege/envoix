@@ -29,6 +29,7 @@ private enum class Screen { Home, Discovery, Logs, Settings }
 class MainActivity : ComponentActivity() {
     private val vm: TransferViewModel by viewModels()
     private val sharedUris = MutableStateFlow<List<Uri>>(emptyList())
+    private var inboundInvite by androidx.compose.runtime.mutableStateOf<String?>(null)
 
     private val requestNotif =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
@@ -40,6 +41,7 @@ class MainActivity : ComponentActivity() {
         }
         TransferService.restoreAll(this)
         captureSharedUris(intent)
+        captureInvite(intent)
         setContent {
             val settings by SettingsStore.settings.collectAsState()
             CompositionLocalProvider(LocalAppLanguage provides settings.language) {
@@ -52,13 +54,29 @@ class MainActivity : ComponentActivity() {
                         Screen.Discovery ->
                             DiscoveryScreen(
                                 onBack = { screen = Screen.Home },
-                                onReceive = { c, b, r, qr, copyApproved ->
+                                onReceive = { c, b, r, qr, copyApproved, rememberLabel, rememberedRelationshipId ->
                                     screen = Screen.Home
-                                    vm.startReceive(c, b, r, qr, copyApproved)
+                                    vm.startReceive(
+                                        c,
+                                        b,
+                                        r,
+                                        qr,
+                                        copyApproved,
+                                        rememberLabel,
+                                        rememberedRelationshipId,
+                                    )
                                 },
-                                onSend = { c, b, r, jobId, qr ->
+                                onSend = { c, b, r, jobId, qr, rememberLabel, rememberedRelationshipId ->
                                     screen = Screen.Home
-                                    vm.startSend(c, jobId, b, r, qr)
+                                    vm.startSend(
+                                        c,
+                                        jobId,
+                                        b,
+                                        r,
+                                        qr,
+                                        rememberLabel,
+                                        rememberedRelationshipId,
+                                    )
                                 },
                             )
                         Screen.Logs -> LogScreen(onBack = { screen = Screen.Home })
@@ -70,10 +88,30 @@ class MainActivity : ComponentActivity() {
                                 transfers = transfers,
                                 initialSharedUris = incomingShares,
                                 onSharedUrisConsumed = { sharedUris.value = emptyList() },
-                                onReceive = { c, b, r, qr, copyApproved ->
-                                    vm.startReceive(c, b, r, qr, copyApproved)
+                                onReceive = { c, b, r, qr, copyApproved, rememberLabel, rememberedRelationshipId ->
+                                    inboundInvite = null
+                                    vm.startReceive(
+                                        c,
+                                        b,
+                                        r,
+                                        qr,
+                                        copyApproved,
+                                        rememberLabel,
+                                        rememberedRelationshipId,
+                                    )
                                 },
-                                onSend = { c, b, r, jobId, qr -> vm.startSend(c, jobId, b, r, qr) },
+                                onSend = { c, b, r, jobId, qr, rememberLabel, rememberedRelationshipId ->
+                                    inboundInvite = null
+                                    vm.startSend(
+                                        c,
+                                        jobId,
+                                        b,
+                                        r,
+                                        qr,
+                                        rememberLabel,
+                                        rememberedRelationshipId,
+                                    )
+                                },
                                 onPauseResume = { vm.pauseResume(it) },
                                 onApproveReceive = { vm.approveReceive(it) },
                                 onCancel = { vm.cancel(it) },
@@ -83,6 +121,7 @@ class MainActivity : ComponentActivity() {
                                 onOpenSettings = { screen = Screen.Settings },
                                 onOpen = { openReceived(it) },
                                 onShare = { shareReceived(it) },
+                                initialPairingInput = inboundInvite,
                             )
                         }
                     }
@@ -95,6 +134,16 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         captureSharedUris(intent)
+        captureInvite(intent)
+    }
+
+    private fun captureInvite(intent: Intent?) {
+        val value = intent?.dataString ?: return
+        if (value.startsWith("envoix://invite/v2/") &&
+            InviteCodec.parseForRouting(value) != null
+        ) {
+            inboundInvite = value
+        }
     }
 
     private fun captureSharedUris(intent: Intent?) {

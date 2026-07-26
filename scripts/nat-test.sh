@@ -5,13 +5,14 @@ readonly SERIAL_A="emulator-5554"
 readonly SERIAL_B="emulator-5556"
 readonly PACKAGE="dev.envoix.app"
 readonly ACTIVITY="$PACKAGE/.MainActivity"
-readonly SERVICE="$PACKAGE/.TransferService"
-readonly ACTION_START="$PACKAGE.START"
+readonly ACTION_CREATE_RECEIVER_INVITE="$PACKAGE.NAT_TEST_CREATE_RECEIVER_INVITE"
+readonly ACTION_START_SENDER="$PACKAGE.NAT_TEST_START_SENDER"
+readonly ACTION_QUERY_TRANSFER="$PACKAGE.NAT_TEST_QUERY_TRANSFER"
+readonly NAT_TEST_RECEIVER="$PACKAGE/.NatTestReceiver"
 readonly DEVICE_INPUT="/data/user/0/$PACKAGE/cache/nat-test-input"
 readonly DEVICE_OUTPUT_DIR="/sdcard/Download/Envoix"
 readonly TRANSFER_RATE_KBITS=4194 # Approximately 512 KiB/s.
 readonly TRANSFER_QUEUE_BYTES=33554432 # 32 MiB.
-readonly DATA_STREAM_WINDOW=1MB # Minimum accepted window; keeps sender progress near delivery.
 readonly AVAILABLE_TESTS=(
     symmetric-both-ipv4
     friendly-both-ipv4
@@ -79,8 +80,6 @@ OpenSSL, cargo-ndk, and the Android SDK/NDK.
 Both AVDs must use x86_64 Google APIs images, not Google Play images.
 Startup removes stale NAT-test resources and stops the global netsimd process.
 The sender's Wi-Fi bandwidth is limited to approximately 512 KiB/s.
-Each transfer uses a 1 MiB QUIC data-stream window so sender progress reflects
-the shaped link after at most the initial window has been queued.
 In symmetric-one-side-ipv4, side A uses symmetric NAT while side B is directly
 routed on the test WAN with no address translation or inbound firewall.
 
@@ -434,6 +433,41 @@ wait_for_validation() {
     done
 }
 
+wait_for_wifi_route() {
+    local serial="$1"
+    local gateway="$2"
+    local expected_subnet="$3"
+    local deadline=$((SECONDS + 15))
+    local retried=0
+
+    until "$adb" -s "$serial" shell ip -4 route show table all 2>/dev/null |
+        grep -q "^default via $gateway dev wlan0"; do
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            if [ "$retried" -eq 0 ]; then
+                printf '[wifi] %s has no Wi-Fi default route; reconnecting once...\n' "$serial"
+                wait_for_wifi "$serial" "$expected_subnet"
+                retried=1
+                deadline=$((SECONDS + 15))
+            else
+                capture_startup_diagnostics "wifi-route-timeout"
+                die "$serial did not install its TAP-backed Wi-Fi default route; see $log_dir/startup-*"
+            fi
+        fi
+        sleep 1
+    done
+}
+
+configure_test_validation() {
+    local serial="$1"
+
+    # The broker and relay live on the isolated simulated WAN. Public Google
+    # captive-portal probes are unrelated to the path under test and make
+    # startup depend on the host's current Internet/DNS behavior. These AVDs
+    # are disposable, so tell Android to trust the test Wi-Fi for this boot.
+    "$adb" -s "$serial" shell settings put global captive_portal_mode 0
+    "$adb" -s "$serial" shell settings put global private_dns_mode off
+}
+
 capture_startup_diagnostics() {
     local reason="$1"
     local serial role
@@ -469,6 +503,9 @@ capture_startup_diagnostics() {
         in_namespace "$ns_b" ip -details -brief address
         in_namespace "$ns_b" ip -4 route show table all
         in_namespace "$ns_b" ip -6 route show table all
+        printf '\n== host forwarding ==\n'
+        privileged iptables -S FORWARD
+        privileged iptables -t nat -S POSTROUTING
     } >"$log_dir/startup-host-network.log" 2>&1 || true
 
     if [ "$verbose" -eq 1 ]; then
@@ -516,6 +553,7 @@ set_device_ipv6() {
     # Android's existing IpClient session does not restart SLAAC merely because
     # disable_ipv6 changes. Reconnect Wi-Fi so IpClient processes the RAs again.
     wait_for_wifi "$serial" "$expected_ipv4_subnet"
+    wait_for_wifi_route "$serial" "${expected_ipv4_subnet}1" "$expected_ipv4_subnet"
     wait_for_validation "$serial"
     deadline=$((SECONDS + 30))
     until "$adb" -s "$serial" shell \
@@ -552,20 +590,62 @@ reset_app() {
     "$adb" -s "$serial" shell pm grant "$PACKAGE" android.permission.POST_NOTIFICATIONS 2>/dev/null || true
 }
 
-start_transfer() {
+start_sender() {
     local serial="$1"
-    local direction="$2"
-    local room="$3"
-    local path="$4"
+    local room="$2"
+    local path="$3"
+    local output
 
-    # adb flattens shell arguments; literal quotes preserve an empty remote
-    # argument instead of leaving --es without its required value.
-    "$adb" -s "$serial" shell am start-foreground-service \
-        -n "$SERVICE" -a "$ACTION_START" \
-        --es direction "$direction" --es room "$room" --es path "$path" \
-        --es broker "$broker_endpoint" --es relay "$relay_url" \
-        --es data_stream_window "$DATA_STREAM_WINDOW" \
-        --es receipt_server "''" >/dev/null
+    output="$("$adb" -s "$serial" shell am broadcast \
+        -n "$NAT_TEST_RECEIVER" -a "$ACTION_START_SENDER" \
+        --es room "$room" --es path "$path" \
+        --es broker "$broker_endpoint" --es relay "$relay_url" 2>&1)"
+    if ! printf '%s\n' "$output" | grep -q 'result=-1, data="started"'; then
+        die "failed to start sender Manifest V2 session on $serial: $output"
+    fi
+}
+
+start_creator_receiver() {
+    local output room
+
+    output="$("$adb" -s "$SERIAL_B" shell am broadcast \
+        -n "$NAT_TEST_RECEIVER" -a "$ACTION_CREATE_RECEIVER_INVITE" \
+        --es broker "$broker_endpoint" --es relay "$relay_url" 2>&1)"
+    room="$(printf '%s\n' "$output" |
+        sed -n 's/.*result=-1, data="\([^"]*\)".*/\1/p' |
+        tail -n 1)"
+    if ! [[ "$room" =~ ^[0-9]{6}-[a-z0-9]{4}-[a-z0-9]{4}$ ]]; then
+        die "failed to create receiver InviteV2 on $SERIAL_B: $output"
+    fi
+    printf '%s\n' "$room"
+}
+
+clear_receiver_outputs() {
+    local output
+
+    if ! output="$("$adb" -s "$SERIAL_B" shell \
+        "content delete --user 0 --uri content://media/external/file --where \"_data LIKE '/storage/emulated/0/Download/Envoix/nat-test-input%'\"" \
+        2>&1)"; then
+        die "failed to clear prior NAT-test MediaStore rows on $SERIAL_B: $output"
+    fi
+    "$adb" -s "$SERIAL_B" shell \
+        "find '$DEVICE_OUTPUT_DIR' -maxdepth 1 -type f -name 'nat-test-input*' -exec rm -f {} \\; 2>/dev/null || true"
+}
+
+wait_for_transfer_record() {
+    local serial="$1"
+    local role="$2"
+    local profile="$3"
+    local deadline=$((SECONDS + 15))
+
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if [ -n "$(record_state "$serial" "$role" || true)" ]; then
+            return
+        fi
+        sleep 1
+    done
+    capture_diagnostics "$profile"
+    die "$serial $role session did not expose transfer state; see $log_dir/$profile-$role-*"
 }
 
 device_hashes() {
@@ -574,44 +654,38 @@ device_hashes() {
         tr -d '\r'
 }
 
+query_transfer_field() {
+    local serial="$1"
+    local role="$2"
+    local field="$3"
+    local output
+
+    output="$("$adb" -s "$serial" shell am broadcast \
+        -n "$NAT_TEST_RECEIVER" -a "$ACTION_QUERY_TRANSFER" \
+        --es direction "$role" --es field "$field" 2>/dev/null || true)"
+    printf '%s\n' "$output" |
+        sed -n 's/.*result=-1, data="\([^"]*\)".*/\1/p' |
+        tail -n 1 | tr -d '\r'
+}
+
 record_state() {
-    "$adb" -s "$1" shell \
-        "grep -h '\"state\"' /data/user/0/$PACKAGE/files/records/*.json 2>/dev/null" |
-        tail -n 1 | sed 's/.*"state": *"\([^"]*\)".*/\1/' | tr -d '\r'
+    query_transfer_field "$1" "$2" state
 }
 
 record_peer() {
-    "$adb" -s "$1" shell \
-        "cat /data/user/0/$PACKAGE/files/records/*.json 2>/dev/null" |
-        tr -d '\r' |
-        awk '
-            /"session"[[:space:]]*:/ { in_session = 1 }
-            in_session && /"path"[[:space:]]*:[[:space:]]*\{/ { in_path = 1; next }
-            in_path && /"type"[[:space:]]*:/ {
-                type = $0
-                sub(/^[^:]*:[[:space:]]*"/, "", type)
-                sub(/",?[[:space:]]*$/, "", type)
-            }
-            in_path && /"(addr|url|description)"[[:space:]]*:/ {
-                endpoint = $0
-                sub(/^[^:]*:[[:space:]]*"/, "", endpoint)
-                sub(/",?[[:space:]]*$/, "", endpoint)
-                print type " (" endpoint ")"
-                exit
-            }
-        '
+    query_transfer_field "$1" "$2" peer
 }
 
 record_peer_type() {
-    record_peer "$1" | sed 's/[[:space:]].*$//'
+    record_peer "$1" "$2" | sed 's/[[:space:]].*$//'
 }
 
 print_peer_data() {
     local profile="$1"
     local sender receiver
 
-    sender="$(record_peer "$SERIAL_A" || true)"
-    receiver="$(record_peer "$SERIAL_B" || true)"
+    sender="$(record_peer "$SERIAL_A" sender || true)"
+    receiver="$(record_peer "$SERIAL_B" receiver || true)"
     printf '[%s] Sender peer:   %s\n' "$profile" "${sender:-unavailable}"
     printf '[%s] Receiver peer: %s\n' "$profile" "${receiver:-unavailable}"
 }
@@ -937,7 +1011,7 @@ run_test() {
     local room deadline actual app_uid sender_state receiver_state
     local sender_peer_type receiver_peer_type failure_reason
 
-    room="$(printf '%06d' $((RANDOM % 1000000)))-nat-test"
+    room=""
     actual=""
     sender_state=""
     receiver_state=""
@@ -962,32 +1036,33 @@ run_test() {
     reset_app "$SERIAL_B"
     "$adb" -s "$SERIAL_A" logcat -c
     "$adb" -s "$SERIAL_B" logcat -c
-    "$adb" -s "$SERIAL_B" shell \
-        "find '$DEVICE_OUTPUT_DIR' -maxdepth 1 -type f -name 'nat-test-input*' -exec rm -f {} \\; 2>/dev/null || true"
+    clear_receiver_outputs
     "$adb" -s "$SERIAL_A" push "$test_file" /data/local/tmp/nat-test-input >/dev/null
     app_uid="$("$adb" -s "$SERIAL_A" shell stat -c %u "/data/user/0/$PACKAGE" | tr -d '\r')"
     "$adb" -s "$SERIAL_A" shell \
         "cp /data/local/tmp/nat-test-input '$DEVICE_INPUT'; chown $app_uid:$app_uid '$DEVICE_INPUT'"
 
-    start_transfer "$SERIAL_B" receive "$room" unused
+    room="$(start_creator_receiver)"
+    wait_for_transfer_record "$SERIAL_B" receiver "$profile"
     sleep 2
     printf '[%s] Limiting sender Wi-Fi to approximately 512 KiB/s...\n' "$profile"
     limit_bandwidth "$SERIAL_A"
-    start_transfer "$SERIAL_A" send "$room" "$DEVICE_INPUT"
+    start_sender "$SERIAL_A" "$room" "$DEVICE_INPUT"
+    wait_for_transfer_record "$SERIAL_A" sender "$profile"
 
     deadline=$((SECONDS + timeout))
     while [ "$SECONDS" -lt "$deadline" ]; do
         actual="$(device_hashes || true)"
-        sender_state="$(record_state "$SERIAL_A" || true)"
-        receiver_state="$(record_state "$SERIAL_B" || true)"
+        sender_state="$(record_state "$SERIAL_A" sender || true)"
+        receiver_state="$(record_state "$SERIAL_B" receiver || true)"
         if [ "$verbose" -eq 1 ]; then
             printf '[%s] sender=%s receiver=%s\r' "$profile" \
                 "${sender_state:-unknown}" "${receiver_state:-unknown}"
         fi
         if printf '%s\n' "$actual" | grep -q "^$expected_hash " &&
-            [ "$sender_state" = completed ] && [ "$receiver_state" = completed ]; then
-            sender_peer_type="$(record_peer_type "$SERIAL_A" || true)"
-            receiver_peer_type="$(record_peer_type "$SERIAL_B" || true)"
+            [ "$sender_state" = delivered ] && [ "$receiver_state" = delivered ]; then
+            sender_peer_type="$(record_peer_type "$SERIAL_A" sender || true)"
+            receiver_peer_type="$(record_peer_type "$SERIAL_B" receiver || true)"
             if [ "$profile" = friendly-both-ipv4 ] &&
                 { [ "$sender_peer_type" != direct ] || [ "$receiver_peer_type" != direct ]; }; then
                 failure_reason="completed through sender=${sender_peer_type:-unknown}, receiver=${receiver_peer_type:-unknown}; expected direct"
@@ -1175,8 +1250,12 @@ root_device "$SERIAL_A"
 root_device "$SERIAL_B"
 "$adb" -s "$SERIAL_A" shell 'command -v tc >/dev/null' ||
     die "$SERIAL_A does not provide the tc traffic-control utility"
+configure_test_validation "$SERIAL_A"
+configure_test_validation "$SERIAL_B"
 wait_for_wifi "$SERIAL_A" 192.168.101.
 wait_for_wifi "$SERIAL_B" 192.168.102.
+wait_for_wifi_route "$SERIAL_A" 192.168.101.1 192.168.101.
+wait_for_wifi_route "$SERIAL_B" 192.168.102.1 192.168.102.
 wait_for_validation "$SERIAL_A"
 wait_for_validation "$SERIAL_B"
 printf 'Wi-Fi addresses: A=%s B=%s\n' \

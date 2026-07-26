@@ -109,26 +109,35 @@ Expected result:
 - The wrong-token receiver does not finalize a file.
 - Failed attempts do not duplicate transfer progress output.
 
-## 6. QR Invite Across Devices
+## 6. Directional InviteV2 Across Devices
 
 Terminal 1:
 
 ```bash
-cargo run -p envoix-cli -- receive --auto --output ./received-qr
+cargo run -p envoix-cli -- receive --create-invite \
+  --rendezvous "<broker-id>@<broker-ip>:8445" \
+  --relay "https://relay.example:8444" \
+  --output ./received-qr
 ```
 
-Copy or scan the printed `invite: envoix:...` value on a second device:
+Copy or scan the intentionally printed `envoix://invite/v2/...` value on a
+second device:
 
 ```bash
-cargo run -p envoix-cli -- send --invite "envoix:..." ./hello.txt
+cargo run -p envoix-cli -- send --invite "envoix://invite/v2/..." ./hello.txt
 ```
 
 Expected result:
 
-- The invite candidate is a reachable LAN address, not `127.0.0.1`.
 - The sender validates the invite before dialing.
+- The sender is the encoded joiner role.
 - Transfer completes across devices.
 - Expired invites fail before any connection attempt.
+- Reusing a successfully consumed creator secret fails as replay.
+
+Repeat with the displayed Room Code and `--room-code` plus `--rendezvous`.
+InviteV2 is not an mDNS fallback: this section shares the cross-device
+checklist, not the mDNS discovery path.
 
 ## 7. Platform Coverage
 

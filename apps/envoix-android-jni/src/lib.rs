@@ -9,11 +9,15 @@
 //! those crates panic ("android context was not initialized").
 
 use std::sync::OnceLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use envoix_client::api::{Invite, Role};
+use envoix_client::api::{
+    Capabilities, InvitationBootstrap, InvitationError, InviteSecretRef, InviteV2, PeerSource,
+    RoomCode, TransferRole, ValidatedInvitation, register_remembered_credential,
+};
 use jni::JNIEnv;
 use jni::JavaVM;
-use jni::objects::{GlobalRef, JClass, JObject, JString, JValue};
+use jni::objects::{GlobalRef, JByteArray, JClass, JObject, JString, JValue};
 
 static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
@@ -53,10 +57,7 @@ pub extern "system" fn Java_dev_envoix_app_Native_initContext(
     std::mem::forget(ctx);
 }
 
-#[allow(clippy::too_many_arguments)]
-/// Generate a room invite for `role` ("send"/"receive"). Returns JSON
-/// `{"code":..,"payload":..}` (the payload is the QR string), or `{"error":..}`.
-/// `relay` may be empty.
+/// Generate a directional InviteV2 for `role` ("send"/"receive").
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_envoix_app_Native_generateInvite(
     mut env: JNIEnv,
@@ -65,30 +66,54 @@ pub extern "system" fn Java_dev_envoix_app_Native_generateInvite(
     broker: JString,
     relay: JString,
 ) -> jni::sys::jstring {
-    let role = if jstr(&mut env, &role) == "send" {
-        Role::Send
-    } else {
-        Role::Receive
+    let role = match jstr(&mut env, &role).as_str() {
+        "send" => TransferRole::Sender,
+        "receive" => TransferRole::Receiver,
+        _ => return to_jstring(&mut env, r#"{"error":"role must be send or receive"}"#),
     };
     let broker = jstr(&mut env, &broker);
     let relay = jstr(&mut env, &relay);
-    let relay = (!relay.is_empty()).then_some(relay);
-    let json = match Invite::room(broker, relay) {
-        Ok(inv) => {
-            let inv = inv.with_role(role);
+    let relay_urls = (!relay.is_empty()).then_some(relay).into_iter().collect();
+    let json = match InviteV2::create(
+        broker.clone(),
+        relay_urls,
+        role,
+        Capabilities::current(),
+        unix_now(),
+    ) {
+        Ok(invite) => {
+            let public = &invite.invitation().public_context;
+            let room_code = invite.room_code.canonical().to_string();
+            let payload = invite.payload.clone();
+            let creator_role = invite.creator_role;
+            let joiner_role = invite.joiner_role;
+            let expires_at = invite.expires_at;
+            let relay = public.relay_urls.first().cloned();
+            let reference = match store_invitation(invite.into_bootstrap(), broker.clone()) {
+                Ok(reference) => reference,
+                Err(error) => return to_jstring(&mut env, &invitation_error_json(&error)),
+            };
             format!(
-                r#"{{"code":{},"payload":{}}}"#,
-                json_str(inv.code()),
-                json_str(&inv.payload())
+                r#"{{"code":{},"payload":{},"reference":{},"broker":{},"relay":{},"creatorRole":{},"joinerRole":{},"expiresAt":{}}}"#,
+                json_str(&room_code),
+                json_str(&payload),
+                reference_json(&reference),
+                json_str(&broker),
+                relay
+                    .as_deref()
+                    .map(json_str)
+                    .unwrap_or_else(|| "null".to_string()),
+                json_str(role_name(creator_role)),
+                json_str(role_name(joiner_role)),
+                expires_at,
             )
         }
-        Err(e) => format!(r#"{{"error":{}}}"#, json_str(&e.to_string())),
+        Err(error) => invitation_error_json(&error),
     };
     to_jstring(&mut env, &json)
 }
 
-/// Parse a typed code or a scanned `envoix://` payload. Returns JSON
-/// `{"code":..,"broker":..,"relay":..,"role":..}`, or `{"error":..}`.
+/// Parse a full payload for deep-link routing without returning its credential.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_envoix_app_Native_parseInvite(
     mut env: JNIEnv,
@@ -96,24 +121,164 @@ pub extern "system" fn Java_dev_envoix_app_Native_parseInvite(
     input: JString,
 ) -> jni::sys::jstring {
     let input = jstr(&mut env, &input);
-    let json = match Invite::parse(&input) {
-        Ok(inv) => {
-            let role = match inv.role() {
-                Some(Role::Send) => "\"send\"",
-                Some(Role::Receive) => "\"receive\"",
-                None => "null",
-            };
-            format!(
-                r#"{{"code":{},"broker":{},"relay":{},"role":{}}}"#,
-                json_str(inv.code()),
-                opt_json(inv.broker()),
-                opt_json(inv.relay()),
-                role,
+    let json = InviteV2::parse(&input, unix_now())
+        .map(|invite| parsed_invite_json(&invite))
+        .unwrap_or_else(|error| invitation_error_json(&error));
+    to_jstring(&mut env, &json)
+}
+
+/// Validate a full invitation or Room Code against the active flow and retain
+/// the private bootstrap only behind an opaque process-memory reference.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_parseInviteForRole(
+    mut env: JNIEnv,
+    _class: JClass,
+    input: JString,
+    role: JString,
+) -> jni::sys::jstring {
+    let input = jstr(&mut env, &input);
+    let role = match jstr(&mut env, &role).as_str() {
+        "send" => TransferRole::Sender,
+        "receive" => TransferRole::Receiver,
+        _ => return to_jstring(&mut env, r#"{"error":"role must be send or receive"}"#),
+    };
+    let prepared = if input.starts_with("envoix:") {
+        InviteV2::parse_for_role(&input, role, unix_now()).and_then(|validated| {
+            let public = &validated.invitation().public_context;
+            let broker = public.broker.clone();
+            let relay = public.relay_urls.first().cloned();
+            let creator_role = public.creator_transfer_role;
+            let joiner_role = public.joiner_transfer_role;
+            let expires_at = public.expires_at;
+            store_invitation(validated.into_bootstrap(), broker.clone()).map(|reference| {
+                prepared_invite_json(
+                    &reference,
+                    &broker,
+                    relay.as_deref(),
+                    creator_role,
+                    joiner_role,
+                    expires_at,
+                )
+            })
+        })
+    } else {
+        RoomCode::parse(&input).and_then(|room_code| {
+            store_invitation(
+                InvitationBootstrap::room_code_joiner(room_code, role),
+                String::new(),
             )
-        }
-        Err(e) => format!(r#"{{"error":{}}}"#, json_str(&e.to_string())),
+            .map(|reference| prepared_invite_json(&reference, "", None, role.complement(), role, 0))
+        })
+    };
+    let json = prepared.unwrap_or_else(|error| invitation_error_json(&error));
+    to_jstring(&mut env, &json)
+}
+
+/// Strictly normalize canonical or separator-free Room Code input.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_normalizeRoomCode(
+    mut env: JNIEnv,
+    _class: JClass,
+    input: JString,
+) -> jni::sys::jstring {
+    let input = jstr(&mut env, &input);
+    let json = RoomCode::parse(&input)
+        .map(|code| format!(r#"{{"code":{}}}"#, json_str(code.canonical())))
+        .unwrap_or_else(|error| invitation_error_json(&error));
+    to_jstring(&mut env, &json)
+}
+
+/// Validate protected bytes loaded by Android and retain them only in process
+/// memory for the next remembered session.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_envoix_app_Native_registerRememberedCredential(
+    mut env: JNIEnv,
+    _class: JClass,
+    opaque_credential: JByteArray,
+) -> jni::sys::jstring {
+    let json = match env.convert_byte_array(&opaque_credential) {
+        Ok(opaque) => match register_remembered_credential(&opaque) {
+            Ok(reference) => format!(r#"{{"reference":{}}}"#, json_str(reference.as_str())),
+            Err(error) => format!(r#"{{"error":{}}}"#, json_str(&error.to_string())),
+        },
+        Err(error) => format!(
+            r#"{{"error":{}}}"#,
+            json_str(&format!("read protected remembered credential: {error}")),
+        ),
     };
     to_jstring(&mut env, &json)
+}
+
+fn store_invitation(
+    bootstrap: InvitationBootstrap,
+    broker: String,
+) -> Result<InviteSecretRef, InvitationError> {
+    match PeerSource::invitation(bootstrap, broker)
+        .map_err(|_| InvitationError::AuthenticationFailed)?
+    {
+        PeerSource::Invitation { secret_ref, .. } => Ok(secret_ref),
+        _ => unreachable!("invitation constructor returned a non-invitation source"),
+    }
+}
+
+fn reference_json(reference: &InviteSecretRef) -> String {
+    serde_json::to_string(reference).expect("invitation reference is JSON serializable")
+}
+
+fn parsed_invite_json(invite: &ValidatedInvitation) -> String {
+    let public = &invite.invitation().public_context;
+    format!(
+        r#"{{"broker":{},"relay":{},"creatorRole":{},"joinerRole":{},"expiresAt":{}}}"#,
+        json_str(&public.broker),
+        public
+            .relay_urls
+            .first()
+            .map(|value| json_str(value))
+            .unwrap_or_else(|| "null".to_string()),
+        json_str(role_name(public.creator_transfer_role)),
+        json_str(role_name(public.joiner_transfer_role)),
+        public.expires_at,
+    )
+}
+
+fn prepared_invite_json(
+    reference: &InviteSecretRef,
+    broker: &str,
+    relay: Option<&str>,
+    creator_role: TransferRole,
+    joiner_role: TransferRole,
+    expires_at: u64,
+) -> String {
+    format!(
+        r#"{{"reference":{},"broker":{},"relay":{},"creatorRole":{},"joinerRole":{},"expiresAt":{}}}"#,
+        reference_json(reference),
+        json_str(broker),
+        relay.map(json_str).unwrap_or_else(|| "null".to_string()),
+        json_str(role_name(creator_role)),
+        json_str(role_name(joiner_role)),
+        expires_at,
+    )
+}
+
+fn invitation_error_json(error: &InvitationError) -> String {
+    format!(
+        r#"{{"error":{},"errorCode":{}}}"#,
+        json_str(&error.to_string()),
+        json_str(error.code().as_str()),
+    )
+}
+
+fn role_name(role: TransferRole) -> &'static str {
+    match role {
+        TransferRole::Sender => "send",
+        TransferRole::Receiver => "receive",
+    }
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
 }
 
 fn to_jstring(env: &mut JNIEnv, s: &str) -> jni::sys::jstring {
@@ -123,10 +288,6 @@ fn to_jstring(env: &mut JNIEnv, s: &str) -> jni::sys::jstring {
             tracing::warn!(%error, "failed to allocate Java string");
             std::ptr::null_mut()
         })
-}
-
-fn opt_json(s: Option<&str>) -> String {
-    s.map(json_str).unwrap_or_else(|| "null".to_string())
 }
 
 fn jstr(env: &mut JNIEnv, s: &JString) -> String {
