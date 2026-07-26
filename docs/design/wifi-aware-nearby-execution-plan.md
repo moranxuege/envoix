@@ -233,22 +233,33 @@ milestone and must not precede migration correctness.
 
 The default selector is a reference implementation and test oracle, not the
 unqualified production policy. iroh remains the path-selection and migration
-engine, but the hybrid endpoint installs an Envoix-owned
-`GuardedNearbyPathSelector` through iroh's `PathSelector` interface.
+engine, while Envoix divides its guard into two parts:
 
-The guard applies these rules:
+1. `GuardedNearbyPathAdmission` decides whether the peer-bound Wi-Fi Aware
+   custom address may be exposed to iroh at all.
+2. `GuardedNearbyPathSelector`, installed through iroh's `PathSelector`
+   interface, makes deterministic choices among paths that iroh has already
+   validated.
 
-- only already validated and peer-bound paths are eligible;
-- relay remains a backup while a healthy primary path exists;
-- a newly visible path does not win from one RTT sample;
-- the current path remains sticky across short jitter;
-- MTU violations, a new black-hole event, path closure, or sustained
-  no-progress can make a path ineligible immediately;
-- loss and congestion decisions use interval deltas rather than cumulative
-  counters;
-- switching back to a recently failed path requires a healthy observation
-  window and cooldown; and
-- every switch records the old path, new path, health evidence, and reason.
+This split is required by the pinned iroh 1.0.3 API. `PathSelector::select` is
+invoked on path lifecycle events, not on a periodic sampling schedule. It
+therefore cannot truthfully implement a continuous goodput/no-progress
+controller by itself. The admission guard owns the healthy observation window,
+peer binding, negotiated MTU, native queue-pressure checks, and cooldown before
+the custom address enters the endpoint.
+
+Once admitted:
+
+- relay remains a backup while a validated primary path exists;
+- the current path remains sticky across short RTT jitter;
+- selector decisions use only the current lifecycle snapshot, never pretend
+  cumulative counters are interval samples;
+- hybrid QUIC uses a 2-second per-path keepalive and 6-second per-path idle
+  timeout, giving three failed observations before iroh abandons the path and
+  invokes selection again;
+- MTU is fixed at 1,200 bytes across every hybrid path; and
+- every observed switch records the old path, new path, health evidence, and
+  reason.
 
 The first selector version does not claim to infer bulk throughput from RTT.
 H1 and H5 establish measured thresholds as named constants; no unexplained
@@ -360,8 +371,8 @@ Verification:
 - build endpoints containing test custom, IP, and optional relay transports;
 - use one endpoint identity and one mixed `EndpointAddr`;
 - verify the default selector can choose custom or IP according to RTT;
-- model the guarded selector against jitter, cumulative-counter rollover,
-  black-hole, MTU, loss, cooldown, and stale-stat sequences;
+- model admission and selection separately against jitter, cumulative-counter
+  rollover, black-hole, MTU, loss, cooldown, and stale-stat sequences;
 - fail the selected custom path and prove the same QUIC connection continues
   over IP;
 - fail IP and prove the same connection can continue over custom;
@@ -371,6 +382,19 @@ Verification:
   never reused before all old owners exit; and
 - inject a custom-path receive/send failure while IP remains healthy and prove
   that the custom error does not terminate the whole endpoint.
+
+Current H1 evidence:
+
+- `mixed_endpoint_migrates_from_wifi_aware_to_ip_on_same_connection` builds one
+  endpoint pair with simultaneous custom and IP paths;
+- cutting both custom bridges preserves the original QUIC connection and
+  bidirectional stream, then continues the second payload over IP;
+- iroh's stock 5-second keepalive / 15-second path-idle policy migrated in
+  15.21 seconds; and
+- the Nearby hybrid 2-second / 6-second policy migrated in 6.23 seconds.
+
+Reverse IP-to-custom migration, relay coexistence, repeated identity teardown,
+and fault/counter model coverage remain open H1 gates.
 
 This phase is the go/no-go gate for full integration. If same-connection
 migration cannot be made reliable with the pinned iroh API, retain the proven

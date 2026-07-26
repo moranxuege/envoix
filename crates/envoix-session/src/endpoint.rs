@@ -720,6 +720,17 @@ pub const DEFAULT_DATA_STREAM_WINDOW: u32 = 4 * 1024 * 1024;
 pub const MIN_DATA_STREAM_WINDOW: u32 = 1024 * 1024;
 pub const MAX_DATA_STREAM_WINDOW: u32 = 128 * 1024 * 1024;
 
+/// Conservative UDP payload shared by IP and Wi-Fi Aware hybrid paths.
+#[cfg(test)]
+pub(crate) const HYBRID_DATA_MTU: u16 = 1_200;
+/// Nearby hybrid endpoints allow three idle probes before retiring a path.
+#[cfg(test)]
+pub(crate) const HYBRID_PATH_KEEP_ALIVE_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(2);
+#[cfg(test)]
+pub(crate) const HYBRID_PATH_MAX_IDLE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(6);
+
 /// QUIC transport tuning for high-latency links (e.g. trans-Pacific, ~280 ms RTT).
 ///
 /// quinn's default per-stream receive window is sized for a 100 ms / 100 Mbit
@@ -740,11 +751,25 @@ pub(crate) fn fixed_mtu_data_transport_config(
     window: u32,
     maximum_datagram_size: u16,
 ) -> QuicTransportConfig {
+    fixed_mtu_data_transport_config_builder(window, maximum_datagram_size).build()
+}
+
+#[cfg(test)]
+pub(crate) fn hybrid_data_transport_config(window: u32) -> QuicTransportConfig {
+    fixed_mtu_data_transport_config_builder(window, HYBRID_DATA_MTU)
+        .default_path_keep_alive_interval(HYBRID_PATH_KEEP_ALIVE_INTERVAL)
+        .default_path_max_idle_timeout(HYBRID_PATH_MAX_IDLE_TIMEOUT)
+        .build()
+}
+
+fn fixed_mtu_data_transport_config_builder(
+    window: u32,
+    maximum_datagram_size: u16,
+) -> QuicTransportConfigBuilder {
     data_transport_config_builder(window)
         .initial_mtu(maximum_datagram_size)
         .min_mtu(maximum_datagram_size)
         .mtu_discovery_config(None)
-        .build()
 }
 
 fn data_transport_config_builder(window: u32) -> QuicTransportConfigBuilder {

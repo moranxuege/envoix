@@ -682,15 +682,48 @@ mod tests {
         CanonicalTransferJob, DestinationDecisionV2, DestinationRequestV2, EventSink,
         POST_SAVE_RESERVE_BYTES, TransferEvent,
     };
+    use iroh::endpoint::transports::{Addr, PathSelection, PathSelectionContext, PathSelector};
     use tempfile::tempdir;
     use tokio::fs;
     use tokio::sync::Mutex as AsyncMutex;
 
     use super::*;
+    use crate::endpoint::{HYBRID_DATA_MTU, hybrid_data_transport_config};
     use crate::{
-        PairingConfig, receive_manifest_v2_offer_over_datagram_transport,
+        DEFAULT_DATA_STREAM_WINDOW, PairingConfig,
+        receive_manifest_v2_offer_over_datagram_transport,
         send_manifest_v2_over_datagram_transport,
     };
+
+    const HYBRID_TEST_ALPN: &[u8] = b"envoix/test/wifi-aware-hybrid/1";
+    const HYBRID_TEST_MIGRATION_TIMEOUT: Duration = Duration::from_secs(12);
+
+    #[derive(Debug)]
+    struct PreferWifiAwarePath;
+
+    impl PathSelector for PreferWifiAwarePath {
+        fn select(&self, context: &PathSelectionContext<'_>) -> PathSelection {
+            let mut selection = PathSelection::none();
+            if let Some(path) = context.paths().find(|path| {
+                matches!(
+                    path.network_path().remote(),
+                    Addr::Custom(addr) if addr.id() == WIFI_AWARE_TRANSPORT_ID
+                )
+            }) {
+                selection.set(&path);
+                return selection;
+            }
+            if let Some(path) = context
+                .paths()
+                .filter_map(|path| path.stats().map(|stats| (path, stats.rtt)))
+                .min_by_key(|(_, rtt)| *rtt)
+                .map(|(path, _)| path)
+            {
+                selection.set(&path);
+            }
+            selection
+        }
+    }
 
     struct MemoryDatagramTransport {
         outbound: mpsc::Sender<Vec<u8>>,
@@ -1015,5 +1048,188 @@ mod tests {
         assert!(receiver_events.selected_wifi_aware());
         assert!(client_transport.largest_send() <= usize::from(client_maximum_datagram_size));
         assert!(server_transport.largest_send() <= usize::from(client_maximum_datagram_size));
+    }
+
+    #[tokio::test]
+    async fn mixed_endpoint_migrates_from_wifi_aware_to_ip_on_same_connection() {
+        let client_secret = SecretKey::generate();
+        let server_secret = SecretKey::generate();
+        let client_id = client_secret.public();
+        let server_id = server_secret.public();
+        let client_custom_addr = custom_addr(client_id);
+        let server_custom_addr = custom_addr(server_id);
+        let (client_platform, server_platform) = MemoryDatagramTransport::pair(false);
+        let (client_custom, client_bridge) = DatagramCustomTransport::start(
+            client_platform.clone(),
+            DatagramTransportRole::Client,
+            client_custom_addr,
+            server_custom_addr.clone(),
+            HYBRID_DATA_MTU,
+        );
+        let (server_custom, server_bridge) = DatagramCustomTransport::start(
+            server_platform.clone(),
+            DatagramTransportRole::Server,
+            server_custom_addr.clone(),
+            custom_addr(client_id),
+            HYBRID_DATA_MTU,
+        );
+        let selector: Arc<dyn PathSelector> = Arc::new(PreferWifiAwarePath);
+        let client_endpoint = Endpoint::builder(presets::N0)
+            .secret_key(client_secret)
+            .alpns(vec![HYBRID_TEST_ALPN.to_vec()])
+            .transport_config(hybrid_data_transport_config(DEFAULT_DATA_STREAM_WINDOW))
+            .clear_address_lookup()
+            .clear_relay_transports()
+            .add_custom_transport(client_custom)
+            .path_selector(selector.clone())
+            .bind()
+            .await
+            .unwrap();
+        let server_endpoint = Endpoint::builder(presets::N0)
+            .secret_key(server_secret)
+            .alpns(vec![HYBRID_TEST_ALPN.to_vec()])
+            .transport_config(hybrid_data_transport_config(DEFAULT_DATA_STREAM_WINDOW))
+            .clear_address_lookup()
+            .clear_relay_transports()
+            .add_custom_transport(server_custom)
+            .path_selector(selector)
+            .bind()
+            .await
+            .unwrap();
+        let server_addr = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let direct_addrs = server_endpoint
+                    .addr()
+                    .ip_addrs()
+                    .copied()
+                    .collect::<Vec<_>>();
+                if !direct_addrs.is_empty() {
+                    break EndpointAddr::from_parts(
+                        server_id,
+                        direct_addrs
+                            .into_iter()
+                            .map(TransportAddr::Ip)
+                            .chain(std::iter::once(TransportAddr::Custom(
+                                server_custom_addr.clone(),
+                            ))),
+                    );
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("server endpoint did not publish a direct IP address");
+
+        let server = tokio::spawn({
+            let server_endpoint = server_endpoint.clone();
+            async move {
+                let incoming = server_endpoint.accept().await.unwrap();
+                let connection = incoming.await.unwrap();
+                let (mut send, mut receive) = connection.accept_bi().await.unwrap();
+                for expected in [b"before".as_slice(), b"after".as_slice()] {
+                    let mut bytes = vec![0; expected.len()];
+                    receive.read_exact(&mut bytes).await.unwrap();
+                    assert_eq!(bytes, expected);
+                    send.write_all(&bytes).await.unwrap();
+                }
+                send.finish().unwrap();
+                connection.closed().await;
+            }
+        });
+        let connection = client_endpoint
+            .connect(server_addr, HYBRID_TEST_ALPN)
+            .await
+            .unwrap();
+        let (mut send, mut receive) = connection.open_bi().await.unwrap();
+
+        send.write_all(b"before").await.unwrap();
+        let mut before = [0_u8; 6];
+        receive.read_exact(&mut before).await.unwrap();
+        assert_eq!(&before, b"before");
+
+        let mixed_paths_settled = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let paths = connection.paths();
+                let has_ip = paths.iter().any(|path| path.remote_addr().is_ip());
+                let wifi_aware_selected = paths.iter().any(|path| {
+                    path.is_selected()
+                        && matches!(
+                            path.remote_addr(),
+                            TransportAddr::Custom(addr)
+                                if addr.id() == WIFI_AWARE_TRANSPORT_ID
+                        )
+                });
+                if has_ip && wifi_aware_selected {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await;
+        if mixed_paths_settled.is_err() {
+            let paths = connection.paths();
+            let snapshot = paths
+                .iter()
+                .map(|path| {
+                    format!(
+                        "{:?} selected={} rtt={:?}",
+                        path.remote_addr(),
+                        path.is_selected(),
+                        path.rtt()
+                    )
+                })
+                .collect::<Vec<_>>();
+            panic!(
+                "mixed IP and selected Wi-Fi Aware paths did not settle: {}",
+                snapshot.join(", ")
+            );
+        }
+
+        client_bridge.close().await;
+        server_bridge.close().await;
+        send.write_all(b"after").await.unwrap();
+
+        let migrated = tokio::time::timeout(HYBRID_TEST_MIGRATION_TIMEOUT, async {
+            loop {
+                if connection
+                    .paths()
+                    .iter()
+                    .any(|path| path.is_selected() && path.remote_addr().is_ip())
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await;
+        if migrated.is_err() {
+            let paths = connection.paths();
+            let snapshot = paths
+                .iter()
+                .map(|path| {
+                    format!(
+                        "{:?} selected={} rtt={:?}",
+                        path.remote_addr(),
+                        path.is_selected(),
+                        path.rtt()
+                    )
+                })
+                .collect::<Vec<_>>();
+            panic!(
+                "connection did not migrate from Wi-Fi Aware to IP; close_reason={:?}; paths={}",
+                connection.close_reason(),
+                snapshot.join(", ")
+            );
+        }
+
+        send.finish().unwrap();
+        let mut after = [0_u8; 5];
+        receive.read_exact(&mut after).await.unwrap();
+        assert_eq!(&after, b"after");
+        assert!(client_platform.largest_send() <= usize::from(HYBRID_DATA_MTU));
+        assert!(server_platform.largest_send() <= usize::from(HYBRID_DATA_MTU));
+
+        connection.close(0_u32.into(), b"done");
+        server.await.unwrap();
     }
 }
