@@ -1,6 +1,6 @@
 # Wi-Fi Aware as a nearby-activated iroh path
 
-Status: **Nearby hybrid path passes scoped no-device gates; Apple physical gate awaiting approval**
+Status: **Nearby hybrid and coordinated iroh fallback pass the core Apple physical gate; firmware stability limit remains**
 
 Last reviewed: 2026-07-26
 
@@ -32,8 +32,10 @@ The rule is:
   to create ordinary iroh endpoints without Wi-Fi Aware;
 - when Nearby has no unambiguous paired Wi-Fi Aware device, the transfer
   proceeds through ordinary iroh; and
-- once a hybrid endpoint exists, Envoix does not run a second provider-level
-  fallback state machine. iroh owns path selection and migration.
+- recoverable Apple setup failures before a hybrid QUIC connection exists use
+  one coordinated retry through the ordinary authenticated Room path; and
+- once a hybrid QUIC connection exists, Envoix never starts a second transfer
+  session. iroh owns path selection and migration.
 
 Wi-Fi Aware may still be reported as `DataPath::WifiAware` when its custom path
 is selected. This describes the physical path, not a separate protocol stack.
@@ -204,10 +206,18 @@ The first implementation therefore uses a per-session hybrid endpoint:
 7. iroh NAT traversal validates the ordinary IP backup on that connection.
 
 When the paired-device snapshot is absent or ambiguous, no Apple channel is
-opened and the existing ordinary Room path runs. Once a unique candidate has
-entered native setup, setup errors are currently explicit failures rather than
-an uncoordinated one-sided fallback. A coordinated pre-admission timeout is a
-follow-up reliability item; it must not retry after authentication or payload.
+opened and the existing ordinary Room path runs. When a unique candidate has
+entered native setup, a recoverable Apple setup error falls back to that same
+ordinary authenticated Room route. The receiver waits at most 20 seconds for
+the first native connection to become ready; this prevents a ready-but-unused
+listener from remaining on Wi-Fi Aware after the sender has already fallen
+back.
+
+The fallback boundary is explicit. Cancellation, malformed input, peer or
+endpoint identity mismatch, and authentication/integrity failures do not
+fallback. Once iroh reports an authenticated connection or the receiver has
+accepted an offer and requested a destination, later path failure belongs to
+iroh migration and cannot create a second transfer session.
 
 A long-lived custom-transport registry capable of attaching channels to an
 already-bound shared endpoint would remove the setup wait, but it introduces
@@ -311,10 +321,12 @@ There are two distinct stages:
 If the Nearby snapshot contains zero or multiple Wi-Fi Aware paired devices,
 omit the custom path and run the existing ordinary Room transfer.
 
-After one unique device has been staged and native setup begins, an unavailable
-device, setup timeout, invalid MTU, or identity mismatch is currently an
-explicit failure. The two peers do not independently guess whether to retry an
-ordinary session; a coordinated pre-admission fallback remains follow-up work.
+After one unique device has been staged, an unavailable device, native
+Network.framework error, connection-ready timeout, datagram bootstrap timeout,
+or invalid native datagram capacity may retry the existing ordinary Room
+transfer. The receiver's 20-second connection-ready deadline makes this
+transition symmetric even when only the sender detects the original native
+failure.
 
 Do not continue after:
 
@@ -322,6 +334,11 @@ Do not continue after:
 - paired-peer or endpoint-identity mismatch;
 - authentication/downgrade evidence; or
 - malformed peer input.
+
+Fallback failures from the first attempt are held until the decision is known,
+so the activity is not marked failed before an allowed retry. The activity
+receives the diagnostic `Wi-Fi Aware path unavailable; continuing over
+authenticated iroh direct/relay` when the retry begins.
 
 ### After one iroh connection exists
 
@@ -347,20 +364,11 @@ dropped or joined before the endpoint closes and before that identity can be
 reused. Existing policy remains unchanged: static receivers may retain their
 activity-scoped identity, while dialers and Room peers use ephemeral identities.
 
-## 11. Recovery baseline
+## 11. Evidence retention
 
-The clean worktree is `feat/wifi-aware`; the restored checkpoint is
-`286018c`. Source from the previous
-detached working directory is preserved at:
-
-```text
-/private/tmp/envoix-wifi-aware-orphan-20260725-0746
-```
-
-It contains the Apple connected-UDP adapter, custom iroh transport, bootstrap
-v2, negotiated MTU fix, asymmetric MTU regression, and 256 MiB physical-test
-harness. Recovery must restore only relevant source changes; generated
-bindings and caches are regenerated.
+The implementation is maintained on `feat/wifi-aware`. Generated bindings,
+DerivedData, payloads, logs, and `.xcresult` bundles are regenerable and are
+not durable project data.
 
 Persistent physical evidence is stored at:
 
@@ -368,9 +376,10 @@ Persistent physical evidence is stored at:
 /Users/moranxuege/SJTU_JI/2026SU/ECE4410J/WiFiAwareEvidence/2026-07-24
 ```
 
-It proves custom-only Wi-Fi Aware in both Apple directions. Hybrid selection
-and Wi-Fi-Aware-to-IP migration are proven in memory; Apple physical hybrid
-selection and migration remain gated on explicit approval.
+It proves the recovered custom-only Wi-Fi Aware baseline in both Apple
+directions. The 2026-07-26 hybrid, migration, cancellation, fallback, and
+stability findings are summarized below; their temporary test bundles were
+deleted after extracting the results.
 
 ## 12. Execution phases
 
@@ -548,8 +557,27 @@ Payload gates:
 Use the iPad through wireless CoreDevice where possible so the Android device
 and its USB port remain available to the other branch.
 
-Status: not started. The user requested that both-Apple testing wait for
-explicit approval.
+Status: core gate passed on 2026-07-26 after explicit approval:
+
+- the product `Nearby preferred` helper completed an 8 MiB hash-verified
+  transfer through Wi-Fi Aware in both directions;
+- custom-only and Nearby hybrid transfers completed 8 MiB and 256 MiB in both
+  directions, followed by one 1 GiB hash-verified hybrid transfer per
+  direction;
+- closing the Wi-Fi Aware datagram bridge during a 1 GiB transfer preserved
+  the same QUIC connection and completed over the validated LAN path in both
+  directions;
+- sender cancellation at 0% and 25% was followed by a successful transfer in
+  the same and reverse directions without rebooting or re-pairing; and
+- an asymmetric setup fault, where only the sender used an unavailable Apple
+  peer ID, made the receiver leave its native listener after approximately
+  20.1 seconds. Both directions then paired through ordinary iroh direct,
+  transferred 8 MiB, and verified the payload hash.
+
+The remaining release-gate scenarios are IP-to-Wi-Fi-Aware recovery, physical
+relay coexistence, and a short product-level check that non-Nearby entry points
+never activate the native publisher/subscriber. The routing unit tests already
+cover the last rule without devices.
 
 ### H6 — Reliability and performance
 
@@ -561,9 +589,42 @@ explicit approval.
 - compare fixed 1,200-byte hybrid performance with the 1,402-byte custom-only
   baseline before considering MTU optimization.
 
-The current custom-only single-run results, approximately 192.8 Mbit/s from
-iPhone to iPad and 156.8 Mbit/s in reverse, are a baseline rather than a hybrid
-guarantee.
+Status: partially complete on iPhone 15 Pro Max and iPad Air 5 running
+26.5.2 (`23F84`). Representative Nearby hybrid sender payload goodput was:
+
+| Payload | iPhone → iPad | iPad → iPhone |
+| --- | ---: | ---: |
+| 8 MiB | 126.8 Mbit/s | 130.0 Mbit/s |
+| 256 MiB | 117.5 Mbit/s | 129.0 Mbit/s |
+| 1 GiB | 130.1 Mbit/s | 131.7 Mbit/s |
+
+The forced 1 GiB Wi-Fi-Aware-to-LAN migration completed with matching hashes
+at approximately 99 Mbit/s in the final repeat. These are close-range samples,
+not a throughput guarantee or a Wi-Fi Alliance PHY-rate comparison.
+
+The 30-run stability gate did not pass. Three consecutive transfers completed
+in each direction. A later forward pressure batch then completed 14
+consecutive 8 MiB transfers before iteration 15 failed with Apple datapath
+messages including `lost nexus assignment`, followed by
+`connection_terminated` / `Socket is not connected`. Both devices still
+reported Wi-Fi Aware capability ready and exactly one paired device. The
+failure therefore establishes a current firmware/NDP stability boundary; it
+does not establish its private root cause.
+
+Apple's `NetworkListener.State.waiting` contract permits a listener to wait
+until a viable network appears, so the paired harness starts the subscriber
+after either `waiting` or `ready`, not only after `ready`. Recent Apple
+Developer Forums reports describe similar repeated-NDP resource symptoms, but
+they are supporting context rather than proof of the Envoix failure's cause:
+[NetworkListener.State](https://developer.apple.com/documentation/network/networklistener/state),
+[Apple Developer Forums thread 818708](https://developer.apple.com/forums/thread/818708).
+
+TCP remains diagnostic-only because the first connected TCP frame consistently
+returns Darwin `ENOBUFS` (55). Connected UDP with a 1,452-byte current maximum
+and iroh QUIC is the production path. The receiver still projects peer
+cancellation as `networkLost` / `early eof`; sender cancellation itself is
+correct and teardown recovery is proven, but the receiver-facing semantic
+mapping remains follow-up work.
 
 ### H7 — UI and merge integration
 
@@ -615,8 +676,8 @@ The architecture is complete only when:
 - a selected Nearby peer can contribute an exact, peer-specific custom path;
 - custom, IP, and relay paths belong to one endpoint identity and one QUIC
   connection;
-- iroh executes selection and migration through the guarded policy, without an
-  Envoix second-connection retry loop;
+- after hybrid QUIC admission, iroh executes selection and migration through
+  the guarded policy without an Envoix second-connection retry loop;
 - custom-path loss can continue on an already validated alternate path without
   restarting SPAKE2, Manifest, or the activity;
 - hybrid MTU handling cannot emit a packet larger than the custom path accepts;

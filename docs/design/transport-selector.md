@@ -1,38 +1,39 @@
 # Transport provider selector
 
-Status: **Apple Wi-Fi Aware UDP/QUIC adapter physically validated; product selection remains peer-specific**
+Status: **Nearby admits peer-specific Apple Wi-Fi Aware into iroh; native setup fallback is physically validated**
 
-Last reviewed: 2026-07-24
+Last reviewed: 2026-07-26
 
 ## Decision
 
-Envoix has three independent routing axes:
+Envoix retains three routing axes at its compatibility/API boundary:
 
 1. `PeerSource` decides how peers find and authenticate each other (manual,
    invite, mDNS, or Room).
-2. `TransportSelector` decides which provider establishes the data channel
-   (wired, Wi-Fi Aware, or iroh).
+2. `TransportSelector` decides which transport capability may be admitted
+   (wired, Wi-Fi Aware, or ordinary iroh).
 3. `PathPolicy` constrains direct/relay behavior *inside iroh* after iroh is
    selected.
 
-The selector must never encode Wi-Fi Aware as “iroh direct.” An Apple
-`WAEndpoint` is an opaque Network.framework endpoint, and a future raw USB
-bulk/accessory channel is not an IP path at all. They remain independent
-providers even though the Apple adapter now reuses iroh's QUIC engine over a
-custom, platform-owned datagram transport.
+The active Apple product route is narrower than the compatibility surface.
+Only a selected Nearby peer may contribute Wi-Fi Aware, and it contributes a
+custom path to one iroh endpoint rather than starting a second transfer
+protocol. The selector must still never report Wi-Fi Aware as “iroh direct”:
+an Apple `WAEndpoint` is an opaque Network.framework path with its own
+availability and diagnostics.
 
 ```text
 PeerSource / nearby-device identity
                  ↓
        TransportSelector
       ↙          ↓          ↘
-  Wired      Wi-Fi Aware      iroh
-     ↓             ↓            ↓
- raw stream   platform UDP   IP/relay
-     ↓             ↓            ↓
- native frame   iroh custom transport
-     connection       \        /
-                       QUIC
+  Wired      Nearby-selected Wi-Fi Aware
+     ↓             ↓
+ raw stream   platform UDP → iroh custom path
+                               ↘
+                       iroh IP/relay paths
+                               ↓
+                         one QUIC connection
                         ↓
                 FrameConnection
                  ↓
@@ -63,24 +64,33 @@ be compiled, and the selected peer must have a usable candidate. This prevents
 the W0 Apple/Android probes from advertising a data path before the physical
 pairing and channel gates pass.
 
+For the Apple Nearby flow, `Prefer(WifiAware)` means “admit the peer-specific
+custom path when native setup succeeds.” The same iroh endpoint also validates
+an IP backup after custom-path admission. If native setup fails before a
+hybrid QUIC connection exists, both peers may continue through the ordinary
+authenticated iroh Room route. Cancellation, identity mismatch, authentication
+failure, and any failure after QUIC admission do not trigger this
+second-session fallback.
+
 ## Current adapter matrix
 
 | Provider | Compiled status | Current behavior |
 | --- | --- | --- |
 | iroh | `ready` | Existing Manual/Invite/mDNS/Room send and receive functions; existing `PathPolicy` preserved |
-| Wi-Fi Aware | adapter implemented | Apple Network.framework provides connected UDP; Rust runs iroh QUIC, SPAKE2, Manifest v2, recovery, and delivery proof over a custom transport. Android currently provides a raw TCP stream with Rust-owned TLS 1.3 and the same upper layers |
+| Wi-Fi Aware | adapter implemented | Apple Network.framework provides connected UDP; Nearby gives it to the same iroh endpoint as a custom-first path with IP backup. Rust runs QUIC, SPAKE2, Manifest v2, recovery, and delivery proof. Android currently provides a raw TCP stream with Rust-owned TLS 1.3 and the same upper layers |
 | wired | `implementation_pending` | Reserved for a future raw wired provider; never treated as an iroh/IP path |
 
 Wi-Fi Aware readiness is supplied for the selected paired device, not inferred
 from a global hardware probe. Apple calls the additive UniFFI datagram entry
 points while retaining the publisher/listener or subscriber/connection scope
-for the complete session. The Rust custom transport disables ordinary IP and
-relay transports, exchanges ephemeral iroh endpoint IDs over a bounded,
-retrying bootstrap, and reports the selected path as `wifi_aware`. Android
+for the complete session. The custom-only diagnostic disables ordinary IP and
+relay; the production Nearby hybrid exchanges ephemeral endpoint IDs over a
+bounded bootstrap, dials the custom address first, and lets iroh validate an
+ordinary IP backup on that connection. Android
 calls the additive JNI stream entry point after its Wi-Fi Aware network
 callback has produced a TCP socket. Existing iroh APIs are unchanged, so
-`Prefer(WifiAware)` may retry through ordinary iroh without creating another
-job or transfer protocol.
+recoverable pre-admission setup failure may reuse the same sealed job through
+ordinary iroh without duplicating file semantics or activity state.
 
 On Apple, iroh's ephemeral QUIC endpoint identity protects the transport and
 mutual SPAKE2 authenticates the invitation secret over that connection. On the
@@ -138,6 +148,26 @@ with the default `bestEffort` service class:
   regression test that models both a cancelled foreign receive lingering
   across UniFFI and asymmetric 1402/1452-byte platform limits.
 
+The 2026-07-26 production-hybrid gate on the same devices additionally proved:
+
+- Nearby custom-first QUIC and hash-verified 8 MiB, 256 MiB, and 1 GiB
+  transfers in both directions;
+- a forced Wi-Fi-Aware-to-LAN migration during each 1 GiB transfer without
+  restarting the QUIC connection or Manifest session;
+- cancellation followed by a successful transfer without rebooting or
+  re-pairing; and
+- coordinated pre-admission fallback in both directions. With only the sender
+  forced to reject its WFA peer, the receiver left its unused native listener
+  after about 20.1 seconds, both peers joined ordinary authenticated iroh, and
+  the 8 MiB payload hash matched.
+
+A forward pressure batch then completed 14 consecutive 8 MiB Wi-Fi Aware
+transfers before Apple reported `lost nexus assignment` on iteration 15 and
+the connection terminated. Capability and pairing probes remained ready. This
+is recorded as an iOS/iPadOS 26.5.2 firmware/NDP stability boundary, not as a
+confirmed private-framework root cause. The 30-per-direction release gate
+therefore remains open.
+
 The same devices still reproduce Darwin `ENOBUFS` (55) on the first TCP frame
 after the Wi-Fi Aware connection becomes ready. Full device reboot, re-pairing,
 and the 26.5.2 update did not change that result. Apple also prints
@@ -162,3 +192,7 @@ throughput ceiling, current capacity, capacity ratio, signal strength, and
 maximum datagram size at ready and completion. Transfer progress is sampled at
 25 percent intervals and reports payload goodput separately from discovery,
 handshake, verification, and save time.
+
+Physical `.xcresult` bundles, payloads, logs, DerivedData, and generated Swift
+bindings are deliberately deleted after extracting these results; they are
+regenerable artifacts, not durable evidence.
