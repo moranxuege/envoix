@@ -21,7 +21,8 @@ pub use envoix_invite::{
     BootstrapKind, Commitment, InvitationControlContext, InvitationSide, TransferRole,
 };
 use envoix_rendezvous::{
-    CloseWaiter, Join, PeerConn, Reply, Role, RoomRegistry, read_framed, write_framed,
+    BrokerOutcome, BrokerRejection, CloseWaiter, Join, PeerConn, PeerSource, Reply, Role,
+    RoomRegistry, read_framed, write_framed,
 };
 use serde::{Deserialize, Serialize};
 
@@ -161,31 +162,26 @@ pub fn endpoint_addr(endpoint: &Endpoint) -> EndpointAddr {
     )
 }
 
-/// Cap on connections served at once, so a flood cannot exhaust the broker.
-const MAX_CONCURRENT_CONNECTIONS: usize = 256;
-
-/// Cap on a fresh connection's handshake + pairing-stream open before Join, so a
-/// half-open idle connection cannot hold a connection slot indefinitely.
-const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
 /// Accept pairing connections forever, serving each through `registry`, up to
-/// MAX_CONCURRENT_CONNECTIONS at a time (excess incoming connections are dropped).
+/// the configured global connection cap (excess incoming connections are dropped).
 pub async fn serve_endpoint(
     endpoint: Endpoint,
     registry: Arc<RoomRegistry>,
     locate: Option<PeerLocator>,
 ) -> Result<()> {
-    let limit = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+    let limit = Arc::new(tokio::sync::Semaphore::new(
+        registry.config().max_connections,
+    ));
     while let Some(incoming) = endpoint.accept().await {
         let Ok(permit) = limit.clone().try_acquire_owned() else {
+            registry.record_transport_busy();
             tracing::warn!("rendezvous connection limit reached; dropping incoming");
             continue;
         };
         let registry = registry.clone();
         let locate = locate.clone();
         tokio::spawn(async move {
-            let _permit = permit;
-            if let Err(error) = serve_incoming(incoming, &registry, locate.as_ref()).await {
+            if let Err(error) = serve_incoming(incoming, registry, locate.as_ref(), permit).await {
                 tracing::debug!(%error, "rendezvous connection ended");
             }
         });
@@ -195,16 +191,18 @@ pub async fn serve_endpoint(
 
 async fn serve_incoming(
     incoming: Incoming,
-    registry: &RoomRegistry,
+    registry: Arc<RoomRegistry>,
     locate: Option<&PeerLocator>,
+    permit: tokio::sync::OwnedSemaphorePermit,
 ) -> Result<()> {
     // Bound the pre-Join setup so a connection that half-opens and then goes idle
     // cannot pin a connection slot; the registry separately bounds the first
     // control-frame read.
-    let connection = tokio::time::timeout(HANDSHAKE_TIMEOUT, incoming)
+    let handshake_timeout = registry.config().handshake_timeout;
+    let connection = tokio::time::timeout(handshake_timeout, incoming)
         .await
         .context("rendezvous connection handshake timed out")??;
-    let (send, recv) = tokio::time::timeout(HANDSHAKE_TIMEOUT, connection.accept_bi())
+    let (send, recv) = tokio::time::timeout(handshake_timeout, connection.accept_bi())
         .await
         .context("rendezvous pairing stream not opened in time")??;
     // Correlation span for this connection. `room` is filled in by the broker
@@ -218,11 +216,23 @@ async fn serve_incoming(
         peer = tracing::field::Empty,
         geo = tracing::field::Empty,
     );
-    spawn_peer_locator(connection.clone(), locate.cloned(), span.clone());
+    let direct_addr = observed_addr(&connection);
+    spawn_peer_locator(
+        connection.clone(),
+        locate.cloned(),
+        span.clone(),
+        registry.clone(),
+        direct_addr.is_some(),
+    );
     // The Connection is the close-waiter: the broker keeps it open until the
     // peer closes, then drops it.
-    let conn = PeerConn::new(send, recv, IrohClose(connection));
-    registry.serve(conn).instrument(span).await?;
+    let source = PeerSource::new(
+        *connection.remote_id().as_bytes(),
+        direct_addr.map(|addr| addr.ip()),
+    );
+    let mut conn = PeerConn::new(send, recv, IrohClose(connection));
+    conn.hold(permit);
+    registry.serve_from(conn, source).instrument(span).await?;
     Ok(())
 }
 
@@ -234,10 +244,19 @@ const PEER_LOCATE_ATTEMPTS: usize = 40;
 /// it - annotated via `locate` when set - onto `span` and emit one `peer
 /// located` line. Gives up quietly if the connection closes first or never
 /// punches direct (a purely relay-reached peer).
-fn spawn_peer_locator(connection: Connection, locate: Option<PeerLocator>, span: tracing::Span) {
+fn spawn_peer_locator(
+    connection: Connection,
+    locate: Option<PeerLocator>,
+    span: tracing::Span,
+    registry: Arc<RoomRegistry>,
+    direct_ip_already_debited: bool,
+) {
     tokio::spawn(async move {
         for _ in 0..PEER_LOCATE_ATTEMPTS {
             if let Some(addr) = observed_addr(&connection) {
+                if !direct_ip_already_debited && registry.observe_direct_ip(addr.ip()).is_err() {
+                    connection.close(0_u32.into(), b"source rate limited");
+                }
                 let geo = locate.as_ref().and_then(|locate| locate(addr.ip()));
                 span.record("peer", tracing::field::display(&addr));
                 if let Some(geo) = &geo {
@@ -296,7 +315,13 @@ pub async fn join_invitation(
     let reply: Reply = read_framed(&mut recv).await?;
     let paired = match reply {
         Reply::Paired(paired) => paired,
-        Reply::Expired => anyhow::bail!(ROOM_EXPIRED),
+        Reply::Rejected(rejection) => return Err(anyhow::Error::new(rejection)),
+        Reply::Expired => {
+            return Err(anyhow::Error::new(BrokerRejection {
+                outcome: BrokerOutcome::RoomExpired,
+                retry_after: None,
+            }));
+        }
     };
     Ok(BrokerSession {
         connection,

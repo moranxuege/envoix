@@ -18,6 +18,8 @@ use envoix_client::api::{
     receive_manifest_v2_offer_via_room_with_authentication, send_manifest_v2_enable_mdns,
     send_manifest_v2_via_remembered, send_manifest_v2_via_room_with_authentication,
 };
+#[cfg(test)]
+use envoix_error::RendezvousCause;
 use envoix_error::{CoreError, TransferCause};
 use envoix_protocol::manifest_v2::{ManifestEntryKindV2, ManifestV2};
 use envoix_types::PairingStep;
@@ -1603,6 +1605,7 @@ struct FailureFact {
 fn error_fact(error: &CoreError, direction: &str) -> FailureFact {
     let (cause, detail) = match error {
         CoreError::Cause { cause, detail } => (cause.code(), detail.clone()),
+        CoreError::Rendezvous { cause, .. } => (cause.code(), error.to_string()),
         CoreError::Cancelled => ("user_canceled", "operation cancelled".into()),
         CoreError::InvalidInput(detail) => ("unsupported_feature", detail.clone()),
         CoreError::Transport(detail) => ("transport", detail.clone()),
@@ -1629,6 +1632,13 @@ fn error_fact(error: &CoreError, direction: &str) -> FailureFact {
 fn failure_recovery(cause: &str) -> (bool, &'static str) {
     match cause {
         "transport" | "discovery" => (true, "resume"),
+        "room_not_found"
+        | "room_full"
+        | "room_rate_limited"
+        | "endpoint_rate_limited"
+        | "ip_rate_limited"
+        | "server_busy" => (true, "retry"),
+        "room_expired" | "room_under_attack" => (true, "re_pair"),
         "authentication_failed" => (true, "re_pair"),
         "sender_source_unavailable" | "sender_source_changed" | "transfer" => (true, "retry"),
         "sender_permission_lost" => (true, "open_settings"),
@@ -1730,6 +1740,30 @@ mod tests {
             failure_recovery("protocol_or_integrity_failure"),
             (false, "none")
         );
+    }
+
+    #[test]
+    fn rendezvous_failures_keep_machine_causes_and_recovery() {
+        let rate_limited = error_fact(
+            &CoreError::Rendezvous {
+                cause: RendezvousCause::IpRateLimited,
+                retry_after: Some(5),
+            },
+            "send",
+        );
+        assert_eq!(rate_limited.cause, "ip_rate_limited");
+        assert!(rate_limited.retryable);
+        assert_eq!(rate_limited.recovery_action, "retry");
+
+        let closed = error_fact(
+            &CoreError::Rendezvous {
+                cause: RendezvousCause::RoomUnderAttack,
+                retry_after: None,
+            },
+            "receive",
+        );
+        assert_eq!(closed.cause, "room_under_attack");
+        assert_eq!(closed.recovery_action, "re_pair");
     }
 
     #[test]

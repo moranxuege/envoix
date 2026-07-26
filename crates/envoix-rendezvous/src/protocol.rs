@@ -39,9 +39,56 @@ pub struct Paired {
     pub selected_bootstrap_method: BootstrapKind,
 }
 
+/// Stable broker-owned outcome for a rejected Room operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrokerOutcome {
+    RoomNotFound,
+    RoomExpired,
+    RoomFull,
+    RoomRateLimited,
+    RoomUnderAttack,
+    EndpointRateLimited,
+    IpRateLimited,
+    ServerBusy,
+    MalformedJoin,
+    UnsupportedVersion,
+}
+
+impl BrokerOutcome {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::RoomNotFound => "room_not_found",
+            Self::RoomExpired => "room_expired",
+            Self::RoomFull => "room_full",
+            Self::RoomRateLimited => "room_rate_limited",
+            Self::RoomUnderAttack => "room_under_attack",
+            Self::EndpointRateLimited => "endpoint_rate_limited",
+            Self::IpRateLimited => "ip_rate_limited",
+            Self::ServerBusy => "server_busy",
+            Self::MalformedJoin => "malformed_join",
+            Self::UnsupportedVersion => "unsupported_version",
+        }
+    }
+}
+
+/// Structured rejection. `retry_after` is whole seconds and is always bounded
+/// by both server and client policy.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize, thiserror::Error)]
+#[error("{outcome_code}", outcome_code = .outcome.code())]
+#[serde(deny_unknown_fields)]
+pub struct BrokerRejection {
+    pub outcome: BrokerOutcome,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after: Option<u64>,
+}
+
 /// The broker's reply to a [`Join`].
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub enum Reply {
     Paired(Paired),
+    Rejected(BrokerRejection),
+    /// Retained on the wire for protocol-V2 clients. New clients normalize it
+    /// to `room_expired`.
     Expired,
 }

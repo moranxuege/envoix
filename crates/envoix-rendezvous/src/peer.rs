@@ -11,10 +11,17 @@ use serde::de::DeserializeOwned;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::RendezvousError;
-use crate::io::{read_framed, write_framed};
+use crate::io::{read_framed, read_framed_with_limit, write_framed};
 
 type BoxWriter = Box<dyn AsyncWrite + Send + Unpin>;
 type BoxReader = Box<dyn AsyncRead + Send + Unpin>;
+
+pub(crate) struct PeerParts {
+    pub writer: BoxWriter,
+    pub reader: BoxReader,
+    pub close: Box<dyn CloseWaiter>,
+    pub lifetimes: Vec<Box<dyn Send>>,
+}
 
 /// Resolves once the peer has closed its side of the transport (so everything
 /// the broker relayed has been delivered). For iroh this awaits
@@ -35,6 +42,7 @@ pub struct PeerConn {
     writer: BoxWriter,
     reader: BoxReader,
     close: Box<dyn CloseWaiter>,
+    lifetimes: Vec<Box<dyn Send>>,
 }
 
 impl PeerConn {
@@ -48,12 +56,26 @@ impl PeerConn {
             writer: Box::new(writer),
             reader: Box::new(reader),
             close: Box::new(close),
+            lifetimes: Vec::new(),
         }
+    }
+
+    /// Keep a resource permit alive for exactly as long as this connection,
+    /// including when the connection is handed to another task.
+    pub fn hold(&mut self, lifetime: impl Send + 'static) {
+        self.lifetimes.push(Box::new(lifetime));
     }
 
     /// Read one length-prefixed control frame.
     pub async fn read_control<T: DeserializeOwned>(&mut self) -> Result<T, RendezvousError> {
         read_framed(&mut self.reader).await
+    }
+
+    pub(crate) async fn read_control_with_limit<T: DeserializeOwned>(
+        &mut self,
+        max_frame_body: usize,
+    ) -> Result<T, RendezvousError> {
+        read_framed_with_limit(&mut self.reader, max_frame_body).await
     }
 
     /// Write one length-prefixed control frame.
@@ -62,7 +84,12 @@ impl PeerConn {
     }
 
     /// Split into the raw halves (plus close-waiter) for byte relaying.
-    pub(crate) fn into_parts(self) -> (BoxWriter, BoxReader, Box<dyn CloseWaiter>) {
-        (self.writer, self.reader, self.close)
+    pub(crate) fn into_parts(self) -> PeerParts {
+        PeerParts {
+            writer: self.writer,
+            reader: self.reader,
+            close: self.close,
+            lifetimes: self.lifetimes,
+        }
     }
 }

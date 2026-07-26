@@ -85,24 +85,6 @@ async fn two_iroh_peers_pair_through_the_rendezvous() {
     )
     .unwrap();
     let creator_context = joiner_context.clone();
-    let a = tokio::spawn(async move {
-        let session = join_invitation(
-            &ca,
-            broker_a,
-            Join {
-                version: RENDEZVOUS_PROTOCOL_VERSION,
-                room_id: "700007".to_string(),
-                invitation_side: InvitationSide::Joiner,
-                transfer_role: TransferRole::Sender,
-                bootstrap_methods: Vec::new(),
-                selected_bootstrap_method: Some(BootstrapKind::RoomCode),
-            },
-        )
-        .await?;
-        drive_pairing(session, "700007-abcd-1234", &joiner_context, &mine_a, None).await
-    });
-    // Arrival order does not select the PAKE role.
-    tokio::time::sleep(Duration::from_millis(100)).await;
     let b = tokio::spawn(async move {
         let session = join_invitation(
             &cb,
@@ -118,6 +100,23 @@ async fn two_iroh_peers_pair_through_the_rendezvous() {
         )
         .await?;
         drive_pairing(session, "700007-abcd-1234", &creator_context, &mine_b, None).await
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let a = tokio::spawn(async move {
+        let session = join_invitation(
+            &ca,
+            broker_a,
+            Join {
+                version: RENDEZVOUS_PROTOCOL_VERSION,
+                room_id: "700007".to_string(),
+                invitation_side: InvitationSide::Joiner,
+                transfer_role: TransferRole::Sender,
+                bootstrap_methods: Vec::new(),
+                selected_bootstrap_method: Some(BootstrapKind::RoomCode),
+            },
+        )
+        .await?;
+        drive_pairing(session, "700007-abcd-1234", &joiner_context, &mine_a, None).await
     });
 
     let join = Duration::from_secs(20);

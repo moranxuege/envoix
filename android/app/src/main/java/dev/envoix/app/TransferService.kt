@@ -681,6 +681,41 @@ class TransferService : Service() {
                     "The peer could not be authenticated. Pair the devices again.",
                     "无法验证对端身份。请重新配对设备。",
                 )
+            "room_not_found" ->
+                uiText(
+                    "The Room is not available yet. Ask the creator to keep it open and retry.",
+                    "房间尚不可用。请让创建者保持房间开启后重试。",
+                )
+            "room_expired" ->
+                uiText(
+                    "This Room expired. Create a new Room Code.",
+                    "此房间已过期。请创建新的房间码。",
+                )
+            "room_full" ->
+                uiText(
+                    "This Room is already in use. Retry shortly.",
+                    "此房间正在使用中。请稍后重试。",
+                )
+            "room_rate_limited", "endpoint_rate_limited", "ip_rate_limited" ->
+                uiText(
+                    "Too many Room attempts. Wait before retrying.",
+                    "房间尝试次数过多。请稍后再试。",
+                )
+            "room_under_attack" ->
+                uiText(
+                    "This Room was closed for security. Create a new Room Code.",
+                    "此房间因安全原因已关闭。请创建新的房间码。",
+                )
+            "server_busy" ->
+                uiText(
+                    "The Room service is busy. Retry shortly.",
+                    "房间服务繁忙。请稍后重试。",
+                )
+            "malformed_join", "unsupported_version" ->
+                uiText(
+                    "This app version cannot join the Room. Update Envoix.",
+                    "当前应用版本无法加入房间。请更新 Envoix。",
+                )
             "transport" ->
                 uiText(
                     "The connection was interrupted. Resume to continue from verified data.",

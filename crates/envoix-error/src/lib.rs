@@ -39,6 +39,39 @@ impl TransferCause {
     }
 }
 
+/// Stable broker-owned Room outcome. Recovery code must match this value
+/// directly and must never parse a diagnostic string.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RendezvousCause {
+    RoomNotFound,
+    RoomExpired,
+    RoomFull,
+    RoomRateLimited,
+    RoomUnderAttack,
+    EndpointRateLimited,
+    IpRateLimited,
+    ServerBusy,
+    MalformedJoin,
+    UnsupportedVersion,
+}
+
+impl RendezvousCause {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::RoomNotFound => "room_not_found",
+            Self::RoomExpired => "room_expired",
+            Self::RoomFull => "room_full",
+            Self::RoomRateLimited => "room_rate_limited",
+            Self::RoomUnderAttack => "room_under_attack",
+            Self::EndpointRateLimited => "endpoint_rate_limited",
+            Self::IpRateLimited => "ip_rate_limited",
+            Self::ServerBusy => "server_busy",
+            Self::MalformedJoin => "malformed_join",
+            Self::UnsupportedVersion => "unsupported_version",
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum CoreError {
     #[error("invalid input: {0}")]
@@ -62,8 +95,21 @@ pub enum CoreError {
         cause: TransferCause,
         detail: String,
     },
+    #[error(
+        "rendezvous {cause_code}{retry}",
+        cause_code = .cause.code(),
+        retry = retry_suffix(*retry_after)
+    )]
+    Rendezvous {
+        cause: RendezvousCause,
+        retry_after: Option<u64>,
+    },
     #[error("operation cancelled")]
     Cancelled,
+}
+
+fn retry_suffix(retry_after: Option<u64>) -> String {
+    retry_after.map_or_else(String::new, |seconds| format!(" (retry after {seconds}s)"))
 }
 
 impl From<std::io::Error> for CoreError {

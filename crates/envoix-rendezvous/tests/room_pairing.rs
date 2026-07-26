@@ -2,6 +2,7 @@
 //! `envoix-pairing` exchange (SPAKE2 + sealed descriptors) over the broker's
 //! blind relay. Uses in-memory duplexes - no sockets, no iroh.
 
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,10 +10,11 @@ use envoix_pairing::{
     Confirm, PakeResponse, PakeStart, initiator_start, open_json, responder_respond, seal_json,
 };
 use envoix_rendezvous::{
-    BootstrapKind, InvitationSide, Join, PeerConn, RENDEZVOUS_PROTOCOL_VERSION, Reply, Role,
+    BootstrapKind, BrokerConfig, BrokerOutcome, BrokerRejection, InvitationSide, Join, PeerConn,
+    PeerSource, RENDEZVOUS_PROTOCOL_VERSION, RateLimitConfig, RendezvousError, Reply, Role,
     RoomRegistry, TransferRole, read_framed, write_framed,
 };
-use tokio::io::DuplexStream;
+use tokio::io::{AsyncWriteExt, DuplexStream};
 
 /// Wrap the broker's side of a duplex as a `PeerConn` (the halves own the
 /// stream, so no separate keep-alive is needed).
@@ -141,6 +143,71 @@ async fn join_only(
     Ok(read_framed(&mut reader).await?)
 }
 
+fn abuse_test_config() -> BrokerConfig {
+    let generous = RateLimitConfig {
+        events: 100,
+        period: Duration::from_secs(60),
+        burst: 100,
+    };
+    BrokerConfig {
+        room_ttl: Duration::from_secs(5),
+        room_tombstone_ttl: Duration::from_secs(5),
+        room_attempt_rate: generous,
+        endpoint_join_rate: generous,
+        ip_join_rate: generous,
+        subnet_join_rate: generous,
+        ..BrokerConfig::default()
+    }
+}
+
+fn start_peer(
+    registry: Arc<RoomRegistry>,
+    join: Join,
+) -> (
+    tokio::task::JoinHandle<Reply>,
+    tokio::task::JoinHandle<Result<(), RendezvousError>>,
+) {
+    let (client, broker) = tokio::io::duplex(64 * 1024);
+    let serve = tokio::spawn(async move { registry.serve(broker_conn(broker)).await });
+    let reply = tokio::spawn(async move { join_only(client, join).await.unwrap() });
+    (reply, serve)
+}
+
+fn start_sourced_peer(
+    registry: Arc<RoomRegistry>,
+    source: PeerSource,
+    join: Join,
+) -> (
+    tokio::task::JoinHandle<Reply>,
+    tokio::task::JoinHandle<Result<(), RendezvousError>>,
+) {
+    let (client, broker) = tokio::io::duplex(64 * 1024);
+    let serve = tokio::spawn(async move { registry.serve_from(broker_conn(broker), source).await });
+    let reply = tokio::spawn(async move { join_only(client, join).await.unwrap() });
+    (reply, serve)
+}
+
+async fn wait_for_creator(registry: &RoomRegistry) {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while registry.metrics_snapshot().waiting_creators == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("creator was not parked");
+}
+
+async fn match_once(registry: Arc<RoomRegistry>, room: &str) {
+    let (creator, creator_serve) =
+        start_peer(registry.clone(), creator_join(room, TransferRole::Receiver));
+    wait_for_creator(&registry).await;
+    let (joiner, joiner_serve) = start_peer(registry, joiner_join(room, TransferRole::Sender));
+    assert!(matches!(creator.await.unwrap(), Reply::Paired(_)));
+    assert!(matches!(joiner.await.unwrap(), Reply::Paired(_)));
+    creator_serve.await.unwrap().unwrap();
+    joiner_serve.await.unwrap().unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_peers_pair_and_exchange_descriptors() {
     let registry = Arc::new(RoomRegistry::with_ttl(Duration::from_secs(5)));
@@ -152,20 +219,19 @@ async fn two_peers_pair_and_exchange_descriptors() {
     let r2 = registry.clone();
     let s2 = tokio::spawn(async move { r2.serve(broker_conn(broker_b)).await });
 
-    // Connection roles follow invitation side, not arrival order.
     let a = tokio::spawn(async move {
-        run_initiator(client_a, "420042", "12-orange-tiger", "endpoint-A").await
+        run_responder(client_a, "420042", "12-orange-tiger", "endpoint-A").await
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
     let b = tokio::spawn(async move {
-        run_responder(client_b, "420042", "12-orange-tiger", "endpoint-B").await
+        run_initiator(client_b, "420042", "12-orange-tiger", "endpoint-B").await
     });
 
-    let (role_a, a_got) = a.await.unwrap().expect("initiator pairs");
-    let (role_b, b_got) = b.await.unwrap().expect("responder pairs");
+    let (role_a, a_got) = a.await.unwrap().expect("creator pairs");
+    let (role_b, b_got) = b.await.unwrap().expect("joiner pairs");
 
-    assert_eq!(role_a, Role::Initiator);
-    assert_eq!(role_b, Role::Responder);
+    assert_eq!(role_a, Role::Responder);
+    assert_eq!(role_b, Role::Initiator);
     // Each recovered the OTHER peer's descriptor, sealed under the shared key.
     assert_eq!(a_got, "endpoint-B");
     assert_eq!(b_got, "endpoint-A");
@@ -191,6 +257,7 @@ async fn remembered_locator_pairs_only_the_fixed_complementary_roles() {
     let receiver_join = remembered_creator_join(&room);
     let sender_join = remembered_joiner_join(&room);
     let receiver = tokio::spawn(async move { join_only(receiver, receiver_join).await });
+    tokio::time::sleep(Duration::from_millis(20)).await;
     let sender = tokio::spawn(async move { join_only(sender, sender_join).await });
 
     let Reply::Paired(receiver) = receiver.await.unwrap().unwrap() else {
@@ -278,14 +345,22 @@ async fn same_direction_peers_do_not_match() {
     });
 
     assert_eq!(first.await.unwrap().unwrap(), Reply::Expired);
-    assert_eq!(second.await.unwrap().unwrap(), Reply::Expired);
+    assert!(matches!(
+        second.await.unwrap().unwrap(),
+        Reply::Rejected(envoix_rendezvous::BrokerRejection {
+            outcome: envoix_rendezvous::BrokerOutcome::RoomNotFound,
+            ..
+        })
+    ));
     assert!(matches!(
         serve_a.await.unwrap(),
         Err(envoix_rendezvous::RendezvousError::Expired)
     ));
     assert!(matches!(
         serve_b.await.unwrap(),
-        Err(envoix_rendezvous::RendezvousError::Expired)
+        Err(envoix_rendezvous::RendezvousError::Rejected(
+            envoix_rendezvous::BrokerOutcome::RoomNotFound
+        ))
     ));
 }
 
@@ -341,7 +416,7 @@ async fn dead_waiter_is_evicted_and_next_two_peers_pair() {
         .unwrap();
     assert!(matches!(
         a_result,
-        Err(envoix_rendezvous::RendezvousError::Rejected(_))
+        Err(envoix_rendezvous::RendezvousError::Io(_))
     ));
 
     // B and C join the same room and must pair with each other, not the corpse.
@@ -353,20 +428,486 @@ async fn dead_waiter_is_evicted_and_next_two_peers_pair() {
     let sc = tokio::spawn(async move { rc.serve(broker_conn(broker_c)).await });
 
     let b = tokio::spawn(async move {
-        run_initiator(client_b, "400004", "12-kelp-coral", "endpoint-B").await
+        run_responder(client_b, "400004", "12-kelp-coral", "endpoint-B").await
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
     let c = tokio::spawn(async move {
-        run_responder(client_c, "400004", "12-kelp-coral", "endpoint-C").await
+        run_initiator(client_c, "400004", "12-kelp-coral", "endpoint-C").await
     });
 
     let (role_b, b_got) = b.await.unwrap().expect("B pairs despite the corpse");
     let (role_c, c_got) = c.await.unwrap().expect("C pairs despite the corpse");
-    assert_eq!(role_b, Role::Initiator);
-    assert_eq!(role_c, Role::Responder);
+    assert_eq!(role_b, Role::Responder);
+    assert_eq!(role_c, Role::Initiator);
     assert_eq!(b_got, "endpoint-C");
     assert_eq!(c_got, "endpoint-B");
 
     sb.await.unwrap().expect("broker serves B");
     sc.await.unwrap().expect("broker serves C");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn creator_first_room_charges_matches_and_exhausts_without_reset() {
+    let config = BrokerConfig {
+        room_attempt_limit: 2,
+        ..abuse_test_config()
+    };
+    let registry = Arc::new(RoomRegistry::with_config(config).unwrap());
+
+    match_once(registry.clone(), "510001").await;
+    match_once(registry.clone(), "510001").await;
+
+    let (creator, serve) = start_peer(
+        registry.clone(),
+        creator_join("510001", TransferRole::Receiver),
+    );
+    assert_eq!(
+        creator.await.unwrap(),
+        Reply::Rejected(BrokerRejection {
+            outcome: BrokerOutcome::RoomUnderAttack,
+            retry_after: None,
+        })
+    );
+    assert!(matches!(
+        serve.await.unwrap(),
+        Err(RendezvousError::Rejected(BrokerOutcome::RoomUnderAttack))
+    ));
+
+    match_once(registry.clone(), "510002").await;
+    let metrics = registry.metrics_snapshot();
+    assert_eq!(metrics.matches, 3);
+    assert_eq!(metrics.exhausted_rooms, 1);
+    assert_eq!(metrics.active_rooms, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unmatched_and_incompatible_joiners_never_pin_creator_slots() {
+    let registry = Arc::new(RoomRegistry::with_config(abuse_test_config()).unwrap());
+
+    let (early, early_serve) = start_peer(
+        registry.clone(),
+        joiner_join("520001", TransferRole::Sender),
+    );
+    assert!(matches!(
+        early.await.unwrap(),
+        Reply::Rejected(BrokerRejection {
+            outcome: BrokerOutcome::RoomNotFound,
+            ..
+        })
+    ));
+    assert!(early_serve.await.unwrap().is_err());
+    assert_eq!(registry.metrics_snapshot().active_rooms, 0);
+
+    let (creator, creator_serve) = start_peer(
+        registry.clone(),
+        creator_join("520001", TransferRole::Receiver),
+    );
+    wait_for_creator(&registry).await;
+
+    let (incompatible, incompatible_serve) = start_peer(
+        registry.clone(),
+        joiner_join("520001", TransferRole::Receiver),
+    );
+    assert!(matches!(
+        incompatible.await.unwrap(),
+        Reply::Rejected(BrokerRejection {
+            outcome: BrokerOutcome::RoomNotFound,
+            ..
+        })
+    ));
+    assert!(incompatible_serve.await.unwrap().is_err());
+    assert_eq!(registry.metrics_snapshot().waiting_creators, 1);
+
+    let (duplicate, duplicate_serve) = start_peer(
+        registry.clone(),
+        creator_join("520001", TransferRole::Receiver),
+    );
+    assert!(matches!(
+        duplicate.await.unwrap(),
+        Reply::Rejected(BrokerRejection {
+            outcome: BrokerOutcome::RoomFull,
+            ..
+        })
+    ));
+    assert!(duplicate_serve.await.unwrap().is_err());
+
+    let (joiner, joiner_serve) = start_peer(
+        registry.clone(),
+        joiner_join("520001", TransferRole::Sender),
+    );
+    assert!(matches!(creator.await.unwrap(), Reply::Paired(_)));
+    assert!(matches!(joiner.await.unwrap(), Reply::Paired(_)));
+    creator_serve.await.unwrap().unwrap();
+    joiner_serve.await.unwrap().unwrap();
+    assert_eq!(registry.metrics_snapshot().matches, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_joiners_charge_exactly_one_match() {
+    let registry = Arc::new(RoomRegistry::with_config(abuse_test_config()).unwrap());
+    let (creator, creator_serve) = start_peer(
+        registry.clone(),
+        creator_join("525001", TransferRole::Receiver),
+    );
+    wait_for_creator(&registry).await;
+    let (joiner_a, serve_a) = start_peer(
+        registry.clone(),
+        joiner_join("525001", TransferRole::Sender),
+    );
+    let (joiner_b, serve_b) = start_peer(
+        registry.clone(),
+        joiner_join("525001", TransferRole::Sender),
+    );
+
+    assert!(matches!(creator.await.unwrap(), Reply::Paired(_)));
+    let replies = [joiner_a.await.unwrap(), joiner_b.await.unwrap()];
+    assert_eq!(
+        replies
+            .iter()
+            .filter(|reply| matches!(reply, Reply::Paired(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        replies
+            .iter()
+            .filter(|reply| {
+                matches!(
+                    reply,
+                    Reply::Rejected(BrokerRejection {
+                        outcome: BrokerOutcome::RoomFull,
+                        ..
+                    })
+                )
+            })
+            .count(),
+        1
+    );
+    creator_serve.await.unwrap().unwrap();
+    let results = [serve_a.await.unwrap(), serve_b.await.unwrap()];
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(registry.metrics_snapshot().matches, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn room_rate_limit_preserves_creator_and_bounds_retry_after() {
+    let config = BrokerConfig {
+        room_attempt_limit: 10,
+        room_attempt_rate: RateLimitConfig {
+            events: 1,
+            period: Duration::from_secs(60),
+            burst: 1,
+        },
+        max_retry_after: Duration::from_secs(3),
+        ..abuse_test_config()
+    };
+    let registry = Arc::new(RoomRegistry::with_config(config).unwrap());
+    match_once(registry.clone(), "530001").await;
+
+    let (creator, creator_serve) = start_peer(
+        registry.clone(),
+        creator_join("530001", TransferRole::Receiver),
+    );
+    wait_for_creator(&registry).await;
+    let (joiner, joiner_serve) = start_peer(
+        registry.clone(),
+        joiner_join("530001", TransferRole::Sender),
+    );
+    assert_eq!(
+        joiner.await.unwrap(),
+        Reply::Rejected(BrokerRejection {
+            outcome: BrokerOutcome::RoomRateLimited,
+            retry_after: Some(3),
+        })
+    );
+    assert!(joiner_serve.await.unwrap().is_err());
+    assert_eq!(registry.metrics_snapshot().waiting_creators, 1);
+    assert_eq!(registry.metrics_snapshot().matches, 1);
+
+    creator.abort();
+    let _ = creator.await;
+    assert!(creator_serve.await.unwrap().is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn room_and_source_state_caps_return_server_busy_without_growth() {
+    let config = BrokerConfig {
+        max_room_states: 1,
+        max_waiting_creators: 1,
+        ..abuse_test_config()
+    };
+    let registry = Arc::new(RoomRegistry::with_config(config).unwrap());
+    let (first, first_serve) = start_peer(
+        registry.clone(),
+        creator_join("540001", TransferRole::Receiver),
+    );
+    wait_for_creator(&registry).await;
+
+    let (second, second_serve) = start_peer(
+        registry.clone(),
+        creator_join("540002", TransferRole::Receiver),
+    );
+    assert!(matches!(
+        second.await.unwrap(),
+        Reply::Rejected(BrokerRejection {
+            outcome: BrokerOutcome::ServerBusy,
+            ..
+        })
+    ));
+    assert!(second_serve.await.unwrap().is_err());
+    assert_eq!(registry.metrics_snapshot().active_rooms, 1);
+    assert_eq!(registry.metrics_snapshot().server_busy_rejections, 1);
+
+    first.abort();
+    let _ = first.await;
+    assert!(first_serve.await.unwrap().is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oversized_and_idle_join_frames_are_structured_and_counted() {
+    let oversized_registry = Arc::new(
+        RoomRegistry::with_config(BrokerConfig {
+            max_frame_body: 32,
+            ..abuse_test_config()
+        })
+        .unwrap(),
+    );
+    let (mut client, broker) = tokio::io::duplex(4096);
+    let registry = oversized_registry.clone();
+    let serve = tokio::spawn(async move { registry.serve(broker_conn(broker)).await });
+    client.write_all(&33_u32.to_be_bytes()).await.unwrap();
+    let reply: Reply = read_framed(&mut client).await.unwrap();
+    assert!(matches!(
+        reply,
+        Reply::Rejected(BrokerRejection {
+            outcome: BrokerOutcome::MalformedJoin,
+            ..
+        })
+    ));
+    assert!(serve.await.unwrap().is_err());
+    let metrics = oversized_registry.metrics_snapshot();
+    assert_eq!(metrics.oversized_frames, 1);
+    assert_eq!(metrics.malformed_joins, 1);
+
+    let timeout_registry = Arc::new(
+        RoomRegistry::with_config(BrokerConfig {
+            join_timeout: Duration::from_millis(20),
+            ..abuse_test_config()
+        })
+        .unwrap(),
+    );
+    let (mut client, broker) = tokio::io::duplex(4096);
+    let registry = timeout_registry.clone();
+    let serve = tokio::spawn(async move { registry.serve(broker_conn(broker)).await });
+    let reply: Reply = read_framed(&mut client).await.unwrap();
+    assert!(matches!(
+        reply,
+        Reply::Rejected(BrokerRejection {
+            outcome: BrokerOutcome::MalformedJoin,
+            ..
+        })
+    ));
+    assert!(serve.await.unwrap().is_err());
+    assert_eq!(timeout_registry.metrics_snapshot().timeouts, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn post_match_frames_obey_size_and_idle_deadlines() {
+    let config = BrokerConfig {
+        max_frame_body: 512,
+        relay_idle_timeout: Duration::from_millis(30),
+        close_grace: Duration::from_millis(20),
+        ..abuse_test_config()
+    };
+    let registry = Arc::new(RoomRegistry::with_config(config).unwrap());
+    let (mut creator, creator_broker) = tokio::io::duplex(4096);
+    let creator_registry = registry.clone();
+    let creator_serve =
+        tokio::spawn(async move { creator_registry.serve(broker_conn(creator_broker)).await });
+    write_framed(
+        &mut creator,
+        &creator_join("550001", TransferRole::Receiver),
+    )
+    .await
+    .unwrap();
+    wait_for_creator(&registry).await;
+
+    let (mut joiner, joiner_broker) = tokio::io::duplex(4096);
+    let joiner_registry = registry.clone();
+    let joiner_serve =
+        tokio::spawn(async move { joiner_registry.serve(broker_conn(joiner_broker)).await });
+    write_framed(&mut joiner, &joiner_join("550001", TransferRole::Sender))
+        .await
+        .unwrap();
+    assert!(matches!(
+        read_framed::<_, Reply>(&mut creator).await.unwrap(),
+        Reply::Paired(_)
+    ));
+    assert!(matches!(
+        read_framed::<_, Reply>(&mut joiner).await.unwrap(),
+        Reply::Paired(_)
+    ));
+
+    creator.write_all(&513_u32.to_be_bytes()).await.unwrap();
+    drop(creator);
+    drop(joiner);
+    creator_serve.await.unwrap().unwrap();
+    joiner_serve.await.unwrap().unwrap();
+    assert_eq!(registry.metrics_snapshot().oversized_frames, 1);
+
+    let idle_registry = Arc::new(
+        RoomRegistry::with_config(BrokerConfig {
+            relay_idle_timeout: Duration::from_millis(20),
+            close_grace: Duration::from_millis(20),
+            ..abuse_test_config()
+        })
+        .unwrap(),
+    );
+    let (mut creator, creator_broker) = tokio::io::duplex(4096);
+    let registry_clone = idle_registry.clone();
+    let creator_serve =
+        tokio::spawn(async move { registry_clone.serve(broker_conn(creator_broker)).await });
+    write_framed(
+        &mut creator,
+        &creator_join("550002", TransferRole::Receiver),
+    )
+    .await
+    .unwrap();
+    wait_for_creator(&idle_registry).await;
+    let (mut joiner, joiner_broker) = tokio::io::duplex(4096);
+    let registry_clone = idle_registry.clone();
+    let joiner_serve =
+        tokio::spawn(async move { registry_clone.serve(broker_conn(joiner_broker)).await });
+    write_framed(&mut joiner, &joiner_join("550002", TransferRole::Sender))
+        .await
+        .unwrap();
+    let _: Reply = read_framed(&mut creator).await.unwrap();
+    let _: Reply = read_framed(&mut joiner).await.unwrap();
+    creator_serve.await.unwrap().unwrap();
+    joiner_serve.await.unwrap().unwrap();
+    assert!(idle_registry.metrics_snapshot().timeouts >= 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_limits_are_structured_on_the_wire() {
+    let endpoint_limited = Arc::new(
+        RoomRegistry::with_config(BrokerConfig {
+            endpoint_join_rate: RateLimitConfig {
+                events: 1,
+                period: Duration::from_secs(60),
+                burst: 1,
+            },
+            ..abuse_test_config()
+        })
+        .unwrap(),
+    );
+    let source = PeerSource::new([7; 32], None);
+    let (first, first_serve) = start_sourced_peer(
+        endpoint_limited.clone(),
+        source,
+        joiner_join("560001", TransferRole::Sender),
+    );
+    assert!(matches!(
+        first.await.unwrap(),
+        Reply::Rejected(BrokerRejection {
+            outcome: BrokerOutcome::RoomNotFound,
+            ..
+        })
+    ));
+    assert!(first_serve.await.unwrap().is_err());
+    let (second, second_serve) = start_sourced_peer(
+        endpoint_limited.clone(),
+        source,
+        joiner_join("560002", TransferRole::Sender),
+    );
+    assert!(matches!(
+        second.await.unwrap(),
+        Reply::Rejected(BrokerRejection {
+            outcome: BrokerOutcome::EndpointRateLimited,
+            ..
+        })
+    ));
+    assert!(second_serve.await.unwrap().is_err());
+
+    let ip_limited = Arc::new(
+        RoomRegistry::with_config(BrokerConfig {
+            ip_join_rate: RateLimitConfig {
+                events: 1,
+                period: Duration::from_secs(60),
+                burst: 1,
+            },
+            ..abuse_test_config()
+        })
+        .unwrap(),
+    );
+    let ip = Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9)));
+    let (first, first_serve) = start_sourced_peer(
+        ip_limited.clone(),
+        PeerSource::new([8; 32], ip),
+        joiner_join("560003", TransferRole::Sender),
+    );
+    let _ = first.await.unwrap();
+    assert!(first_serve.await.unwrap().is_err());
+    let (second, second_serve) = start_sourced_peer(
+        ip_limited.clone(),
+        PeerSource::new([9; 32], ip),
+        joiner_join("560004", TransferRole::Sender),
+    );
+    assert!(matches!(
+        second.await.unwrap(),
+        Reply::Rejected(BrokerRejection {
+            outcome: BrokerOutcome::IpRateLimited,
+            ..
+        })
+    ));
+    assert!(second_serve.await.unwrap().is_err());
+    assert_eq!(ip_limited.metrics_snapshot().ip_rate_limit_rejections, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn expired_and_unsupported_rooms_return_stable_outcomes() {
+    let registry = Arc::new(
+        RoomRegistry::with_config(BrokerConfig {
+            room_ttl: Duration::from_millis(30),
+            room_tombstone_ttl: Duration::from_secs(1),
+            ..abuse_test_config()
+        })
+        .unwrap(),
+    );
+    let (creator, creator_serve) = start_peer(
+        registry.clone(),
+        creator_join("570001", TransferRole::Receiver),
+    );
+    assert_eq!(creator.await.unwrap(), Reply::Expired);
+    assert!(matches!(
+        creator_serve.await.unwrap(),
+        Err(RendezvousError::Expired)
+    ));
+    let (reconnect, reconnect_serve) = start_peer(
+        registry.clone(),
+        creator_join("570001", TransferRole::Receiver),
+    );
+    assert!(matches!(
+        reconnect.await.unwrap(),
+        Reply::Rejected(BrokerRejection {
+            outcome: BrokerOutcome::RoomExpired,
+            ..
+        })
+    ));
+    assert!(reconnect_serve.await.unwrap().is_err());
+
+    let unsupported = Join {
+        version: RENDEZVOUS_PROTOCOL_VERSION + 1,
+        ..creator_join("570002", TransferRole::Receiver)
+    };
+    let (reply, serve) = start_peer(registry.clone(), unsupported);
+    assert!(matches!(
+        reply.await.unwrap(),
+        Reply::Rejected(BrokerRejection {
+            outcome: BrokerOutcome::UnsupportedVersion,
+            ..
+        })
+    ));
+    assert!(serve.await.unwrap().is_err());
+    assert_eq!(registry.metrics_snapshot().unsupported_versions, 1);
 }

@@ -1977,6 +1977,20 @@ func friendlyFailure(
         return AppText.value("Connection lost. Resume to continue.", "连接已断开，可恢复继续。", language: language)
     case .authenticationFailed:
         return AppText.value("Pairing authentication failed.", "配对认证失败。", language: language)
+    case .roomNotFound:
+        return AppText.value("The Room is not available yet. Ask the creator to keep it open and retry.", "房间尚不可用。请让创建者保持房间开启后重试。", language: language)
+    case .roomExpired:
+        return AppText.value("This Room expired. Create a new Room Code.", "此房间已过期。请创建新的房间码。", language: language)
+    case .roomFull:
+        return AppText.value("This Room is already in use. Retry shortly.", "此房间正在使用中。请稍后重试。", language: language)
+    case .roomRateLimited, .endpointRateLimited, .ipRateLimited:
+        return AppText.value("Too many Room attempts. Wait before retrying.", "房间尝试次数过多。请稍后再试。", language: language)
+    case .roomUnderAttack:
+        return AppText.value("This Room was closed for security. Create a new Room Code.", "此房间因安全原因已关闭。请创建新的房间码。", language: language)
+    case .serverBusy:
+        return AppText.value("The Room service is busy. Retry shortly.", "房间服务繁忙。请稍后重试。", language: language)
+    case .malformedJoin, .unsupportedRendezvousVersion:
+        return AppText.value("Update Envoix before joining this Room.", "请更新 Envoix 后再加入此房间。", language: language)
     case .senderPermissionLost:
         return AppText.value("Source permission expired. Choose the source again.", "来源权限已失效，请重新选择。", language: language)
     case .senderSourceUnavailable, .senderItemRemoved:

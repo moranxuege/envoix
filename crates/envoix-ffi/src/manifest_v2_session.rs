@@ -11,7 +11,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use envoix_client::api::{
     AuthenticationHandler, AuthenticationOutcome, DestinationDecisionV2, DestinationRequestV2,
-    EventSink, PairingConfig, PeerSource, PendingManifestV2Receive, SessionError,
+    EventSink, PairingConfig, PeerSource, PendingManifestV2Receive, RendezvousCause, SessionError,
     TransferCancelToken, TransferEvent, acquire_invitation, acquire_remembered_credential,
     acquire_shared_token, parse_broker_addr, receive_manifest_v2_offer_enable_mdns,
     receive_manifest_v2_offer_via_remembered,
@@ -943,6 +943,7 @@ fn report_v2_failure(
 ) {
     let (code, category, phase, origin, retryable, recovery_action, message_key) = match error {
         SessionError::Cause { cause, .. } => manifest_v2_cause_projection(cause.code()),
+        SessionError::Rendezvous { cause, .. } => rendezvous_cause_projection(*cause),
         SessionError::Cancelled => (
             FfiFailureCode::UserCanceled,
             FfiFailureCategory::User,
@@ -1026,6 +1027,98 @@ fn report_v2_failure(
         user_message_key: message_key.into(),
         diagnostic_message: error.to_string(),
     });
+}
+
+#[allow(clippy::type_complexity)]
+fn rendezvous_cause_projection(
+    cause: RendezvousCause,
+) -> (
+    FfiFailureCode,
+    FfiFailureCategory,
+    FfiFailurePhase,
+    FfiFailureOrigin,
+    bool,
+    FfiRecoveryAction,
+    &'static str,
+) {
+    let (code, retryable, recovery, key) = match cause {
+        RendezvousCause::RoomNotFound => (
+            FfiFailureCode::RoomNotFound,
+            true,
+            FfiRecoveryAction::Retry,
+            "transfer.room_not_found",
+        ),
+        RendezvousCause::RoomExpired => (
+            FfiFailureCode::RoomExpired,
+            true,
+            FfiRecoveryAction::RePair,
+            "transfer.room_expired",
+        ),
+        RendezvousCause::RoomFull => (
+            FfiFailureCode::RoomFull,
+            true,
+            FfiRecoveryAction::Retry,
+            "transfer.room_full",
+        ),
+        RendezvousCause::RoomRateLimited => (
+            FfiFailureCode::RoomRateLimited,
+            true,
+            FfiRecoveryAction::Retry,
+            "transfer.room_rate_limited",
+        ),
+        RendezvousCause::RoomUnderAttack => (
+            FfiFailureCode::RoomUnderAttack,
+            true,
+            FfiRecoveryAction::RePair,
+            "transfer.room_under_attack",
+        ),
+        RendezvousCause::EndpointRateLimited => (
+            FfiFailureCode::EndpointRateLimited,
+            true,
+            FfiRecoveryAction::Retry,
+            "transfer.endpoint_rate_limited",
+        ),
+        RendezvousCause::IpRateLimited => (
+            FfiFailureCode::IpRateLimited,
+            true,
+            FfiRecoveryAction::Retry,
+            "transfer.ip_rate_limited",
+        ),
+        RendezvousCause::ServerBusy => (
+            FfiFailureCode::ServerBusy,
+            true,
+            FfiRecoveryAction::Retry,
+            "transfer.server_busy",
+        ),
+        RendezvousCause::MalformedJoin => (
+            FfiFailureCode::MalformedJoin,
+            false,
+            FfiRecoveryAction::None,
+            "transfer.malformed_join",
+        ),
+        RendezvousCause::UnsupportedVersion => (
+            FfiFailureCode::UnsupportedRendezvousVersion,
+            false,
+            FfiRecoveryAction::None,
+            "transfer.unsupported_rendezvous_version",
+        ),
+    };
+    (
+        code,
+        if matches!(
+            cause,
+            RendezvousCause::MalformedJoin | RendezvousCause::UnsupportedVersion
+        ) {
+            FfiFailureCategory::Unsupported
+        } else {
+            FfiFailureCategory::Network
+        },
+        FfiFailurePhase::Pairing,
+        FfiFailureOrigin::Unknown,
+        retryable,
+        recovery,
+        key,
+    )
 }
 
 fn io_failure_recovery(direction: FfiTransferDirection) -> FfiRecoveryAction {
@@ -1192,5 +1285,17 @@ mod tests {
             io_failure_recovery(FfiTransferDirection::Send),
             FfiRecoveryAction::Retry
         );
+    }
+
+    #[test]
+    fn rendezvous_causes_project_without_parsing_diagnostics() {
+        let rate_limited = rendezvous_cause_projection(RendezvousCause::RoomRateLimited);
+        assert_eq!(rate_limited.0, FfiFailureCode::RoomRateLimited);
+        assert!(rate_limited.4);
+        assert_eq!(rate_limited.5, FfiRecoveryAction::Retry);
+
+        let exhausted = rendezvous_cause_projection(RendezvousCause::RoomUnderAttack);
+        assert_eq!(exhausted.0, FfiFailureCode::RoomUnderAttack);
+        assert_eq!(exhausted.5, FfiRecoveryAction::RePair);
     }
 }

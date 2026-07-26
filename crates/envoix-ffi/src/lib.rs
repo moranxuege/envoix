@@ -25,7 +25,7 @@ pub use manifest_v2_session::*;
 const DEFAULT_RENDEZVOUS_BROKER: &str =
     "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445";
 const DEFAULT_RELAY_URL: &str = "https://envoix.chkxwlyh.us:8444";
-const ENVOIX_FFI_API_VERSION: u32 = 5;
+const ENVOIX_FFI_API_VERSION: u32 = 6;
 
 static FFI_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static CREATED_INVITATIONS: OnceLock<Mutex<HashMap<(String, TransferRole), InvitationBootstrap>>> =
@@ -288,6 +288,16 @@ pub enum FfiFailureCode {
     UserCanceled,
     NetworkLost,
     AuthenticationFailed,
+    RoomNotFound,
+    RoomExpired,
+    RoomFull,
+    RoomRateLimited,
+    RoomUnderAttack,
+    EndpointRateLimited,
+    IpRateLimited,
+    ServerBusy,
+    MalformedJoin,
+    UnsupportedRendezvousVersion,
     UnsupportedFeature,
     InternalError,
     SenderSourceUnavailable,

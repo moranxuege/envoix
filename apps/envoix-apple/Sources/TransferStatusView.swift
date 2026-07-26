@@ -468,6 +468,20 @@ struct TransferStatusView: View {
             title = AppText.value("Connection failed", "连接失败", language: language)
         case .authenticationFailed:
             title = AppText.value("Pairing failed", "配对失败", language: language)
+        case .roomNotFound:
+            title = AppText.value("Room unavailable", "房间不可用", language: language)
+        case .roomExpired:
+            title = AppText.value("Room expired", "房间已过期", language: language)
+        case .roomFull:
+            title = AppText.value("Room in use", "房间正在使用", language: language)
+        case .roomRateLimited, .endpointRateLimited, .ipRateLimited:
+            title = AppText.value("Try again later", "请稍后重试", language: language)
+        case .roomUnderAttack:
+            title = AppText.value("New Room required", "需要新房间", language: language)
+        case .serverBusy:
+            title = AppText.value("Service busy", "服务繁忙", language: language)
+        case .malformedJoin, .unsupportedRendezvousVersion:
+            title = AppText.value("Update required", "需要更新", language: language)
         case .unsupportedFeature:
             title = AppText.value("Update required", "需要更新", language: language)
         case .internalError:

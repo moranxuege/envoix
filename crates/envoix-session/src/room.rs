@@ -9,10 +9,10 @@ use envoix_invite::{
     BootstrapKind, InvitationBootstrap, InvitationError, InvitationSide, TransferRole,
 };
 use envoix_protocol::manifest_v2_frames::JobGenerationV2;
-use envoix_rendezvous::{Join, RENDEZVOUS_PROTOCOL_VERSION};
+use envoix_rendezvous::{BrokerOutcome, BrokerRejection, Join, RENDEZVOUS_PROTOCOL_VERSION};
 use envoix_rendezvous_iroh::{
-    AuthenticatedControl, RoomPairing, authenticate_invitation, build_endpoint_with_dns,
-    join_invitation,
+    AuthenticatedControl, BrokerSession, RoomPairing, authenticate_invitation,
+    build_endpoint_with_dns, join_invitation,
 };
 use envoix_transfer::{SenderDeliveryStoreV2, SenderTransferPhaseV2};
 use envoix_types::PairingStep;
@@ -21,8 +21,9 @@ use iroh::{Endpoint, EndpointAddr, SecretKey};
 use crate::{
     AuthenticationHandler, BindAddrs, BoundEndpoint, CanonicalTransferJob, EventSink,
     NoopAuthenticationHandler, PairingConfig, PendingManifestV2Receive, RememberedSession,
-    SenderManifestV2SessionSummary, SessionConfig, SessionError, TransferCancelToken,
-    TransferEvent, bind_iroh_manifest_v2_endpoint, receive_manifest_v2_offer_with_authentication,
+    RendezvousCause, RendezvousRetryPolicy, SenderManifestV2SessionSummary, SessionConfig,
+    SessionError, TransferCancelToken, TransferEvent, bind_iroh_manifest_v2_endpoint,
+    receive_manifest_v2_offer_with_authentication,
     send_manifest_v2_to_endpoint_addr_with_authentication,
 };
 
@@ -44,23 +45,90 @@ async fn rendezvous_endpoint(relay: &Option<String>) -> Result<Endpoint, Session
     .map_err(|error| CoreError::Transport(error.to_string()))
 }
 
+async fn join_broker_with_retry(
+    endpoint: &Endpoint,
+    broker: &EndpointAddr,
+    join: Join,
+    policy: RendezvousRetryPolicy,
+) -> Result<BrokerSession, SessionError> {
+    for retry in 0..=policy.server_retries {
+        match join_invitation(endpoint, broker.clone(), join.clone()).await {
+            Ok(session) => return Ok(session),
+            Err(error) => {
+                let Some(rejection) = error.downcast_ref::<BrokerRejection>() else {
+                    return Err(CoreError::Transport(error.to_string()));
+                };
+                let core_error = broker_rejection(rejection);
+                let Some(retry_after) = broker_retry_delay(rejection, retry, policy) else {
+                    return Err(core_error);
+                };
+                tokio::time::sleep(retry_after).await;
+            }
+        }
+    }
+    unreachable!("server retry loop always returns")
+}
+
+fn retryable_broker_outcome(outcome: BrokerOutcome) -> bool {
+    matches!(
+        outcome,
+        BrokerOutcome::RoomNotFound
+            | BrokerOutcome::RoomFull
+            | BrokerOutcome::RoomRateLimited
+            | BrokerOutcome::EndpointRateLimited
+            | BrokerOutcome::IpRateLimited
+            | BrokerOutcome::ServerBusy
+    )
+}
+
+fn broker_retry_delay(
+    rejection: &BrokerRejection,
+    retries_completed: usize,
+    policy: RendezvousRetryPolicy,
+) -> Option<Duration> {
+    let delay = Duration::from_secs(rejection.retry_after?);
+    (retries_completed < policy.server_retries
+        && retryable_broker_outcome(rejection.outcome)
+        && delay <= policy.max_retry_after)
+        .then_some(delay)
+}
+
+fn broker_rejection(rejection: &BrokerRejection) -> CoreError {
+    let cause = match rejection.outcome {
+        BrokerOutcome::RoomNotFound => RendezvousCause::RoomNotFound,
+        BrokerOutcome::RoomExpired => RendezvousCause::RoomExpired,
+        BrokerOutcome::RoomFull => RendezvousCause::RoomFull,
+        BrokerOutcome::RoomRateLimited => RendezvousCause::RoomRateLimited,
+        BrokerOutcome::RoomUnderAttack => RendezvousCause::RoomUnderAttack,
+        BrokerOutcome::EndpointRateLimited => RendezvousCause::EndpointRateLimited,
+        BrokerOutcome::IpRateLimited => RendezvousCause::IpRateLimited,
+        BrokerOutcome::ServerBusy => RendezvousCause::ServerBusy,
+        BrokerOutcome::MalformedJoin => RendezvousCause::MalformedJoin,
+        BrokerOutcome::UnsupportedVersion => RendezvousCause::UnsupportedVersion,
+    };
+    CoreError::Rendezvous {
+        cause,
+        retry_after: rejection.retry_after,
+    }
+}
+
 async fn authenticate_in_room_retrying(
     rdz: &Endpoint,
     broker: &EndpointAddr,
     bootstrap: &InvitationBootstrap,
     public_context: Option<&[u8]>,
     events: &dyn EventSink,
+    retry_policy: RendezvousRetryPolicy,
 ) -> Result<AuthenticatedControl, SessionError> {
-    const ATTEMPTS: usize = 4;
     const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(8);
     let mut last: Option<SessionError> = None;
-    for _ in 0..ATTEMPTS {
+    for _ in 0..retry_policy.pairing_attempts.max(1) {
         events.on_event(TransferEvent::Pairing {
             step: PairingStep::Joining,
         });
-        let session = join_invitation(
+        let session = join_broker_with_retry(
             rdz,
-            broker.clone(),
+            broker,
             Join {
                 version: RENDEZVOUS_PROTOCOL_VERSION,
                 room_id: bootstrap.room_id().to_string(),
@@ -69,9 +137,9 @@ async fn authenticate_in_room_retrying(
                 bootstrap_methods: bootstrap.advertised_methods(),
                 selected_bootstrap_method: bootstrap.selected_method(),
             },
+            retry_policy,
         )
-        .await
-        .map_err(|error| CoreError::Transport(error.to_string()))?;
+        .await?;
         events.on_event(TransferEvent::Pairing {
             step: PairingStep::Matched,
         });
@@ -104,8 +172,8 @@ async fn authenticate_remembered_in_room_retrying(
     remembered: &RememberedSession,
     local_role: TransferRole,
     events: &dyn EventSink,
+    retry_policy: RendezvousRetryPolicy,
 ) -> Result<AuthenticatedControl, SessionError> {
-    const ATTEMPTS: usize = 4;
     const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(8);
     let (invitation_side, bootstrap_methods, selected_bootstrap_method) = match local_role {
         TransferRole::Sender => (
@@ -122,13 +190,13 @@ async fn authenticate_remembered_in_room_retrying(
     let context = remembered.control_context()?;
     let password = remembered.control_password();
     let mut last = None;
-    for _ in 0..ATTEMPTS {
+    for _ in 0..retry_policy.pairing_attempts.max(1) {
         events.on_event(TransferEvent::Pairing {
             step: PairingStep::Joining,
         });
-        let session = join_invitation(
+        let session = join_broker_with_retry(
             rdz,
-            broker.clone(),
+            broker,
             Join {
                 version: RENDEZVOUS_PROTOCOL_VERSION,
                 room_id: remembered.room_id().to_string(),
@@ -137,9 +205,9 @@ async fn authenticate_remembered_in_room_retrying(
                 bootstrap_methods: bootstrap_methods.clone(),
                 selected_bootstrap_method,
             },
+            retry_policy,
         )
-        .await
-        .map_err(|error| CoreError::Transport(error.to_string()))?;
+        .await?;
         events.on_event(TransferEvent::Pairing {
             step: PairingStep::Matched,
         });
@@ -165,9 +233,11 @@ async fn pair_or_cancel(
     public_context: Option<&[u8]>,
     cancel: &TransferCancelToken,
     events: &dyn EventSink,
+    retry_policy: RendezvousRetryPolicy,
     timeout: Option<Duration>,
 ) -> Result<AuthenticatedControl, SessionError> {
-    let pairing = authenticate_in_room_retrying(rdz, broker, bootstrap, public_context, events);
+    let pairing =
+        authenticate_in_room_retrying(rdz, broker, bootstrap, public_context, events, retry_policy);
     let result = if let Some(timeout) = timeout {
         tokio::select! {
             result = pairing => result,
@@ -196,10 +266,17 @@ async fn pair_remembered_or_cancel(
     local_role: TransferRole,
     cancel: &TransferCancelToken,
     events: &dyn EventSink,
+    retry_policy: RendezvousRetryPolicy,
     timeout: Option<Duration>,
 ) -> Result<AuthenticatedControl, SessionError> {
-    let pairing =
-        authenticate_remembered_in_room_retrying(rdz, broker, remembered, local_role, events);
+    let pairing = authenticate_remembered_in_room_retrying(
+        rdz,
+        broker,
+        remembered,
+        local_role,
+        events,
+        retry_policy,
+    );
     let result = if let Some(timeout) = timeout {
         tokio::select! {
             result = pairing => result,
@@ -315,6 +392,7 @@ pub async fn receive_manifest_v2_offer_via_remembered(
         TransferRole::Receiver,
         cancel,
         events.as_ref(),
+        config.rendezvous_retry,
         None,
     )
     .await?;
@@ -474,6 +552,7 @@ pub async fn send_manifest_v2_via_remembered(
         TransferRole::Sender,
         cancel,
         events.as_ref(),
+        config.rendezvous_retry,
         Some(SEND_ROOM_PAIRING_TIMEOUT),
     )
     .await?;
@@ -590,6 +669,7 @@ async fn authenticate_room(
         public_context.as_deref(),
         cancel,
         events,
+        config.rendezvous_retry,
         timeout,
     )
     .await

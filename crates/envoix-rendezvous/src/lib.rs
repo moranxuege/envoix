@@ -13,15 +13,19 @@
 //! duplex in tests).
 
 mod broker;
+mod config;
 mod io;
 mod peer;
 mod protocol;
 
-pub use broker::RoomRegistry;
+pub use broker::{BrokerMetricsSnapshot, PeerSource, RoomRegistry};
+pub use config::{BrokerConfig, RateLimitConfig};
 pub use envoix_invite::{BootstrapKind, InvitationSide, TransferRole};
 pub use io::{read_framed, write_framed};
 pub use peer::{CloseWaiter, PeerConn};
-pub use protocol::{Join, Paired, RENDEZVOUS_PROTOCOL_VERSION, Reply, Role};
+pub use protocol::{
+    BrokerOutcome, BrokerRejection, Join, Paired, RENDEZVOUS_PROTOCOL_VERSION, Reply, Role,
+};
 
 /// Errors from the rendezvous broker.
 #[derive(Debug, thiserror::Error)]
@@ -34,6 +38,8 @@ pub enum RendezvousError {
     FrameTooLarge,
     #[error("pairing window expired before a partner joined the room")]
     Expired,
-    #[error("join rejected: {0}")]
-    Rejected(&'static str),
+    #[error("join rejected: {outcome}", outcome = .0.code())]
+    Rejected(BrokerOutcome),
+    #[error("rendezvous deadline elapsed")]
+    Timeout,
 }

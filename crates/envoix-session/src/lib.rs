@@ -18,6 +18,7 @@ pub use envoix_auth::{
     authenticate_sender_with_remember,
 };
 use envoix_error::CoreError;
+pub use envoix_error::RendezvousCause;
 use envoix_protocol::PeerDescriptor;
 pub use envoix_protocol::TransferProtocol;
 pub use envoix_rendezvous_iroh::{generate_code, split_code};
@@ -97,6 +98,27 @@ impl AuthenticationHandler for NoopAuthenticationHandler {
     }
 }
 
+/// Client retry policy for broker-owned Room outcomes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RendezvousRetryPolicy {
+    /// PAKE/control attempts after a creator and joiner have been matched.
+    pub pairing_attempts: usize,
+    /// Rejections with acceptable server retry guidance that may be retried.
+    pub server_retries: usize,
+    /// A larger server delay ends the operation instead of retrying early.
+    pub max_retry_after: Duration,
+}
+
+impl Default for RendezvousRetryPolicy {
+    fn default() -> Self {
+        Self {
+            pairing_attempts: 4,
+            server_retries: 4,
+            max_retry_after: Duration::from_secs(30),
+        }
+    }
+}
+
 /// Runtime transport policy. Manifest block size and compression belong to the
 /// sealed job and are deliberately absent from this session configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -107,6 +129,7 @@ pub struct SessionConfig {
     pub direct_only: bool,
     pub candidates: CandidateFilter,
     pub data_stream_window: u32,
+    pub rendezvous_retry: RendezvousRetryPolicy,
 }
 
 impl SessionConfig {
