@@ -1037,6 +1037,7 @@ impl InvitationBootstrap {
         if selected != self.selected_method().unwrap_or(selected) {
             return Err(InvitationError::AuthenticationFailed);
         }
+        validate_public_context(&public, now)?;
         Ok((public, context_commitment))
     }
 

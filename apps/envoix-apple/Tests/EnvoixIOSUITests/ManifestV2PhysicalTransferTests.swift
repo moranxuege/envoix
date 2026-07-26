@@ -141,10 +141,16 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
         }
 
         let observer = ManifestV2PhysicalObserver()
+        let pairingInvite = try makePairingInvite(
+            role: .receive,
+            broker: defaultRendezvousBroker,
+            relay: defaultRelayURL
+        )
+        Self.marker("pairing_code=\(pairingInvite.roomCode)")
         Self.marker("\(Self.platformName) receiver ready scenario=\(fixture.scenario.rawValue)")
         let pending = try await receiveTransferOfferV2(
             settings: Self.settings,
-            request: Self.request(direction: .receive),
+            request: Self.request(direction: .receive, code: pairingInvite.roomCode),
             stateDirectory: stateDirectory.path,
             cancellation: FfiManifestV2Cancellation(),
             observer: observer
@@ -218,14 +224,17 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
         return UInt64(capacity)
     }
 
-    private static func request(direction: FfiTransferDirection) -> FfiTransferRequest {
+    private static func request(
+        direction: FfiTransferDirection,
+        code: String = scenarioCode
+    ) -> FfiTransferRequest {
         FfiTransferRequest(
             direction: direction,
             mode: .room,
             peerDescriptor: "",
             invite: "",
-            code: scenarioCode,
-            token: scenarioCode,
+            code: code,
+            token: code,
             rememberConsent: false,
             rememberedCredentialRef: "",
             rememberedGeneration: 0,

@@ -368,6 +368,13 @@ wait_for_log() {
   return 1
 }
 
+pairing_code_from_log() {
+  local file="$1"
+  grep -Eo 'pairing_code=[0-9]{6}-[a-z0-9]{4}-[a-z0-9]{4}' "$file" \
+    | tail -n 1 \
+    | cut -d= -f2
+}
+
 run_pair() {
   local sender="$1"
   local receiver="$2"
@@ -378,7 +385,7 @@ run_pair() {
   local sender_log="$log_dir/$case_id.sender.log"
   local receiver_log="$log_dir/$case_id.receiver.log"
   local logcat_log="$log_dir/$case_id.android.logcat.log"
-  local ready_log ready_pattern receiver_pid sender_status=0 receiver_status=0
+  local ready_log ready_pattern pairing_code receiver_pid sender_status=0 receiver_status=0
 
   if [[ "$sender" == "android" || "$receiver" == "android" ]]; then
     start_android_logcat "$logcat_log"
@@ -412,11 +419,23 @@ run_pair() {
     stop_android_logcat
     return 1
   fi
+  pairing_code="$(pairing_code_from_log "$ready_log")"
+  if [[ -z "$pairing_code" ]]; then
+    echo "fail: receiver did not publish an InviteV2 Room Code for $case_id" >&2
+    print_log_tail "$receiver receiver" "$receiver_log"
+    [[ -f "$logcat_log" ]] && print_log_tail "Android logcat" "$logcat_log"
+    kill "$receiver_pid" >/dev/null 2>&1 || true
+    wait "$receiver_pid" >/dev/null 2>&1 || true
+    remove_endpoint_patch "$receiver" receive "$run_id"
+    stop_android_tests
+    stop_android_logcat
+    return 1
+  fi
 
   if [[ "$receiver_settle_seconds" -gt 0 ]]; then
     sleep "$receiver_settle_seconds"
   fi
-  run_endpoint_role "$sender" send "$scenario" "$code" "$run_id" "$sender_log" || sender_status=$?
+  run_endpoint_role "$sender" send "$scenario" "$pairing_code" "$run_id" "$sender_log" || sender_status=$?
   if [[ "$sender_status" -ne 0 ]]; then
     kill "$receiver_pid" >/dev/null 2>&1 || true
   fi

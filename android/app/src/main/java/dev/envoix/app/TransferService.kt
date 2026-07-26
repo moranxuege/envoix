@@ -220,6 +220,8 @@ class TransferService : Service() {
         val nativeId: Long,
     ) : ManifestV2Callback {
         private val id = spec.id
+        private val rememberedPersistence =
+            RememberedPersistenceState(spec.pendingRemember, spec.rememberedRelationshipId)
 
         override fun onEvent(json: String) {
             if (callbacks[id] !== this) return
@@ -284,18 +286,31 @@ class TransferService : Service() {
         override fun onRememberedCredential(
             opaqueCredential: ByteArray,
             generation: Long,
-        ): Boolean =
-            when {
-                spec.pendingRemember != null ->
+        ): Boolean {
+            return rememberedPersistence.persist(
+                create = { pending ->
+                    val created =
+                        RememberedPeerStore
+                            .get(this@TransferService)
+                            .create(pending, opaqueCredential, generation)
+                    if (created) {
+                        specs.computeIfPresent(id) { _, current ->
+                            if (current.pendingRemember?.relationshipId == pending.relationshipId) {
+                                current.copy(pendingRemember = null)
+                            } else {
+                                current
+                            }
+                        }
+                    }
+                    created
+                },
+                rotate = { relationshipId ->
                     RememberedPeerStore
                         .get(this@TransferService)
-                        .create(spec.pendingRemember, opaqueCredential, generation)
-                spec.rememberedRelationshipId != null ->
-                    RememberedPeerStore
-                        .get(this@TransferService)
-                        .rotate(spec.rememberedRelationshipId, opaqueCredential, generation)
-                else -> false
-            }
+                        .rotate(relationshipId, opaqueCredential, generation)
+                },
+            )
+        }
     }
 
     private fun onOffer(
@@ -1070,5 +1085,26 @@ private data class ManifestSpec(
                 rememberedPreviousGeneration = null,
                 restorable = value.optBoolean("restorable", false),
             )
+    }
+}
+
+internal class RememberedPersistenceState(
+    private val pending: PendingRememberedPeer?,
+    private val relationshipId: String?,
+) {
+    private var createdRelationshipId: String? = null
+
+    @Synchronized
+    fun persist(
+        create: (PendingRememberedPeer) -> Boolean,
+        rotate: (String) -> Boolean,
+    ): Boolean {
+        createdRelationshipId?.let { return rotate(it) }
+        pending?.let {
+            return create(it).also { created ->
+                if (created) createdRelationshipId = it.relationshipId
+            }
+        }
+        return relationshipId?.let(rotate) ?: false
     }
 }

@@ -4,6 +4,8 @@ use envoix_invite::InvitationBootstrap;
 use envoix_protocol::PeerDescriptor;
 use envoix_session::RememberedCredential;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The rendezvous mode selected for a Manifest v2 session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -275,7 +277,9 @@ impl InviteSecretStore {
         Ok(InvitationLease {
             secret_ref: secret_ref.clone(),
             bootstrap,
-            consumed: false,
+            consumption: InvitationConsumption {
+                consumed: Arc::new(AtomicBool::new(false)),
+            },
         })
     }
 
@@ -323,7 +327,20 @@ fn remembered_credential_store() -> &'static RememberedCredentialStore {
 pub struct InvitationLease {
     secret_ref: InviteSecretRef,
     bootstrap: InvitationBootstrap,
-    consumed: bool,
+    consumption: InvitationConsumption,
+}
+
+/// Shared one-way marker used to burn an invitation at authentication time.
+#[derive(Clone)]
+pub struct InvitationConsumption {
+    consumed: Arc<AtomicBool>,
+}
+
+impl InvitationConsumption {
+    /// Permanently mark the invitation consumed after data-plane authentication.
+    pub fn consume(&self) {
+        self.consumed.store(true, Ordering::Release);
+    }
 }
 
 impl InvitationLease {
@@ -331,14 +348,23 @@ impl InvitationLease {
         &self.bootstrap
     }
 
-    pub fn consume(&mut self) {
-        self.consumed = true;
+    /// Obtain a marker that can be moved into an authentication callback.
+    pub fn consumption(&self) -> InvitationConsumption {
+        self.consumption.clone()
+    }
+
+    /// Permanently mark the invitation consumed.
+    pub fn consume(&self) {
+        self.consumption.consume();
     }
 }
 
 impl Drop for InvitationLease {
     fn drop(&mut self) {
-        invitation_store().release(&self.secret_ref, self.consumed);
+        invitation_store().release(
+            &self.secret_ref,
+            self.consumption.consumed.load(Ordering::Acquire),
+        );
     }
 }
 
@@ -370,6 +396,7 @@ pub fn register_remembered_credential(
 mod tests {
     use super::*;
     use base64::Engine as _;
+    use envoix_invite::{Capabilities, InviteV2, TransferRole};
 
     fn peer() -> PeerDescriptor {
         "2cfu7vzc7zhqv6w3k7m2kkwqvwzppmzvv53lmst6xm7ubjx5qnya@127.0.0.1:11204"
@@ -423,5 +450,30 @@ mod tests {
             !encoded.contains(&base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(opaque))
         );
         assert!(encoded.contains("\"generation\":9"));
+    }
+
+    #[test]
+    fn invitation_lease_retries_before_consumption_and_burns_afterward() {
+        let created = InviteV2::create(
+            "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445"
+                .into(),
+            Vec::new(),
+            TransferRole::Sender,
+            Capabilities::current(),
+            1_750_000_000,
+        )
+        .expect("create invitation");
+        let source = PeerSource::invitation(created.into_bootstrap(), "broker".into())
+            .expect("store invitation");
+        let PeerSource::Invitation { secret_ref, .. } = source else {
+            panic!("expected invitation source");
+        };
+
+        drop(acquire_invitation(&secret_ref).expect("first lease"));
+        let lease = acquire_invitation(&secret_ref).expect("pre-authentication retry");
+        lease.consumption().consume();
+        drop(lease);
+
+        assert!(acquire_invitation(&secret_ref).is_err());
     }
 }

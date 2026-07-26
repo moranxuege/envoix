@@ -25,9 +25,9 @@ pub use invite::{
 };
 pub use options::{PathPolicy, TransferOptions};
 pub use source::{
-    InvitationLease, InviteSecretRef, PeerSource, RememberedCredentialRef, SharedTokenRef,
-    TransferMode, acquire_invitation, acquire_remembered_credential, acquire_shared_token,
-    register_remembered_credential,
+    InvitationConsumption, InvitationLease, InviteSecretRef, PeerSource, RememberedCredentialRef,
+    SharedTokenRef, TransferMode, acquire_invitation, acquire_remembered_credential,
+    acquire_shared_token, register_remembered_credential,
 };
 
 /// Runtime settings shared by every Manifest v2 route.

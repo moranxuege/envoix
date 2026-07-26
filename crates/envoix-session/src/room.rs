@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use envoix_error::CoreError;
@@ -19,15 +20,44 @@ use envoix_types::PairingStep;
 use iroh::{Endpoint, EndpointAddr, SecretKey};
 
 use crate::{
-    AuthenticationHandler, BindAddrs, BoundEndpoint, CanonicalTransferJob, EventSink,
-    NoopAuthenticationHandler, PairingConfig, PendingManifestV2Receive, RememberedSession,
-    RendezvousCause, RendezvousRetryPolicy, SenderManifestV2SessionSummary, SessionConfig,
-    SessionError, TransferCancelToken, TransferEvent, bind_iroh_manifest_v2_endpoint,
-    receive_manifest_v2_offer_with_authentication,
+    AuthenticationHandler, AuthenticationOutcome, BindAddrs, BoundEndpoint, CanonicalTransferJob,
+    EventSink, NoopAuthenticationHandler, PairingConfig, PendingManifestV2Receive,
+    RememberedSession, RendezvousCause, RendezvousRetryPolicy, SenderManifestV2SessionSummary,
+    SessionConfig, SessionError, TransferCancelToken, TransferEvent,
+    bind_iroh_manifest_v2_endpoint, receive_manifest_v2_offer_with_authentication,
     send_manifest_v2_to_endpoint_addr_with_authentication,
 };
 
 const SEND_ROOM_PAIRING_TIMEOUT: Duration = Duration::from_secs(35);
+
+struct TrackedAuthentication<'a> {
+    inner: &'a dyn AuthenticationHandler,
+    authenticated: AtomicBool,
+}
+
+impl<'a> TrackedAuthentication<'a> {
+    fn new(inner: &'a dyn AuthenticationHandler) -> Self {
+        Self {
+            inner,
+            authenticated: AtomicBool::new(false),
+        }
+    }
+
+    fn authenticated(&self) -> bool {
+        self.authenticated.load(Ordering::Acquire)
+    }
+}
+
+impl AuthenticationHandler for TrackedAuthentication<'_> {
+    fn remember_consent(&self) -> bool {
+        self.inner.remember_consent()
+    }
+
+    fn on_authenticated(&self, outcome: AuthenticationOutcome) -> Result<(), SessionError> {
+        self.authenticated.store(true, Ordering::Release);
+        self.inner.on_authenticated(outcome)
+    }
+}
 
 async fn rendezvous_endpoint(relay: &Option<String>) -> Result<Endpoint, SessionError> {
     #[cfg(any(target_os = "ios", target_os = "android"))]
@@ -367,8 +397,20 @@ pub async fn receive_manifest_v2_offer_via_room_with_authentication(
         }
     };
     rdz.close().await;
-    receive_manifest_v2_offer_with_authentication(bound, &auth, events, cancel, authentication)
-        .await
+    let authentication = TrackedAuthentication::new(authentication);
+    let result = receive_manifest_v2_offer_with_authentication(
+        bound,
+        &auth,
+        events,
+        cancel,
+        &authentication,
+    )
+    .await;
+    if authentication.authenticated() {
+        result.map_err(invitation_consumed)
+    } else {
+        result
+    }
 }
 
 /// Receives through a high-entropy remembered-device rendezvous. The receiver
@@ -493,6 +535,7 @@ pub async fn send_manifest_v2_via_room_with_authentication(
 ) -> Result<SenderManifestV2SessionSummary, SessionError> {
     require_bootstrap_role(&bootstrap, TransferRole::Sender)?;
     let pairing = pair_room_sender(broker, &bootstrap, &config, events.as_ref(), cancel).await?;
+    let authentication = TrackedAuthentication::new(authentication);
     let first_attempt = send_manifest_v2_to_endpoint_addr_with_authentication(
         pairing.peer.clone(),
         job,
@@ -501,13 +544,16 @@ pub async fn send_manifest_v2_via_room_with_authentication(
         &pairing.auth,
         events.clone(),
         cancel,
-        authentication,
+        &authentication,
     )
     .await;
     let error = match first_attempt {
         Ok(summary) => return Ok(summary),
         Err(error) => error,
     };
+    if authentication.authenticated() {
+        return Err(invitation_consumed(error));
+    }
     let sender_phase = sender_delivery_phase(job, &state_directory).await;
     if !should_retry_room_with_relay(&config, &error, sender_phase) {
         return Err(error);
@@ -517,7 +563,7 @@ pub async fn send_manifest_v2_via_room_with_authentication(
     });
     let mut relay_config = config;
     relay_config.relay_only = true;
-    send_manifest_v2_to_endpoint_addr_with_authentication(
+    let result = send_manifest_v2_to_endpoint_addr_with_authentication(
         pairing.peer,
         job,
         state_directory,
@@ -525,9 +571,14 @@ pub async fn send_manifest_v2_via_room_with_authentication(
         &pairing.auth,
         events,
         cancel,
-        authentication,
+        &authentication,
     )
-    .await
+    .await;
+    if authentication.authenticated() {
+        result.map_err(invitation_consumed)
+    } else {
+        result
+    }
 }
 
 /// Sends through a high-entropy remembered-device rendezvous. The sender
@@ -748,6 +799,13 @@ fn require_bootstrap_role(
 
 fn invitation_error(error: InvitationError) -> SessionError {
     CoreError::InvalidInput(format!("invitation {}: {error}", error.code().as_str()))
+}
+
+fn invitation_consumed(error: SessionError) -> SessionError {
+    match error {
+        SessionError::InvitationConsumed(_) => error,
+        error => SessionError::InvitationConsumed(error.to_string()),
+    }
 }
 
 fn unix_now() -> Result<u64, SessionError> {

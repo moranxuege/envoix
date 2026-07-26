@@ -2,10 +2,12 @@ use envoix_error::CoreError;
 
 use envoix_rendezvous::{BrokerOutcome, BrokerRejection};
 
-use super::{broker_retry_delay, should_retry_room_with_relay};
+use super::{
+    TrackedAuthentication, broker_retry_delay, invitation_consumed, should_retry_room_with_relay,
+};
 use crate::{
-    CandidateFilter, DEFAULT_DATA_STREAM_WINDOW, IdentityConfig, SenderTransferPhaseV2,
-    SessionConfig,
+    AuthenticationHandler, AuthenticationOutcome, CandidateFilter, DEFAULT_DATA_STREAM_WINDOW,
+    IdentityConfig, SenderTransferPhaseV2, SessionConfig, SessionError,
 };
 
 #[test]
@@ -76,4 +78,27 @@ fn server_retry_guidance_obeys_both_bounds() {
         retry_after: Some(1),
     };
     assert_eq!(broker_retry_delay(&terminal, 0, policy), None);
+}
+
+#[test]
+fn post_authentication_failure_requires_a_new_invitation() {
+    let error = invitation_consumed(CoreError::Transport("connection lost".into()));
+    assert!(matches!(error, CoreError::InvitationConsumed(_)));
+
+    struct FailingHandler;
+    impl AuthenticationHandler for FailingHandler {
+        fn on_authenticated(&self, _outcome: AuthenticationOutcome) -> Result<(), SessionError> {
+            Err(CoreError::Storage("credential persistence failed".into()))
+        }
+    }
+
+    let authentication = TrackedAuthentication::new(&FailingHandler);
+    assert!(
+        authentication
+            .on_authenticated(AuthenticationOutcome {
+                remember_secret: None,
+            })
+            .is_err()
+    );
+    assert!(authentication.authenticated());
 }

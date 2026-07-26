@@ -671,9 +671,9 @@ final class TransferViewModel: ObservableObject {
             guard request.direction == direction else {
                 throw RuntimeSettingsError("Stored transfer direction does not match its session slot.")
             }
-            if isEphemeralInvitationMode(request.mode) {
+            if usesProcessOnlyAuthentication(request.mode) {
                 clearStoredManifestSession(direction: direction)
-                eventLog.append("discarded pending invitation session after relaunch")
+                eventLog.append("discarded process-authenticated session after relaunch")
                 return
             }
         } catch {
@@ -1572,7 +1572,7 @@ final class TransferViewModel: ObservableObject {
     }
 
     private func persistActiveSend(_ operation: SendOperation) throws {
-        if isEphemeralInvitationMode(operation.request.mode) {
+        if usesProcessOnlyAuthentication(operation.request.mode) {
             clearStoredManifestSession(direction: .send)
             return
         }
@@ -1612,7 +1612,7 @@ final class TransferViewModel: ObservableObject {
     }
 
     private func persistActiveReceive(_ operation: ReceiveOperation) throws {
-        if isEphemeralInvitationMode(operation.request.mode) {
+        if usesProcessOnlyAuthentication(operation.request.mode) {
             clearStoredManifestSession(direction: .receive)
             return
         }
@@ -1675,12 +1675,10 @@ final class TransferViewModel: ObservableObject {
         return try manifestRootDirectory().appendingPathComponent(fileName, isDirectory: false)
     }
 
-    private func isEphemeralInvitationMode(_ mode: FfiTransferMode) -> Bool {
+    private func usesProcessOnlyAuthentication(_ mode: FfiTransferMode) -> Bool {
         switch mode {
-        case .invite, .room, .showInvite, .remembered:
+        case .manual, .invite, .remembered, .showManual, .showInvite, .mdns, .room:
             return true
-        case .manual, .showManual, .mdns:
-            return false
         }
     }
 

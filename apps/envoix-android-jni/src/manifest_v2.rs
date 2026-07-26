@@ -7,13 +7,13 @@ use async_trait::async_trait;
 use envoix_client::api::{
     AuthenticationHandler, AuthenticationOutcome, CanonicalTransferJob, Client,
     CompressionPolicyV2, DestinationDecisionV2, DestinationRequestV2, EventSink,
-    InvitationBootstrap, InviteSecretRef, JobIdV2, JobLifecycle, LocalSourceOrigin,
-    ManifestV2DataError, ManifestV2ProgressPhase, ManifestV2ResultGate, PairingConfig,
-    PendingManifestV2Receive, ProviderSourceIssue, RememberedCredentialRef, RootPlanV2,
-    SavedEntryV2, SenderManifestV2SessionSummary, SessionError, SourceDecision, SourceIssueKind,
-    SourceItemId, SourceSelectionState, TransferCancelToken, TransferEvent, TransferJobStore,
-    TransferOptions, acquire_invitation, acquire_remembered_credential, local_allocatable_bytes,
-    parse_broker_addr, receive_manifest_v2_offer_enable_mdns,
+    InvitationBootstrap, InvitationConsumption, InviteSecretRef, JobIdV2, JobLifecycle,
+    LocalSourceOrigin, ManifestV2DataError, ManifestV2ProgressPhase, ManifestV2ResultGate,
+    PairingConfig, PendingManifestV2Receive, ProviderSourceIssue, RememberedCredentialRef,
+    RootPlanV2, SavedEntryV2, SenderManifestV2SessionSummary, SessionError, SourceDecision,
+    SourceIssueKind, SourceItemId, SourceSelectionState, TransferCancelToken, TransferEvent,
+    TransferJobStore, TransferOptions, acquire_invitation, acquire_remembered_credential,
+    local_allocatable_bytes, parse_broker_addr, receive_manifest_v2_offer_enable_mdns,
     receive_manifest_v2_offer_via_remembered,
     receive_manifest_v2_offer_via_room_with_authentication, send_manifest_v2_enable_mdns,
     send_manifest_v2_via_remembered, send_manifest_v2_via_room_with_authentication,
@@ -188,16 +188,23 @@ struct AndroidAuthentication {
     callback: Arc<GlobalRef>,
     remember_consent: bool,
     rotation: Option<(Vec<u8>, u64)>,
+    invitation_consumption: Option<InvitationConsumption>,
     persisted: AtomicBool,
 }
 
 impl AndroidAuthentication {
-    fn invitation(vm: Arc<JavaVM>, callback: Arc<GlobalRef>, remember_consent: bool) -> Self {
+    fn invitation(
+        vm: Arc<JavaVM>,
+        callback: Arc<GlobalRef>,
+        remember_consent: bool,
+        invitation_consumption: Option<InvitationConsumption>,
+    ) -> Self {
         Self {
             vm,
             callback,
             remember_consent,
             rotation: None,
+            invitation_consumption,
             persisted: AtomicBool::new(false),
         }
     }
@@ -213,6 +220,7 @@ impl AndroidAuthentication {
             callback,
             remember_consent: false,
             rotation: Some((opaque_credential, next_generation)),
+            invitation_consumption: None,
             persisted: AtomicBool::new(false),
         }
     }
@@ -228,6 +236,9 @@ impl AuthenticationHandler for AndroidAuthentication {
     }
 
     fn on_authenticated(&self, outcome: AuthenticationOutcome) -> Result<(), SessionError> {
+        if let Some(consumption) = &self.invitation_consumption {
+            consumption.consume();
+        }
         let credential = if let Some(secret) = outcome.remember_secret {
             Some((secret.into_credential().to_opaque(), 0))
         } else {
@@ -776,7 +787,7 @@ async fn run_session(
         .use_room
         .then(|| parse_broker_addr(&params.broker, options.relay.as_deref()))
         .transpose()?;
-    let mut invitation_lease = if params.mode == "invitation" {
+    let invitation_lease = if params.mode == "invitation" {
         params
             .invitation_ref
             .as_ref()
@@ -789,6 +800,7 @@ async fn run_session(
     let invitation = invitation_lease
         .as_ref()
         .map(|lease| lease.bootstrap().clone());
+    let invitation_consumption = invitation_lease.as_ref().map(|lease| lease.consumption());
     if params.mode == "invitation" && params.use_room && invitation.is_none() {
         return Err(CoreError::InvalidInput(
             "Room rendezvous requires validated invitation private state".into(),
@@ -843,13 +855,13 @@ async fn run_session(
             )
             .await?;
         } else {
-            let authentication: Arc<dyn AuthenticationHandler> =
-                Arc::new(AndroidAuthentication::invitation(
-                    vm.clone(),
-                    callback.clone(),
-                    params.remember_consent,
-                ));
-            send_with_enabled_routes(
+            let authentication = Arc::new(AndroidAuthentication::invitation(
+                vm.clone(),
+                callback.clone(),
+                params.remember_consent,
+                invitation_consumption,
+            ));
+            let result = send_with_enabled_routes(
                 EnabledSendRoutes {
                     broker,
                     code: &params.room,
@@ -861,12 +873,10 @@ async fn run_session(
                 config,
                 events,
                 cancel,
-                authentication,
+                authentication.clone(),
             )
-            .await?;
-        }
-        if let Some(lease) = invitation_lease.as_mut() {
-            lease.consume();
+            .await;
+            result?;
         }
         emit(
             vm.as_ref(),
@@ -891,28 +901,28 @@ async fn run_session(
         )
         .await?
     } else {
-        let authentication: Arc<dyn AuthenticationHandler> =
-            Arc::new(AndroidAuthentication::invitation(
-                vm.clone(),
-                callback.clone(),
-                params.remember_consent,
-            ));
-        receive_from_enabled_routes(
-            broker,
-            &params.room,
-            invitation,
-            params.use_room,
-            params.use_mdns,
+        let authentication = Arc::new(AndroidAuthentication::invitation(
+            vm.clone(),
+            callback.clone(),
+            params.remember_consent,
+            invitation_consumption,
+        ));
+        let result = receive_from_enabled_routes(
+            EnabledReceiveRoutes {
+                broker,
+                code: &params.room,
+                invitation,
+                use_room: params.use_room,
+                use_mdns: params.use_mdns,
+            },
             config,
             events,
             cancel,
-            authentication,
+            authentication.clone(),
         )
-        .await?
+        .await;
+        result?
     };
-    if let Some(lease) = invitation_lease.as_mut() {
-        lease.consume();
-    }
     let manifest = &pending.offer().manifest;
     let inventory = manifest
         .entries
@@ -1167,6 +1177,14 @@ struct EnabledSendRoutes<'a> {
     use_mdns: bool,
 }
 
+struct EnabledReceiveRoutes<'a> {
+    broker: Option<envoix_client::EndpointAddr>,
+    code: &'a str,
+    invitation: Option<InvitationBootstrap>,
+    use_room: bool,
+    use_mdns: bool,
+}
+
 async fn send_with_enabled_routes(
     routes: EnabledSendRoutes<'_>,
     job: &CanonicalTransferJob,
@@ -1196,6 +1214,7 @@ async fn send_with_enabled_routes(
         .await
         {
             Ok(summary) => return Ok(summary),
+            Err(error @ CoreError::InvitationConsumed(_)) => return Err(error),
             Err(error) if !cancel.is_cancelled() => {
                 events.on_event(TransferEvent::Diagnostic {
                     message: format!("Room route failed; trying another enabled route: {error}"),
@@ -1226,16 +1245,19 @@ async fn send_with_enabled_routes(
 }
 
 async fn receive_from_enabled_routes(
-    broker: Option<envoix_client::EndpointAddr>,
-    code: &str,
-    invitation: Option<InvitationBootstrap>,
-    use_room: bool,
-    use_mdns: bool,
+    routes: EnabledReceiveRoutes<'_>,
     config: envoix_client::api::SessionConfig,
     events: Arc<dyn EventSink>,
     cancel: &TransferCancelToken,
     authentication: Arc<dyn AuthenticationHandler>,
 ) -> Result<PendingManifestV2Receive, CoreError> {
+    let EnabledReceiveRoutes {
+        broker,
+        code,
+        invitation,
+        use_room,
+        use_mdns,
+    } = routes;
     if use_room && !use_mdns {
         let broker = broker
             .ok_or_else(|| CoreError::InvalidInput("Room rendezvous requires a broker".into()))?;
@@ -1277,13 +1299,13 @@ async fn receive_from_enabled_routes(
     })?;
     let room_cancel = TransferCancelToken::new();
     let mdns_cancel = TransferCancelToken::new();
-    let mut routes = JoinSet::new();
+    let mut route_tasks = JoinSet::new();
     {
         let config = config.clone();
         let events = events.clone();
         let route_cancel = room_cancel.clone();
         let authentication = authentication.clone();
-        routes.spawn(async move {
+        route_tasks.spawn(async move {
             let result = receive_manifest_v2_offer_via_room_with_authentication(
                 broker,
                 invitation,
@@ -1301,7 +1323,7 @@ async fn receive_from_enabled_routes(
         let pairing = PairingConfig::spake2_shared_token(code.to_string())?;
         let events = events.clone();
         let route_cancel = mdns_cancel.clone();
-        routes.spawn(async move {
+        route_tasks.spawn(async move {
             let result = receive_manifest_v2_offer_enable_mdns(
                 envoix_client::BindAddrs::dual_stack(0),
                 config,
@@ -1321,32 +1343,38 @@ async fn receive_from_enabled_routes(
             () = cancel.cancelled() => {
                 room_cancel.cancel();
                 mdns_cancel.cancel();
-                while routes.join_next().await.is_some() {}
+                while route_tasks.join_next().await.is_some() {}
                 return Err(CoreError::Cancelled);
             }
-            joined = routes.join_next() => match joined {
+            joined = route_tasks.join_next() => match joined {
                 Some(Ok((winner, Ok(pending)))) => {
                     if winner == 0 { mdns_cancel.cancel(); } else { room_cancel.cancel(); }
-                    while routes.join_next().await.is_some() {}
+                    while route_tasks.join_next().await.is_some() {}
                     return Ok(pending);
+                }
+                Some(Ok((_, Err(error @ CoreError::InvitationConsumed(_))))) => {
+                    room_cancel.cancel();
+                    mdns_cancel.cancel();
+                    while route_tasks.join_next().await.is_some() {}
+                    return Err(error);
                 }
                 Some(Ok((_, Err(error)))) => {
                     events.on_event(TransferEvent::Diagnostic {
                         message: format!("Receive route failed; keeping the other route active: {error}"),
                     });
                     last_error = Some(error);
-                    if routes.is_empty() { break; }
+                    if route_tasks.is_empty() { break; }
                 }
                 Some(Err(error)) => {
                     last_error = Some(CoreError::Transfer(format!("receive route task failed: {error}")));
-                    if routes.is_empty() { break; }
+                    if route_tasks.is_empty() { break; }
                 }
                 None => break,
             },
             () = cancel.cancelled() => {
                 room_cancel.cancel();
                 mdns_cancel.cancel();
-                while routes.join_next().await.is_some() {}
+                while route_tasks.join_next().await.is_some() {}
                 return Err(CoreError::Cancelled);
             }
         }
@@ -1611,6 +1639,7 @@ fn error_fact(error: &CoreError, direction: &str) -> FailureFact {
         CoreError::Transport(detail) => ("transport", detail.clone()),
         CoreError::Protocol(detail) => ("protocol_or_integrity_failure", detail.clone()),
         CoreError::Crypto(detail) => ("authentication_failed", detail.clone()),
+        CoreError::InvitationConsumed(detail) => ("authentication_failed", detail.clone()),
         CoreError::Io(detail) | CoreError::Storage(detail) if direction == "send" => {
             ("sender_source_unavailable", detail.clone())
         }
@@ -1690,6 +1719,13 @@ mod tests {
             (
                 CoreError::Crypto("bad key".into()),
                 "receive",
+                "authentication_failed",
+                true,
+                "re_pair",
+            ),
+            (
+                CoreError::InvitationConsumed("connection lost".into()),
+                "send",
                 "authentication_failed",
                 true,
                 "re_pair",

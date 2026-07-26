@@ -104,6 +104,8 @@ pub enum CoreError {
         cause: RendezvousCause,
         retry_after: Option<u64>,
     },
+    #[error("one-time invitation was consumed after authentication: {0}")]
+    InvitationConsumed(String),
     #[error("operation cancelled")]
     Cancelled,
 }

@@ -338,18 +338,34 @@ class ManifestV2CrossDeviceInstrumentedTest {
         stateDirectory: File,
         jobStore: File,
         jobId: String?,
-    ): JSONObject =
-        JSONObject()
+    ): JSONObject {
+        val preparedInvitation =
+            if (direction == "receive") {
+                checkedResponse(Native.generateInvite("receive", Endpoints.BROKER, Endpoints.RELAY))
+            } else {
+                checkedResponse(Native.parseInviteForRole(scenarioCode(), "send"))
+            }
+        val roomCode =
+            if (direction == "receive") {
+                preparedInvitation.getString("code").also {
+                    marker("pairing_code=$it")
+                }
+            } else {
+                scenarioCode()
+            }
+        return JSONObject()
             .put("direction", direction)
-            .put("room", scenarioCode())
+            .put("room", roomCode)
             .put("broker", Endpoints.BROKER)
             .put("relay", Endpoints.RELAY)
             .put("state_directory", stateDirectory.path)
             .put("job_store_directory", jobStore.path)
             .put("job_id", jobId ?: JSONObject.NULL)
+            .put("invitation_ref", preparedInvitation.getString("reference"))
             .put("use_room", true)
             .put("use_mdns", false)
             .also { check(context.packageName == "dev.envoix.app") }
+    }
 
     private fun publishShareSource(
         context: Context,

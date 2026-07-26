@@ -11,10 +11,10 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use envoix_client::api::{
     AuthenticationHandler, AuthenticationOutcome, DestinationDecisionV2, DestinationRequestV2,
-    EventSink, PairingConfig, PeerSource, PendingManifestV2Receive, RendezvousCause, SessionError,
-    TransferCancelToken, TransferEvent, acquire_invitation, acquire_remembered_credential,
-    acquire_shared_token, parse_broker_addr, receive_manifest_v2_offer_enable_mdns,
-    receive_manifest_v2_offer_via_remembered,
+    EventSink, InvitationConsumption, PairingConfig, PeerSource, PendingManifestV2Receive,
+    RendezvousCause, SessionError, TransferCancelToken, TransferEvent, acquire_invitation,
+    acquire_remembered_credential, acquire_shared_token, parse_broker_addr,
+    receive_manifest_v2_offer_enable_mdns, receive_manifest_v2_offer_via_remembered,
     receive_manifest_v2_offer_via_room_with_authentication,
     receive_manifest_v2_offer_with_bound_peer, send_manifest_v2_enable_mdns,
     send_manifest_v2_manual, send_manifest_v2_via_remembered,
@@ -219,15 +219,32 @@ struct NativeAuthentication {
     observer: Arc<dyn TransferObserver>,
     remember_consent: bool,
     rotation: Option<(Vec<u8>, u64)>,
+    invitation_consumption: Option<InvitationConsumption>,
     persisted: AtomicBool,
 }
 
+struct SendAttemptContext<'a> {
+    job: &'a envoix_client::api::CanonicalTransferJob,
+    state_directory: PathBuf,
+    config: envoix_client::api::SessionConfig,
+    events: Arc<dyn EventSink>,
+    cancel: &'a TransferCancelToken,
+    relay: Option<&'a str>,
+    observer: Arc<dyn TransferObserver>,
+    remember_consent: bool,
+}
+
 impl NativeAuthentication {
-    fn invitation(observer: Arc<dyn TransferObserver>, remember_consent: bool) -> Self {
+    fn invitation(
+        observer: Arc<dyn TransferObserver>,
+        remember_consent: bool,
+        invitation_consumption: InvitationConsumption,
+    ) -> Self {
         Self {
             observer,
             remember_consent,
             rotation: None,
+            invitation_consumption: Some(invitation_consumption),
             persisted: AtomicBool::new(false),
         }
     }
@@ -241,6 +258,7 @@ impl NativeAuthentication {
             observer,
             remember_consent: false,
             rotation: Some((opaque_credential, next_generation)),
+            invitation_consumption: None,
             persisted: AtomicBool::new(false),
         }
     }
@@ -256,6 +274,9 @@ impl AuthenticationHandler for NativeAuthentication {
     }
 
     fn on_authenticated(&self, outcome: AuthenticationOutcome) -> Result<(), SessionError> {
+        if let Some(consumption) = &self.invitation_consumption {
+            consumption.consume();
+        }
         let credential = if let Some(secret) = outcome.remember_secret {
             Some((secret.into_credential().to_opaque(), 0))
         } else {
@@ -361,14 +382,16 @@ pub async fn send_transfer_job_v2(
             });
             let result = send_attempt(
                 &attempt.source,
-                &job,
-                state_directory.clone(),
-                config,
-                events,
-                &cancellation.token,
-                options.relay.as_deref(),
-                observer.clone(),
-                request.remember_consent,
+                SendAttemptContext {
+                    job: &job,
+                    state_directory: state_directory.clone(),
+                    config,
+                    events,
+                    cancel: &cancellation.token,
+                    relay: options.relay.as_deref(),
+                    observer: observer.clone(),
+                    remember_consent: request.remember_consent,
+                },
             )
             .await;
             match result {
@@ -384,7 +407,10 @@ pub async fn send_transfer_job_v2(
                         saved_paths: Vec::new(),
                     });
                 }
-                Err(error) if !cancellation.token.is_cancelled() => {
+                Err(error)
+                    if !cancellation.token.is_cancelled()
+                        && !matches!(error, SessionError::InvitationConsumed(_)) =>
+                {
                     observer.on_diagnostic(format!("route failed; trying next route: {error}"));
                     last_error = Some(error);
                 }
@@ -519,6 +545,17 @@ async fn receive_offer_from_attempts(
                         cancellation,
                     )));
                 }
+                Some(Ok((_, Err(error @ SessionError::InvitationConsumed(_))))) => {
+                    route_cancellations.iter().for_each(TransferCancelToken::cancel);
+                    while routes.join_next().await.is_some() {}
+                    report_v2_failure(
+                        observer.as_ref(),
+                        &error,
+                        FfiTransferDirection::Receive,
+                        FfiFailurePhase::Authenticating,
+                    );
+                    return Err(op_err(error));
+                }
                 Some(Ok((_, Err(error)))) => {
                     observer.on_diagnostic(format!("receive route failed; keeping other routes active: {error}"));
                     last_error = Some(error);
@@ -589,15 +626,18 @@ async fn receive_one_offer_attempt(
 
 async fn send_attempt(
     source: &PeerSource,
-    job: &envoix_client::api::CanonicalTransferJob,
-    state_directory: PathBuf,
-    config: envoix_client::api::SessionConfig,
-    events: Arc<dyn EventSink>,
-    cancel: &TransferCancelToken,
-    relay: Option<&str>,
-    observer: Arc<dyn TransferObserver>,
-    remember_consent: bool,
+    context: SendAttemptContext<'_>,
 ) -> Result<envoix_client::api::SenderManifestV2SessionSummary, SessionError> {
+    let SendAttemptContext {
+        job,
+        state_directory,
+        config,
+        events,
+        cancel,
+        relay,
+        observer,
+        remember_consent,
+    } = context;
     match source {
         PeerSource::Manual { peer, token_ref } => {
             let token = acquire_shared_token(token_ref).map_err(op_err_core)?;
@@ -616,10 +656,11 @@ async fn send_attempt(
         PeerSource::Invitation {
             secret_ref, broker, ..
         } => {
-            let mut lease = acquire_invitation(secret_ref).map_err(op_err_core)?;
+            let lease = acquire_invitation(secret_ref).map_err(op_err_core)?;
             let broker = parse_broker_addr(broker, relay)?;
-            let authentication = NativeAuthentication::invitation(observer, remember_consent);
-            let result = send_manifest_v2_via_room_with_authentication(
+            let authentication =
+                NativeAuthentication::invitation(observer, remember_consent, lease.consumption());
+            send_manifest_v2_via_room_with_authentication(
                 broker,
                 lease.bootstrap().clone(),
                 job,
@@ -629,11 +670,7 @@ async fn send_attempt(
                 cancel,
                 &authentication,
             )
-            .await;
-            if result.is_ok() {
-                lease.consume();
-            }
-            result
+            .await
         }
         PeerSource::Remembered {
             credential_ref,
@@ -755,10 +792,11 @@ async fn receive_offer_attempt(
         PeerSource::Invitation {
             secret_ref, broker, ..
         } => {
-            let mut lease = acquire_invitation(secret_ref).map_err(op_err_core)?;
+            let lease = acquire_invitation(secret_ref).map_err(op_err_core)?;
             let broker = parse_broker_addr(broker, relay)?;
-            let authentication = NativeAuthentication::invitation(observer, remember_consent);
-            let result = receive_manifest_v2_offer_via_room_with_authentication(
+            let authentication =
+                NativeAuthentication::invitation(observer, remember_consent, lease.consumption());
+            receive_manifest_v2_offer_via_room_with_authentication(
                 broker,
                 lease.bootstrap().clone(),
                 listen_addrs(&listen),
@@ -767,11 +805,7 @@ async fn receive_offer_attempt(
                 cancel,
                 &authentication,
             )
-            .await;
-            if result.is_ok() {
-                lease.consume();
-            }
-            result
+            .await
         }
         PeerSource::Remembered {
             credential_ref,
@@ -962,7 +996,7 @@ fn report_v2_failure(
             FfiRecoveryAction::Resume,
             "transfer.network_lost",
         ),
-        SessionError::Crypto(_) => (
+        SessionError::Crypto(_) | SessionError::InvitationConsumed(_) => (
             FfiFailureCode::AuthenticationFailed,
             FfiFailureCategory::Authentication,
             FfiFailurePhase::Authenticating,
@@ -1261,6 +1295,30 @@ fn op_err_core(error: impl std::fmt::Display) -> SessionError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex as StdMutex;
+
+    #[derive(Default)]
+    struct RecordingObserver {
+        failure: StdMutex<Option<FfiTransferFailure>>,
+    }
+
+    impl TransferObserver for RecordingObserver {
+        fn on_invite_ready(&self, _invite: String) {}
+        fn on_started(&self, _item_count: u32, _total_bytes: u64) {}
+        fn on_phase(&self, _phase: FfiManifestV2Phase) {}
+        fn on_progress(&self, _transferred: u64, _total: u64) {}
+        fn on_completed(&self, _bytes: u64) {}
+
+        fn on_transfer_failed(&self, failure: FfiTransferFailure) {
+            *self.failure.lock().expect("failure mutex") = Some(failure);
+        }
+
+        fn on_diagnostic(&self, _message: String) {}
+
+        fn on_remembered_credential(&self, _opaque_credential: Vec<u8>, _generation: u64) -> bool {
+            false
+        }
+    }
 
     #[test]
     fn room_joining_keeps_the_platform_waiting_state() {
@@ -1297,5 +1355,25 @@ mod tests {
         let exhausted = rendezvous_cause_projection(RendezvousCause::RoomUnderAttack);
         assert_eq!(exhausted.0, FfiFailureCode::RoomUnderAttack);
         assert_eq!(exhausted.5, FfiRecoveryAction::RePair);
+    }
+
+    #[test]
+    fn consumed_invitation_failure_requires_repair() {
+        let observer = RecordingObserver::default();
+        report_v2_failure(
+            &observer,
+            &SessionError::InvitationConsumed("connection lost".into()),
+            FfiTransferDirection::Send,
+            FfiFailurePhase::Transferring,
+        );
+        let failure = observer
+            .failure
+            .lock()
+            .expect("failure mutex")
+            .clone()
+            .expect("reported failure");
+
+        assert_eq!(failure.code, FfiFailureCode::AuthenticationFailed);
+        assert_eq!(failure.recovery_action, FfiRecoveryAction::RePair);
     }
 }

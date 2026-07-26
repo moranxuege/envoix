@@ -12,12 +12,26 @@ use args::{Cli, Command, SaveModeArg, SourceIssueActionArg, TransferPlan};
 use clap::Parser;
 use envoix_client::api::{
     self, CanonicalTransferJob, DestinationDecisionV2, DestinationRequestV2, EventSink,
-    PairingConfig, PeerSource, PendingManifestV2Receive, SourceDecision, SourceSelectionState,
-    TransferEvent, TransferJobStore, acquire_invitation,
+    InvitationConsumption, PairingConfig, PeerSource, PendingManifestV2Receive, SourceDecision,
+    SourceSelectionState, TransferEvent, TransferJobStore, acquire_invitation,
 };
 use envoix_client::{IdentityConfig, SPAKE2_EXPERIMENTAL_WARNING, TransferCancelToken};
 
 type CliResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
+
+struct OneTimeInvitationAuthentication {
+    consumption: InvitationConsumption,
+}
+
+impl api::AuthenticationHandler for OneTimeInvitationAuthentication {
+    fn on_authenticated(
+        &self,
+        _outcome: api::AuthenticationOutcome,
+    ) -> Result<(), api::SessionError> {
+        self.consumption.consume();
+        Ok(())
+    }
+}
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -251,10 +265,13 @@ async fn send_job(
         PeerSource::Invitation {
             secret_ref, broker, ..
         } => {
-            let mut lease = acquire_invitation(secret_ref)
+            let lease = acquire_invitation(secret_ref)
                 .map_err(|error| api::SessionError::InvalidInput(error.to_string()))?;
             let broker = api::parse_broker_addr(broker, relay)?;
-            let result = api::send_manifest_v2_via_room(
+            let authentication = OneTimeInvitationAuthentication {
+                consumption: lease.consumption(),
+            };
+            api::send_manifest_v2_via_room_with_authentication(
                 broker,
                 lease.bootstrap().clone(),
                 job,
@@ -262,12 +279,9 @@ async fn send_job(
                 config,
                 events,
                 cancel,
+                &authentication,
             )
-            .await;
-            if result.is_ok() {
-                lease.consume();
-            }
-            result
+            .await
         }
         PeerSource::Mdns {
             token_ref: Some(token_ref),
@@ -341,22 +355,22 @@ async fn receive_offer(
         PeerSource::Invitation {
             secret_ref, broker, ..
         } => {
-            let mut lease = acquire_invitation(secret_ref)
+            let lease = acquire_invitation(secret_ref)
                 .map_err(|error| api::SessionError::InvalidInput(error.to_string()))?;
             let broker = api::parse_broker_addr(broker, relay)?;
-            let result = api::receive_manifest_v2_offer_via_room(
+            let authentication = OneTimeInvitationAuthentication {
+                consumption: lease.consumption(),
+            };
+            api::receive_manifest_v2_offer_via_room_with_authentication(
                 broker,
                 lease.bootstrap().clone(),
                 listen_addrs,
                 config,
                 events,
                 cancel,
+                &authentication,
             )
-            .await;
-            if result.is_ok() {
-                lease.consume();
-            }
-            result
+            .await
         }
         _ => Err(api::SessionError::InvalidInput(
             "this route cannot listen for a sender".into(),
