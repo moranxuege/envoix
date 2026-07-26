@@ -20,6 +20,7 @@ internal enum class RoomControlPhase {
 internal data class RoomControlUiState(
     val phase: RoomControlPhase = RoomControlPhase.None,
     val invite: RoomControlInvite? = null,
+    val endpoint: RoomControlEndpoint? = null,
     val inviteRevealed: Boolean = false,
     val peerName: String? = null,
     val creator: Boolean = false,
@@ -284,6 +285,7 @@ internal class RoomControlWorkflow(
                     it.copy(
                         phase = RoomControlPhase.Hosting,
                         invite = event.invite,
+                        endpoint = event.invite.endpoint,
                         closeReason = null,
                         error = null,
                     )
@@ -291,9 +293,14 @@ internal class RoomControlWorkflow(
                 scheduleHostingExpiry(event.invite)
                 onHosting(event.invite)
             }
-            RoomControlEvent.Joining -> {
+            is RoomControlEvent.Joining -> {
                 if (state.phase != RoomControlPhase.Joining) return
-                update { it.copy(error = null) }
+                update {
+                    it.copy(
+                        endpoint = event.endpoint,
+                        error = null,
+                    )
+                }
             }
             is RoomControlEvent.Connected -> {
                 if (state.phase != RoomControlPhase.Hosting &&
@@ -310,6 +317,7 @@ internal class RoomControlWorkflow(
                 update {
                     RoomControlUiState(
                         phase = RoomControlPhase.Connected,
+                        endpoint = event.endpoint,
                         peerName = peerName,
                         creator = event.creator,
                         lifetimeRevision = event.lifetime.revision,

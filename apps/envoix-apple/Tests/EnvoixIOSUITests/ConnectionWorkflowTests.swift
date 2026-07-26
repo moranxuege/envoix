@@ -13,9 +13,9 @@ final class ConnectionWorkflowTests: XCTestCase {
         let info = envoixCoreInfo()
 
         XCTAssertEqual(info.ffiApiVersion, expectedCoreFFIAPIVersion)
-        XCTAssertEqual(expectedCoreFFIAPIVersion, 8)
+        XCTAssertEqual(expectedCoreFFIAPIVersion, 9)
         XCTAssertTrue(info.capabilities.contains(expectedRoomControlCoreCapability))
-        XCTAssertEqual(expectedRoomControlCoreCapability, "foreground_room_control_v3")
+        XCTAssertEqual(expectedRoomControlCoreCapability, "foreground_room_control_v4")
     }
 
     func testIncomingOfferQueueDeduplicatesBoundsAndExpires() {
@@ -138,6 +138,65 @@ final class ConnectionWorkflowTests: XCTestCase {
         XCTAssertEqual(workflow.peerDisplayName, "Other phone")
         XCTAssertTrue(workflow.isRoomCreator)
         XCTAssertEqual(workflow.room?.origin, .roomControl)
+    }
+
+    func testConnectedRoomRetainsItsAuthoritativeEndpoint() async {
+        let gateway = RecordingRoomControlGateway()
+        let workflow = ConnectionWorkflowState(gateway: gateway)
+        let endpoint = RoomControlEndpoint(
+            broker: "udp://room.example.test:8555",
+            relay: ""
+        )
+
+        XCTAssertNil(workflow.startHosting(
+            broker: endpoint.broker,
+            relay: endpoint.relay,
+            displayName: "My iPhone",
+            identityPath: "/tmp/envoix-test-identity",
+            existingActivityIDs: []
+        ))
+        await Task.yield()
+        gateway.emit(.connected(
+            peerDisplayName: "Other phone",
+            creator: true,
+            lifetime: lifetime(revision: 1)
+        ))
+        await Task.yield()
+
+        XCTAssertEqual(workflow.room?.endpoint, endpoint)
+        XCTAssertEqual(workflow.room?.endpoint?.relay, "")
+    }
+
+    func testTransferInvitationEndpointPreservesAnEmptyRelay() {
+        let invitation = FfiPairingInvite(
+            roomCode: "123456-test-room",
+            payload: "envoix://pair/test",
+            broker: "udp://room.example.test:8555",
+            relayUrls: [],
+            creatorRole: .send,
+            joinerRole: .receive,
+            expiresAt: 2_000
+        )
+
+        XCTAssertEqual(
+            RoomControlEndpoint(transferInvitation: invitation),
+            RoomControlEndpoint(
+                broker: "udp://room.example.test:8555",
+                relay: ""
+            )
+        )
+    }
+
+    func testDestinationRepairRequiresTheSameOfferAndRoom() {
+        let roomID = UUID()
+        let request = RoomDestinationRepairRequest(
+            offerID: "offer-1",
+            roomID: roomID
+        )
+
+        XCTAssertTrue(request.matches(offerID: "offer-1", roomID: roomID))
+        XCTAssertFalse(request.matches(offerID: "offer-2", roomID: roomID))
+        XCTAssertFalse(request.matches(offerID: "offer-1", roomID: UUID()))
     }
 
     func testFailedHostingRefreshPreservesCurrentInvitation() async {
@@ -438,6 +497,7 @@ final class ConnectionWorkflowTests: XCTestCase {
             transferInvite: "envoix://pair/river-stone-test?role=send",
             rootNames: ["report.pdf"],
             itemCount: 1,
+            directoryCount: 0,
             totalBytes: 1_024
         )))
         await Task.yield()
@@ -591,6 +651,7 @@ private final class RecordingRoomControlGateway: RoomControlGateway {
         return RoomControlInvitation(
             code: "R123456-test-room",
             payload: "envoix://room/R123456-test-room",
+            endpoint: RoomControlEndpoint(broker: broker, relay: relay),
             expiresAt: now.addingTimeInterval(ConnectionWorkflowPolicy.roomInvitationLifetime)
         )
     }
@@ -601,7 +662,7 @@ private final class RecordingRoomControlGateway: RoomControlGateway {
         relay: String,
         now: Date
     ) throws -> RoomControlInvitation {
-        try makeInvitation(broker: "", relay: "", now: now)
+        try makeInvitation(broker: broker, relay: relay, now: now)
     }
 
     func host(

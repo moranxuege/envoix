@@ -247,6 +247,7 @@ class ConnectionWorkflowViewModelTest {
             viewModel.joinRoom(TEST_INVITE.payload)
             runCurrent()
             assertEquals(RoomControlPhase.Joining, viewModel.uiState.value.control.phase)
+            assertEquals(TEST_ROOM_ENDPOINT, viewModel.uiState.value.control.endpoint)
 
             viewModel.endWaitingRoom()
             runCurrent()
@@ -271,6 +272,7 @@ class ConnectionWorkflowViewModelTest {
                 RoomControlEvent.Connected(
                     peerName = "iPhone",
                     creator = false,
+                    endpoint = TEST_ROOM_ENDPOINT,
                     lifetime =
                         RoomLifetimeSnapshot(
                             revision = 1,
@@ -281,6 +283,12 @@ class ConnectionWorkflowViewModelTest {
             )
             runCurrent()
 
+            assertEquals(TEST_ROOM_ENDPOINT, viewModel.uiState.value.control.endpoint)
+            assertEquals(
+                TEST_ROOM_ENDPOINT,
+                viewModel.uiState.value.room
+                    ?.controlEndpoint,
+            )
             viewModel.setForeground(false)
             runCurrent()
 
@@ -304,6 +312,7 @@ class ConnectionWorkflowViewModelTest {
                 RoomControlEvent.Connected(
                     peerName = "iPhone",
                     creator = true,
+                    endpoint = TEST_ROOM_ENDPOINT,
                     lifetime =
                         RoomLifetimeSnapshot(
                             revision = 1,
@@ -337,6 +346,7 @@ class ConnectionWorkflowViewModelTest {
                 RoomControlEvent.Connected(
                     peerName = "Nearby phone",
                     creator = false,
+                    endpoint = TEST_ROOM_ENDPOINT,
                     lifetime =
                         RoomLifetimeSnapshot(
                             revision = 1,
@@ -355,8 +365,8 @@ class ConnectionWorkflowViewModelTest {
                 parseInvitation = {
                     ParsedInvite(
                         reference = "private-transfer-reference",
-                        broker = "https://broker.example",
-                        relay = null,
+                        broker = TEST_ROOM_ENDPOINT.broker,
+                        relay = TEST_ROOM_ENDPOINT.relay,
                         creatorRole = "send",
                         joinerRole = "receive",
                         expiresAt = Long.MAX_VALUE,
@@ -389,6 +399,59 @@ class ConnectionWorkflowViewModelTest {
         }
 
     @Test
+    fun `incoming offer on another endpoint is not prepared or acknowledged`() =
+        runTest(dispatcher) {
+            val gateway = HostedInviteGateway()
+            val viewModel =
+                ConnectionWorkflowViewModel(
+                    gateway = gateway,
+                    currentSettings = { TEST_SETTINGS },
+                )
+            runCurrent()
+            viewModel.revealRoomInvite()
+            runCurrent()
+            gateway.emit(
+                RoomControlEvent.Connected(
+                    peerName = "Nearby phone",
+                    creator = true,
+                    endpoint = TEST_ROOM_ENDPOINT,
+                    lifetime =
+                        RoomLifetimeSnapshot(
+                            revision = 1,
+                            policy = RoomLifetimePolicy.Idle15Minutes,
+                            idleDeadlineEpochMs = 900_000,
+                        ),
+                ),
+            )
+            gateway.emit(RoomControlEvent.IncomingOffer(TEST_TRANSFER_OFFER))
+            runCurrent()
+
+            var receiverPrepared = false
+            viewModel.acceptIncomingRoomOffer(
+                parseInvitation = {
+                    ParsedInvite(
+                        reference = "private-transfer-reference",
+                        broker = "different-broker@127.0.0.1:8445",
+                        relay = TEST_ROOM_ENDPOINT.relay,
+                        creatorRole = "send",
+                        joinerRole = "receive",
+                        expiresAt = Long.MAX_VALUE,
+                    )
+                },
+                onPrepareReceive = { _, _, _, _, _, _ -> receiverPrepared = true },
+                onCancelReceive = {},
+            )
+            runCurrent()
+
+            assertFalse(receiverPrepared)
+            assertNull(gateway.respondedOffer)
+            assertEquals(
+                "This file offer does not belong to the current room.",
+                viewModel.uiState.value.incomingOfferError,
+            )
+        }
+
+    @Test
     fun `legacy replacement request moves to its dialog and can return`() =
         runTest(dispatcher) {
             val gateway = HostedInviteGateway()
@@ -418,6 +481,7 @@ class ConnectionWorkflowViewModelTest {
             RoomControlInvite(
                 code = "R123456-amber-comet",
                 payload = "envoix://room/R123456-amber-comet",
+                endpoint = TEST_ROOM_ENDPOINT,
                 expiresAtEpochMs = Long.MAX_VALUE,
             )
         val TEST_SELECTION =
@@ -432,6 +496,7 @@ class ConnectionWorkflowViewModelTest {
                 transferInvite = "envoix://invite/v2/redacted",
                 rootNames = listOf("notes.txt"),
                 itemCount = 1,
+                directoryCount = 0,
                 totalBytes = 42,
             )
         val TEST_SETTINGS = Settings(nearbyDisplayName = "Android phone")
@@ -461,6 +526,7 @@ private class HostedInviteGateway : RoomControlGateway {
                 RoomControlInvite(
                     code = "R123456-amber-comet",
                     payload = "envoix://room/R123456-amber-comet",
+                    endpoint = TEST_ROOM_ENDPOINT,
                     expiresAtEpochMs = Long.MAX_VALUE,
                 ),
             ),
@@ -470,7 +536,9 @@ private class HostedInviteGateway : RoomControlGateway {
     override suspend fun join(
         input: String,
         displayName: String,
-    ) = Unit
+    ) {
+        mutableEvents.emit(RoomControlEvent.Joining(TEST_ROOM_ENDPOINT))
+    }
 
     override suspend fun refreshInvite() = Unit
 
@@ -491,3 +559,9 @@ private class HostedInviteGateway : RoomControlGateway {
         closedWith = reason
     }
 }
+
+private val TEST_ROOM_ENDPOINT =
+    RoomControlEndpoint(
+        broker = "room-broker@127.0.0.1:8555",
+        relay = "https://room-relay.example",
+    )

@@ -21,6 +21,7 @@ internal data class DeviceRoomDraft(
     val pendingRoleAdapter: String? = null,
     val transferCodes: Set<String> = emptySet(),
     val controlSession: Boolean = false,
+    val controlEndpoint: RoomControlEndpoint? = null,
 )
 
 internal data class RoomTransferDraft(

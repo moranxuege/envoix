@@ -41,6 +41,24 @@ fn invitation_round_trips_reserved_transport_characters() {
 }
 
 #[test]
+fn invitation_canonicalizes_transport_endpoint_whitespace() {
+    let invite = RoomControlInvite::from_parts(
+        "R123456-amber-comet".into(),
+        "  id@[2001:db8::1]:8445  ".into(),
+        Some("  https://relay.example/path?a=b  ".into()),
+        u64::MAX,
+    )
+    .unwrap();
+    assert_eq!(invite.broker(), "id@[2001:db8::1]:8445");
+    assert_eq!(invite.relay(), Some("https://relay.example/path?a=b"));
+
+    let payload = invite.payload();
+    assert!(payload.contains("broker=id%40%5B2001%3Adb8%3A%3A1%5D%3A8445"));
+    assert!(payload.contains("relay=https%3A%2F%2Frelay.example%2Fpath%3Fa%3Db"));
+    assert!(!payload.contains("%20"));
+}
+
+#[test]
 fn legacy_pairing_codes_cannot_enter_control_namespace() {
     assert!(RoomControlInvite::parse("123456-amber-comet", "broker", None).is_err());
 }
@@ -54,11 +72,51 @@ fn typed_room_code_is_case_insensitive_and_canonicalized() {
 
 #[test]
 fn offer_requires_three_bounded_sanitized_roots_and_sender_invite() {
-    let valid = offer("offer_1", "123456-amber-comet");
-    assert!(valid.validate().is_ok());
+    let valid = offer("offer_1", TEST_BROKER, Vec::new());
+    assert!(valid.validate(TEST_BROKER, None).is_ok());
     let mut invalid = valid.clone();
     invalid.root_names.push("../secret".into());
-    assert!(invalid.validate().is_err());
+    assert!(invalid.validate(TEST_BROKER, None).is_err());
+}
+
+#[test]
+fn offer_directory_count_cannot_exceed_item_count() {
+    let mut invalid = offer("offer_1", TEST_BROKER, Vec::new());
+    invalid.directory_count = invalid.item_count + 1;
+    assert!(matches!(
+        invalid.validate(TEST_BROKER, None),
+        Err(CoreError::InvalidInput(message))
+            if message == "room offer directory count exceeds item count"
+    ));
+}
+
+#[test]
+fn offer_route_must_exactly_match_room_control_route() {
+    let no_relay = offer("offer_1", TEST_BROKER, Vec::new());
+    assert!(no_relay.validate(TEST_BROKER, None).is_ok());
+    assert!(matches!(
+        no_relay.validate(OTHER_BROKER, None),
+        Err(CoreError::InvalidInput(message))
+            if message == "room offer transfer route differs from room control route"
+    ));
+
+    let relay = "https://relay.example.test".to_string();
+    let one_relay = offer("offer_2", TEST_BROKER, vec![relay.clone()]);
+    assert!(one_relay.validate(TEST_BROKER, Some(&relay)).is_ok());
+    assert!(one_relay.validate(TEST_BROKER, None).is_err());
+
+    let two_relays = offer(
+        "offer_3",
+        TEST_BROKER,
+        vec![relay.clone(), "https://relay2.example.test".into()],
+    );
+    assert!(two_relays.validate(TEST_BROKER, Some(&relay)).is_err());
+}
+
+#[test]
+fn room_control_protocol_identifiers_are_v4() {
+    assert_eq!(ROOM_CONTROL_ALPN, b"envoix-room-control/4");
+    assert_eq!(ROOM_CONTROL_VERSION, 4);
 }
 
 #[tokio::test]
@@ -241,9 +299,13 @@ async fn room_control_loopback_supports_alternating_offers_and_close() {
         Arc::new(RoomRegistry::new()),
         None,
     ));
-    let invite =
-        RoomControlInvite::from_parts("R123456-amber-comet".into(), broker_text, None, u64::MAX)
-            .unwrap();
+    let invite = RoomControlInvite::from_parts(
+        "R123456-amber-comet".into(),
+        broker_text.clone(),
+        None,
+        u64::MAX,
+    )
+    .unwrap();
     let host_invite = invite.clone();
     let join_invite = invite;
     let host = tokio::spawn(async move {
@@ -290,6 +352,42 @@ async fn room_control_loopback_supports_alternating_offers_and_close() {
     assert!(!joiner.is_creator());
     assert_eq!(host.lifetime_state(), joiner.lifetime_state());
     assert_eq!(host.lifetime_state().revision, 1);
+
+    let local_route_error = host
+        .offer_transfer(offer("wrong_local_route", OTHER_BROKER, Vec::new()))
+        .await
+        .expect_err("local room offer must keep the control route");
+    assert!(matches!(
+        local_route_error,
+        CoreError::InvalidInput(message)
+            if message == "room offer transfer route differs from room control route"
+    ));
+
+    joiner
+        .send(ControlMessage::TransferOffer(offer(
+            "wrong_peer_route",
+            OTHER_BROKER,
+            Vec::new(),
+        )))
+        .await
+        .expect("send malicious peer offer");
+    let incoming_route_error = host
+        .next_event()
+        .await
+        .expect_err("incoming room offer must keep the control route");
+    assert!(matches!(
+        incoming_route_error,
+        CoreError::InvalidInput(message)
+            if message == "room offer transfer route differs from room control route"
+    ));
+    assert!(matches!(
+        joiner.receive().await.unwrap(),
+        ControlMessage::OfferRejected {
+            offer_id,
+            reason: RoomOfferRejection::Invalid,
+        } if offer_id == "wrong_peer_route"
+    ));
+
     assert!(
         joiner
             .set_policy(RoomLifetimePolicy::UntilForegroundEnds)
@@ -356,7 +454,7 @@ async fn room_control_loopback_supports_alternating_offers_and_close() {
     );
 
     let from_host_lifetime = host
-        .offer_transfer(offer("from_host", "123456-amber-comet"))
+        .offer_transfer(offer("from_host", &broker_text, Vec::new()))
         .await
         .unwrap()
         .expect("creator offer activity");
@@ -387,7 +485,7 @@ async fn room_control_loopback_supports_alternating_offers_and_close() {
 
     assert!(
         joiner
-            .offer_transfer(offer("from_joiner", "654321-river-slate"))
+            .offer_transfer(offer("from_joiner", &broker_text, Vec::new()))
             .await
             .unwrap()
             .is_none()
@@ -453,11 +551,15 @@ fn test_config() -> SessionConfig {
     }
 }
 
-fn offer(offer_id: &str, _code: &str) -> RoomTransferOffer {
+const TEST_BROKER: &str =
+    "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445";
+const OTHER_BROKER: &str =
+    "f946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8555";
+
+fn offer(offer_id: &str, broker: &str, relay_urls: Vec<String>) -> RoomTransferOffer {
     let transfer_invite = InviteV2::create(
-        "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445"
-            .into(),
-        Vec::new(),
+        broker.into(),
+        relay_urls,
         TransferRole::Sender,
         envoix_invite::Capabilities::current(),
         now_unix_secs().expect("current time"),
@@ -469,6 +571,7 @@ fn offer(offer_id: &str, _code: &str) -> RoomTransferOffer {
         transfer_invite,
         root_names: vec!["Photos".into(), "report.pdf".into()],
         item_count: 2,
+        directory_count: 1,
         total_bytes: 42,
     }
 }

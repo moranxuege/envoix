@@ -57,6 +57,7 @@ enum RoomCommand {
         transfer_invite: String,
         root_names: Vec<String>,
         item_count: u32,
+        directory_count: u32,
         total_bytes: u64,
     },
     Respond {
@@ -461,6 +462,7 @@ async fn execute_command(
             transfer_invite,
             root_names,
             item_count,
+            directory_count,
             total_bytes,
         } => {
             session
@@ -469,6 +471,7 @@ async fn execute_command(
                     transfer_invite: transfer_invite.clone(),
                     root_names: root_names.clone(),
                     item_count: *item_count,
+                    directory_count: *directory_count,
                     total_bytes: *total_bytes,
                 })
                 .await
@@ -514,6 +517,7 @@ fn event_json(event: RoomControlEvent) -> Value {
                 "transfer_invite":offer.transfer_invite,
                 "root_names":offer.root_names,
                 "item_count":offer.item_count,
+                "directory_count":offer.directory_count,
                 "total_bytes":offer.total_bytes,
             }
         }),
@@ -706,13 +710,30 @@ mod tests {
     #[test]
     fn command_preserves_opaque_offer_id() {
         let command: RoomCommand = serde_json::from_str(
-            r#"{"command":"offer","offer_id":"opaque_7","transfer_invite":"x","root_names":[],"item_count":0,"total_bytes":0}"#,
+            r#"{"command":"offer","offer_id":"opaque_7","transfer_invite":"x","root_names":[],"item_count":3,"directory_count":2,"total_bytes":0}"#,
         )
         .unwrap();
         assert!(matches!(
             command,
-            RoomCommand::Offer { offer_id, .. } if offer_id == "opaque_7"
+            RoomCommand::Offer {
+                offer_id,
+                directory_count: 2,
+                ..
+            } if offer_id == "opaque_7"
         ));
+    }
+
+    #[test]
+    fn incoming_offer_json_includes_directory_count() {
+        let event = event_json(RoomControlEvent::IncomingOffer(RoomTransferOffer {
+            offer_id: "opaque_7".into(),
+            transfer_invite: "opaque_invite".into(),
+            root_names: vec!["Photos".into()],
+            item_count: 3,
+            directory_count: 2,
+            total_bytes: 42,
+        }));
+        assert_eq!(event["offer"]["directory_count"], 2);
     }
 
     #[test]

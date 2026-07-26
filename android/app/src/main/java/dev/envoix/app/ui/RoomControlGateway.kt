@@ -3,9 +3,15 @@ package dev.envoix.app.ui
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
 
+internal data class RoomControlEndpoint(
+    val broker: String,
+    val relay: String,
+)
+
 internal data class RoomControlInvite(
     val code: String,
     val payload: String,
+    val endpoint: RoomControlEndpoint,
     val expiresAtEpochMs: Long,
 )
 
@@ -14,6 +20,7 @@ internal data class RoomTransferOffer(
     val transferInvite: String,
     val rootNames: List<String>,
     val itemCount: Int,
+    val directoryCount: Int,
     val totalBytes: Long,
 )
 
@@ -22,6 +29,7 @@ internal data class RoomTransferOfferDraft(
     val transferInvite: String,
     val rootNames: List<String>,
     val itemCount: Int,
+    val directoryCount: Int,
     val totalBytes: Long,
 )
 
@@ -51,11 +59,14 @@ internal sealed interface RoomControlEvent {
         val invite: RoomControlInvite,
     ) : RoomControlEvent
 
-    data object Joining : RoomControlEvent
+    data class Joining(
+        val endpoint: RoomControlEndpoint,
+    ) : RoomControlEvent
 
     data class Connected(
         val peerName: String?,
         val creator: Boolean,
+        val endpoint: RoomControlEndpoint,
         val lifetime: RoomLifetimeSnapshot,
     ) : RoomControlEvent
 

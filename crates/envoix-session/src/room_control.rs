@@ -23,8 +23,8 @@ use crate::{
     BindAddrs, BoundEndpoint, SessionConfig, SessionError, TransferCancelToken, parse_broker_addr,
 };
 
-pub const ROOM_CONTROL_ALPN: &[u8] = b"envoix-room-control/3";
-const ROOM_CONTROL_VERSION: u16 = 3;
+pub const ROOM_CONTROL_ALPN: &[u8] = b"envoix-room-control/4";
+const ROOM_CONTROL_VERSION: u16 = 4;
 const ROOM_CODE_PREFIX: char = 'R';
 const ROOM_URI_PREFIX: &str = "envoix://room/";
 const ROOM_INVITE_TTL: Duration = Duration::from_secs(300);
@@ -113,15 +113,19 @@ impl RoomControlInvite {
         expires_at_unix_secs: u64,
     ) -> Result<Self, SessionError> {
         let code = normalize_room_code(&code)?;
-        if broker.trim().is_empty() {
+        let broker = broker.trim().to_string();
+        if broker.is_empty() {
             return Err(CoreError::InvalidInput(
                 "room control invitation needs a broker".into(),
             ));
         }
+        let relay = relay
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
         Ok(Self {
             code,
             broker,
-            relay: relay.filter(|value| !value.trim().is_empty()),
+            relay,
             expires_at_unix_secs,
         })
     }
@@ -241,11 +245,16 @@ pub struct RoomTransferOffer {
     pub transfer_invite: String,
     pub root_names: Vec<String>,
     pub item_count: u32,
+    pub directory_count: u32,
     pub total_bytes: u64,
 }
 
 impl RoomTransferOffer {
-    fn validate(&self) -> Result<(), SessionError> {
+    fn validate(
+        &self,
+        expected_broker: &str,
+        expected_relay: Option<&str>,
+    ) -> Result<(), SessionError> {
         if self.offer_id.is_empty()
             || self.offer_id.len() > MAX_OFFER_ID_BYTES
             || !self
@@ -262,7 +271,7 @@ impl RoomTransferOffer {
                 "room offer needs a bounded directional sender invitation".into(),
             ));
         }
-        InviteV2::parse_for_role(
+        let transfer_invite = InviteV2::parse_for_role(
             &self.transfer_invite,
             TransferRole::Receiver,
             now_unix_secs()?,
@@ -272,6 +281,23 @@ impl RoomTransferOffer {
                 "room offer needs a valid directional InviteV2: {error}"
             ))
         })?;
+        let route = &transfer_invite.invitation().public_context;
+        let relay_matches = match expected_relay {
+            Some(expected) => {
+                route.relay_urls.len() == 1 && route.relay_urls[0].as_str() == expected
+            }
+            None => route.relay_urls.is_empty(),
+        };
+        if route.broker != expected_broker || !relay_matches {
+            return Err(CoreError::InvalidInput(
+                "room offer transfer route differs from room control route".into(),
+            ));
+        }
+        if self.directory_count > self.item_count {
+            return Err(CoreError::InvalidInput(
+                "room offer directory count exceeds item count".into(),
+            ));
+        }
         if self.root_names.len() > MAX_ROOT_PREVIEWS {
             return Err(CoreError::InvalidInput(
                 "room offer has more than three root previews".into(),
@@ -486,6 +512,8 @@ pub struct RoomControlSession {
     offers: std::sync::Mutex<OfferState>,
     lifetime_updates: Mutex<()>,
     lifetime: std::sync::Mutex<RoomLifetimeMachine>,
+    broker: String,
+    relay: Option<String>,
     peer_name: String,
     creator: bool,
 }
@@ -511,7 +539,7 @@ impl RoomControlSession {
         &self,
         offer: RoomTransferOffer,
     ) -> Result<Option<RoomLifetimeState>, SessionError> {
-        offer.validate()?;
+        offer.validate(&self.broker, self.relay.as_deref())?;
         {
             let mut state = self
                 .offers
@@ -674,7 +702,7 @@ impl RoomControlSession {
                     return Err(CoreError::Protocol("duplicate room control hello".into()));
                 }
                 ControlMessage::TransferOffer(offer) => {
-                    if let Err(error) = offer.validate() {
+                    if let Err(error) = offer.validate(&self.broker, self.relay.as_deref()) {
                         let _ = self
                             .send(ControlMessage::OfferRejected {
                                 offer_id: offer.offer_id,
@@ -991,6 +1019,8 @@ pub async fn connect_room_control(
         offers: std::sync::Mutex::new(OfferState::default()),
         lifetime_updates: Mutex::new(()),
         lifetime: std::sync::Mutex::new(RoomLifetimeMachine::new(lifetime)),
+        broker: invite.broker,
+        relay: invite.relay,
         peer_name,
         creator,
     })

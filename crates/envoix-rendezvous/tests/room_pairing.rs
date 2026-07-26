@@ -315,33 +315,19 @@ async fn remembered_locator_rejects_reversed_roles() {
 async fn room_control_locator_pairs_only_the_fixed_control_roles() {
     let registry = Arc::new(RoomRegistry::with_ttl(Duration::from_secs(5)));
     let room = "c1_123456";
-    let (creator, broker_creator) = tokio::io::duplex(4096);
-    let (joiner, broker_joiner) = tokio::io::duplex(4096);
+    let (creator, creator_serve) = start_peer(registry.clone(), room_control_creator_join(room));
+    wait_for_creator(&registry).await;
+    let (joiner, joiner_serve) = start_peer(registry, room_control_joiner_join(room));
 
-    let creator_registry = registry.clone();
-    let creator_serve =
-        tokio::spawn(async move { creator_registry.serve(broker_conn(broker_creator)).await });
-    let joiner_registry = registry.clone();
-    let joiner_serve =
-        tokio::spawn(async move { joiner_registry.serve(broker_conn(broker_joiner)).await });
-
-    let creator =
-        tokio::spawn(async move { join_only(creator, room_control_creator_join(room)).await });
-    let joiner =
-        tokio::spawn(async move { join_only(joiner, room_control_joiner_join(room)).await });
-
-    let Reply::Paired(creator) = creator.await.unwrap().unwrap() else {
+    let Reply::Paired(creator) = creator.await.unwrap() else {
         panic!("room-control creator was not paired");
     };
-    let Reply::Paired(joiner) = joiner.await.unwrap().unwrap() else {
+    let Reply::Paired(joiner) = joiner.await.unwrap() else {
         panic!("room-control joiner was not paired");
     };
     assert_eq!(creator.role, Role::Responder);
     assert_eq!(joiner.role, Role::Initiator);
-    assert_eq!(
-        creator.selected_bootstrap_method,
-        BootstrapKind::RoomCode
-    );
+    assert_eq!(creator.selected_bootstrap_method, BootstrapKind::RoomCode);
     assert_eq!(joiner.selected_bootstrap_method, BootstrapKind::RoomCode);
 
     creator_serve.await.unwrap().expect("serve creator");

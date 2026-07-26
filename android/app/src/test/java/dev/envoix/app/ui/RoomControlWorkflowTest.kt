@@ -35,12 +35,14 @@ class RoomControlWorkflowTest {
             runCurrent()
             assertEquals(RoomControlPhase.Hosting, workflow.state.phase)
             assertFalse(workflow.state.connected)
+            assertEquals(TEST_ROOM_ENDPOINT, workflow.state.endpoint)
             assertNull(connectedPeer)
 
             gateway.emit(
                 RoomControlEvent.Connected(
                     peerName = "iPhone",
                     creator = true,
+                    endpoint = TEST_ROOM_ENDPOINT,
                     lifetime = lifetime(),
                 ),
             )
@@ -48,6 +50,7 @@ class RoomControlWorkflowTest {
 
             assertTrue(workflow.state.connected)
             assertEquals("iPhone", connectedPeer)
+            assertEquals(TEST_ROOM_ENDPOINT, workflow.state.endpoint)
             assertEquals(900_000L, workflow.state.idleDeadlineEpochMs)
         }
 
@@ -74,6 +77,7 @@ class RoomControlWorkflowTest {
                     RoomControlInvite(
                         code = "R123456-amber-comet",
                         payload = "envoix://room/R123456-amber-comet",
+                        endpoint = TEST_ROOM_ENDPOINT,
                         expiresAtEpochMs = 5_000L,
                     ),
                 ),
@@ -131,6 +135,7 @@ class RoomControlWorkflowTest {
                 RoomControlInvite(
                     code = "R123456-amber-comet",
                     payload = "envoix://room/R123456-amber-comet",
+                    endpoint = TEST_ROOM_ENDPOINT,
                     expiresAtEpochMs = 60_000L,
                 )
             workflow.host("Android", "broker", "relay")
@@ -156,10 +161,12 @@ class RoomControlWorkflowTest {
             runCurrent()
             workflow.join(TEST_OFFER.transferInvite, "Android", "iPhone")
             runCurrent()
+            assertEquals(TEST_ROOM_ENDPOINT, workflow.state.endpoint)
             gateway.emit(
                 RoomControlEvent.Connected(
                     peerName = "iPhone",
                     creator = false,
+                    endpoint = TEST_ROOM_ENDPOINT,
                     lifetime = lifetime(),
                 ),
             )
@@ -200,6 +207,7 @@ class RoomControlWorkflowTest {
                 RoomControlEvent.Connected(
                     peerName = "iPhone",
                     creator = true,
+                    endpoint = TEST_ROOM_ENDPOINT,
                     lifetime = lifetime(),
                 ),
             )
@@ -247,6 +255,7 @@ class RoomControlWorkflowTest {
                 RoomControlEvent.Connected(
                     peerName = "iPhone",
                     creator = true,
+                    endpoint = TEST_ROOM_ENDPOINT,
                     lifetime = lifetime(deadlineEpochMs = 1_000L),
                 ),
             )
@@ -291,6 +300,7 @@ class RoomControlWorkflowTest {
                 RoomControlEvent.Connected(
                     peerName = "iPhone",
                     creator = false,
+                    endpoint = TEST_ROOM_ENDPOINT,
                     lifetime = lifetime(revision = 7, deadlineEpochMs = 5_000L),
                 ),
             )
@@ -334,6 +344,7 @@ class RoomControlWorkflowTest {
                 RoomControlEvent.Connected(
                     peerName = "iPhone",
                     creator = true,
+                    endpoint = TEST_ROOM_ENDPOINT,
                     lifetime = lifetime(),
                 ),
             )
@@ -367,6 +378,7 @@ class RoomControlWorkflowTest {
                 RoomControlEvent.Connected(
                     peerName = "iPhone",
                     creator = false,
+                    endpoint = TEST_ROOM_ENDPOINT,
                     lifetime = lifetime(),
                 ),
             )
@@ -411,6 +423,7 @@ class RoomControlWorkflowTest {
                 transferInvite = "envoix://pair/123456-alpha-bravo?role=send",
                 rootNames = listOf("Photos"),
                 itemCount = 3,
+                directoryCount = 1,
                 totalBytes = 42,
             )
         val TEST_DRAFT =
@@ -419,6 +432,7 @@ class RoomControlWorkflowTest {
                 transferInvite = TEST_OFFER.transferInvite,
                 rootNames = TEST_OFFER.rootNames,
                 itemCount = TEST_OFFER.itemCount,
+                directoryCount = TEST_OFFER.directoryCount,
                 totalBytes = TEST_OFFER.totalBytes,
             )
     }
@@ -447,12 +461,15 @@ private class FakeRoomControlGateway : RoomControlGateway {
         relay: String,
     ) {
         hostError?.let(::error)
+        mutableEvents.emit(RoomControlEvent.Hosting(TEST_ROOM_INVITE))
     }
 
     override suspend fun join(
         input: String,
         displayName: String,
-    ) = Unit
+    ) {
+        mutableEvents.emit(RoomControlEvent.Joining(TEST_ROOM_ENDPOINT))
+    }
 
     override suspend fun refreshInvite() {
         refreshError?.let(::error)
@@ -481,3 +498,17 @@ private class FakeRoomControlGateway : RoomControlGateway {
         closedWith = reason
     }
 }
+
+private val TEST_ROOM_ENDPOINT =
+    RoomControlEndpoint(
+        broker = "room-broker@127.0.0.1:8555",
+        relay = "https://room-relay.example",
+    )
+
+private val TEST_ROOM_INVITE =
+    RoomControlInvite(
+        code = "R123456-amber-comet",
+        payload = "envoix://room/R123456-amber-comet",
+        endpoint = TEST_ROOM_ENDPOINT,
+        expiresAtEpochMs = Long.MAX_VALUE,
+    )

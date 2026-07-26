@@ -14,6 +14,7 @@ import androidx.test.uiautomator.UiObject2
 import androidx.test.uiautomator.Until
 import dev.envoix.app.ui.AppText
 import dev.envoix.app.ui.RoomCloseReason
+import dev.envoix.app.ui.RoomControlEndpoint
 import dev.envoix.app.ui.RoomControlEvent
 import dev.envoix.app.ui.RoomControlGateway
 import dev.envoix.app.ui.RoomControlGatewayProvider
@@ -54,6 +55,7 @@ class ManifestV2AppUiInstrumentedTest {
                         roomTitle = "ROOM",
                         roomStatus = "Authenticated for this room",
                         roomEnded = "ROOM ENDED",
+                        roomClosed = "Room closed",
                         done = "Done",
                         addFiles = "Add files",
                         inventoryFiles = "ADD FILES",
@@ -73,6 +75,7 @@ class ManifestV2AppUiInstrumentedTest {
                         roomTitle = "房间",
                         roomStatus = "已为此房间认证",
                         roomEnded = "房间已结束",
+                        roomClosed = "房间已关闭",
                         done = "完成",
                         addFiles = "添加文件",
                         inventoryFiles = "添加文件",
@@ -127,6 +130,8 @@ class ManifestV2AppUiInstrumentedTest {
 
         gateway.endRoom()
         text(device, copy.roomEnded)
+        text(device, copy.roomClosed)
+        assertFalse(resource(device, ROOM_ADD_FILES).isEnabled)
         text(device, copy.done).click()
         resource(device, CONNECTION_HUB)
         resource(device, HUB_ROOM_INVITE)
@@ -245,6 +250,7 @@ class ManifestV2AppUiInstrumentedTest {
         val roomTitle: String,
         val roomStatus: String,
         val roomEnded: String,
+        val roomClosed: String,
         val done: String,
         val addFiles: String,
         val inventoryFiles: String,
@@ -262,11 +268,13 @@ private class ImmediatelyConnectedRoomGateway : RoomControlGateway {
         broker: String,
         relay: String,
     ) {
+        val endpoint = RoomControlEndpoint(broker, relay)
         mutableEvents.emit(
             RoomControlEvent.Hosting(
                 RoomControlInvite(
                     code = "R123456-test-room",
                     payload = "envoix://room/R123456-test-room",
+                    endpoint = endpoint,
                     expiresAtEpochMs = System.currentTimeMillis() + ROOM_LIFETIME_MS,
                 ),
             ),
@@ -275,6 +283,7 @@ private class ImmediatelyConnectedRoomGateway : RoomControlGateway {
             RoomControlEvent.Connected(
                 peerName = "Test device",
                 creator = true,
+                endpoint = endpoint,
                 lifetime =
                     RoomLifetimeSnapshot(
                         revision = 1,

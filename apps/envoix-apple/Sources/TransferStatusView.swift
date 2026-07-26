@@ -96,6 +96,22 @@ struct TransferStatusView: View {
                                 Text(byteString(item.plaintextSize))
                                     .monospacedDigit()
                             }
+                            Button(role: .destructive) {
+                                viewModel.removeManifestSource(rootItemID: item.rootItemId)
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.body.weight(.semibold))
+                                    .frame(width: 32, height: 32)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(Theme.danger)
+                            .disabled(viewModel.isPreparingManifest || viewModel.isBusy)
+                            .accessibilityLabel(AppText.value(
+                                "Remove \(item.name)",
+                                "移除 \(item.name)",
+                                language: language
+                            ))
+                            .accessibilityIdentifier("remove_prepared_source_\(item.rootItemId)")
                         }
                         .font(.footnote)
                         .foregroundStyle(item.hasWarning ? Theme.danger : Theme.muted)
@@ -191,6 +207,11 @@ struct TransferStatusView: View {
                                     viewModel.removeManifestSource(rootItemID: selection.rootItemId)
                                 }
                                 .buttonStyle(.bordered)
+                                .accessibilityLabel(AppText.value(
+                                    "Remove \(selection.requestedName)",
+                                    "移除 \(selection.requestedName)",
+                                    language: language
+                                ))
                             }
                         }
                     }

@@ -26,8 +26,8 @@ let deprecatedLogServers: Set<String> = [
     "http://envoix.chkxwlyh.us:8460",
 ]
 
-let expectedCoreFFIAPIVersion: UInt32 = 8
-let expectedRoomControlCoreCapability = "foreground_room_control_v3"
+let expectedCoreFFIAPIVersion: UInt32 = 9
+let expectedRoomControlCoreCapability = "foreground_room_control_v4"
 let appDebugBuildLabel = "Debug build 2026.07.08.19"
 
 func coreMatchesExpectedRoomControlContract(_ info: FfiCoreInfo) -> Bool {

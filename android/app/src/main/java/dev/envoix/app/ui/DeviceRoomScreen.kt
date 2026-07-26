@@ -2,6 +2,8 @@ package dev.envoix.app.ui
 
 import android.net.Uri
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -22,9 +24,11 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
@@ -32,6 +36,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.envoix.app.SettingsStore
 import dev.envoix.app.Transfer
 import dev.envoix.app.discovery.DiscoverySource
 import dev.envoix.app.discovery.DiscoveryViewModel
@@ -71,7 +76,48 @@ internal fun DeviceRoomScreen(
     discoveryViewModel: DiscoveryViewModel,
 ) {
     val colors = Envoix.colors
+    val context = LocalContext.current
+    val language = LocalAppLanguage.current
     val discoveryState by discoveryViewModel.uiState.collectAsStateWithLifecycle()
+    val settings by SettingsStore.settings.collectAsStateWithLifecycle()
+    var pendingDestinationOfferId by
+        rememberSaveable(draft.id) { mutableStateOf<String?>(null) }
+    var autoResumedDestinationOfferId by
+        rememberSaveable(draft.id) { mutableStateOf<String?>(null) }
+    var destinationRevision by rememberSaveable(draft.id) { mutableStateOf(0) }
+    val destinationPicker =
+        rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            val requestedOfferId = pendingDestinationOfferId
+            pendingDestinationOfferId = null
+            try {
+                if (uri != null && requestedOfferId != null) {
+                    SettingsStore.setSaveTree(context, uri)
+                    destinationRevision += 1
+                    val currentOffer = control.incomingOffer
+                    val destination =
+                        currentOffer?.let {
+                            roomOfferDestinationPresentation(
+                                context = context,
+                                settings = SettingsStore.settings.value,
+                                directoryCount = it.directoryCount,
+                                language = language,
+                            )
+                        }
+                    if (shouldResumeRoomOfferAfterDestinationRepair(
+                            requestedOfferId = requestedOfferId,
+                            currentOfferId = currentOffer?.id,
+                            destinationReady = destination?.ready == true,
+                            alreadyResumedOfferId = autoResumedDestinationOfferId,
+                        )
+                    ) {
+                        autoResumedDestinationOfferId = requestedOfferId
+                        onAcceptIncomingRoomOffer()
+                    }
+                }
+            } finally {
+                onExternalActivityChanged(false)
+            }
+        }
     val setupUsesPending = transferDraft?.usesPendingAction == true
     val pendingRole = draft.pendingRoleAdapter
     val visiblePendingRole =
@@ -83,6 +129,24 @@ internal fun DeviceRoomScreen(
     val active = roomTransfers.filterNot { it.status.isTerminal }
     val connectedRoom = control.connected && draft.controlSession
     val legacyRoom = control.phase == RoomControlPhase.Legacy
+    val incomingDestination =
+        remember(
+            control.incomingOffer?.id,
+            control.incomingOffer?.directoryCount,
+            settings.saveTreeUri,
+            settings.saveFolder,
+            destinationRevision,
+            language,
+        ) {
+            control.incomingOffer?.let { offer ->
+                roomOfferDestinationPresentation(
+                    context = context,
+                    settings = settings,
+                    directoryCount = offer.directoryCount,
+                    language = language,
+                )
+            }
+        }
     val nearbyAvailable =
         draft.nearbySelection?.discoveryPeerKey?.let { selectedKey ->
             discoveryState.peers.any { it.peerKey == selectedKey }
@@ -151,13 +215,40 @@ internal fun DeviceRoomScreen(
             }
             control.incomingOffer?.let { offer ->
                 item {
-                    IncomingRoomOfferCard(
-                        offer = offer,
-                        busy = incomingOfferBusy,
-                        error = incomingOfferError,
-                        onAccept = onAcceptIncomingRoomOffer,
-                        onReject = onRejectIncomingRoomOffer,
-                    )
+                    incomingDestination?.let { destination ->
+                        IncomingRoomOfferCard(
+                            offer = offer,
+                            destination = destination,
+                            busy =
+                                incomingOfferBusy ||
+                                    pendingDestinationOfferId == offer.id,
+                            error = incomingOfferError,
+                            onAccept = {
+                                val currentDestination =
+                                    roomOfferDestinationPresentation(
+                                        context = context,
+                                        settings = SettingsStore.settings.value,
+                                        directoryCount = offer.directoryCount,
+                                        language = language,
+                                    )
+                                if (currentDestination.ready) {
+                                    onAcceptIncomingRoomOffer()
+                                } else if (pendingDestinationOfferId == null) {
+                                    pendingDestinationOfferId = offer.id
+                                    autoResumedDestinationOfferId = null
+                                    destinationRevision += 1
+                                    onExternalActivityChanged(true)
+                                    runCatching {
+                                        destinationPicker.launch(SettingsStore.savePickerInitialUri())
+                                    }.onFailure {
+                                        pendingDestinationOfferId = null
+                                        onExternalActivityChanged(false)
+                                    }
+                                }
+                            },
+                            onReject = onRejectIncomingRoomOffer,
+                        )
+                    }
                 }
             }
             visiblePendingRole?.let { role ->
@@ -237,6 +328,7 @@ internal fun DeviceRoomScreen(
                 initialHostedPayload = draft.hostedPayload.takeIf { setupUsesPending },
                 roomMode = true,
                 connectedRoom = connectedRoom,
+                roomEndpoint = draft.controlEndpoint.takeIf { connectedRoom },
                 onExternalActivityChanged = onExternalActivityChanged,
                 onBeforeStart = null,
                 onPrepareReceiveBeforeDecision = null,

@@ -65,6 +65,7 @@ pub struct FfiRoomTransferOffer {
     pub transfer_invite: String,
     pub root_names: Vec<String>,
     pub item_count: u32,
+    pub directory_count: u32,
     pub total_bytes: u64,
 }
 
@@ -323,6 +324,7 @@ fn core_offer(offer: FfiRoomTransferOffer) -> RoomTransferOffer {
         transfer_invite: offer.transfer_invite,
         root_names: offer.root_names,
         item_count: offer.item_count,
+        directory_count: offer.directory_count,
         total_bytes: offer.total_bytes,
     }
 }
@@ -333,6 +335,7 @@ fn ffi_offer(offer: RoomTransferOffer) -> FfiRoomTransferOffer {
         transfer_invite: offer.transfer_invite,
         root_names: offer.root_names,
         item_count: offer.item_count,
+        directory_count: offer.directory_count,
         total_bytes: offer.total_bytes,
     }
 }
@@ -483,6 +486,19 @@ mod tests {
     }
 
     #[test]
+    fn offer_projection_preserves_directory_count() {
+        let offer = FfiRoomTransferOffer {
+            offer_id: "opaque_7".into(),
+            transfer_invite: "opaque_invite".into(),
+            root_names: vec!["Photos".into()],
+            item_count: 7,
+            directory_count: 3,
+            total_bytes: 42,
+        };
+        assert_eq!(ffi_offer(core_offer(offer.clone())), offer);
+    }
+
+    #[test]
     fn lifetime_projection_preserves_revision_policy_and_nullable_deadline() {
         let state = RoomLifetimeState {
             revision: 7,
@@ -509,13 +525,13 @@ mod tests {
     }
 
     #[test]
-    fn core_info_advertises_room_control_v3_ffi_v8() {
+    fn core_info_advertises_room_control_v4_ffi_v9() {
         let info = crate::envoix_core_info();
-        assert_eq!(info.ffi_api_version, 8);
+        assert_eq!(info.ffi_api_version, 9);
         assert!(
             info.capabilities
                 .iter()
-                .any(|capability| capability == "foreground_room_control_v3")
+                .any(|capability| capability == "foreground_room_control_v4")
         );
     }
 }

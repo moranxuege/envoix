@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Smartphone
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
@@ -369,6 +370,12 @@ internal fun NearbyIdentityRow(
     onVisibility: () -> Unit,
 ) {
     val colors = Envoix.colors
+    val visibilityColor =
+        if (visibility == NearbyVisibility.Hidden) {
+            colors.muted
+        } else {
+            colors.accentStrong
+        }
     Column(
         Modifier
             .fillMaxWidth()
@@ -407,16 +414,7 @@ internal fun NearbyIdentityRow(
                         .size(17.dp),
             )
             Spacer(Modifier.width(6.dp))
-            Text(
-                visibility.label(),
-                color =
-                    if (visibility == NearbyVisibility.Hidden) {
-                        colors.muted
-                    } else {
-                        colors.accentStrong
-                    },
-                fontSize = 12.sp,
-                fontWeight = FontWeight.SemiBold,
+            Row(
                 modifier =
                     Modifier
                         .clip(RoundedCornerShape(14.dp))
@@ -428,7 +426,26 @@ internal fun NearbyIdentityRow(
                             },
                         ).clickable(onClick = onVisibility)
                         .padding(horizontal = 10.dp, vertical = 7.dp),
-            )
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    if (visibility == NearbyVisibility.Hidden) {
+                        Icons.Default.VisibilityOff
+                    } else {
+                        Icons.Default.Visibility
+                    },
+                    contentDescription = null,
+                    tint = visibilityColor,
+                    modifier = Modifier.size(14.dp),
+                )
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    visibility.label(),
+                    color = visibilityColor,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
         }
     }
 }
@@ -464,15 +481,22 @@ internal fun NearbyDeviceCard(
             Icon(Icons.Default.Smartphone, null, tint = colors.accent, modifier = Modifier.size(20.dp))
         }
         Spacer(Modifier.width(11.dp))
-        Text(
-            peer.displayName ?: appText("Nearby Envoix device", "附近的 Envoix 设备"),
-            color = colors.text,
-            fontSize = 15.sp,
-            fontWeight = FontWeight.Bold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f),
-        )
+        Column(Modifier.weight(1f)) {
+            Text(
+                peer.displayName ?: appText("Nearby Envoix device", "附近的 Envoix 设备"),
+                color = colors.text,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                appText("Nearby · Unverified", "附近 · 未验证"),
+                color = colors.muted,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
         Icon(
             Icons.AutoMirrored.Filled.KeyboardArrowRight,
             appText("Open room", "打开房间"),

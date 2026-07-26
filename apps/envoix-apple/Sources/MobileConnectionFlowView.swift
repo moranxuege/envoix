@@ -18,7 +18,20 @@ private enum MobileTransferRoute: String, Identifiable {
     var id: String { rawValue }
 }
 
+struct RoomDestinationRepairRequest: Equatable, Identifiable {
+    let offerID: String
+    let roomID: UUID
+
+    var id: String { "\(roomID.uuidString):\(offerID)" }
+
+    func matches(offerID: String, roomID: UUID) -> Bool {
+        self.offerID == offerID && self.roomID == roomID
+    }
+}
+
 struct MobileConnectionFlowView: View {
+    private typealias PreparedRoomDestination = (url: URL, access: AnyObject?)
+
     @EnvironmentObject private var model: AppModel
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("envoix.language") private var language = "en"
@@ -28,6 +41,7 @@ struct MobileConnectionFlowView: View {
     @AppStorage("envoix.candidatesAllow") private var candidatesAllow = ""
     @AppStorage("envoix.candidatesDeny") private var candidatesDeny = ""
     @AppStorage("envoix.speedLimit") private var speedLimit = 40
+    @AppStorage("envoix.outputDirDisplayName") private var outputDirDisplayName = ""
 
     @StateObject private var nearbyCoordinator = NearbyDiscoveryCoordinator()
     @StateObject private var presence = NearbyPresencePreferences()
@@ -62,6 +76,7 @@ struct MobileConnectionFlowView: View {
     @State private var pendingRoomReplacement: (() -> Void)?
     @State private var isRoomReplacementPresented = false
     @State private var acceptingRoomOfferID: String?
+    @State private var roomDestinationRepair: RoomDestinationRepairRequest?
     #if DEBUG
     @State private var didStageBackgroundShareFixture = false
     @State private var openInUITestFixtureURL: URL?
@@ -101,6 +116,17 @@ struct MobileConnectionFlowView: View {
             .presentationDragIndicator(.visible)
             .presentationDetents([.large])
             .interactiveDismissDisabled(transferSheetDismissalBlocked)
+        }
+        .sheet(item: $roomDestinationRepair) { request in
+            FolderPickerSheet(
+                onPick: { url in
+                    completeRoomDestinationRepair(url: url, request: request)
+                },
+                onCancel: {
+                    guard roomDestinationRepair == request else { return }
+                    roomDestinationRepair = nil
+                }
+            )
         }
         .fullScreenCover(isPresented: $scannerIsPresented) {
             QRCodeScannerSheet(language: language) { value in
@@ -237,6 +263,14 @@ struct MobileConnectionFlowView: View {
                transferUsesRoomControl {
                 transferRoute = nil
             }
+            if isEndedOrFailed(phase) {
+                roomDestinationRepair = nil
+            }
+        }
+        .onChange(of: workflow.incomingRoomOffer?.id) { offerID in
+            if let request = roomDestinationRepair, request.offerID != offerID {
+                roomDestinationRepair = nil
+            }
         }
         .onChange(of: nearbyCoordinator.state.incomingRendezvousOffer?.id) { _ in
             captureIncomingNearbyOffer()
@@ -305,7 +339,8 @@ struct MobileConnectionFlowView: View {
                     controlPhase: workflow.controlPhase,
                     peerDisplayName: workflow.peerDisplayName,
                     incomingOffer: workflow.incomingRoomOffer,
-                    isAcceptingOffer: acceptingRoomOfferID != nil,
+                    isAcceptingOffer: acceptingRoomOfferID != nil
+                        || roomDestinationRepair != nil,
                     isRoomCreator: workflow.isRoomCreator,
                     lifetimePolicy: workflow.roomLifetimePolicy,
                     idleDeadline: workflow.idleDeadline,
@@ -433,6 +468,9 @@ struct MobileConnectionFlowView: View {
                     ? { offer, completion in
                         workflow.offerTransfer(offer, onDecision: completion)
                     }
+                    : nil,
+                roomControlEndpoint: transferUsesRoomControl
+                    ? workflow.room?.endpoint
                     : nil,
                 onRoomOfferPendingChange: { transferSheetDismissalBlocked = $0 },
                 onInitialPairingInputConsumed: { pendingSendPairingInput = nil },
@@ -687,6 +725,7 @@ struct MobileConnectionFlowView: View {
         transferHasStarted = false
         transferSheetDismissalBlocked = false
         roomOwnsSendDraft = false
+        roomDestinationRepair = nil
     }
 
     private func roomActivityRecords(_ room: OneTimeRoomSession) -> [TransferActivityRecord] {
@@ -1017,6 +1056,12 @@ struct MobileConnectionFlowView: View {
     }
 
     private func acceptIncomingRoomOffer() {
+        continueAcceptingIncomingRoomOffer(using: nil)
+    }
+
+    private func continueAcceptingIncomingRoomOffer(
+        using preparedDestination: PreparedRoomDestination?
+    ) {
         guard let offer = workflow.incomingRoomOffer,
               let room = workflow.room,
               acceptingRoomOfferID == nil else { return }
@@ -1035,16 +1080,18 @@ struct MobileConnectionFlowView: View {
                 input: offer.transferInvite,
                 localRole: .receive
             )
-            applyRuntimeSettings(from: invitation)
+            guard let endpoint = room.endpoint else {
+                throw RuntimeSettingsError("The room transfer route is unavailable.")
+            }
+            guard invitation.relayUrls.count <= 1,
+                  RoomControlEndpoint(transferInvitation: invitation) == endpoint else {
+                throw RuntimeSettingsError("The file offer does not use this room's route.")
+            }
             settings = try RuntimeSettingsProvider.make(
                 concurrentTransfers: concurrentTransfers,
                 language: language,
-                serverURL: invitation.broker.trimmed.isEmpty
-                    ? serverURL
-                    : invitation.broker,
-                relayURL: invitation.relayUrls.first.flatMap {
-                    $0.trimmed.isEmpty ? nil : $0
-                } ?? relayURL,
+                serverURL: endpoint.broker,
+                relayURL: endpoint.relay,
                 candidatesAllow: candidatesAllow,
                 candidatesDeny: candidatesDeny,
                 speedLimit: speedLimit
@@ -1054,12 +1101,19 @@ struct MobileConnectionFlowView: View {
             return
         }
 
-        let destination: (url: URL, access: AnyObject?)
-        do {
-            destination = try prepareAutomaticRoomDestination()
-        } catch {
-            presentRoomReceiveSheet(offer: offer, room: room)
-            return
+        let destination: PreparedRoomDestination
+        if let preparedDestination {
+            destination = preparedDestination
+        } else {
+            do {
+                destination = try prepareAutomaticRoomDestination()
+            } catch {
+                roomDestinationRepair = RoomDestinationRepairRequest(
+                    offerID: offer.id,
+                    roomID: room.id
+                )
+                return
+            }
         }
 
         acceptingRoomOfferID = offer.id
@@ -1103,19 +1157,42 @@ struct MobileConnectionFlowView: View {
         }
     }
 
-    private func presentRoomReceiveSheet(
-        offer: RoomControlTransferOffer,
-        room: OneTimeRoomSession
+    private func completeRoomDestinationRepair(
+        url: URL,
+        request: RoomDestinationRepairRequest
     ) {
-        transferRoomID = room.id
-        transferHasStarted = false
-        transferUsesInboundInvite = true
-        transferUsesRoomControl = true
-        pendingReceivePairingInput = offer.transferInvite
-        transferRoute = .receive
+        guard roomDestinationRepair == request else { return }
+        let access = SecurityScopedResourceAccess(url: url)
+        do {
+            guard access.isActive || FileManager.default.isWritableFile(atPath: url.path) else {
+                throw RuntimeSettingsError(AppText.value(
+                    "Envoix cannot access the selected save folder.",
+                    "Envoix 无法访问所选保存文件夹。",
+                    language: language
+                ))
+            }
+            try validateWritableDirectoryAccess(url)
+            let bookmark = try makeSecurityScopedFolderBookmark(for: url)
+            UserDefaults.standard.set(bookmark, forKey: "envoix.outputDirBookmark")
+            outputDirDisplayName = url.lastPathComponent.isEmpty ? url.path : url.lastPathComponent
+
+            guard let offerID = workflow.incomingRoomOffer?.id,
+                  let roomID = workflow.room?.id,
+                  request.matches(offerID: offerID, roomID: roomID) else {
+                roomDestinationRepair = nil
+                return
+            }
+
+            let destination: PreparedRoomDestination = (url, access)
+            roomDestinationRepair = nil
+            continueAcceptingIncomingRoomOffer(using: destination)
+        } catch {
+            roomDestinationRepair = nil
+            ToastCenter.shared.show(error.localizedDescription)
+        }
     }
 
-    private func prepareAutomaticRoomDestination() throws -> (url: URL, access: AnyObject?) {
+    private func prepareAutomaticRoomDestination() throws -> PreparedRoomDestination {
         let bookmarkKey = "envoix.outputDirBookmark"
         if let bookmark = UserDefaults.standard.data(forKey: bookmarkKey) {
             let url = try resolveSecurityScopedFolderBookmark(bookmark)

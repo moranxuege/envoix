@@ -350,6 +350,34 @@ internal class ConnectionWorkflowViewModel(
             )
             return
         }
+        val roomEndpoint = _uiState.value.control.endpoint
+        if (roomEndpoint == null) {
+            setIncomingOfferAcceptance(
+                busy = false,
+                error =
+                    AppText.value(
+                        "The room route is unavailable. Reconnect before receiving files.",
+                        "房间连接地址不可用，请重新连接后再接收文件。",
+                        currentSettings().language,
+                    ),
+            )
+            return
+        }
+        val belongsToRoom =
+            invitation.broker == roomEndpoint.broker &&
+                invitation.relay.orEmpty() == roomEndpoint.relay
+        if (!belongsToRoom) {
+            setIncomingOfferAcceptance(
+                busy = false,
+                error =
+                    AppText.value(
+                        "This file offer does not belong to the current room.",
+                        "此文件邀请不属于当前房间。",
+                        currentSettings().language,
+                    ),
+            )
+            return
+        }
         val attempt = ++incomingOfferAttempt
         setIncomingOfferAcceptance(busy = true, error = null)
         var receiveCompletionInvoked = false
@@ -560,6 +588,7 @@ internal class ConnectionWorkflowViewModel(
                         .copy(
                             displayName = peerName,
                             controlSession = true,
+                            controlEndpoint = _uiState.value.control.endpoint,
                             hostedCode = null,
                             hostedPayload = null,
                             pendingRoleAdapter =

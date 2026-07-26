@@ -66,6 +66,7 @@ internal class NativeRoomControlGateway(
             displayName = displayName,
             fallbackBroker = broker,
             fallbackRelay = relay,
+            endpoint = invite.endpoint,
             initialEvent = RoomControlEvent.Hosting(invite),
         )
     }
@@ -90,7 +91,8 @@ internal class NativeRoomControlGateway(
             displayName = displayName,
             fallbackBroker = settings.broker,
             fallbackRelay = settings.relay,
-            initialEvent = RoomControlEvent.Joining,
+            endpoint = invite.endpoint,
+            initialEvent = RoomControlEvent.Joining(invite.endpoint),
         )
     }
 
@@ -109,6 +111,7 @@ internal class NativeRoomControlGateway(
                 .put("transfer_invite", draft.transferInvite)
                 .put("root_names", JSONArray(draft.rootNames.take(3)))
                 .put("item_count", draft.itemCount.coerceAtLeast(0))
+                .put("directory_count", draft.directoryCount.coerceAtLeast(0))
                 .put("total_bytes", draft.totalBytes.coerceAtLeast(0L)),
         )
     }
@@ -197,6 +200,7 @@ internal class NativeRoomControlGateway(
         displayName: String,
         fallbackBroker: String,
         fallbackRelay: String,
+        endpoint: RoomControlEndpoint,
         initialEvent: RoomControlEvent,
     ) = synchronized(sessionLock) {
         cancelCurrentLocked()
@@ -219,7 +223,7 @@ internal class NativeRoomControlGateway(
             params.toString(),
             object : RoomControlCallback {
                 override fun onEvent(json: String) {
-                    handleNativeEvent(id, json)
+                    handleNativeEvent(id, endpoint, json)
                 }
             },
         )
@@ -251,6 +255,7 @@ internal class NativeRoomControlGateway(
 
     private fun handleNativeEvent(
         id: Long,
+        endpoint: RoomControlEndpoint,
         json: String,
     ) = synchronized(sessionLock) {
         // A callback from an old generation may already be in flight while a
@@ -277,16 +282,18 @@ internal class NativeRoomControlGateway(
                     RoomControlEvent.Connected(
                         peerName = value.optString("peer_name").takeIf(String::isNotBlank),
                         creator = value.optBoolean("creator"),
+                        endpoint = endpoint,
                         lifetime = lifetime,
                     ),
                 )
             }
             "incoming_offer" -> {
                 val offer = value.optJSONObject("offer")
-                if (offer == null) {
+                val parsedOffer = offer?.let { runCatching { it.roomOffer() }.getOrNull() }
+                if (parsedOffer == null) {
                     emit(id, RoomControlEvent.Failed("Room control returned an invalid file offer"))
                 } else {
-                    emit(id, RoomControlEvent.IncomingOffer(offer.roomOffer()))
+                    emit(id, RoomControlEvent.IncomingOffer(parsedOffer))
                 }
             }
             "offer_accepted" ->
@@ -434,6 +441,15 @@ internal class NativeRoomControlGateway(
         return RoomControlInvite(
             code = value.getString("code"),
             payload = value.getString("payload"),
+            endpoint =
+                RoomControlEndpoint(
+                    broker = value.getString("broker"),
+                    relay =
+                        value
+                            .optString("relay")
+                            .takeUnless { value.isNull("relay") }
+                            .orEmpty(),
+                ),
             expiresAtEpochMs = value.getLong("expires_at_epoch_ms"),
         )
     }
@@ -465,6 +481,7 @@ private fun JSONObject.roomOffer(): RoomTransferOffer {
                 .mapNotNull { index -> names.optString(index).takeIf(String::isNotBlank) }
                 .take(3),
         itemCount = optInt("item_count").coerceAtLeast(0),
+        directoryCount = getInt("directory_count").coerceAtLeast(0),
         totalBytes = optLong("total_bytes").coerceAtLeast(0L),
     )
 }

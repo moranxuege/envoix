@@ -69,6 +69,7 @@ struct SendView: View {
         RoomControlTransferOffer,
         @escaping (Bool) -> Void
     ) -> Void)?
+    private let roomControlEndpoint: RoomControlEndpoint?
     private let onRoomOfferPendingChange: ((Bool) -> Void)?
     private let onInitialPairingInputConsumed: (() -> Void)?
     private let onSwitchToReceive: ((String, SendSelectionSnapshot) -> Void)?
@@ -93,6 +94,7 @@ struct SendView: View {
             RoomControlTransferOffer,
             @escaping (Bool) -> Void
         ) -> Void)? = nil,
+        roomControlEndpoint: RoomControlEndpoint? = nil,
         onRoomOfferPendingChange: ((Bool) -> Void)? = nil,
         onInitialPairingInputConsumed: (() -> Void)? = nil,
         onSwitchToReceive: ((String, SendSelectionSnapshot) -> Void)? = nil
@@ -102,6 +104,7 @@ struct SendView: View {
         self.nearbySelection = nearbySelection
         self.nearbyInviteOffer = nearbyInviteOffer
         self.roomControlOffer = roomControlOffer
+        self.roomControlEndpoint = roomControlEndpoint
         self.onRoomOfferPendingChange = onRoomOfferPendingChange
         self.onInitialPairingInputConsumed = onInitialPairingInputConsumed
         self.onSwitchToReceive = onSwitchToReceive
@@ -1072,7 +1075,7 @@ struct SendView: View {
             return AppText.value("Folder structure will be preserved.", "将完整保留文件夹结构。", language: uiLanguage)
         case 1:
             #if os(iOS)
-            return AppText.value("Ready to send. Tap to replace.", "已准备发送，点击可替换。", language: uiLanguage)
+            return AppText.value("Ready to send.", "已准备发送。", language: uiLanguage)
             #else
             return AppText.value("Ready to send. Click to replace.", "已准备发送，点击可替换。", language: uiLanguage)
             #endif
@@ -1436,20 +1439,23 @@ struct SendView: View {
               !nearbyInviteDelivery.isDelivering else { return }
         guard !selectedItems.isEmpty else { return }
         do {
-            let settings = try RuntimeSettingsProvider.make(
-                concurrentTransfers: concurrentTransfers,
-                language: language,
-                serverURL: serverURL,
-                relayURL: relayURL,
-                candidatesAllow: candidatesAllow,
-                candidatesDeny: candidatesDeny,
-                speedLimit: speedLimit
-            )
             if let roomControlOffer {
+                guard let roomControlEndpoint else {
+                    throw RuntimeSettingsError("The room transfer route is unavailable.")
+                }
+                let settings = try RuntimeSettingsProvider.make(
+                    concurrentTransfers: concurrentTransfers,
+                    language: language,
+                    serverURL: roomControlEndpoint.broker,
+                    relayURL: roomControlEndpoint.relay,
+                    candidatesAllow: candidatesAllow,
+                    candidatesDeny: candidatesDeny,
+                    speedLimit: speedLimit
+                )
                 let pairingInvite = try makePairingInvite(
                     role: .send,
-                    broker: serverURL,
-                    relay: relayURL
+                    broker: roomControlEndpoint.broker,
+                    relay: roomControlEndpoint.relay
                 )
                 let summary = viewModel.preparedInventorySummary
                 let offerID = UUID().uuidString.lowercased()
@@ -1458,6 +1464,7 @@ struct SendView: View {
                     transferInvite: pairingInvite.payload,
                     rootNames: viewModel.preparedInventoryRoots.prefix(3).map(\.name),
                     itemCount: (summary?.fileCount ?? 0) + (summary?.directoryCount ?? 0),
+                    directoryCount: summary?.directoryCount ?? 0,
                     totalBytes: summary?.totalPlaintextBytes ?? 0
                 )
                 pendingRoomOfferID = offerID
@@ -1480,6 +1487,15 @@ struct SendView: View {
                 }
                 return
             }
+            let settings = try RuntimeSettingsProvider.make(
+                concurrentTransfers: concurrentTransfers,
+                language: language,
+                serverURL: serverURL,
+                relayURL: relayURL,
+                candidatesAllow: candidatesAllow,
+                candidatesDeny: candidatesDeny,
+                speedLimit: speedLimit
+            )
             switch mode {
             case .room:
                 let input = roomCode.trimmed

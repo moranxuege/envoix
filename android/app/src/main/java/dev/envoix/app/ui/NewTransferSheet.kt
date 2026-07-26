@@ -123,6 +123,7 @@ internal fun NewTransferSheet(
     initialHostedPayload: String? = null,
     roomMode: Boolean = false,
     connectedRoom: Boolean = false,
+    roomEndpoint: RoomControlEndpoint? = null,
     showQrInitially: Boolean = false,
     onExternalActivityChanged: (Boolean) -> Unit = {},
     onOfferInvite: ((offer: RoomTransferOfferDraft, completion: (error: String?) -> Unit) -> Unit)? = null,
@@ -142,8 +143,8 @@ internal fun NewTransferSheet(
     ) = AppText.value(english, simplifiedChinese, language)
     val switchedToSendNotice = appString(R.string.switched_to_send_notice)
     val switchedToReceiveNotice = appString(R.string.switched_to_receive_notice)
-    val broker = settings.broker
-    val relay = settings.relay
+    val broker = roomEndpoint?.broker ?: settings.broker
+    val relay = roomEndpoint?.relay ?: settings.relay
 
     val fallbackPreparation =
         remember(draftId) {
@@ -1033,6 +1034,8 @@ internal fun NewTransferSheet(
                                         itemCount =
                                             (summary?.optInt("file_count") ?: 0) +
                                                 (summary?.optInt("directory_count") ?: 0),
+                                        directoryCount =
+                                            summary?.optInt("directory_count") ?: 0,
                                         totalBytes = summary?.optLong("total") ?: 0L,
                                     ),
                                 ) { error ->

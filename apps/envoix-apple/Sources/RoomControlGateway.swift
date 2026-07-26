@@ -1,9 +1,27 @@
 import Foundation
 import EnvoixCore
 
+struct RoomControlEndpoint: Equatable {
+    let broker: String
+    let relay: String
+
+    init(broker: String, relay: String) {
+        self.broker = broker.trimmed
+        self.relay = relay.trimmed
+    }
+
+    init(transferInvitation: FfiPairingInvite) {
+        self.init(
+            broker: transferInvitation.broker,
+            relay: transferInvitation.relayUrls.first ?? ""
+        )
+    }
+}
+
 struct RoomControlInvitation: Equatable {
     let code: String
     let payload: String
+    let endpoint: RoomControlEndpoint
     let expiresAt: Date
 }
 
@@ -12,6 +30,7 @@ struct RoomControlTransferOffer: Equatable, Identifiable {
     let transferInvite: String
     let rootNames: [String]
     let itemCount: UInt32
+    let directoryCount: UInt32
     let totalBytes: UInt64
 }
 
@@ -221,6 +240,7 @@ final class LiveRoomControlGateway: RoomControlGateway {
             transferInvite: offer.transferInvite,
             rootNames: Array(offer.rootNames.prefix(3)),
             itemCount: offer.itemCount,
+            directoryCount: offer.directoryCount,
             totalBytes: offer.totalBytes
         )).map(project)
     }
@@ -345,6 +365,10 @@ final class LiveRoomControlGateway: RoomControlGateway {
         RoomControlInvitation(
             code: invitation.code,
             payload: invitation.payload,
+            endpoint: RoomControlEndpoint(
+                broker: invitation.broker,
+                relay: invitation.relay
+            ),
             expiresAt: Date(
                 timeIntervalSince1970: TimeInterval(invitation.expiresAtEpochMs) / 1_000
             )
@@ -360,6 +384,7 @@ final class LiveRoomControlGateway: RoomControlGateway {
                 transferInvite: offer.transferInvite,
                 rootNames: Array(offer.rootNames.prefix(3)),
                 itemCount: offer.itemCount,
+                directoryCount: offer.directoryCount,
                 totalBytes: offer.totalBytes
             ))
         case .offerAccepted:
@@ -452,6 +477,7 @@ private final class FixtureRoomControlGateway: RoomControlGateway {
         RoomControlInvitation(
             code: "R123456-test-room",
             payload: "envoix://room/R123456-test-room",
+            endpoint: RoomControlEndpoint(broker: broker, relay: relay),
             expiresAt: now.addingTimeInterval(5 * 60)
         )
     }
@@ -462,7 +488,7 @@ private final class FixtureRoomControlGateway: RoomControlGateway {
         relay: String,
         now: Date
     ) throws -> RoomControlInvitation {
-        try makeInvitation(broker: "", relay: "", now: now)
+        try makeInvitation(broker: broker, relay: relay, now: now)
     }
 
     func host(

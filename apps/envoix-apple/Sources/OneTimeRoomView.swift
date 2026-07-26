@@ -50,11 +50,16 @@ struct OneTimeRoomView: View {
     private var roomHeader: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top, spacing: 12) {
-                Image(systemName: "person.crop.circle.badge.questionmark")
+                Image(systemName: roomWasAuthenticated
+                    ? "person.crop.circle.badge.checkmark"
+                    : "person.crop.circle.badge.questionmark")
                     .font(.title2.weight(.semibold))
-                    .foregroundStyle(Theme.accentStrong)
+                    .foregroundStyle(roomWasAuthenticated ? Theme.success : Theme.warning)
                     .frame(width: 48, height: 48)
-                    .background(Theme.accentSoft, in: RoundedRectangle(cornerRadius: 14))
+                    .background(
+                        (roomWasAuthenticated ? Theme.success : Theme.warning).opacity(0.12),
+                        in: RoundedRectangle(cornerRadius: 14)
+                    )
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(roomTitle)
@@ -137,32 +142,52 @@ struct OneTimeRoomView: View {
     private func incomingOfferCard(_ offer: RoomControlTransferOffer) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Label(
-                AppText.value("Incoming file offer", "收到文件邀请", language: language),
+                AppText.value("Incoming transfer", "收到传输邀请", language: language),
                 systemImage: "tray.and.arrow.down.fill"
             )
             .font(.headline)
             .foregroundStyle(Theme.text)
 
+            Text(AppText.value("Offer summary", "内容摘要", language: language))
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Theme.muted)
+                .textCase(.uppercase)
+
             Text(offerSummary(offer))
                 .font(.subheadline)
+                .foregroundStyle(Theme.text)
+
+            Text(AppText.value("Destination", "保存位置", language: language))
+                .font(.caption.weight(.semibold))
                 .foregroundStyle(Theme.muted)
+                .textCase(.uppercase)
 
-            Label(
-                AppText.value(
-                    "Save to \(incomingDestinationName)",
-                    "保存到 \(incomingDestinationName)",
+            Label(incomingDestinationName, systemImage: "folder")
+                .font(.subheadline)
+                .foregroundStyle(Theme.text)
+
+            if !offer.rootNames.isEmpty {
+                Text(AppText.value("Contents", "内容", language: language))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Theme.muted)
+                    .textCase(.uppercase)
+
+                ForEach(Array(offer.rootNames.prefix(3).enumerated()), id: \.offset) { _, name in
+                    Label(name, systemImage: "doc.on.doc")
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.text)
+                        .lineLimit(1)
+                }
+            }
+
+            if additionalItemCount(offer) > 0 {
+                Text(AppText.value(
+                    "+\(additionalItemCount(offer)) more",
+                    "另有 \(additionalItemCount(offer)) 项",
                     language: language
-                ),
-                systemImage: "folder"
-            )
-            .font(.subheadline)
-            .foregroundStyle(Theme.muted)
-
-            ForEach(Array(offer.rootNames.prefix(3).enumerated()), id: \.offset) { _, name in
-                Label(name, systemImage: "doc")
-                    .font(.subheadline)
-                    .foregroundStyle(Theme.text)
-                    .lineLimit(1)
+                ))
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Theme.muted)
             }
 
             HStack(spacing: 10) {
@@ -213,12 +238,6 @@ struct OneTimeRoomView: View {
                      ? AppText.value("Send", "发送", language: language)
                      : AppText.value("Receive", "接收", language: language))
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(Theme.muted)
-            }
-
-            if let path = record.connectionPath {
-                Text(ConnectionPathPresentationPolicy.label(for: path, language: language))
-                    .font(.caption)
                     .foregroundStyle(Theme.muted)
             }
 
@@ -488,12 +507,27 @@ struct OneTimeRoomView: View {
     }
 
     private func offerSummary(_ offer: RoomControlTransferOffer) -> String {
-        let itemText = AppText.value(
-            offer.itemCount == 1 ? "1 item" : "\(offer.itemCount) items",
-            "\(offer.itemCount) 个项目",
+        let fileCount = offer.itemCount >= offer.directoryCount
+            ? offer.itemCount - offer.directoryCount
+            : 0
+        let fileText = AppText.value(
+            fileCount == 1 ? "1 file" : "\(fileCount) files",
+            "\(fileCount) 个文件",
             language: language
         )
-        return "\(itemText) · \(byteString(offer.totalBytes))"
+        let folderText = AppText.value(
+            offer.directoryCount == 1 ? "1 folder" : "\(offer.directoryCount) folders",
+            "\(offer.directoryCount) 个文件夹",
+            language: language
+        )
+        return "\(fileText) · \(folderText) · \(byteString(offer.totalBytes))"
+    }
+
+    private func additionalItemCount(_ offer: RoomControlTransferOffer) -> UInt32 {
+        let shownCount = UInt32(offer.rootNames.count)
+        return offer.itemCount > shownCount
+            ? offer.itemCount - shownCount
+            : 0
     }
 
     private var incomingDestinationName: String {

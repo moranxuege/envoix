@@ -6,6 +6,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -20,6 +21,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -140,13 +142,25 @@ internal fun ConnectionHubScreen(
                 )
             }
             item {
-                Text(
-                    appText("NEARBY DEVICES", "附近设备"),
-                    color = colors.muted,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 0.8.sp,
-                )
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        appText("NEARBY DEVICES", "附近设备"),
+                        color = colors.muted,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.8.sp,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(
+                        onClick = discoveryViewModel::restart,
+                        modifier = Modifier.testTag("hub_restart_nearby"),
+                    ) {
+                        Text(appText("Restart", "重新搜索"), color = colors.accent)
+                    }
+                }
             }
             if (discovery.statuses.values.any {
                     it.availability == ProviderAvailability.PermissionRequired
@@ -166,11 +180,39 @@ internal fun ConnectionHubScreen(
             }
             if (discovery.peers.isEmpty()) {
                 item {
+                    val message =
+                        when (
+                            nearbyEmptyState(
+                                active = discovery.active,
+                                availabilities =
+                                    discovery.statuses.values.map { it.availability },
+                            )
+                        ) {
+                            NearbyEmptyState.Paused ->
+                                appText(
+                                    "Nearby discovery is paused.",
+                                    "附近发现已暂停。",
+                                )
+                            NearbyEmptyState.Unavailable ->
+                                appText(
+                                    "Nearby discovery is currently unavailable.",
+                                    "附近发现当前不可用。",
+                                )
+                            NearbyEmptyState.Looking ->
+                                appText(
+                                    "Looking for nearby devices…",
+                                    "正在寻找附近设备…",
+                                )
+                        }
                     Text(
-                        appText("Looking for nearby devices…", "正在寻找附近设备…"),
+                        message,
                         color = colors.muted,
                         fontSize = 14.sp,
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 20.dp),
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 20.dp)
+                                .testTag("hub_nearby_empty"),
                     )
                 }
             } else {
@@ -318,5 +360,35 @@ internal fun ConnectionHubScreen(
             },
             containerColor = colors.surface,
         )
+    }
+}
+
+internal enum class NearbyEmptyState {
+    Paused,
+    Unavailable,
+    Looking,
+}
+
+internal fun nearbyEmptyState(
+    active: Boolean,
+    availabilities: Collection<ProviderAvailability>,
+): NearbyEmptyState {
+    if (!active) return NearbyEmptyState.Paused
+    val unavailableStates =
+        setOf(
+            ProviderAvailability.PermissionRequired,
+            ProviderAvailability.Disabled,
+            ProviderAvailability.Unsupported,
+            ProviderAvailability.TemporarilyUnavailable,
+            ProviderAvailability.Reserved,
+            ProviderAvailability.Error,
+        )
+    return if (
+        availabilities.isNotEmpty() &&
+        availabilities.all { it in unavailableStates }
+    ) {
+        NearbyEmptyState.Unavailable
+    } else {
+        NearbyEmptyState.Looking
     }
 }

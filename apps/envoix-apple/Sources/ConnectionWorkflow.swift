@@ -22,6 +22,7 @@ struct OneTimeRoomSession: Equatable, Identifiable {
     var origin: OneTimeRoomOrigin
     var pairingInput: String?
     var suggestedAction: OneTimeRoomAction
+    let endpoint: RoomControlEndpoint?
     let baselineActivityIDs: Set<String>
     var activityIDs: Set<String>
 
@@ -30,12 +31,14 @@ struct OneTimeRoomSession: Equatable, Identifiable {
         origin: OneTimeRoomOrigin,
         pairingInput: String? = nil,
         suggestedAction: OneTimeRoomAction = .choose,
+        endpoint: RoomControlEndpoint? = nil,
         baselineActivityIDs: Set<String>
     ) {
         self.id = id
         self.origin = origin
         self.pairingInput = pairingInput
         self.suggestedAction = suggestedAction
+        self.endpoint = endpoint
         self.baselineActivityIDs = baselineActivityIDs
         self.activityIDs = []
     }
@@ -477,6 +480,7 @@ final class ConnectionWorkflowState: ObservableObject {
         switch event {
         case .connected(let name, let creator, let lifetime):
             guard controlPhase == .hosting || controlPhase == .joining else { return }
+            let endpoint = roomInvitation?.endpoint
             peerDisplayName = NearbyDiscoveryPeerRegistry.sanitizeDisplayName(name)
                 ?? "Nearby device"
             isRoomCreator = creator
@@ -484,6 +488,7 @@ final class ConnectionWorkflowState: ObservableObject {
             roomInvitation = nil
             room = OneTimeRoomSession(
                 origin: .roomControl,
+                endpoint: endpoint,
                 baselineActivityIDs: baselineActivityIDs
             )
             applyLifetime(lifetime)
