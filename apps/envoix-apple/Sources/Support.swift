@@ -26,8 +26,14 @@ let deprecatedLogServers: Set<String> = [
     "http://envoix.chkxwlyh.us:8460",
 ]
 
-let expectedCoreFFIAPIVersion: UInt32 = 5
+let expectedCoreFFIAPIVersion: UInt32 = 8
+let expectedRoomControlCoreCapability = "foreground_room_control_v3"
 let appDebugBuildLabel = "Debug build 2026.07.08.19"
+
+func coreMatchesExpectedRoomControlContract(_ info: FfiCoreInfo) -> Bool {
+    info.ffiApiVersion == expectedCoreFFIAPIVersion
+        && info.capabilities.contains(expectedRoomControlCoreCapability)
+}
 
 /// Generates a short, memorable, easy-to-type pairing token of the form
 /// `word-word-NN` (always ≥ `minTokenLength` since each word is ≥4 letters).

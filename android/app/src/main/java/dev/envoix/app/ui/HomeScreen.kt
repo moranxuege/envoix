@@ -70,6 +70,7 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
@@ -90,6 +91,7 @@ import dev.envoix.app.Status
 import dev.envoix.app.Transfer
 import dev.envoix.app.TransferPresentationPolicy
 import dev.envoix.app.TransferProgressPresentation
+import dev.envoix.app.connectionPathLabel
 import dev.envoix.app.humanBytes
 import dev.envoix.app.isTerminal
 import dev.envoix.app.smoothedBps
@@ -396,7 +398,7 @@ private fun EmptyState() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun TransferCard(
+internal fun TransferCard(
     t: Transfer,
     expanded: Boolean,
     onToggleDetail: (Long) -> Unit,
@@ -409,6 +411,11 @@ private fun TransferCard(
 ) {
     val colors = Envoix.colors
     val language = LocalAppLanguage.current
+    val saveLocation =
+        resolvedSavedDestinationLabel(
+            recordedDestinationLabel = t.savedDestinationLabel,
+            fallbackDestinationLabel = SettingsStore.saveLabel(LocalContext.current),
+        )
     val failed = t.status == Status.Failed
     val canceled = t.status == Status.Canceled
     val progressPresentation = TransferPresentationPolicy.progress(t.status)
@@ -475,7 +482,7 @@ private fun TransferCard(
                             PathBadge(t)
                         }
                         Text(
-                            subtitle(t, language),
+                            subtitle(t, language, saveLocation),
                             color = colors.muted,
                             fontSize = 13.sp,
                             fontFamily = FontFamily.Monospace,
@@ -507,14 +514,7 @@ private fun TransferCard(
                         }
                         if (t.status == Status.AwaitingDecision && t.rootCount > 0) {
                             Spacer(Modifier.height(6.dp))
-                            Text(
-                                appText(
-                                    "Tap to review the authenticated incoming list.",
-                                    "点击查看已认证的待接收清单。",
-                                ),
-                                color = colors.warning,
-                                fontSize = 12.sp,
-                            )
+                            IncomingInventoryPreview(t)
                         }
                         if (failed && t.error != null) {
                             Spacer(Modifier.height(6.dp))
@@ -526,6 +526,48 @@ private fun TransferCard(
                 }
             }
             if (expanded) DetailDrawer(t)
+        }
+    }
+}
+
+@Composable
+private fun IncomingInventoryPreview(t: Transfer) {
+    val colors = Envoix.colors
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(colors.accentSoft)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        Text(
+            appText(
+                "${t.fileCount} files · ${t.directoryCount} folders · ${humanBytes(t.total)}",
+                "${t.fileCount} 个文件 · ${t.directoryCount} 个文件夹 · ${humanBytes(t.total)}",
+            ),
+            color = colors.accentStrong,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+        )
+        t.inventoryPreview.take(3).forEach { entry ->
+            Text(
+                if (entry.directory) {
+                    appText("Folder · ${entry.name}", "文件夹 · ${entry.name}")
+                } else {
+                    appText(
+                        "File · ${entry.name} · ${humanBytes(entry.size)}",
+                        "文件 · ${entry.name} · ${humanBytes(entry.size)}",
+                    )
+                },
+                color = colors.muted,
+                fontSize = 11.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        if (t.inventoryPreview.size > 3 || t.inventoryHasMore) {
+            Text(appText("Tap for the complete preview", "点击查看完整预览"), color = colors.muted, fontSize = 11.sp)
         }
     }
 }
@@ -707,6 +749,7 @@ private fun WaitingBody(
 @Composable
 private fun DetailDrawer(t: Transfer) {
     val colors = Envoix.colors
+    val settings by SettingsStore.settings.collectAsState()
     Column(Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, bottom = 14.dp)) {
         HorizontalDivider(color = colors.line)
         if (t.speedHistory.size >= 2) {
@@ -737,8 +780,10 @@ private fun DetailDrawer(t: Transfer) {
             SpeedChart(t.speedHistory, t.avgBps)
         }
         Spacer(Modifier.height(4.dp))
-        DetailRow(appText("Room", "配对房间"), t.room)
-        if (t.pathAddr != null) DetailRow(appText("Path", "连接路径"), t.pathAddr)
+        DetailRow(appText("Transfer", "传输"), "#${t.id}")
+        connectionPathLabel(t.pathAddr, LocalAppLanguage.current)?.let { path ->
+            DetailRow(appText("Path", "连接路径"), path)
+        }
         DetailRow(appText("Transferred", "已传输"), "${humanBytes(t.bytes)} / ${humanBytes(t.total)}")
         if (t.rootCount > 0) {
             DetailRow(
@@ -766,10 +811,9 @@ private fun DetailDrawer(t: Transfer) {
                 )
             }
         }
-        if (t.log.isNotEmpty()) {
+        if (t.log.isNotEmpty() && settings.devMode) {
             val clip = LocalClipboardManager.current
             var copied by remember(t.id) { mutableStateOf(false) }
-            val settings by SettingsStore.settings.collectAsState()
             val scope = rememberCoroutineScope()
             var upload by remember(t.id) { mutableStateOf("") }
             val uploadLabel = appText("Upload", "上传")
@@ -1019,13 +1063,37 @@ private fun itemTitle(
 private fun subtitle(
     t: Transfer,
     language: String,
+    saveLocation: String,
 ): String =
     when {
         t.status == Status.Delivered && t.savedUri != null ->
-            AppText.value("Saved to Downloads · tap to open", "已保存到 Downloads · 点击打开", language)
-        t.pathAddr != null -> t.pathAddr
-        else -> AppText.value("room ${t.room}", "配对房间 ${t.room}", language)
+            savedDestinationSubtitle(saveLocation, language)
+        t.pathAddr != null ->
+            connectionPathLabel(t.pathAddr, language)
+                ?: AppText.value("One-time transfer", "一次性传输", language)
+        else -> AppText.value("One-time transfer", "一次性传输", language)
     }
+
+internal fun savedDestinationSubtitle(
+    destinationLabel: String,
+    language: String,
+): String {
+    val destination = destinationLabel.trim().ifEmpty { "Downloads" }
+    return AppText.value(
+        "Saved to $destination · tap to open",
+        "已保存到 $destination · 点击打开",
+        language,
+    )
+}
+
+internal fun resolvedSavedDestinationLabel(
+    recordedDestinationLabel: String?,
+    fallbackDestinationLabel: String,
+): String =
+    recordedDestinationLabel
+        ?.trim()
+        ?.takeIf(String::isNotEmpty)
+        ?: fallbackDestinationLabel.trim().ifEmpty { "Downloads" }
 
 private fun fraction(t: Transfer): Float {
     if (TransferPresentationPolicy.progress(t.status) == TransferProgressPresentation.Complete) return 1f

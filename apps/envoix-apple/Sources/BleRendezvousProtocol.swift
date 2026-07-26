@@ -41,7 +41,7 @@ enum BleRendezvousProtocol {
     private static let envelopeTypeInvite: UInt8 = 1
     private static let peerKeyBytes = 16
     private static let envelopeFixedBytes = 6 + peerKeyBytes
-    private static let invitePrefix = "envoix://pair/"
+    private static let invitePrefixes = ["envoix://pair/", "envoix://room/"]
 
     static func encodeInvite(
         identity: LocalNearbyDiscoveryIdentity,
@@ -53,7 +53,7 @@ enum BleRendezvousProtocol {
         guard let peerKey = NearbyDiscoveryPeerRegistry.normalizePeerKey(identity.peerKey) else { return nil }
         let normalizedInvite = invite.trimmingCharacters(in: .whitespacesAndNewlines)
         let inviteBytes = Array(normalizedInvite.utf8)
-        guard normalizedInvite.lowercased().hasPrefix(invitePrefix),
+        guard isSupportedInvite(normalizedInvite),
               !inviteBytes.isEmpty,
               inviteBytes.count <= maximumInviteBytes else {
             return nil
@@ -166,7 +166,7 @@ enum BleRendezvousProtocol {
         guard let name = String(bytes: bytes[nameStart..<inviteStart], encoding: .utf8),
               let invite = String(bytes: bytes[inviteStart...], encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines),
-              invite.lowercased().hasPrefix(invitePrefix) else {
+              isSupportedInvite(invite) else {
             return nil
         }
         return BleRendezvousInvite(
@@ -175,6 +175,11 @@ enum BleRendezvousProtocol {
             senderDisplayName: NearbyDiscoveryPeerRegistry.sanitizeDisplayName(name),
             invite: invite
         )
+    }
+
+    private static func isSupportedInvite(_ value: String) -> Bool {
+        let normalized = value.lowercased()
+        return invitePrefixes.contains { normalized.hasPrefix($0) }
     }
 
     private static func boundedUTF8(_ value: String, maximumBytes: Int) -> [UInt8] {

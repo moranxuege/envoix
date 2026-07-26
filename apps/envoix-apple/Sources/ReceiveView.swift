@@ -31,7 +31,14 @@ struct ReceiveView: View {
     @State private var pairingPanel: PairingPanelMode = .show
     @State private var revealAddress = false
     @State private var didApplyInitialPairingInput = false
+    @State private var didAutoStartRoomControl = false
+    @State private var isAcceptingRoomOffer = false
+    @StateObject private var nearbyInviteDelivery = NearbyInviteDeliveryController()
     private let initialPairingInput: String?
+    private let nearbySelection: NearbyPairingSelection?
+    private let nearbyInviteOffer: NearbyInviteOffer?
+    private let roomControlTransfer: Bool
+    private let roomControlAccept: (() async -> Bool)?
     private let onInitialPairingInputConsumed: (() -> Void)?
     private let onSwitchToSend: ((String) -> Void)?
     #if os(iOS)
@@ -44,11 +51,19 @@ struct ReceiveView: View {
         viewModel: TransferViewModel,
         initialMode: PairingMode = .room,
         initialPairingInput: String? = nil,
+        nearbySelection: NearbyPairingSelection? = nil,
+        nearbyInviteOffer: NearbyInviteOffer? = nil,
+        roomControlTransfer: Bool = false,
+        roomControlAccept: (() async -> Bool)? = nil,
         onInitialPairingInputConsumed: (() -> Void)? = nil,
         onSwitchToSend: ((String) -> Void)? = nil
     ) {
         self.viewModel = viewModel
         self.initialPairingInput = initialPairingInput
+        self.nearbySelection = nearbySelection
+        self.nearbyInviteOffer = nearbyInviteOffer
+        self.roomControlTransfer = roomControlTransfer
+        self.roomControlAccept = roomControlAccept
         self.onInitialPairingInputConsumed = onInitialPairingInputConsumed
         self.onSwitchToSend = onSwitchToSend
         _mode = State(initialValue: initialMode)
@@ -115,6 +130,7 @@ struct ReceiveView: View {
         }
         .onAppear(perform: applyInitialPairingInputIfNeeded)
         .onAppear(perform: refreshRememberedPeers)
+        .onDisappear(perform: cancelNearbyInviteDelivery)
         #else
         VStack(spacing: 0) {
             scrollContent
@@ -130,8 +146,20 @@ struct ReceiveView: View {
     private var scrollContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                #if os(iOS)
+                if let nearbySelection {
+                    NearbyTransferContextView(
+                        selection: nearbySelection,
+                        deliversInvitationOnStart: nearbyInviteOffer != nil,
+                        isDelivering: nearbyInviteDelivery.isDelivering,
+                        error: nearbyInviteDelivery.error
+                    )
+                }
+                #endif
                 outputSection
-                connectionSection
+                if !roomControlTransfer {
+                    connectionSection
+                }
                 #if os(macOS)
                 if !viewModel.peerAddress.isEmpty {
                     addressReveal
@@ -257,6 +285,8 @@ struct ReceiveView: View {
         .disabled(
             (viewModel.isBusy && !canStartAnotherReceive)
                 || viewModel.isFinalizing
+                || nearbyInviteDelivery.isDelivering
+                || isAcceptingRoomOffer
                 || !canStart
                 || concurrencyBlocked
         )
@@ -428,6 +458,12 @@ struct ReceiveView: View {
     #endif
 
     private var primaryLabel: String {
+        if isAcceptingRoomOffer {
+            return AppText.value("Accepting offer…", "正在接受邀请…", language: uiLanguage)
+        }
+        if nearbyInviteDelivery.isDelivering {
+            return AppText.value("Delivering Invitation…", "正在发送邀请码…", language: uiLanguage)
+        }
         if canStartAnotherReceive {
             return AppText.value("Start Another Receive", "再开启一个接收", language: uiLanguage)
         }
@@ -698,6 +734,9 @@ struct ReceiveView: View {
     }
 
     private var canStart: Bool {
+        if roomControlTransfer {
+            return mode == .invite && !joiningInvite.isEmpty
+        }
         if rememberAfterPairing,
            (mode == .room || mode == .invite),
            rememberLabel.trimmed.isEmpty {
@@ -733,12 +772,12 @@ struct ReceiveView: View {
     }
 
     private func refreshPairingInviteIfNeeded() {
-        guard mode == .room, pairingInvite == nil else { return }
+        guard !roomControlTransfer, mode == .room, pairingInvite == nil else { return }
         refreshPairingInvite()
     }
 
     private func refreshPairingInviteForSettingsChange() {
-        guard mode == .room, !viewModel.isBusy else { return }
+        guard !roomControlTransfer, mode == .room, !viewModel.isBusy else { return }
         refreshPairingInvite()
     }
 
@@ -754,23 +793,19 @@ struct ReceiveView: View {
         }
     }
 
-    private func activeRoomCode() throws -> String {
-        let joinedCode = joinRoomCode.trimmed
-        if !joinedCode.isEmpty {
-            return try roomCodeFromJoinInput(joinedCode)
-        }
+    private func activeReceivePairingInvite() throws -> FfiPairingInvite {
         if let invite = pairingInvite {
             let code = invite.roomCode.trimmed
             if !code.isEmpty {
                 updateRoomQRCode(for: invite.payload)
-                return code
+                return invite
             }
         }
         let invite = try makePairingInvite(role: .receive, broker: serverURL, relay: relayURL)
         pairingInvite = invite
         roomCode = invite.roomCode
         updateRoomQRCode(for: invite.payload)
-        return invite.roomCode
+        return invite
     }
 
     private func roomCodeFromJoinInput(_ input: String) throws -> String {
@@ -837,6 +872,21 @@ struct ReceiveView: View {
         didApplyInitialPairingInput = true
         _ = applyPairingInput(initialPairingInput, source: .scan)
         onInitialPairingInputConsumed?()
+        if roomControlTransfer {
+            DispatchQueue.main.async {
+                autoStartRoomControlReceiveIfReady()
+            }
+        }
+    }
+
+    private func autoStartRoomControlReceiveIfReady() {
+        guard roomControlTransfer,
+              !didAutoStartRoomControl,
+              mode == .invite,
+              !joiningInvite.isEmpty,
+              !viewModel.isBusy else { return }
+        didAutoStartRoomControl = true
+        primaryAction()
     }
 
     private func applyRuntimeSettings(from parsed: FfiPairingInvite) {
@@ -855,7 +905,9 @@ struct ReceiveView: View {
     }
 
     private func primaryAction() {
-        guard (!viewModel.isBusy || canStartAnotherReceive), !viewModel.isFinalizing else { return }
+        guard (!viewModel.isBusy || canStartAnotherReceive),
+              !viewModel.isFinalizing,
+              !nearbyInviteDelivery.isDelivering else { return }
         #if os(iOS)
         guard outputDir != nil else {
             shouldStartAfterFolderPick = true
@@ -865,7 +917,75 @@ struct ReceiveView: View {
         #elseif os(macOS)
         guard ensureMacOutputDirectoryAuthorization() else { return }
         #endif
-        startReceive()
+        if roomControlAccept != nil {
+            startRoomControlReceive()
+        } else {
+            startReceive()
+        }
+    }
+
+    private func startRoomControlReceive() {
+        guard let roomControlAccept else { return }
+        do {
+            let prepared = try prepareOutputDir()
+            let settings = try RuntimeSettingsProvider.make(
+                concurrentTransfers: concurrentTransfers,
+                language: language,
+                serverURL: serverURL,
+                relayURL: relayURL,
+                candidatesAllow: candidatesAllow,
+                candidatesDeny: candidatesDeny,
+                speedLimit: speedLimit
+            )
+            isAcceptingRoomOffer = true
+            switch mode {
+            case .invite:
+                _ = try parsePairingInviteForRole(
+                    input: joiningInvite,
+                    localRole: .receive
+                )
+            case .room, .remembered, .token:
+                throw RuntimeSettingsError(AppText.value(
+                    "This room offer needs a new InviteV2 invitation.",
+                    "此房间邀请需要新的 InviteV2 邀请。",
+                    language: uiLanguage
+                ))
+            }
+            Task { @MainActor in
+                let result = await RoomOfferAcceptanceCoordinator.startReceiverThenAccept(
+                    startReceiver: {
+                        viewModel.startReceivingWithInvite(
+                            outputDir: prepared.url.path,
+                            invite: joiningInvite,
+                            settings: settings,
+                            destinationAccess: prepared.access
+                        )
+                        guard let activity = viewModel.transferActivity,
+                              activity.state != .failed else {
+                            return nil
+                        }
+                        return activity.activityId
+                    },
+                    acceptOffer: roomControlAccept,
+                    cancelReceiver: { activityID in
+                        if viewModel.transferActivity?.activityId == activityID {
+                            _ = viewModel.cancel()
+                        }
+                    }
+                )
+                isAcceptingRoomOffer = false
+                if case .offerUnavailable = result {
+                    ToastCenter.shared.show(AppText.value(
+                        "The file offer is no longer available.",
+                        "此文件邀请已不可用。",
+                        language: uiLanguage
+                    ))
+                }
+            }
+        } catch {
+            isAcceptingRoomOffer = false
+            viewModel.handleFailed(error.localizedDescription)
+        }
     }
 
     /// Starts (or restarts, for "Regenerate") the receive session.
@@ -907,7 +1027,6 @@ struct ReceiveView: View {
 
     private func startReceiveWithRoom() {
         do {
-            let code = try activeRoomCode()
             let prepared = try prepareOutputDir()
             let settings = try RuntimeSettingsProvider.make(
                 concurrentTransfers: concurrentTransfers,
@@ -918,16 +1037,36 @@ struct ReceiveView: View {
                 candidatesDeny: candidatesDeny,
                 speedLimit: speedLimit
             )
-            viewModel.startReceivingWithRoom(
-                outputDir: prepared.url.path,
-                code: code,
-                settings: settings,
-                destinationAccess: prepared.access,
-                rememberLabel: rememberAfterPairing ? rememberLabel : nil
-            )
+            let start: (String) -> Void = { code in
+                viewModel.startReceivingWithRoom(
+                    outputDir: prepared.url.path,
+                    code: code,
+                    settings: settings,
+                    destinationAccess: prepared.access,
+                    rememberLabel: rememberAfterPairing ? rememberLabel : nil
+                )
+            }
+
+            let joinedCode = joinRoomCode.trimmed
+            if !joinedCode.isEmpty {
+                start(try roomCodeFromJoinInput(joinedCode))
+                return
+            }
+
+            let pairingInvite = try activeReceivePairingInvite()
+            nearbyInviteDelivery.deliver(
+                invite: pairingInvite.payload,
+                using: nearbyInviteOffer
+            ) {
+                start(pairingInvite.roomCode)
+            }
         } catch {
             viewModel.handleFailed(error.localizedDescription)
         }
+    }
+
+    private func cancelNearbyInviteDelivery() {
+        nearbyInviteDelivery.cancel()
     }
 
     private func startReceiveWithInvite() {
@@ -1121,7 +1260,7 @@ struct ReceiveView: View {
             if shouldStartAfterFolderPick {
                 shouldStartAfterFolderPick = false
                 DispatchQueue.main.async {
-                    startReceive()
+                    primaryAction()
                 }
             }
         } catch {

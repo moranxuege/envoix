@@ -11,25 +11,26 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.setValue
 import androidx.core.content.IntentCompat
+import dev.envoix.app.discovery.DiscoveryMode
+import dev.envoix.app.discovery.DiscoveryViewModel
 import dev.envoix.app.ui.AppText
-import dev.envoix.app.ui.DiscoveryScreen
+import dev.envoix.app.ui.ConnectionHubScreen
+import dev.envoix.app.ui.ConnectionWorkflowViewModel
+import dev.envoix.app.ui.DeviceRoomScreen
 import dev.envoix.app.ui.EnvoixTheme
-import dev.envoix.app.ui.HomeScreen
 import dev.envoix.app.ui.LocalAppLanguage
-import dev.envoix.app.ui.LogScreen
 import dev.envoix.app.ui.SettingsScreen
-import kotlinx.coroutines.flow.MutableStateFlow
-
-private enum class Screen { Home, Discovery, Logs, Settings }
+import dev.envoix.app.ui.TransferActivityScreen
+import dev.envoix.app.ui.WorkflowScreen
 
 class MainActivity : ComponentActivity() {
     private val vm: TransferViewModel by viewModels()
-    private val sharedUris = MutableStateFlow<List<Uri>>(emptyList())
-    private var inboundInvite by androidx.compose.runtime.mutableStateOf<String?>(null)
+    private val discoveryVm: DiscoveryViewModel by viewModels()
+    private val workflowVm: ConnectionWorkflowViewModel by viewModels()
 
     private val requestNotif =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
@@ -46,51 +47,131 @@ class MainActivity : ComponentActivity() {
             val settings by SettingsStore.settings.collectAsState()
             CompositionLocalProvider(LocalAppLanguage provides settings.language) {
                 EnvoixTheme {
-                    var screen by androidx.compose.runtime.remember {
-                        androidx.compose.runtime.mutableStateOf(Screen.Home)
+                    val transfers by vm.transfers.collectAsState()
+                    val workflow by workflowVm.uiState.collectAsState()
+                    val selectedPeerKey = workflow.room?.nearbySelection?.discoveryPeerKey
+                    val controlRoom = workflow.room?.controlSession == true
+                    val activeRoomTransferCount =
+                        workflow.room
+                            ?.transferCodes
+                            ?.let { roomCodes ->
+                                transfers.count { transfer ->
+                                    transfer.room in roomCodes &&
+                                        !transfer.status.isTerminal
+                                }
+                            } ?: 0
+
+                    LaunchedEffect(workflow.screen, selectedPeerKey, controlRoom) {
+                        when {
+                            workflow.screen == WorkflowScreen.Hub ->
+                                discoveryVm.setMode(DiscoveryMode.BrowseNearby)
+                            workflow.screen == WorkflowScreen.Room &&
+                                selectedPeerKey != null &&
+                                !controlRoom ->
+                                discoveryVm.setMode(DiscoveryMode.SelectedPeer, selectedPeerKey)
+                            else -> discoveryVm.setMode(DiscoveryMode.Off)
+                        }
                     }
-                    if (screen != Screen.Home) BackHandler { screen = Screen.Home }
-                    when (screen) {
-                        Screen.Discovery ->
-                            DiscoveryScreen(
-                                onBack = { screen = Screen.Home },
-                                onReceive = { c, b, r, qr, copyApproved, rememberLabel, rememberedRelationshipId ->
-                                    screen = Screen.Home
-                                    vm.startReceive(
-                                        c,
-                                        b,
-                                        r,
-                                        qr,
-                                        copyApproved,
-                                        rememberLabel,
-                                        rememberedRelationshipId,
-                                    )
-                                },
-                                onSend = { c, b, r, jobId, qr, rememberLabel, rememberedRelationshipId ->
-                                    screen = Screen.Home
-                                    vm.startSend(
-                                        c,
-                                        jobId,
-                                        b,
-                                        r,
-                                        qr,
-                                        rememberLabel,
-                                        rememberedRelationshipId,
-                                    )
-                                },
+                    // Keep room idleness correct even while Activity, Settings,
+                    // or the Hub is covering the room screen.
+                    LaunchedEffect(activeRoomTransferCount, workflow.room?.id) {
+                        workflowVm.updateRoomTransferActivity(activeRoomTransferCount)
+                    }
+
+                    if (workflow.screen != WorkflowScreen.Hub) {
+                        BackHandler { workflowVm.navigateBack() }
+                    }
+                    when (workflow.screen) {
+                        WorkflowScreen.Hub ->
+                            ConnectionHubScreen(
+                                control = workflow.control,
+                                onRevealInvite = workflowVm::revealRoomInvite,
+                                onHideInvite = workflowVm::hideRoomInvite,
+                                onRefreshInvite = workflowVm::refreshRoomInvite,
+                                onEndWaitingRoom = workflowVm::endWaitingRoom,
+                                onJoinInvite = { workflowVm.joinRoom(it) },
+                                onNearbyRoom = workflowVm::startNearbyRoom,
+                                onReturnToRoom = workflowVm::returnToCurrentRoom,
+                                onActivity = workflowVm::openActivity,
+                                onSettings = workflowVm::openSettings,
+                                onAcceptIncomingOffer = workflowVm::acceptIncomingOffer,
+                                onCancelReplacement = workflowVm::cancelReplacement,
+                                onConfirmReplacement = workflowVm::confirmReplacement,
+                                onExternalActivityChanged = workflowVm::setExternalActivityActive,
+                                pendingShareCount = workflow.pendingShares.size,
+                                discoveryViewModel = discoveryVm,
                             )
-                        Screen.Logs -> LogScreen(onBack = { screen = Screen.Home })
-                        Screen.Settings -> SettingsScreen(onBack = { screen = Screen.Home })
-                        Screen.Home -> {
-                            val transfers by vm.transfers.collectAsState()
-                            val incomingShares by sharedUris.collectAsState()
-                            HomeScreen(
-                                transfers = transfers,
-                                initialSharedUris = incomingShares,
-                                onSharedUrisConsumed = { sharedUris.value = emptyList() },
-                                onReceive = { c, b, r, qr, copyApproved, rememberLabel, rememberedRelationshipId ->
-                                    inboundInvite = null
-                                    vm.startReceive(
+                        WorkflowScreen.Room -> {
+                            val draft = workflow.room
+                            if (draft == null) {
+                                ConnectionHubScreen(
+                                    control = workflow.control,
+                                    onRevealInvite = workflowVm::revealRoomInvite,
+                                    onHideInvite = workflowVm::hideRoomInvite,
+                                    onRefreshInvite = workflowVm::refreshRoomInvite,
+                                    onEndWaitingRoom = workflowVm::endWaitingRoom,
+                                    onJoinInvite = { workflowVm.joinRoom(it) },
+                                    onNearbyRoom = workflowVm::startNearbyRoom,
+                                    onReturnToRoom = workflowVm::returnToCurrentRoom,
+                                    onActivity = workflowVm::openActivity,
+                                    onSettings = workflowVm::openSettings,
+                                    onAcceptIncomingOffer = workflowVm::acceptIncomingOffer,
+                                    onCancelReplacement = workflowVm::cancelReplacement,
+                                    onConfirmReplacement = workflowVm::confirmReplacement,
+                                    onExternalActivityChanged = workflowVm::setExternalActivityActive,
+                                    pendingShareCount = workflow.pendingShares.size,
+                                    discoveryViewModel = discoveryVm,
+                                )
+                            } else {
+                                DeviceRoomScreen(
+                                    draft = draft,
+                                    control = workflow.control,
+                                    transferDraft = workflow.transferDraft,
+                                    transfers = transfers,
+                                    onBack = workflowVm::returnToHub,
+                                    onActivity = workflowVm::openActivity,
+                                    onSettings = workflowVm::openSettings,
+                                    initialSources = workflow.pendingShares,
+                                    onBeginTransfer = workflowVm::beginTransfer,
+                                    onShowRoomQr = workflowVm::showRoomQr,
+                                    onDismissTransfer = workflowVm::dismissTransferDraft,
+                                    onTransferStarted = workflowVm::completeTransferDraft,
+                                    onOfferRoomTransfer = workflowVm::offerRoomTransfer,
+                                    incomingOfferBusy = workflow.incomingOfferBusy,
+                                    incomingOfferError = workflow.incomingOfferError,
+                                    onAcceptIncomingRoomOffer = {
+                                        workflowVm.acceptIncomingRoomOffer(
+                                            parseInvitation = {
+                                                InviteCodec.parseForRole(it, "receive")
+                                            },
+                                            onPrepareReceive = {
+                                                c,
+                                                b,
+                                                r,
+                                                qr,
+                                                copyApproved,
+                                                completion,
+                                                ->
+                                                vm.startReceiveWhenReady(
+                                                    c,
+                                                    b,
+                                                    r,
+                                                    qr,
+                                                    copyApproved,
+                                                    completion,
+                                                )
+                                            },
+                                            onCancelReceive = vm::cancel,
+                                        )
+                                    },
+                                    onRejectIncomingRoomOffer = workflowVm::rejectIncomingRoomOffer,
+                                    onKeepOpen = workflowVm::setKeepOpen,
+                                    onEndRoom = { workflowVm.endRoom() },
+                                    onDismissEndedRoom = workflowVm::dismissEndedRoom,
+                                    onRoomActiveTransfers = workflowVm::updateRoomTransferActivity,
+                                    onExternalActivityChanged = workflowVm::setExternalActivityActive,
+                                    onAcceptIncomingOffer = workflowVm::acceptIncomingOffer,
+                                    onReceive = {
                                         c,
                                         b,
                                         r,
@@ -98,32 +179,54 @@ class MainActivity : ComponentActivity() {
                                         copyApproved,
                                         rememberLabel,
                                         rememberedRelationshipId,
-                                    )
-                                },
-                                onSend = { c, b, r, jobId, qr, rememberLabel, rememberedRelationshipId ->
-                                    inboundInvite = null
-                                    vm.startSend(
+                                        ->
+                                        vm.startReceive(
+                                            c,
+                                            b,
+                                            r,
+                                            qr,
+                                            copyApproved,
+                                            rememberLabel,
+                                            rememberedRelationshipId,
+                                        )
+                                    },
+                                    onOpenReceived = ::openReceived,
+                                    onShareReceived = ::shareReceived,
+                                    onSend = {
                                         c,
-                                        jobId,
                                         b,
                                         r,
+                                        jobId,
                                         qr,
                                         rememberLabel,
                                         rememberedRelationshipId,
-                                    )
-                                },
+                                        ->
+                                        vm.startSend(
+                                            c,
+                                            jobId,
+                                            b,
+                                            r,
+                                            qr,
+                                            rememberLabel,
+                                            rememberedRelationshipId,
+                                        )
+                                    },
+                                    discoveryViewModel = discoveryVm,
+                                )
+                            }
+                        }
+                        WorkflowScreen.Activity ->
+                            TransferActivityScreen(
+                                transfers = transfers,
+                                onBack = workflowVm::navigateBack,
                                 onPauseResume = { vm.pauseResume(it) },
                                 onApproveReceive = { vm.approveReceive(it) },
                                 onCancel = { vm.cancel(it) },
                                 onRemove = { vm.remove(it) },
-                                onOpenDiscovery = { screen = Screen.Discovery },
-                                onOpenLogs = { screen = Screen.Logs },
-                                onOpenSettings = { screen = Screen.Settings },
                                 onOpen = { openReceived(it) },
                                 onShare = { shareReceived(it) },
-                                initialPairingInput = inboundInvite,
                             )
-                        }
+                        WorkflowScreen.Settings -> SettingsScreen(onBack = workflowVm::navigateBack)
                     }
                 }
             }
@@ -142,8 +245,24 @@ class MainActivity : ComponentActivity() {
         if (value.startsWith("envoix://invite/v2/") &&
             InviteCodec.parseForRouting(value) != null
         ) {
-            inboundInvite = value
+            workflowVm.joinRoom(value)
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        workflowVm.setForeground(true)
+        discoveryVm.setForeground(true)
+    }
+
+    override fun onStop() {
+        // Rotation/recreation keeps the same retained ViewModels and must not
+        // be interpreted as the user backgrounding the room.
+        if (!isChangingConfigurations) {
+            workflowVm.setForeground(false)
+            discoveryVm.setForeground(false)
+        }
+        super.onStop()
     }
 
     private fun captureSharedUris(intent: Intent?) {
@@ -156,7 +275,7 @@ class MainActivity : ComponentActivity() {
                     IntentCompat.getParcelableArrayListExtra(intent, Intent.EXTRA_STREAM, Uri::class.java).orEmpty()
                 else -> emptyList()
             }
-        if (uris.isNotEmpty()) sharedUris.value = uris.distinct()
+        workflowVm.captureSharedUris(uris)
     }
 
     /** Open a received file (a Downloads content Uri) in whatever app handles it. */

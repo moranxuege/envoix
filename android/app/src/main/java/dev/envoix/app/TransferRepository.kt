@@ -48,6 +48,7 @@ object TransferRepository {
         qrPayload: String? = null,
         savedUri: String? = null,
         savedName: String? = null,
+        savedDestinationLabel: String? = null,
     ): Boolean {
         if (_transfers.value.any { it.id == id }) return false
         nextId = maxOf(nextId, id + 1)
@@ -59,6 +60,7 @@ object TransferRepository {
                 qrPayload = qrPayload,
                 savedUri = savedUri,
                 savedName = savedName,
+                savedDestinationLabel = savedDestinationLabel,
             )
         return true
     }

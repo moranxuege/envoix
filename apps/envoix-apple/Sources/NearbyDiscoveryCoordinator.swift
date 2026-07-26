@@ -19,7 +19,6 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
     @Published private(set) var state: NearbyDiscoveryState
 
     private var identity: LocalNearbyDiscoveryIdentity
-    private let identityFactory: () -> LocalNearbyDiscoveryIdentity
     private let registry: NearbyDiscoveryPeerRegistry
     private let clock: () -> Int64
     private let providerFactory: ProviderFactory
@@ -33,8 +32,7 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
     private var lastLoggedAvailability: [NearbyDiscoverySource: NearbyProviderAvailability] = [:]
     private var generation = 0
     private var started = false
-    private var hasStarted = false
-
+    private var advertisingEnabled = false
     init(
         identity: LocalNearbyDiscoveryIdentity? = nil,
         identityFactory: (() -> LocalNearbyDiscoveryIdentity)? = nil,
@@ -42,19 +40,10 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
         clock: @escaping () -> Int64 = NearbyDiscoveryCoordinator.monotonicMilliseconds,
         providerFactory: @escaping ProviderFactory = NearbyDiscoveryCoordinator.defaultProviderFactory
     ) {
-        let resolvedIdentityFactory: () -> LocalNearbyDiscoveryIdentity
-        if let identity {
-            resolvedIdentityFactory = { identity }
-        } else if let identityFactory {
-            resolvedIdentityFactory = identityFactory
-        } else {
-            resolvedIdentityFactory = {
-                NearbyDiscoveryIdentityFactory.create(displayName: UIDevice.current.model)
-            }
-        }
-        let resolvedIdentity = resolvedIdentityFactory()
+        let resolvedIdentity = identity
+            ?? identityFactory?()
+            ?? NearbyDiscoveryIdentityFactory.create(displayName: UIDevice.current.model)
         self.identity = resolvedIdentity
-        self.identityFactory = resolvedIdentityFactory
         self.registry = registry
         self.clock = clock
         self.providerFactory = providerFactory
@@ -83,12 +72,6 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
     func start() {
         guard !started else { return }
         started = true
-        if hasStarted {
-            identity = identityFactory()
-            state.localName = identity.displayName
-        } else {
-            hasStarted = true
-        }
         generation += 1
         let activeGeneration = generation
         registry.clear()
@@ -97,6 +80,8 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
         state.incomingRendezvousOffer = nil
         providers = providerFactory(identity)
         providers.forEach { provider in
+            (provider as? NearbyAdvertisingConfigurable)?
+                .setAdvertisingEnabled(advertisingEnabled)
             provider.start { [weak self] event in
                 guard let self else { return }
                 if Thread.isMainThread {
@@ -138,6 +123,28 @@ final class NearbyDiscoveryCoordinator: ObservableObject {
     func restart() {
         stop()
         start()
+    }
+
+    func configure(displayName: String, advertisingEnabled: Bool) {
+        let resolvedName = NearbyDiscoveryPeerRegistry.sanitizeDisplayName(displayName)
+            ?? identity.displayName
+        let needsRestart = resolvedName != identity.displayName
+            || advertisingEnabled != self.advertisingEnabled
+        guard needsRestart else { return }
+
+        let wasStarted = started
+        if wasStarted {
+            stop()
+        }
+        identity = LocalNearbyDiscoveryIdentity(
+            peerKey: identity.peerKey,
+            displayName: resolvedName
+        )
+        self.advertisingEnabled = advertisingEnabled
+        state.localName = resolvedName
+        if wasStarted {
+            start()
+        }
     }
 
     func offerInvite(
@@ -266,6 +273,15 @@ private final class FixtureNearbyDiscoveryProvider: NearbyDiscoveryProvider, Nea
             displayName: source == .mdns ? "Nearby test device" : nil,
             rssi: source == .bluetooth ? -48 : nil
         )))
+        if source == .bluetooth,
+           ProcessInfo.processInfo.arguments.contains("--ui-testing-incoming-nearby-offer") {
+            sink(.rendezvousOffer(NearbyRendezvousOffer(
+                requestID: "ui-test-incoming-offer",
+                senderPeerKey: "0011223344556677",
+                senderDisplayName: "Nearby test device",
+                invite: "envoix://pair/123456-alpha-bravo?role=send"
+            )))
+        }
     }
 
     func stop() {
@@ -278,7 +294,9 @@ private final class FixtureNearbyDiscoveryProvider: NearbyDiscoveryProvider, Nea
         completion: @escaping (String?) -> Void
     ) {
         let validPeer = NearbyDiscoveryPeerRegistry.normalizePeerKey(peerKey) != nil
-        let validInvite = invite.lowercased().hasPrefix("envoix://pair/")
+        let normalizedInvite = invite.lowercased()
+        let validInvite = normalizedInvite.hasPrefix("envoix://pair/")
+            || normalizedInvite.hasPrefix("envoix://room/")
         completion(validPeer && validInvite ? nil : "Invalid fixture invitation")
     }
 }

@@ -2,7 +2,7 @@
 import Foundation
 import Network
 
-final class AppleBonjourDiscoveryProvider: NearbyDiscoveryProvider {
+final class AppleBonjourDiscoveryProvider: NearbyDiscoveryProvider, NearbyAdvertisingConfigurable {
     let source = NearbyDiscoverySource.mdns
 
     private enum OperationState {
@@ -31,6 +31,7 @@ final class AppleBonjourDiscoveryProvider: NearbyDiscoveryProvider {
     private var browserState = OperationState.setup
     private var listenerState = OperationState.setup
     private var active = false
+    private var advertisingEnabled = false
 
     init(identity: LocalNearbyDiscoveryIdentity) {
         self.identity = identity
@@ -63,32 +64,41 @@ final class AppleBonjourDiscoveryProvider: NearbyDiscoveryProvider {
         }
         self.browser = browser
 
-        do {
-            let listenerParameters = NWParameters.udp
-            listenerParameters.includePeerToPeer = true
-            let listener = try NWListener(using: listenerParameters, on: .any)
-            let record = NearbyDiscoveryBonjourRecord(identity: identity)
-            listener.service = NWListener.Service(
-                name: "Envoix-\(identity.peerKey.prefix(8))",
-                type: NearbyDiscoveryBonjourRecord.serviceType,
-                domain: nil,
-                txtRecord: NWTXTRecord(record.dictionary)
-            )
-            listener.newConnectionHandler = { connection in
-                connection.cancel()
+        if advertisingEnabled {
+            do {
+                let listenerParameters = NWParameters.udp
+                listenerParameters.includePeerToPeer = true
+                let listener = try NWListener(using: listenerParameters, on: .any)
+                let record = NearbyDiscoveryBonjourRecord(identity: identity)
+                listener.service = NWListener.Service(
+                    name: "Envoix-\(identity.peerKey.prefix(8))",
+                    type: NearbyDiscoveryBonjourRecord.serviceType,
+                    domain: nil,
+                    txtRecord: NWTXTRecord(record.dictionary)
+                )
+                listener.newConnectionHandler = { connection in
+                    connection.cancel()
+                }
+                listener.stateUpdateHandler = { [weak self] state in
+                    self?.handleListenerState(state)
+                }
+                self.listener = listener
+            } catch {
+                listenerState = .failed
             }
-            listener.stateUpdateHandler = { [weak self] state in
-                self?.handleListenerState(state)
-            }
-            self.listener = listener
-        } catch {
-            listenerState = .failed
+        } else {
+            listenerState = .cancelled
         }
 
         browser.start(queue: .main)
         listener?.start(queue: .main)
         startRefreshTimer()
         emitOperationalStatus()
+    }
+
+    func setAdvertisingEnabled(_ enabled: Bool) {
+        precondition(!active, "Advertising policy must be configured before discovery starts")
+        advertisingEnabled = enabled
     }
 
     func stop() {
@@ -195,7 +205,9 @@ final class AppleBonjourDiscoveryProvider: NearbyDiscoveryProvider {
 
     private func emitOperationalStatus() {
         guard active else { return }
-        if browserState == .ready && listenerState == .ready {
+        if browserState == .ready && !advertisingEnabled {
+            emitStatus(.ready, .localNetworkScanningOnly)
+        } else if browserState == .ready && listenerState == .ready {
             emitStatus(.ready, .localNetworkReady)
         } else if browserState == .ready && listenerState.isSettledUnavailable {
             emitStatus(.degraded, .localNetworkScanningOnly)

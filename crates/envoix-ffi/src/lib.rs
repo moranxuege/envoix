@@ -21,11 +21,13 @@ mod manifest_v2_job;
 pub use manifest_v2_job::*;
 mod manifest_v2_session;
 pub use manifest_v2_session::*;
+mod room_control;
+pub use room_control::*;
 
 const DEFAULT_RENDEZVOUS_BROKER: &str =
     "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445";
 const DEFAULT_RELAY_URL: &str = "https://envoix.chkxwlyh.us:8444";
-const ENVOIX_FFI_API_VERSION: u32 = 6;
+const ENVOIX_FFI_API_VERSION: u32 = 8;
 
 static FFI_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static CREATED_INVITATIONS: OnceLock<Mutex<HashMap<(String, TransferRole), InvitationBootstrap>>> =
@@ -368,6 +370,31 @@ pub struct FfiTransferFailure {
     pub diagnostic_message: String,
 }
 
+/// Privacy-safe classification of the data path selected by the transport.
+///
+/// Endpoint addresses and relay URLs remain internal diagnostics and are
+/// deliberately excluded from this product-facing contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum FfiDataPathKind {
+    Direct,
+    Relay,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum FfiConnectionPathEventKind {
+    /// The first data path selected for an established transfer connection.
+    Selected,
+    /// A later transport migration, such as a relay-to-direct upgrade.
+    Changed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct FfiConnectionPathEvent {
+    pub path_kind: FfiDataPathKind,
+    pub event_kind: FfiConnectionPathEventKind,
+}
+
 #[uniffi::export(with_foreign)]
 pub trait TransferObserver: Send + Sync {
     fn on_invite_ready(&self, invite: String);
@@ -376,6 +403,7 @@ pub trait TransferObserver: Send + Sync {
     fn on_progress(&self, transferred: u64, total: u64);
     fn on_completed(&self, bytes: u64);
     fn on_transfer_failed(&self, failure: FfiTransferFailure);
+    fn on_connection_path(&self, event: FfiConnectionPathEvent);
     fn on_diagnostic(&self, message: String);
     /// Called only on the native worker at the authenticated persistence
     /// boundary. Implementations store these bytes immediately and must never
@@ -400,6 +428,8 @@ pub fn envoix_core_info() -> FfiCoreInfo {
             "manifest_v2_session".into(),
             "paged_transfer_inventory_v2".into(),
             "delivery_proof_v2".into(),
+            "structured_connection_path".into(),
+            "foreground_room_control_v3".into(),
             "remembered_devices_v1".into(),
         ],
     }

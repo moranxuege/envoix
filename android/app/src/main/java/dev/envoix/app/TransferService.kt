@@ -89,11 +89,22 @@ class TransferService : Service() {
         intent: Intent,
         direction: Direction,
     ) {
+        val reservedId = intent.getLongExtra(EXTRA_ID, -1L)
         val rememberedRelationshipId =
             intent.getStringExtra(EXTRA_REMEMBERED_RELATIONSHIP_ID)?.takeIf(String::isNotBlank)
         val remembered =
             rememberedRelationshipId?.let { RememberedPeerStore.get(this).load(it) }
-        if (rememberedRelationshipId != null && remembered == null) return
+        if (rememberedRelationshipId != null && remembered == null) {
+            if (reservedId >= 0L) {
+                TransferRepository.update(reservedId) {
+                    it.copy(
+                        status = Status.Failed,
+                        error = uiText("This remembered device is no longer available", "此已记住设备已不可用"),
+                    )
+                }
+            }
+            return
+        }
         val room =
             remembered?.summary?.label
                 ?: intent.getStringExtra(EXTRA_ROOM)?.takeIf(String::isNotBlank)
@@ -120,10 +131,16 @@ class TransferService : Service() {
                 ?.let { RememberedPeerStore.get(this).prepare(it, broker, relay) }
         val sessionRelationshipId =
             rememberedRelationshipId ?: pendingRemember?.relationshipId
-        val activityLabel =
-            remembered?.summary?.label
-                ?: uiText("Secure invitation", "安全邀请")
-        val id = TransferRepository.create(direction, activityLabel)
+        val id =
+            if (reservedId >= 0L &&
+                TransferRepository.transfers.value.any {
+                    it.id == reservedId && it.direction == direction && it.room == room
+                }
+            ) {
+                reservedId
+            } else {
+                TransferRepository.create(direction, room)
+            }
         val spec =
             ManifestSpec(
                 id = id,
@@ -191,15 +208,25 @@ class TransferService : Service() {
         }
         specs[id] = spec
         persistSpecs()
-        TransferRepository.update(id) {
-            it.copy(
-                status = if (spec.qrPayload == null) Status.Pairing else Status.WaitingForPeer,
-                qrPayload = spec.qrPayload,
-                jobId = spec.jobId,
-                log = addLog(it.log, "canonical Manifest v2 session started"),
-            )
-        }
         startNative(spec)
+        // Publish readiness only after the native receiver/sender has been
+        // launched. Room control uses this transition before acknowledging an
+        // incoming offer, so the peer cannot race an unbound receiver.
+        TransferRepository.update(id) {
+            if (it.status != Status.Connecting) {
+                // A synchronous native callback may already have failed the
+                // attempt. Never overwrite that terminal result with a false
+                // readiness signal.
+                it
+            } else {
+                it.copy(
+                    status = if (spec.qrPayload == null) Status.Pairing else Status.WaitingForPeer,
+                    qrPayload = spec.qrPayload,
+                    jobId = spec.jobId,
+                    log = addLog(it.log, "canonical Manifest v2 session started"),
+                )
+            }
+        }
     }
 
     private fun startNative(spec: ManifestSpec) {
@@ -253,7 +280,11 @@ class TransferService : Service() {
                     return
                 }
                 "path" -> {
-                    TransferRepository.update(id) { it.copy(pathAddr = event.optString("path")) }
+                    val kind =
+                        ConnectionPathKind.fromWireOrLegacy(
+                            event.optString("path_kind").ifBlank { event.optString("path") },
+                        )
+                    TransferRepository.update(id) { it.copy(pathAddr = kind?.wire) }
                     return
                 }
             }
@@ -275,7 +306,11 @@ class TransferService : Service() {
 
         override fun onSaveRequired(requestJson: String): String {
             check(callbacks[id] === this) { "Manifest v2 attempt is no longer active" }
-            return destinationWriter.save(requestJson)
+            val result = destinationWriter.saveWithDestination(requestJson)
+            TransferRepository.update(id) {
+                it.copy(savedDestinationLabel = result.destinationLabel)
+            }
+            return result.responseJson
         }
 
         override fun onPlanRequired(requestJson: String): String {
@@ -289,11 +324,16 @@ class TransferService : Service() {
         ): Boolean =
             rememberedPersistence.persist(
                 create = { pending ->
-                    val created =
-                        RememberedPeerStore
-                            .get(this@TransferService)
-                            .create(pending, opaqueCredential, generation)
-                    if (created) {
+                    val store = RememberedPeerStore.get(this@TransferService)
+                    val persisted =
+                        if (store.load(pending.relationshipId) == null) {
+                            store.create(pending, opaqueCredential, generation)
+                        } else {
+                            // A retry may renegotiate after the initial
+                            // credential was already committed.
+                            store.rotate(pending.relationshipId, opaqueCredential, generation)
+                        }
+                    if (persisted) {
                         specs.computeIfPresent(id) { _, current ->
                             if (current.pendingRemember?.relationshipId == pending.relationshipId) {
                                 current.copy(pendingRemember = null)
@@ -302,7 +342,7 @@ class TransferService : Service() {
                             }
                         }
                     }
-                    created
+                    persisted
                 },
                 rotate = { relationshipId ->
                     RememberedPeerStore
@@ -488,7 +528,7 @@ class TransferService : Service() {
                 failureCause = cause,
                 retryable = retryable,
                 recoveryAction = recoveryAction,
-                error = explainFailure(cause, detail),
+                error = explainFailure(cause),
                 log = addLog(it.log, "$cause · $detail"),
             )
         }
@@ -640,15 +680,17 @@ class TransferService : Service() {
         message: String,
     ): List<String> = (current + "${clock.format(Instant.now())}  $message").takeLast(TransferRepository.LOG_CAP)
 
-    private fun explainFailure(
-        cause: String,
-        detail: String,
-    ): String =
+    private fun explainFailure(cause: String): String =
         when (cause) {
             "sender_permission_lost" ->
                 uiText(
                     "The sender lost permission to read a selected item. Reauthorize it and retry.",
                     "发送端已失去所选项目的读取权限。请重新授权后重试。",
+                )
+            "sender_source_unavailable", "sender_item_removed" ->
+                uiText(
+                    "A selected source is no longer available. Review the selection and try again.",
+                    "所选来源已不可用。请检查所选内容后重试。",
                 )
             "sender_source_changed" ->
                 uiText(
@@ -672,8 +714,8 @@ class TransferService : Service() {
                 )
             "receiver_save_failed" ->
                 uiText(
-                    "The receiver could not save the verified files: $detail",
-                    "接收端无法保存已验证的文件：$detail",
+                    "The receiver could not finish saving. Resume to reconcile the destination.",
+                    "接收端未能完成保存。请继续任务以核对目标位置。",
                 )
             "receiver_reused_object_lost" ->
                 uiText(
@@ -730,12 +772,26 @@ class TransferService : Service() {
                     "This app version cannot join the Room. Update Envoix.",
                     "当前应用版本无法加入房间。请更新 Envoix。",
                 )
+            "unsupported_feature" ->
+                uiText(
+                    "This transfer request is not supported.",
+                    "不支持此传输请求。",
+                )
+            "discovery" ->
+                uiText(
+                    "The other device could not be reached. Check both devices and resume.",
+                    "无法连接另一台设备。请检查两台设备后继续任务。",
+                )
             "transport" ->
                 uiText(
                     "The connection was interrupted. Resume to continue from verified data.",
                     "连接已中断。继续任务即可从已验证的数据恢复。",
                 )
-            else -> detail
+            else ->
+                uiText(
+                    "The transfer failed. Try again or open Developer mode for details.",
+                    "传输失败。请重试，或打开开发者模式查看详情。",
+                )
         }
 
     private fun uiText(
@@ -925,18 +981,26 @@ class TransferService : Service() {
             destinationCopyApproved: Boolean,
             rememberLabel: String?,
             rememberedRelationshipId: String?,
-        ) = launch(
-            context,
-            ACTION_START_RECEIVE,
-            room,
-            broker,
-            relay,
-            qrPayload,
-            jobId = null,
-            copyApproved = destinationCopyApproved,
-            rememberLabel = rememberLabel,
-            rememberedRelationshipId = rememberedRelationshipId,
-        )
+        ): Long {
+            // Reserve the card synchronously. The caller can then wait for the
+            // service to move it out of Connecting before accepting a room
+            // offer, and can cancel this exact attempt if acceptance fails.
+            val id = TransferRepository.create(Direction.Receive, room)
+            launch(
+                context,
+                ACTION_START_RECEIVE,
+                room,
+                broker,
+                relay,
+                qrPayload,
+                jobId = null,
+                copyApproved = destinationCopyApproved,
+                rememberLabel = rememberLabel,
+                rememberedRelationshipId = rememberedRelationshipId,
+                reservedId = id,
+            )
+            return id
+        }
 
         private fun launch(
             context: Context,
@@ -949,6 +1013,7 @@ class TransferService : Service() {
             copyApproved: Boolean,
             rememberLabel: String?,
             rememberedRelationshipId: String?,
+            reservedId: Long? = null,
         ) {
             context.startForegroundService(
                 Intent(context, TransferService::class.java).apply {
@@ -963,6 +1028,7 @@ class TransferService : Service() {
                     putExtra(EXTRA_USE_MDNS, false)
                     putExtra(EXTRA_REMEMBER_LABEL, rememberLabel)
                     putExtra(EXTRA_REMEMBERED_RELATIONSHIP_ID, rememberedRelationshipId)
+                    reservedId?.let { putExtra(EXTRA_ID, it) }
                 },
             )
         }

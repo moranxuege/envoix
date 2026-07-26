@@ -8,6 +8,7 @@ import org.junit.Test
 class BleRendezvousProtocolTest {
     private val identity = LocalDiscoveryIdentity("0011223344556677", "Android phone")
     private val invite = "envoix://pair/123456-alpha-bravo?broker=https%3A%2F%2Fexample.test&role=send"
+    private val roomInvite = "envoix://room/R123456-amber-comet?broker=example.test&expires=42"
 
     @Test
     fun `round trips a fragmented invite`() {
@@ -24,6 +25,24 @@ class BleRendezvousProtocolTest {
         assertEquals(identity.peerKey, decoded.senderPeerKey)
         assertEquals(identity.displayName, decoded.senderDisplayName)
         assertEquals(invite, decoded.invite)
+    }
+
+    @Test
+    fun `round trips a room control invite`() {
+        val frames =
+            requireNotNull(
+                BleRendezvousProtocol.encodeInvite(
+                    identity,
+                    roomInvite,
+                    REQUEST_ID,
+                    maximumFrameBytes = 31,
+                ),
+            )
+        val assembler = BleRendezvousProtocol.Assembler()
+
+        val decoded = frames.mapNotNull(assembler::accept).single()
+
+        assertEquals(roomInvite, decoded.invite)
     }
 
     @Test
@@ -45,6 +64,14 @@ class BleRendezvousProtocolTest {
     @Test
     fun `rejects invalid invites and too small frames`() {
         assertNull(BleRendezvousProtocol.encodeInvite(identity, "123456-alpha-bravo", REQUEST_ID, 64))
+        assertNull(
+            BleRendezvousProtocol.encodeInvite(
+                identity,
+                "https://example.test/envoix-room",
+                REQUEST_ID,
+                64,
+            ),
+        )
         assertNull(
             BleRendezvousProtocol.encodeInvite(
                 identity,

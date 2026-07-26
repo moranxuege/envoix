@@ -82,6 +82,9 @@ data class Transfer(
     /** Where a received file ended up (a `content://` in Downloads), for opening. */
     val savedUri: String? = null,
     val savedUris: List<String> = emptyList(),
+    /** Human-readable destination captured from the exact save operation.
+     * Null identifies legacy/incomplete records whose UI must use a fallback. */
+    val savedDestinationLabel: String? = null,
     /** The name the received file was actually saved under — may differ from
      *  [fileName] (the transfer identity) after a collision bump, e.g. "photo (1).jpg". */
     val savedName: String? = null,

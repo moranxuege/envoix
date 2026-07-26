@@ -59,6 +59,17 @@ fn remembered_joiner_join(room_id: &str) -> Join {
     }
 }
 
+fn room_control_creator_join(room_id: &str) -> Join {
+    Join {
+        bootstrap_methods: vec![BootstrapKind::RoomCode],
+        ..creator_join(room_id, TransferRole::Receiver)
+    }
+}
+
+fn room_control_joiner_join(room_id: &str) -> Join {
+    joiner_join(room_id, TransferRole::Sender)
+}
+
 fn control_context(room_id: &str) -> envoix_invite::InvitationControlContext {
     envoix_invite::InvitationControlContext::new(
         room_id.to_string(),
@@ -298,6 +309,75 @@ async fn remembered_locator_rejects_reversed_roles() {
         serve.await.unwrap(),
         Err(envoix_rendezvous::RendezvousError::Rejected(_))
     ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn room_control_locator_pairs_only_the_fixed_control_roles() {
+    let registry = Arc::new(RoomRegistry::with_ttl(Duration::from_secs(5)));
+    let room = "c1_123456";
+    let (creator, broker_creator) = tokio::io::duplex(4096);
+    let (joiner, broker_joiner) = tokio::io::duplex(4096);
+
+    let creator_registry = registry.clone();
+    let creator_serve =
+        tokio::spawn(async move { creator_registry.serve(broker_conn(broker_creator)).await });
+    let joiner_registry = registry.clone();
+    let joiner_serve =
+        tokio::spawn(async move { joiner_registry.serve(broker_conn(broker_joiner)).await });
+
+    let creator =
+        tokio::spawn(async move { join_only(creator, room_control_creator_join(room)).await });
+    let joiner =
+        tokio::spawn(async move { join_only(joiner, room_control_joiner_join(room)).await });
+
+    let Reply::Paired(creator) = creator.await.unwrap().unwrap() else {
+        panic!("room-control creator was not paired");
+    };
+    let Reply::Paired(joiner) = joiner.await.unwrap().unwrap() else {
+        panic!("room-control joiner was not paired");
+    };
+    assert_eq!(creator.role, Role::Responder);
+    assert_eq!(joiner.role, Role::Initiator);
+    assert_eq!(
+        creator.selected_bootstrap_method,
+        BootstrapKind::RoomCode
+    );
+    assert_eq!(joiner.selected_bootstrap_method, BootstrapKind::RoomCode);
+
+    creator_serve.await.unwrap().expect("serve creator");
+    joiner_serve.await.unwrap().expect("serve joiner");
+}
+
+#[tokio::test]
+async fn room_control_locator_rejects_non_control_join_shapes() {
+    let invalid_joins = [
+        creator_join("c1_123456", TransferRole::Receiver),
+        Join {
+            transfer_role: TransferRole::Sender,
+            ..room_control_creator_join("c1_123456")
+        },
+        Join {
+            selected_bootstrap_method: Some(BootstrapKind::FullTicket),
+            ..room_control_joiner_join("c1_123456")
+        },
+        Join {
+            transfer_role: TransferRole::Receiver,
+            ..room_control_joiner_join("c1_123456")
+        },
+    ];
+
+    for join in invalid_joins {
+        let registry = Arc::new(RoomRegistry::new());
+        let (mut client, broker) = tokio::io::duplex(4096);
+        let serve = tokio::spawn(async move { registry.serve(broker_conn(broker)).await });
+        let (_reader, mut writer) = tokio::io::split(&mut client);
+        write_framed(&mut writer, &join).await.unwrap();
+
+        assert!(matches!(
+            serve.await.unwrap(),
+            Err(envoix_rendezvous::RendezvousError::Rejected(_))
+        ));
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

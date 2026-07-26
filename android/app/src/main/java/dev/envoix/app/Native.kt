@@ -18,6 +18,10 @@ interface ManifestV2Callback {
     ): Boolean
 }
 
+interface RoomControlCallback {
+    fun onEvent(json: String)
+}
+
 /** Sink for the core's `tracing` log lines. */
 interface LogCallback {
     fun log(
@@ -62,6 +66,30 @@ object Native {
     /** Parse a complete InviteV2 for deep-link routing. */
     external fun parseInvite(input: String): String
 
+    external fun generateRoomControlInvite(
+        broker: String,
+        relay: String,
+    ): String
+
+    external fun parseRoomControlInvite(
+        input: String,
+        fallbackBroker: String,
+        fallbackRelay: String,
+    ): String
+
+    external fun startRoomControlSession(
+        id: Long,
+        paramsJson: String,
+        callback: RoomControlCallback,
+    )
+
+    external fun sendRoomControlCommand(
+        id: Long,
+        commandJson: String,
+    ): String
+
+    external fun cancelRoomControlSession(id: Long)
+
     /** Validate a complete invitation or Room Code for an active flow. */
     external fun parseInviteForRole(
         input: String,
@@ -89,6 +117,12 @@ object Native {
         storeDirectory: String,
         jobId: String,
         rootsJson: String,
+    ): String
+
+    /** Cancel an unstarted job before its room-scoped staging is discarded. */
+    external fun cancelManifestV2Job(
+        storeDirectory: String,
+        jobId: String,
     ): String
 
     external fun resolveManifestV2Source(

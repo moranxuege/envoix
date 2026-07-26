@@ -17,6 +17,26 @@ enum TransferProgressPresentation: Equatable {
     case retained
 }
 
+enum ConnectionPathPresentationPolicy {
+    static func label(for path: FfiDataPathKind, language: String) -> String {
+        switch path {
+        case .direct: return AppText.value("Direct path", "直连链路", language: language)
+        case .relay: return AppText.value("Relay path", "中继链路", language: language)
+        case .other: return AppText.value("Other path", "其他链路", language: language)
+        }
+    }
+
+    static func label(for event: FfiConnectionPathEvent, language: String) -> String {
+        let path = label(for: event.pathKind, language: language)
+        guard event.eventKind == .changed else { return path }
+        return AppText.value(
+            "\(path) · changed",
+            "\(path) · 已切换",
+            language: language
+        )
+    }
+}
+
 /// Pure lifecycle-to-presentation policy shared by every Apple transfer
 /// surface. SwiftUI renders this result and does not infer actions or progress
 /// behavior independently.

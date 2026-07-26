@@ -61,6 +61,24 @@ final class NearbyDiscoveryTests: XCTestCase {
         XCTAssertNil(BleRendezvousProtocol.Assembler().accept(frame))
     }
 
+    func testBleRendezvousCarriesDirectionNeutralRoomInvite() throws {
+        let identity = LocalNearbyDiscoveryIdentity(
+            peerKey: "0011223344556677",
+            displayName: "iPhone"
+        )
+        let invite = "envoix://room/R123456-river-stone?broker=example"
+        let frames = try XCTUnwrap(BleRendezvousProtocol.encodeInvite(
+            identity: identity,
+            invite: invite,
+            requestID: 9,
+            maximumFrameBytes: 31
+        ))
+
+        let assembler = BleRendezvousProtocol.Assembler()
+        let decoded = try XCTUnwrap(frames.compactMap(assembler.accept).first)
+        XCTAssertEqual(decoded.invite, invite)
+    }
+
     func testBluetoothUUIDMatchesAndroidWireContract() throws {
         let peerKey = "8899aabbccddeeff"
         let uuid = try XCTUnwrap(NearbyDiscoveryBluetoothUUID.encode(peerKey: peerKey))
@@ -172,6 +190,31 @@ final class NearbyDiscoveryTests: XCTestCase {
         XCTAssertNotEqual(second.peerKey, first.peerKey)
     }
 
+    @MainActor
+    func testPresenceDefaultsHiddenSanitizesNameAndExpiresEveryoneMode() {
+        let suiteName = "NearbyPresencePreferencesTests"
+        let defaults = try! XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let start = Date(timeIntervalSince1970: 1_000)
+        let preferences = NearbyPresencePreferences(defaults: defaults, now: start)
+
+        XCTAssertEqual(preferences.visibility, .hidden)
+        XCTAssertFalse(preferences.isAdvertising(sceneIsActive: true, now: start))
+        XCTAssertTrue(preferences.updateDisplayName("  Jinbin's\n iPhone  "))
+        XCTAssertEqual(preferences.displayName, "Jinbin's iPhone")
+
+        preferences.setVisibility(.everyoneTenMinutes, now: start)
+        XCTAssertTrue(preferences.isAdvertising(
+            sceneIsActive: true,
+            now: start.addingTimeInterval(599)
+        ))
+        XCTAssertTrue(preferences.expireIfNeeded(
+            now: start.addingTimeInterval(NearbyPresencePreferences.visibilityDuration)
+        ))
+        XCTAssertEqual(preferences.visibility, .hidden)
+    }
+
     func testCoordinatorStartStopAreIdempotentAndIgnoreSelf() {
         var now: Int64 = 100
         let provider = CountingNearbyDiscoveryProvider(source: .bluetooth)
@@ -209,14 +252,17 @@ final class NearbyDiscoveryTests: XCTestCase {
         XCTAssertTrue(coordinator.state.peers.isEmpty)
     }
 
-    func testCoordinatorRotatesIdentityAcrossPresenceSessions() {
-        var identities = [
-            LocalNearbyDiscoveryIdentity(peerKey: "0011223344556677", displayName: "first"),
-            LocalNearbyDiscoveryIdentity(peerKey: "8899aabbccddeeff", displayName: "second"),
-        ]
+    func testCoordinatorRetainsIdentityAcrossPausedPresenceForRoomContinuity() {
+        var identityFactoryCalls = 0
         var advertisedPeerKeys: [String] = []
         let coordinator = NearbyDiscoveryCoordinator(
-            identityFactory: { identities.removeFirst() },
+            identityFactory: {
+                identityFactoryCalls += 1
+                return LocalNearbyDiscoveryIdentity(
+                    peerKey: "0011223344556677",
+                    displayName: "iPhone"
+                )
+            },
             providerFactory: { identity in
                 advertisedPeerKeys.append(identity.peerKey)
                 return [CountingNearbyDiscoveryProvider(source: .bluetooth)]
@@ -227,8 +273,9 @@ final class NearbyDiscoveryTests: XCTestCase {
         coordinator.stop()
         coordinator.start()
 
-        XCTAssertEqual(advertisedPeerKeys, ["0011223344556677", "8899aabbccddeeff"])
-        XCTAssertEqual(coordinator.state.localName, "second")
+        XCTAssertEqual(identityFactoryCalls, 1)
+        XCTAssertEqual(advertisedPeerKeys, ["0011223344556677", "0011223344556677"])
+        XCTAssertEqual(coordinator.state.localName, "iPhone")
     }
 
     func testRegistryKeepsPeerThroughSourceLossAndMergesReturningSource() throws {

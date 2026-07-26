@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::oneshot;
 
+use envoix_invite::is_room_control_locator;
+
 use crate::peer::{PeerConn, PeerParts};
 use crate::protocol::{
     BrokerOutcome, BrokerRejection, Join, Paired, RENDEZVOUS_PROTOCOL_VERSION, Reply, Role,
@@ -576,6 +578,8 @@ impl RoomRegistry {
         let room_id = join.room_id.clone();
         let room_log_label = if is_remembered_room_id(&room_id) {
             "<remembered>"
+        } else if is_room_control_locator(&room_id) {
+            "<room-control>"
         } else {
             room_id.as_str()
         };
@@ -961,12 +965,16 @@ fn validate_join(join: &Join) -> Result<(), BrokerOutcome> {
     let invitation_room =
         join.room_id.len() == ROOM_ID_LEN && join.room_id.bytes().all(|byte| byte.is_ascii_digit());
     let remembered_room = is_remembered_room_id(&join.room_id);
-    if !invitation_room && !remembered_room {
+    let room_control = is_room_control_locator(&join.room_id);
+    if !invitation_room && !remembered_room && !room_control {
         return Err(BrokerOutcome::MalformedJoin);
     }
     match join.invitation_side {
         InvitationSide::Creator => {
-            let valid_methods = if remembered_room {
+            let valid_methods = if room_control {
+                join.bootstrap_methods == [BootstrapKind::RoomCode]
+                    && join.transfer_role == TransferRole::Receiver
+            } else if remembered_room {
                 join.bootstrap_methods == [BootstrapKind::FullTicket]
                     && join.transfer_role == TransferRole::Receiver
             } else {
@@ -977,7 +985,10 @@ fn validate_join(join: &Join) -> Result<(), BrokerOutcome> {
             }
         }
         InvitationSide::Joiner => {
-            let valid_selection = if remembered_room {
+            let valid_selection = if room_control {
+                join.selected_bootstrap_method == Some(BootstrapKind::RoomCode)
+                    && join.transfer_role == TransferRole::Sender
+            } else if remembered_room {
                 join.selected_bootstrap_method == Some(BootstrapKind::FullTicket)
                     && join.transfer_role == TransferRole::Sender
             } else {

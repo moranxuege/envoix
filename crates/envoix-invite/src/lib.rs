@@ -34,6 +34,8 @@ pub const PAKE_SUITE: &str = "spake2-ed25519-sha256-hkdf-hmac";
 pub const FULL_TICKET_METHOD: &str = "full-ticket-v1";
 /// Human Room-Code bootstrap identifier.
 pub const ROOM_CODE_METHOD: &str = "room-code-v1";
+/// Broker locator namespace reserved for an authenticated foreground room.
+pub const ROOM_CONTROL_LOCATOR_PREFIX: &str = "c1_";
 /// Currently implemented optional transfer capability.
 pub const MANIFEST_V1_CAPABILITY: &str = "manifest-v1";
 
@@ -553,6 +555,23 @@ impl InvitationControlContext {
         })
     }
 
+    /// Construct the fixed creator/joiner mapping used only to bootstrap a
+    /// direction-neutral foreground room control connection.
+    ///
+    /// These roles select deterministic SPAKE2 speaking order; they do not
+    /// authorize a file direction inside the established room.
+    pub fn room_control(room_id: String) -> Result<Self, InvitationError> {
+        if !is_room_control_locator(&room_id) {
+            return Err(malformed("room control locator is invalid"));
+        }
+        Ok(Self {
+            room_id,
+            selected_bootstrap_method: BootstrapKind::RoomCode,
+            creator_transfer_role: TransferRole::Receiver,
+            joiner_transfer_role: TransferRole::Sender,
+        })
+    }
+
     /// Deterministic framed bytes included in control-plane confirmation.
     pub fn framed_binding(&self) -> Vec<u8> {
         let mut output = Vec::new();
@@ -1034,6 +1053,7 @@ impl InvitationBootstrap {
                 )?
             }
         };
+        validate_public_context(&public, now)?;
         if selected != self.selected_method().unwrap_or(selected) {
             return Err(InvitationError::AuthenticationFailed);
         }
@@ -1385,6 +1405,16 @@ fn validate_room_id(value: &str) -> Result<(), InvitationError> {
     } else {
         Err(malformed("room_id must contain exactly six digits"))
     }
+}
+
+/// Whether `value` is the bounded, non-transfer namespace used by a
+/// foreground room control rendezvous.
+pub fn is_room_control_locator(value: &str) -> bool {
+    value
+        .strip_prefix(ROOM_CONTROL_LOCATOR_PREFIX)
+        .is_some_and(|room_id| {
+            room_id.len() == ROOM_ID_LEN && room_id.bytes().all(|byte| byte.is_ascii_digit())
+        })
 }
 
 fn validate_remembered_room_id(value: &str) -> Result<(), InvitationError> {

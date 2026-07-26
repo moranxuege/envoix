@@ -134,22 +134,30 @@ fn expiry_is_strict() {
 }
 
 #[test]
-fn creator_and_full_ticket_joiner_recheck_expiry_during_authentication() {
+fn every_bootstrap_rechecks_expiry_during_authentication() {
     let created = created(TransferRole::Sender);
     let expires_at = created.expires_at;
-    let public_context = created
-        .invitation()
-        .public_context
-        .canonical_json()
-        .unwrap();
     let creator = created.clone().into_bootstrap();
+    let creator_context = creator
+        .creator_public_context()
+        .expect("creator public context")
+        .expect("creator context bytes");
     let joiner = InviteV2::parse(&created.payload, NOW)
-        .unwrap()
+        .expect("parse full invitation")
         .into_bootstrap();
 
     assert!(
         creator
             .validate_control_context(BootstrapKind::FullTicket, None, expires_at - 1)
+            .is_ok()
+    );
+    assert!(
+        joiner
+            .validate_control_context(
+                BootstrapKind::FullTicket,
+                Some(&creator_context),
+                expires_at - 1,
+            )
             .is_ok()
     );
     assert_eq!(
@@ -159,18 +167,13 @@ fn creator_and_full_ticket_joiner_recheck_expiry_during_authentication() {
             .code(),
         InvitationErrorCode::Expired
     );
-    assert!(
+    assert_eq!(
         joiner
             .validate_control_context(
                 BootstrapKind::FullTicket,
-                Some(&public_context),
-                expires_at - 1,
+                Some(&creator_context),
+                expires_at,
             )
-            .is_ok()
-    );
-    assert_eq!(
-        joiner
-            .validate_control_context(BootstrapKind::FullTicket, Some(&public_context), expires_at,)
             .unwrap_err()
             .code(),
         InvitationErrorCode::Expired

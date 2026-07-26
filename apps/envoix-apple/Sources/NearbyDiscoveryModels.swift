@@ -144,6 +144,10 @@ protocol NearbyDiscoveryProvider: AnyObject {
     func stop()
 }
 
+protocol NearbyAdvertisingConfigurable: AnyObject {
+    func setAdvertisingEnabled(_ enabled: Bool)
+}
+
 protocol NearbyRendezvousProvider: AnyObject {
     func offerInvite(
         peerKey: String,

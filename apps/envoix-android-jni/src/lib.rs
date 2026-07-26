@@ -356,3 +356,4 @@ fn callback_or_log(env: &JNIEnv, callback: &JObject, context: &str) -> Option<Gl
 
 mod logging;
 mod manifest_v2;
+mod room_control;

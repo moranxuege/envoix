@@ -20,16 +20,17 @@ use envoix_client::api::{
     send_manifest_v2_manual, send_manifest_v2_via_remembered,
     send_manifest_v2_via_room_with_authentication,
 };
-use envoix_types::PairingStep;
+use envoix_types::{DataPath, PairingStep};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
 use super::{
-    EnvoixError, EnvoixRuntimeSettings, FfiFailureCategory, FfiFailureCode, FfiFailureOrigin,
-    FfiFailurePhase, FfiManifestV2Phase, FfiRecoveryAction, FfiTransferDirection,
-    FfiTransferFailure, FfiTransferJobV2, FfiTransferRequest, TransferObserver,
-    build_client_for_request, on_ffi_runtime, op_err, peer_sources_for_request,
-    spawn_on_ffi_runtime, transfer_options_for_request,
+    EnvoixError, EnvoixRuntimeSettings, FfiConnectionPathEvent, FfiConnectionPathEventKind,
+    FfiDataPathKind, FfiFailureCategory, FfiFailureCode, FfiFailureOrigin, FfiFailurePhase,
+    FfiManifestV2Phase, FfiRecoveryAction, FfiTransferDirection, FfiTransferFailure,
+    FfiTransferJobV2, FfiTransferRequest, TransferObserver, build_client_for_request,
+    on_ffi_runtime, op_err, peer_sources_for_request, spawn_on_ffi_runtime,
+    transfer_options_for_request,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -215,11 +216,27 @@ struct NativeSessionEvents {
     observer: Arc<dyn TransferObserver>,
 }
 
+fn project_connection_path(
+    path: &DataPath,
+    event_kind: FfiConnectionPathEventKind,
+) -> FfiConnectionPathEvent {
+    let path_kind = match path {
+        DataPath::Direct { .. } => FfiDataPathKind::Direct,
+        DataPath::Relay { .. } => FfiDataPathKind::Relay,
+        DataPath::Other { .. } => FfiDataPathKind::Other,
+    };
+    FfiConnectionPathEvent {
+        path_kind,
+        event_kind,
+    }
+}
+
 struct NativeAuthentication {
     observer: Arc<dyn TransferObserver>,
     remember_consent: bool,
     rotation: Option<(Vec<u8>, u64)>,
     invitation_consumption: Option<InvitationConsumption>,
+    authenticated: AtomicBool,
     persisted: AtomicBool,
 }
 
@@ -245,6 +262,7 @@ impl NativeAuthentication {
             remember_consent,
             rotation: None,
             invitation_consumption: Some(invitation_consumption),
+            authenticated: AtomicBool::new(false),
             persisted: AtomicBool::new(false),
         }
     }
@@ -259,8 +277,13 @@ impl NativeAuthentication {
             remember_consent: false,
             rotation: Some((opaque_credential, next_generation)),
             invitation_consumption: None,
+            authenticated: AtomicBool::new(false),
             persisted: AtomicBool::new(false),
         }
+    }
+
+    fn authenticated(&self) -> bool {
+        self.authenticated.load(Ordering::Acquire)
     }
 
     fn persisted(&self) -> bool {
@@ -274,6 +297,7 @@ impl AuthenticationHandler for NativeAuthentication {
     }
 
     fn on_authenticated(&self, outcome: AuthenticationOutcome) -> Result<(), SessionError> {
+        self.authenticated.store(true, Ordering::Release);
         if let Some(consumption) = &self.invitation_consumption {
             consumption.consume();
         }
@@ -309,10 +333,16 @@ impl EventSink for NativeSessionEvents {
                 self.observer.on_phase(FfiManifestV2Phase::Connecting);
             }
             TransferEvent::Connected { path } => {
-                self.observer.on_diagnostic(format!("connected via {path}"));
+                let event = project_connection_path(&path, FfiConnectionPathEventKind::Selected);
+                self.observer.on_connection_path(event);
+                self.observer
+                    .on_diagnostic(format!("connected via {:?}", event.path_kind));
             }
             TransferEvent::PathChanged { path } => {
-                self.observer.on_diagnostic(format!("path changed: {path}"));
+                let event = project_connection_path(&path, FfiConnectionPathEventKind::Changed);
+                self.observer.on_connection_path(event);
+                self.observer
+                    .on_diagnostic(format!("path changed: {:?}", event.path_kind));
             }
             TransferEvent::Progress {
                 bytes_transferred,
@@ -660,7 +690,7 @@ async fn send_attempt(
             let broker = parse_broker_addr(broker, relay)?;
             let authentication =
                 NativeAuthentication::invitation(observer, remember_consent, lease.consumption());
-            send_manifest_v2_via_room_with_authentication(
+            let result = send_manifest_v2_via_room_with_authentication(
                 broker,
                 lease.bootstrap().clone(),
                 job,
@@ -670,7 +700,11 @@ async fn send_attempt(
                 cancel,
                 &authentication,
             )
-            .await
+            .await;
+            if result.is_ok() || authentication.authenticated() {
+                lease.consume();
+            }
+            result
         }
         PeerSource::Remembered {
             credential_ref,
@@ -796,7 +830,7 @@ async fn receive_offer_attempt(
             let broker = parse_broker_addr(broker, relay)?;
             let authentication =
                 NativeAuthentication::invitation(observer, remember_consent, lease.consumption());
-            receive_manifest_v2_offer_via_room_with_authentication(
+            let result = receive_manifest_v2_offer_via_room_with_authentication(
                 broker,
                 lease.bootstrap().clone(),
                 listen_addrs(&listen),
@@ -805,7 +839,11 @@ async fn receive_offer_attempt(
                 cancel,
                 &authentication,
             )
-            .await
+            .await;
+            if result.is_ok() || authentication.authenticated() {
+                lease.consume();
+            }
+            result
         }
         PeerSource::Remembered {
             credential_ref,
@@ -1294,26 +1332,40 @@ fn op_err_core(error: impl std::fmt::Display) -> SessionError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::Mutex as StdMutex;
+
+    use super::*;
 
     #[derive(Default)]
     struct RecordingObserver {
         failure: StdMutex<Option<FfiTransferFailure>>,
+        path_events: StdMutex<Vec<FfiConnectionPathEvent>>,
+        diagnostics: StdMutex<Vec<String>>,
     }
 
     impl TransferObserver for RecordingObserver {
         fn on_invite_ready(&self, _invite: String) {}
+
         fn on_started(&self, _item_count: u32, _total_bytes: u64) {}
+
         fn on_phase(&self, _phase: FfiManifestV2Phase) {}
+
         fn on_progress(&self, _transferred: u64, _total: u64) {}
+
         fn on_completed(&self, _bytes: u64) {}
 
         fn on_transfer_failed(&self, failure: FfiTransferFailure) {
             *self.failure.lock().expect("failure mutex") = Some(failure);
         }
 
-        fn on_diagnostic(&self, _message: String) {}
+        fn on_connection_path(&self, event: FfiConnectionPathEvent) {
+            self.path_events.lock().unwrap().push(event);
+        }
+
+        fn on_diagnostic(&self, message: String) {
+            self.diagnostics.lock().unwrap().push(message);
+        }
 
         fn on_remembered_credential(&self, _opaque_credential: Vec<u8>, _generation: u64) -> bool {
             false
@@ -1375,5 +1427,88 @@ mod tests {
 
         assert_eq!(failure.code, FfiFailureCode::AuthenticationFailed);
         assert_eq!(failure.recovery_action, FfiRecoveryAction::RePair);
+    }
+
+    #[test]
+    fn authentication_milestone_precedes_credential_persistence() {
+        let authentication =
+            NativeAuthentication::rotation(Arc::new(RecordingObserver::default()), vec![1], 1);
+
+        let result = authentication.on_authenticated(AuthenticationOutcome {
+            remember_secret: None,
+        });
+
+        assert!(matches!(result, Err(SessionError::Storage(_))));
+        assert!(authentication.authenticated());
+        assert!(!authentication.persisted());
+    }
+
+    #[test]
+    fn connection_path_projection_classifies_without_endpoint_details() {
+        let direct = DataPath::Direct {
+            addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 42)), 4242),
+        };
+        let relay = DataPath::Relay {
+            url: "https://sensitive-relay.example".into(),
+        };
+        let other = DataPath::Other {
+            description: "sensitive transport details".into(),
+        };
+
+        let projections = [
+            project_connection_path(&direct, FfiConnectionPathEventKind::Selected),
+            project_connection_path(&relay, FfiConnectionPathEventKind::Changed),
+            project_connection_path(&other, FfiConnectionPathEventKind::Changed),
+        ];
+
+        assert_eq!(projections[0].path_kind, FfiDataPathKind::Direct);
+        assert_eq!(
+            projections[0].event_kind,
+            FfiConnectionPathEventKind::Selected
+        );
+        assert_eq!(projections[1].path_kind, FfiDataPathKind::Relay);
+        assert_eq!(projections[2].path_kind, FfiDataPathKind::Other);
+        let rendered = format!("{projections:?}");
+        assert!(!rendered.contains("198.51.100.42"));
+        assert!(!rendered.contains("sensitive-relay.example"));
+        assert!(!rendered.contains("sensitive transport details"));
+    }
+
+    #[test]
+    fn native_events_forward_selected_and_changed_paths() {
+        let observer = Arc::new(RecordingObserver::default());
+        let sink = NativeSessionEvents {
+            observer: observer.clone(),
+        };
+
+        sink.on_event(TransferEvent::Connected {
+            path: DataPath::Relay {
+                url: "https://relay.example".into(),
+            },
+        });
+        sink.on_event(TransferEvent::PathChanged {
+            path: DataPath::Direct {
+                addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443),
+            },
+        });
+
+        assert_eq!(
+            *observer.path_events.lock().unwrap(),
+            vec![
+                FfiConnectionPathEvent {
+                    path_kind: FfiDataPathKind::Relay,
+                    event_kind: FfiConnectionPathEventKind::Selected,
+                },
+                FfiConnectionPathEvent {
+                    path_kind: FfiDataPathKind::Direct,
+                    event_kind: FfiConnectionPathEventKind::Changed,
+                },
+            ]
+        );
+        let diagnostics = observer.diagnostics.lock().unwrap().join("\n");
+        assert!(diagnostics.contains("Relay"));
+        assert!(diagnostics.contains("Direct"));
+        assert!(!diagnostics.contains("relay.example"));
+        assert!(!diagnostics.contains("127.0.0.1"));
     }
 }

@@ -654,10 +654,11 @@ pub(crate) async fn build_manifest_v2_accept_endpoint(
     candidates: &CandidateFilter,
     window: u32,
 ) -> Result<Endpoint, SessionError> {
+    let accepted_alpns = [TransferProtocol::ManifestV2.alpn().to_vec()];
     build_endpoint(
         Some(listen_addrs),
         identity,
-        &[TransferProtocol::ManifestV2],
+        &accepted_alpns,
         false,
         relay,
         relay_only,
@@ -675,10 +676,11 @@ pub(crate) async fn build_manifest_v2_advertising_accept_endpoint(
     candidates: &CandidateFilter,
     window: u32,
 ) -> Result<Endpoint, SessionError> {
+    let accepted_alpns = [TransferProtocol::ManifestV2.alpn().to_vec()];
     build_endpoint(
         Some(listen_addrs),
         identity,
-        &[TransferProtocol::ManifestV2],
+        &accepted_alpns,
         true,
         relay,
         relay_only,
@@ -744,10 +746,10 @@ fn data_transport_config(window: u32) -> QuicTransportConfig {
 // Endpoint knobs are independent flags/handles; the v2 accept/dial wrappers
 // above pin the supported combinations without exposing legacy ALPN choices.
 #[allow(clippy::too_many_arguments)]
-async fn build_endpoint(
+pub(crate) async fn build_endpoint(
     local_listen_addrs: Option<BindAddrs>,
     identity: &IdentityConfig,
-    accepted_protocols: &[TransferProtocol],
+    accepted_alpns: &[Vec<u8>],
     advertise_self: bool,
     relay: &Option<String>,
     relay_only: bool,
@@ -774,13 +776,8 @@ async fn build_endpoint(
     {
         builder = builder.dns_resolver(platform_system_dns_resolver());
     }
-    if !accepted_protocols.is_empty() {
-        builder = builder.alpns(
-            accepted_protocols
-                .iter()
-                .map(|protocol| protocol.alpn().to_vec())
-                .collect(),
-        );
+    if !accepted_alpns.is_empty() {
+        builder = builder.alpns(accepted_alpns.to_vec());
     }
     if advertise_self {
         builder = builder.address_lookup(MdnsAddressLookup::builder().advertise(true));

@@ -57,12 +57,12 @@ jobs:
         run: ./gradlew :app:lintDebug --no-daemon --stacktrace
       - name: Check Android JNI compatibility
         run: scripts/check-android-jni-transfer-surface.sh
-      - name: Build app and instrumentation APKs
+      - name: Run Android unit tests and build app/instrumentation APKs
         working-directory: android
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/26.3.11579264
           ENVOIX_ANDROID_ABIS: arm64-v8a
-        run: ./gradlew :app:assembleDebug :app:assembleDebugAndroidTest --no-daemon --stacktrace
+        run: ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest --no-daemon --stacktrace
       - name: Verify Android test artifacts
         run: |
           test -s android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk

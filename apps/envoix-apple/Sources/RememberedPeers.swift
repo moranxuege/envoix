@@ -135,7 +135,7 @@ final class RememberedPeerStore: @unchecked Sendable {
     }
 
     func releaseSession(_ relationshipID: String) {
-        lock.withEnvoixLock {
+        _ = lock.withEnvoixLock {
             activeRelationships.remove(relationshipID)
         }
     }
