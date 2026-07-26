@@ -286,8 +286,8 @@ class TransferService : Service() {
         override fun onRememberedCredential(
             opaqueCredential: ByteArray,
             generation: Long,
-        ): Boolean {
-            return rememberedPersistence.persist(
+        ): Boolean =
+            rememberedPersistence.persist(
                 create = { pending ->
                     val created =
                         RememberedPeerStore
@@ -310,7 +310,6 @@ class TransferService : Service() {
                         .rotate(relationshipId, opaqueCredential, generation)
                 },
             )
-        }
     }
 
     private fun onOffer(

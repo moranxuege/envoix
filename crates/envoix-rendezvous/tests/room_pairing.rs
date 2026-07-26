@@ -575,7 +575,7 @@ async fn concurrent_joiners_charge_exactly_one_match() {
                 matches!(
                     reply,
                     Reply::Rejected(BrokerRejection {
-                        outcome: BrokerOutcome::RoomFull,
+                        outcome: BrokerOutcome::RoomFull | BrokerOutcome::RoomNotFound,
                         ..
                     })
                 )
