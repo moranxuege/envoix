@@ -13,7 +13,7 @@ import org.json.JSONException
 import org.json.JSONObject
 import org.json.JSONTokener
 
-const val READ_SCHEMA_ID: String = "envoix/binding/read/5"
+const val READ_SCHEMA_ID: String = "envoix/binding/read/6"
 const val READ_MAX_FRAME_BYTES: Int = 1048576
 
 enum class ReadErrorKind {
@@ -187,10 +187,16 @@ data class IdentityView(
     val artifact: String,
 )
 
+data class QrView(
+    val width: Long,
+    val modules: ReadSecretString,
+)
+
 data class InviteView(
     val code: ReadSecretString,
     val codeFingerprint: String,
     val link: ReadSecretString?,
+    val qr: QrView?,
 )
 
 data class CardView(
@@ -306,6 +312,7 @@ data class ProtocolManifestView(
 data class AbiSchemaManifestView(
     val readBindingSchemaId: String,
     val commandBindingSchemaId: String,
+    val capabilityBindingSchemaId: String,
     val evidenceRustAbiId: String,
     val evidenceTimelineSchemaId: String,
     val mailboxReceiptSchemaId: String,
@@ -794,13 +801,23 @@ object EnvoixReadCodec {
         )
     }
 
+    private fun decodeQrView(value: Any?, context: String): QrView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("width", "modules"), context)
+        return QrView(
+            width = integer(field(map, "width", "QrView.width"), 65535, "QrView.width"),
+            modules = ReadSecretString(hexVariable(field(map, "modules", "QrView.modules"), 7834, "QrView.modules")),
+        )
+    }
+
     private fun decodeInviteView(value: Any?, context: String): InviteView {
         val map = obj(value, context)
-        knownKeys(map, setOf("code", "code_fingerprint", "link"), context)
+        knownKeys(map, setOf("code", "code_fingerprint", "link", "qr"), context)
         return InviteView(
             code = ReadSecretString(utf8Bounded(field(map, "code", "InviteView.code"), 64, "InviteView.code")),
             codeFingerprint = hexFixed(field(map, "code_fingerprint", "InviteView.code_fingerprint"), 16, "InviteView.code_fingerprint"),
             link = field(map, "link", "InviteView.link")?.let { ReadSecretString(utf8Bounded(it, 5481, "InviteView.link")) },
+            qr = field(map, "qr", "InviteView.qr")?.let { decodeQrView(it, "InviteView.qr") },
         )
     }
 
@@ -1020,10 +1037,11 @@ object EnvoixReadCodec {
 
     private fun decodeAbiSchemaManifestView(value: Any?, context: String): AbiSchemaManifestView {
         val map = obj(value, context)
-        knownKeys(map, setOf("read_binding_schema_id", "command_binding_schema_id", "evidence_rust_abi_id", "evidence_timeline_schema_id", "mailbox_receipt_schema_id", "operation_envelope_schema_id"), context)
+        knownKeys(map, setOf("read_binding_schema_id", "command_binding_schema_id", "capability_binding_schema_id", "evidence_rust_abi_id", "evidence_timeline_schema_id", "mailbox_receipt_schema_id", "operation_envelope_schema_id"), context)
         return AbiSchemaManifestView(
             readBindingSchemaId = asciiBounded(field(map, "read_binding_schema_id", "AbiSchemaManifestView.read_binding_schema_id"), 64, "AbiSchemaManifestView.read_binding_schema_id"),
             commandBindingSchemaId = asciiBounded(field(map, "command_binding_schema_id", "AbiSchemaManifestView.command_binding_schema_id"), 64, "AbiSchemaManifestView.command_binding_schema_id"),
+            capabilityBindingSchemaId = asciiBounded(field(map, "capability_binding_schema_id", "AbiSchemaManifestView.capability_binding_schema_id"), 64, "AbiSchemaManifestView.capability_binding_schema_id"),
             evidenceRustAbiId = asciiBounded(field(map, "evidence_rust_abi_id", "AbiSchemaManifestView.evidence_rust_abi_id"), 64, "AbiSchemaManifestView.evidence_rust_abi_id"),
             evidenceTimelineSchemaId = asciiBounded(field(map, "evidence_timeline_schema_id", "AbiSchemaManifestView.evidence_timeline_schema_id"), 64, "AbiSchemaManifestView.evidence_timeline_schema_id"),
             mailboxReceiptSchemaId = asciiBounded(field(map, "mailbox_receipt_schema_id", "AbiSchemaManifestView.mailbox_receipt_schema_id"), 64, "AbiSchemaManifestView.mailbox_receipt_schema_id"),

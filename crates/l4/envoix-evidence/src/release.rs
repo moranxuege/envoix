@@ -116,6 +116,15 @@ pub struct ReleasePolicy {
     /// What the payload is built from, as Ant-style globs. Both enforcers read
     /// this one list, so neither can answer the question differently.
     pub payload_sources: Vec<String>,
+    /// The COMPLETE set of permissions a release artifact may request, judged
+    /// in BOTH directions.
+    ///
+    /// A deny-list cannot do this job: the markers list can only reject the
+    /// debug spellings somebody thought to name, so a NEW permission — the one
+    /// case worth reviewing — would slide past it silently. An allow-list makes
+    /// gaining a permission a diff in this file, which is where the decision to
+    /// ask a user for their camera actually belongs.
+    pub allowed_permissions: Vec<String>,
     /// Recognised debug markers in the packaged app manifest.
     pub forbidden_manifest_markers: Vec<String>,
     /// Class names a release dex may never define.
@@ -273,6 +282,8 @@ pub struct PackagedFacts {
     pub abis: Vec<String>,
     /// Every entry name the archive contains.
     pub entries: Vec<String>,
+    /// Every permission the packaged app manifest requests.
+    pub permissions: Vec<String>,
     /// Recognised debug markers found in the packaged app manifest.
     pub manifest_markers: Vec<String>,
     /// Packaged entries whose bytes carry PEM trust material.
@@ -334,6 +345,7 @@ pub enum Invariant {
     ManifestMarkers,
     TrustMaterial,
     ReleaseClasses,
+    Permissions,
     TrustRoot,
 }
 
@@ -354,6 +366,7 @@ impl Invariant {
             Self::ManifestMarkers => "manifest_markers",
             Self::TrustMaterial => "trust_material",
             Self::ReleaseClasses => "release_classes",
+            Self::Permissions => "permissions",
             Self::TrustRoot => "trust_root",
         }
     }
@@ -555,6 +568,10 @@ pub enum Disagreement {
     },
     /// The artifact packages something the release surface does not allow.
     UnexpectedPackageEntry { variant: String, entry: String },
+    /// The packaged app manifest requests a permission nobody reviewed.
+    UnreviewedPermission { variant: String, permission: String },
+    /// The release claims a permission the packaged manifest never requests.
+    UnrequestedPermission { variant: String, permission: String },
     /// The packaged app manifest carries a debug-shaped marker.
     DebugManifestMarker { variant: String, marker: String },
     /// The artifact carries trust material.
@@ -759,6 +776,22 @@ impl fmt::Display for Disagreement {
                 "surface: {variant} packages {entry}, which the release surface \
                  does not allow"
             ),
+            Self::UnreviewedPermission {
+                variant,
+                permission,
+            } => write!(
+                formatter,
+                "permissions: {variant} requests {permission}, which the release \
+                 does not claim"
+            ),
+            Self::UnrequestedPermission {
+                variant,
+                permission,
+            } => write!(
+                formatter,
+                "permissions: the release claims {permission}, which {variant} \
+                 never requests"
+            ),
             Self::DebugManifestMarker { variant, marker } => write!(
                 formatter,
                 "trust: {variant} declares {marker}, which only a debug build may carry"
@@ -844,6 +877,7 @@ pub fn render_policy(
         policy.allowed_bundle_entries.join(","),
     );
     line("payload_sources", policy.payload_sources.join(","));
+    line("allowed_permissions", policy.allowed_permissions.join(","));
     line(
         "forbidden_manifest_markers",
         policy.forbidden_manifest_markers.join(","),
@@ -968,6 +1002,7 @@ fn check_policy_projection(
         ("allowed_package_entries", &policy.allowed_package_entries),
         ("allowed_bundle_entries", &policy.allowed_bundle_entries),
         ("payload_sources", &policy.payload_sources),
+        ("allowed_permissions", &policy.allowed_permissions),
         (
             "forbidden_manifest_markers",
             &policy.forbidden_manifest_markers,
@@ -1178,6 +1213,43 @@ fn check_artifact(
             });
         }
         Some(_) => {}
+    }
+
+    // Both directions, over what the artifact ACTUALLY requests: a permission
+    // the release does not claim fails, and a claim the artifact never exercises
+    // fails too, so this list cannot rot into a wish. Counted over the union, so
+    // an empty manifest and an empty claim are not both reported as "clean".
+    verdict.judged(
+        label,
+        Invariant::Permissions,
+        facts
+            .permissions
+            .len()
+            .max(policy.allowed_permissions.len()),
+    );
+    // `{application_id}` expands to THIS variant's own id, so a permission a
+    // library scopes to the package is claimed once and still judged exactly:
+    // `dev` may not carry `prod`'s spelling, which a `*` wildcard would allow.
+    let claimed: Vec<String> = policy
+        .allowed_permissions
+        .iter()
+        .map(|permission| permission.replace("{application_id}", &facts.application_id))
+        .collect();
+    for permission in &facts.permissions {
+        if !claimed.contains(permission) {
+            verdict.disagree(Disagreement::UnreviewedPermission {
+                variant: variant.clone(),
+                permission: permission.clone(),
+            });
+        }
+    }
+    for permission in &claimed {
+        if !facts.permissions.contains(permission) {
+            verdict.disagree(Disagreement::UnrequestedPermission {
+                variant: variant.clone(),
+                permission: permission.clone(),
+            });
+        }
     }
 
     // These two count the markers and classes the rule LOOKS for, not the ones
@@ -1457,6 +1529,7 @@ mod tests {
                 ],
                 allowed_bundle_entries: vec!["BundleConfig.pb".to_owned()],
                 payload_sources: vec!["Cargo.lock".to_owned()],
+                allowed_permissions: vec!["android.permission.INTERNET".to_owned()],
                 forbidden_manifest_markers: vec![":debuggable(".to_owned()],
                 forbidden_release_classes: vec!["E2eBridge".to_owned()],
                 distribution: Distribution::Internal,
@@ -1510,6 +1583,7 @@ mod tests {
                 "classes.dex".to_owned(),
                 "lib/arm64-v8a/libhost.so".to_owned(),
             ],
+            permissions: vec!["android.permission.INTERNET".to_owned()],
             manifest_markers: Vec::new(),
             trust_material: Vec::new(),
             build_manifest_sha256: Some("11".repeat(32)),

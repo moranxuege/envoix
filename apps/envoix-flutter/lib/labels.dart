@@ -13,6 +13,7 @@
 library;
 
 import 'attachment.dart';
+import 'bindings/envoix_capability.dart';
 import 'bindings/envoix_command.dart';
 import 'bindings/envoix_read.dart';
 import 'commands.dart';
@@ -349,3 +350,16 @@ String percentLabel(CardView view) {
   final double? progress = progressOf(view);
   return progress == null ? 'unknown' : '${(progress * 100).round()} percent';
 }
+
+/// Why a scan produced no text. Three answers, drawn as three: whether the user
+/// changed their mind, said no, or this device has nothing to scan with are
+/// different situations with different next steps, and one "scan failed" would
+/// have told a user none of them.
+String scanDeclinedLabel(DeclinedView reason) => switch (reason) {
+      DeclinedView.cancelled => 'Scan cancelled.',
+      DeclinedView.refused =>
+        'Envoix needs camera permission to scan. You can still paste the '
+            'invite.',
+      DeclinedView.unsupported =>
+        'This device has no camera to scan with. Paste the invite instead.',
+    };

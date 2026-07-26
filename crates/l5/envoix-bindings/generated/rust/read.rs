@@ -5,7 +5,7 @@ use serde_json::{Map, Value};
 
 use envoix_types::Secret;
 
-pub const READ_SCHEMA_ID: &str = "envoix/binding/read/5";
+pub const READ_SCHEMA_ID: &str = "envoix/binding/read/6";
 pub const READ_MAX_FRAME_BYTES: usize = 1048576;
 
 const U63_MAX: u64 = 9_223_372_036_854_775_807;
@@ -325,10 +325,17 @@ pub struct IdentityView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QrView {
+    pub width: u16,
+    pub modules: Secret<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InviteView {
     pub code: Secret<String>,
     pub code_fingerprint: String,
     pub link: Option<Secret<String>>,
+    pub qr: Option<QrView>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -463,6 +470,7 @@ pub struct ProtocolManifestView {
 pub struct AbiSchemaManifestView {
     pub read_binding_schema_id: String,
     pub command_binding_schema_id: String,
+    pub capability_binding_schema_id: String,
     pub evidence_rust_abi_id: String,
     pub evidence_timeline_schema_id: String,
     pub mailbox_receipt_schema_id: String,
@@ -1300,19 +1308,42 @@ fn encode_identity_view_value(value: &IdentityView) -> Result<Value, ReadError> 
     Ok(Value::Object(map))
 }
 
+fn decode_qr_view_value(value: &Value, context: &'static str) -> Result<QrView, ReadError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["width", "modules"], context)?;
+    let width = integer_u16(field(map, "width", "QrView.width")?, "QrView.width")?;
+    let modules = Secret::new(hex_variable(field(map, "modules", "QrView.modules")?, 7834, "QrView.modules")?);
+    Ok(QrView {
+        width,
+        modules,
+    })
+}
+
+fn encode_qr_view_value(value: &QrView) -> Result<Value, ReadError> {
+    let mut map = Map::new();
+    map.insert("width".to_owned(), Value::from(value.width));
+    map.insert("modules".to_owned(), encode_hex_variable(value.modules.expose(), 7834, "QrView.modules")?);
+    Ok(Value::Object(map))
+}
+
 fn decode_invite_view_value(value: &Value, context: &'static str) -> Result<InviteView, ReadError> {
     let map = frame_object(value, context)?;
-    known_keys(map, &["code", "code_fingerprint", "link"], context)?;
+    known_keys(map, &["code", "code_fingerprint", "link", "qr"], context)?;
     let code = Secret::new(utf8_bounded(field(map, "code", "InviteView.code")?, 64, "InviteView.code")?);
     let code_fingerprint = hex_fixed(field(map, "code_fingerprint", "InviteView.code_fingerprint")?, 16, "InviteView.code_fingerprint")?;
     let link = match field(map, "link", "InviteView.link")? {
         Value::Null => None,
         present => Some(Secret::new(utf8_bounded(present, 5481, "InviteView.link")?)),
     };
+    let qr = match field(map, "qr", "InviteView.qr")? {
+        Value::Null => None,
+        present => Some(decode_qr_view_value(present, "InviteView.qr")?),
+    };
     Ok(InviteView {
         code,
         code_fingerprint,
         link,
+        qr,
     })
 }
 
@@ -1325,6 +1356,13 @@ fn encode_invite_view_value(value: &InviteView) -> Result<Value, ReadError> {
         match &value.link {
             None => Value::Null,
             Some(inner) => encode_utf8_bounded(inner.expose(), 5481, "InviteView.link")?,
+        },
+    );
+    map.insert(
+        "qr".to_owned(),
+        match &value.qr {
+            None => Value::Null,
+            Some(inner) => encode_qr_view_value(inner)?,
         },
     );
     Ok(Value::Object(map))
@@ -1814,9 +1852,10 @@ fn encode_protocol_manifest_view_value(value: &ProtocolManifestView) -> Result<V
 
 fn decode_abi_schema_manifest_view_value(value: &Value, context: &'static str) -> Result<AbiSchemaManifestView, ReadError> {
     let map = frame_object(value, context)?;
-    known_keys(map, &["read_binding_schema_id", "command_binding_schema_id", "evidence_rust_abi_id", "evidence_timeline_schema_id", "mailbox_receipt_schema_id", "operation_envelope_schema_id"], context)?;
+    known_keys(map, &["read_binding_schema_id", "command_binding_schema_id", "capability_binding_schema_id", "evidence_rust_abi_id", "evidence_timeline_schema_id", "mailbox_receipt_schema_id", "operation_envelope_schema_id"], context)?;
     let read_binding_schema_id = ascii_bounded(field(map, "read_binding_schema_id", "AbiSchemaManifestView.read_binding_schema_id")?, 64, "AbiSchemaManifestView.read_binding_schema_id")?;
     let command_binding_schema_id = ascii_bounded(field(map, "command_binding_schema_id", "AbiSchemaManifestView.command_binding_schema_id")?, 64, "AbiSchemaManifestView.command_binding_schema_id")?;
+    let capability_binding_schema_id = ascii_bounded(field(map, "capability_binding_schema_id", "AbiSchemaManifestView.capability_binding_schema_id")?, 64, "AbiSchemaManifestView.capability_binding_schema_id")?;
     let evidence_rust_abi_id = ascii_bounded(field(map, "evidence_rust_abi_id", "AbiSchemaManifestView.evidence_rust_abi_id")?, 64, "AbiSchemaManifestView.evidence_rust_abi_id")?;
     let evidence_timeline_schema_id = ascii_bounded(field(map, "evidence_timeline_schema_id", "AbiSchemaManifestView.evidence_timeline_schema_id")?, 64, "AbiSchemaManifestView.evidence_timeline_schema_id")?;
     let mailbox_receipt_schema_id = ascii_bounded(field(map, "mailbox_receipt_schema_id", "AbiSchemaManifestView.mailbox_receipt_schema_id")?, 64, "AbiSchemaManifestView.mailbox_receipt_schema_id")?;
@@ -1824,6 +1863,7 @@ fn decode_abi_schema_manifest_view_value(value: &Value, context: &'static str) -
     Ok(AbiSchemaManifestView {
         read_binding_schema_id,
         command_binding_schema_id,
+        capability_binding_schema_id,
         evidence_rust_abi_id,
         evidence_timeline_schema_id,
         mailbox_receipt_schema_id,
@@ -1835,6 +1875,7 @@ fn encode_abi_schema_manifest_view_value(value: &AbiSchemaManifestView) -> Resul
     let mut map = Map::new();
     map.insert("read_binding_schema_id".to_owned(), encode_ascii_bounded(&value.read_binding_schema_id, 64, "AbiSchemaManifestView.read_binding_schema_id")?);
     map.insert("command_binding_schema_id".to_owned(), encode_ascii_bounded(&value.command_binding_schema_id, 64, "AbiSchemaManifestView.command_binding_schema_id")?);
+    map.insert("capability_binding_schema_id".to_owned(), encode_ascii_bounded(&value.capability_binding_schema_id, 64, "AbiSchemaManifestView.capability_binding_schema_id")?);
     map.insert("evidence_rust_abi_id".to_owned(), encode_ascii_bounded(&value.evidence_rust_abi_id, 64, "AbiSchemaManifestView.evidence_rust_abi_id")?);
     map.insert("evidence_timeline_schema_id".to_owned(), encode_ascii_bounded(&value.evidence_timeline_schema_id, 64, "AbiSchemaManifestView.evidence_timeline_schema_id")?);
     map.insert("mailbox_receipt_schema_id".to_owned(), encode_ascii_bounded(&value.mailbox_receipt_schema_id, 64, "AbiSchemaManifestView.mailbox_receipt_schema_id")?);

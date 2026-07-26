@@ -18,7 +18,9 @@ pub use commit::{
 // The invite grammar's own published maxima, re-exported beside the channel
 // that carries them: an observer sizes its contract from the layer that owns
 // invites (`XI02`) instead of restating a number about somebody else's data.
-pub use envoix_invite::{MAX_INVITE_INPUT_LENGTH, MAX_INVITE_LINK_LENGTH, MAX_ROOM_CODE_LENGTH};
+pub use envoix_invite::{
+    MAX_INVITE_INPUT_LENGTH, MAX_INVITE_LINK_LENGTH, MAX_ROOM_CODE_LENGTH, QrMatrix,
+};
 pub use identity::{IdentityError, IdentitySource, ProductIdentity, SystemIdentitySource};
 pub use model::{
     AppliedCommand, CapabilityAction, CommandLedger, Facts, LedgerHit, NewTransfer, PauseOrigin,

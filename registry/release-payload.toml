@@ -7,38 +7,38 @@
 # cargo.
 
 [payload]
-build_manifest_sha256 = "2271262be936235346d76d4b47b9c4d52dabdaef8ba980c1a425194458cec91f"
-sources_sha256 = "f4b624db72f5d9707c6db205b69513664cbca9b2ae75cf22cf173e1975f31884"
+build_manifest_sha256 = "6bc7e0ee49913932b1335a6446df28ba150b75228bf146b8311a245c99e665db"
+sources_sha256 = "fad01c29b76c55d2d78f30a88e8eaa375b92f62828eee0d84a5e15bd2d86bdb6"
 
 [[payload.library]]
 build_type = "debug"
 abi = "arm64-v8a"
-sha256 = "bbef963415edc2de535136e588f09fbdfd5cf8d238bd12b538e584e9a5c08836"
+sha256 = "f445a2a04bdcc1d1f98672990a6be9c534358e2442b9db5780d8c07827ca9427"
 
 [[payload.library]]
 build_type = "debug"
 abi = "x86_64"
-sha256 = "b47b011559850d98b1797d3f5748bdfc96a55bf928cb1bd2dd5342b2b037c63b"
+sha256 = "901fa308e911d6044707a229f0cbe51ac018fb6ff46d390b4159ec6e121c9f55"
 
 [[payload.library]]
 build_type = "release"
 abi = "arm64-v8a"
-sha256 = "f176c0fa8303e497014c83ea11080fbde630c0d25e3e6536dfb5b1eedddf6972"
+sha256 = "4b7302c2f2a6ef29c37e0a0c087fa4aac109b59a4bd33e70629241dc4b94e064"
 
 [[payload.library]]
 build_type = "release"
 abi = "x86_64"
-sha256 = "4a9338d9e2ebec147293c3af8fc600951d3d7e40431d4b5cd3672bb460c1549d"
+sha256 = "4618a991a9038c3e13401e2f7aa1ee48337dbb20a19377a1339321db98ef1899"
 
 [[payload.bundled]]
 soname = "libapp.so"
 abi = "arm64-v8a"
-sha256 = "8ac829dea94e8420a23669369747fa17255862c84276af1c4af49153a65f08cb"
+sha256 = "4fd9c22eb32dffa25c1c00704f372acc4d18cd7857cd5db29c5b325dd0ccd88b"
 
 [[payload.bundled]]
 soname = "libapp.so"
 abi = "x86_64"
-sha256 = "3ebed32c8806294e96b32d2d545423a52fb3da471a283b6ddc1a2927f20f6bac"
+sha256 = "c2aa353c25d5df005df1f81fbdcd9c5724e1e8462bbd1a1c421c387153e42cbd"
 
 [[payload.bundled]]
 soname = "libflutter.so"
@@ -49,3 +49,13 @@ sha256 = "ac977ad375350cf07a9cb88b60530f2e035423eb22932af48c60426d5010ac20"
 soname = "libflutter.so"
 abi = "x86_64"
 sha256 = "f8de979f11c4d2c4d4d3a54b5cfdb793273c280e1a3b12592774bacce7dae56b"
+
+[[payload.bundled]]
+soname = "libimage_processing_util_jni.so"
+abi = "arm64-v8a"
+sha256 = "2ead62ff358ae3a9e9cb5b0278a1d5132a7b410288bc74add8f6356d668fdc39"
+
+[[payload.bundled]]
+soname = "libimage_processing_util_jni.so"
+abi = "x86_64"
+sha256 = "f4af5a0c8c69e863254e1d1c89f5df469c94551cf077c873d3a1c83b50da66f6"

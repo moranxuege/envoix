@@ -16,8 +16,10 @@ import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:envoix/attachment.dart';
+import 'package:envoix/bindings/envoix_capability.dart';
 import 'package:envoix/bindings/envoix_command.dart';
 import 'package:envoix/bindings/envoix_read.dart';
+import 'package:envoix/capability.dart';
 import 'package:envoix/commands.dart';
 import 'package:envoix/home.dart';
 import 'package:envoix/instrumentation.dart';
@@ -25,6 +27,7 @@ import 'package:envoix/labels.dart';
 import 'package:envoix/lane.dart';
 import 'package:envoix/logs.dart';
 import 'package:envoix/main.dart';
+import 'package:envoix/qr.dart';
 import 'package:flutter/foundation.dart' show DebugPrintCallback, debugPrint;
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
@@ -1228,6 +1231,7 @@ void main() {
                 abiSchema: AbiSchemaManifestView(
                   readBindingSchemaId: 'envoix/binding/read/2',
                   commandBindingSchemaId: 'envoix/binding/command/1',
+                  capabilityBindingSchemaId: 'envoix/binding/capability/1',
                   evidenceRustAbiId: 'evidence/abi/1',
                   evidenceTimelineSchemaId: 'evidence/timeline/1',
                   mailboxReceiptSchemaId: 'receipt/1',
@@ -2090,6 +2094,7 @@ void main() {
           code: secret,
           codeFingerprint: fingerprint,
           link: null,
+          qr: null,
         ),
       );
 
@@ -2101,11 +2106,13 @@ void main() {
       WidgetTester tester,
       RecordingCreateSink sink, {
       SourcePicker picker = _noPick,
+      CapabilityAsk ask = _noScanner,
     }) async {
       await tester.pumpWidget(EnvoixApp(
         lane: () => const Stream<List<int>>.empty(),
         commands: sink.call,
         picker: picker,
+        ask: ask,
       ));
       await tester.pumpAndSettle();
       await tester.tap(find.text('New transfer'));
@@ -2364,12 +2371,181 @@ void main() {
               code: const ReadSecretString('000123-amber-brass'),
               codeFingerprint: '0123456789abcdef',
               link: ReadSecretString(invite),
+              qr: null,
             ),
           )),
         ));
       await pumpHome(tester, attachment);
       expect(find.text('000123-amber-brass'), findsOneWidget);
       expect(find.widgetWithText(TextButton, 'Copy invite'), findsOneWidget);
+    });
+
+
+    testWidgets('a published square is drawn, not described',
+        (WidgetTester tester) async {
+      // A 3x3 checker: 9 bits, packed MSB-first into 2 bytes.
+      final Attachment attachment = Attachment()
+        ..admit(update(
+          1,
+          CardUpdateKindViewSnapshot(cardView(
+            invite: const InviteView(
+              code: ReadSecretString('000123-amber-brass'),
+              codeFingerprint: '0123456789abcdef',
+              link: ReadSecretString(invite),
+              qr: QrView(width: 3, modules: ReadSecretString('aa80')),
+            ),
+          )),
+        ));
+      await pumpHome(tester, attachment);
+      expect(find.byType(InviteQr), findsOneWidget);
+      expect(find.byType(CustomPaint), findsWidgets);
+      expect(
+        find.text('Too long to show as a code — share the link instead.'),
+        findsNothing,
+      );
+    });
+
+    testWidgets('an invite past the QR frontier draws an answer, never a blank',
+        (WidgetTester tester) async {
+      // The frontier is real: this grammar reaches 5481 bytes and QR stops
+      // around 2.3 kB, so a card CAN hold a link with no square. The absence
+      // must be words a user can act on.
+      final Attachment attachment = Attachment()
+        ..admit(update(
+          1,
+          CardUpdateKindViewSnapshot(cardView(
+            invite: const InviteView(
+              code: ReadSecretString('000123-amber-brass'),
+              codeFingerprint: '0123456789abcdef',
+              link: ReadSecretString(invite),
+              qr: null,
+            ),
+          )),
+        ));
+      await pumpHome(tester, attachment);
+      expect(
+        find.text('Too long to show as a code — share the link instead.'),
+        findsOneWidget,
+      );
+      // And the link is still offered: the fallback the message names exists.
+      expect(find.widgetWithText(TextButton, 'Copy invite'), findsOneWidget);
+    });
+
+    testWidgets('a QR whose modules do not fill its width is refused, not drawn',
+        (WidgetTester tester) async {
+      final Attachment attachment = Attachment()
+        ..admit(update(
+          1,
+          CardUpdateKindViewSnapshot(cardView(
+            invite: const InviteView(
+              code: ReadSecretString('000123-amber-brass'),
+              codeFingerprint: '0123456789abcdef',
+              link: ReadSecretString(invite),
+              // 3x3 needs 9 bits = 2 bytes = 4 hex characters; this is 2.
+              qr: QrView(width: 3, modules: ReadSecretString('aa')),
+            ),
+          )),
+        ));
+      await pumpHome(tester, attachment);
+      expect(
+        find.text('This code did not arrive whole — share the link instead.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a scanned invite fills the SAME field a paste fills',
+        (WidgetTester tester) async {
+      final RecordingCreateSink sink = RecordingCreateSink(
+        (CreateView create) => createdOf(create.requestId, other),
+      );
+      await openSheet(
+        tester,
+        sink,
+        ask: (CapabilityRequestView capability) async {
+          expect(capability, CapabilityRequestView.scanInvite);
+          return const CapabilityProvided(invite);
+        },
+      );
+      await tester.tap(find.widgetWithText(OutlinedButton, 'Scan a code'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Join'));
+      await tester.pumpAndSettle();
+
+      // The scan produced a JOIN on the ordinary create path, carrying the text
+      // verbatim. A scanner that had its own creation route would show up here
+      // as a different intent — or as none at all.
+      expect(sink.requested, hasLength(1));
+      final CreateView create = sink.requested.single;
+      final CreateIntentView intent = create.intent;
+      expect(intent, isA<CreateIntentViewJoin>());
+      expect(
+        (intent as CreateIntentViewJoin).value.invite.expose(),
+        invite,
+      );
+    });
+
+    // Cancelling, refusing and having no camera are three ANSWERS. One test
+    // per answer, and the set below is asserted distinct: a single "scan
+    // failed" would tell a user which of three situations they are in — none.
+    const Map<DeclinedView, String> declineAnswers = <DeclinedView, String>{
+      DeclinedView.cancelled: 'Scan cancelled.',
+      DeclinedView.refused:
+          'Envoix needs camera permission to scan. You can still paste the '
+              'invite.',
+      DeclinedView.unsupported:
+          'This device has no camera to scan with. Paste the invite instead.',
+    };
+
+    test('the capability seam rides the catalogued channel', () {
+      // capability.dart states the whole seam locally so it reads on its own;
+      // this is what stops the two spellings from drifting apart.
+      expect(commandChannelName, commandChannel);
+    });
+
+    test('every decline reads as itself', () {
+      expect(declineAnswers.values.toSet(), hasLength(3));
+      for (final DeclinedView reason in DeclinedView.values) {
+        expect(declineAnswers.containsKey(reason), isTrue,
+            reason: '$reason has no words');
+        expect(scanDeclinedLabel(reason), declineAnswers[reason]);
+      }
+    });
+
+    for (final MapEntry<DeclinedView, String> answer
+        in declineAnswers.entries) {
+      testWidgets('a scan declined as ${answer.key.name} says so',
+          (WidgetTester tester) async {
+        final RecordingCreateSink sink =
+            RecordingCreateSink((CreateView create) => null);
+        await openSheet(
+          tester,
+          sink,
+          ask: (CapabilityRequestView capability) async =>
+              CapabilityDeclined(answer.key),
+        );
+        await tester.tap(find.widgetWithText(OutlinedButton, 'Scan a code'));
+        await tester.pumpAndSettle();
+        expect(find.text(answer.value), findsOneWidget);
+        // Nothing was created: a decline is an answer about the scanner, never
+        // about the transfer.
+        expect(sink.requested, isEmpty);
+      });
+    }
+
+    testWidgets('a platform with no scanner withdraws the offer',
+        (WidgetTester tester) async {
+      final RecordingCreateSink sink =
+          RecordingCreateSink((CreateView create) => null);
+      // The desktop/CLI answer. Declining is first-class: the button is offered
+      // until the platform says it cannot, then withdrawn rather than left to
+      // fail again.
+      await openSheet(tester, sink, ask: _noScanner);
+      expect(find.widgetWithText(OutlinedButton, 'Scan a code'), findsOneWidget);
+      await tester.tap(find.widgetWithText(OutlinedButton, 'Scan a code'));
+      await tester.pumpAndSettle();
+      expect(find.widgetWithText(OutlinedButton, 'Scan a code'), findsNothing);
+      // Paste still works, which is the whole point of declining well.
+      expect(find.widgetWithText(FilledButton, 'Join'), findsOneWidget);
     });
 
     testWidgets('a channel that no longer spells an invite still shows its code',
@@ -2382,6 +2558,7 @@ void main() {
               code: const ReadSecretString('000999-cedar-onyx'),
               codeFingerprint: 'fedcba9876543210',
               link: null,
+              qr: null,
             ),
           )),
         ));
@@ -2399,6 +2576,11 @@ void main() {
 /// A picker the user never used. The sheet must still build and still refuse to
 /// send, because nothing has been granted.
 Future<PickedSource?> _noPick() async => null;
+
+/// A platform with no scanner adapter — the desktop/CLI case. It answers, and
+/// what it answers is a first-class part of the contract.
+Future<CapabilityAnswer> _noScanner(CapabilityRequestView capability) async =>
+    const CapabilityDeclined(DeclinedView.unsupported);
 
 /// The 13 shapes a `DispositionView` can take (11 variants, 3 pause causes).
 const List<DispositionView> dispositions = <DispositionView>[

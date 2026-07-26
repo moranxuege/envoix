@@ -2,6 +2,7 @@
 
 use std::num::NonZeroUsize;
 
+use envoix_bindings::capability::CAPABILITY_SCHEMA_ID;
 use envoix_bindings::command::COMMAND_SCHEMA_ID;
 use envoix_bindings::read::{
     AbiSchemaManifestView, CapabilityActionView, CardUpdateKindView, CardView, DirectionView,
@@ -84,6 +85,10 @@ fn generated_artifacts_match_schema() {
         "generated/dart/envoix_command.dart",
         "generated/kotlin/EnvoixCommand.kt",
         "generated/swift/EnvoixCommand.swift",
+        "generated/rust/capability.rs",
+        "generated/dart/envoix_capability.dart",
+        "generated/kotlin/EnvoixCapability.kt",
+        "generated/swift/EnvoixCapability.swift",
     ];
     let mut expected: Vec<String> = artifacts(&doc)
         .iter()
@@ -93,7 +98,7 @@ fn generated_artifacts_match_schema() {
     expected.sort();
     assert_eq!(
         on_disk, expected,
-        "generated/ must contain exactly the read + command artifacts"
+        "generated/ must contain exactly the read, command and capability artifacts"
     );
 }
 
@@ -478,7 +483,7 @@ fn generated_read_schema_roundtrip_and_containment() {
 
     // Unknown or missing schema versions fail explicitly.
     let future = tamper(&base, |value| {
-        value["schema"] = serde_json::json!("envoix/binding/read/6");
+        value["schema"] = serde_json::json!("envoix/binding/read/7");
     });
     assert_eq!(decode_read_frame(&future), Err(ReadError::UnknownSchema));
     let missing = tamper(&base, |value| {
@@ -683,7 +688,7 @@ fn generated_read_schema_roundtrip_and_containment() {
         /// Text this contract mints, so the bound is this contract's call.
         ContractLocal,
     }
-    let classified: [(&str, &str, TextBound); 13] = [
+    let classified: [(&str, &str, TextBound); 14] = [
         (
             "OutcomeView",
             "display",
@@ -713,6 +718,11 @@ fn generated_read_schema_roundtrip_and_containment() {
         (
             "AbiSchemaManifestView",
             "command_binding_schema_id",
+            TextBound::ContractLocal,
+        ),
+        (
+            "AbiSchemaManifestView",
+            "capability_binding_schema_id",
             TextBound::ContractLocal,
         ),
         (
@@ -1138,8 +1148,8 @@ fn the_read_contract_publishes_every_command_a_frontend_can_send() {
 }
 
 /// Manifest coherence: the projected manifest names EVERY identity this build
-/// speaks — the four L4 ids plus both generated binding contracts — and none of
-/// them crosses empty. The view is destructured, so an identity added to the
+/// speaks — the four L4 ids plus all three generated binding contracts — and
+/// none of them crosses empty. The view is destructured, so an identity added to the
 /// contract fails to compile here until it is accounted for; `project.rs`
 /// destructures the L4 manifest for the same reason in the other direction.
 #[test]
@@ -1151,6 +1161,7 @@ fn projected_manifest_names_every_identity() {
     let AbiSchemaManifestView {
         read_binding_schema_id,
         command_binding_schema_id,
+        capability_binding_schema_id,
         evidence_rust_abi_id,
         evidence_timeline_schema_id,
         mailbox_receipt_schema_id,
@@ -1167,6 +1178,11 @@ fn projected_manifest_names_every_identity() {
             "command_binding_schema_id",
             command_binding_schema_id,
             COMMAND_SCHEMA_ID,
+        ),
+        (
+            "capability_binding_schema_id",
+            capability_binding_schema_id,
+            CAPABILITY_SCHEMA_ID,
         ),
         (
             "evidence_rust_abi_id",

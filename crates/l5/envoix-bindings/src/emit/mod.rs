@@ -319,6 +319,7 @@ pub(crate) struct HelperUse {
     pub integer: bool,
     pub u16: bool,
     pub u32: bool,
+    pub u63: bool,
     pub hex_fixed: bool,
     pub hex_variable: bool,
     pub utf8: bool,
@@ -432,7 +433,10 @@ fn visit_ty(ty: &FieldTy, used: &mut HelperUse) {
             used.integer = true;
             used.u32 = true;
         }
-        FieldTy::U63 => used.integer = true,
+        FieldTy::U63 => {
+            used.integer = true;
+            used.u63 = true;
+        }
         FieldTy::Hex16 | FieldTy::Hex32 | FieldTy::Hex64 => used.hex_fixed = true,
         FieldTy::HexVar { .. } => used.hex_variable = true,
         FieldTy::Str { .. } => used.utf8 = true,

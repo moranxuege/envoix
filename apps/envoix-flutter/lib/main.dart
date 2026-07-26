@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'attachment.dart';
+import 'capability.dart';
 import 'create.dart';
 import 'home.dart';
 import 'instrumentation.dart';
@@ -17,18 +18,28 @@ class EnvoixApp extends StatelessWidget {
     this.lane = platformLane,
     this.commands = platformCommands,
     this.picker = platformPickSource,
+    this.ask = platformCapability,
   });
 
   final LaneSource lane;
   final CommandSink commands;
   final SourcePicker picker;
 
+  /// How this app asks the platform for a capability. Injectable so a test
+  /// drives every answer without a camera.
+  final CapabilityAsk ask;
+
   @override
   Widget build(BuildContext context) => MaterialApp(
         title: 'Envoix',
         theme: envoixTheme(Brightness.light),
         darkTheme: envoixTheme(Brightness.dark),
-        home: Shell(lane: lane, commands: commands, picker: picker),
+        home: Shell(
+          lane: lane,
+          commands: commands,
+          picker: picker,
+          ask: ask,
+        ),
       );
 }
 
@@ -60,12 +71,14 @@ class Shell extends StatefulWidget {
     required this.lane,
     required this.commands,
     required this.picker,
+    required this.ask,
     super.key,
   });
 
   final LaneSource lane;
   final CommandSink commands;
   final SourcePicker picker;
+  final CapabilityAsk ask;
 
   @override
   State<Shell> createState() => _ShellState();
@@ -101,6 +114,7 @@ class _ShellState extends State<Shell> {
       builder: (BuildContext context) => NewTransferSheet(
         creator: _lane.creator,
         picker: widget.picker,
+        ask: widget.ask,
       ),
     );
   }

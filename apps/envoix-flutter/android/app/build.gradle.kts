@@ -18,6 +18,20 @@ flutter {
     source = "../.."
 }
 
+/**
+ * ktlint judges the Kotlin PEOPLE write. `com/envoix/bindings` is a link to a
+ * generated artifact whose formatting is the emitter's, and whose real gate is
+ * far stronger than a style rule: `generated_artifacts_match_capability_schema`
+ * fails on a single byte of difference from what the schema emits. Reformatting
+ * it is not possible (the drift gate would reject the result) and teaching the
+ * emitter one linter's preferences would be a formatter shaping a contract.
+ */
+ktlint {
+    filter {
+        exclude { it.file.absolutePath.contains("/com/envoix/bindings/") }
+    }
+}
+
 /** The repository root; this project lives at apps/envoix-flutter/android/app. */
 val repositoryRoot: File = rootProject.projectDir.parentFile.parentFile.parentFile
 
@@ -81,6 +95,10 @@ val allowedBundleEntries = policyList("allowed_bundle_entries")
  */
 val payloadSources = policyList("payload_sources")
 val recordedPayloadSources = policy("payload_sources_sha256")
+val allowedPermissions = policyList("allowed_permissions").toSet()
+
+/** Every ABI Android defines. The policy names which of them a release ships. */
+val ANDROID_ABIS = setOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
 val forbiddenManifestMarkers = policyList("forbidden_manifest_markers")
 val forbiddenReleaseClasses = policyList("forbidden_release_classes")
 
@@ -186,6 +204,20 @@ android {
     }
     kotlinOptions {
         jvmTarget = "17"
+    }
+
+    // `ndk.abiFilters` governs what this project BUILDS. It does not govern
+    // what a dependency's AAR already contains: CameraX ships
+    // `libimage_processing_util_jni.so` for four ABIs, and armeabi-v7a and x86
+    // reached the archive past that filter. The release claims exactly two
+    // ABIs, so the packager drops every other one — derived by subtracting the
+    // policy's list from the ABIs Android defines, never by naming two here.
+    packaging {
+        jniLibs {
+            for (abi in ANDROID_ABIS - requiredAbis.toSet()) {
+                excludes += "lib/$abi/**"
+            }
+        }
     }
 
     sourceSets {
@@ -723,6 +755,14 @@ fun verifyReleaseArtifact(
     val versionName = manifestAttribute("versionName", "\"([^\"]*)\"")
     val applicationId = manifestAttribute("package", "\"([^\"]*)\"")
     val manifestMarkers = forbiddenManifestMarkers.filter(manifest::contains)
+    // Every permission the PACKAGED manifest requests, read from the same
+    // aapt2 dump the markers are: the source manifest is not the artifact, and
+    // a merged dependency manifest can add a permission nobody wrote here.
+    val permissions =
+        Regex("uses-permission[\\s\\S]*?android:name(?:\\(0x[0-9a-f]+\\))?=\"([^\"]+)\"")
+            .findAll(manifest)
+            .map { it.groupValues[1] }
+            .toSortedSet()
     val signers = packagedSigners(artifact, kind)
 
     val artifactPath = repositoryRoot.toURI().relativize(artifact.toURI()).path
@@ -742,6 +782,7 @@ fun verifyReleaseArtifact(
             appendLine("signers = [${signers.joinToString { "\"$it\"" }}]")
             appendLine("abis = [${abis.joinToString { "\"$it\"" }}]")
             appendLine("entries = [${entries.sorted().joinToString { "\"$it\"" }}]")
+            appendLine("permissions = [${permissions.joinToString { "\"$it\"" }}]")
             appendLine("manifest_markers = [${manifestMarkers.joinToString { "\"$it\"" }}]")
             appendLine("trust_material = [${trustMaterial.joinToString { "\"$it\"" }}]")
             appendLine(
@@ -866,6 +907,16 @@ fun verifyReleaseArtifact(
             failures +=
                 "$variant ships build manifest $shippedManifest, but this build compiles $compiledBuildManifest"
     }
+    // Both directions, exactly as the independent gate judges them: an
+    // unreviewed permission fails, and so does a claim the artifact never makes.
+    val claimedPermissions =
+        allowedPermissions.map { it.replace("{application_id}", applicationId) }.toSet()
+    for (permission in permissions - claimedPermissions) {
+        failures += "$variant requests $permission, which the release does not claim"
+    }
+    for (permission in claimedPermissions - permissions) {
+        failures += "$variant never requests $permission, which the release claims"
+    }
     for (marker in manifestMarkers) {
         failures += "$variant declares $marker, which only a debug build may carry"
     }
@@ -945,4 +996,19 @@ androidComponents.onVariants { variant ->
 dependencies {
     // FileProvider only; the host app has no UI (F1/F2 add frontends).
     implementation("androidx.core:core:1.13.1")
+
+    // The `scan_invite` capability's Android currency, and it is Android's
+    // alone: CameraX for frames, ZXing to decode one. Nothing here appears in
+    // the shared capability contract, which is why an Apple adapter pays in
+    // AVFoundation instead and a desktop one pays nothing at all.
+    //
+    // `camera-view` brings `PreviewView`; `camera-lifecycle` brings the
+    // `LifecycleOwner` binding that `ScanActivity` supplies from a plain
+    // `LifecycleRegistry`, which is what keeps androidx `appcompat` and
+    // `activity` off this list.
+    implementation("androidx.camera:camera-core:1.3.4")
+    implementation("androidx.camera:camera-camera2:1.3.4")
+    implementation("androidx.camera:camera-lifecycle:1.3.4")
+    implementation("androidx.camera:camera-view:1.3.4")
+    implementation("com.google.zxing:core:3.5.3")
 }

@@ -1,0 +1,147 @@
+# envoix generated capability contract — the single source every generated
+# capability binding (Rust/Dart/Kotlin/Swift) derives from. The identifier
+# catalog extracts the schema id from the `id` key; regenerate artifacts with
+# `ENVOIX_BINDINGS_REGEN=1 cargo test -p envoix-bindings generated_artifacts`.
+#
+# WHAT THIS IS, and why it is a third contract rather than a duty kind.
+#
+# A `Duty` (`envoix-capabilities`, L1) is card-scoped by construction: its
+# provenance names the card, the attempt generation and the request it belongs
+# to, and `DutyLedger::register` refuses one whose card has no current
+# generation. That is the right shape for work a card asks the platform to do,
+# and it is why the source handle, the publication and the courier are duties.
+#
+# It is the wrong shape for work a frontend asks the platform to do BEFORE a
+# card exists. Scanning an invite is exactly that: the text a camera reads is
+# what a card would be created FROM, so there is no card to name, no generation
+# to stamp, and no ledger entry a report could discharge. A `DutyKind::Scan`
+# could be built only by inventing a provenance, and the invented one would be
+# rejected by the ledger it was invented to satisfy. A `WorkReport` could not
+# carry the answer either: it is `{provenance, OutcomeCode}`, and `OutcomeCode`
+# is L0's TRANSFER vocabulary — "the user denied the camera" is not a transfer
+# outcome, and teaching L0 that it is would push a platform concept to the
+# bottom of the stack.
+#
+# So this contract carries what a duty cannot: a card-less exchange whose
+# answer has a payload.
+#
+# WHO SPEAKS IT. A frontend and its own platform adapter — Dart and Kotlin
+# today, SwiftUI and AVFoundation tomorrow. The Rust authority is deliberately
+# NOT a peer here: it decodes `command.schema`, a capability frame never
+# reaches it, and the text a scan produces re-enters the core through the SAME
+# `create(join)` intent the paste field fills. Scanning therefore adds no core
+# surface at all — the invite grammar judges a scanned string exactly as it
+# judges a pasted one.
+#
+# WHY THE BODY IS A ONE-ARM UNION. This generator models two roles, a Rust host
+# that always encodes and a native frontend that encodes only the single union
+# arm marked `originator`. This contract's two peers are BOTH native, and each
+# must encode: the frontend asks, the adapter answers. One marked arm whose
+# payload reaches every declaration is how that is spelled without changing the
+# generator — so the arm is the exchange itself, and the step within it says
+# which half is being spoken. The alternative, marking one of `requested` /
+# `provided` / `declined`, would hand an encoder to one peer and leave the other
+# unable to reply.
+#
+# CONTAINMENT. The scalar vocabulary and grammar are identical to
+# schema/read.schema: no bytes/blob type and no handle/path/URI type. A camera
+# frame, an image, a device identifier or a file handle cannot be spelled here,
+# which is what keeps a platform's implementation out of the contract that
+# names its capability.
+
+id = "envoix/binding/capability/1"
+root = "CapabilityFrame"
+direction = "bidirectional"
+
+[limits]
+# A scanned invite is the largest thing that crosses, and its own bound below
+# is what limits it; this envelope only refuses the absurd.
+max_frame_bytes = 65536
+
+# The capabilities a frontend may ask its platform adapter for.
+#
+# One variant, because one is what exists. The document picker is this
+# contract's sibling in fact but not yet in code: it still crosses as an ad-hoc
+# method name and an untyped map. Moving it here is a wiring change rather than
+# a contract argument, but it is a change nobody has made, so it is not
+# pre-declared.
+[[decl]]
+kind = "enum"
+name = "CapabilityRequestView"
+variants = ["scan_invite"]
+
+[[decl]]
+kind = "struct"
+name = "ScannedTextView"
+fields = [
+  # OPAQUE text, exactly as the scanner read it. The adapter does not parse it,
+  # does not validate it and does not decide the local role: it goes verbatim
+  # into the SAME create-join intent the paste field fills, and the invite
+  # grammar in Rust does all three (`XI02`). A scanner that understood invites
+  # would be a second, weaker copy of that grammar on every platform.
+  #
+  # The bound is `JoinInviteView.invite`'s, so text a scanner can read is text
+  # the join intent can carry, and an over-long scan is refused BY the authority
+  # rather than by whichever encoder happened to see it first.
+  #
+  # Secret for the reason the published link is: an invite read off a screen is
+  # the pairing password, and a QR is not secrecy.
+  { name = "text", type = "str(16384)", secret = true },
+]
+
+# Why a capability was not exercised. These are three ANSWERS, not three
+# failures, and a frontend must be able to tell them apart: the user changed
+# their mind, the user said no, or this platform has nothing to say yes with.
+#
+# `unsupported` is the variant that makes this contract portable. A desktop or
+# CLI adapter answers it unconditionally — no camera, no permission model, no
+# dependency — and the frontend falls back to the paste field it already has.
+# Declining costs such an adapter one match arm; it is a first-class answer
+# rather than an error it has to fabricate.
+[[decl]]
+kind = "enum"
+name = "DeclinedView"
+variants = ["cancelled", "refused", "unsupported"]
+
+[[decl]]
+kind = "struct"
+name = "DeclinedReasonView"
+fields = [{ name = "reason", type = "DeclinedView" }]
+
+# One half of one exchange. `requested` is the frontend speaking; the other two
+# are the adapter answering, and they are exhaustive over what can happen: the
+# capability produced text, or it did not and said why.
+[[decl]]
+kind = "union"
+name = "CapabilityStepView"
+variants = [
+  { name = "requested" },
+  { name = "provided", payload = "ScannedTextView" },
+  { name = "declined", payload = "DeclinedReasonView" },
+]
+
+[[decl]]
+kind = "struct"
+name = "CapabilityExchangeView"
+fields = [
+  # Which capability is being spoken about. Carried on BOTH halves, so an
+  # adapter that answered a different capability than the one asked for is
+  # visibly answering a question nobody asked rather than silently believed.
+  { name = "capability", type = "CapabilityRequestView" },
+  { name = "step", type = "CapabilityStepView" },
+]
+
+[[decl]]
+kind = "union"
+name = "CapabilityBody"
+variants = [
+  { name = "exchange", payload = "CapabilityExchangeView", originator = "frontend" },
+]
+
+[[decl]]
+kind = "struct"
+name = "CapabilityFrame"
+fields = [
+  { name = "schema", type = "ascii(64)" },
+  { name = "body", type = "CapabilityBody" },
+]

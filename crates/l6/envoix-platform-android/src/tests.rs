@@ -601,7 +601,7 @@ fn frontend_lane_channel_is_one_name() {
 /// verbs. `EnvoixHostService` and `DutyExecutor` are deliberately NOT here —
 /// the service owns the lifetime and executes duties, which is exactly what a
 /// frontend may not do.
-const FRONTEND_KOTLIN: [(&str, &str); 2] = [
+const FRONTEND_KOTLIN: [(&str, &str); 3] = [
     (
         "FrontendLane.kt",
         include_str!(concat!(
@@ -614,6 +614,17 @@ const FRONTEND_KOTLIN: [(&str, &str); 2] = [
         include_str!(concat!(
             "../../../../apps/envoix-flutter/android/app/src/main/kotlin/app/envoix/host/",
             "MainActivity.kt"
+        )),
+    ),
+    // The scanner is a capability adapter on the observer side: it reads text
+    // and answers a contract. Held to the same rule as the rest of the frontend
+    // — it may not spell a runtime verb, and it may not touch the service that
+    // owns the process's lifetime.
+    (
+        "ScanActivity.kt",
+        include_str!(concat!(
+            "../../../../apps/envoix-flutter/android/app/src/main/kotlin/app/envoix/host/",
+            "ScanActivity.kt"
         )),
     ),
 ];
@@ -781,11 +792,32 @@ fn the_frontend_kotlin_speaks_only_the_observer_vocabulary() {
         for kind in &generated {
             assert!(
                 !source.contains(kind.as_str()),
-                "{file} names the generated type {kind}: Kotlin shuttles bytes and \
-                 decodes nothing"
+                "{file} names the generated type {kind}: the read and command \
+                 contracts are the HOST's, and Kotlin only shuttles their bytes"
             );
         }
     }
+
+    // The one contract Kotlin does speak, stated rather than left to the
+    // accident that `generated` above is built from two files and not three.
+    //
+    // The old rule was "Kotlin decodes nothing", and it was right while Kotlin
+    // was only a byte mover between the JNI lane and the message channels. The
+    // capability contract has two NATIVE peers — a frontend asks, its platform
+    // adapter answers — and this side is the adapter, so it must decode a
+    // request and encode an answer. Widened deliberately, and no further: the
+    // host's own contracts stay opaque here, which is what the loop above
+    // still enforces.
+    let lane = code_only(FRONTEND_KOTLIN[0].1);
+    assert!(
+        lane.contains("EnvoixCapabilityCodec"),
+        "the frontend lane must speak the capability contract through the \
+         generated codec, not a hand-written parse"
+    );
+    assert!(
+        !lane.contains("EnvoixReadCodec") && !lane.contains("EnvoixCommandCodec"),
+        "the host's contracts are not Kotlin's to decode"
+    );
     // A lane that never attaches, or never polls, is a frontend that shows an
     // empty screen forever — and would satisfy every denial above.
     for verb in PERMITTED_VERBS {

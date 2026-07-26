@@ -6,6 +6,16 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- The `scan_invite` capability. Requested at runtime and refusable: a
+         refusal is an ANSWER the frontend draws, never a crash, and paste
+         remains the way in. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <!-- Scanning is a capability, not a requirement: a device with no camera
+         installs Envoix and is told, in words, to paste instead. -->
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
 
     <application
         android:allowBackup="false"
@@ -32,6 +42,15 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- The invite scanner. Not exported: it is this app's own capability
+             adapter, launched only by MainActivity, and nothing outside the app
+             may start a camera on its behalf. -->
+        <activity
+            android:name=".ScanActivity"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:exported="false"
+            android:label="Scan an invite" />
 
         <!-- The embedding version the Flutter engine looks for. -->
         <meta-data

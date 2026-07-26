@@ -31,7 +31,12 @@ class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         startForegroundService(Intent(this, EnvoixHostService::class.java))
-        lane = FrontendLane(flutterEngine.dartExecutor.binaryMessenger, ::pickSource)
+        lane =
+            FrontendLane(
+                flutterEngine.dartExecutor.binaryMessenger,
+                ::pickSource,
+                ::scanInvite,
+            )
     }
 
     private fun pickSource() {
@@ -48,11 +53,27 @@ class MainActivity : FlutterActivity() {
         startActivityForResult(intent, REQUEST_PICK_SOURCE)
     }
 
+    /**
+     * Opens the invite scanner. Like the picker, it is a platform capability
+     * this Activity owns rather than a transfer verb: what it reads comes back
+     * as TEXT, and a card is created only if the frontend then asks for one.
+     */
+    private fun scanInvite() {
+        startActivityForResult(Intent(this, ScanActivity::class.java), REQUEST_SCAN_INVITE)
+    }
+
     override fun onActivityResult(
         requestCode: Int,
         resultCode: Int,
         data: Intent?,
     ) {
+        if (requestCode == REQUEST_SCAN_INVITE) {
+            lane?.scanned(
+                text = data?.getStringExtra(ScanActivity.EXTRA_TEXT),
+                declined = data?.getStringExtra(ScanActivity.EXTRA_DECLINED),
+            )
+            return
+        }
         if (requestCode != REQUEST_PICK_SOURCE) {
             super.onActivityResult(requestCode, resultCode, data)
             return
@@ -78,7 +99,8 @@ class MainActivity : FlutterActivity() {
         /** Any document the provider will open; the product filters no types. */
         const val ANY_DOCUMENT = "*/*"
 
-        /** This activity's own request code; nothing else here starts one. */
+        /** This activity's own request codes; nothing else here starts one. */
         const val REQUEST_PICK_SOURCE = 0x50_1c
+        const val REQUEST_SCAN_INVITE = 0x5c_a4
     }
 }

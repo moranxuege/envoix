@@ -15,22 +15,23 @@ use envoix_evidence::{
 use envoix_outcomes::{Outcome, OutcomeCode, Phase, Recovery, Retryability, SafeDisplay};
 use envoix_runtime::{
     CapabilityAction, CardUpdateKind, Duty, DutyKind, LosslessUpdateKind, MAX_ROOM_CODE_LENGTH,
-    PairingChannel, PauseOrigin, ProductCommand, ProductState, Quiescence, RetirementIntent,
-    SubscribeError, TransferRecord, WorkerKind,
+    PairingChannel, PauseOrigin, ProductCommand, ProductState, QrMatrix, Quiescence,
+    RetirementIntent, SubscribeError, TransferRecord, WorkerKind,
 };
 use envoix_types::{Direction, OfferedName, RecordId, Secret};
 
+use crate::capability::CAPABILITY_SCHEMA_ID;
 use crate::command::COMMAND_SCHEMA_ID;
 use crate::read::{
     AbiSchemaManifestView, BuildManifestView, CapabilityActionView, CardUpdateKindView,
     CardUpdateView, CardView, ClosedView, CommandKindView, DegradedView, DiagnosticsStatusView,
     DirectionView, DutyFrameView, DutyKindView, DutyProvenanceView, DutyView, EvidenceProgressView,
     EvidenceTimelineView, EvidenceValueView, IdentityView, InviteView, LagView, LosslessKindView,
-    OutcomeView, PausedView, PhaseView, ProductStateView, ProtocolManifestView, QuiescenceView,
-    READ_SCHEMA_ID, ReadBody, ReadFrame, RecoveryView, RedactedIdKindView, RedactedIdView,
-    RetirementIntentView, RetiringView, RetryabilityView, RunningView, SessionKeyView,
-    SubscribeRejectedView, SubscribeRejectionView, TimelineEntryView, TrustRootSha256View,
-    TrustRootView, WorkerKindView,
+    OutcomeView, PausedView, PhaseView, ProductStateView, ProtocolManifestView, QrView,
+    QuiescenceView, READ_SCHEMA_ID, ReadBody, ReadFrame, RecoveryView, RedactedIdKindView,
+    RedactedIdView, RetirementIntentView, RetiringView, RetryabilityView, RunningView,
+    SessionKeyView, SubscribeRejectedView, SubscribeRejectionView, TimelineEntryView,
+    TrustRootSha256View, TrustRootView, WorkerKindView,
 };
 
 /// The codec bound on safe-display text and on offered names: L0 owns both
@@ -156,6 +157,7 @@ pub fn build_manifest_frame(manifest: &BuildTrustManifest) -> ReadFrame {
         abi_schema: AbiSchemaManifestView {
             read_binding_schema_id: READ_SCHEMA_ID.to_owned(),
             command_binding_schema_id: COMMAND_SCHEMA_ID.to_owned(),
+            capability_binding_schema_id: CAPABILITY_SCHEMA_ID.to_owned(),
             evidence_rust_abi_id: evidence_rust_abi_id.to_owned(),
             evidence_timeline_schema_id: evidence_timeline_schema_id.to_owned(),
             mailbox_receipt_schema_id: mailbox_receipt_schema_id.to_owned(),
@@ -224,7 +226,38 @@ fn invite_view(pairing: &PairingChannel) -> Option<InviteView> {
         // dropping the field. Absence therefore means one thing only: the
         // stored fields no longer spell an invite the grammar can encode.
         link: pairing.shareable().map(Secret::new),
+        // Absent when the grammar has no square for these fields — either they
+        // no longer spell an invite, or they spell one past the QR frontier.
+        // Both are answers a frontend draws; neither is a blank code.
+        qr: pairing.qr().as_ref().map(qr_view),
     })
+}
+
+/// Packs a QR's modules row-major, one bit each, MSB first, as lowercase hex.
+///
+/// The schema's bound is version 40's worst case, so a square the grammar can
+/// produce always fits and is never truncated. Nothing measures it here: were
+/// the two ever to disagree, the read codec refuses the whole frame rather than
+/// quietly publishing half a code.
+fn qr_view(matrix: &QrMatrix) -> QrView {
+    let modules = matrix.modules();
+    let mut packed = vec![0u8; modules.len().div_ceil(8)];
+    for (index, dark) in modules.iter().enumerate() {
+        if *dark {
+            packed[index / 8] |= 0x80 >> (index % 8);
+        }
+    }
+    QrView {
+        width: u16::try_from(matrix.width()).unwrap_or(u16::MAX),
+        modules: Secret::new(packed.iter().fold(
+            String::with_capacity(packed.len() * 2),
+            |mut hex, byte| {
+                use std::fmt::Write as _;
+                let _ = write!(hex, "{byte:02x}");
+                hex
+            },
+        )),
+    }
 }
 
 const fn command_kind_view(command: ProductCommand) -> CommandKindView {

@@ -8,6 +8,7 @@ import 'commands.dart';
 import 'instrumentation.dart';
 import 'labels.dart';
 import 'lane.dart';
+import 'qr.dart';
 
 /// UI01 — every card this attachment can see, and how healthy the lane that
 /// fed them is.
@@ -354,6 +355,9 @@ class _Invite extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
             _Fact(label: 'Room code', value: invite.code.expose()),
+            // The square the authority published. Absent is an ANSWER here —
+            // an invite past the QR frontier draws one, never a blank space.
+            InviteQr(qr: invite.qr),
             if (link != null)
               Padding(
                 padding: const EdgeInsets.only(top: 4),

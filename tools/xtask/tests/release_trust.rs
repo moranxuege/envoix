@@ -63,6 +63,14 @@ fn agreeing(
         .into_iter()
         .chain(payload.iter().map(|library| library.artifact.clone()))
         .collect(),
+        // An agreeing artifact requests exactly what the release claims, with
+        // `{application_id}` expanded as the gate expands it. Both directions
+        // are judged, so anything else here would disagree by construction.
+        permissions: policy
+            .allowed_permissions
+            .iter()
+            .map(|permission| permission.replace("{application_id}", "app.envoix.host"))
+            .collect(),
         manifest_markers: Vec::new(),
         trust_material: Vec::new(),
         build_manifest_sha256: Some(build.manifest_sha256.clone()),
@@ -105,12 +113,13 @@ fn release_package_trust_and_metadata_agreement() {
         "the packaged build-manifest asset is stale: re-run scripts/build-jni-libs.sh"
     );
 
-    // The manifest names every identity the running system speaks: both
+    // The manifest names every identity the running system speaks: all three
     // generated binding contracts, all four L4 ids, the protocol set, and the
     // trust-root slot.
     for identity in [
         "abi_schema_read_binding_schema_id",
         "abi_schema_command_binding_schema_id",
+        "abi_schema_capability_binding_schema_id",
         "abi_schema_evidence_rust_abi_id",
         "abi_schema_evidence_timeline_schema_id",
         "abi_schema_mailbox_receipt_schema_id",

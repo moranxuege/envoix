@@ -1,4 +1,4 @@
-use envoix_invite::{Invite, InviteError, Role, encode_deep_link};
+use envoix_invite::{Invite, InviteError, QrMatrix, Role, encode_deep_link, encode_qr_matrix};
 use serde::{Deserialize, Serialize};
 
 /// The rendezvous channel a card is frozen to when it is created.
@@ -58,5 +58,24 @@ impl PairingChannel {
         self.invite()
             .ok()
             .and_then(|invite| encode_deep_link(&invite).ok())
+    }
+
+    /// The square a camera reads, or `None` when this channel has no square.
+    ///
+    /// Two different absences share this answer, and both are honest: the
+    /// stored fields no longer spell a valid invite, or they spell one too long
+    /// for any QR version to hold. The second is a real frontier — the payload
+    /// is base64url, so it encodes as BINARY and tops out around 2.3 kB against
+    /// a link this grammar can take to 5481 — and it is why the answer is an
+    /// option rather than a promise. A frontend draws the absence; it must
+    /// never be handed a blank square where a code was expected.
+    ///
+    /// A MATRIX, because rendering belongs to whoever is drawing while WHAT the
+    /// square says belongs to the invite grammar. That split is what lets one
+    /// encoder serve four frontends instead of four encoders drifting apart.
+    pub fn qr(&self) -> Option<QrMatrix> {
+        self.invite()
+            .ok()
+            .and_then(|invite| encode_qr_matrix(&invite).ok())
     }
 }

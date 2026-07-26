@@ -316,16 +316,23 @@ fn parse_decl(
                 // link is absent on a card that has none and is the pairing
                 // password when present. Refusing `option(str)` here would push
                 // the caller to declare it plain, which is the leak.
+                //
+                // `hexv` is sealable for the same reason `str` is, and the rule
+                // is the spelling-independence one the link already states: a
+                // QR's modules ARE the pairing password drawn as a square, so a
+                // hex bitmap of them is exactly as disclosing as the base64 the
+                // link carries. Every language emits both as `String`, so this
+                // widens WHAT may be sealed and nothing about how.
                 fn secretable(ty: &FieldTy) -> bool {
                     match ty {
-                        FieldTy::Str { .. } => true,
+                        FieldTy::Str { .. } | FieldTy::HexVar { .. } => true,
                         FieldTy::Option(inner) => secretable(inner),
                         _ => false,
                     }
                 }
                 if secret && !secretable(&ty) {
                     return Err(SchemaParseError::grammar(format!(
-                        "{member_context}: only bounded UTF-8 text may be secret"
+                        "{member_context}: only bounded text may be secret"
                     )));
                 }
                 parsed.push(FieldDecl {

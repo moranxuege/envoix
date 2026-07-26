@@ -8,7 +8,7 @@
 
 import Foundation
 
-public let readSchemaId = "envoix/binding/read/5"
+public let readSchemaId = "envoix/binding/read/6"
 public let readMaxFrameBytes = 1048576
 private let u63Max: Int64 = 9_223_372_036_854_775_807
 
@@ -189,10 +189,16 @@ public struct IdentityView: Equatable {
     public let artifact: String
 }
 
+public struct QrView: Equatable {
+    public let width: Int64
+    public let modules: ReadSecretString
+}
+
 public struct InviteView: Equatable {
     public let code: ReadSecretString
     public let codeFingerprint: String
     public let link: ReadSecretString?
+    public let qr: QrView?
 }
 
 public struct CardView: Equatable {
@@ -308,6 +314,7 @@ public struct ProtocolManifestView: Equatable {
 public struct AbiSchemaManifestView: Equatable {
     public let readBindingSchemaId: String
     public let commandBindingSchemaId: String
+    public let capabilityBindingSchemaId: String
     public let evidenceRustAbiId: String
     public let evidenceTimelineSchemaId: String
     public let mailboxReceiptSchemaId: String
@@ -801,9 +808,20 @@ public enum EnvoixReadCodec {
         )
     }
 
+    private static func decodeQrView(_ value: Any?, _ context: String) throws -> QrView {
+        let map = try object(value, context)
+        try knownKeys(map, ["width", "modules"], context)
+        let width = try integer(try field(map, "width", "QrView.width"), 65535, "QrView.width")
+        let modules = ReadSecretString(try hexVariable(try field(map, "modules", "QrView.modules"), 7834, "QrView.modules"))
+        return QrView(
+            width: width,
+            modules: modules
+        )
+    }
+
     private static func decodeInviteView(_ value: Any?, _ context: String) throws -> InviteView {
         let map = try object(value, context)
-        try knownKeys(map, ["code", "code_fingerprint", "link"], context)
+        try knownKeys(map, ["code", "code_fingerprint", "link", "qr"], context)
         let code = ReadSecretString(try utf8Bounded(try field(map, "code", "InviteView.code"), 64, "InviteView.code"))
         let codeFingerprint = try hexFixed(try field(map, "code_fingerprint", "InviteView.code_fingerprint"), 16, "InviteView.code_fingerprint")
         let link: ReadSecretString?
@@ -812,10 +830,17 @@ public enum EnvoixReadCodec {
         } else {
             link = nil
         }
+        let qr: QrView?
+        if let present = try field(map, "qr", "InviteView.qr") {
+            qr = try decodeQrView(present, "InviteView.qr")
+        } else {
+            qr = nil
+        }
         return InviteView(
             code: code,
             codeFingerprint: codeFingerprint,
-            link: link
+            link: link,
+            qr: qr
         )
     }
 
@@ -1085,9 +1110,10 @@ public enum EnvoixReadCodec {
 
     private static func decodeAbiSchemaManifestView(_ value: Any?, _ context: String) throws -> AbiSchemaManifestView {
         let map = try object(value, context)
-        try knownKeys(map, ["read_binding_schema_id", "command_binding_schema_id", "evidence_rust_abi_id", "evidence_timeline_schema_id", "mailbox_receipt_schema_id", "operation_envelope_schema_id"], context)
+        try knownKeys(map, ["read_binding_schema_id", "command_binding_schema_id", "capability_binding_schema_id", "evidence_rust_abi_id", "evidence_timeline_schema_id", "mailbox_receipt_schema_id", "operation_envelope_schema_id"], context)
         let readBindingSchemaId = try asciiBounded(try field(map, "read_binding_schema_id", "AbiSchemaManifestView.read_binding_schema_id"), 64, "AbiSchemaManifestView.read_binding_schema_id")
         let commandBindingSchemaId = try asciiBounded(try field(map, "command_binding_schema_id", "AbiSchemaManifestView.command_binding_schema_id"), 64, "AbiSchemaManifestView.command_binding_schema_id")
+        let capabilityBindingSchemaId = try asciiBounded(try field(map, "capability_binding_schema_id", "AbiSchemaManifestView.capability_binding_schema_id"), 64, "AbiSchemaManifestView.capability_binding_schema_id")
         let evidenceRustAbiId = try asciiBounded(try field(map, "evidence_rust_abi_id", "AbiSchemaManifestView.evidence_rust_abi_id"), 64, "AbiSchemaManifestView.evidence_rust_abi_id")
         let evidenceTimelineSchemaId = try asciiBounded(try field(map, "evidence_timeline_schema_id", "AbiSchemaManifestView.evidence_timeline_schema_id"), 64, "AbiSchemaManifestView.evidence_timeline_schema_id")
         let mailboxReceiptSchemaId = try asciiBounded(try field(map, "mailbox_receipt_schema_id", "AbiSchemaManifestView.mailbox_receipt_schema_id"), 64, "AbiSchemaManifestView.mailbox_receipt_schema_id")
@@ -1095,6 +1121,7 @@ public enum EnvoixReadCodec {
         return AbiSchemaManifestView(
             readBindingSchemaId: readBindingSchemaId,
             commandBindingSchemaId: commandBindingSchemaId,
+            capabilityBindingSchemaId: capabilityBindingSchemaId,
             evidenceRustAbiId: evidenceRustAbiId,
             evidenceTimelineSchemaId: evidenceTimelineSchemaId,
             mailboxReceiptSchemaId: mailboxReceiptSchemaId,

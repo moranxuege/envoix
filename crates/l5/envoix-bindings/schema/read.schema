@@ -14,7 +14,7 @@
 # There is deliberately no bytes/blob type and no handle/path/URI type, so bulk
 # payload bytes and OS handles cannot be represented in a read frame.
 
-id = "envoix/binding/read/5"
+id = "envoix/binding/read/6"
 root = "ReadFrame"
 # Only the host originates read frames, so the native artifacts are decode-only:
 # a frontend cannot fabricate an observation.
@@ -215,6 +215,33 @@ fields = [
 #
 # It stays optional for the one reason left: a record whose stored fields no
 # longer spell an invite the grammar can encode has no link to publish.
+# One invite as the square a camera reads: `width` modules per side, and the
+# modules themselves row-major, one BIT each, packed most-significant-bit first
+# and rendered as lowercase hex.
+#
+# Published as DATA rather than as an image, and published at all rather than
+# left to each frontend, for the same reason the link is: the invite grammar in
+# Rust owns what the square says, so one encoder serves Dart, Kotlin, Swift and
+# any CLI instead of four encoders drifting apart — and no frontend needs a QR
+# library to show a code. What remains a frontend's own is drawing: scale,
+# quiet zone, colour and theme are decisions this contract deliberately does
+# not make.
+#
+# `hexv(7834)` is version 40's worst case stated exactly: 177 modules a side is
+# 31329 bits, which is 3917 bytes, which is 7834 hex characters. A square that
+# does not fit is not truncated — it is absent, which is the frontier below.
+[[decl]]
+kind = "struct"
+name = "QrView"
+fields = [
+  { name = "width", type = "u16" },
+  # The SAME secret the code and the link are, in a third spelling. A QR is a
+  # rendering of the pairing password, and a bitmap of it is no more secret
+  # than the base64 the link carries; sealing two spellings and leaving the
+  # third plain would let one log line draw the password.
+  { name = "modules", type = "hexv(7834)", secret = true },
+]
+
 [[decl]]
 kind = "struct"
 name = "InviteView"
@@ -229,6 +256,13 @@ fields = [
   # base64, and base64 is not secrecy. Sealing the code and leaving the link
   # plain would let one log line spell the password anyway.
   { name = "link", type = "option(str(5481))", secret = true },
+  # Absent when this invite has no square. Two causes share the answer and both
+  # are honest: the stored fields no longer spell an invite, or they spell one
+  # past the QR frontier — our grammar reaches 5481 bytes and QR's binary mode
+  # stops around 2.3 kB, so an invite too long to draw is a REAL state, not an
+  # error. A frontend renders that absence as an answer ("too long to show as a
+  # code — share the link instead") rather than as an empty square.
+  { name = "qr", type = "option(QrView)" },
 ]
 
 [[decl]]
@@ -408,6 +442,11 @@ name = "AbiSchemaManifestView"
 fields = [
   { name = "read_binding_schema_id", type = "ascii(64)" },
   { name = "command_binding_schema_id", type = "ascii(64)" },
+  # The capability contract a frontend and its platform adapter speak. It is
+  # declared here for the reason the other two are: a release states every
+  # contract it speaks, and this one is spoken between the Dart in libapp.so and
+  # the Kotlin in classes.dex — two halves of one artifact that must agree.
+  { name = "capability_binding_schema_id", type = "ascii(64)" },
   { name = "evidence_rust_abi_id", type = "ascii(64)" },
   { name = "evidence_timeline_schema_id", type = "ascii(64)" },
   { name = "mailbox_receipt_schema_id", type = "ascii(64)" },

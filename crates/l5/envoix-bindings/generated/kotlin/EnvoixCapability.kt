@@ -1,0 +1,314 @@
+// @generated from schema/capability.schema by envoix-bindings. Do not edit;
+// regenerate with `ENVOIX_BINDINGS_REGEN=1 cargo test -p envoix-bindings generated_artifacts`.
+// Known platform caveats: `org.json` duplicate-key handling is runtime-dependent
+// (Android keeps the last key; the reference json.org jar throws, so JVM unit
+// tests may see MALFORMED_JSON where a device sees last-wins). JSON `-0`
+// decodes as integer 0 here while the Rust reference codec rejects it (benign:
+// every field with a positive minimum still fails its range check).
+// Encoded frames are semantically identical to the Rust reference codec's but
+// not byte-identical: `org.json` decides key order and escaping, both of which
+// are runtime-dependent. The wire contract is the decoded value, and every
+// decoder here is order-insensitive. The frame cap is defined over the
+// canonical (serde_json) serialization, and `org.json` escapes U+0080..U+009F
+// and U+2000..U+20FF as `\uXXXX` — up to 3x the canonical bytes — so this
+// encoder can refuse a frame the contract permits. It is never the other way
+// round: the cap is measured on the bytes this artifact actually emits.
+
+package com.envoix.bindings
+
+import org.json.JSONArray
+import org.json.JSONException
+import org.json.JSONObject
+import org.json.JSONTokener
+
+const val CAPABILITY_SCHEMA_ID: String = "envoix/binding/capability/1"
+const val CAPABILITY_MAX_FRAME_BYTES: Int = 65536
+
+enum class CapabilityErrorKind {
+    FRAME_TOO_LARGE,
+    MALFORMED_JSON,
+    UNKNOWN_SCHEMA,
+    SHAPE,
+    UNKNOWN_FIELD,
+    UNKNOWN_VARIANT,
+    RANGE,
+    BOUND,
+}
+
+/** Typed codec failure carrying only static schema context. */
+class CapabilityContractException(val kind: CapabilityErrorKind, val context: String) :
+    Exception("read contract: $kind at $context")
+
+/** Bounded contract text that redacts ordinary string interpolation. */
+data class CapabilitySecretString(private val value: String) {
+    fun expose(): String = value
+
+    override fun toString(): String = "CapabilitySecretString([redacted])"
+}
+
+enum class CapabilityRequestView {
+    SCAN_INVITE,
+}
+
+data class ScannedTextView(
+    val text: CapabilitySecretString,
+)
+
+enum class DeclinedView {
+    CANCELLED,
+    REFUSED,
+    UNSUPPORTED,
+}
+
+data class DeclinedReasonView(
+    val reason: DeclinedView,
+)
+
+sealed interface CapabilityStepView {
+    object Requested : CapabilityStepView
+    data class Provided(val value: ScannedTextView) : CapabilityStepView
+    data class Declined(val value: DeclinedReasonView) : CapabilityStepView
+}
+
+data class CapabilityExchangeView(
+    val capability: CapabilityRequestView,
+    val step: CapabilityStepView,
+)
+
+sealed interface CapabilityBody {
+    data class Exchange(val value: CapabilityExchangeView) : CapabilityBody
+}
+
+data class CapabilityFrame(
+    val body: CapabilityBody,
+)
+
+object EnvoixCapabilityCodec {
+    /**
+     * Decodes and validates one frame. Every failure is a typed
+     * [CapabilityContractException]; no input, however hostile, misparses.
+     */
+    fun decode(text: String): CapabilityFrame {
+        if (text.toByteArray(Charsets.UTF_8).size > CAPABILITY_MAX_FRAME_BYTES) {
+            throw CapabilityContractException(CapabilityErrorKind.FRAME_TOO_LARGE, "CapabilityFrame")
+        }
+        val tokener = JSONTokener(text)
+        val value = try {
+            tokener.nextValue()
+        } catch (exception: JSONException) {
+            throw CapabilityContractException(CapabilityErrorKind.MALFORMED_JSON, "CapabilityFrame")
+        }
+        while (tokener.more()) {
+            val trailing = tokener.next()
+            if (trailing != ' ' && trailing != '\t' && trailing != '\r' && trailing != '\n') {
+                throw CapabilityContractException(CapabilityErrorKind.MALFORMED_JSON, "CapabilityFrame")
+            }
+        }
+        val map = obj(value, "CapabilityFrame")
+        val schema = map.opt("schema")
+        if (schema !is String) {
+            throw CapabilityContractException(CapabilityErrorKind.SHAPE, "CapabilityFrame.schema")
+        }
+        if (schema != CAPABILITY_SCHEMA_ID) {
+            throw CapabilityContractException(CapabilityErrorKind.UNKNOWN_SCHEMA, "CapabilityFrame")
+        }
+        return decodeCapabilityFrame(value, "CapabilityFrame")
+    }
+
+    /**
+     * Encodes the one frame a frontend may originate, stamping the schema
+     * envelope and the `exchange` body around it and enforcing every bound
+     * [decode] checks. Every failure is a typed [CapabilityContractException]; an
+     * over-bound frame never leaves the process.
+     */
+    fun encode(body: CapabilityExchangeView): String {
+        val map = JSONObject()
+        map.put("schema", CAPABILITY_SCHEMA_ID)
+        map.put(
+            "body",
+            JSONObject().put("kind", "exchange").put("value", encodeCapabilityExchangeView(body)),
+        )
+        val text = map.toString()
+        if (text.toByteArray(Charsets.UTF_8).size > CAPABILITY_MAX_FRAME_BYTES) {
+            throw CapabilityContractException(CapabilityErrorKind.FRAME_TOO_LARGE, "CapabilityFrame")
+        }
+        return text
+    }
+
+    private fun obj(value: Any?, context: String): JSONObject =
+        value as? JSONObject ?: throw CapabilityContractException(CapabilityErrorKind.SHAPE, context)
+
+    private fun knownKeys(map: JSONObject, allowed: Set<String>, context: String) {
+        for (key in map.keys()) {
+            if (key !in allowed) {
+                throw CapabilityContractException(CapabilityErrorKind.UNKNOWN_FIELD, context)
+            }
+        }
+    }
+
+    private fun field(map: JSONObject, key: String, context: String): Any? {
+        if (!map.has(key)) {
+            throw CapabilityContractException(CapabilityErrorKind.SHAPE, context)
+        }
+        val value = map.get(key)
+        return if (value == JSONObject.NULL) null else value
+    }
+
+    private fun utf8Bounded(value: Any?, maxBytes: Int, context: String): String {
+        if (value !is String) {
+            throw CapabilityContractException(CapabilityErrorKind.SHAPE, context)
+        }
+        // Unpaired surrogates parse here but not in the Rust reference codec;
+        // reject them so every language accepts the same strings.
+        var index = 0
+        while (index < value.length) {
+            val unit = value[index]
+            if (unit.isHighSurrogate()) {
+                if (index + 1 == value.length || !value[index + 1].isLowSurrogate()) {
+                    throw CapabilityContractException(CapabilityErrorKind.SHAPE, context)
+                }
+                index += 2
+            } else if (unit.isLowSurrogate()) {
+                throw CapabilityContractException(CapabilityErrorKind.SHAPE, context)
+            } else {
+                index += 1
+            }
+        }
+        if (value.toByteArray(Charsets.UTF_8).size > maxBytes) {
+            throw CapabilityContractException(CapabilityErrorKind.BOUND, context)
+        }
+        return value
+    }
+
+    private fun payload(map: JSONObject, context: String): Any {
+        val value = field(map, "value", context)
+            ?: throw CapabilityContractException(CapabilityErrorKind.SHAPE, context)
+        return value
+    }
+
+    private fun unitPayload(map: JSONObject, context: String) {
+        if (map.has("value") && map.get("value") != JSONObject.NULL) {
+            throw CapabilityContractException(CapabilityErrorKind.SHAPE, context)
+        }
+    }
+
+    private fun encodeUtf8Bounded(value: String, maxBytes: Int, context: String): String =
+        utf8Bounded(value, maxBytes, context)
+
+    private fun decodeCapabilityRequestView(value: Any?, context: String): CapabilityRequestView = when (value) {
+        "scan_invite" -> CapabilityRequestView.SCAN_INVITE
+        is String -> throw CapabilityContractException(CapabilityErrorKind.UNKNOWN_VARIANT, context)
+        else -> throw CapabilityContractException(CapabilityErrorKind.SHAPE, context)
+    }
+
+    private fun encodeCapabilityRequestView(value: CapabilityRequestView): String = when (value) {
+        CapabilityRequestView.SCAN_INVITE -> "scan_invite"
+    }
+
+    private fun decodeScannedTextView(value: Any?, context: String): ScannedTextView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("text"), context)
+        return ScannedTextView(
+            text = CapabilitySecretString(utf8Bounded(field(map, "text", "ScannedTextView.text"), 16384, "ScannedTextView.text")),
+        )
+    }
+
+    private fun encodeScannedTextView(value: ScannedTextView): JSONObject {
+        val map = JSONObject()
+        map.put("text", encodeUtf8Bounded(value.text.expose(), 16384, "ScannedTextView.text"))
+        return map
+    }
+
+    private fun decodeDeclinedView(value: Any?, context: String): DeclinedView = when (value) {
+        "cancelled" -> DeclinedView.CANCELLED
+        "refused" -> DeclinedView.REFUSED
+        "unsupported" -> DeclinedView.UNSUPPORTED
+        is String -> throw CapabilityContractException(CapabilityErrorKind.UNKNOWN_VARIANT, context)
+        else -> throw CapabilityContractException(CapabilityErrorKind.SHAPE, context)
+    }
+
+    private fun encodeDeclinedView(value: DeclinedView): String = when (value) {
+        DeclinedView.CANCELLED -> "cancelled"
+        DeclinedView.REFUSED -> "refused"
+        DeclinedView.UNSUPPORTED -> "unsupported"
+    }
+
+    private fun decodeDeclinedReasonView(value: Any?, context: String): DeclinedReasonView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("reason"), context)
+        return DeclinedReasonView(
+            reason = decodeDeclinedView(field(map, "reason", "DeclinedReasonView.reason"), "DeclinedReasonView.reason"),
+        )
+    }
+
+    private fun encodeDeclinedReasonView(value: DeclinedReasonView): JSONObject {
+        val map = JSONObject()
+        map.put("reason", encodeDeclinedView(value.reason))
+        return map
+    }
+
+    private fun decodeCapabilityStepView(value: Any?, context: String): CapabilityStepView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("kind", "value"), context)
+        val kind = field(map, "kind", context) as? String
+            ?: throw CapabilityContractException(CapabilityErrorKind.SHAPE, context)
+        return when (kind) {
+            "requested" -> {
+                unitPayload(map, "CapabilityStepView.requested")
+                CapabilityStepView.Requested
+            }
+            "provided" -> CapabilityStepView.Provided(
+                decodeScannedTextView(payload(map, "CapabilityStepView.provided"), "CapabilityStepView.provided"),
+            )
+            "declined" -> CapabilityStepView.Declined(
+                decodeDeclinedReasonView(payload(map, "CapabilityStepView.declined"), "CapabilityStepView.declined"),
+            )
+            else -> throw CapabilityContractException(CapabilityErrorKind.UNKNOWN_VARIANT, context)
+        }
+    }
+
+    private fun encodeCapabilityStepView(value: CapabilityStepView): JSONObject = when (value) {
+        is CapabilityStepView.Requested -> JSONObject().put("kind", "requested")
+        is CapabilityStepView.Provided ->
+            JSONObject().put("kind", "provided").put("value", encodeScannedTextView(value.value))
+        is CapabilityStepView.Declined ->
+            JSONObject().put("kind", "declined").put("value", encodeDeclinedReasonView(value.value))
+    }
+
+    private fun decodeCapabilityExchangeView(value: Any?, context: String): CapabilityExchangeView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("capability", "step"), context)
+        return CapabilityExchangeView(
+            capability = decodeCapabilityRequestView(field(map, "capability", "CapabilityExchangeView.capability"), "CapabilityExchangeView.capability"),
+            step = decodeCapabilityStepView(field(map, "step", "CapabilityExchangeView.step"), "CapabilityExchangeView.step"),
+        )
+    }
+
+    private fun encodeCapabilityExchangeView(value: CapabilityExchangeView): JSONObject {
+        val map = JSONObject()
+        map.put("capability", encodeCapabilityRequestView(value.capability))
+        map.put("step", encodeCapabilityStepView(value.step))
+        return map
+    }
+
+    private fun decodeCapabilityBody(value: Any?, context: String): CapabilityBody {
+        val map = obj(value, context)
+        knownKeys(map, setOf("kind", "value"), context)
+        val kind = field(map, "kind", context) as? String
+            ?: throw CapabilityContractException(CapabilityErrorKind.SHAPE, context)
+        return when (kind) {
+            "exchange" -> CapabilityBody.Exchange(
+                decodeCapabilityExchangeView(payload(map, "CapabilityBody.exchange"), "CapabilityBody.exchange"),
+            )
+            else -> throw CapabilityContractException(CapabilityErrorKind.UNKNOWN_VARIANT, context)
+        }
+    }
+
+    private fun decodeCapabilityFrame(value: Any?, context: String): CapabilityFrame {
+        val map = obj(value, context)
+        knownKeys(map, setOf("schema", "body"), context)
+        return CapabilityFrame(
+            body = decodeCapabilityBody(field(map, "body", "CapabilityFrame.body"), "CapabilityFrame.body"),
+        )
+    }
+}

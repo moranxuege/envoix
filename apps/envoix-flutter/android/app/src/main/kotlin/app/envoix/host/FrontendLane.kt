@@ -2,6 +2,15 @@ package app.envoix.host
 
 import android.os.Handler
 import android.os.Looper
+import com.envoix.bindings.CapabilityBody
+import com.envoix.bindings.CapabilityExchangeView
+import com.envoix.bindings.CapabilityRequestView
+import com.envoix.bindings.CapabilitySecretString
+import com.envoix.bindings.CapabilityStepView
+import com.envoix.bindings.DeclinedReasonView
+import com.envoix.bindings.DeclinedView
+import com.envoix.bindings.EnvoixCapabilityCodec
+import com.envoix.bindings.ScannedTextView
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
@@ -40,6 +49,7 @@ import kotlin.concurrent.thread
 class FrontendLane(
     messenger: BinaryMessenger,
     private val pickSource: () -> Unit,
+    private val scanInvite: () -> Unit,
 ) : EventChannel.StreamHandler {
     private val channel = EventChannel(messenger, CHANNEL)
     private val commands = MethodChannel(messenger, COMMAND_CHANNEL)
@@ -64,6 +74,9 @@ class FrontendLane(
     /** The pick in flight, answered when the Activity reports its result. */
     private var picking: MethodChannel.Result? = null
 
+    /** The capability exchange in flight, answered by the Activity's result. */
+    private var scanning: MethodChannel.Result? = null
+
     private fun onCommand(
         call: MethodCall,
         result: MethodChannel.Result,
@@ -71,6 +84,7 @@ class FrontendLane(
         when (call.method) {
             INTENT -> onIntent(call, result)
             PICK_SOURCE -> onPickSource(result)
+            CAPABILITY -> onCapability(call, result)
             else -> result.notImplemented()
         }
     }
@@ -101,6 +115,84 @@ class FrontendLane(
                 mapOf(DISPLAY_NAME to it.displayName, SIZE_BYTES to it.sizeBytes)
             },
         )
+    }
+
+    /**
+     * The capability seam, and the ONE place this class decodes a frame.
+     *
+     * Everything else here moves opaque `ByteArray`s, because the host owns
+     * those contracts. This one it must speak: a frontend and its platform
+     * adapter are the contract's two peers, and this side is the adapter. It is
+     * the same generated codec a Swift adapter would use, which is exactly why
+     * an Apple frontend owes this file nothing.
+     */
+    private fun onCapability(
+        call: MethodCall,
+        result: MethodChannel.Result,
+    ) {
+        val frame = call.arguments as? ByteArray
+        if (frame == null) {
+            result.error(NOT_A_FRAME, "capability takes an encoded capability frame", null)
+            return
+        }
+        val request =
+            try {
+                EnvoixCapabilityCodec.decode(String(frame, Charsets.UTF_8))
+            } catch (malformed: Exception) {
+                result.error(NOT_A_FRAME, malformed.message ?: "not a capability frame", null)
+                return
+            }
+        val exchange = (request.body as CapabilityBody.Exchange).value
+        if (exchange.step !is CapabilityStepView.Requested) {
+            // The adapter's own half echoed back is not a question.
+            result.error(NOT_A_FRAME, "a capability request was expected", null)
+            return
+        }
+        when (exchange.capability) {
+            CapabilityRequestView.SCAN_INVITE -> {
+                if (scanning != null) {
+                    result.error(SCAN_IN_FLIGHT, "a scan is already open", null)
+                    return
+                }
+                scanning = result
+                scanInvite()
+            }
+        }
+    }
+
+    /**
+     * The Activity's answer: the text a camera read, or which decline it was.
+     * Both are ANSWERS on the contract; neither is a platform error.
+     */
+    fun scanned(
+        text: String?,
+        declined: String?,
+    ) {
+        val result = scanning ?: return
+        scanning = null
+        val step =
+            when {
+                text != null ->
+                    CapabilityStepView.Provided(ScannedTextView(CapabilitySecretString(text)))
+                else ->
+                    CapabilityStepView.Declined(
+                        DeclinedReasonView(
+                            when (declined) {
+                                ScanActivity.DECLINED_REFUSED -> DeclinedView.REFUSED
+                                ScanActivity.DECLINED_UNSUPPORTED -> DeclinedView.UNSUPPORTED
+                                else -> DeclinedView.CANCELLED
+                            },
+                        ),
+                    )
+            }
+        val answer =
+            EnvoixCapabilityCodec.encode(
+                CapabilityExchangeView(
+                    capability = CapabilityRequestView.SCAN_INVITE,
+                    step = step,
+                ),
+            )
+        result.success(answer.toByteArray(Charsets.UTF_8))
     }
 
     private fun onIntent(
@@ -159,6 +251,8 @@ class FrontendLane(
     fun dispose() {
         picking?.error(HOST_UNAVAILABLE, "the frontend went away", null)
         picking = null
+        scanning?.error(HOST_UNAVAILABLE, "the frontend went away", null)
+        scanning = null
         onCancel(null)
         channel.setStreamHandler(null)
         commands.setMethodCallHandler(null)
@@ -211,12 +305,23 @@ class FrontendLane(
         /** The platform-capability method: open the document picker. */
         const val PICK_SOURCE = "pickSource"
 
+        /**
+         * The generated-capability method. Mirrors the catalogued
+         * `android.frontend_capability_method`; it carries a capability frame
+         * in and one out, unlike [PICK_SOURCE], whose untyped map predates the
+         * contract and is the sibling still owed this treatment.
+         */
+        const val CAPABILITY = "capability"
+
         /** Keys of the pick reply. Sanitized metadata only — never a URI. */
         const val DISPLAY_NAME = "displayName"
         const val SIZE_BYTES = "sizeBytes"
 
         /** A pick was requested while one was already open. */
         const val PICK_IN_FLIGHT = "pick-in-flight"
+
+        /** A scan was requested while one was already open. */
+        const val SCAN_IN_FLIGHT = "scan-in-flight"
 
         /** No host to observe; the Dart side surfaces it and may re-listen. */
         const val HOST_UNAVAILABLE = "host-unavailable"

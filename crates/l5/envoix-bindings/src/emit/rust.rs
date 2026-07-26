@@ -51,7 +51,12 @@ fn header(out: &mut String, doc: &SchemaDoc) {
         doc.max_frame_bytes
     ));
     rules_consts(out, doc);
-    out.push_str("const U63_MAX: u64 = 9_223_372_036_854_775_807;\n\n");
+    // Only when the contract has a u63 to bound. A schema without one would
+    // otherwise carry a constant nothing reads, which is a warning in every
+    // language that checks for it and a lint failure in two of them.
+    if helper_use(doc).u63 {
+        out.push_str("const U63_MAX: u64 = 9_223_372_036_854_775_807;\n\n");
+    }
 }
 
 fn rules_consts(out: &mut String, doc: &SchemaDoc) {
@@ -800,11 +805,11 @@ fn encode_struct_field(out: &mut String, doc: &SchemaDoc, decl: &StructDecl, fie
             ));
         }
         ty => {
+            // The one place a secret is meant to leave: onto the wire. Which
+            // encoder it takes is the field's own type — text and hex are both
+            // sealable, and both spell the same password.
             let expr = if field.secret {
-                let FieldTy::Str { max_bytes } = ty else {
-                    unreachable!("the parser permits secret bounded strings only")
-                };
-                format!("encode_utf8_bounded({access}.expose(), {max_bytes}, {context})?")
+                encode_scalar_ref(ty, &format!("{access}.expose()"), &context)
             } else {
                 encode_expr(doc, ty, &access, &context)
             };

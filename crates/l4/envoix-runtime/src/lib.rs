@@ -70,7 +70,7 @@ pub use envoix_evidence::{EvidenceSink, EvidenceSinkError};
 pub use envoix_product::{
     CapabilityAction, CommandLedger, MAX_INVITE_INPUT_LENGTH, MAX_INVITE_LINK_LENGTH,
     MAX_ROOM_CODE_LENGTH, PairingChannel, PauseOrigin, ProductCommand, ProductIdentity,
-    ProductState, Quiescence, TransferRecord, WorkerKind,
+    ProductState, QrMatrix, Quiescence, TransferRecord, WorkerKind,
 };
 pub use error::{AcquireError, CommandRejected};
 pub use port::{

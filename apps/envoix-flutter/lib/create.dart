@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 
+import 'bindings/envoix_capability.dart';
 import 'bindings/envoix_command.dart';
+import 'capability.dart';
 import 'commands.dart';
 import 'instrumentation.dart';
 import 'labels.dart';
@@ -21,11 +23,17 @@ class NewTransferSheet extends StatefulWidget {
   const NewTransferSheet({
     required this.creator,
     required this.picker,
+    required this.ask,
     super.key,
   });
 
   final Creator creator;
   final SourcePicker picker;
+
+  /// Asks the platform for a capability. A platform with no adapter for one
+  /// answers `unsupported`, which this screen draws as an absent button rather
+  /// than a broken one.
+  final CapabilityAsk ask;
 
   @override
   State<NewTransferSheet> createState() => _NewTransferSheetState();
@@ -42,6 +50,17 @@ class _NewTransferSheetState extends State<NewTransferSheet> {
   CreateIntent? _request;
 
   bool _picking = false;
+  bool _scanning = false;
+
+  /// Why the last scan produced no text, or null when none has. It is drawn as
+  /// three distinct answers, because cancelling, refusing and having no camera
+  /// are three different things to tell a user.
+  DeclinedView? _declined;
+
+  /// Set once this platform has said it cannot scan at all. The offer is then
+  /// withdrawn rather than repeatedly failed.
+  bool _scanUnsupported = false;
+
   String? _sendRequestId;
   String? _joinRequestId;
 
@@ -103,6 +122,35 @@ class _NewTransferSheetState extends State<NewTransferSheet> {
           displayName: source.displayName,
           sizeBytes: source.sizeBytes,
         ));
+  }
+
+  /// Asks the platform to scan an invite and puts whatever it read into the
+  /// SAME field a paste fills. This screen does not look at the text, does not
+  /// judge it and does not join on its behalf: a scan is another way to fill
+  /// the box, never a second way to create a card.
+  Future<void> _scan() async {
+    setState(() {
+      _scanning = true;
+      _declined = null;
+    });
+    final CapabilityAnswer answer =
+        await widget.ask(CapabilityRequestView.scanInvite);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _scanning = false;
+      switch (answer) {
+        case CapabilityProvided(text: final String text):
+          _invite.text = text;
+        case CapabilityDeclined(reason: final DeclinedView reason):
+          _declined = reason;
+          _scanUnsupported = reason == DeclinedView.unsupported;
+        case CapabilityUnavailable():
+          // The adapter could not be asked. Not a decline — nothing answered.
+          _scanUnsupported = true;
+      }
+    });
   }
 
   /// The text goes to the core exactly as typed. Trimming it here would be this
@@ -195,6 +243,33 @@ class _NewTransferSheetState extends State<NewTransferSheet> {
                 );
               },
             ),
+            if (!_scanUnsupported) ...<Widget>[
+              const SizedBox(height: 8),
+              Builder(
+                builder: (BuildContext context) {
+                  reportSheetControl(context, 'scan');
+                  return OutlinedButton(
+                    onPressed: _scanning ? null : _scan,
+                    child: const Text('Scan a code'),
+                  );
+                },
+              ),
+            ],
+            if (_declined != null) ...<Widget>[
+              const SizedBox(height: 8),
+              Semantics(
+                container: true,
+                liveRegion: true,
+                label: 'The scanner answered',
+                value: scanDeclinedLabel(_declined!),
+                child: ExcludeSemantics(
+                  child: Text(
+                    scanDeclinedLabel(_declined!),
+                    style: theme.textTheme.bodySmall,
+                  ),
+                ),
+              ),
+            ],
             const SizedBox(height: 8),
             // Always enabled. Whether the text is an invite is the core's
             // answer, and a button that greys itself out has already decided.

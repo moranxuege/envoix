@@ -22,7 +22,7 @@ use envoix_bindings::read::{
     ClosedView, CommandKindView, DegradedView, DiagnosticsStatusView, DirectionView,
     EvidenceProgressView, EvidenceTimelineView, EvidenceValueView, IdentityView, InviteView,
     LagView, LosslessKindView, OutcomeCodeView, OutcomeView, PauseOriginView, PausedView,
-    PhaseView, ProductStateView, ProtocolManifestView, QuiescenceView, ReadBody, ReadError,
+    PhaseView, ProductStateView, ProtocolManifestView, QrView, QuiescenceView, ReadBody, ReadError,
     ReadFrame, RecoveryView, RedactedIdKindView, RedactedIdView, RetirementIntentView,
     RetiringView, RetryabilityView, RunningView, SessionKeyView, SubscribeRejectedView,
     SubscribeRejectionView, TimelineEntryView, TrustRootSha256View, TrustRootView, WorkerKindView,
@@ -736,6 +736,13 @@ fn read_vectors() -> Vec<(String, ReadFrame)> {
                 "envoix://invite/v3/{}",
                 "A".repeat(MAX_INVITE_LINK_LENGTH - "envoix://invite/v3/".len())
             ))),
+            // The widest square any QR version can hold: 177 modules a side is
+            // 31329 bits, 3917 bytes, 7834 hex characters. A frontend that
+            // mis-sizes its buffer fails on THIS vector rather than in a room.
+            qr: Some(QrView {
+                width: 177,
+                modules: Secret::new("f".repeat(7834)),
+            }),
         }),
     };
     let narrowest = CardView {
@@ -770,6 +777,9 @@ fn read_vectors() -> Vec<(String, ReadFrame)> {
             code: Secret::new("000000-amber-brass".to_owned()),
             code_fingerprint: "fedcba9876543210".to_owned(),
             link: None,
+            // Past the QR frontier as well: no link to carry means no square
+            // to draw, and both absences must survive the trip as absences.
+            qr: None,
         }),
         ..widest.clone()
     };
@@ -867,6 +877,7 @@ fn read_vectors() -> Vec<(String, ReadFrame)> {
                     abi_schema: AbiSchemaManifestView {
                         read_binding_schema_id: "envoix/binding/read/2".to_owned(),
                         command_binding_schema_id: "envoix/binding/command/2".to_owned(),
+                        capability_binding_schema_id: "envoix/binding/capability/2".to_owned(),
                         evidence_rust_abi_id: "envoix/evidence/abi/1".to_owned(),
                         evidence_timeline_schema_id: "envoix/evidence/timeline/1".to_owned(),
                         mailbox_receipt_schema_id: "envoix/mailbox/receipt/1".to_owned(),

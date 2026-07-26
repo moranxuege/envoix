@@ -54,7 +54,11 @@ pub fn module(doc: &SchemaDoc) -> String {
         doc.max_frame_bytes
     ));
     rules_consts(&mut out, doc);
-    out.push_str("private let u63Max: Int64 = 9_223_372_036_854_775_807\n\n");
+    // Only when the contract has a u63 to bound; an unread private constant is
+    // a warning in the frontends that compile this file.
+    if helper_use(doc).u63 {
+        out.push_str("private let u63Max: Int64 = 9_223_372_036_854_775_807\n\n");
+    }
     error_type(&mut out);
     if has_secret(doc) {
         secret_type(&mut out);

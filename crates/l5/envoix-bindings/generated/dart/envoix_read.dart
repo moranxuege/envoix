@@ -6,7 +6,7 @@
 
 import 'dart:convert';
 
-const String readSchemaId = 'envoix/binding/read/5';
+const String readSchemaId = 'envoix/binding/read/6';
 const int readMaxFrameBytes = 1048576;
 const int _u63Max = 9223372036854775807;
 
@@ -272,16 +272,28 @@ final class IdentityView {
   final String artifact;
 }
 
+final class QrView {
+  const QrView({
+    required this.width,
+    required this.modules,
+  });
+
+  final int width;
+  final ReadSecretString modules;
+}
+
 final class InviteView {
   const InviteView({
     required this.code,
     required this.codeFingerprint,
     required this.link,
+    required this.qr,
   });
 
   final ReadSecretString code;
   final String codeFingerprint;
   final ReadSecretString? link;
+  final QrView? qr;
 }
 
 final class CardView {
@@ -544,6 +556,7 @@ final class AbiSchemaManifestView {
   const AbiSchemaManifestView({
     required this.readBindingSchemaId,
     required this.commandBindingSchemaId,
+    required this.capabilityBindingSchemaId,
     required this.evidenceRustAbiId,
     required this.evidenceTimelineSchemaId,
     required this.mailboxReceiptSchemaId,
@@ -552,6 +565,7 @@ final class AbiSchemaManifestView {
 
   final String readBindingSchemaId;
   final String commandBindingSchemaId;
+  final String capabilityBindingSchemaId;
   final String evidenceRustAbiId;
   final String evidenceTimelineSchemaId;
   final String mailboxReceiptSchemaId;
@@ -1148,15 +1162,28 @@ IdentityView _decodeIdentityView(Object? value, String context) {
   );
 }
 
+QrView _decodeQrView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'width', 'modules'}, context);
+  return QrView(
+    width: _integer(_field(map, 'width', 'QrView.width'), 65535, 'QrView.width'),
+    modules: ReadSecretString(_hexVariable(_field(map, 'modules', 'QrView.modules'), 7834, 'QrView.modules')),
+  );
+}
+
 InviteView _decodeInviteView(Object? value, String context) {
   final map = _object(value, context);
-  _knownKeys(map, const {'code', 'code_fingerprint', 'link'}, context);
+  _knownKeys(map, const {'code', 'code_fingerprint', 'link', 'qr'}, context);
   return InviteView(
     code: ReadSecretString(_utf8Bounded(_field(map, 'code', 'InviteView.code'), 64, 'InviteView.code')),
     codeFingerprint: _hexFixed(_field(map, 'code_fingerprint', 'InviteView.code_fingerprint'), 16, 'InviteView.code_fingerprint'),
     link: switch (_field(map, 'link', 'InviteView.link')) {
       null => null,
       final present => ReadSecretString(_utf8Bounded(present, 5481, 'InviteView.link')),
+    },
+    qr: switch (_field(map, 'qr', 'InviteView.qr')) {
+      null => null,
+      final present => _decodeQrView(present, 'InviteView.qr'),
     },
   );
 }
@@ -1401,10 +1428,11 @@ ProtocolManifestView _decodeProtocolManifestView(Object? value, String context) 
 
 AbiSchemaManifestView _decodeAbiSchemaManifestView(Object? value, String context) {
   final map = _object(value, context);
-  _knownKeys(map, const {'read_binding_schema_id', 'command_binding_schema_id', 'evidence_rust_abi_id', 'evidence_timeline_schema_id', 'mailbox_receipt_schema_id', 'operation_envelope_schema_id'}, context);
+  _knownKeys(map, const {'read_binding_schema_id', 'command_binding_schema_id', 'capability_binding_schema_id', 'evidence_rust_abi_id', 'evidence_timeline_schema_id', 'mailbox_receipt_schema_id', 'operation_envelope_schema_id'}, context);
   return AbiSchemaManifestView(
     readBindingSchemaId: _asciiBounded(_field(map, 'read_binding_schema_id', 'AbiSchemaManifestView.read_binding_schema_id'), 64, 'AbiSchemaManifestView.read_binding_schema_id'),
     commandBindingSchemaId: _asciiBounded(_field(map, 'command_binding_schema_id', 'AbiSchemaManifestView.command_binding_schema_id'), 64, 'AbiSchemaManifestView.command_binding_schema_id'),
+    capabilityBindingSchemaId: _asciiBounded(_field(map, 'capability_binding_schema_id', 'AbiSchemaManifestView.capability_binding_schema_id'), 64, 'AbiSchemaManifestView.capability_binding_schema_id'),
     evidenceRustAbiId: _asciiBounded(_field(map, 'evidence_rust_abi_id', 'AbiSchemaManifestView.evidence_rust_abi_id'), 64, 'AbiSchemaManifestView.evidence_rust_abi_id'),
     evidenceTimelineSchemaId: _asciiBounded(_field(map, 'evidence_timeline_schema_id', 'AbiSchemaManifestView.evidence_timeline_schema_id'), 64, 'AbiSchemaManifestView.evidence_timeline_schema_id'),
     mailboxReceiptSchemaId: _asciiBounded(_field(map, 'mailbox_receipt_schema_id', 'AbiSchemaManifestView.mailbox_receipt_schema_id'), 64, 'AbiSchemaManifestView.mailbox_receipt_schema_id'),

@@ -1,11 +1,12 @@
-//! envoix-bindings (L5): the generated read and command contracts.
+//! envoix-bindings (L5): the generated read, command and capability contracts.
 //!
-//! Two TOML schemas are the single sources of truth: `schema/read.schema` for
-//! everything a frontend may observe, and `schema/command.schema` for the
-//! mutating command conversation (submit → acceptance → completion, BN2's
-//! frozen semantics). One deterministic generator emits both into per-schema
-//! Rust/Dart/Kotlin/Swift artifacts; drift tests regenerate all eight and fail
-//! on any byte difference.
+//! Three TOML schemas are the single sources of truth: `schema/read.schema` for
+//! everything a frontend may observe, `schema/command.schema` for the mutating
+//! command conversation (submit → acceptance → completion, BN2's frozen
+//! semantics), and `schema/capability.schema` for what a frontend asks its own
+//! platform adapter to do before any card exists. One deterministic generator
+//! emits all three into per-schema Rust/Dart/Kotlin/Swift artifacts; drift
+//! tests regenerate all twelve and fail on any byte difference.
 //!
 //! # Containment
 //! The shared scalar vocabulary has no bytes/blob type and no handle/path/URI
@@ -46,6 +47,21 @@ pub mod command {
     ));
 }
 
+/// Generated capability-contract types and codec; see
+/// `generated/rust/capability.rs`.
+///
+/// The Rust artifact exists because the generator emits one reference codec per
+/// schema and the drift tests compare against it — not because the authority
+/// speaks this contract. Its two peers are a frontend and its platform adapter
+/// (Dart and Kotlin today, SwiftUI and AVFoundation tomorrow); a capability
+/// frame never reaches the host, which decodes [`command`] alone.
+pub mod capability {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/generated/rust/capability.rs"
+    ));
+}
+
 pub use model::{
     Decl, DeclKind, Direction, EnumDecl, FieldDecl, FieldTy, FrontendBody, RuleValue, SchemaDoc,
     StructDecl, UnionDecl, UnionVariant,
@@ -64,4 +80,9 @@ pub fn read_schema_text() -> &'static str {
 /// The command-schema source this build was generated from.
 pub fn command_schema_text() -> &'static str {
     include_str!("../schema/command.schema")
+}
+
+/// The capability-schema source this build was generated from.
+pub fn capability_schema_text() -> &'static str {
+    include_str!("../schema/capability.schema")
 }
