@@ -10,7 +10,8 @@ use crate::model::{
 };
 
 use super::{
-    apply_naming, helper_use, is_envelope_field, rust_field, snake, upper_camel, upper_snake,
+    apply_naming, has_secret, helper_use, is_envelope_field, rust_field, snake, upper_camel,
+    upper_snake,
 };
 
 pub fn module(doc: &SchemaDoc) -> String {
@@ -38,6 +39,9 @@ fn header(out: &mut String, doc: &SchemaDoc) {
         "// regenerate with `ENVOIX_BINDINGS_REGEN=1 cargo test -p envoix-bindings generated_artifacts`.\n\n",
     );
     out.push_str("use serde_json::{Map, Value};\n\n");
+    if has_secret(doc) {
+        out.push_str("use envoix_types::Secret;\n\n");
+    }
     out.push_str(&format!(
         "pub const READ_SCHEMA_ID: &str = \"{}\";\n",
         doc.id
@@ -103,6 +107,19 @@ fn rust_ty(ty: &FieldTy) -> String {
     }
 }
 
+fn rust_field_ty(field: &FieldDecl) -> String {
+    if !field.secret {
+        return rust_ty(&field.ty);
+    }
+    match &field.ty {
+        // `Option<Secret<T>>`, never `Secret<Option<T>>`: WHETHER a card has a
+        // link is not secret — a card without one shows "no shareable link".
+        // What is secret is the link when there is one.
+        FieldTy::Option(inner) => format!("Option<Secret<{}>>", rust_ty(inner)),
+        ty => format!("Secret<{}>", rust_ty(ty)),
+    }
+}
+
 fn type_decl(out: &mut String, doc: &SchemaDoc, decl: &Decl) {
     match decl {
         Decl::Enum(decl) => {
@@ -132,7 +149,7 @@ fn type_decl(out: &mut String, doc: &SchemaDoc, decl: &Decl) {
                 out.push_str(&format!(
                     "    pub {}: {},\n",
                     rust_field(&field.name),
-                    rust_ty(&field.ty)
+                    rust_field_ty(field)
                 ));
             }
             out.push_str("}\n\n");
@@ -598,6 +615,11 @@ fn decode_struct_field(out: &mut String, doc: &SchemaDoc, decl: &StructDecl, fie
     match &field.ty {
         FieldTy::Option(inner) => {
             let inner_expr = decode_expr(doc, inner, "present", &context);
+            let inner_expr = if field.secret {
+                format!("Secret::new({inner_expr})")
+            } else {
+                inner_expr
+            };
             out.push_str(&format!(
                 "    let {name} = match {json} {{\n\
                  \x20       Value::Null => None,\n\
@@ -625,6 +647,11 @@ fn decode_struct_field(out: &mut String, doc: &SchemaDoc, decl: &StructDecl, fie
         }
         ty => {
             let expr = decode_expr(doc, ty, &json, &context);
+            let expr = if field.secret {
+                format!("Secret::new({expr})")
+            } else {
+                expr
+            };
             out.push_str(&format!("    let {} = {expr};\n", rust_field(&field.name)));
         }
     }
@@ -730,6 +757,12 @@ fn encode_struct_field(out: &mut String, doc: &SchemaDoc, decl: &StructDecl, fie
                 }
                 scalar => encode_scalar_ref(scalar, "inner", &context),
             };
+            // The one place a secret is meant to leave: onto the wire.
+            let inner_expr = if field.secret {
+                inner_expr.replace("inner", "inner.expose()")
+            } else {
+                inner_expr
+            };
             out.push_str(&format!(
                 "    map.insert(\n\
                  \x20       \"{name}\".to_owned(),\n\
@@ -767,7 +800,14 @@ fn encode_struct_field(out: &mut String, doc: &SchemaDoc, decl: &StructDecl, fie
             ));
         }
         ty => {
-            let expr = encode_expr(doc, ty, &access, &context);
+            let expr = if field.secret {
+                let FieldTy::Str { max_bytes } = ty else {
+                    unreachable!("the parser permits secret bounded strings only")
+                };
+                format!("encode_utf8_bounded({access}.expose(), {max_bytes}, {context})?")
+            } else {
+                encode_expr(doc, ty, &access, &context)
+            };
             out.push_str(&format!(
                 "    map.insert(\"{name}\".to_owned(), {expr});\n",
                 name = field.name,

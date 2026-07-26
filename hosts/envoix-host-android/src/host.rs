@@ -11,24 +11,25 @@ use envoix_bindings::bridge::{
 use envoix_bindings::command::{
     CardCreatedView, CreateOutcomeView, CreateRefusalView, encode_command_frame,
 };
-use envoix_bindings::read::encode_read_frame;
+use envoix_bindings::read::{ReadError, ReadFrame, encode_read_frame};
 use envoix_bindings::{
     card_update_frame, closed_frame, evidence_frame, lag_frame, subscribe_rejected_frame,
 };
 use envoix_capabilities::{Admission, DutyLedger, Registration};
 use envoix_evidence::{EvidenceRecord, EvidenceSink, EvidenceSinkError, SessionKey, TimelineStore};
 use envoix_platform_android::{DutyAdapter, IssueDecision, WorkOrder, WorkReport, platform_work};
-use envoix_product::{
-    ApplyOutcome, CommitStatus, CommittedSession, IdentityError, NewTransfer, SystemIdentitySource,
-};
 #[cfg(feature = "e2e-instrumentation")]
-use envoix_product::{ProductState, RecordDecode, decode_record};
+use envoix_product::ProductState;
+use envoix_product::{
+    ApplyOutcome, CommitStatus, CommittedSession, IdentityError, NewTransfer, RecordDecode,
+    SystemIdentitySource, decode_record,
+};
 use envoix_runtime::{
     CardSubscription, CardUpdateKind, CommandRejected, CommandVerdict, Runtime, RuntimeConfig,
     SubscribeError, TransferRecord, TryRecvError,
 };
 use envoix_storage_local::LocalStorage;
-use envoix_types::{ByteCount, Direction, OfferedName, RecordId};
+use envoix_types::{ByteCount, CommandId, Direction, OfferedName, RecordId};
 
 use crate::create;
 use crate::executor::PreparedIrohExecutor;
@@ -92,6 +93,15 @@ pub enum FramePoll {
     Superseded,
 }
 
+/// Why the authority refused an intent before it could produce a correlated
+/// command-contract answer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IntentRejection {
+    /// The bytes were not a valid frontend-originated intent. No command or
+    /// create reached its authority handler, so no durable effect can exist.
+    Contract,
+}
+
 /// The Android composition root: one process-wide runtime owner.
 ///
 /// The Kotlin foreground service constructs exactly one `Host` per process
@@ -102,7 +112,65 @@ pub struct Host {
     tokio: tokio::runtime::Runtime,
     runtime: Arc<Runtime<HostProvider, PreparedIrohExecutor>>,
     stores: CardStores,
+    /// Process index of frontend create identities, on TWO keys, because one
+    /// key cannot answer both retries.
+    ///
+    /// The request id answers a retry within one process: the frontend forms an
+    /// id with the intent and reuses it, so a resend of an unanswered ask is
+    /// recognisably the same ask.
+    ///
+    /// The rendezvous ENDPOINT answers the retry it cannot. The frontend keeps
+    /// nothing durable, so after a process death the user re-pastes the invite
+    /// and mints a FRESH id — and only the rendezvous says the two asks are the
+    /// same thing. That is the reported defect: a lost answer, a restart, and a
+    /// retry produced two cards frozen to one room.
+    ///
+    /// The endpoint is `(room, direction)` and not the room, because a room has
+    /// two ends and one device may legitimately hold both: joining an invite it
+    /// published itself is a real case, and keying on the room alone answers
+    /// that join with the SENDING card. Two joins of one invite are one card; a
+    /// send and a join of one room are two. A send mints a fresh room each
+    /// time, so this key never merges two sends.
+    ///
+    /// The mutex serializes the check+create boundary so two concurrent copies
+    /// of one request cannot both observe absence.
+    creates: Mutex<CreateIndex>,
     shared: Arc<Shared>,
+}
+
+/// The two keys a create is remembered by. See `Host::creates`.
+#[derive(Default)]
+struct CreateIndex {
+    by_request: HashMap<CommandId, CreateOutcomeView>,
+    by_endpoint: HashMap<(String, Direction), CreateOutcomeView>,
+}
+
+impl CreateIndex {
+    /// The answer an identical create already produced, if one did.
+    fn existing(
+        &self,
+        request: CommandId,
+        endpoint: Option<&(String, Direction)>,
+    ) -> Option<CreateOutcomeView> {
+        self.by_request
+            .get(&request)
+            .or_else(|| self.by_endpoint.get(endpoint?))
+            .cloned()
+    }
+
+    /// Remembers one durable card. First-writer-wins, so replaying the boot
+    /// scan or re-observing a card never moves a key onto a younger card.
+    fn remember(
+        &mut self,
+        request: CommandId,
+        endpoint: Option<(String, Direction)>,
+        outcome: CreateOutcomeView,
+    ) {
+        self.by_request.entry(request).or_insert(outcome.clone());
+        if let Some(endpoint) = endpoint {
+            self.by_endpoint.entry(endpoint).or_insert(outcome);
+        }
+    }
 }
 
 struct Shared {
@@ -195,6 +263,14 @@ struct SharedState {
     frames: VecDeque<Vec<u8>>,
     /// Encoded platform work orders awaiting the service executor.
     work: VecDeque<Vec<u8>>,
+    /// Cards whose durable removal ended the platform capability they owned.
+    /// The service consumes this lane and releases the matching persistable
+    /// document grant; boot reseeds it from a removal record after a crash.
+    source_releases: VecDeque<RecordId>,
+    /// One release delivery per card per process. A process death deliberately
+    /// forgets this set, because replay is how the pop-before-release crash
+    /// window closes.
+    source_releases_seen: HashSet<RecordId>,
 }
 
 impl Shared {
@@ -212,6 +288,22 @@ fn push_bounded(queue: &mut VecDeque<Vec<u8>>, bytes: Vec<u8>) {
         queue.pop_front();
     }
     queue.push_back(bytes);
+}
+
+/// Projects one read frame onto the lane without erasing a typed codec
+/// refusal. Every producer passed here is an in-process bounded projection; an
+/// encoder error is therefore a broken host/contract invariant, not hostile
+/// frontend input. Panicking makes that defect loud at its origin instead of
+/// letting the observer wait forever for a frame the host silently discarded.
+fn push_read_frame(queue: &mut VecDeque<Vec<u8>>, frame: &ReadFrame) {
+    push_encoded_read(queue, encode_read_frame(frame));
+}
+
+fn push_encoded_read(queue: &mut VecDeque<Vec<u8>>, encoded: Result<Vec<u8>, ReadError>) {
+    let bytes = encoded.unwrap_or_else(|error| {
+        panic!("read projection rejected by typed codec: {error:?}");
+    });
+    push_bounded(queue, bytes);
 }
 
 impl Host {
@@ -245,6 +337,7 @@ impl Host {
             tokio,
             runtime,
             stores,
+            creates: Mutex::new(CreateIndex::default()),
             shared: Arc::new(Shared {
                 state: Mutex::new(SharedState::default()),
                 evidence,
@@ -259,6 +352,18 @@ impl Host {
             Err(_) => Vec::new(),
         };
         for card in cards {
+            if let Some((request_id, endpoint, outcome)) = host.create_receipt(card) {
+                host.creates
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remember(request_id, endpoint, outcome);
+            }
+            if host
+                .durable_record(card)
+                .is_some_and(|record| record.facts.remove_requested)
+            {
+                enqueue_source_release(&mut host.shared.lock(), card);
+            }
             // Absent/corrupt cards stay quarantined in storage; a restore
             // refusal must not fail the boot of every other card.
             let _ = host.runtime.restore(card);
@@ -369,6 +474,13 @@ impl Host {
         self.shared.lock().work.pop_front()
     }
 
+    /// One card whose durable removal ended ownership of its persistable source
+    /// grant. Delivery is at least once across process generations and once
+    /// within one: releasing an Android URI grant is itself idempotent.
+    pub fn poll_source_release(&self) -> Option<RecordId> {
+        self.shared.lock().source_releases.pop_front()
+    }
+
     /// Takes one frontend-originated intent frame and returns the encoded
     /// answer: an acceptance for a command on an existing card, or a create
     /// result for a request that one be made.
@@ -376,13 +488,16 @@ impl Host {
     /// Both intents ride ONE contract, one lane and one native verb, because
     /// both are the same thing — a frontend asking the authority for something
     /// and being told what happened.
-    pub fn intent(&self, bytes: &[u8]) -> Vec<u8> {
+    pub fn intent(&self, bytes: &[u8]) -> Result<Vec<u8>, IntentRejection> {
         match decode_intent(bytes) {
-            Ok(FrontendIntent::Command(spec)) => self.submit_command(spec),
-            Ok(FrontendIntent::Create(spec)) => self.create(&spec),
-            // Hostile or non-intent bytes carry no usable request id; the
-            // caller violated the contract and gets nothing correlatable.
-            Err(SubmitDecodeError::Frame(_) | SubmitDecodeError::NotAnIntent) => Vec::new(),
+            Ok(FrontendIntent::Command(spec)) => Ok(self.submit_command(spec)),
+            Ok(FrontendIntent::Create(spec)) => Ok(self.create(&spec)),
+            // Hostile or non-intent bytes carry no usable request id. This is
+            // nevertheless a typed authority refusal, not zero bytes that a
+            // frontend can only misreport as a lost answer.
+            Err(SubmitDecodeError::Frame(_) | SubmitDecodeError::NotAnIntent) => {
+                Err(IntentRejection::Contract)
+            }
         }
     }
 
@@ -399,17 +514,45 @@ impl Host {
     /// is still created: the record exists, and the lane says so in its own
     /// words by refusing the subscription rather than by unmaking the card.
     fn create(&self, spec: &CreateSpec) -> Vec<u8> {
-        let outcome = match create::plan(spec) {
-            Ok(transfer) => self.commit_new_card(transfer),
-            Err(refusal) => CreateOutcomeView::Refused(refusal),
+        // The lock covers lookup through initial commit. It is deliberately
+        // separate from `SharedState`: no frame/store lock-order is introduced,
+        // and concurrent deliveries of one id cannot both allocate a card.
+        let mut creates = self.creates.lock().unwrap_or_else(PoisonError::into_inner);
+        // The endpoint is only knowable once the invite has been judged, so the
+        // request-id lookup happens first and the endpoint lookup after
+        // planning — both still inside the one lock that covers the commit.
+        let outcome = if let Some(outcome) = creates.existing(spec.request_id, None) {
+            outcome
+        } else {
+            match create::plan(spec) {
+                Ok(transfer) => {
+                    let endpoint = transfer
+                        .pairing
+                        .as_ref()
+                        .map(|pairing| (pairing.code().to_owned(), transfer.direction));
+                    match creates.existing(spec.request_id, endpoint.as_ref()) {
+                        Some(outcome) => outcome,
+                        None => {
+                            let outcome = self.commit_new_card(spec.request_id, transfer);
+                            creates.remember(spec.request_id, endpoint, outcome.clone());
+                            outcome
+                        }
+                    }
+                }
+                // A refusal allocates nothing and is a pure function of the
+                // request, so a repeat re-derives the identical answer and
+                // there is nothing to remember.
+                Err(refusal) => CreateOutcomeView::Refused(refusal),
+            }
         };
         encode_command_frame(&create_result_frame(spec.request_id, outcome)).unwrap_or_default()
     }
 
-    fn commit_new_card(&self, transfer: NewTransfer) -> CreateOutcomeView {
+    fn commit_new_card(&self, request_id: CommandId, transfer: NewTransfer) -> CreateOutcomeView {
         let store = HostStore::deferred(self.stores.clone());
-        let created = CommittedSession::create(
+        let created = CommittedSession::create_identified(
             transfer,
+            request_id,
             &mut SystemIdentitySource,
             store,
             NonZeroUsize::new(3).expect("nonzero"),
@@ -424,6 +567,41 @@ impl Host {
             self.attach(card);
         }
         outcome
+    }
+
+    /// Rebuilds one successful create result from the same durable record that
+    /// authorized the card, on both keys. Missing/pre-F2b/corrupt records have
+    /// no create identity to claim and therefore cannot poison the retry index.
+    ///
+    /// The endpoint has to be rebuilt here too: it is the key that survives the
+    /// frontend, so an index restored on the request id alone would answer
+    /// nothing after the restart it exists for.
+    #[allow(clippy::type_complexity)]
+    fn create_receipt(
+        &self,
+        card: RecordId,
+    ) -> Option<(CommandId, Option<(String, Direction)>, CreateOutcomeView)> {
+        let record = self.durable_record(card)?;
+        let request_id = *record.create_request_id?;
+        let endpoint = record
+            .pairing
+            .as_ref()
+            .map(|pairing| (pairing.code().to_owned(), record.direction));
+        Some((
+            request_id,
+            endpoint,
+            CreateOutcomeView::Created(CardCreatedView {
+                card: format!("{:016x}", card.get()),
+            }),
+        ))
+    }
+
+    fn durable_record(&self, card: RecordId) -> Option<TransferRecord> {
+        let store = HostStore::opened(self.stores.clone(), card)?;
+        let RecordDecode::Loaded(record) = decode_record(&store.latest()?).ok()? else {
+            return None;
+        };
+        Some(*record)
     }
 
     fn submit_command(&self, spec: SubmitSpec) -> Vec<u8> {
@@ -494,7 +672,8 @@ impl Host {
     pub fn create_for_e2e(&self, name: &str, total: u64) -> Result<RecordId, IdentityError> {
         let transfer = NewTransfer {
             direction: Direction::Send,
-            offered_name: OfferedName::from_untrusted(name),
+            offered_name: OfferedName::from_untrusted(name)
+                .expect("e2e instrumentation supplies a bounded name"),
             total: ByteCount::new(total),
             source: envoix_product::SourceDecision::Ready,
             pairing: None,
@@ -599,9 +778,7 @@ fn install(
             } else {
                 state.known.insert(card);
             }
-            if let Ok(bytes) = encode_read_frame(&subscribe_rejected_frame(card, error)) {
-                push_bounded(&mut state.frames, bytes);
-            }
+            push_read_frame(&mut state.frames, &subscribe_rejected_frame(card, error));
         }
     }
 }
@@ -634,6 +811,8 @@ fn pump_once(shared: &Shared) {
         adapter,
         frames,
         work,
+        source_releases,
+        source_releases_seen,
     } = &mut *state;
     let mut closed: Vec<(RecordId, u64)> = Vec::new();
     for (card, subscription) in subscriptions.iter_mut() {
@@ -661,11 +840,13 @@ fn pump_once(shared: &Shared) {
                     // generation is established before any duty can register.
                     if let Some(record) = observed_record(&update.kind) {
                         ledger.advance_generation(update.card, record.generation);
+                        if record.facts.remove_requested && source_releases_seen.insert(update.card)
+                        {
+                            source_releases.push_back(update.card);
+                        }
                     }
                     let frame = card_update_frame(update.epoch.get(), update.card, &update.kind);
-                    if let Ok(bytes) = encode_read_frame(&frame) {
-                        push_bounded(frames, bytes);
-                    }
+                    push_read_frame(frames, &frame);
                 }
                 Err(TryRecvError::Empty) => break,
                 // The runtime ended this epoch. Surfacing it once — and
@@ -677,9 +858,7 @@ fn pump_once(shared: &Shared) {
                 }
                 Err(TryRecvError::Lagged(lag)) => {
                     let frame = lag_frame(lag.epoch.get(), *card, lag.missed);
-                    if let Ok(bytes) = encode_read_frame(&frame) {
-                        push_bounded(frames, bytes);
-                    }
+                    push_read_frame(frames, &frame);
                     break;
                 }
             }
@@ -687,19 +866,21 @@ fn pump_once(shared: &Shared) {
     }
     for (card, epoch) in closed {
         subscriptions.remove(&card);
-        if let Ok(bytes) = encode_read_frame(&closed_frame(epoch, card)) {
-            push_bounded(frames, bytes);
-        }
+        push_read_frame(frames, &closed_frame(epoch, card));
     }
     for session in shared.evidence.take_unpublished() {
         // A session the store has since evicted has no timeline left to state,
         // and the contract carries no "forgotten" frame — inventing one would
         // be telling the observer something the authority never said.
-        if let Some(timeline) = shared.evidence.store.snapshot(session)
-            && let Ok(bytes) = encode_read_frame(&evidence_frame(&timeline))
-        {
-            push_bounded(frames, bytes);
+        if let Some(timeline) = shared.evidence.store.snapshot(session) {
+            push_read_frame(frames, &evidence_frame(&timeline));
         }
+    }
+}
+
+fn enqueue_source_release(state: &mut SharedState, card: RecordId) {
+    if state.source_releases_seen.insert(card) {
+        state.source_releases.push_back(card);
     }
 }
 
@@ -719,6 +900,15 @@ mod tests {
     use envoix_product::CommitFailure;
 
     use super::*;
+
+    /// Regression for the old `if let Ok(bytes)` pump shape: the codec's typed
+    /// error must be visible at the failure site, never converted into an
+    /// absent frame.
+    #[test]
+    #[should_panic(expected = "read projection rejected by typed codec: FrameTooLarge")]
+    fn a_rejected_read_projection_fails_loudly() {
+        push_encoded_read(&mut VecDeque::new(), Err(ReadError::FrameTooLarge));
+    }
 
     /// A card is "created" only when its record write crossed the barrier.
     ///

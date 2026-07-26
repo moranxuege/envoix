@@ -3,7 +3,9 @@
 
 use serde_json::{Map, Value};
 
-pub const COMMAND_SCHEMA_ID: &str = "envoix/binding/command/3";
+use envoix_types::Secret;
+
+pub const COMMAND_SCHEMA_ID: &str = "envoix/binding/command/4";
 pub const COMMAND_MAX_FRAME_BYTES: usize = 1048576;
 
 // Contract rules frozen by schema/command.schema.
@@ -97,7 +99,7 @@ pub struct SendSourceView {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JoinInviteView {
-    pub invite: String,
+    pub invite: Secret<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -177,18 +179,20 @@ pub enum CreateRefusalView {
     InviteTooLong,
     InviteUnsupported,
     InviteRoleUnsupported,
+    NameTooLong,
     StorageFault,
     Internal,
 }
 
 impl CreateRefusalView {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::InviteNotRecognized,
         Self::InviteBareRoomCode,
         Self::InviteMalformed,
         Self::InviteTooLong,
         Self::InviteUnsupported,
         Self::InviteRoleUnsupported,
+        Self::NameTooLong,
         Self::StorageFault,
         Self::Internal,
     ];
@@ -568,7 +572,7 @@ fn encode_submit_view_value(value: &SubmitView) -> Result<Value, CommandError> {
 fn decode_send_source_view_value(value: &Value, context: &'static str) -> Result<SendSourceView, CommandError> {
     let map = frame_object(value, context)?;
     known_keys(map, &["display_name", "total"], context)?;
-    let display_name = utf8_bounded(field(map, "display_name", "SendSourceView.display_name")?, 255, "SendSourceView.display_name")?;
+    let display_name = utf8_bounded(field(map, "display_name", "SendSourceView.display_name")?, 1020, "SendSourceView.display_name")?;
     let total = integer(field(map, "total", "SendSourceView.total")?, U63_MAX, "SendSourceView.total")?;
     Ok(SendSourceView {
         display_name,
@@ -578,7 +582,7 @@ fn decode_send_source_view_value(value: &Value, context: &'static str) -> Result
 
 fn encode_send_source_view_value(value: &SendSourceView) -> Result<Value, CommandError> {
     let mut map = Map::new();
-    map.insert("display_name".to_owned(), encode_utf8_bounded(&value.display_name, 255, "SendSourceView.display_name")?);
+    map.insert("display_name".to_owned(), encode_utf8_bounded(&value.display_name, 1020, "SendSourceView.display_name")?);
     map.insert("total".to_owned(), encode_u63(value.total, "SendSourceView.total")?);
     Ok(Value::Object(map))
 }
@@ -586,7 +590,7 @@ fn encode_send_source_view_value(value: &SendSourceView) -> Result<Value, Comman
 fn decode_join_invite_view_value(value: &Value, context: &'static str) -> Result<JoinInviteView, CommandError> {
     let map = frame_object(value, context)?;
     known_keys(map, &["invite"], context)?;
-    let invite = utf8_bounded(field(map, "invite", "JoinInviteView.invite")?, 16384, "JoinInviteView.invite")?;
+    let invite = Secret::new(utf8_bounded(field(map, "invite", "JoinInviteView.invite")?, 16384, "JoinInviteView.invite")?);
     Ok(JoinInviteView {
         invite,
     })
@@ -594,7 +598,7 @@ fn decode_join_invite_view_value(value: &Value, context: &'static str) -> Result
 
 fn encode_join_invite_view_value(value: &JoinInviteView) -> Result<Value, CommandError> {
     let mut map = Map::new();
-    map.insert("invite".to_owned(), encode_utf8_bounded(&value.invite, 16384, "JoinInviteView.invite")?);
+    map.insert("invite".to_owned(), encode_utf8_bounded(value.invite.expose(), 16384, "JoinInviteView.invite")?);
     Ok(Value::Object(map))
 }
 
@@ -825,6 +829,7 @@ fn decode_create_refusal_view_value(value: &Value, context: &'static str) -> Res
         "invite_too_long" => Ok(CreateRefusalView::InviteTooLong),
         "invite_unsupported" => Ok(CreateRefusalView::InviteUnsupported),
         "invite_role_unsupported" => Ok(CreateRefusalView::InviteRoleUnsupported),
+        "name_too_long" => Ok(CreateRefusalView::NameTooLong),
         "storage_fault" => Ok(CreateRefusalView::StorageFault),
         "internal" => Ok(CreateRefusalView::Internal),
         _ => Err(CommandError::UnknownVariant { context }),
@@ -839,6 +844,7 @@ fn encode_create_refusal_view_value(value: &CreateRefusalView) -> Value {
         CreateRefusalView::InviteTooLong => "invite_too_long",
         CreateRefusalView::InviteUnsupported => "invite_unsupported",
         CreateRefusalView::InviteRoleUnsupported => "invite_role_unsupported",
+        CreateRefusalView::NameTooLong => "name_too_long",
         CreateRefusalView::StorageFault => "storage_fault",
         CreateRefusalView::Internal => "internal",
     })

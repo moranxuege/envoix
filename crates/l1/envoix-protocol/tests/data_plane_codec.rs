@@ -89,7 +89,7 @@ fn fixtures() -> Vec<(Frame, IngressState, &'static [u8])> {
         (
             Frame::FileHeader(FileHeader {
                 transfer_id: transfer_id(),
-                offered_name: OfferedName::from_untrusted("a.txt"),
+                offered_name: OfferedName::from_untrusted("a.txt").unwrap(),
                 file_size: ByteCount::new(5),
                 chunk_size: ByteCount::new(64 * 1024),
                 resume: ResumeMode::Allowed,
@@ -329,7 +329,7 @@ fn max_chunk_and_name_boundaries_are_enforced() {
     let maximum_name = "n".repeat(MAX_OFFERED_NAME_SIZE);
     let header = Frame::FileHeader(FileHeader {
         transfer_id: transfer_id(),
-        offered_name: OfferedName::from_untrusted(&maximum_name),
+        offered_name: OfferedName::from_untrusted(&maximum_name).unwrap(),
         file_size: ByteCount::new(0),
         chunk_size: ByteCount::new(1),
         resume: ResumeMode::Disabled,
@@ -341,20 +341,10 @@ fn max_chunk_and_name_boundaries_are_enforced() {
     );
 
     let oversized_name = "n".repeat(MAX_OFFERED_NAME_SIZE + 1);
-    let header = Frame::FileHeader(FileHeader {
-        transfer_id: transfer_id(),
-        offered_name: OfferedName::from_untrusted(oversized_name),
-        file_size: ByteCount::new(0),
-        chunk_size: ByteCount::new(1),
-        resume: ResumeMode::Disabled,
-    });
-    assert!(matches!(
-        encode_frame(&header),
-        Err(EncodeError::FieldTooLarge {
-            field: Field::OfferedName,
-            ..
-        })
-    ));
+    assert!(
+        OfferedName::from_untrusted(oversized_name).is_err(),
+        "the owner type makes an over-bound protocol name unrepresentable"
+    );
 }
 
 #[test]

@@ -9,13 +9,13 @@
 //! build exactly that body, and encode helpers that are the decode predicates
 //! themselves, so the two halves cannot check different things.
 
-use crate::model::{Decl, DeclKind, FieldTy, SchemaDoc, StructDecl, UnionDecl};
+use crate::model::{Decl, DeclKind, FieldDecl, FieldTy, SchemaDoc, StructDecl, UnionDecl};
 
 use crate::model::RuleValue;
 
 use super::{
-    encodable_decls, encode_helper_use, helper_use, is_envelope_field, scalar_predicate,
-    swift_member,
+    encodable_decls, encode_helper_use, has_secret, helper_use, is_envelope_field,
+    scalar_predicate, swift_member,
 };
 
 /// How Swift names 2^63-1 in the generated artifact.
@@ -56,6 +56,9 @@ pub fn module(doc: &SchemaDoc) -> String {
     rules_consts(&mut out, doc);
     out.push_str("private let u63Max: Int64 = 9_223_372_036_854_775_807\n\n");
     error_type(&mut out);
+    if has_secret(doc) {
+        secret_type(&mut out);
+    }
     for decl in &doc.decls {
         type_decl(&mut out, doc, decl, &encodable);
     }
@@ -105,6 +108,18 @@ fn error_type(out: &mut String) {
     );
 }
 
+fn secret_type(out: &mut String) {
+    out.push_str(
+        "/// Bounded contract text that redacts ordinary string interpolation.\n\
+         public struct ReadSecretString: Equatable, CustomStringConvertible {\n\
+         \x20   private let value: String\n\n\
+         \x20   init(_ value: String) { self.value = value }\n\n\
+         \x20   public func expose() -> String { value }\n\n\
+         \x20   public var description: String { \"ReadSecretString([redacted])\" }\n\
+         }\n\n",
+    );
+}
+
 fn swift_ty(ty: &FieldTy) -> String {
     match ty {
         FieldTy::U16 | FieldTy::U32 | FieldTy::U63 => "Int64".to_owned(),
@@ -117,6 +132,17 @@ fn swift_ty(ty: &FieldTy) -> String {
         FieldTy::Named(name) => name.clone(),
         FieldTy::Option(inner) => format!("{}?", swift_ty(inner)),
         FieldTy::List { element, .. } => format!("[{}]", swift_ty(element)),
+    }
+}
+
+fn swift_field_ty(field: &FieldDecl) -> String {
+    if !field.secret {
+        return swift_ty(&field.ty);
+    }
+    match &field.ty {
+        // Optional AROUND the seal: absence is not a secret.
+        FieldTy::Option(_) => "ReadSecretString?".to_owned(),
+        _ => "ReadSecretString".to_owned(),
     }
 }
 
@@ -140,7 +166,7 @@ fn type_decl(out: &mut String, doc: &SchemaDoc, decl: &Decl, encodable: &[&str])
                 .fields
                 .iter()
                 .filter(|field| !is_envelope_field(doc, &decl.name, &field.name))
-                .map(|field| (swift_member(&field.name), swift_ty(&field.ty)))
+                .map(|field| (swift_member(&field.name), swift_field_ty(field)))
                 .collect::<Vec<_>>();
             out.push_str(&format!("public struct {}: Equatable {{\n", decl.name));
             for (name, ty) in &members {
@@ -573,15 +599,22 @@ fn decode_struct_fn(out: &mut String, doc: &SchemaDoc, decl: &StructDecl) {
         let swift_name = swift_member(&field.name);
         match &field.ty {
             FieldTy::Option(inner) => {
+                // Sealed on the PRESENT value, and the local is declared with
+                // the FIELD's type so the two cannot drift apart.
                 let inner_expr = decode_expr(inner, "present", &context);
+                let inner_expr = if field.secret {
+                    format!("ReadSecretString({inner_expr})")
+                } else {
+                    inner_expr
+                };
                 out.push_str(&format!(
-                    "        let {swift_name}: {}?\n\
+                    "        let {swift_name}: {}\n\
                      \x20       if let present = {json} {{\n\
                      \x20           {swift_name} = {inner_expr}\n\
                      \x20       }} else {{\n\
                      \x20           {swift_name} = nil\n\
                      \x20       }}\n",
-                    swift_ty(inner)
+                    swift_field_ty(field)
                 ));
             }
             FieldTy::List { element, max_len } => {
@@ -594,6 +627,11 @@ fn decode_struct_fn(out: &mut String, doc: &SchemaDoc, decl: &StructDecl) {
             }
             ty => {
                 let expr = decode_expr(ty, &json, &context);
+                let expr = if field.secret {
+                    format!("ReadSecretString({expr})")
+                } else {
+                    expr
+                };
                 out.push_str(&format!("        let {swift_name} = {expr}\n"));
             }
         }
@@ -695,9 +733,19 @@ fn encode_struct_fn(out: &mut String, doc: &SchemaDoc, decl: &StructDecl) {
     for field in &decl.fields {
         let context = format!("\"{}.{}\"", decl.name, field.name);
         let member = format!("value.{}", swift_member(&field.name));
+        let member = if field.secret {
+            format!("{member}.expose()")
+        } else {
+            member
+        };
         match &field.ty {
             FieldTy::Option(inner) => {
-                let inner_expr = encode_expr(doc, inner, "present", &context);
+                let present = if field.secret {
+                    "present.expose()".to_owned()
+                } else {
+                    "present".to_owned()
+                };
+                let inner_expr = encode_expr(doc, inner, &present, &context);
                 out.push_str(&format!(
                     "        if let present = {member} {{\n\
                      \x20           map[\"{name}\"] = {inner_expr}\n\

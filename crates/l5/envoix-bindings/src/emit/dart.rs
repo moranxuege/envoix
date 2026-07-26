@@ -11,7 +11,7 @@
 use crate::model::{Decl, FieldDecl, FieldTy, RuleValue, SchemaDoc, StructDecl, UnionDecl};
 
 use super::{
-    dart_member, encodable_decls, encode_helper_use, helper_use, is_envelope_field,
+    dart_member, encodable_decls, encode_helper_use, has_secret, helper_use, is_envelope_field,
     scalar_predicate, upper_camel,
 };
 
@@ -48,6 +48,9 @@ pub fn module(doc: &SchemaDoc) -> String {
     rules_consts(&mut out, doc);
     out.push_str("const int _u63Max = 9223372036854775807;\n\n");
     error_type(&mut out);
+    if has_secret(doc) {
+        secret_type(&mut out);
+    }
     for decl in &doc.decls {
         type_decl(&mut out, doc, decl);
     }
@@ -111,6 +114,21 @@ fn error_type(out: &mut String) {
     );
 }
 
+fn secret_type(out: &mut String) {
+    out.push_str(
+        "/// Bounded contract text whose ordinary string representation is always\n\
+         /// redacted. Rendering the user-visible value requires an explicit\n\
+         /// [expose] call at the UI boundary.\n\
+         final class ReadSecretString {\n\
+         \x20 const ReadSecretString(this._value);\n\n\
+         \x20 final String _value;\n\n\
+         \x20 String expose() => _value;\n\n\
+         \x20 @override\n\
+         \x20 String toString() => 'ReadSecretString([redacted])';\n\
+         }\n\n",
+    );
+}
+
 fn dart_ty(ty: &FieldTy) -> String {
     match ty {
         FieldTy::U16 | FieldTy::U32 | FieldTy::U63 => "int".to_owned(),
@@ -123,6 +141,17 @@ fn dart_ty(ty: &FieldTy) -> String {
         FieldTy::Named(name) => name.clone(),
         FieldTy::Option(inner) => format!("{}?", dart_ty(inner)),
         FieldTy::List { element, .. } => format!("List<{}>", dart_ty(element)),
+    }
+}
+
+fn dart_field_ty(field: &FieldDecl) -> String {
+    if !field.secret {
+        return dart_ty(&field.ty);
+    }
+    match &field.ty {
+        // Optional AROUND the seal: absence is not a secret, the value is.
+        FieldTy::Option(_) => "ReadSecretString?".to_owned(),
+        _ => "ReadSecretString".to_owned(),
     }
 }
 
@@ -154,7 +183,7 @@ fn type_decl(out: &mut String, doc: &SchemaDoc, decl: &Decl) {
                 }
                 out.push_str(&format!(
                     "  final {} {};\n",
-                    dart_ty(&field.ty),
+                    dart_field_ty(field),
                     dart_member(&field.name)
                 ));
             }
@@ -590,7 +619,14 @@ fn decode_struct_fn(out: &mut String, doc: &SchemaDoc, decl: &StructDecl) {
         let dart_name = dart_member(&field.name);
         match &field.ty {
             FieldTy::Option(inner) => {
+                // Sealed on the PRESENT value, never around the option:
+                // whether a card has a link is not secret, only the link is.
                 let inner_expr = decode_expr(inner, "present", &context);
+                let inner_expr = if field.secret {
+                    format!("ReadSecretString({inner_expr})")
+                } else {
+                    inner_expr
+                };
                 out.push_str(&format!(
                     "    {dart_name}: switch ({json}) {{\n\
                      \x20     null => null,\n\
@@ -608,6 +644,11 @@ fn decode_struct_fn(out: &mut String, doc: &SchemaDoc, decl: &StructDecl) {
             }
             ty => {
                 let expr = decode_expr(ty, &json, &context);
+                let expr = if field.secret {
+                    format!("ReadSecretString({expr})")
+                } else {
+                    expr
+                };
                 out.push_str(&format!("    {dart_name}: {expr},\n"));
             }
         }
@@ -706,9 +747,19 @@ fn encode_struct_fn(out: &mut String, decl: &StructDecl) {
     for field in fields {
         let context = format!("'{}.{}'", decl.name, field.name);
         let member = format!("value.{}", dart_member(&field.name));
+        let member = if field.secret {
+            format!("{member}.expose()")
+        } else {
+            member
+        };
         match &field.ty {
             FieldTy::Option(inner) => {
-                let inner_expr = encode_expr(inner, &format!("{member}!"), &context);
+                let present = if field.secret {
+                    format!("{member}!.expose()")
+                } else {
+                    format!("{member}!")
+                };
+                let inner_expr = encode_expr(inner, &present, &context);
                 out.push_str(&format!(
                     "    '{name}': {member} == null ? null : {inner_expr},\n",
                     name = field.name,

@@ -13,7 +13,8 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use envoix_bindings::command::{
-    COMMAND_SCHEMA_ID, CommandBody, CreateOutcomeView, decode_command_frame,
+    COMMAND_SCHEMA_ID, CommandBody, CommandFrame, CreateIntentView, CreateOutcomeView, CreateView,
+    FrontendIntentView, JoinInviteView, SendSourceView, decode_command_frame, encode_command_frame,
 };
 use envoix_bindings::lag_frame;
 use envoix_bindings::read::{
@@ -25,7 +26,7 @@ use envoix_host_android::{AttachmentToken, FramePoll, Host};
 use envoix_outcomes::OutcomeCode;
 use envoix_platform_android::{Work, WorkOrder, WorkReport};
 use envoix_runtime::LosslessUpdateKind;
-use envoix_types::RecordId;
+use envoix_types::{RecordId, Secret};
 
 /// Set this to run the host's gates without the Dart replay. It is named in
 /// the failure message on purpose: a decode gate that skips itself when a
@@ -300,7 +301,11 @@ fn flutter_mutating_hot_restart_preserves_cards() {
 
     // Acceptance first, and it is NOT the effect: the committed completion
     // arrives separately, on the frame lane.
-    fs::write(work.join("accepted.frame"), host.intent(&submit)).expect("write the acceptance");
+    fs::write(
+        work.join("accepted.frame"),
+        host.intent(&submit).expect("the host accepts the intent"),
+    )
+    .expect("write the acceptance");
     let settled = drain_until(&host, token, |frames| {
         frames.iter().any(|frame| is_completion(frame))
     });
@@ -325,14 +330,28 @@ fn flutter_mutating_hot_restart_preserves_cards() {
     }
 
     // The same identity again, now that its effect is in committed truth.
-    fs::write(work.join("duplicate.frame"), host.intent(&submit)).expect("write the duplicate");
-    fs::write(work.join("conflict.frame"), host.intent(&conflict)).expect("write the conflict");
+    fs::write(
+        work.join("duplicate.frame"),
+        host.intent(&submit).expect("the host accepts the retry"),
+    )
+    .expect("write the duplicate");
+    fs::write(
+        work.join("conflict.frame"),
+        host.intent(&conflict)
+            .expect("the host accepts the conflict"),
+    )
+    .expect("write the conflict");
 
     // The hot restart: the isolate dies, the host does not. The next attachment
     // is a new epoch, and the frame the OLD one encoded is refused typed.
     let restarted = host.open_lane();
     assert_ne!(restarted, token);
-    fs::write(work.join("stale.frame"), host.intent(&submit)).expect("write the refusal");
+    fs::write(
+        work.join("stale.frame"),
+        host.intent(&submit)
+            .expect("the host accepts the stale command"),
+    )
+    .expect("write the refusal");
     // The card may still have been retiring its worker when this attachment
     // opened, in which case the rest of the story arrives as `state` updates
     // rather than inside the opening snapshot. Both are the same truth.
@@ -428,7 +447,9 @@ fn flutter_creates_a_transfer_without_the_debug_bridge() {
     // reported for the document it picked, and nothing else.
     replay("ask-send");
     let send = fs::read(work.join("send.frame")).expect("the app encoded a create");
-    let result = host.intent(&send);
+    let result = host
+        .intent(&send)
+        .expect("the host accepts the send intent");
     fs::write(work.join("send.result"), &result).expect("write the send result");
     let card = created_card(&result).expect("the authority created the send");
     assert_eq!(host.live_cards(), vec![card], "exactly one card exists");
@@ -454,8 +475,8 @@ fn flutter_creates_a_transfer_without_the_debug_bridge() {
     // app: the invite a device harness pastes is one the core published, never
     // one a script invented. The code rides beside it because it lives inside
     // the link's base64, where a harness cannot read it.
-    fs::write(work.join("invite.txt"), &link).expect("write the invite");
-    fs::write(work.join("code.txt"), &invite.code).expect("write the room code");
+    fs::write(work.join("invite.txt"), link.expose()).expect("write the invite");
+    fs::write(work.join("code.txt"), invite.code.expose()).expect("write the room code");
 
     // The join: the sender's own published invite, pasted back. The authority
     // parses it, chooses the opposite role, and creates the receiving card.
@@ -463,7 +484,12 @@ fn flutter_creates_a_transfer_without_the_debug_bridge() {
     replay("ask-join");
     for (name, result) in [("join", "join.result"), ("bare", "bare.result")] {
         let frame = fs::read(work.join(format!("{name}.frame"))).expect("the app encoded it");
-        fs::write(work.join(result), host.intent(&frame)).expect("write the result");
+        fs::write(
+            work.join(result),
+            host.intent(&frame)
+                .expect("the host accepts the create intent"),
+        )
+        .expect("write the result");
     }
     let joined = created_card(&fs::read(work.join("join.result")).expect("join result"))
         .expect("the authority created the join");
@@ -528,13 +554,79 @@ fn flutter_creates_a_transfer_without_the_debug_bridge() {
     let codes: BTreeSet<String> = restored
         .iter()
         .filter_map(|frame| card_view(frame))
-        .filter_map(|view| view.invite.map(|invite| invite.code))
+        .filter_map(|view| view.invite.map(|invite| invite.code.expose().clone()))
         .collect();
     assert_eq!(
         codes,
-        BTreeSet::from([invite.code]),
+        BTreeSet::from([invite.code.expose().clone()]),
         "both restored cards carry the one room code the send minted"
     );
+}
+
+/// A create id is authority identity, not just frontend correlation. The first
+/// durable record stores it in the same commit that creates the card, so a
+/// repeated delivery after the process has forgotten all memory answers with
+/// that card instead of allocating another one.
+#[test]
+fn repeated_create_identity_survives_restart_without_creating_another_card() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let request_id = "0123456789abcdeffedcba9876543210";
+    let request = encode_command_frame(&CommandFrame {
+        body: CommandBody::Intent(FrontendIntentView::Create(CreateView {
+            intent: CreateIntentView::Send(SendSourceView {
+                display_name: "one-card.bin".to_owned(),
+                total: 4096,
+            }),
+            request_id: request_id.to_owned(),
+        })),
+    })
+    .expect("a create intent encodes");
+
+    let first = {
+        let host = Host::boot(root.path()).expect("first process boots");
+        let answer = host
+            .intent(&request)
+            .expect("the authority accepts the intent");
+        assert_eq!(
+            host.live_cards().len(),
+            1,
+            "the first delivery creates one card"
+        );
+        host.shutdown();
+        answer
+    };
+
+    let rebooted = Host::boot(root.path()).expect("second process boots");
+    let repeated = rebooted
+        .intent(&request)
+        .expect("the authority accepts the repeated intent");
+    assert_eq!(
+        repeated, first,
+        "the repeated identity gets its original durable answer"
+    );
+    assert_eq!(
+        rebooted.live_cards().len(),
+        1,
+        "one create identity is one card across process generations"
+    );
+    rebooted.shutdown();
+}
+
+/// Malformed bytes reached the authority and were refused before an intent
+/// handler ran. This must remain distinct from a missing host or a lost answer.
+#[test]
+fn authority_refuses_non_contract_intent_as_a_third_origin() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let host = Host::boot(root.path()).expect("the host boots");
+    assert_eq!(
+        host.intent(br#"{"schema":"not-envoix"}"#),
+        Err(envoix_host_android::IntentRejection::Contract)
+    );
+    assert!(
+        host.live_cards().is_empty(),
+        "a refused frame creates nothing"
+    );
+    host.shutdown();
 }
 
 /// The card a create result names, or `None` for a refusal.
@@ -898,4 +990,99 @@ fn repository_root() -> PathBuf {
         .and_then(Path::parent)
         .expect("the host crate sits two levels below the repository root")
         .to_path_buf()
+}
+
+/// The retry the request id CANNOT answer.
+///
+/// The frontend forms a create id with the intent, which is what makes a resend
+/// within one process recognisably the same ask. But that id lives in the sheet
+/// the user is looking at, and the sheet dies with the process. So the reported
+/// sequence — the answer is lost, the app restarts, the user pastes the same
+/// invite again — arrives as a create the authority has never seen, carrying a
+/// FRESH id and asking for the room it already joined.
+///
+/// Only the rendezvous says those two asks are the same thing. Keyed on the id
+/// alone this makes a second card frozen to the first one's room; keyed on the
+/// endpoint too, the second ask is answered with the first card.
+#[test]
+fn a_fresh_id_for_a_room_already_joined_does_not_make_a_second_card() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let sender = tempfile::tempdir().expect("sender tempdir");
+
+    // An invite the CORE published, never one this test invented.
+    let link = {
+        let host = Host::boot(sender.path()).expect("the sending host boots");
+        let token = host.open_lane();
+        host.intent(&create_send_frame("shared.bin", 4096))
+            .expect("the send is created");
+        let published = drain_until(&host, token, |frames| {
+            frames
+                .iter()
+                .filter_map(|frame| card_view(frame))
+                .any(|view| view.invite.is_some())
+        });
+        let link: envoix_types::Secret<String> = published
+            .iter()
+            .filter_map(|frame| card_view(frame))
+            .find_map(|view| view.invite)
+            .expect("the send publishes an invite")
+            .link
+            .clone()
+            .expect("the invite has a shareable link");
+        host.shutdown();
+        link
+    };
+
+    // First join, first process, first id.
+    {
+        let host = Host::boot(root.path()).expect("the joining host boots");
+        host.intent(&create_join_frame(
+            link.expose(),
+            "0123456789abcdeffedcba9876543210",
+        ))
+        .expect("the first join is accepted");
+        assert_eq!(host.live_cards().len(), 1, "the first join makes one card");
+        host.shutdown();
+    }
+
+    // The answer never arrived, the app died, the user pastes it again. A new
+    // sheet mints a new id, because nothing durable on the frontend remembers.
+    let rebooted = Host::boot(root.path()).expect("the joining host boots again");
+    rebooted
+        .intent(&create_join_frame(
+            link.expose(),
+            "fedcba98765432100123456789abcdef",
+        ))
+        .expect("the repeated join is accepted");
+    assert_eq!(
+        rebooted.live_cards().len(),
+        1,
+        "a second id for a room already joined must answer with the first card, \
+         not freeze a second card to the same rendezvous"
+    );
+}
+
+fn create_send_frame(name: &str, total: u64) -> Vec<u8> {
+    encode_command_frame(&CommandFrame {
+        body: CommandBody::Intent(FrontendIntentView::Create(CreateView {
+            intent: CreateIntentView::Send(SendSourceView {
+                display_name: name.to_owned(),
+                total,
+            }),
+            request_id: "00000000000000000000000000000001".to_owned(),
+        })),
+    })
+    .expect("a send intent encodes")
+}
+
+fn create_join_frame(link: &str, request_id: &str) -> Vec<u8> {
+    encode_command_frame(&CommandFrame {
+        body: CommandBody::Intent(FrontendIntentView::Create(CreateView {
+            intent: CreateIntentView::Join(JoinInviteView {
+                invite: Secret::new(link.to_owned()),
+            }),
+            request_id: request_id.to_owned(),
+        })),
+    })
+    .expect("a join intent encodes")
 }

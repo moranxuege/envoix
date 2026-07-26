@@ -19,7 +19,7 @@ use envoix_runtime::{
     CommandCompletion, CommandLedger, CommandRejected, CommandVerdict, MAX_INVITE_INPUT_LENGTH,
     PauseOrigin, ProductState,
 };
-use envoix_types::{CommandId, OfferedName, RecordId};
+use envoix_types::{CommandId, OfferedName, RecordId, Secret};
 
 fn doc() -> envoix_bindings::SchemaDoc {
     envoix_bindings::parse_schema(envoix_bindings::command_schema_text())
@@ -125,7 +125,7 @@ fn generated_command_schema_exhaustiveness() {
         assert!(SUPERSESSION_INERT_PRE_ACCEPTANCE_ONLY);
         assert!(RETRY_HORIZON_COMPLETIONS as usize == CommandLedger::RETENTION);
     }
-    assert_eq!(COMMAND_SCHEMA_ID, "envoix/binding/command/3");
+    assert_eq!(COMMAND_SCHEMA_ID, "envoix/binding/command/4");
 
     // The invite field carries text the grammar has not seen yet, so its bound
     // is the one place `MAX_INVITE_INPUT_LENGTH` — the parser's permissive
@@ -241,7 +241,7 @@ fn generated_command_schema_exhaustiveness() {
     );
     let hostile = "envoix://invite/v3/\u{202e}not-really'; DROP--";
     let bytes = encode_command_frame(&create_frame(CreateIntentView::Join(JoinInviteView {
-        invite: hostile.to_owned(),
+        invite: Secret::new(hostile.to_owned()),
     })))
     .expect("join intent encodes");
     let FrontendIntent::Create(spec) = decode_intent(&bytes).expect("join intent decodes") else {
@@ -293,7 +293,7 @@ fn generated_command_schema_exhaustiveness() {
     assert_eq!(union_len("FrontendIntentView"), 2);
     assert_eq!(union_len("CreateIntentView"), 2);
     assert_eq!(union_len("CreateOutcomeView"), 2);
-    assert_eq!(CreateRefusalView::ALL.len(), 8);
+    assert_eq!(CreateRefusalView::ALL.len(), 9);
     assert_eq!(union_len("AcceptanceView"), 4);
     assert_eq!(union_len("CompletionView"), completions.len());
     assert_eq!(union_len("DispositionView"), 11);
@@ -301,14 +301,12 @@ fn generated_command_schema_exhaustiveness() {
     assert_eq!(CommandView::ALL.len(), 5);
 }
 
-/// `SendSourceView.display_name` carries an L0 `OfferedName` — the leaf the
-/// authority re-sanitizes and a publication lands under — so its bound is that
-/// type's published maximum and not a number this schema picked. The read
-/// contract classifies every text bound it declares; this schema has exactly
-/// one field carrying another layer's value, so the agreement is gated here
-/// rather than by standing up a second classifier for three strings.
+/// The command must carry every provider name Android can report so L0, the
+/// authority that owns the portable byte limit, can answer with `name_too_long`
+/// instead of the frontend encoder failing first. A provider leaf is at most
+/// 255 UTF-16 units and each may occupy four UTF-8 bytes.
 #[test]
-fn the_picked_name_bound_is_the_offered_name_maximum() {
+fn the_picked_name_bound_reaches_the_authority_for_every_android_leaf() {
     let doc = doc();
     let Some(Decl::Struct(decl)) = doc.find("SendSourceView") else {
         panic!("SendSourceView expected");
@@ -320,8 +318,8 @@ fn the_picked_name_bound_is_the_offered_name_maximum() {
         .expect("SendSourceView declares a display_name");
     assert!(
         matches!(field.ty, FieldTy::Str { max_bytes }
-            if max_bytes as usize == OfferedName::MAX_BYTES),
-        "display_name must be bounded by the offered-name maximum, found {:?}",
+            if max_bytes as usize == OfferedName::MAX_BYTES * 4),
+        "display_name must carry Android's UTF-16 leaf maximum, found {:?}",
         field.ty
     );
 }
@@ -351,7 +349,7 @@ fn command_frames_reject_hostile_input() {
     );
 
     let future_version = tamper(&base, |value| {
-        value["schema"] = serde_json::json!("envoix/binding/command/4");
+        value["schema"] = serde_json::json!("envoix/binding/command/5");
     });
     assert_eq!(
         decode_command_frame(&future_version),

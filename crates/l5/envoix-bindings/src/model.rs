@@ -125,6 +125,10 @@ pub struct StructDecl {
 pub struct FieldDecl {
     pub name: String,
     pub ty: FieldTy,
+    /// This scalar is safe to decode and explicitly expose for rendering, but
+    /// every generated language wraps it in a type whose string/debug
+    /// representation is redacted.
+    pub secret: bool,
 }
 
 /// A tagged choice; crosses as `{"kind": ..., "value": ...}` with the value

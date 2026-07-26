@@ -4,6 +4,11 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 const FALLBACK_NAME: &str = "unnamed";
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OfferedNameError {
+    TooLong { actual: usize, maximum: usize },
+}
+
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct OfferedName(String);
@@ -20,8 +25,15 @@ impl OfferedName {
     pub const MAX_BYTES: usize = 255;
 
     /// Reduces an untrusted provider name to one filesystem-independent leaf.
-    pub fn from_untrusted(provider_name: impl AsRef<str>) -> Self {
-        Self(sanitize_leaf(provider_name.as_ref()))
+    pub fn from_untrusted(provider_name: impl AsRef<str>) -> Result<Self, OfferedNameError> {
+        let leaf = sanitize_leaf(provider_name.as_ref());
+        if leaf.len() > Self::MAX_BYTES {
+            return Err(OfferedNameError::TooLong {
+                actual: leaf.len(),
+                maximum: Self::MAX_BYTES,
+            });
+        }
+        Ok(Self(leaf))
     }
 
     pub fn as_str(&self) -> &str {
@@ -34,7 +46,8 @@ impl<'de> Deserialize<'de> for OfferedName {
     where
         D: Deserializer<'de>,
     {
-        deserialize_canonical_leaf(deserializer).map(Self)
+        let leaf = deserialize_canonical_leaf(deserializer)?;
+        Self::from_untrusted(&leaf).map_err(|error| D::Error::custom(format!("{error:?}")))
     }
 }
 

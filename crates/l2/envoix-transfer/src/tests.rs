@@ -30,7 +30,7 @@ fn request(
 ) -> SenderRequest {
     SenderRequest::new(
         id,
-        OfferedName::from_untrusted("report.bin"),
+        OfferedName::from_untrusted("report.bin").unwrap(),
         ByteCount::new(file_size as u64),
         ByteCount::new(chunk_size as u64),
         resume,

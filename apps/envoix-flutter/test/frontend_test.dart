@@ -25,6 +25,7 @@ import 'package:envoix/labels.dart';
 import 'package:envoix/lane.dart';
 import 'package:envoix/logs.dart';
 import 'package:envoix/main.dart';
+import 'package:flutter/foundation.dart' show DebugPrintCallback, debugPrint;
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
@@ -164,6 +165,13 @@ class RecordingCreateSink {
   }
 }
 
+Future<List<int>?> _authorityRefuses(List<int> frame) async {
+  throw PlatformException(
+    code: hostRejected,
+    message: 'the authority refused the intent frame',
+  );
+}
+
 CommandFrame createdOf(String id, String createdCard) => CommandFrame(
       body: CommandBodyCreateResult(
         CreateResultView(
@@ -234,7 +242,7 @@ String _createIntent(CreateIntentView intent) => switch (intent) {
             '{"display_name":${jsonEncode(value.displayName)},'
             '"total":${value.total}}}',
       CreateIntentViewJoin(:final JoinInviteView value) =>
-        '{"kind":"join","value":{"invite":${jsonEncode(value.invite)}}}',
+        '{"kind":"join","value":{"invite":${jsonEncode(value.invite.expose())}}}',
     };
 
 String _createOutcome(CreateOutcomeView outcome) => switch (outcome) {
@@ -251,6 +259,7 @@ String _refusal(CreateRefusalView refusal) => switch (refusal) {
       CreateRefusalView.inviteTooLong => 'invite_too_long',
       CreateRefusalView.inviteUnsupported => 'invite_unsupported',
       CreateRefusalView.inviteRoleUnsupported => 'invite_role_unsupported',
+      CreateRefusalView.nameTooLong => 'name_too_long',
       CreateRefusalView.storageFault => 'storage_fault',
       CreateRefusalView.internal => 'internal',
     };
@@ -1380,7 +1389,7 @@ void main() {
             FrontendIntentViewCreate(
               CreateView(
                 intent: const CreateIntentViewJoin(
-                  JoinInviteView(invite: 'envoix://invite/v3/AAAA'),
+                  JoinInviteView(invite: CommandSecretString('envoix://invite/v3/AAAA')),
                 ),
                 requestId: id,
               ),
@@ -1391,7 +1400,7 @@ void main() {
         for (final CreateRefusalView refusal in CreateRefusalView.values)
           refusedOf(id, refusal),
       ];
-      expect(frames.length, 66);
+      expect(frames.length, 67);
       for (final CommandFrame frame in frames) {
         final CommandFrame decoded = decodeCommandFrame(_encoded(frame));
         // Re-spelling what the decoder produced must give the same text: the
@@ -2062,6 +2071,32 @@ void main() {
   group('create', () {
     const String invite = 'envoix://invite/v3/eyJ2ZXJzaW9uIjozfQ';
 
+    test('a secret passed to shipped instrumentation cannot reach its log', () {
+      const String password = '481920-thistle-zephyr';
+      const String fingerprint = '0123456789abcdef';
+      final List<String> lines = <String>[];
+      final DebugPrintCallback original = debugPrint;
+      debugPrint = (String? message, {int? wrapWidth}) {
+        lines.add(message ?? '');
+      };
+      addTearDown(() => debugPrint = original);
+      forgetRendered();
+
+      const ReadSecretString secret = ReadSecretString(password);
+      expect(secret.toString(), isNot(contains(password)));
+      reportInvite(
+        card,
+        const InviteView(
+          code: secret,
+          codeFingerprint: fingerprint,
+          link: null,
+        ),
+      );
+
+      expect(lines.join('\n'), contains('fingerprint=$fingerprint'));
+      expect(lines.join('\n'), isNot(contains(password)));
+    });
+
     Future<void> openSheet(
       WidgetTester tester,
       RecordingCreateSink sink, {
@@ -2093,14 +2128,14 @@ void main() {
         'envoix://pair/legacy',
       ];
       for (final String text in texts) {
-        await creator.join(text);
+        await creator.join(id: mintCommandId(), invite: text);
       }
       expect(sink.requested.length, texts.length);
       for (int index = 0; index < texts.length; index += 1) {
         final CreateIntentView intent = sink.requested[index].intent;
         expect(intent, isA<CreateIntentViewJoin>());
         expect(
-          (intent as CreateIntentViewJoin).value.invite,
+          (intent as CreateIntentViewJoin).value.invite.expose(),
           texts[index],
           reason: 'the app must not interpret, trim or judge invite text',
         );
@@ -2110,8 +2145,11 @@ void main() {
     test('a send carries the metadata the platform reported', () async {
       final RecordingCreateSink sink =
           RecordingCreateSink((CreateView create) => null);
-      await Creator(sink: sink.call)
-          .send(displayName: 'quarterly report.pdf', sizeBytes: 4096);
+      await Creator(sink: sink.call).send(
+        id: mintCommandId(),
+        displayName: 'quarterly report.pdf',
+        sizeBytes: 4096,
+      );
       final CreateIntentView intent = sink.requested.single.intent;
       expect(intent, isA<CreateIntentViewSend>());
       final SendSourceView source = (intent as CreateIntentViewSend).value;
@@ -2119,19 +2157,32 @@ void main() {
       expect(source.total, 4096);
     });
 
-    test('one identity per request, and never reused', () async {
+    test('the identity bound to each user intent is preserved', () async {
       final RecordingCreateSink sink =
           RecordingCreateSink((CreateView create) => null);
       final Creator creator = Creator(sink: sink.call);
-      await creator.join(invite);
-      await creator.join(invite);
-      await creator.send(displayName: 'a.bin', sizeBytes: 1);
-      final Set<String> ids =
-          sink.requested.map((CreateView create) => create.requestId).toSet();
-      expect(ids.length, 3);
-      for (final String id in ids) {
-        expect(id, matches(RegExp(r'^[0-9a-f]{32}$')));
-      }
+      final List<String> ids =
+          List<String>.generate(3, (_) => mintCommandId());
+      await creator.join(id: ids[0], invite: invite);
+      await creator.join(id: ids[1], invite: invite);
+      await creator.send(id: ids[2], displayName: 'a.bin', sizeBytes: 1);
+      expect(
+        sink.requested.map((CreateView create) => create.requestId),
+        ids,
+      );
+    });
+
+    test('retrying a formed intent reuses its identity', () async {
+      final RecordingCreateSink sink =
+          RecordingCreateSink((CreateView create) => null);
+      final Creator creator = Creator(sink: sink.call);
+      final String requestId = mintCommandId();
+      await creator.join(id: requestId, invite: invite);
+      await creator.join(id: requestId, invite: invite);
+      expect(
+        sink.requested.map((CreateView create) => create.requestId),
+        <String>[requestId, requestId],
+      );
     });
 
     test('the authority decides, and its refusal is what is shown', () async {
@@ -2141,7 +2192,8 @@ void main() {
         );
         // The text is a perfectly well-formed invite; the answer is still the
         // authority's, because the app never looked at it.
-        final CreateIntent request = await Creator(sink: sink.call).join(invite);
+        final CreateIntent request = await Creator(sink: sink.call)
+            .join(id: mintCommandId(), invite: invite);
         expect(request.outcome, isA<CreateOutcomeViewRefused>());
         expect(request.card, isNull);
         expect(createAnswerLabel(request), startsWith('Refused'));
@@ -2159,7 +2211,8 @@ void main() {
       final RecordingCreateSink sink = RecordingCreateSink(
         (CreateView create) => createdOf(create.requestId, other),
       );
-      final CreateIntent request = await Creator(sink: sink.call).join(invite);
+      final CreateIntent request = await Creator(sink: sink.call)
+          .join(id: mintCommandId(), invite: invite);
       expect(request.card, other);
       expect(createAnswerLabel(request), contains(other));
     });
@@ -2168,7 +2221,8 @@ void main() {
       final RecordingCreateSink sink = RecordingCreateSink(
         (CreateView create) => createdOf('9' * 32, other),
       );
-      final CreateIntent request = await Creator(sink: sink.call).join(invite);
+      final CreateIntent request = await Creator(sink: sink.call)
+          .join(id: mintCommandId(), invite: invite);
       expect(request.outcome, isNull);
       expect(request.card, isNull);
       expect(request.fault, isNotNull);
@@ -2177,7 +2231,8 @@ void main() {
     test('a lane that never answers is not a verdict', () async {
       final RecordingCreateSink sink =
           RecordingCreateSink((CreateView create) => null);
-      final CreateIntent request = await Creator(sink: sink.call).join(invite);
+      final CreateIntent request = await Creator(sink: sink.call)
+          .join(id: mintCommandId(), invite: invite);
       expect(request.outcome, isNull);
       expect(request.pending, isFalse);
       expect(request.fault?.origin, FaultOrigin.unanswered);
@@ -2186,23 +2241,36 @@ void main() {
       expect(createAnswerLabel(request), contains('If a transfer appears'));
     });
 
-    test('a request the encoder refused never left, and never says it might',
+    test('an authority refusal is neither unsent nor an unanswered create',
+        () async {
+      final CreateIntent request = await Creator(sink: _authorityRefuses)
+          .join(id: mintCommandId(), invite: invite);
+      expect(request.outcome, isNull);
+      expect(request.fault?.origin, FaultOrigin.authorityRefused);
+      expect(createAnswerLabel(request), contains('transfer authority'));
+      expect(createAnswerLabel(request), contains('Nothing was created'));
+      expect(createAnswerLabel(request), isNot(contains('If a transfer appears')));
+    });
+
+    test('an ordinary over-byte CJK name reaches the authority and is typed',
         () async {
       final RecordingCreateSink sink = RecordingCreateSink(
-        (CreateView create) => createdOf(create.requestId, other),
+        (CreateView create) =>
+            refusedOf(create.requestId, CreateRefusalView.nameTooLong),
       );
-      final CreateIntent request = await Creator(sink: sink.call)
-          .send(displayName: 'n' * 256, sizeBytes: 1);
-      // The frame never reached the sink, so no card can be in the list.
-      expect(sink.requested, isEmpty);
-      expect(request.outcome, isNull);
-      expect(request.fault?.origin, FaultOrigin.unsent);
-      expect(createAnswerLabel(request), contains('Not sent'));
-      expect(createAnswerLabel(request), contains('Nothing was created'));
+      final CreateIntent request = await Creator(sink: sink.call).send(
+        id: mintCommandId(),
+        displayName: '界' * 86,
+        sizeBytes: 1,
+      );
+      expect(sink.requested, hasLength(1));
+      expect(request.outcome, isA<CreateOutcomeViewRefused>());
       expect(
-        createAnswerLabel(request),
-        isNot(contains('If a transfer appears')),
+        (request.outcome! as CreateOutcomeViewRefused).value,
+        CreateRefusalView.nameTooLong,
       );
+      expect(request.fault, isNull);
+      expect(createAnswerLabel(request), contains('Rename it'));
     });
 
     testWidgets('the send button waits for the platform, not for a rule',
@@ -2237,6 +2305,16 @@ void main() {
       expect((intent as CreateIntentViewSend).value.displayName, 'holiday.mp4');
       expect(find.textContaining('Created'), findsOneWidget);
       expect(find.textContaining(other), findsOneWidget);
+
+      // Re-tapping retries the same formed user intent. The sheet, rather than
+      // each transmission, owns the id.
+      await tester.tap(start);
+      await tester.pumpAndSettle();
+      expect(sink.requested.length, 2);
+      expect(
+        sink.requested[1].requestId,
+        sink.requested[0].requestId,
+      );
     });
 
     testWidgets('join is always offered; the answer is the authority\'s',
@@ -2256,7 +2334,7 @@ void main() {
       await tester.tap(join);
       await tester.pumpAndSettle();
       expect(
-        (sink.requested.single.intent as CreateIntentViewJoin).value.invite,
+        (sink.requested.single.intent as CreateIntentViewJoin).value.invite.expose(),
         '  000123-amber-brass  ',
       );
       expect(
@@ -2282,7 +2360,11 @@ void main() {
         ..admit(update(
           1,
           CardUpdateKindViewSnapshot(cardView(
-            invite: const InviteView(code: '000123-amber-brass', link: invite),
+            invite: const InviteView(
+              code: const ReadSecretString('000123-amber-brass'),
+              codeFingerprint: '0123456789abcdef',
+              link: ReadSecretString(invite),
+            ),
           )),
         ));
       await pumpHome(tester, attachment);
@@ -2296,7 +2378,11 @@ void main() {
         ..admit(update(
           1,
           CardUpdateKindViewSnapshot(cardView(
-            invite: const InviteView(code: '000999-cedar-onyx', link: null),
+            invite: const InviteView(
+              code: const ReadSecretString('000999-cedar-onyx'),
+              codeFingerprint: 'fedcba9876543210',
+              link: null,
+            ),
           )),
         ));
       await pumpHome(tester, attachment);

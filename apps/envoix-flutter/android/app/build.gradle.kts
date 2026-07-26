@@ -43,6 +43,20 @@ fun policy(key: String): String = releasePolicy.getProperty(key) ?: throw Gradle
 
 fun policyList(key: String): List<String> = policy(key).split(',').filter(String::isNotEmpty)
 
+/** The one reviewed identity for the toolchain that produces the native payload. */
+val nativeToolchainFile = File(repositoryRoot, "registry/android-native-toolchain.properties")
+val nativeToolchain =
+    Properties().apply {
+        if (!nativeToolchainFile.isFile) {
+            throw GradleException("missing $nativeToolchainFile")
+        }
+        nativeToolchainFile.inputStream().use(::load)
+    }
+
+fun nativeToolchain(key: String): String =
+    nativeToolchain.getProperty(key)
+        ?: throw GradleException("the native toolchain has no $key")
+
 val expectedSigner = policy("signer_sha256")
 val requiredAbis = policyList("required_abis")
 
@@ -66,6 +80,7 @@ val allowedBundleEntries = policyList("allowed_bundle_entries")
  * answer "what determines the payload" differently.
  */
 val payloadSources = policyList("payload_sources")
+val recordedPayloadSources = policy("payload_sources_sha256")
 val forbiddenManifestMarkers = policyList("forbidden_manifest_markers")
 val forbiddenReleaseClasses = policyList("forbidden_release_classes")
 
@@ -206,13 +221,23 @@ val keytoolExecutable = File(System.getProperty("java.home"), "bin/keytool")
  * cross-compiled the payload, so it is located there rather than on PATH.
  */
 val llvmNmExecutable: File by lazy {
+    val expectedRevision = nativeToolchain("android_ndk_revision")
     val ndk =
         System.getenv("ANDROID_NDK_HOME")?.let(::File)?.takeIf(File::isDirectory)
-            ?: File(android.sdkDirectory, "ndk")
-                .listFiles(File::isDirectory)
-                .orEmpty()
-                .maxByOrNull(File::getName)
-            ?: throw GradleException("no Android NDK under ${android.sdkDirectory}/ndk")
+            ?: File(android.sdkDirectory, "ndk/$expectedRevision")
+    val observedRevision =
+        File(ndk, "source.properties")
+            .takeIf(File::isFile)
+            ?.readLines()
+            ?.firstOrNull { it.substringBefore('=').trim() == "Pkg.Revision" }
+            ?.substringAfter('=')
+            ?.trim()
+    if (observedRevision != expectedRevision) {
+        throw GradleException(
+            "Android NDK at $ndk is ${observedRevision ?: "unidentified"}, " +
+                "expected $expectedRevision from $nativeToolchainFile",
+        )
+    }
     File(ndk, "toolchains/llvm/prebuilt")
         .listFiles(File::isDirectory)
         .orEmpty()
@@ -226,6 +251,39 @@ fun sha256(bytes: ByteArray): String =
         .getInstance("SHA-256")
         .digest(bytes)
         .joinToString("") { byte -> "%02x".format(byte) }
+
+/**
+ * The Rust gate's source digest, reproduced from the SAME payload_sources
+ * enumeration. Paths and per-file digests are part of the index, so renames,
+ * additions and recipe/toolchain edits all invalidate the recorded payload by
+ * content rather than by a timestamp accident.
+ */
+fun payloadSourceFiles(): Map<String, File> {
+    val files = sortedMapOf<String, File>()
+    for (pattern in payloadSources) {
+        val matched = fileTree(repositoryRoot) { include(pattern) }.files.filter(File::isFile)
+        if (matched.isEmpty()) {
+            throw GradleException("payload_sources pattern \"$pattern\" names no file")
+        }
+        for (file in matched) {
+            files[file.relativeTo(repositoryRoot).invariantSeparatorsPath] = file
+        }
+    }
+    return files
+}
+
+fun payloadSourcesDigest(): String {
+    val index =
+        buildString {
+            for ((path, file) in payloadSourceFiles()) {
+                append(path)
+                append(' ')
+                append(sha256(file.readBytes()))
+                append('\n')
+            }
+        }
+    return sha256(index.toByteArray(Charsets.UTF_8))
+}
 
 /** Runs one build tool and returns everything it printed. */
 fun toolOutput(
@@ -266,11 +324,18 @@ fun definedSymbols(library: File): List<String> =
 fun registerJniLibsGuard(buildType: String) =
     tasks.register("verify${buildType.replaceFirstChar(Char::uppercase)}JniLibs") {
         inputs.file(policyFile)
+        // Materialise exact files here. Declaring a fileTree rooted at the
+        // repository makes Gradle conservatively treat every task output under
+        // that root as overlapping even when no include pattern matches it.
+        inputs.files(payloadSourceFiles().values)
         doLast {
-            val newestSource =
-                fileTree(repositoryRoot) { include(payloadSources) }
-                    .files
-                    .maxOfOrNull { it.lastModified() } ?: 0L
+            val observedPayloadSources = payloadSourcesDigest()
+            if (observedPayloadSources != recordedPayloadSources) {
+                throw GradleException(
+                    "$buildType payload sources hash to $observedPayloadSources, but the payload " +
+                        "record accounts for $recordedPayloadSources: re-run scripts/build-jni-libs.sh",
+                )
+            }
             for (abi in requiredAbis) {
                 val directory = file("src/$buildType/jniLibs/$abi")
                 val libraries =
@@ -286,12 +351,6 @@ fun registerJniLibsGuard(buildType: String) =
                     )
                 }
                 val library = File(directory, hostSoname)
-                if (newestSource > library.lastModified()) {
-                    throw GradleException(
-                        "$buildType/$abi/$hostSoname is older than the sources it must be built " +
-                            "from: re-run scripts/build-jni-libs.sh",
-                    )
-                }
                 val recorded = policy("payload_${buildType}_${abi}_sha256")
                 val observed = sha256(library.readBytes())
                 if (observed != recorded) {

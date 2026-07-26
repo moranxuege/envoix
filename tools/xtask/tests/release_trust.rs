@@ -88,6 +88,7 @@ fn release_package_trust_and_metadata_agreement() {
     facts.artifact_sha256 = sha256_hex(&fs::read(&artifact).expect("the named artifact is real"));
     let measured = MeasuredArtifact {
         observed_sha256: Some(facts.artifact_sha256.clone()),
+        observed_payload: Some(facts.payload.clone()),
         facts,
     };
     let clean = check_release(&ledger, &build, std::slice::from_ref(&measured)).disagreements;
@@ -195,6 +196,27 @@ fn the_bundle_container_list_never_claims_app_content() {
         !ledger.policy.allowed_bundle_entries.is_empty(),
         "a bundle carries container entries; an empty list would fail every bundle"
     );
+}
+
+/// Resources are shipped data. The release policy therefore names every
+/// currently reviewed archive entry rather than pre-authorising a directory or
+/// extension for whatever a future dependency/source edit puts there.
+#[test]
+fn the_packaged_resource_inventory_contains_no_patterns() {
+    let ledger = load_ledger(&xtask::workspace_root()).expect("the release ledger parses");
+    let resources: Vec<&String> = ledger
+        .policy
+        .allowed_package_entries
+        .iter()
+        .filter(|entry| entry.starts_with("res/"))
+        .collect();
+    assert!(!resources.is_empty(), "the packaged app carries resources");
+    for entry in resources {
+        assert!(
+            !entry.contains('*'),
+            "{entry} pre-authorises unreviewed resource data"
+        );
+    }
 }
 
 /// The debug instrumentation entry points are cut at the root: they compile

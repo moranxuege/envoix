@@ -335,7 +335,7 @@ fn plan(direction: Direction, generation: u32, resume: ResumeIntent) -> AttemptP
 
 fn spec(bytes: &[u8]) -> AttemptTransferSpec {
     AttemptTransferSpec {
-        offered_name: OfferedName::from_untrusted("payload.bin"),
+        offered_name: OfferedName::from_untrusted("payload.bin").unwrap(),
         file_size: ByteCount::new(bytes.len() as u64),
         chunk_size: ByteCount::new(1024),
         claimed_complete: None,

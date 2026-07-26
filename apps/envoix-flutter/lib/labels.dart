@@ -147,6 +147,8 @@ String createRefusalLabel(CreateRefusalView refusal) => switch (refusal) {
         'This version of Envoix cannot use that invite.',
       CreateRefusalView.inviteRoleUnsupported =>
         'That invite asks you to send a file. Start a send instead.',
+      CreateRefusalView.nameTooLong =>
+        'That file name is too long to send. Rename it, then choose it again.',
       CreateRefusalView.storageFault =>
         'The transfer could not be written to storage, so nothing was created.',
       CreateRefusalView.internal =>
@@ -164,6 +166,8 @@ String createAnswerLabel(CreateIntent request) {
       FaultOrigin.unsent =>
         'Not sent — Envoix could not put this request on the wire ($fault). '
             'Nothing was created.',
+      FaultOrigin.authorityRefused =>
+        'Refused by the transfer authority ($fault). Nothing was created.',
       // NOT a verdict: the request may or may not have made a card, and only
       // the card list can say. Offering a guess here would be inventing one.
       FaultOrigin.unanswered => 'No answer arrived ($fault). '

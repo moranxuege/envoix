@@ -109,8 +109,11 @@ fn create_spec(create: CreateView) -> Result<CreateSpec, SubmitDecodeError> {
                 display_name: source.display_name,
                 total: source.total,
             },
+            // Exposed at the one boundary that must read it: the invite
+            // grammar in Rust is what judges this text. It is sealed on the
+            // wire and sealed again in anything the frontend can render.
             CreateIntentView::Join(join) => CreateIntent::Join {
-                invite: join.invite,
+                invite: join.invite.expose().clone(),
             },
         },
     })

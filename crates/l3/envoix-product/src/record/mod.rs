@@ -8,12 +8,13 @@ pub mod identifiers;
 
 pub use identifiers::PRODUCT_RECORD_SCHEMA_ID;
 
-/// The version written by this build. Version 2 added `command_ledger` (BN2)
-/// and version 3 added `pairing` (F2b); the body codec is self-describing, so
-/// every version back to [`OLDEST_READABLE_RECORD_VERSION`] decodes with absent
-/// fields defaulted. An older reader seeing a newer version takes the honest
+/// The version written by this build. Version 2 added `command_ledger` (BN2),
+/// version 3 added `pairing` (F2b), and version 4 added the create request
+/// identity. The body codec is self-describing, so every version back to
+/// [`OLDEST_READABLE_RECORD_VERSION`] decodes with absent fields defaulted. An
+/// older reader seeing a newer version takes the honest
 /// [`RecordDecode::UnsupportedFuture`] quarantine, never the corrupt path.
-pub const PRODUCT_RECORD_VERSION: u32 = 3;
+pub const PRODUCT_RECORD_VERSION: u32 = 4;
 /// The oldest record version this build still decodes.
 pub const OLDEST_READABLE_RECORD_VERSION: u32 = 1;
 const MAX_RECORD_BODY_BYTES: usize = 1024 * 1024;
@@ -26,8 +27,12 @@ const _: () = assert!(MAX_RECORD_BODY_BYTES <= u32::MAX as usize);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RecordDecode {
-    Loaded(TransferRecord),
-    UnsupportedFuture { version: u32 },
+    /// Boxed so the rare future-version answer does not carry the full record's
+    /// stack footprint merely because it shares this result vocabulary.
+    Loaded(Box<TransferRecord>),
+    UnsupportedFuture {
+        version: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -149,7 +154,7 @@ pub fn decode_record(encoded: &[u8]) -> Result<RecordDecode, RecordCodecError> {
     let record: TransferRecord = serde_json::from_slice(&encoded[body_length_end..])
         .map_err(|_| RecordCodecError::MalformedBody)?;
     validate_record(&record)?;
-    Ok(RecordDecode::Loaded(record))
+    Ok(RecordDecode::Loaded(Box::new(record)))
 }
 
 fn validate_record(record: &TransferRecord) -> Result<(), RecordCodecError> {

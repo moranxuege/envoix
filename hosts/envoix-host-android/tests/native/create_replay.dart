@@ -92,7 +92,7 @@ void main(List<String> arguments) {
       'join.frame',
       createFrame(
         id: id,
-        intent: CreateIntentViewJoin(JoinInviteView(invite: text('invite.txt'))),
+        intent: CreateIntentViewJoin(JoinInviteView(invite: CommandSecretString(text('invite.txt')))),
       ),
     );
     writeText('join.id', id);
@@ -105,7 +105,7 @@ void main(List<String> arguments) {
         // Six digits and two words: exactly the shape the old app called
         // "ready" with `contains("-")`. This app has no opinion about it.
         intent: const CreateIntentViewJoin(
-          JoinInviteView(invite: '000123-amber-brass'),
+          JoinInviteView(invite: CommandSecretString('000123-amber-brass')),
         ),
       ),
     );
@@ -160,7 +160,7 @@ void main(List<String> arguments) {
   check('the send publishes an invite to share', published != null);
   check(
     'whose room code the authority generated',
-    RegExp(r'^\d{6}-[a-z]+-[a-z]+$').hasMatch(published!.code),
+    RegExp(r'^\d{6}-[a-z]+-[a-z]+$').hasMatch(published!.code.expose()),
   );
   check('and whose link the frontend can copy', published.link != null);
 
@@ -172,8 +172,8 @@ void main(List<String> arguments) {
   equal('the joiner receives', directionLabel(joining.direction), 'Receiving');
   equal(
     'on the same room code the sender published',
-    joining.invite?.code,
-    published.code,
+    joining.invite?.code.expose(),
+    published.code.expose(),
   );
   report();
 }

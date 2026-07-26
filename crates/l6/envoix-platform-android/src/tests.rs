@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use envoix_capabilities::{Admission, Duty, DutyKind, DutyLedger, DutyProvenance, Registration};
 use envoix_outcomes::OutcomeCode;
@@ -306,14 +306,14 @@ fn pin_publication_crash_windows(provenance: DutyProvenance) {
     assert!(world.committed_row_exists(&other));
 }
 
-/// A model of the Kotlin source-pick lane: one slot for the document the user
-/// picked, and a per-card binding once a card has claimed it. It mirrors
-/// `SourcePicks`: claiming is idempotent per card, a card that claims when no
-/// pick is outstanding gets nothing, and a process death loses both.
+/// A model of the Kotlin source-pick lane: the picker slot is ephemeral, while
+/// CARD → document is the durable lifecycle ownership created only on claim.
 #[derive(Default)]
 struct PickWorld {
     offered: Option<&'static str>,
     bound: HashMap<String, &'static str>,
+    owners: HashMap<String, &'static str>,
+    persisted: HashSet<&'static str>,
 }
 
 impl PickWorld {
@@ -325,9 +325,41 @@ impl PickWorld {
         if let Some(bound) = self.bound.get(card) {
             return Some(bound);
         }
+        if let Some(owned) = self.owners.get(card).copied() {
+            self.bound.insert(card.to_owned(), owned);
+            return Some(owned);
+        }
         let picked = self.offered.take()?;
+        // Android retains first; the journal makes the already-durable card
+        // its owner. `recover` owns the crash between those two operations.
+        self.persisted.insert(picked);
+        self.owners.insert(card.to_owned(), picked);
         self.bound.insert(card.to_owned(), picked);
         Some(picked)
+    }
+
+    fn restart(&self) -> Self {
+        Self {
+            offered: None,
+            bound: HashMap::new(),
+            owners: self.owners.clone(),
+            persisted: self.persisted.clone(),
+        }
+    }
+
+    fn remove(&mut self, card: &str) {
+        let owned = self.owners.remove(card);
+        self.bound.remove(card);
+        if let Some(document) = owned
+            && !self.owners.values().any(|other| *other == document)
+        {
+            self.persisted.remove(document);
+        }
+    }
+
+    fn recover(&mut self) {
+        self.persisted
+            .retain(|document| self.owners.values().any(|owned| owned == document));
     }
 
     /// The outcome the executor reports for one delivery of the duty.
@@ -356,20 +388,44 @@ fn pin_source_pick_crash_windows(provenance: DutyProvenance) {
     assert_eq!(world.execute(&other), OutcomeCode::Completed);
     assert_eq!(world.bound[&other], "something-else.bin");
 
-    // Window 2 — a crash between the pick and the card claiming it. The
-    // platform slot is memory, so the honest report is that no source can be
-    // read: exactly the outcome whose recovery is "re-pick the source".
+    // Window 2 — a pick alone owns no retained capability. A crash before a
+    // committed card claims it loses only the ephemeral picker slot.
     let mut world = PickWorld::default();
     world.offer("holiday.mp4");
+    assert!(world.persisted.is_empty(), "offer took a persistent grant");
     let mut crashed = PickWorld::default();
     assert_eq!(crashed.execute(&card), OutcomeCode::SourceUnreadable);
     assert_eq!(world.claim(&card), Some("holiday.mp4"), "the model is live");
 
-    // Window 3 — a card that never had a pick reports the same thing, so a
+    // Window 3 — a claimed source survives process memory because its durable
+    // card owns the grant and URI together.
+    let mut crashed = world.restart();
+    assert_eq!(crashed.execute(&card), OutcomeCode::Completed);
+    assert_eq!(crashed.bound[&card], "holiday.mp4");
+
+    // Window 4 — a card that never had a pick reports the same thing, so a
     // frontend that asked for a send without one is refused by the platform
     // rather than left waiting.
     let mut world = PickWorld::default();
     assert_eq!(world.execute(&card), OutcomeCode::SourceUnreadable);
+
+    // Window 5 — removal ends ownership and the last owner's grant. Sharing a
+    // URI retains it until the final card leaves.
+    let mut world = PickWorld::default();
+    world.offer("holiday.mp4");
+    assert_eq!(world.execute(&card), OutcomeCode::Completed);
+    world.owners.insert(other.clone(), "holiday.mp4");
+    world.remove(&card);
+    assert!(world.persisted.contains("holiday.mp4"));
+    world.remove(&other);
+    assert!(!world.persisted.contains("holiday.mp4"));
+
+    // Window 6 — Android retained access and the process died before the owner
+    // journal committed. Recovery releases every such unowned grant.
+    let mut world = PickWorld::default();
+    world.persisted.insert("orphaned.bin");
+    world.recover();
+    assert!(world.persisted.is_empty());
 
     // The report crosses the lane and the ledger admits it exactly once,
     // whichever outcome it carried.
@@ -378,6 +434,49 @@ fn pin_source_pick_crash_windows(provenance: DutyProvenance) {
         let decoded = WorkReport::decode(&report.encode().unwrap()).unwrap();
         assert_eq!(decoded, report);
         assert_eq!(decoded.to_result().outcome, outcome);
+    }
+}
+
+/// The Android half names the same lifecycle the model proves: the Activity
+/// can only offer an ephemeral pick, a card claim is the only place a grant is
+/// retained, and the service consumes durable removal ids to release it.
+#[test]
+fn persistable_source_grants_have_exactly_one_lifecycle_owner() {
+    const ACTIVITY: &str = include_str!(concat!(
+        "../../../../apps/envoix-flutter/android/app/src/main/kotlin/app/envoix/host/",
+        "MainActivity.kt"
+    ));
+    const PICKS: &str = include_str!(concat!(
+        "../../../../apps/envoix-flutter/android/app/src/main/kotlin/app/envoix/host/",
+        "SourcePicks.kt"
+    ));
+    const SERVICE: &str = include_str!(concat!(
+        "../../../../apps/envoix-flutter/android/app/src/main/kotlin/app/envoix/host/",
+        "EnvoixHostService.kt"
+    ));
+    assert!(
+        !code_only(ACTIVITY).contains("takePersistableUriPermission("),
+        "an unowned picker result retained a grant"
+    );
+    for fact in [
+        "takePersistableUriPermission(",
+        "releasePersistableUriPermission(",
+        "putString(card,",
+        "remove(card)",
+    ] {
+        assert!(
+            code_only(PICKS).contains(fact),
+            "SourcePicks lacks `{fact}`"
+        );
+    }
+    for fact in [
+        "NativeHost.pollSourceRelease()",
+        "SourcePicks.release(this, removedCard)",
+    ] {
+        assert!(
+            code_only(SERVICE).contains(fact),
+            "the service never completes `{fact}`"
+        );
     }
 }
 
@@ -624,7 +723,13 @@ fn the_frontend_kotlin_speaks_only_the_observer_vocabulary() {
         })
         .collect();
     // Vacuity: the set this test denies from has to be the real lane.
-    for verb in ["boot", "shutdown", "reportDuty", "pollWork"] {
+    for verb in [
+        "boot",
+        "shutdown",
+        "reportDuty",
+        "pollWork",
+        "pollSourceRelease",
+    ] {
         assert!(
             declared.contains(verb),
             "{verb} is no longer a NativeHost verb; this test denies from the wrong set"

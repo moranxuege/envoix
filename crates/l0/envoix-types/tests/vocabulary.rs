@@ -17,7 +17,7 @@ fn no_secret_reaches_display() {
 
 #[test]
 fn offered_vs_landed_name_typed() {
-    let offered = OfferedName::from_untrusted("../../etc/passwd");
+    let offered = OfferedName::from_untrusted("../../etc/passwd").unwrap();
     let landed = LandedName::new("passwd (1)");
 
     assert_eq!(offered.as_str(), "passwd");
@@ -27,14 +27,22 @@ fn offered_vs_landed_name_typed() {
     let mut records_by_offered_name = HashMap::new();
     records_by_offered_name.insert(offered.clone(), "record-7");
     assert_eq!(
-        records_by_offered_name.get(&OfferedName::from_untrusted("passwd")),
+        records_by_offered_name.get(&OfferedName::from_untrusted("passwd").unwrap()),
         Some(&"record-7")
     );
 
-    assert_eq!(OfferedName::from_untrusted("..").as_str(), "unnamed");
     assert_eq!(
-        OfferedName::from_untrusted(r"C:\provider\photo.jpg").as_str(),
+        OfferedName::from_untrusted("..").unwrap().as_str(),
+        "unnamed"
+    );
+    assert_eq!(
+        OfferedName::from_untrusted(r"C:\provider\photo.jpg")
+            .unwrap()
+            .as_str(),
         "photo.jpg"
     );
+    let cjk = "界".repeat(86);
+    assert_eq!(cjk.len(), 258);
+    assert!(OfferedName::from_untrusted(cjk).is_err());
     assert!(serde_json::from_str::<OfferedName>(r#""../passwd""#).is_err());
 }

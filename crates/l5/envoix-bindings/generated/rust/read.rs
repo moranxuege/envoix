@@ -3,7 +3,9 @@
 
 use serde_json::{Map, Value};
 
-pub const READ_SCHEMA_ID: &str = "envoix/binding/read/4";
+use envoix_types::Secret;
+
+pub const READ_SCHEMA_ID: &str = "envoix/binding/read/5";
 pub const READ_MAX_FRAME_BYTES: usize = 1048576;
 
 const U63_MAX: u64 = 9_223_372_036_854_775_807;
@@ -324,8 +326,9 @@ pub struct IdentityView {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InviteView {
-    pub code: String,
-    pub link: Option<String>,
+    pub code: Secret<String>,
+    pub code_fingerprint: String,
+    pub link: Option<Secret<String>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1299,26 +1302,29 @@ fn encode_identity_view_value(value: &IdentityView) -> Result<Value, ReadError> 
 
 fn decode_invite_view_value(value: &Value, context: &'static str) -> Result<InviteView, ReadError> {
     let map = frame_object(value, context)?;
-    known_keys(map, &["code", "link"], context)?;
-    let code = utf8_bounded(field(map, "code", "InviteView.code")?, 64, "InviteView.code")?;
+    known_keys(map, &["code", "code_fingerprint", "link"], context)?;
+    let code = Secret::new(utf8_bounded(field(map, "code", "InviteView.code")?, 64, "InviteView.code")?);
+    let code_fingerprint = hex_fixed(field(map, "code_fingerprint", "InviteView.code_fingerprint")?, 16, "InviteView.code_fingerprint")?;
     let link = match field(map, "link", "InviteView.link")? {
         Value::Null => None,
-        present => Some(utf8_bounded(present, 5481, "InviteView.link")?),
+        present => Some(Secret::new(utf8_bounded(present, 5481, "InviteView.link")?)),
     };
     Ok(InviteView {
         code,
+        code_fingerprint,
         link,
     })
 }
 
 fn encode_invite_view_value(value: &InviteView) -> Result<Value, ReadError> {
     let mut map = Map::new();
-    map.insert("code".to_owned(), encode_utf8_bounded(&value.code, 64, "InviteView.code")?);
+    map.insert("code".to_owned(), encode_utf8_bounded(value.code.expose(), 64, "InviteView.code")?);
+    map.insert("code_fingerprint".to_owned(), encode_hex_fixed(&value.code_fingerprint, 16, "InviteView.code_fingerprint")?);
     map.insert(
         "link".to_owned(),
         match &value.link {
             None => Value::Null,
-            Some(inner) => encode_utf8_bounded(inner, 5481, "InviteView.link")?,
+            Some(inner) => encode_utf8_bounded(inner.expose(), 5481, "InviteView.link")?,
         },
     );
     Ok(Value::Object(map))

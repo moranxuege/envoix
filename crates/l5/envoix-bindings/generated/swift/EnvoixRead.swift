@@ -8,7 +8,7 @@
 
 import Foundation
 
-public let readSchemaId = "envoix/binding/read/4"
+public let readSchemaId = "envoix/binding/read/5"
 public let readMaxFrameBytes = 1048576
 private let u63Max: Int64 = 9_223_372_036_854_775_807
 
@@ -27,6 +27,17 @@ public enum ReadErrorKind {
 public struct ReadContractError: Error, Equatable {
     public let kind: ReadErrorKind
     public let context: String
+}
+
+/// Bounded contract text that redacts ordinary string interpolation.
+public struct ReadSecretString: Equatable, CustomStringConvertible {
+    private let value: String
+
+    init(_ value: String) { self.value = value }
+
+    public func expose() -> String { value }
+
+    public var description: String { "ReadSecretString([redacted])" }
 }
 
 public enum DirectionView: String, Equatable {
@@ -179,8 +190,9 @@ public struct IdentityView: Equatable {
 }
 
 public struct InviteView: Equatable {
-    public let code: String
-    public let link: String?
+    public let code: ReadSecretString
+    public let codeFingerprint: String
+    public let link: ReadSecretString?
 }
 
 public struct CardView: Equatable {
@@ -791,16 +803,18 @@ public enum EnvoixReadCodec {
 
     private static func decodeInviteView(_ value: Any?, _ context: String) throws -> InviteView {
         let map = try object(value, context)
-        try knownKeys(map, ["code", "link"], context)
-        let code = try utf8Bounded(try field(map, "code", "InviteView.code"), 64, "InviteView.code")
-        let link: String?
+        try knownKeys(map, ["code", "code_fingerprint", "link"], context)
+        let code = ReadSecretString(try utf8Bounded(try field(map, "code", "InviteView.code"), 64, "InviteView.code"))
+        let codeFingerprint = try hexFixed(try field(map, "code_fingerprint", "InviteView.code_fingerprint"), 16, "InviteView.code_fingerprint")
+        let link: ReadSecretString?
         if let present = try field(map, "link", "InviteView.link") {
-            link = try utf8Bounded(present, 5481, "InviteView.link")
+            link = ReadSecretString(try utf8Bounded(present, 5481, "InviteView.link"))
         } else {
             link = nil
         }
         return InviteView(
             code: code,
+            codeFingerprint: codeFingerprint,
             link: link
         )
     }

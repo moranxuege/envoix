@@ -42,9 +42,24 @@ class _NewTransferSheetState extends State<NewTransferSheet> {
   CreateIntent? _request;
 
   bool _picking = false;
+  String? _sendRequestId;
+  String? _joinRequestId;
+
+  @override
+  void initState() {
+    super.initState();
+    // Editing forms a different join intent. The identity is minted lazily on
+    // the first tap, then remains bound to these exact bytes for every retry.
+    _invite.addListener(_joinChanged);
+  }
+
+  void _joinChanged() {
+    _joinRequestId = null;
+  }
 
   @override
   void dispose() {
+    _invite.removeListener(_joinChanged);
     _invite.dispose();
     super.dispose();
   }
@@ -60,6 +75,9 @@ class _NewTransferSheetState extends State<NewTransferSheet> {
           _picking = false;
           if (granted != null) {
             _source = granted;
+            // A newly chosen source is a new user intent, even when its
+            // provider metadata happens to equal the previous pick.
+            _sendRequestId = null;
           }
         });
       }
@@ -79,7 +97,9 @@ class _NewTransferSheetState extends State<NewTransferSheet> {
     if (source == null) {
       return Future<void>.value();
     }
+    final String id = _sendRequestId ??= mintCommandId();
     return _ask(() => widget.creator.send(
+          id: id,
           displayName: source.displayName,
           sizeBytes: source.sizeBytes,
         ));
@@ -88,7 +108,10 @@ class _NewTransferSheetState extends State<NewTransferSheet> {
   /// The text goes to the core exactly as typed. Trimming it here would be this
   /// app deciding what an invite is allowed to look like, which is the grammar's
   /// job (`XI02`), and guessing readiness from its shape is the `XI03` bug.
-  Future<void> _join() => _ask(() => widget.creator.join(_invite.text));
+  Future<void> _join() {
+    final String id = _joinRequestId ??= mintCommandId();
+    return _ask(() => widget.creator.join(id: id, invite: _invite.text));
+  }
 
   @override
   Widget build(BuildContext context) {

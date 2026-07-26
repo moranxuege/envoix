@@ -2,9 +2,10 @@
 //!
 //! The gate judges the ARTIFACT, never the builder's claims about it. Every
 //! verdict here is anchored to a file the caller re-read and re-hashed for
-//! itself, and every "this must not be present" rule is expressed as an
-//! allow-list, so an entry point or a packaged file nobody reviewed is a
-//! failure by construction rather than a missing deny entry.
+//! itself, including native libraries and symbol tables the caller extracted
+//! independently from that file. Every "this must not be present" rule is
+//! expressed as an allow-list, so an entry point or a packaged file nobody
+//! reviewed is a failure by construction rather than a missing deny entry.
 //!
 //! The answer is a pure function over data, so it lives beside the build
 //! manifest it judges rather than inside one gate's binary: D1's deployment
@@ -22,7 +23,8 @@
 //!
 //! `tools/xtask`'s `release-gate` is the thin CLI over both: it loads the
 //! registry files, composes the compiled identity out of the L5 projection,
-//! re-hashes every artifact gradle reported, and calls [`check_release`].
+//! re-hashes and opens every artifact gradle reported, and calls
+//! [`check_release`].
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -279,11 +281,14 @@ pub struct PackagedFacts {
     pub build_manifest_sha256: Option<String>,
     /// Forbidden class names the packaged dex still defines.
     pub release_classes: Vec<String>,
+    /// Gradle's fail-early mirror of the packaged payload. The independent
+    /// gate does not trust this field; [`MeasuredArtifact::observed_payload`]
+    /// is the authority passed to the verdict.
     pub payload: Vec<PackagedPayload>,
 }
 
 /// One shared object found inside the packaged artifact, wherever it sat.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PackagedPayload {
     pub artifact: String,
@@ -293,12 +298,16 @@ pub struct PackagedPayload {
 }
 
 /// One artifact the gate measured for itself: the facts packaging wrote, plus
-/// the digest the gate computed by re-reading the named file.
+/// observations made by independently re-reading the named archive.
 #[derive(Clone, Debug)]
 pub struct MeasuredArtifact {
     pub facts: PackagedFacts,
     /// `None` when the named artifact is missing or unreadable.
     pub observed_sha256: Option<String>,
+    /// Every shared object extracted from the artifact and measured by the
+    /// gate itself. `None` means the archive or one of its ELF payloads could
+    /// not be read; packaging's reported symbol list is never substituted.
+    pub observed_payload: Option<Vec<PackagedPayload>>,
 }
 
 /// One rule the release verdict is made of.
@@ -425,6 +434,9 @@ pub enum Disagreement {
         recorded: String,
         observed: String,
     },
+    /// The gate could not independently read the native payload inside the
+    /// archive, so packaging's report cannot stand in for an observation.
+    PackagedPayloadUnreadable { variant: String, artifact: String },
     /// This (applicationId, versionCode) pair has already been released.
     VersionAlreadyReleased {
         variant: String,
@@ -569,6 +581,11 @@ impl fmt::Display for Disagreement {
                 formatter,
                 "artifact: {variant} reports {artifact} as {recorded}, \
                  but the file on disk hashes to {observed}"
+            ),
+            Self::PackagedPayloadUnreadable { variant, artifact } => write!(
+                formatter,
+                "payload: {variant} packages {artifact}, but the gate could not \
+                 independently read its shipped shared objects"
             ),
             Self::VersionAlreadyReleased {
                 variant,
@@ -855,6 +872,7 @@ pub fn render_policy(
         "build_manifest_sha256",
         payload.build_manifest_sha256.clone(),
     );
+    line("payload_sources_sha256", payload.sources_sha256.clone());
     for library in &payload.library {
         line(
             &format!("payload_{}_{}_sha256", library.build_type, library.abi),
@@ -1124,7 +1142,7 @@ fn check_artifact(
         }
     }
 
-    check_payload(ledger, build, facts, &variant, label, verdict);
+    check_payload(ledger, build, artifact, &variant, label, verdict);
 
     // Every entry, in every shape of archive. An entry is app content, judged
     // against the reviewed surface under the name an APK would give it, or it
@@ -1212,13 +1230,21 @@ fn check_artifact(
 fn check_payload(
     ledger: &ReleaseLedger,
     build: &BuildIdentity,
-    facts: &PackagedFacts,
+    artifact: &MeasuredArtifact,
     variant: &str,
     label: Option<&str>,
     verdict: &mut ReleaseVerdict,
 ) {
+    let facts = &artifact.facts;
     let policy = &ledger.policy;
-    verdict.judged(label, Invariant::PackagedPayload, facts.payload.len());
+    let payload = artifact.observed_payload.as_deref().unwrap_or_default();
+    verdict.judged(label, Invariant::PackagedPayload, payload.len());
+    if artifact.observed_payload.is_none() {
+        verdict.disagree(Disagreement::PackagedPayloadUnreadable {
+            variant: variant.to_owned(),
+            artifact: facts.artifact.clone(),
+        });
+    }
     let allowed: BTreeSet<&String> = policy.allowed_native_symbols.iter().collect();
     let expected_paths: Vec<String> = policy
         .required_abis
@@ -1241,11 +1267,7 @@ fn check_payload(
         .collect();
 
     for path in &expected_paths {
-        if !facts
-            .payload
-            .iter()
-            .any(|library| &library.artifact == path)
-        {
+        if !payload.iter().any(|library| &library.artifact == path) {
             verdict.disagree(Disagreement::MissingNativeLibrary {
                 variant: variant.to_owned(),
                 artifact: path.clone(),
@@ -1253,7 +1275,7 @@ fn check_payload(
         }
     }
 
-    for library in &facts.payload {
+    for library in payload {
         // A library the release packages but does not build gets its own
         // toolchain's exported surface — and none of the payload's. It cannot
         // stand in for the payload either: the assertions below are keyed on
@@ -1431,8 +1453,7 @@ mod tests {
                     "classes.dex".to_owned(),
                     "lib/*/libhost.so".to_owned(),
                     "lib/*/libthird.so".to_owned(),
-                    "res/*.xml".to_owned(),
-                    "res/*/*.xml".to_owned(),
+                    "res/drawable-hdpi-v4/icon.xml".to_owned(),
                 ],
                 allowed_bundle_entries: vec!["BundleConfig.pb".to_owned()],
                 payload_sources: vec!["Cargo.lock".to_owned()],
@@ -1501,8 +1522,16 @@ mod tests {
         };
         MeasuredArtifact {
             observed_sha256: Some(facts.artifact_sha256.clone()),
+            observed_payload: Some(facts.payload.clone()),
             facts,
         }
+    }
+
+    fn payload(artifact: &mut MeasuredArtifact) -> &mut Vec<PackagedPayload> {
+        artifact
+            .observed_payload
+            .as_mut()
+            .expect("the test artifact payload is readable")
     }
 
     fn judge(mutate: impl FnOnce(&mut ReleaseLedger, &mut MeasuredArtifact)) -> ReleaseVerdict {
@@ -1542,6 +1571,23 @@ mod tests {
                 recorded: "44".repeat(32),
                 observed: "55".repeat(32),
             }]
+        );
+    }
+
+    #[test]
+    fn an_artifact_whose_payload_cannot_be_measured_is_not_clean() {
+        assert_eq!(
+            verdict(|_, artifact| artifact.observed_payload = None),
+            vec![
+                Disagreement::PackagedPayloadUnreadable {
+                    variant: "prodRelease".to_owned(),
+                    artifact: "build/app.apk".to_owned(),
+                },
+                Disagreement::MissingNativeLibrary {
+                    variant: "prodRelease".to_owned(),
+                    artifact: "lib/arm64-v8a/libhost.so".to_owned(),
+                },
+            ]
         );
     }
 
@@ -1615,8 +1661,19 @@ mod tests {
     /// nobody recognises fails exactly like a known debug one.
     #[test]
     fn the_native_surface_is_allow_listed_in_both_directions() {
+        // Packaging's report is not the authority. Lying in it changes no
+        // verdict because the gate judges `observed_payload`, extracted from
+        // the artifact bytes by its caller.
         assert_eq!(
-            verdict(|_, artifact| artifact.facts.payload[0]
+            verdict(|_, artifact| {
+                artifact.facts.payload[0]
+                    .symbols
+                    .push("Java_probe_E2ecreate".to_owned());
+            }),
+            Vec::new()
+        );
+        assert_eq!(
+            verdict(|_, artifact| payload(artifact)[0]
                 .symbols
                 .push("Java_probe_E2ecreate".to_owned())),
             vec![Disagreement::DebugTrustMaterial {
@@ -1626,9 +1683,7 @@ mod tests {
             }]
         );
         assert_eq!(
-            verdict(|_, artifact| artifact.facts.payload[0]
-                .symbols
-                .push("JNI_OnLoad".to_owned())),
+            verdict(|_, artifact| payload(artifact)[0].symbols.push("JNI_OnLoad".to_owned())),
             vec![Disagreement::UnexpectedNativeSymbol {
                 variant: "prodRelease".to_owned(),
                 artifact: "lib/arm64-v8a/libhost.so".to_owned(),
@@ -1636,7 +1691,7 @@ mod tests {
             }]
         );
         assert_eq!(
-            verdict(|_, artifact| artifact.facts.payload[0].symbols.clear()),
+            verdict(|_, artifact| payload(artifact)[0].symbols.clear()),
             vec![Disagreement::MissingNativeSymbol {
                 variant: "prodRelease".to_owned(),
                 artifact: "lib/arm64-v8a/libhost.so".to_owned(),
@@ -1661,7 +1716,7 @@ mod tests {
         // there, hashed and exporting exactly the allow-list.
         assert_eq!(
             verdict(|_, artifact| {
-                artifact.facts.payload.push(third.clone());
+                payload(artifact).push(third.clone());
                 artifact
                     .facts
                     .entries
@@ -1674,7 +1729,7 @@ mod tests {
             verdict(|_, artifact| {
                 let mut impostor = third.clone();
                 impostor.symbols.push("Java_probe_boot".to_owned());
-                artifact.facts.payload.push(impostor);
+                payload(artifact).push(impostor);
                 artifact
                     .facts
                     .entries
@@ -1691,7 +1746,7 @@ mod tests {
             verdict(|_, artifact| {
                 let mut impostor = third.clone();
                 impostor.symbols.push("Java_probe_E2ecreate".to_owned());
-                artifact.facts.payload.push(impostor);
+                payload(artifact).push(impostor);
                 artifact
                     .facts
                     .entries
@@ -1706,7 +1761,7 @@ mod tests {
         // And its presence never stands in for the payload's absence.
         assert_eq!(
             verdict(|_, artifact| {
-                artifact.facts.payload = vec![third.clone()];
+                *payload(artifact) = vec![third.clone()];
                 artifact.facts.entries = vec!["lib/arm64-v8a/libthird.so".to_owned()];
             }),
             vec![Disagreement::MissingNativeLibrary {
@@ -1723,7 +1778,7 @@ mod tests {
             verdict(|_, artifact| {
                 let mut swapped = third.clone();
                 swapped.sha256 = "77".repeat(32);
-                artifact.facts.payload.push(swapped);
+                payload(artifact).push(swapped);
                 artifact
                     .facts
                     .entries
@@ -1748,7 +1803,7 @@ mod tests {
                     .push("lib/*/libfourth.so".to_owned());
                 let mut unrecorded = third.clone();
                 unrecorded.artifact = "lib/arm64-v8a/libfourth.so".to_owned();
-                artifact.facts.payload.push(unrecorded);
+                payload(artifact).push(unrecorded);
                 artifact
                     .facts
                     .entries
@@ -1765,7 +1820,7 @@ mod tests {
         let smuggled = verdict(|_, artifact| {
             let mut elsewhere = third.clone();
             elsewhere.artifact = "assets/lib/arm64-v8a/libthird.so".to_owned();
-            artifact.facts.payload.push(elsewhere);
+            payload(artifact).push(elsewhere);
             artifact
                 .facts
                 .entries
@@ -1790,7 +1845,7 @@ mod tests {
     fn a_library_outside_the_payload_path_is_rejected() {
         assert_eq!(
             verdict(|_, artifact| {
-                artifact.facts.payload.push(PackagedPayload {
+                payload(artifact).push(PackagedPayload {
                     artifact: "assets/lib/arm64-v8a/libhost.so".to_owned(),
                     sha256: "33".repeat(32),
                     symbols: vec!["Java_probe_boot".to_owned()],
@@ -1817,7 +1872,7 @@ mod tests {
     #[test]
     fn the_shipped_library_is_the_recorded_one() {
         assert_eq!(
-            verdict(|_, artifact| artifact.facts.payload[0].sha256 = "99".repeat(32)),
+            verdict(|_, artifact| payload(artifact)[0].sha256 = "99".repeat(32)),
             vec![Disagreement::ShippedPayloadMismatch {
                 variant: "prodRelease".to_owned(),
                 artifact: "lib/arm64-v8a/libhost.so".to_owned(),
@@ -1870,7 +1925,7 @@ mod tests {
     fn a_bundle_is_held_to_the_same_reviewed_surface() {
         fn bundle(artifact: &mut MeasuredArtifact) {
             artifact.facts.kind = ArtifactKind::Bundle;
-            artifact.facts.payload[0].artifact = "base/lib/arm64-v8a/libhost.so".to_owned();
+            payload(artifact)[0].artifact = "base/lib/arm64-v8a/libhost.so".to_owned();
             artifact.facts.entries = vec![
                 "BundleConfig.pb".to_owned(),
                 "base/dex/classes.dex".to_owned(),
@@ -1918,7 +1973,7 @@ mod tests {
             let judged = judge(|_, artifact| {
                 if kind == ArtifactKind::Bundle {
                     artifact.facts.kind = ArtifactKind::Bundle;
-                    artifact.facts.payload[0].artifact = "base/lib/arm64-v8a/libhost.so".to_owned();
+                    payload(artifact)[0].artifact = "base/lib/arm64-v8a/libhost.so".to_owned();
                     artifact.facts.entries = vec![
                         "BundleConfig.pb".to_owned(),
                         "base/dex/classes.dex".to_owned(),

@@ -468,7 +468,7 @@ fn artifact_key(seed: u8) -> ArtifactKey {
 
 fn stage<S: Storage>(store: &mut OperationStore<S>, key: ArtifactKey, name: &str, bytes: &[u8]) {
     assert!(matches!(
-        store.stage_artifact(key, OfferedName::from_untrusted(name), bytes),
+        store.stage_artifact(key, OfferedName::from_untrusted(name).unwrap(), bytes),
         Ok(ArtifactCommit::Staged { .. })
     ));
 }

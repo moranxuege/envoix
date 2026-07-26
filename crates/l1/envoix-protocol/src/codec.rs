@@ -589,7 +589,8 @@ impl<'a> PayloadReader<'a> {
         let value = std::str::from_utf8(bytes).map_err(|_| DecodeError::InvalidUtf8 {
             field: Field::OfferedName,
         })?;
-        let offered_name = OfferedName::from_untrusted(value);
+        let offered_name =
+            OfferedName::from_untrusted(value).map_err(|_| DecodeError::InvalidOfferedName)?;
         if offered_name.as_str() != value {
             return Err(DecodeError::InvalidOfferedName);
         }

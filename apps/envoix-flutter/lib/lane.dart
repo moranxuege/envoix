@@ -45,6 +45,9 @@ const String intentMethod = 'intent';
 /// The platform-capability method: open the document picker.
 const String pickSourceMethod = 'pickSource';
 
+/// Platform error code for a frame the authority received and rejected.
+const String hostRejected = 'host-rejected';
+
 /// The real lane. The bytes are opaque here and on the platform side; only the
 /// generated codec in `bindings/` ever looks inside one.
 Stream<List<int>> platformLane() => const EventChannel(laneChannel)
@@ -148,11 +151,11 @@ class LaneAttachment {
 
 /// Asks the authority to create a card, and reports exactly what it answered.
 ///
-/// It mints one identity per request, encodes the create frame with the
-/// generated encoder, and records the answer. It decides nothing at all: it
-/// does not look at the invite text it carries, does not judge whether one is
-/// valid, and does not infer a direction — every one of those is in the answer
-/// it gets back.
+/// It transmits the identity the sheet bound to the user's form state, encodes
+/// the create frame with the generated encoder, and records the answer. It
+/// decides nothing at all: it does not look at the invite text it carries, does
+/// not judge whether one is valid, and does not infer a direction — every one
+/// of those is in the answer it gets back.
 class Creator {
   Creator({required CommandSink sink}) : _sink = sink;
 
@@ -160,12 +163,13 @@ class Creator {
 
   /// Asks for a send of the document the platform granted.
   Future<CreateIntent> send({
+    required String id,
     required String displayName,
     required int sizeBytes,
   }) =>
       _ask(
         CreateIntent(
-          id: mintCommandId(),
+          id: id,
           kind: CreateKind.send,
           displayName: displayName,
         ),
@@ -176,9 +180,9 @@ class Creator {
 
   /// Asks to join whatever `invite` turns out to be. The text is passed
   /// through untouched — not trimmed, not sniffed, not measured.
-  Future<CreateIntent> join(String invite) => _ask(
-        CreateIntent(id: mintCommandId(), kind: CreateKind.join),
-        CreateIntentViewJoin(JoinInviteView(invite: invite)),
+  Future<CreateIntent> join({required String id, required String invite}) => _ask(
+        CreateIntent(id: id, kind: CreateKind.join),
+        CreateIntentViewJoin(JoinInviteView(invite: CommandSecretString(invite))),
       );
 
   Future<CreateIntent> _ask(
@@ -199,7 +203,12 @@ class Creator {
     try {
       reply = await _sink(frame);
     } on PlatformException catch (error) {
-      request.fault = IntentFault(FaultOrigin.unanswered, error);
+      request.fault = IntentFault(
+        error.code == hostRejected
+            ? FaultOrigin.authorityRefused
+            : FaultOrigin.unanswered,
+        error,
+      );
       return request;
     } on MissingPluginException catch (error) {
       request.fault = IntentFault(FaultOrigin.unanswered, error);
@@ -287,7 +296,13 @@ class Commander {
     try {
       reply = await _sink(frame);
     } on PlatformException catch (error) {
-      return _fault(intent, FaultOrigin.unanswered, error);
+      return _fault(
+        intent,
+        error.code == hostRejected
+            ? FaultOrigin.authorityRefused
+            : FaultOrigin.unanswered,
+        error,
+      );
     } on MissingPluginException catch (error) {
       return _fault(intent, FaultOrigin.unanswered, error);
     }

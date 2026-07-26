@@ -97,7 +97,7 @@ class DutyExecutor(
      */
     private fun bindSource(provenance: JSONObject): String {
         val card = provenance.optString("card")
-        val source = SourcePicks.claim(card) ?: return "source_unreadable"
+        val source = SourcePicks.claim(context, card) ?: return "source_unreadable"
         return if (SourcePicks.readable(context, source)) "completed" else "source_unreadable"
     }
 

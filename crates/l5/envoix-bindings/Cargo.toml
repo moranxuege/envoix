@@ -9,6 +9,7 @@ layer = "L5"
 role = "library"
 
 [dependencies]
+blake3.workspace = true
 envoix-types = { path = "../../l0/envoix-types" }
 envoix-outcomes = { path = "../../l0/envoix-outcomes" }
 envoix-evidence = { path = "../../l4/envoix-evidence" }

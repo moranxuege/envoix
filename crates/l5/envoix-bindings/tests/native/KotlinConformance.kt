@@ -159,7 +159,7 @@ fun handBuiltSubmits(): Map<String, FrontendIntentView> {
         "at_bound" to "e".repeat(16384),
     )
     invites.forEach { (name, invite) ->
-        bodies["create_join_$name"] = create(id, CreateIntentView.Join(JoinInviteView(invite)))
+        bodies["create_join_$name"] = create(id, CreateIntentView.Join(JoinInviteView(CommandSecretString(invite))))
     }
     return bodies
 }

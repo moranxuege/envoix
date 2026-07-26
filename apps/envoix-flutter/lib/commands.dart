@@ -47,6 +47,10 @@ enum FaultOrigin {
   /// of the authority, so there is nothing anywhere to go looking for.
   unsent,
 
+  /// The authority received the frame and refused it before any intent handler
+  /// ran. No durable effect can exist, unlike an answer that may have been lost.
+  authorityRefused,
+
   /// It was sent and no verdict came back. This says nothing about whether the
   /// command applied; only the card's own truth does.
   unanswered,
@@ -118,6 +122,7 @@ class CommandIntent {
     if (fault != null) {
       return switch (fault.origin) {
         FaultOrigin.unsent => CommandPhase.refused,
+        FaultOrigin.authorityRefused => CommandPhase.refused,
         FaultOrigin.unanswered => CommandPhase.undelivered,
       };
     }

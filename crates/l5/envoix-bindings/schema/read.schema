@@ -14,7 +14,7 @@
 # There is deliberately no bytes/blob type and no handle/path/URI type, so bulk
 # payload bytes and OS handles cannot be represented in a read frame.
 
-id = "envoix/binding/read/4"
+id = "envoix/binding/read/5"
 root = "ReadFrame"
 # Only the host originates read frames, so the native artifacts are decode-only:
 # a frontend cannot fabricate an observation.
@@ -219,8 +219,16 @@ fields = [
 kind = "struct"
 name = "InviteView"
 fields = [
-  { name = "code", type = "str(64)" },
-  { name = "link", type = "option(str(5481))" },
+  # The code is the SPAKE2 password. Every generated language wraps it in a
+  # redacting scalar; displaying it requires an explicit expose boundary.
+  { name = "code", type = "str(64)", secret = true },
+  # Stable BLAKE3 digest prefix for shipped instrumentation. It proves which
+  # rendered code was present without placing the password in a release log.
+  { name = "code_fingerprint", type = "hex16" },
+  # The link is the SAME secret in another spelling: the code lives inside its
+  # base64, and base64 is not secrecy. Sealing the code and leaving the link
+  # plain would let one log line spell the password anyway.
+  { name = "link", type = "option(str(5481))", secret = true },
 ]
 
 [[decl]]

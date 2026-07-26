@@ -11,6 +11,12 @@ pub mod swift;
 
 use crate::model::{Decl, FieldTy, SchemaDoc};
 
+pub(crate) fn has_secret(doc: &SchemaDoc) -> bool {
+    doc.decls.iter().any(
+        |decl| matches!(decl, Decl::Struct(decl) if decl.fields.iter().any(|field| field.secret)),
+    )
+}
+
 /// One scalar predicate, described once for both halves of a native codec.
 ///
 /// The decode call is `{stem}(json, bound, context)` and the encode call is
@@ -275,6 +281,7 @@ pub(crate) const SCAFFOLD_TOKENS: &[&str] = &[
     "ReadContractError",
     "EnvoixReadCodec",
     "READ_SCHEMA_ID",
+    "ReadSecretString",
     "ReadErrorKind",
     "readSchemaId",
     "ReadError",

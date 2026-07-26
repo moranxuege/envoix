@@ -39,6 +39,9 @@ object NativeHost {
     /** One encoded platform work order, or null when drained. */
     external fun pollWork(): ByteArray?
 
+    /** One durably removed card whose persistable source grant must end. */
+    external fun pollSourceRelease(): String?
+
     /**
      * Hands one frontend-originated intent frame to the authority and returns
      * its encoded answer: an acceptance for a command on an existing card, or
@@ -62,3 +65,12 @@ object NativeHost {
 class SupersededAttachment(
     message: String,
 ) : IllegalStateException(message)
+
+/**
+ * Raised by [NativeHost.intent] when the host received the bytes but refused
+ * them as a non-contract intent. This is neither a null host nor a lost answer:
+ * no command/create handler ran, so no durable effect can exist.
+ */
+class RejectedIntent(
+    message: String,
+) : IllegalArgumentException(message)

@@ -11,7 +11,7 @@
 
 import 'dart:convert';
 
-const String commandSchemaId = 'envoix/binding/command/3';
+const String commandSchemaId = 'envoix/binding/command/4';
 const int commandMaxFrameBytes = 1048576;
 // Contract rules frozen by schema/command.schema.
 const bool newestAttachmentCommands = true;
@@ -39,6 +39,20 @@ final class CommandContractException implements Exception {
 
   @override
   String toString() => 'CommandContractException(${kind.name}, $context)';
+}
+
+/// Bounded contract text whose ordinary string representation is always
+/// redacted. Rendering the user-visible value requires an explicit
+/// [expose] call at the UI boundary.
+final class CommandSecretString {
+  const CommandSecretString(this._value);
+
+  final String _value;
+
+  String expose() => _value;
+
+  @override
+  String toString() => 'CommandSecretString([redacted])';
 }
 
 enum CommandView {
@@ -142,7 +156,7 @@ final class JoinInviteView {
     required this.invite,
   });
 
-  final String invite;
+  final CommandSecretString invite;
 }
 
 sealed class CreateIntentView {
@@ -274,6 +288,7 @@ enum CreateRefusalView {
   inviteTooLong,
   inviteUnsupported,
   inviteRoleUnsupported,
+  nameTooLong,
   storageFault,
   internal,
 }
@@ -608,14 +623,14 @@ SendSourceView _decodeSendSourceView(Object? value, String context) {
   final map = _object(value, context);
   _knownKeys(map, const {'display_name', 'total'}, context);
   return SendSourceView(
-    displayName: _utf8Bounded(_field(map, 'display_name', 'SendSourceView.display_name'), 255, 'SendSourceView.display_name'),
+    displayName: _utf8Bounded(_field(map, 'display_name', 'SendSourceView.display_name'), 1020, 'SendSourceView.display_name'),
     total: _integer(_field(map, 'total', 'SendSourceView.total'), _u63Max, 'SendSourceView.total'),
   );
 }
 
 Map<String, Object?> _encodeSendSourceView(SendSourceView value) {
   return <String, Object?>{
-    'display_name': _encodeUtf8Bounded(value.displayName, 255, 'SendSourceView.display_name'),
+    'display_name': _encodeUtf8Bounded(value.displayName, 1020, 'SendSourceView.display_name'),
     'total': _encodeInteger(value.total, _u63Max, 'SendSourceView.total'),
   };
 }
@@ -624,13 +639,13 @@ JoinInviteView _decodeJoinInviteView(Object? value, String context) {
   final map = _object(value, context);
   _knownKeys(map, const {'invite'}, context);
   return JoinInviteView(
-    invite: _utf8Bounded(_field(map, 'invite', 'JoinInviteView.invite'), 16384, 'JoinInviteView.invite'),
+    invite: CommandSecretString(_utf8Bounded(_field(map, 'invite', 'JoinInviteView.invite'), 16384, 'JoinInviteView.invite')),
   );
 }
 
 Map<String, Object?> _encodeJoinInviteView(JoinInviteView value) {
   return <String, Object?>{
-    'invite': _encodeUtf8Bounded(value.invite, 16384, 'JoinInviteView.invite'),
+    'invite': _encodeUtf8Bounded(value.invite.expose(), 16384, 'JoinInviteView.invite'),
   };
 }
 
@@ -814,6 +829,7 @@ CreateRefusalView _decodeCreateRefusalView(Object? value, String context) {
     'invite_too_long' => CreateRefusalView.inviteTooLong,
     'invite_unsupported' => CreateRefusalView.inviteUnsupported,
     'invite_role_unsupported' => CreateRefusalView.inviteRoleUnsupported,
+    'name_too_long' => CreateRefusalView.nameTooLong,
     'storage_fault' => CreateRefusalView.storageFault,
     'internal' => CreateRefusalView.internal,
     String() =>

@@ -1,5 +1,6 @@
 use std::fmt;
 
+#[derive(Clone, Eq, PartialEq)]
 pub struct Secret<T>(T);
 
 impl<T> Secret<T> {

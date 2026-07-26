@@ -113,7 +113,19 @@ class FrontendLane(
             return
         }
         intents.execute {
-            val answer = NativeHost.intent(frame)
+            val answer =
+                try {
+                    NativeHost.intent(frame)
+                } catch (rejected: RejectedIntent) {
+                    main.post {
+                        result.error(
+                            HOST_REJECTED,
+                            rejected.message ?: "the authority refused the intent",
+                            null,
+                        )
+                    }
+                    return@execute
+                }
             main.post {
                 if (answer == null) {
                     result.error(HOST_UNAVAILABLE, "the transfer host is not running", null)
@@ -208,6 +220,9 @@ class FrontendLane(
 
         /** No host to observe; the Dart side surfaces it and may re-listen. */
         const val HOST_UNAVAILABLE = "host-unavailable"
+
+        /** The host received the frame and refused it before running an intent. */
+        const val HOST_REJECTED = "host-rejected"
 
         /** The call carried something that is not an encoded intent frame. */
         const val NOT_A_FRAME = "not-a-frame"

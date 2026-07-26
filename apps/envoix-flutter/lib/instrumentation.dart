@@ -147,6 +147,7 @@ String _createAnswer(CreateIntent request) {
   if (fault != null) {
     return switch (fault.origin) {
       FaultOrigin.unsent => 'unsent',
+      FaultOrigin.authorityRefused => 'authority_refused',
       FaultOrigin.unanswered => 'undelivered',
     };
   }
@@ -159,11 +160,12 @@ String _createAnswer(CreateIntent request) {
   };
 }
 
-/// The card's published invite, as it was DRAWN. The room code is what the user
-/// reads out, so instrumentation asserting a send flow needs to see that one
-/// actually reached the screen.
+/// The card's published invite, as it was DRAWN. The fingerprint proves which
+/// code reached the screen without putting the SPAKE2 password in a release
+/// log. The generated secret wrapper is a second boundary: interpolating
+/// `invite.code` here can only render `[redacted]`.
 void reportInvite(String card, InviteView invite) {
-  _report('envoix-f2b invite card=$card code=${invite.code} '
+  _report('envoix-f2b invite card=$card fingerprint=${invite.codeFingerprint} '
       'link=${invite.link == null ? 'absent' : 'present'}');
 }
 
@@ -173,6 +175,7 @@ String _answer(CommandIntent intent) {
   if (fault != null) {
     return switch (fault.origin) {
       FaultOrigin.unsent => 'unsent',
+      FaultOrigin.authorityRefused => 'authority_refused',
       FaultOrigin.unanswered => 'undelivered',
     };
   }

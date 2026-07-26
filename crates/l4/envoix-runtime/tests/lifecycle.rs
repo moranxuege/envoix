@@ -97,7 +97,7 @@ impl SessionProvider for OpStoreProvider {
             RecordDecode::UnsupportedFuture { .. } => return None,
         };
         Some(CommittedSession::from_record(
-            record,
+            *record,
             store,
             NonZeroUsize::MIN,
         ))
@@ -281,7 +281,7 @@ fn create_session(
 ) -> (Session, envoix_product::ApplyOutcome) {
     let transfer = NewTransfer {
         direction,
-        offered_name: OfferedName::from_untrusted("payload.bin"),
+        offered_name: OfferedName::from_untrusted("payload.bin").unwrap(),
         total: ByteCount::new(1024),
         source: SourceDecision::Ready,
         pairing: None,
@@ -298,7 +298,7 @@ fn create_session(
 fn create_staged_session(root: &Path, seed: u8) -> (Session, envoix_product::ApplyOutcome) {
     let transfer = NewTransfer {
         direction: Direction::Send,
-        offered_name: OfferedName::from_untrusted("payload.bin"),
+        offered_name: OfferedName::from_untrusted("payload.bin").unwrap(),
         total: ByteCount::new(1024),
         source: SourceDecision::Stage { recoverable: false },
         pairing: None,
@@ -318,7 +318,7 @@ fn durable_state(root: &Path, card: RecordId) -> TransferRecord {
     let store = OpStoreRecords::opened(root, card).expect("the card store opens");
     let encoded = store.latest().expect("a committed product record");
     match decode_record(&encoded).unwrap() {
-        RecordDecode::Loaded(record) => record,
+        RecordDecode::Loaded(record) => *record,
         RecordDecode::UnsupportedFuture { .. } => panic!("the record decodes"),
     }
 }

@@ -13,7 +13,7 @@ import org.json.JSONException
 import org.json.JSONObject
 import org.json.JSONTokener
 
-const val READ_SCHEMA_ID: String = "envoix/binding/read/4"
+const val READ_SCHEMA_ID: String = "envoix/binding/read/5"
 const val READ_MAX_FRAME_BYTES: Int = 1048576
 
 enum class ReadErrorKind {
@@ -30,6 +30,13 @@ enum class ReadErrorKind {
 /** Typed codec failure carrying only static schema context. */
 class ReadContractException(val kind: ReadErrorKind, val context: String) :
     Exception("read contract: $kind at $context")
+
+/** Bounded contract text that redacts ordinary string interpolation. */
+data class ReadSecretString(private val value: String) {
+    fun expose(): String = value
+
+    override fun toString(): String = "ReadSecretString([redacted])"
+}
 
 enum class DirectionView {
     SEND,
@@ -181,8 +188,9 @@ data class IdentityView(
 )
 
 data class InviteView(
-    val code: String,
-    val link: String?,
+    val code: ReadSecretString,
+    val codeFingerprint: String,
+    val link: ReadSecretString?,
 )
 
 data class CardView(
@@ -788,10 +796,11 @@ object EnvoixReadCodec {
 
     private fun decodeInviteView(value: Any?, context: String): InviteView {
         val map = obj(value, context)
-        knownKeys(map, setOf("code", "link"), context)
+        knownKeys(map, setOf("code", "code_fingerprint", "link"), context)
         return InviteView(
-            code = utf8Bounded(field(map, "code", "InviteView.code"), 64, "InviteView.code"),
-            link = field(map, "link", "InviteView.link")?.let { utf8Bounded(it, 5481, "InviteView.link") },
+            code = ReadSecretString(utf8Bounded(field(map, "code", "InviteView.code"), 64, "InviteView.code")),
+            codeFingerprint = hexFixed(field(map, "code_fingerprint", "InviteView.code_fingerprint"), 16, "InviteView.code_fingerprint"),
+            link = field(map, "link", "InviteView.link")?.let { ReadSecretString(utf8Bounded(it, 5481, "InviteView.link")) },
         )
     }
 

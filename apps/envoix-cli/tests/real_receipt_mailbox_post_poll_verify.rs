@@ -210,7 +210,7 @@ async fn real_receipt_mailbox_post_poll_verify() {
     let server = run(server_config(directory.path())).await.unwrap();
     let mailbox =
         HttpReceiptMailbox::new(&format!("http://{}", server.mailbox_bound_addr())).unwrap();
-    let offered_name = OfferedName::from_untrusted("offered-name-is-not-identity.bin");
+    let offered_name = OfferedName::from_untrusted("offered-name-is-not-identity.bin").unwrap();
     let total = ByteCount::new(12_345);
 
     let (mut sender, sender_created) = CommittedSession::create(

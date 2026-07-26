@@ -6,7 +6,7 @@
 
 import 'dart:convert';
 
-const String readSchemaId = 'envoix/binding/read/4';
+const String readSchemaId = 'envoix/binding/read/5';
 const int readMaxFrameBytes = 1048576;
 const int _u63Max = 9223372036854775807;
 
@@ -30,6 +30,20 @@ final class ReadContractException implements Exception {
 
   @override
   String toString() => 'ReadContractException(${kind.name}, $context)';
+}
+
+/// Bounded contract text whose ordinary string representation is always
+/// redacted. Rendering the user-visible value requires an explicit
+/// [expose] call at the UI boundary.
+final class ReadSecretString {
+  const ReadSecretString(this._value);
+
+  final String _value;
+
+  String expose() => _value;
+
+  @override
+  String toString() => 'ReadSecretString([redacted])';
 }
 
 enum DirectionView {
@@ -261,11 +275,13 @@ final class IdentityView {
 final class InviteView {
   const InviteView({
     required this.code,
+    required this.codeFingerprint,
     required this.link,
   });
 
-  final String code;
-  final String? link;
+  final ReadSecretString code;
+  final String codeFingerprint;
+  final ReadSecretString? link;
 }
 
 final class CardView {
@@ -1134,12 +1150,13 @@ IdentityView _decodeIdentityView(Object? value, String context) {
 
 InviteView _decodeInviteView(Object? value, String context) {
   final map = _object(value, context);
-  _knownKeys(map, const {'code', 'link'}, context);
+  _knownKeys(map, const {'code', 'code_fingerprint', 'link'}, context);
   return InviteView(
-    code: _utf8Bounded(_field(map, 'code', 'InviteView.code'), 64, 'InviteView.code'),
+    code: ReadSecretString(_utf8Bounded(_field(map, 'code', 'InviteView.code'), 64, 'InviteView.code')),
+    codeFingerprint: _hexFixed(_field(map, 'code_fingerprint', 'InviteView.code_fingerprint'), 16, 'InviteView.code_fingerprint'),
     link: switch (_field(map, 'link', 'InviteView.link')) {
       null => null,
-      final present => _utf8Bounded(present, 5481, 'InviteView.link'),
+      final present => ReadSecretString(_utf8Bounded(present, 5481, 'InviteView.link')),
     },
   );
 }

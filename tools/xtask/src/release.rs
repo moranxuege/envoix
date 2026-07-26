@@ -6,13 +6,12 @@
 //! the four generated release records.
 //!
 //! The IDENTITY input is pure Rust, because Rust is the only side that can see
-//! the L4 build manifest composed with the L5 binding contracts. The PACKAGING
-//! input — signer fingerprint, shipped ABIs, versionCode, the packaged manifest
-//! and the payload's symbol tables — can only be observed by Gradle, which
-//! holds the artifact; Gradle asserts it in-build and writes what it saw as
-//! typed facts, and this gate RE-READS AND RE-HASHES every artifact those facts
-//! name before judging them, so a facts file is a report about a real file or
-//! it is nothing.
+//! the L4 build manifest composed with the L5 binding contracts. Gradle writes
+//! typed facts about packaging-only observations such as signer, version and
+//! manifest. This gate then RE-READS AND RE-HASHES every artifact those facts
+//! name, opens the archive, and independently parses every shipped ELF dynamic
+//! symbol table. A facts file therefore identifies a real artifact; it never
+//! certifies its own native payload.
 //!
 //! The packaging side never reads this registry's TOML. It reads
 //! `registry/release-policy.properties`, the flat projection rendered here from
@@ -21,6 +20,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
 use envoix_bindings::build_manifest_frame;
@@ -28,9 +28,10 @@ use envoix_bindings::read::encode_read_frame;
 use envoix_evidence::BUILD_TRUST_MANIFEST;
 use envoix_evidence::release::{
     BuildIdentity, BundledLibrary, Distribution, Evaluation, MeasuredArtifact, PackagedFacts,
-    PayloadLibrary, PayloadRecord, ReleaseLedger, ReleaseVerdict, check_release,
+    PackagedPayload, PayloadLibrary, PayloadRecord, ReleaseLedger, ReleaseVerdict, check_release,
     matches_source_glob, render_policy,
 };
+use object::{Object, ObjectSymbol};
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -299,7 +300,13 @@ pub fn record_bundled(root: &Path) -> CheckResult<PayloadRecord> {
     let mut record = load_payload(root)?;
     let mut accepted: BTreeMap<(String, String), String> = BTreeMap::new();
     for artifact in load_artifacts(root)? {
-        for library in &artifact.facts.payload {
+        let payload = artifact.observed_payload.ok_or_else(|| {
+            format!(
+                "cannot record bundled libraries from unreadable artifact {}",
+                artifact.facts.artifact
+            )
+        })?;
+        for library in &payload {
             let mut segments = library.artifact.rsplit('/');
             let (Some(soname), Some(abi)) = (segments.next(), segments.next()) else {
                 continue;
@@ -406,10 +413,10 @@ pub fn regenerate(
     )
 }
 
-/// Every artifact the packaging side reported, each one re-read and re-hashed
-/// here. A facts file that names no readable artifact still produces a verdict
-/// — [`MeasuredArtifact::observed_sha256`] is `None` and the gate rejects it —
-/// so a hand-written facts file cannot inflate the artifact count.
+/// Every artifact the packaging side reported, each one re-read, re-hashed and
+/// opened here. Native paths, bytes and dynamic symbols come from the archive,
+/// not from the facts file: a producer report may help explain a failure but
+/// can never certify its own payload.
 fn load_artifacts(root: &Path) -> CheckResult<Vec<MeasuredArtifact>> {
     let directory = root.join(FACTS_DIR);
     let entries = fs::read_dir(&directory).map_err(|error| {
@@ -441,15 +448,65 @@ fn load_artifacts(root: &Path) -> CheckResult<Vec<MeasuredArtifact>> {
         .iter()
         .map(|path| {
             let facts = load_toml::<FactsFile>(path)?.facts;
-            let observed_sha256 = read_file(&root.join(&facts.artifact))
-                .ok()
-                .map(|bytes| sha256_hex(&bytes));
+            let bytes = read_file(&root.join(&facts.artifact)).ok();
+            let observed_sha256 = bytes.as_deref().map(sha256_hex);
+            let observed_payload = bytes
+                .as_deref()
+                .and_then(|bytes| measure_archive_payload(bytes).ok());
             Ok(MeasuredArtifact {
                 facts,
                 observed_sha256,
+                observed_payload,
             })
         })
         .collect()
+}
+
+/// Every shared object the artifact actually ships, with its digest and every
+/// defined dynamic symbol. This is deliberately independent of Gradle's
+/// `facts.payload`: the release verdict must judge the library in the upload,
+/// not a library compiled by a test and not a producer's description of it.
+fn measure_archive_payload(bytes: &[u8]) -> CheckResult<Vec<PackagedPayload>> {
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
+        .map_err(|error| format!("opening archive: {error}"))?;
+    let mut payload = Vec::new();
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|error| format!("reading archive entry {index}: {error}"))?;
+        if !entry.name().ends_with(".so") {
+            continue;
+        }
+        let artifact = entry.name().to_owned();
+        let mut library = Vec::new();
+        entry
+            .read_to_end(&mut library)
+            .map_err(|error| format!("extracting {artifact}: {error}"))?;
+        payload.push(PackagedPayload {
+            artifact,
+            sha256: sha256_hex(&library),
+            symbols: defined_symbols(&library)?,
+        });
+    }
+    payload.sort_by(|left, right| left.artifact.cmp(&right.artifact));
+    Ok(payload)
+}
+
+/// The exact callable surface of one ELF shared object.
+fn defined_symbols(library: &[u8]) -> CheckResult<Vec<String>> {
+    let file = object::File::parse(library)
+        .map_err(|error| format!("parsing packaged ELF payload: {error}"))?;
+    let mut symbols = BTreeSet::new();
+    for symbol in file.dynamic_symbols() {
+        if symbol.is_definition()
+            && symbol.is_global()
+            && let Ok(name) = symbol.name()
+            && !name.is_empty()
+        {
+            symbols.insert(name.to_owned());
+        }
+    }
+    Ok(symbols.into_iter().collect())
 }
 
 /// The digest that pins the payload to the sources it was compiled from: every

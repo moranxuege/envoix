@@ -31,7 +31,7 @@ fn create(direction: Direction, source: SourceDecision) -> (TransferRecord, Vec<
     TransferRecord::create(
         NewTransfer {
             direction,
-            offered_name: OfferedName::from_untrusted("quiescence.bin"),
+            offered_name: OfferedName::from_untrusted("quiescence.bin").unwrap(),
             total: ByteCount::new(100),
             source,
             pairing: None,

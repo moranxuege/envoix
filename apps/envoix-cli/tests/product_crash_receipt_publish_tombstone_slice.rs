@@ -158,7 +158,7 @@ impl RecordStore for ProductOperationStore {
 
 fn decode_loaded_record(encoded: &[u8]) -> Result<TransferRecord, ()> {
     match decode_record(encoded).map_err(|_| ())? {
-        RecordDecode::Loaded(record) => Ok(record),
+        RecordDecode::Loaded(record) => Ok(*record),
         RecordDecode::UnsupportedFuture { .. } => Err(()),
     }
 }
@@ -439,7 +439,7 @@ async fn product_crash_receipt_publish_tombstone_slice() {
     let durable_root = directory.path().join("durable");
     let server = run(server_config(directory.path())).await.unwrap();
     let broker = server.endpoint_addr().clone();
-    let offered_name = OfferedName::from_untrusted("p5-walking-slice.bin");
+    let offered_name = OfferedName::from_untrusted("p5-walking-slice.bin").unwrap();
     let total = ByteCount::new(TOTAL_BYTES);
 
     // Create the sender first: it alone mints the shared transfer/artifact pair.
@@ -899,7 +899,7 @@ async fn product_crash_receipt_publish_tombstone_slice() {
         store
             .stage_artifact(
                 key,
-                OfferedName::from_untrusted("last-copy.bin"),
+                OfferedName::from_untrusted("last-copy.bin").unwrap(),
                 b"complete",
             )
             .unwrap();

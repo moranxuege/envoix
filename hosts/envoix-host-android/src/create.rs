@@ -53,6 +53,8 @@ pub fn plan(spec: &CreateSpec) -> Result<NewTransfer, CreateRefusalView> {
 }
 
 fn plan_send(display_name: &str, total: u64) -> Result<NewTransfer, CreateRefusalView> {
+    let offered_name =
+        OfferedName::from_untrusted(display_name).map_err(|_| CreateRefusalView::NameTooLong)?;
     let code = generate_room_code(&mut SystemEntropy).map_err(refusal)?;
     // The invite declares OUR role, so whoever joins takes the opposite one.
     let invite =
@@ -61,7 +63,7 @@ fn plan_send(display_name: &str, total: u64) -> Result<NewTransfer, CreateRefusa
         direction: Direction::Send,
         // Untrusted provider metadata, sanitized by the authority rather than
         // trusted as the frontend spelled it (`SF09`).
-        offered_name: OfferedName::from_untrusted(display_name),
+        offered_name,
         total: ByteCount::new(total),
         // The document is picked but not yet staged, so the card is created
         // needing source work — which is what mints the `SourceHandle` duty.
@@ -88,7 +90,7 @@ fn plan_join(text: &str) -> Result<NewTransfer, CreateRefusalView> {
         // The offered name is the sender's to state; until the peer does, the
         // record carries the authority's own fallback rather than an invented
         // name.
-        offered_name: OfferedName::from_untrusted(""),
+        offered_name: OfferedName::from_untrusted("").expect("the fallback name is bounded"),
         total: ByteCount::new(0),
         source: SourceDecision::Ready,
         pairing: Some(Box::new(PairingChannel::from_invite(&invite))),
@@ -245,5 +247,25 @@ mod tests {
         })
         .expect("a send always plans");
         assert_eq!(planned.offered_name.as_str(), "passwd");
+    }
+
+    /// UTF-8 bytes, not user-perceived characters, are the portable leaf-name
+    /// limit. The wider command contract deliberately lets the ordinary CJK
+    /// filename reach this authority boundary so the answer is typed rather
+    /// than a frontend codec exception.
+    #[test]
+    fn an_over_byte_cjk_name_is_refused_before_a_room_is_minted() {
+        let cjk = "界".repeat(86);
+        assert_eq!(cjk.len(), 258);
+        assert_eq!(
+            plan(&CreateSpec {
+                request_id: envoix_types::CommandId::from_bytes([4; 16]),
+                intent: CreateIntent::Send {
+                    display_name: cjk,
+                    total: 1,
+                },
+            }),
+            Err(CreateRefusalView::NameTooLong)
+        );
     }
 }

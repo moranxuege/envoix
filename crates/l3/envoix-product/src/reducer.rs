@@ -105,6 +105,7 @@ impl TransferRecord {
             facts,
             source_recoverable,
             pairing: transfer.pairing,
+            create_request_id: None,
             receipt_request,
             command_ledger: crate::CommandLedger::default(),
         };

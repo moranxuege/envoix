@@ -10,13 +10,39 @@
 # Gradle never invokes cargo, so jniLibs is a hand-refreshed BUILD ARTIFACT.
 # `xtask record-payload` is what stops that from being a hole: it hashes the
 # libraries this run produced, the composed build manifest they were compiled
-# against and the contract sources they came from, and rewrites every generated
-# release record from them. Re-run this script whenever anything under crates/
-# or hosts/ changes; both the app's `verify<BuildType>JniLibs` task and the
-# release gate FAIL on a payload that no longer matches its record.
+# against and the complete source/build/toolchain closure they came from, and
+# rewrites every generated release record from them. Both the app's
+# `verify<BuildType>JniLibs` task and the release gate fail on any closure edit
+# until this script rebuilds and records the payload.
 set -euo pipefail
 cd "$(dirname "$0")/../../../.."
-export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-/usr/local/android-sdk/ndk/26.3.11579264}"
+TOOLCHAIN_FILE="registry/android-native-toolchain.properties"
+
+toolchain_property() {
+    local key="$1"
+    sed -n "s/^${key}=//p" "$TOOLCHAIN_FILE"
+}
+
+RUSTC_RELEASE="$(toolchain_property rustc_release)"
+CARGO_RELEASE="$(toolchain_property cargo_release)"
+ANDROID_NDK_REVISION="$(toolchain_property android_ndk_revision)"
+[[ "$(rustc --version | awk '{print $2}')" == "$RUSTC_RELEASE" ]] || {
+    echo "rustc does not match pinned release $RUSTC_RELEASE in $TOOLCHAIN_FILE" >&2
+    exit 1
+}
+[[ "$(cargo --version | awk '{print $2}')" == "$CARGO_RELEASE" ]] || {
+    echo "cargo does not match pinned release $CARGO_RELEASE in $TOOLCHAIN_FILE" >&2
+    exit 1
+}
+
+export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-/usr/local/android-sdk/ndk/$ANDROID_NDK_REVISION}"
+OBSERVED_NDK_REVISION="$(
+    sed -n 's/^Pkg\.Revision[[:space:]]*=[[:space:]]*//p' "$ANDROID_NDK_HOME/source.properties"
+)"
+[[ "$OBSERVED_NDK_REVISION" == "$ANDROID_NDK_REVISION" ]] || {
+    echo "Android NDK at $ANDROID_NDK_HOME is $OBSERVED_NDK_REVISION, expected $ANDROID_NDK_REVISION" >&2
+    exit 1
+}
 APP="apps/envoix-flutter/android/app/src"
 SONAME="libenvoix_host_android.so"
 

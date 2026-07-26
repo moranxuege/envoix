@@ -294,7 +294,7 @@ fn parse_decl(
                     .as_table()
                     .ok_or_else(|| SchemaParseError::shape(&member_context))?;
                 for key in field.keys() {
-                    if !matches!(key.as_str(), "name" | "type") {
+                    if !matches!(key.as_str(), "name" | "type" | "secret") {
                         return Err(SchemaParseError::shape(format!(
                             "{member_context}: unknown key {key}"
                         )));
@@ -305,9 +305,33 @@ fn parse_decl(
                 push_unique(&mut names, field_name.clone(), &member_context)?;
                 let type_text = require_str(field.get("type"), &format!("{member_context}.type"))?;
                 let ty = parse_type(&type_text, &member_context, declared, true)?;
+                let secret = match field.get("secret") {
+                    None => false,
+                    Some(toml::Value::Boolean(secret)) => *secret,
+                    Some(_) => {
+                        return Err(SchemaParseError::shape(format!("{member_context}.secret")));
+                    }
+                };
+                // An OPTIONAL secret is still a secret: the published invite
+                // link is absent on a card that has none and is the pairing
+                // password when present. Refusing `option(str)` here would push
+                // the caller to declare it plain, which is the leak.
+                fn secretable(ty: &FieldTy) -> bool {
+                    match ty {
+                        FieldTy::Str { .. } => true,
+                        FieldTy::Option(inner) => secretable(inner),
+                        _ => false,
+                    }
+                }
+                if secret && !secretable(&ty) {
+                    return Err(SchemaParseError::grammar(format!(
+                        "{member_context}: only bounded UTF-8 text may be secret"
+                    )));
+                }
                 parsed.push(FieldDecl {
                     name: field_name,
                     ty,
+                    secret,
                 });
             }
             require_non_empty(&parsed, context)?;

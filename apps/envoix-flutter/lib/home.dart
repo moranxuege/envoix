@@ -338,7 +338,9 @@ class _Invite extends StatelessWidget {
   Widget build(BuildContext context) {
     reportInvite(card, invite);
     final ColorScheme colors = Theme.of(context).colorScheme;
-    final String? link = invite.link;
+    // Exposed because sharing it IS the feature. Every other path renders it
+    // redacted, which is what keeps it out of a log or a stack trace.
+    final String? link = invite.link?.expose();
     return Padding(
       padding: const EdgeInsets.only(top: 8),
       child: Container(
@@ -351,7 +353,7 @@ class _Invite extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
-            _Fact(label: 'Room code', value: invite.code),
+            _Fact(label: 'Room code', value: invite.code.expose()),
             if (link != null)
               Padding(
                 padding: const EdgeInsets.only(top: 4),

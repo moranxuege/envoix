@@ -1,6 +1,7 @@
 package app.envoix.host
 
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
 import java.util.concurrent.ConcurrentHashMap
@@ -15,12 +16,12 @@ import java.util.concurrent.atomic.AtomicReference
  * never an artifact key (`SF09`) — and nothing else, so no Dart value can name
  * a file, open a stream, or be forged into one (`XP01`).
  *
- * It is deliberately NOT durable. A persistable read grant is taken so the OS
- * keeps the permission, but this build holds no durable pointer to the picked
- * document, so a process death really does lose the pick — and the card, whose
- * source was created non-recoverable, then fails honestly with "re-pick the
- * source" (`RS04`) instead of promising a resume it cannot deliver. Durable
- * source retention arrives with the F3 staging slice.
+ * A pick has no durable authority. Only a card whose initial record has
+ * committed may claim it; that claim takes the persistable read grant and
+ * journals CARD → URI before reporting the source duty complete. Durable
+ * removal travels back from the Rust authority on a separate service lane and
+ * deletes the journal ownership before releasing the OS grant. Thus retained
+ * access without a live card is not a state this object can represent.
  */
 object SourcePicks {
     /** What the platform will tell the frontend about a pick. */
@@ -39,7 +40,7 @@ object SourcePicks {
     /** Card id (16 hex digits) to the source bound to it. */
     private val bound = ConcurrentHashMap<String, Uri>()
 
-    /** Records a pick and reads back what the frontend may be told about it. */
+    /** Records an ephemeral pick and reads what the frontend may be told. */
     fun offer(
         context: Context,
         uri: Uri,
@@ -53,10 +54,79 @@ object SourcePicks {
      * time. Idempotent per card: a duty re-delivered for a card that already
      * holds a source resolves to the same one instead of eating the next pick.
      */
-    fun claim(card: String): Uri? {
+    @Synchronized
+    fun claim(
+        context: Context,
+        card: String,
+    ): Uri? {
         bound[card]?.let { return it }
+        val journal = journal(context)
+        journal.getString(card, null)?.let(Uri::parse)?.let { owned ->
+            return bound.putIfAbsent(card, owned) ?: owned
+        }
         val picked = offered.getAndSet(null) ?: return null
-        return bound.putIfAbsent(card, picked) ?: picked
+        val source = bound.putIfAbsent(card, picked) ?: picked
+        // Some providers grant only process-lifetime access. Such a source can
+        // still satisfy this process's duty honestly, but it is not written as
+        // durable ownership unless Android actually retained the permission.
+        val retained =
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    source,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                )
+                true
+            }.getOrDefault(false)
+        if (retained) {
+            if (!journal.edit().putString(card, source.toString()).commit()) {
+                // A capability without durable ownership is not retained.
+                releaseGrant(context, source)
+            }
+        }
+        return source
+    }
+
+    /**
+     * Ends one durably removed card's ownership. Journal removal comes first:
+     * a crash after it leaves an unowned persisted grant, which [recover]
+     * releases; doing these operations in the opposite order could retain a
+     * dead card forever after a crash.
+     */
+    @Synchronized
+    fun release(
+        context: Context,
+        card: String,
+    ) {
+        val journal = journal(context)
+        val owned = journal.getString(card, null)?.let(Uri::parse)
+        val sharedByAnotherCard =
+            owned != null &&
+                journal.all.any { (owner, uri) ->
+                    owner != card && uri == owned.toString()
+                }
+        bound.remove(card)
+        journal.edit().remove(card).commit()
+        if (owned != null && !sharedByAnotherCard) {
+            releaseGrant(context, owned)
+        }
+    }
+
+    /**
+     * Closes the only claim crash window: Android retained the grant, but the
+     * process died before CARD → URI committed. Every persisted read URI not
+     * named by the ownership journal is therefore an orphan and is released.
+     */
+    @Synchronized
+    fun recover(context: Context) {
+        val owners =
+            journal(context)
+                .all.values
+                .filterIsInstance<String>()
+                .toSet()
+        context.contentResolver.persistedUriPermissions
+            .asSequence()
+            .filter { it.isReadPermission && it.uri.toString() !in owners }
+            .forEach { releaseGrant(context, it.uri) }
     }
 
     /** Whether the bound source is still readable through its grant. */
@@ -66,6 +136,24 @@ object SourcePicks {
     ): Boolean =
         runCatching { context.contentResolver.openInputStream(uri)?.use { true } }
             .getOrNull() == true
+
+    private fun journal(context: Context) =
+        context.getSharedPreferences(
+            OWNERSHIP_JOURNAL,
+            Context.MODE_PRIVATE,
+        )
+
+    private fun releaseGrant(
+        context: Context,
+        uri: Uri,
+    ) {
+        runCatching {
+            context.contentResolver.releasePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION,
+            )
+        }
+    }
 
     private fun describe(
         context: Context,
@@ -87,4 +175,6 @@ object SourcePicks {
                 )
             } ?: Granted(displayName = "", sizeBytes = 0L)
     }
+
+    private const val OWNERSHIP_JOURNAL = "envoix-source-ownership"
 }

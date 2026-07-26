@@ -38,7 +38,7 @@ fn storage_contract_semantics() {
     assert!(OPERATION_ENVELOPE_SCHEMA_ID.ends_with(&format!("/{CURRENT_ENVELOPE_VERSION}")));
     assert_eq!(envelope.encode(), ENVELOPE_FIXTURE);
 
-    let duplicate_name = OfferedName::from_untrusted("photo.jpg");
+    let duplicate_name = OfferedName::from_untrusted("photo.jpg").unwrap();
     let mut transaction = store.begin(&lease).unwrap();
     assert_eq!(transaction.record_id(), record_id);
     transaction.put_operation(envelope.clone());

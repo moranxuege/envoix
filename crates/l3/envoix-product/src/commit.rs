@@ -107,6 +107,27 @@ impl<S: RecordStore> CommittedSession<S> {
         Ok((session, outcome))
     }
 
+    /// Creates a card under the frontend request identity that owns it.
+    ///
+    /// The identity is installed before the first record is encoded, so the
+    /// dedup fact and the card can only become durable together. A composition
+    /// root can rebuild its request index by reading records after a restart;
+    /// there is no answer-write window in which the card exists but its create
+    /// identity does not.
+    pub fn create_identified(
+        transfer: NewTransfer,
+        request_id: CommandId,
+        identities: &mut impl IdentitySource,
+        store: S,
+        max_commit_attempts: NonZeroUsize,
+    ) -> Result<(Self, ApplyOutcome), IdentityError> {
+        let (mut record, effects) = TransferRecord::create(transfer, identities)?;
+        record.create_request_id = Some(Box::new(request_id));
+        let mut session = Self::from_record(record, store, max_commit_attempts);
+        let outcome = session.finish_reduction(effects, true, None, false)?;
+        Ok((session, outcome))
+    }
+
     pub fn create_with_identity(
         transfer: NewTransfer,
         transfer_id: TransferId,

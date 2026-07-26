@@ -750,7 +750,7 @@ fn plan_pair(
 
 fn transfer_spec() -> AttemptTransferSpec {
     AttemptTransferSpec {
-        offered_name: OfferedName::from_untrusted("walking-slice.bin"),
+        offered_name: OfferedName::from_untrusted("walking-slice.bin").unwrap(),
         file_size: ByteCount::new(SOURCE_SIZE as u64),
         chunk_size: ByteCount::new(CHUNK_SIZE),
         claimed_complete: None,

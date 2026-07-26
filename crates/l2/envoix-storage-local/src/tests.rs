@@ -36,7 +36,7 @@ fn storage_local_fault_each_commit_stage() {
         baseline.put_operation(envelope(b"operation-old"));
         baseline.put_artifact(
             first_artifact,
-            OfferedName::from_untrusted("same-name.bin"),
+            OfferedName::from_untrusted("same-name.bin").unwrap(),
             envelope(b"artifact-old"),
         );
         baseline.commit(Durability::Durable).unwrap();
@@ -46,12 +46,12 @@ fn storage_local_fault_each_commit_stage() {
         update.put_operation(envelope(b"operation-new"));
         update.put_artifact(
             first_artifact,
-            OfferedName::from_untrusted("same-name.bin"),
+            OfferedName::from_untrusted("same-name.bin").unwrap(),
             envelope(b"artifact-new"),
         );
         update.put_artifact(
             second_artifact,
-            OfferedName::from_untrusted("same-name.bin"),
+            OfferedName::from_untrusted("same-name.bin").unwrap(),
             envelope(b"artifact-second"),
         );
         assert!(matches!(
@@ -102,7 +102,7 @@ fn durable_round_trip_and_identity_keyed_manifest() {
     assert_eq!(store.get(operation_key).unwrap(), LoadOutcome::Absent);
     let lease = acquired(store.acquire_writer(card).unwrap());
 
-    let same_name = OfferedName::from_untrusted("../photo.jpg");
+    let same_name = OfferedName::from_untrusted("../photo.jpg").unwrap();
     let mut buffered = store.begin(&lease).unwrap();
     buffered.put_operation(envelope([]));
     buffered.put_artifact(
@@ -175,7 +175,7 @@ fn quarantine_absent_and_replacement_remain_distinct() {
     initial.put_operation(envelope(b"operation"));
     initial.put_artifact(
         artifact_id,
-        OfferedName::from_untrusted("data.bin"),
+        OfferedName::from_untrusted("data.bin").unwrap(),
         envelope(b"artifact"),
     );
     initial.commit(Durability::Durable).unwrap();
@@ -237,7 +237,7 @@ fn quarantine_absent_and_replacement_remain_distinct() {
     let mut replace_artifact = store.begin(&lease).unwrap();
     replace_artifact.put_artifact(
         artifact_id,
-        OfferedName::from_untrusted("data.bin"),
+        OfferedName::from_untrusted("data.bin").unwrap(),
         envelope(b"artifact-replacement"),
     );
     replace_artifact.commit(Durability::Durable).unwrap();

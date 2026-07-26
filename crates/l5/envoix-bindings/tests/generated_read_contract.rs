@@ -143,22 +143,28 @@ fn an_invite_reaches_the_frontend_however_long_the_grammar_let_it_be() {
     let short = published("broker.example", "relay.example");
     let link = short.link.expect("a short channel publishes its link");
     assert!(
-        link.starts_with("envoix://"),
+        link.expose().starts_with("envoix://"),
         "the link is the grammar's own encoding, not a fragment"
     );
-    assert_eq!(short.code, "000123-amber-brass");
+    assert_eq!(short.code.expose(), "000123-amber-brass");
+    assert_eq!(
+        short.code_fingerprint,
+        blake3::hash(short.code.expose().as_bytes()).to_hex()[..16],
+        "instrumentation gets a stable digest prefix, never the SPAKE2 password"
+    );
 
     // The widest endpoints the grammar admits — an invite far past the bound
     // F2b restated, and one the frontend must still be handed whole.
     let widest = published(&"b".repeat(1024), &"r".repeat(2048));
     let link = widest.link.expect("a maximal channel publishes its link");
     assert!(
-        link.len() > 1024 && link.len() <= MAX_INVITE_LINK_LENGTH,
+        link.expose().len() > 1024 && link.expose().len() <= MAX_INVITE_LINK_LENGTH,
         "a maximal invite is {} bytes and must cross whole",
-        link.len()
+        link.expose().len()
     );
     assert_eq!(
-        widest.code, "000123-amber-brass",
+        widest.code.expose(),
+        "000123-amber-brass",
         "the code crosses beside it"
     );
 
@@ -472,7 +478,7 @@ fn generated_read_schema_roundtrip_and_containment() {
 
     // Unknown or missing schema versions fail explicitly.
     let future = tamper(&base, |value| {
-        value["schema"] = serde_json::json!("envoix/binding/read/5");
+        value["schema"] = serde_json::json!("envoix/binding/read/6");
     });
     assert_eq!(decode_read_frame(&future), Err(ReadError::UnknownSchema));
     let missing = tamper(&base, |value| {

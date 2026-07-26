@@ -323,6 +323,14 @@ pub struct TransferRecord {
     /// than four in every probe.
     #[serde(default)]
     pub pairing: Option<Box<PairingChannel>>,
+    /// The frontend create identity that authorized this card's initial
+    /// record. It is written in the SAME commit that creates the card, so a
+    /// retry can recover the original result after process death without
+    /// allocating a second identity, room, or card.
+    ///
+    /// `None` is the pre-F2b shape and the non-frontend construction paths.
+    #[serde(default)]
+    pub create_request_id: Option<Box<CommandId>>,
     pub(crate) receipt_request: RequestId,
     /// Durable frontend-command dedup, committed atomically with each effect.
     /// Defaulted so pre-BN2 dev records still decode.

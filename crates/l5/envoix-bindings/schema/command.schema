@@ -15,7 +15,7 @@
 # bytes/blob type and no handle/path/URI type, so a command can never carry
 # file bytes or an OS handle.
 
-id = "envoix/binding/command/3"
+id = "envoix/binding/command/4"
 root = "CommandFrame"
 # Frontends originate frames on this contract, so every native artifact carries
 # an encoder that enforces the same bounds its decoder checks. Which frames is
@@ -94,7 +94,12 @@ fields = [
   # authority re-sanitizes the name, and staging's own completion is what
   # authors the real byte count. No URI or handle can be spelled here — the
   # scalar vocabulary has no type for one.
-  { name = "display_name", type = "str(255)" },
+  # Wider than OfferedName::MAX_BYTES so ordinary provider names whose UTF-8
+  # representation exceeds a filesystem leaf reach the authority and receive
+  # its typed refusal instead of dying as a local codec exception. Android
+  # providers conventionally cap names at 255 UTF-16 units; 1020 bytes covers
+  # the all-supplementary-plane case.
+  { name = "display_name", type = "str(1020)" },
   { name = "total", type = "u63" },
 ]
 
@@ -107,7 +112,9 @@ fields = [
   # invite grammar in Rust does all three and answers typed (`XI02`). The bound
   # is deliberately wider than the grammar's own input limit so an over-long
   # paste is refused BY the authority instead of by the encoder.
-  { name = "invite", type = "str(16384)" },
+  # Carries the same password the published link does: it IS an invite the
+  # user pasted. Opaque to the frontend and secret from every log.
+  { name = "invite", type = "str(16384)", secret = true },
 ]
 
 [[decl]]
@@ -205,6 +212,7 @@ variants = [
   "invite_too_long",
   "invite_unsupported",
   "invite_role_unsupported",
+  "name_too_long",
   "storage_fault",
   "internal",
 ]

@@ -130,10 +130,10 @@ Map<String, FrontendIntentView> handBuiltSubmits() {
   };
   invites.forEach((name, invite) {
     bodies['create_join_$name'] =
-        create(id, CreateIntentViewJoin(JoinInviteView(invite: invite)));
+        create(id, CreateIntentViewJoin(JoinInviteView(invite: CommandSecretString(invite))));
   });
   bodies['create_join_at_bound'] =
-      create(id, CreateIntentViewJoin(JoinInviteView(invite: 'e' * 16384)));
+      create(id, CreateIntentViewJoin(JoinInviteView(invite: CommandSecretString('e' * 16384))));
   return bodies;
 }
 

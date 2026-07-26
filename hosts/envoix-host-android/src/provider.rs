@@ -35,7 +35,7 @@ impl SessionProvider for HostProvider {
             RecordDecode::UnsupportedFuture { .. } => return None,
         };
         Some(CommittedSession::from_record(
-            record,
+            *record,
             store,
             self.max_commit_attempts,
         ))

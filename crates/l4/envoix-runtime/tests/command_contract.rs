@@ -167,7 +167,7 @@ impl SessionProvider for ScriptedProvider {
             RecordDecode::UnsupportedFuture { .. } => return None,
         };
         Some(CommittedSession::from_record(
-            record,
+            *record,
             store,
             NonZeroUsize::new(3).unwrap(),
         ))
@@ -227,7 +227,7 @@ fn create_card(
     CommittedSession::create(
         NewTransfer {
             direction: Direction::Send,
-            offered_name: OfferedName::from_untrusted("payload.bin"),
+            offered_name: OfferedName::from_untrusted("payload.bin").unwrap(),
             total: ByteCount::new(1024),
             source: SourceDecision::Ready,
             pairing: None,
@@ -243,7 +243,7 @@ fn durable_state(root: &Path, card: RecordId, script: &Script) -> TransferRecord
     let store = ScriptedStore::opened(root, card, script.clone()).expect("the card store opens");
     let encoded = store.latest().expect("a committed product record");
     match decode_record(&encoded).unwrap() {
-        RecordDecode::Loaded(record) => record,
+        RecordDecode::Loaded(record) => *record,
         RecordDecode::UnsupportedFuture { .. } => panic!("the record decodes"),
     }
 }

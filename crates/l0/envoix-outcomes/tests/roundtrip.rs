@@ -27,7 +27,7 @@ fn typed_identity_outcome_roundtrip() {
         transfer_id: TransferId::from_bytes([0x11; 16]),
         artifact_id: ArtifactId::from_bytes([0x22; 16]),
         request_id: RequestId::from_bytes([0x33; 16]),
-        offered_name: OfferedName::from_untrusted("photo.jpg"),
+        offered_name: OfferedName::from_untrusted("photo.jpg").unwrap(),
         landed_name: LandedName::new("photo (1).jpg"),
         direction: Direction::Receive,
         bytes: ByteCount::new(u64::MAX),

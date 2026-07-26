@@ -13,9 +13,9 @@ use std::sync::{OnceLock, RwLock};
 
 use jni::JNIEnv;
 use jni::objects::{JByteArray, JClass, JString};
-use jni::sys::{jboolean, jbyteArray, jlong};
+use jni::sys::{jboolean, jbyteArray, jlong, jstring};
 
-use crate::host::{AttachmentToken, FramePoll, Host};
+use crate::host::{AttachmentToken, FramePoll, Host, IntentRejection};
 
 static HOST: OnceLock<RwLock<Option<Host>>> = OnceLock::new();
 
@@ -23,6 +23,8 @@ static HOST: OnceLock<RwLock<Option<Host>>> = OnceLock::new();
 /// "nothing queued" would leave the replaced pump spinning forever, so the
 /// frontend is told in the one way a JNI method can say something typed.
 const SUPERSEDED: &str = "app/envoix/host/SupersededAttachment";
+/// A frontend frame reached the authority boundary and was refused there.
+const REJECTED_INTENT: &str = "app/envoix/host/RejectedIntent";
 
 fn host_slot() -> &'static RwLock<Option<Host>> {
     HOST.get_or_init(|| RwLock::new(None))
@@ -117,6 +119,19 @@ pub extern "system" fn Java_app_envoix_host_NativeHost_pollWork(
     bytes_out(&mut env, order)
 }
 
+/// `NativeHost.pollSourceRelease(): String?` — one durably removed card whose
+/// platform-owned persistable source grant must be released.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_app_envoix_host_NativeHost_pollSourceRelease(
+    env: JNIEnv<'_>,
+    _class: JClass<'_>,
+) -> jstring {
+    let card = with_host(Host::poll_source_release).flatten();
+    card.and_then(|card| env.new_string(format!("{:016x}", card.get())).ok())
+        .map(|text| text.into_raw())
+        .unwrap_or(std::ptr::null_mut())
+}
+
 /// `NativeHost.intent(frame): ByteArray` — one frontend-originated intent
 /// frame in, the authority's encoded answer out: an acceptance for a command
 /// on an existing card, or a create result for a request that one be made.
@@ -129,8 +144,14 @@ pub extern "system" fn Java_app_envoix_host_NativeHost_intent(
     let Ok(bytes) = env.convert_byte_array(&frame) else {
         return std::ptr::null_mut();
     };
-    let answer = with_host(|host| host.intent(&bytes));
-    bytes_out(&mut env, answer)
+    match with_host(|host| host.intent(&bytes)) {
+        Some(Ok(answer)) => bytes_out(&mut env, Some(answer)),
+        Some(Err(IntentRejection::Contract)) => {
+            let _ = env.throw_new(REJECTED_INTENT, "the authority refused the intent frame");
+            std::ptr::null_mut()
+        }
+        None => std::ptr::null_mut(),
+    }
 }
 
 /// `NativeHost.reportDuty(report): Boolean`
@@ -203,7 +224,7 @@ mod e2e {
     /// separated by `;durable=`: the cards this process generation actually
     /// brought back as comma-separated 16-digit hex ids, then each card's
     /// latest COMMITTED state read back off disk as `id:state`. One JNI symbol
-    /// answers both, because BN5 pins the dynamic symbol table to seven names.
+    /// answers both, because BN5 pins the dynamic symbol table exactly.
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_app_envoix_host_E2eBridge_liveCards(
         env: JNIEnv<'_>,

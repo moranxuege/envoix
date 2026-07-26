@@ -15,7 +15,7 @@
 
 import Foundation
 
-public let commandSchemaId = "envoix/binding/command/3"
+public let commandSchemaId = "envoix/binding/command/4"
 public let commandMaxFrameBytes = 1048576
 // Contract rules frozen by schema/command.schema.
 public let newestAttachmentCommands = true
@@ -38,6 +38,17 @@ public enum CommandErrorKind {
 public struct CommandContractError: Error, Equatable {
     public let kind: CommandErrorKind
     public let context: String
+}
+
+/// Bounded contract text that redacts ordinary string interpolation.
+public struct CommandSecretString: Equatable, CustomStringConvertible {
+    private let value: String
+
+    init(_ value: String) { self.value = value }
+
+    public func expose() -> String { value }
+
+    public var description: String { "CommandSecretString([redacted])" }
 }
 
 public enum CommandView: String, Equatable {
@@ -97,9 +108,9 @@ public struct SendSourceView: Equatable {
 }
 
 public struct JoinInviteView: Equatable {
-    public let invite: String
+    public let invite: CommandSecretString
 
-    public init(invite: String) {
+    public init(invite: CommandSecretString) {
         self.invite = invite
     }
 }
@@ -165,6 +176,7 @@ public enum CreateRefusalView: String, Equatable {
     case inviteTooLong = "invite_too_long"
     case inviteUnsupported = "invite_unsupported"
     case inviteRoleUnsupported = "invite_role_unsupported"
+    case nameTooLong = "name_too_long"
     case storageFault = "storage_fault"
     case `internal` = "internal"
 }
@@ -434,7 +446,7 @@ public enum EnvoixCommandCodec {
     private static func decodeSendSourceView(_ value: Any?, _ context: String) throws -> SendSourceView {
         let map = try object(value, context)
         try knownKeys(map, ["display_name", "total"], context)
-        let displayName = try utf8Bounded(try field(map, "display_name", "SendSourceView.display_name"), 255, "SendSourceView.display_name")
+        let displayName = try utf8Bounded(try field(map, "display_name", "SendSourceView.display_name"), 1020, "SendSourceView.display_name")
         let total = try integer(try field(map, "total", "SendSourceView.total"), u63Max, "SendSourceView.total")
         return SendSourceView(
             displayName: displayName,
@@ -444,7 +456,7 @@ public enum EnvoixCommandCodec {
 
     private static func encodeSendSourceView(_ value: SendSourceView) throws -> [String: Any] {
         var map: [String: Any] = [:]
-        map["display_name"] = try encodeUtf8Bounded(value.displayName, 255, "SendSourceView.display_name")
+        map["display_name"] = try encodeUtf8Bounded(value.displayName, 1020, "SendSourceView.display_name")
         map["total"] = try encodeInteger(value.total, u63Max, "SendSourceView.total")
         return map
     }
@@ -452,7 +464,7 @@ public enum EnvoixCommandCodec {
     private static func decodeJoinInviteView(_ value: Any?, _ context: String) throws -> JoinInviteView {
         let map = try object(value, context)
         try knownKeys(map, ["invite"], context)
-        let invite = try utf8Bounded(try field(map, "invite", "JoinInviteView.invite"), 16384, "JoinInviteView.invite")
+        let invite = CommandSecretString(try utf8Bounded(try field(map, "invite", "JoinInviteView.invite"), 16384, "JoinInviteView.invite"))
         return JoinInviteView(
             invite: invite
         )
@@ -460,7 +472,7 @@ public enum EnvoixCommandCodec {
 
     private static func encodeJoinInviteView(_ value: JoinInviteView) throws -> [String: Any] {
         var map: [String: Any] = [:]
-        map["invite"] = try encodeUtf8Bounded(value.invite, 16384, "JoinInviteView.invite")
+        map["invite"] = try encodeUtf8Bounded(value.invite.expose(), 16384, "JoinInviteView.invite")
         return map
     }
 

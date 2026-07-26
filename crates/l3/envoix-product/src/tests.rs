@@ -45,7 +45,7 @@ fn create(direction: Direction, source: SourceDecision) -> (TransferRecord, Vec<
     TransferRecord::create(
         NewTransfer {
             direction,
-            offered_name: OfferedName::from_untrusted("a.zip"),
+            offered_name: OfferedName::from_untrusted("a.zip").unwrap(),
             total: ByteCount::new(100),
             source,
             pairing: None,
@@ -211,7 +211,7 @@ fn product_mints_all_identity_before_the_first_attempt() {
     let error = TransferRecord::create(
         NewTransfer {
             direction: Direction::Send,
-            offered_name: OfferedName::from_untrusted("a.zip"),
+            offered_name: OfferedName::from_untrusted("a.zip").unwrap(),
             total: ByteCount::new(1),
             source: SourceDecision::Ready,
             pairing: None,
@@ -229,7 +229,7 @@ fn receiver_adopts_authenticated_transfer_identity_and_mints_local_identity() {
     let (record, effects) = TransferRecord::create_with_identity(
         NewTransfer {
             direction: Direction::Receive,
-            offered_name: OfferedName::from_untrusted("authenticated.zip"),
+            offered_name: OfferedName::from_untrusted("authenticated.zip").unwrap(),
             total: ByteCount::new(321),
             source: SourceDecision::Ready,
             pairing: None,
@@ -1364,7 +1364,7 @@ fn staging_handoff_state_round_trips_through_the_codec() {
     let RecordDecode::Loaded(decoded) = decode_record(&encoded).expect("and decodable") else {
         panic!("the staging handoff must load");
     };
-    assert_eq!(decoded, record);
+    assert_eq!(*decoded, record);
 
     // The same state without the staging retirement is still rejected.
     let mut bogus = record.clone();
@@ -2120,7 +2120,7 @@ fn a_card_that_needs_a_source_asks_the_platform_for_one() {
     let (session, outcome) = crate::CommittedSession::create_without_store(
         NewTransfer {
             direction: Direction::Send,
-            offered_name: OfferedName::from_untrusted("a.zip"),
+            offered_name: OfferedName::from_untrusted("a.zip").unwrap(),
             total: ByteCount::new(100),
             source: SourceDecision::Stage { recoverable: false },
             pairing: None,
@@ -2211,7 +2211,7 @@ fn a_cards_channel_survives_the_record_and_re_encodes_to_its_invite() {
     let (record, _) = TransferRecord::create(
         NewTransfer {
             direction: Direction::Send,
-            offered_name: OfferedName::from_untrusted("a.zip"),
+            offered_name: OfferedName::from_untrusted("a.zip").unwrap(),
             total: ByteCount::new(100),
             source: SourceDecision::Stage { recoverable: false },
             pairing: Some(Box::new(crate::PairingChannel::from_invite(&invite))),
@@ -2243,7 +2243,7 @@ fn fixture_record() -> TransferRecord {
             artifact: ArtifactId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3]),
         },
         direction: Direction::Send,
-        offered_name: OfferedName::from_untrusted("a.txt"),
+        offered_name: OfferedName::from_untrusted("a.txt").unwrap(),
         total: ByteCount::new(10),
         state: ProductState::Paused(PauseOrigin::Local),
         quiescence: crate::Quiescence::Quiescent,
@@ -2261,6 +2261,7 @@ fn fixture_record() -> TransferRecord {
         },
         source_recoverable: true,
         pairing: None,
+        create_request_id: None,
         receipt_request: RequestId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4]),
         command_ledger: crate::CommandLedger::default(),
     }
@@ -2272,17 +2273,17 @@ fn product_record_roundtrips() {
     let encoded = encode_record(&record).unwrap();
     assert_eq!(
         decode_record(&encoded).unwrap(),
-        RecordDecode::Loaded(record)
+        RecordDecode::Loaded(Box::new(record))
     );
 }
 
 #[test]
-fn product_record_v3_has_a_byte_exact_fixture() {
-    let body = br#"{"identity":{"card":1,"transfer":"00000000000000000000000000000002","artifact":"00000000000000000000000000000003"},"direction":"send","offered_name":"a.txt","total":10,"state":{"state":"paused","origin":"local"},"quiescence":{"status":"quiescent"},"generation":7,"phase":"transferring","bytes":4,"bytes_resumed":2,"outcome":null,"facts":{"source_ready":true,"complete_sent":false,"proof_delivered":false,"receipt_mismatch":false,"remove_requested":false},"source_recoverable":true,"pairing":null,"receipt_request":"00000000000000000000000000000004","command_ledger":[]}"#;
+fn product_record_v4_has_a_byte_exact_fixture() {
+    let body = br#"{"identity":{"card":1,"transfer":"00000000000000000000000000000002","artifact":"00000000000000000000000000000003"},"direction":"send","offered_name":"a.txt","total":10,"state":{"state":"paused","origin":"local"},"quiescence":{"status":"quiescent"},"generation":7,"phase":"transferring","bytes":4,"bytes_resumed":2,"outcome":null,"facts":{"source_ready":true,"complete_sent":false,"proof_delivered":false,"receipt_mismatch":false,"remove_requested":false},"source_recoverable":true,"pairing":null,"create_request_id":null,"receipt_request":"00000000000000000000000000000004","command_ledger":[]}"#;
     let mut expected = Vec::new();
     expected.extend_from_slice(&23_u16.to_be_bytes());
     expected.extend_from_slice(b"envoix/product-record/1");
-    expected.extend_from_slice(&3_u32.to_be_bytes());
+    expected.extend_from_slice(&4_u32.to_be_bytes());
     expected.extend_from_slice(&(body.len() as u32).to_be_bytes());
     expected.extend_from_slice(body);
     assert_eq!(encode_record(&fixture_record()).unwrap(), expected);
@@ -2301,7 +2302,7 @@ fn product_record_v1_without_command_ledger_still_decodes() {
     encoded.extend_from_slice(body);
     assert_eq!(
         decode_record(&encoded).unwrap(),
-        RecordDecode::Loaded(fixture_record())
+        RecordDecode::Loaded(Box::new(fixture_record()))
     );
 }
 
@@ -2309,10 +2310,11 @@ fn product_record_v1_without_command_ledger_still_decodes() {
 fn product_record_future_version_is_quarantinable() {
     let mut encoded = encode_record(&fixture_record()).unwrap();
     let version_offset = 2 + b"envoix/product-record/1".len();
-    encoded[version_offset..version_offset + 4].copy_from_slice(&4_u32.to_be_bytes());
+    let future = crate::PRODUCT_RECORD_VERSION + 1;
+    encoded[version_offset..version_offset + 4].copy_from_slice(&future.to_be_bytes());
     assert_eq!(
         decode_record(&encoded).unwrap(),
-        RecordDecode::UnsupportedFuture { version: 4 }
+        RecordDecode::UnsupportedFuture { version: future }
     );
 }
 

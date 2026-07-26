@@ -21,7 +21,7 @@ import org.json.JSONException
 import org.json.JSONObject
 import org.json.JSONTokener
 
-const val COMMAND_SCHEMA_ID: String = "envoix/binding/command/3"
+const val COMMAND_SCHEMA_ID: String = "envoix/binding/command/4"
 const val COMMAND_MAX_FRAME_BYTES: Int = 1048576
 
 // Contract rules frozen by schema/command.schema.
@@ -43,6 +43,13 @@ enum class CommandErrorKind {
 /** Typed codec failure carrying only static schema context. */
 class CommandContractException(val kind: CommandErrorKind, val context: String) :
     Exception("read contract: $kind at $context")
+
+/** Bounded contract text that redacts ordinary string interpolation. */
+data class CommandSecretString(private val value: String) {
+    fun expose(): String = value
+
+    override fun toString(): String = "CommandSecretString([redacted])"
+}
 
 enum class CommandView {
     PAUSE,
@@ -89,7 +96,7 @@ data class SendSourceView(
 )
 
 data class JoinInviteView(
-    val invite: String,
+    val invite: CommandSecretString,
 )
 
 sealed interface CreateIntentView {
@@ -148,6 +155,7 @@ enum class CreateRefusalView {
     INVITE_TOO_LONG,
     INVITE_UNSUPPORTED,
     INVITE_ROLE_UNSUPPORTED,
+    NAME_TOO_LONG,
     STORAGE_FAULT,
     INTERNAL,
 }
@@ -431,14 +439,14 @@ object EnvoixCommandCodec {
         val map = obj(value, context)
         knownKeys(map, setOf("display_name", "total"), context)
         return SendSourceView(
-            displayName = utf8Bounded(field(map, "display_name", "SendSourceView.display_name"), 255, "SendSourceView.display_name"),
+            displayName = utf8Bounded(field(map, "display_name", "SendSourceView.display_name"), 1020, "SendSourceView.display_name"),
             total = integer(field(map, "total", "SendSourceView.total"), Long.MAX_VALUE, "SendSourceView.total"),
         )
     }
 
     private fun encodeSendSourceView(value: SendSourceView): JSONObject {
         val map = JSONObject()
-        map.put("display_name", encodeUtf8Bounded(value.displayName, 255, "SendSourceView.display_name"))
+        map.put("display_name", encodeUtf8Bounded(value.displayName, 1020, "SendSourceView.display_name"))
         map.put("total", encodeInteger(value.total, Long.MAX_VALUE, "SendSourceView.total"))
         return map
     }
@@ -447,13 +455,13 @@ object EnvoixCommandCodec {
         val map = obj(value, context)
         knownKeys(map, setOf("invite"), context)
         return JoinInviteView(
-            invite = utf8Bounded(field(map, "invite", "JoinInviteView.invite"), 16384, "JoinInviteView.invite"),
+            invite = CommandSecretString(utf8Bounded(field(map, "invite", "JoinInviteView.invite"), 16384, "JoinInviteView.invite")),
         )
     }
 
     private fun encodeJoinInviteView(value: JoinInviteView): JSONObject {
         val map = JSONObject()
-        map.put("invite", encodeUtf8Bounded(value.invite, 16384, "JoinInviteView.invite"))
+        map.put("invite", encodeUtf8Bounded(value.invite.expose(), 16384, "JoinInviteView.invite"))
         return map
     }
 
@@ -603,6 +611,7 @@ object EnvoixCommandCodec {
         "invite_too_long" -> CreateRefusalView.INVITE_TOO_LONG
         "invite_unsupported" -> CreateRefusalView.INVITE_UNSUPPORTED
         "invite_role_unsupported" -> CreateRefusalView.INVITE_ROLE_UNSUPPORTED
+        "name_too_long" -> CreateRefusalView.NAME_TOO_LONG
         "storage_fault" -> CreateRefusalView.STORAGE_FAULT
         "internal" -> CreateRefusalView.INTERNAL
         is String -> throw CommandContractException(CommandErrorKind.UNKNOWN_VARIANT, context)

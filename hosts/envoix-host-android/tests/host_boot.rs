@@ -13,8 +13,8 @@ use envoix_operation_store::{ArtifactKey, OperationStore, PossessionState};
 use envoix_outcomes::{OutcomeCode, Phase};
 use envoix_platform_android::{Work, WorkOrder, WorkReport};
 use envoix_product::{
-    CommittedSession, NewTransfer, ProductEffect, ProductInput, ProductState, SourceDecision,
-    SystemIdentitySource,
+    CommittedSession, NewTransfer, ProductCommand, ProductEffect, ProductInput, ProductState,
+    SourceDecision, SystemIdentitySource,
 };
 use envoix_storage_api::Durability;
 use envoix_storage_local::LocalStorage;
@@ -60,7 +60,7 @@ fn boot_restores_cards_and_drains_the_outbox() {
         operation
             .stage_artifact(
                 key,
-                OfferedName::from_untrusted("crash-victim.bin"),
+                OfferedName::from_untrusted("crash-victim.bin").unwrap(),
                 b"partial",
             )
             .expect("stages");
@@ -111,7 +111,7 @@ fn boot_restores_cards_and_drains_the_outbox() {
         operation
             .stage_artifact(
                 key,
-                OfferedName::from_untrusted("crash-victim.bin"),
+                OfferedName::from_untrusted("crash-victim.bin").unwrap(),
                 b"fresh-partial",
             )
             .expect("stages again");
@@ -236,7 +236,7 @@ fn commit_completed_receiver(root: &std::path::Path) -> RecordId {
     let stores = CardStores::new(root.to_path_buf());
     let transfer = NewTransfer {
         direction: Direction::Receive,
-        offered_name: OfferedName::from_untrusted("receipt.bin"),
+        offered_name: OfferedName::from_untrusted("receipt.bin").unwrap(),
         total: ByteCount::new(64),
         source: SourceDecision::Ready,
         pairing: None,
@@ -319,4 +319,49 @@ fn created_card_survives_reboot_and_reattaches() {
     assert!(saw_frame, "the restored card surfaces on the frame lane");
     host.shutdown();
     let _ = card;
+}
+
+/// URI ownership follows durable card ownership. A removal queues the release
+/// once in this process, and a crash after delivery but before Android releases
+/// the grant is closed by reseeding the same id from the removal record.
+#[test]
+fn durable_removal_replays_its_source_grant_release_after_restart() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let stores = CardStores::new(root.path().to_path_buf());
+    let transfer = NewTransfer {
+        direction: Direction::Send,
+        offered_name: OfferedName::from_untrusted("owned.bin").unwrap(),
+        total: ByteCount::new(1),
+        // Quiescent immediately, so Remove can commit its tombstone without a
+        // worker acknowledgement obscuring what this test owns.
+        source: SourceDecision::NeedsRepick,
+        pairing: None,
+    };
+    let (mut session, _) = CommittedSession::create(
+        transfer,
+        &mut SystemIdentitySource,
+        HostStore::deferred(stores),
+        NonZeroUsize::new(3).expect("nonzero"),
+    )
+    .expect("creation commits");
+    let card = session.record().identity.card;
+    session
+        .apply(ProductInput::Command(ProductCommand::Remove))
+        .expect("removal commits");
+    drop(session);
+
+    for generation in 1..=2 {
+        let host = Host::boot(root.path()).expect("host restores removal truth");
+        assert_eq!(
+            host.poll_source_release(),
+            Some(card),
+            "process generation {generation} replays the release"
+        );
+        assert_eq!(
+            host.poll_source_release(),
+            None,
+            "one process delivers one id once"
+        );
+        host.shutdown();
+    }
 }

@@ -33,6 +33,7 @@ class EnvoixHostService : Service() {
             stopSelf()
             return
         }
+        SourcePicks.recover(this)
         executor = DutyExecutor(this)
         running.set(true)
         thread(name = "envoix-work-pump", isDaemon = true) { workPump() }
@@ -62,6 +63,11 @@ class EnvoixHostService : Service() {
     /** Executes platform work orders until the service stops. */
     private fun workPump() {
         while (running.get()) {
+            val removedCard = NativeHost.pollSourceRelease()
+            if (removedCard != null) {
+                SourcePicks.release(this, removedCard)
+                continue
+            }
             val order = NativeHost.pollWork()
             if (order == null) {
                 Thread.sleep(WORK_POLL_MILLIS)

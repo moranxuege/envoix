@@ -32,6 +32,7 @@ use envoix_bindings::{
     Decl, Direction, SchemaDoc, command_schema_text, emit, parse_schema, read_schema_text,
 };
 use envoix_runtime::{MAX_INVITE_LINK_LENGTH, MAX_ROOM_CODE_LENGTH};
+use envoix_types::Secret;
 
 /// A schema that exercises every scalar, wrapper, and declaration kind in the
 /// grammar, in the direction that needs encoders. The two shipped contracts
@@ -106,7 +107,7 @@ fields = [
 /// statement of intent have to agree.
 fn originable_decls(id: &str) -> &'static [&'static str] {
     match id {
-        "envoix/binding/command/3" => &[
+        "envoix/binding/command/4" => &[
             "CommandView",
             "SubmitView",
             "CreateIntentView",
@@ -303,8 +304,17 @@ fn originable_structs_are_constructible_outside_the_module() {
         let doc = doc(text);
         assert_eq!(doc.direction, Direction::Bidirectional);
         let originable = originable_decls(&doc.id);
+        let mut declared: Vec<&str> = doc
+            .decls
+            .iter()
+            .filter_map(|decl| match decl {
+                Decl::Struct(decl) => Some(decl.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        declared.sort_unstable();
         let swift = emit::swift::module(&doc);
-        let mut swept = 0;
+        let mut swept: Vec<&str> = Vec::new();
         for block in swift.split("\npublic struct ").skip(1) {
             let (head, body) = block.split_once('\n').expect("a struct head");
             // The codec's typed failure is read by consumers, never built by
@@ -313,6 +323,13 @@ fn originable_structs_are_constructible_outside_the_module() {
                 continue;
             }
             let name = head.split(':').next().expect("a struct name").trim();
+            // Scaffolding the emitter writes for every schema: the sealed
+            // secret is deliberately public and deliberately constructible,
+            // because sealing a value is what a caller does with it. Only
+            // schema-declared structs answer to the originable rule.
+            if !declared.contains(&name) {
+                continue;
+            }
             let body = &body[..body.find("\n}\n").expect("the struct body ends")];
             let properties: Vec<&str> = body
                 .lines()
@@ -327,7 +344,7 @@ fn originable_structs_are_constructible_outside_the_module() {
                     parameters.is_none(),
                     "public struct {name} is not originable but is constructible"
                 );
-                swept += 1;
+                swept.push(name);
                 continue;
             }
             let parameters = parameters
@@ -343,14 +360,12 @@ fn originable_structs_are_constructible_outside_the_module() {
                 parameters, properties,
                 "public struct {name} init does not take its stored properties"
             );
-            swept += 1;
+            swept.push(name);
         }
-        let structs = doc
-            .decls
-            .iter()
-            .filter(|decl| matches!(decl, Decl::Struct(_)))
-            .count();
-        assert_eq!(swept, structs, "{} swift structs swept", doc.id);
+        // Set-based rather than counted: a count agrees by accident when one
+        // struct is missed and a scaffold type is counted in its place.
+        swept.sort_unstable();
+        assert_eq!(swept, declared, "{} swift structs swept", doc.id);
 
         let dart = emit::dart::module(&doc);
         let kotlin = emit::kotlin::module(&doc);
@@ -586,7 +601,12 @@ fn command_vectors() -> Vec<(String, CommandFrame)> {
     ] {
         vectors.push((
             format!("create_join_{name}"),
-            create(id, CreateIntentView::Join(JoinInviteView { invite })),
+            create(
+                id,
+                CreateIntentView::Join(JoinInviteView {
+                    invite: Secret::new(invite),
+                }),
+            ),
         ));
     }
     for (index, refusal) in CreateRefusalView::ALL.into_iter().enumerate() {
@@ -707,14 +727,15 @@ fn read_vectors() -> Vec<(String, ReadFrame)> {
             CommandKindView::RePickSource,
         ],
         invite: Some(InviteView {
-            code: "0".repeat(MAX_ROOM_CODE_LENGTH),
+            code: Secret::new("0".repeat(MAX_ROOM_CODE_LENGTH)),
+            code_fingerprint: "0123456789abcdef".to_owned(),
             // The link bound exactly, reached in ASCII — and it is the invite
             // grammar's own emit maximum, so this vector is a real invite's
             // worst case rather than a number the contract chose.
-            link: Some(format!(
+            link: Some(Secret::new(format!(
                 "envoix://invite/v3/{}",
                 "A".repeat(MAX_INVITE_LINK_LENGTH - "envoix://invite/v3/".len())
-            )),
+            ))),
         }),
     };
     let narrowest = CardView {
@@ -746,7 +767,8 @@ fn read_vectors() -> Vec<(String, ReadFrame)> {
     // A channel whose link the contract cannot carry: the code still crosses.
     let linkless = CardView {
         invite: Some(InviteView {
-            code: "000000-amber-brass".to_owned(),
+            code: Secret::new("000000-amber-brass".to_owned()),
+            code_fingerprint: "fedcba9876543210".to_owned(),
             link: None,
         }),
         ..widest.clone()

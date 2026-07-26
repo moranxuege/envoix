@@ -9,12 +9,12 @@
 //! helper is the decode predicate itself, so the two halves cannot check
 //! different things.
 
-use crate::model::{Decl, FieldTy, SchemaDoc, StructDecl, UnionDecl};
+use crate::model::{Decl, FieldDecl, FieldTy, SchemaDoc, StructDecl, UnionDecl};
 
 use crate::model::RuleValue;
 
 use super::{
-    encodable_decls, encode_helper_use, helper_use, is_envelope_field, kotlin_member,
+    encodable_decls, encode_helper_use, has_secret, helper_use, is_envelope_field, kotlin_member,
     scalar_predicate, upper_camel, upper_snake,
 };
 
@@ -59,6 +59,9 @@ pub fn module(doc: &SchemaDoc) -> String {
     ));
     rules_consts(&mut out, doc);
     error_type(&mut out);
+    if has_secret(doc) {
+        secret_type(&mut out);
+    }
     for decl in &doc.decls {
         type_decl(&mut out, doc, decl);
     }
@@ -106,6 +109,16 @@ fn error_type(out: &mut String) {
     );
 }
 
+fn secret_type(out: &mut String) {
+    out.push_str(
+        "/** Bounded contract text that redacts ordinary string interpolation. */\n\
+         data class ReadSecretString(private val value: String) {\n\
+         \x20   fun expose(): String = value\n\n\
+         \x20   override fun toString(): String = \"ReadSecretString([redacted])\"\n\
+         }\n\n",
+    );
+}
+
 fn kotlin_ty(ty: &FieldTy) -> String {
     match ty {
         FieldTy::U16 | FieldTy::U32 | FieldTy::U63 => "Long".to_owned(),
@@ -118,6 +131,17 @@ fn kotlin_ty(ty: &FieldTy) -> String {
         FieldTy::Named(name) => name.clone(),
         FieldTy::Option(inner) => format!("{}?", kotlin_ty(inner)),
         FieldTy::List { element, .. } => format!("List<{}>", kotlin_ty(element)),
+    }
+}
+
+fn kotlin_field_ty(field: &FieldDecl) -> String {
+    if !field.secret {
+        return kotlin_ty(&field.ty);
+    }
+    match &field.ty {
+        // Optional AROUND the seal: absence is not a secret.
+        FieldTy::Option(_) => "ReadSecretString?".to_owned(),
+        _ => "ReadSecretString".to_owned(),
     }
 }
 
@@ -139,7 +163,7 @@ fn type_decl(out: &mut String, doc: &SchemaDoc, decl: &Decl) {
                 out.push_str(&format!(
                     "    val {}: {},\n",
                     kotlin_member(&field.name),
-                    kotlin_ty(&field.ty)
+                    kotlin_field_ty(field)
                 ));
             }
             out.push_str(")\n\n");
@@ -558,6 +582,12 @@ fn decode_struct_fn(out: &mut String, doc: &SchemaDoc, decl: &StructDecl) {
         match &field.ty {
             FieldTy::Option(inner) => {
                 let inner_expr = decode_expr(inner, "it", &context);
+                // Sealed on the PRESENT value: absence is not a secret.
+                let inner_expr = if field.secret {
+                    format!("ReadSecretString({inner_expr})")
+                } else {
+                    inner_expr
+                };
                 out.push_str(&format!(
                     "            {kotlin_name} = {json}?.let {{ {inner_expr} }},\n"
                 ));
@@ -572,6 +602,11 @@ fn decode_struct_fn(out: &mut String, doc: &SchemaDoc, decl: &StructDecl) {
             }
             ty => {
                 let expr = decode_expr(ty, &json, &context);
+                let expr = if field.secret {
+                    format!("ReadSecretString({expr})")
+                } else {
+                    expr
+                };
                 out.push_str(&format!("            {kotlin_name} = {expr},\n"));
             }
         }
@@ -665,9 +700,15 @@ fn encode_struct_fn(out: &mut String, decl: &StructDecl) {
     for field in &decl.fields {
         let context = format!("\"{}.{}\"", decl.name, field.name);
         let member = format!("value.{}", kotlin_member(&field.name));
+        let member = if field.secret {
+            format!("{member}.expose()")
+        } else {
+            member
+        };
         let expr = match &field.ty {
             FieldTy::Option(inner) => {
-                let inner_expr = encode_expr(inner, "it", &context);
+                let present = if field.secret { "it.expose()" } else { "it" };
+                let inner_expr = encode_expr(inner, present, &context);
                 format!("{member}?.let {{ {inner_expr} }} ?: JSONObject.NULL")
             }
             FieldTy::List { element, max_len } => {

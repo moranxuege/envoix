@@ -60,15 +60,9 @@ class MainActivity : FlutterActivity() {
         val uri = data?.data.takeIf { resultCode == Activity.RESULT_OK }
         val granted =
             uri?.let {
-                // The persistable grant is taken FIRST: a source the OS may
-                // revoke before the card exists is one the card could never
-                // open.
-                runCatching {
-                    contentResolver.takePersistableUriPermission(
-                        it,
-                        Intent.FLAG_GRANT_READ_URI_PERMISSION,
-                    )
-                }
+                // A pick owns no durable capability. The grant is taken only
+                // when a committed card claims this URI through its source
+                // duty, which gives it a lifecycle owner.
                 SourcePicks.offer(this, it)
             }
         lane?.sourcePicked(granted)

@@ -18,7 +18,7 @@ use envoix_runtime::{
     PairingChannel, PauseOrigin, ProductCommand, ProductState, Quiescence, RetirementIntent,
     SubscribeError, TransferRecord, WorkerKind,
 };
-use envoix_types::{Direction, OfferedName, RecordId};
+use envoix_types::{Direction, OfferedName, RecordId, Secret};
 
 use crate::command::COMMAND_SCHEMA_ID;
 use crate::read::{
@@ -212,15 +212,18 @@ fn card_view(record: &TransferRecord) -> CardView {
 }
 
 fn invite_view(pairing: &PairingChannel) -> Option<InviteView> {
+    let code = truncate_utf8(pairing.code(), MAX_ROOM_CODE_LENGTH);
+    let digest = blake3::hash(code.as_bytes()).to_hex();
     Some(InviteView {
-        code: truncate_utf8(pairing.code(), MAX_ROOM_CODE_LENGTH),
+        code: Secret::new(code),
+        code_fingerprint: digest[..16].to_owned(),
         // Nothing measures the link here. The schema's bound IS the grammar's
         // published emit maximum, so a link this contract cannot carry is not a
         // thing the encoder can produce; were the two ever to disagree, the
         // read codec refuses the whole frame as `Bound` rather than quietly
         // dropping the field. Absence therefore means one thing only: the
         // stored fields no longer spell an invite the grammar can encode.
-        link: pairing.shareable(),
+        link: pairing.shareable().map(Secret::new),
     })
 }
 

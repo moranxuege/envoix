@@ -123,7 +123,7 @@ fn attempts(value: usize) -> NonZeroUsize {
 fn transfer(direction: Direction) -> NewTransfer {
     NewTransfer {
         direction,
-        offered_name: OfferedName::from_untrusted("barrier.bin"),
+        offered_name: OfferedName::from_untrusted("barrier.bin").unwrap(),
         total: ByteCount::new(100),
         source: SourceDecision::Ready,
         pairing: None,
@@ -133,7 +133,7 @@ fn transfer(direction: Direction) -> NewTransfer {
 fn staged_transfer(direction: Direction) -> NewTransfer {
     NewTransfer {
         direction,
-        offered_name: OfferedName::from_untrusted("barrier.bin"),
+        offered_name: OfferedName::from_untrusted("barrier.bin").unwrap(),
         total: ByteCount::new(100),
         source: SourceDecision::Stage { recoverable: true },
         pairing: None,
