@@ -3,7 +3,8 @@
     <application>
         <receiver
             android:name=".NatTestReceiver"
-            android:exported="true">
+            android:exported="true"
+            android:permission="android.permission.DUMP">
             <intent-filter>
                 <action android:name="dev.envoix.app.NAT_TEST_CREATE_RECEIVER_INVITE" />
                 <action android:name="dev.envoix.app.NAT_TEST_START_SENDER" />

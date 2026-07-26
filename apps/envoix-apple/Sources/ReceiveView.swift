@@ -22,7 +22,7 @@ struct ReceiveView: View {
     @State private var selectedRememberedPeer: RememberedPeerSummary?
     @State private var rememberAfterPairing = false
     @State private var rememberLabel = ""
-    @State private var roomCode = newRoomCode()
+    @State private var roomCode = newRoomCode() ?? ""
     @State private var joinRoomCode = ""
     @State private var joiningInvite = ""
     @State private var pairingInvite: FfiPairingInvite?

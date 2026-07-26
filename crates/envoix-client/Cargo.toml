@@ -16,6 +16,9 @@ getrandom.workspace = true
 serde.workspace = true
 toml.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+tempfile.workspace = true
+
 [dev-dependencies]
 serde_json.workspace = true
 tempfile.workspace = true

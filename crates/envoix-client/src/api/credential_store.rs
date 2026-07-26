@@ -39,7 +39,7 @@ impl DesktopCredentialStore {
             let mut file = options.open(&temporary)?;
             file.write_all(opaque_credential)?;
             file.sync_all()?;
-            fs::rename(&temporary, &target)?;
+            replace_file(&temporary, &target)?;
             #[cfg(unix)]
             fs::set_permissions(&target, fs::Permissions::from_mode(0o600))?;
             Ok(())
@@ -93,6 +93,18 @@ impl DesktopCredentialStore {
     }
 }
 
+#[cfg(not(windows))]
+fn replace_file(temporary: &Path, target: &Path) -> io::Result<()> {
+    fs::rename(temporary, target)
+}
+
+#[cfg(windows)]
+fn replace_file(temporary: &Path, target: &Path) -> io::Result<()> {
+    tempfile::TempPath::try_from_path(temporary.to_path_buf())?
+        .persist(target)
+        .map_err(io::Error::from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,6 +118,16 @@ mod tests {
         assert_eq!(
             store.get("reference_1").expect("load").as_deref(),
             Some(b"opaque".as_slice())
+        );
+        store
+            .put("reference_1", b"rotated")
+            .expect("replace credential");
+        assert_eq!(
+            store
+                .get("reference_1")
+                .expect("load replacement")
+                .as_deref(),
+            Some(b"rotated".as_slice())
         );
         #[cfg(unix)]
         assert_eq!(

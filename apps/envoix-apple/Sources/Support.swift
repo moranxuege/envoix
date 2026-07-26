@@ -84,8 +84,8 @@ enum RuntimeSettingsProvider {
     }
 }
 
-func newRoomCode() -> String {
-    (try? generateRoomCode()) ?? ""
+func newRoomCode() -> String? {
+    try? generateRoomCode()
 }
 
 func formatRoomCodeInput(_ input: String) -> String {
@@ -286,8 +286,7 @@ struct RoomCodeField: View {
                     .accessibilityIdentifier(accessibilityIdentifier)
                 if canGenerate {
                     Button {
-                        code = newRoomCode()
-                        ToastCenter.shared.show(AppText.value("Room code generated", "接收码已生成", language: language))
+                        generateCode()
                     } label: {
                         Label(generateLabel, systemImage: "wand.and.stars")
                             .frame(minHeight: 34)
@@ -378,8 +377,7 @@ struct RoomCodeField: View {
                 HStack(spacing: 8) {
                     if canGenerate {
                         Button {
-                            code = newRoomCode()
-                            ToastCenter.shared.show(AppText.value("Room code generated", "接收码已生成", language: language))
+                            generateCode()
                         } label: {
                             Label(generateLabel, systemImage: "wand.and.stars")
                                 .frame(maxWidth: .infinity, minHeight: 36)
@@ -411,6 +409,24 @@ struct RoomCodeField: View {
         .tint(Theme.accentStrong)
     }
     #endif
+
+    private func generateCode() {
+        guard let generated = newRoomCode() else {
+            code = ""
+            ToastCenter.shared.show(AppText.value(
+                "Could not generate a Room Code",
+                "无法生成接收码",
+                language: language
+            ))
+            return
+        }
+        code = generated
+        ToastCenter.shared.show(AppText.value(
+            "Room code generated",
+            "接收码已生成",
+            language: language
+        ))
+    }
 }
 
 /// Renders a string into a crisp QR code image.

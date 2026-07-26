@@ -407,7 +407,10 @@ fun NewTransferSheet(
         initialPairingInput?.takeIf(String::isNotBlank)?.let(::applyScanned)
     }
 
-    val roomCodeValid = typed.isNotBlank() && InviteCodec.normalizeRoomCode(typed) != null
+    val roomCodeValid =
+        remember(typed) {
+            typed.isNotBlank() && InviteCodec.normalizeRoomCode(typed) != null
+        }
     val ready =
         !rendezvousBusy &&
             (
@@ -658,10 +661,16 @@ fun NewTransferSheet(
                                 Modifier
                                     .clip(CircleShape)
                                     .clickable {
-                                        RememberedPeerStore.get(context).delete(peer.relationshipId)
-                                        rememberedPeers.remove(peer)
-                                        if (selectedRememberedPeer == peer) {
-                                            selectedRememberedPeer = null
+                                        preparationScope.launch {
+                                            withContext(Dispatchers.IO) {
+                                                RememberedPeerStore
+                                                    .get(context)
+                                                    .delete(peer.relationshipId)
+                                            }
+                                            rememberedPeers.remove(peer)
+                                            if (selectedRememberedPeer == peer) {
+                                                selectedRememberedPeer = null
+                                            }
                                         }
                                     }.padding(6.dp)
                                     .size(18.dp),
