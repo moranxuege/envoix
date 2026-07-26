@@ -34,6 +34,37 @@ CommandView commandOf(CommandKindView kind) => switch (kind) {
       CommandKindView.rePickSource => CommandView.rePickSource,
     };
 
+/// Where an intent's account of itself ran out.
+///
+/// These are OPPOSITE facts and the frontend must never print one as the other:
+/// "if it appears in the list, it was created" is honest about a request that
+/// left this process and false about one that never did. The lane already draws
+/// the line — the encoder enforces every bound its decoder checks, so a request
+/// that does not encode is not sent — and this is what carries that distinction
+/// past the function that drew it.
+enum FaultOrigin {
+  /// The encoder refused it, so no frame left this process. Nothing was asked
+  /// of the authority, so there is nothing anywhere to go looking for.
+  unsent,
+
+  /// It was sent and no verdict came back. This says nothing about whether the
+  /// command applied; only the card's own truth does.
+  unanswered,
+}
+
+/// Why an intent has no verdict. Not a verdict itself.
+class IntentFault {
+  const IntentFault(this.origin, this.error);
+
+  final FaultOrigin origin;
+
+  /// What refused or interrupted it, in its own words.
+  final Object error;
+
+  @override
+  String toString() => '$error';
+}
+
 /// How far one intent has got. Derived from what the authority has said, never
 /// stored, so it cannot disagree with the answers it is derived from.
 enum CommandPhase {
@@ -46,6 +77,10 @@ enum CommandPhase {
 
   /// A terminal answer exists — a verdict at intake or a completion.
   settled,
+
+  /// The encoder refused it, so nothing was sent. Not "undelivered": there was
+  /// no delivery to fail, and nothing on the authority's side to reconcile.
+  refused,
 
   /// The lane failed, so there is no verdict at all. This says nothing about
   /// whether the command applied; only the card's own truth does.
@@ -76,11 +111,15 @@ class CommandIntent {
   CompletionView? completion;
 
   /// Why the frame never produced a verdict. Not a verdict itself.
-  Object? fault;
+  IntentFault? fault;
 
   CommandPhase get phase {
+    final IntentFault? fault = this.fault;
     if (fault != null) {
-      return CommandPhase.undelivered;
+      return switch (fault.origin) {
+        FaultOrigin.unsent => CommandPhase.refused,
+        FaultOrigin.unanswered => CommandPhase.undelivered,
+      };
     }
     if (completion != null) {
       return CommandPhase.settled;
@@ -159,15 +198,24 @@ class CommandJournal {
     return intent;
   }
 
-  /// The lane failed for `id`: no verdict exists, and none is invented.
-  void faulted(String id, Object error) {
-    _intents[id]?.fault = error;
+  /// No verdict exists for `id`, and none is invented. The origin travels with
+  /// it because "never sent" and "sent, no answer" are different facts.
+  void faulted(String id, IntentFault fault) {
+    _intents[id]?.fault = fault;
   }
 
   CommandAdmission admit(CommandFrame frame) {
     switch (frame.body) {
-      case final CommandBodySubmit _:
+      // Both a command submission and a create request travel as `intent`, and
+      // neither is something a frontend may be SENT.
+      case final CommandBodyIntent _:
         return CommandAdmission.notAnAnswer;
+      // A create is answered on its own submission, not on this lane; one
+      // arriving here belongs to no intent this journal holds, and is counted
+      // exactly like any other answer nobody asked for.
+      case final CommandBodyCreateResult _:
+        unaddressed += 1;
+        return CommandAdmission.unaddressed;
       case final CommandBodyAcceptance body:
         return _answer(
           body.value.commandId,
@@ -224,7 +272,7 @@ String mintCommandId() {
   return id.toString();
 }
 
-/// The one frame a frontend may originate, through the generated encoder.
+/// A command on a card that exists, through the generated encoder.
 ///
 /// `epoch` is the epoch that delivered the card's last update: only the newest
 /// attachment commands (BN2), so a frame carrying a superseded epoch is refused
@@ -235,8 +283,8 @@ List<int> submitFrame({
   required String id,
   required CommandView command,
 }) =>
-    utf8.encode(
-      encodeCommandFrame(
+    _intentFrame(
+      FrontendIntentViewCommand(
         SubmitView(
           card: card,
           epoch: epoch,
@@ -245,3 +293,57 @@ List<int> submitFrame({
         ),
       ),
     );
+
+/// A request that a card be created, through the same encoder and the same
+/// lane: the two things a frontend may originate are one contract.
+///
+/// There is no epoch, because there is no card to be the newest attachment of
+/// — creation is the request that makes one.
+List<int> createFrame({required String id, required CreateIntentView intent}) =>
+    _intentFrame(FrontendIntentViewCreate(
+      CreateView(intent: intent, requestId: id),
+    ));
+
+List<int> _intentFrame(FrontendIntentView intent) =>
+    utf8.encode(encodeCommandFrame(intent));
+
+/// Which kind of card is being asked for. It is the frontend's INTENT, not a
+/// decision about the transfer: a send says the platform has granted a source,
+/// a join carries text the app has not looked at.
+enum CreateKind { send, join }
+
+/// One request that a card be created, and the authority's answer to it.
+///
+/// The answer is a single durable verdict rather than an acceptance followed by
+/// a completion, because creation has no in-flight window: the record write IS
+/// the creation. Nothing here decides whether an invite is good — the whole
+/// point is that the text crosses untouched and the authority answers.
+class CreateIntent {
+  CreateIntent({required this.id, required this.kind, this.displayName});
+
+  /// The caller-minted 128-bit identity, 32 lowercase hex digits. It correlates
+  /// the answer with the request and is written down nowhere.
+  final String id;
+  final CreateKind kind;
+
+  /// What the platform said the picked document is called, for a send. Shown
+  /// so the user can see what they are about to send; it is metadata, and the
+  /// authority sanitizes it again on arrival.
+  final String? displayName;
+
+  CreateOutcomeView? outcome;
+
+  /// Why no answer exists. Not an answer itself: a create whose frame was SENT
+  /// may or may not have made a card, and only the card list says — while one
+  /// the encoder refused made nothing at all.
+  IntentFault? fault;
+
+  /// Whether the user may still be waiting.
+  bool get pending => outcome == null && fault == null;
+
+  /// The card this request made, if it made one.
+  String? get card => switch (outcome) {
+        CreateOutcomeViewCreated(:final CardCreatedView value) => value.card,
+        _ => null,
+      };
+}

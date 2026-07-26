@@ -12,10 +12,26 @@ import 'commands.dart';
 /// dying — only stops the delivery (Pillar 7: the frontend owns no lifetime).
 typedef LaneSource = Stream<List<int>> Function();
 
-/// The one thing that crosses in the other direction: a submit frame out, the
-/// authority's acceptance frame back. Not a transfer verb — the host decides
-/// what the command does, and says so.
+/// The one thing that crosses in the other direction: an intent frame out, the
+/// authority's answer frame back. Not a transfer verb — the host decides what
+/// the intent does, and says so.
 typedef CommandSink = Future<List<int>?> Function(List<int> frame);
+
+/// Asks the platform to open the document picker.
+///
+/// It answers with what the provider says the document is called and how big it
+/// is — sanitized metadata (`SF09`) — or null when the user cancelled. It never
+/// answers with a URI or a handle: the picked source stays on the platform side
+/// (`XP01`), and this app has no type that could hold one.
+typedef SourcePicker = Future<PickedSource?> Function();
+
+/// What the platform will tell this app about a document the user picked.
+class PickedSource {
+  const PickedSource({required this.displayName, required this.sizeBytes});
+
+  final String displayName;
+  final int sizeBytes;
+}
 
 /// Mirrors the catalogued `android.frontend_lane_channel`.
 const String laneChannel = 'app.envoix.host/frontend-lane';
@@ -23,8 +39,11 @@ const String laneChannel = 'app.envoix.host/frontend-lane';
 /// Mirrors the catalogued `android.frontend_command_channel`.
 const String commandChannel = 'app.envoix.host/frontend-commands';
 
-/// The one method that channel carries.
-const String submitMethod = 'submit';
+/// The intent method that channel carries.
+const String intentMethod = 'intent';
+
+/// The platform-capability method: open the document picker.
+const String pickSourceMethod = 'pickSource';
 
 /// The real lane. The bytes are opaque here and on the platform side; only the
 /// generated codec in `bindings/` ever looks inside one.
@@ -32,11 +51,25 @@ Stream<List<int>> platformLane() => const EventChannel(laneChannel)
     .receiveBroadcastStream()
     .cast<List<int>>();
 
-/// The real command sink. The reply is the encoded acceptance frame; the
-/// committed completion follows separately, on the frame lane.
+/// The real command sink. The reply is the encoded answer frame; a committed
+/// completion follows separately, on the frame lane.
 Future<List<int>?> platformCommands(List<int> frame) =>
     const MethodChannel(commandChannel)
-        .invokeMethod<Uint8List>(submitMethod, Uint8List.fromList(frame));
+        .invokeMethod<Uint8List>(intentMethod, Uint8List.fromList(frame));
+
+/// The real source picker. The reply carries two scalars and nothing else.
+Future<PickedSource?> platformPickSource() async {
+  final Map<Object?, Object?>? granted =
+      await const MethodChannel(commandChannel)
+          .invokeMethod<Map<Object?, Object?>>(pickSourceMethod);
+  if (granted == null) {
+    return null;
+  }
+  return PickedSource(
+    displayName: granted['displayName'] as String? ?? '',
+    sizeBytes: granted['sizeBytes'] as int? ?? 0,
+  );
+}
 
 /// One frontend attachment: the [Attachment], the frames that feed it, and the
 /// commander that speaks for it — created together and reachable only through
@@ -76,22 +109,26 @@ class LaneAttachment {
         source = null;
       },
     );
+    void announce() {
+      if (!events.isClosed) {
+        events.add(attachment);
+      }
+    }
+
     return LaneAttachment._(
       attachment,
       events.stream,
-      Commander(
-        attachment: attachment,
-        sink: commands,
-        announce: () {
-          if (!events.isClosed) {
-            events.add(attachment);
-          }
-        },
-      ),
+      Commander(attachment: attachment, sink: commands, announce: announce),
+      Creator(sink: commands),
     );
   }
 
-  const LaneAttachment._(this.attachment, this.frames, this.commander);
+  const LaneAttachment._(
+    this.attachment,
+    this.frames,
+    this.commander,
+    this.creator,
+  );
 
   /// What the lane has said so far, and what the screen shows before the first
   /// frame arrives.
@@ -103,6 +140,100 @@ class LaneAttachment {
 
   /// Issues commands on this attachment's behalf, at its epochs.
   final Commander commander;
+
+  /// Asks the authority for new cards. It carries no epoch and belongs to no
+  /// card, because the card it asks for does not exist yet.
+  final Creator creator;
+}
+
+/// Asks the authority to create a card, and reports exactly what it answered.
+///
+/// It mints one identity per request, encodes the create frame with the
+/// generated encoder, and records the answer. It decides nothing at all: it
+/// does not look at the invite text it carries, does not judge whether one is
+/// valid, and does not infer a direction — every one of those is in the answer
+/// it gets back.
+class Creator {
+  Creator({required CommandSink sink}) : _sink = sink;
+
+  final CommandSink _sink;
+
+  /// Asks for a send of the document the platform granted.
+  Future<CreateIntent> send({
+    required String displayName,
+    required int sizeBytes,
+  }) =>
+      _ask(
+        CreateIntent(
+          id: mintCommandId(),
+          kind: CreateKind.send,
+          displayName: displayName,
+        ),
+        CreateIntentViewSend(
+          SendSourceView(displayName: displayName, total: sizeBytes),
+        ),
+      );
+
+  /// Asks to join whatever `invite` turns out to be. The text is passed
+  /// through untouched — not trimmed, not sniffed, not measured.
+  Future<CreateIntent> join(String invite) => _ask(
+        CreateIntent(id: mintCommandId(), kind: CreateKind.join),
+        CreateIntentViewJoin(JoinInviteView(invite: invite)),
+      );
+
+  Future<CreateIntent> _ask(
+    CreateIntent request,
+    CreateIntentView intent,
+  ) async {
+    final List<int> frame;
+    try {
+      frame = createFrame(id: request.id, intent: intent);
+    } on CommandContractException catch (error) {
+      // The encoder enforces every bound its decoder checks, so a request that
+      // does not encode never leaves the process — and is never reported as
+      // one whose answer got lost.
+      request.fault = IntentFault(FaultOrigin.unsent, error);
+      return request;
+    }
+    final List<int>? reply;
+    try {
+      reply = await _sink(frame);
+    } on PlatformException catch (error) {
+      request.fault = IntentFault(FaultOrigin.unanswered, error);
+      return request;
+    } on MissingPluginException catch (error) {
+      request.fault = IntentFault(FaultOrigin.unanswered, error);
+      return request;
+    }
+    if (reply == null) {
+      request.fault =
+          const IntentFault(FaultOrigin.unanswered, 'the host answered nothing');
+      return request;
+    }
+    final CommandFrame answer;
+    try {
+      answer = decodeCommandFrame(utf8.decode(reply));
+    } on FormatException catch (error) {
+      request.fault = IntentFault(FaultOrigin.unanswered, error);
+      return request;
+    } on CommandContractException catch (error) {
+      request.fault = IntentFault(FaultOrigin.unanswered, error);
+      return request;
+    }
+    // The answer has to be this request's. A create result for another
+    // identity, or a body that is not a create result at all, is not an answer
+    // to what was asked — and is never dressed as one.
+    if (answer.body case final CommandBodyCreateResult body
+        when body.value.requestId == request.id) {
+      request.outcome = body.value.outcome;
+    } else {
+      request.fault = const IntentFault(
+        FaultOrigin.unanswered,
+        'the host answered a request nobody made',
+      );
+    }
+    return request;
+  }
 }
 
 /// Turns a tap into a durable effect, or into an honest account of why not.
@@ -150,35 +281,43 @@ class Commander {
       // The encoder enforces every bound its decoder checks, so a frame that
       // does not encode never leaves the process — and never becomes a command
       // whose fate is unknown.
-      return _fault(intent, error);
+      return _fault(intent, FaultOrigin.unsent, error);
     }
     final List<int>? reply;
     try {
       reply = await _sink(frame);
     } on PlatformException catch (error) {
-      return _fault(intent, error);
+      return _fault(intent, FaultOrigin.unanswered, error);
     } on MissingPluginException catch (error) {
-      return _fault(intent, error);
+      return _fault(intent, FaultOrigin.unanswered, error);
     }
     if (reply == null) {
-      return _fault(intent, 'the host answered nothing');
+      return _fault(
+        intent,
+        FaultOrigin.unanswered,
+        'the host answered nothing',
+      );
     }
     final CommandFrame answer;
     try {
       answer = decodeCommandFrame(utf8.decode(reply));
     } on FormatException catch (error) {
-      return _fault(intent, error);
+      return _fault(intent, FaultOrigin.unanswered, error);
     } on CommandContractException catch (error) {
-      return _fault(intent, error);
+      return _fault(intent, FaultOrigin.unanswered, error);
     }
     if (_attachment.admitCommand(answer) != CommandAdmission.answered) {
-      return _fault(intent, 'the host answered a command nobody issued');
+      return _fault(
+        intent,
+        FaultOrigin.unanswered,
+        'the host answered a command nobody issued',
+      );
     }
     _announce();
   }
 
-  void _fault(CommandIntent intent, Object error) {
-    _attachment.commands.faulted(intent.id, error);
+  void _fault(CommandIntent intent, FaultOrigin origin, Object error) {
+    _attachment.commands.faulted(intent.id, IntentFault(origin, error));
     _announce();
   }
 }

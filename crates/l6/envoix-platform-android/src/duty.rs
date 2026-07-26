@@ -10,13 +10,15 @@
 
 use envoix_capabilities::{Duty, DutyKind, DutyProvenance, DutyResult};
 use envoix_outcomes::OutcomeCode;
-use envoix_types::{AttemptGen, RecordId, RequestId};
+use envoix_types::{AttemptGen, OfferedName, RecordId, RequestId};
 use serde::{Deserialize, Serialize};
 
 /// Longest permitted staged-artifact relative path, in UTF-8 bytes.
 pub const MAX_STAGED_PATH_BYTES: usize = 512;
-/// Longest permitted display name, in UTF-8 bytes (filesystem-leaf convention).
-pub const MAX_DISPLAY_NAME_BYTES: usize = 255;
+/// Longest permitted display name, in UTF-8 bytes. The name this lane carries
+/// is the leaf a publication will land under, so the bound is L0's published
+/// maximum for that type rather than a fourth statement of it.
+pub const MAX_DISPLAY_NAME_BYTES: usize = OfferedName::MAX_BYTES;
 /// Hard cap on one encoded order/report crossing the lane.
 pub const MAX_LANE_FRAME_BYTES: usize = 4096;
 
@@ -124,7 +126,8 @@ wire_hex!(WireHex32, u128, 32);
 /// Dispatching any other kind would strand the duty — the service drops what
 /// it cannot execute, so no result is ever reported and the ledger never
 /// admits one.
-pub const EXECUTED_KINDS: [DutyKind; 5] = [
+pub const EXECUTED_KINDS: [DutyKind; 6] = [
+    DutyKind::SourceHandle,
     DutyKind::Publication,
     DutyKind::Courier,
     DutyKind::Foreground,
@@ -137,14 +140,14 @@ pub const EXECUTED_KINDS: [DutyKind; 5] = [
 ///
 /// An undispatched duty stays outstanding and is re-delivered on the next
 /// attachment — the honest state — instead of being handed to an executor
-/// that cannot answer it. The receipt courier is the only duty the product
-/// mints today; the F2 frontend flow supplies the picked source, the grant,
-/// the staging root, the publication payload, and the share/courier targets.
+/// that cannot answer it. The receipt courier and the source handle are the
+/// duties the product mints today; the F3 staging flow supplies the grant, the
+/// staging root, the publication payload, and the share targets.
 pub fn platform_work(duty: Duty) -> Option<Work> {
     match duty.kind {
         DutyKind::Courier => Some(Work::Courier),
-        DutyKind::SourceHandle
-        | DutyKind::Grant
+        DutyKind::SourceHandle => Some(Work::SourceHandle),
+        DutyKind::Grant
         | DutyKind::Staging
         | DutyKind::Publication
         | DutyKind::Foreground
@@ -161,7 +164,11 @@ pub fn platform_work(duty: Duty) -> Option<Work> {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
 pub enum Work {
-    /// Open the user-picked source. Real payload lands with the F2 pick flow.
+    /// Bind the document the user picked to the card this duty names, and hold
+    /// a read grant on it. The provenance IS the payload: the platform already
+    /// holds the picked source, and the card it belongs to is the one that
+    /// asked. Nothing about the document crosses back — a duty report carries
+    /// an outcome, never a handle.
     SourceHandle,
     /// Persist/refresh a content grant. Real payload lands with F2.
     Grant,

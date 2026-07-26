@@ -63,6 +63,10 @@ struct CardProjection {
 fn duty_discharged(action: CapabilityAction, record: &TransferRecord) -> bool {
     match action {
         CapabilityAction::PostReceipt => record.facts.proof_delivered,
+        // A granted source is not a staged one: the duty stays outstanding
+        // until the card's source really is ready, which is the fact the
+        // reducer sets when staging completes.
+        CapabilityAction::SelectSource => record.facts.source_ready,
     }
 }
 

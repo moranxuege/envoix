@@ -58,6 +58,15 @@ pub enum Recovery {
 pub struct SafeDisplay(String);
 
 impl SafeDisplay {
+    /// The longest safe-display text may be, in UTF-8 bytes.
+    ///
+    /// One sentence a person reads beside an outcome code, which is what this
+    /// type is for: the code carries the meaning and this carries the wording.
+    /// It is this type's own choice about its own text — every layer that
+    /// stores, projects or renders a `SafeDisplay` derives from it rather than
+    /// picking a number for somebody else's data.
+    pub const MAX_BYTES: usize = 160;
+
     pub fn new(controlled_text: impl Into<String>) -> Self {
         Self(controlled_text.into())
     }

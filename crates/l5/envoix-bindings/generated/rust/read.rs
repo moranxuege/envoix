@@ -3,7 +3,7 @@
 
 use serde_json::{Map, Value};
 
-pub const READ_SCHEMA_ID: &str = "envoix/binding/read/3";
+pub const READ_SCHEMA_ID: &str = "envoix/binding/read/4";
 pub const READ_MAX_FRAME_BYTES: usize = 1048576;
 
 const U63_MAX: u64 = 9_223_372_036_854_775_807;
@@ -194,11 +194,13 @@ impl DutyKindView {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CapabilityActionView {
     PostReceipt,
+    SelectSource,
 }
 
 impl CapabilityActionView {
-    pub const ALL: [Self; 1] = [
+    pub const ALL: [Self; 2] = [
         Self::PostReceipt,
+        Self::SelectSource,
     ];
 }
 
@@ -321,6 +323,12 @@ pub struct IdentityView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InviteView {
+    pub code: String,
+    pub link: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CardView {
     pub identity: IdentityView,
     pub direction: DirectionView,
@@ -334,6 +342,7 @@ pub struct CardView {
     pub bytes_resumed: u64,
     pub outcome: Option<OutcomeView>,
     pub allowed_actions: Vec<CommandKindView>,
+    pub invite: Option<InviteView>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -967,6 +976,7 @@ fn decode_capability_action_view_value(value: &Value, context: &'static str) -> 
     let text = value.as_str().ok_or(ReadError::Shape { context })?;
     match text {
         "post_receipt" => Ok(CapabilityActionView::PostReceipt),
+        "select_source" => Ok(CapabilityActionView::SelectSource),
         _ => Err(ReadError::UnknownVariant { context }),
     }
 }
@@ -974,6 +984,7 @@ fn decode_capability_action_view_value(value: &Value, context: &'static str) -> 
 fn encode_capability_action_view_value(value: &CapabilityActionView) -> Value {
     Value::from(match value {
         CapabilityActionView::PostReceipt => "post_receipt",
+        CapabilityActionView::SelectSource => "select_source",
     })
 }
 
@@ -1286,9 +1297,36 @@ fn encode_identity_view_value(value: &IdentityView) -> Result<Value, ReadError> 
     Ok(Value::Object(map))
 }
 
+fn decode_invite_view_value(value: &Value, context: &'static str) -> Result<InviteView, ReadError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["code", "link"], context)?;
+    let code = utf8_bounded(field(map, "code", "InviteView.code")?, 64, "InviteView.code")?;
+    let link = match field(map, "link", "InviteView.link")? {
+        Value::Null => None,
+        present => Some(utf8_bounded(present, 5481, "InviteView.link")?),
+    };
+    Ok(InviteView {
+        code,
+        link,
+    })
+}
+
+fn encode_invite_view_value(value: &InviteView) -> Result<Value, ReadError> {
+    let mut map = Map::new();
+    map.insert("code".to_owned(), encode_utf8_bounded(&value.code, 64, "InviteView.code")?);
+    map.insert(
+        "link".to_owned(),
+        match &value.link {
+            None => Value::Null,
+            Some(inner) => encode_utf8_bounded(inner, 5481, "InviteView.link")?,
+        },
+    );
+    Ok(Value::Object(map))
+}
+
 fn decode_card_view_value(value: &Value, context: &'static str) -> Result<CardView, ReadError> {
     let map = frame_object(value, context)?;
-    known_keys(map, &["identity", "direction", "offered_name", "total", "state", "quiescence", "generation", "phase", "bytes", "bytes_resumed", "outcome", "allowed_actions"], context)?;
+    known_keys(map, &["identity", "direction", "offered_name", "total", "state", "quiescence", "generation", "phase", "bytes", "bytes_resumed", "outcome", "allowed_actions", "invite"], context)?;
     let identity = decode_identity_view_value(field(map, "identity", "CardView.identity")?, "CardView.identity")?;
     let direction = decode_direction_view_value(field(map, "direction", "CardView.direction")?, "CardView.direction")?;
     let offered_name = utf8_bounded(field(map, "offered_name", "CardView.offered_name")?, 255, "CardView.offered_name")?;
@@ -1314,6 +1352,10 @@ fn decode_card_view_value(value: &Value, context: &'static str) -> Result<CardVi
         }
         collected
     };
+    let invite = match field(map, "invite", "CardView.invite")? {
+        Value::Null => None,
+        present => Some(decode_invite_view_value(present, "CardView.invite")?),
+    };
     Ok(CardView {
         identity,
         direction,
@@ -1327,6 +1369,7 @@ fn decode_card_view_value(value: &Value, context: &'static str) -> Result<CardVi
         bytes_resumed,
         outcome,
         allowed_actions,
+        invite,
     })
 }
 
@@ -1359,6 +1402,13 @@ fn encode_card_view_value(value: &CardView) -> Result<Value, ReadError> {
         }
         Value::Array(items)
     });
+    map.insert(
+        "invite".to_owned(),
+        match &value.invite {
+            None => Value::Null,
+            Some(inner) => encode_invite_view_value(inner)?,
+        },
+    );
     Ok(Value::Object(map))
 }
 

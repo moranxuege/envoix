@@ -3,20 +3,23 @@
 //! the full hostile-input containment burden (the direction reverses BN1).
 
 use envoix_bindings::bridge::{
-    SubmitDecodeError, acceptance_frame, command_view, completion_frame, decode_submit,
-    live_command,
+    CreateIntent, FrontendIntent, SubmitDecodeError, acceptance_frame, command_view,
+    completion_frame, create_result_frame, decode_intent, live_command,
 };
 use envoix_bindings::command::{
-    AcceptanceView, COMMAND_MAX_FRAME_BYTES, COMMAND_SCHEMA_ID, CommandAcceptanceView, CommandBody,
-    CommandError, CommandFrame, CommandView, NEWEST_ATTACHMENT_COMMANDS, RETRY_HORIZON_COMPLETIONS,
-    RejectionView, SUPERSESSION_INERT_PRE_ACCEPTANCE_ONLY, SubmitView, decode_command_frame,
+    AcceptanceView, COMMAND_MAX_FRAME_BYTES, COMMAND_SCHEMA_ID, CardCreatedView,
+    CommandAcceptanceView, CommandBody, CommandError, CommandFrame, CommandView, CreateIntentView,
+    CreateOutcomeView, CreateRefusalView, CreateView, FrontendIntentView, JoinInviteView,
+    NEWEST_ATTACHMENT_COMMANDS, RETRY_HORIZON_COMPLETIONS, RejectionView,
+    SUPERSESSION_INERT_PRE_ACCEPTANCE_ONLY, SendSourceView, SubmitView, decode_command_frame,
     encode_command_frame,
 };
-use envoix_bindings::{Decl, emit};
+use envoix_bindings::{Decl, FieldTy, emit};
 use envoix_runtime::{
-    CommandCompletion, CommandLedger, CommandRejected, CommandVerdict, PauseOrigin, ProductState,
+    CommandCompletion, CommandLedger, CommandRejected, CommandVerdict, MAX_INVITE_INPUT_LENGTH,
+    PauseOrigin, ProductState,
 };
-use envoix_types::{CommandId, RecordId};
+use envoix_types::{CommandId, OfferedName, RecordId};
 
 fn doc() -> envoix_bindings::SchemaDoc {
     envoix_bindings::parse_schema(envoix_bindings::command_schema_text())
@@ -64,12 +67,21 @@ fn generated_artifacts_match_command_schema() {
 
 fn submit_frame(command: CommandView) -> CommandFrame {
     CommandFrame {
-        body: CommandBody::Submit(SubmitView {
+        body: CommandBody::Intent(FrontendIntentView::Command(SubmitView {
             card: "00000000000000ab".to_owned(),
             epoch: 7,
             command_id: "000102030405060708090a0b0c0d0e0f".to_owned(),
             command,
-        }),
+        })),
+    }
+}
+
+fn create_frame(intent: CreateIntentView) -> CommandFrame {
+    CommandFrame {
+        body: CommandBody::Intent(FrontendIntentView::Create(CreateView {
+            intent,
+            request_id: "000102030405060708090a0b0c0d0e0f".to_owned(),
+        })),
     }
 }
 
@@ -113,7 +125,34 @@ fn generated_command_schema_exhaustiveness() {
         assert!(SUPERSESSION_INERT_PRE_ACCEPTANCE_ONLY);
         assert!(RETRY_HORIZON_COMPLETIONS as usize == CommandLedger::RETENTION);
     }
-    assert_eq!(COMMAND_SCHEMA_ID, "envoix/binding/command/2");
+    assert_eq!(COMMAND_SCHEMA_ID, "envoix/binding/command/3");
+
+    // The invite field carries text the grammar has not seen yet, so its bound
+    // is the one place `MAX_INVITE_INPUT_LENGTH` — the parser's permissive
+    // INTAKE limit — legitimately shapes a contract. It must stay STRICTLY
+    // wider: an over-long paste has to reach the authority and come back as
+    // `invite_too_long`, and a bound at or below the intake limit would have
+    // the encoder refuse it first, with no words for the user.
+    let invite_bound = doc()
+        .decls
+        .iter()
+        .find_map(|decl| match decl {
+            Decl::Struct(decl) if decl.name == "JoinInviteView" => decl
+                .fields
+                .iter()
+                .find(|field| field.name == "invite")
+                .map(|field| field.ty.clone()),
+            _ => None,
+        })
+        .expect("the join intent carries invite text");
+    let FieldTy::Str { max_bytes } = invite_bound else {
+        panic!("invite text crosses as a bounded string");
+    };
+    assert!(
+        max_bytes as usize > MAX_INVITE_INPUT_LENGTH,
+        "the carried bound ({max_bytes}) must exceed the grammar's intake limit \
+         ({MAX_INVITE_INPUT_LENGTH}), or the encoder refuses before the authority can"
+    );
 
     // Every command variant, swept from the generated ALL array: view -> live
     // -> view is identity, and a full submit frame round-trips into the typed
@@ -121,7 +160,9 @@ fn generated_command_schema_exhaustiveness() {
     for view in CommandView::ALL {
         assert_eq!(command_view(live_command(view)), view);
         let bytes = encode_command_frame(&submit_frame(view)).expect("submit encodes");
-        let spec = decode_submit(&bytes).expect("submit decodes");
+        let FrontendIntent::Command(spec) = decode_intent(&bytes).expect("submit decodes") else {
+            panic!("a submit body decodes as a command intent");
+        };
         assert_eq!(spec.command, live_command(view));
         assert_eq!(spec.card, RecordId::new(0xab));
         assert_eq!(spec.epoch, 7);
@@ -176,6 +217,56 @@ fn generated_command_schema_exhaustiveness() {
         }),
     });
 
+    // Both create intents round-trip into the typed bridge value the host
+    // plans from, and every refusal the authority can answer crosses back.
+    // Invite text is carried, never inspected: what goes in comes out.
+    let bytes = encode_command_frame(&create_frame(CreateIntentView::Send(SendSourceView {
+        display_name: "report.pdf".to_owned(),
+        total: 4096,
+    })))
+    .expect("send intent encodes");
+    let FrontendIntent::Create(spec) = decode_intent(&bytes).expect("send intent decodes") else {
+        panic!("a create body decodes as a create intent");
+    };
+    assert_eq!(
+        spec.request_id,
+        CommandId::from_bytes([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
+    );
+    assert_eq!(
+        spec.intent,
+        CreateIntent::Send {
+            display_name: "report.pdf".to_owned(),
+            total: 4096,
+        }
+    );
+    let hostile = "envoix://invite/v3/\u{202e}not-really'; DROP--";
+    let bytes = encode_command_frame(&create_frame(CreateIntentView::Join(JoinInviteView {
+        invite: hostile.to_owned(),
+    })))
+    .expect("join intent encodes");
+    let FrontendIntent::Create(spec) = decode_intent(&bytes).expect("join intent decodes") else {
+        panic!("a create body decodes as a create intent");
+    };
+    assert_eq!(
+        spec.intent,
+        CreateIntent::Join {
+            invite: hostile.to_owned(),
+        },
+        "invite text crosses verbatim; nothing on this path interprets it"
+    );
+    for refusal in CreateRefusalView::ALL {
+        roundtrip(&create_result_frame(
+            command_id(),
+            CreateOutcomeView::Refused(refusal),
+        ));
+    }
+    roundtrip(&create_result_frame(
+        command_id(),
+        CreateOutcomeView::Created(CardCreatedView {
+            card: "00000000000000ab".to_owned(),
+        }),
+    ));
+
     // Every live completion crosses and round-trips.
     let completions = [
         CommandCompletion::Committed {
@@ -198,12 +289,41 @@ fn generated_command_schema_exhaustiveness() {
         Some(Decl::Union(decl)) => decl.variants.len(),
         _ => panic!("union {name} expected"),
     };
-    assert_eq!(union_len("CommandBody"), 3);
+    assert_eq!(union_len("CommandBody"), 4);
+    assert_eq!(union_len("FrontendIntentView"), 2);
+    assert_eq!(union_len("CreateIntentView"), 2);
+    assert_eq!(union_len("CreateOutcomeView"), 2);
+    assert_eq!(CreateRefusalView::ALL.len(), 8);
     assert_eq!(union_len("AcceptanceView"), 4);
     assert_eq!(union_len("CompletionView"), completions.len());
     assert_eq!(union_len("DispositionView"), 11);
     assert_eq!(RejectionView::ALL.len(), 7);
     assert_eq!(CommandView::ALL.len(), 5);
+}
+
+/// `SendSourceView.display_name` carries an L0 `OfferedName` — the leaf the
+/// authority re-sanitizes and a publication lands under — so its bound is that
+/// type's published maximum and not a number this schema picked. The read
+/// contract classifies every text bound it declares; this schema has exactly
+/// one field carrying another layer's value, so the agreement is gated here
+/// rather than by standing up a second classifier for three strings.
+#[test]
+fn the_picked_name_bound_is_the_offered_name_maximum() {
+    let doc = doc();
+    let Some(Decl::Struct(decl)) = doc.find("SendSourceView") else {
+        panic!("SendSourceView expected");
+    };
+    let field = decl
+        .fields
+        .iter()
+        .find(|field| field.name == "display_name")
+        .expect("SendSourceView declares a display_name");
+    assert!(
+        matches!(field.ty, FieldTy::Str { max_bytes }
+            if max_bytes as usize == OfferedName::MAX_BYTES),
+        "display_name must be bounded by the offered-name maximum, found {:?}",
+        field.ty
+    );
 }
 
 fn tamper(base: &[u8], mutate: impl FnOnce(&mut serde_json::Value)) -> Vec<u8> {
@@ -231,7 +351,7 @@ fn command_frames_reject_hostile_input() {
     );
 
     let future_version = tamper(&base, |value| {
-        value["schema"] = serde_json::json!("envoix/binding/command/3");
+        value["schema"] = serde_json::json!("envoix/binding/command/4");
     });
     assert_eq!(
         decode_command_frame(&future_version),
@@ -263,7 +383,7 @@ fn command_frames_reject_hostile_input() {
     ));
 
     let unknown_command = tamper(&base, |value| {
-        value["body"]["value"]["command"] = serde_json::json!("format_disk");
+        value["body"]["value"]["value"]["command"] = serde_json::json!("format_disk");
     });
     assert!(matches!(
         decode_command_frame(&unknown_command),
@@ -271,7 +391,7 @@ fn command_frames_reject_hostile_input() {
     ));
 
     let uppercase_hex = tamper(&base, |value| {
-        value["body"]["value"]["card"] = serde_json::json!("00000000000000AB");
+        value["body"]["value"]["value"]["card"] = serde_json::json!("00000000000000AB");
     });
     assert!(matches!(
         decode_command_frame(&uppercase_hex),
@@ -279,7 +399,7 @@ fn command_frames_reject_hostile_input() {
     ));
 
     let short_id = tamper(&base, |value| {
-        value["body"]["value"]["command_id"] = serde_json::json!("0102");
+        value["body"]["value"]["value"]["command_id"] = serde_json::json!("0102");
     });
     assert!(matches!(
         decode_command_frame(&short_id),
@@ -287,7 +407,7 @@ fn command_frames_reject_hostile_input() {
     ));
 
     let negative_epoch = tamper(&base, |value| {
-        value["body"]["value"]["epoch"] = serde_json::json!(-1);
+        value["body"]["value"]["value"]["epoch"] = serde_json::json!(-1);
     });
     assert!(matches!(
         decode_command_frame(&negative_epoch),
@@ -295,7 +415,7 @@ fn command_frames_reject_hostile_input() {
     ));
 
     let oversized_epoch = tamper(&base, |value| {
-        value["body"]["value"]["epoch"] = serde_json::json!(9_223_372_036_854_775_808_u64);
+        value["body"]["value"]["value"]["epoch"] = serde_json::json!(9_223_372_036_854_775_808_u64);
     });
     assert!(matches!(
         decode_command_frame(&oversized_epoch),
@@ -303,7 +423,7 @@ fn command_frames_reject_hostile_input() {
     ));
 
     let float_epoch = tamper(&base, |value| {
-        value["body"]["value"]["epoch"] = serde_json::json!(1.5);
+        value["body"]["value"]["value"]["epoch"] = serde_json::json!(1.5);
     });
     assert!(matches!(
         decode_command_frame(&float_epoch),
@@ -349,16 +469,22 @@ fn command_frames_reject_hostile_input() {
     ));
 
     // Result bodies are host->frontend only: a well-formed acceptance frame
-    // arriving AS a command is a typed contract violation, not a submit.
+    // arriving AS an intent is a typed contract violation, not a request.
     let acceptance = encode_command_frame(&acceptance_frame(
         command_id(),
         &Err(CommandRejected::Internal),
     ))
     .expect("acceptance encodes");
     assert_eq!(
-        decode_submit(&acceptance),
-        Err(SubmitDecodeError::NotASubmit)
+        decode_intent(&acceptance),
+        Err(SubmitDecodeError::NotAnIntent)
     );
+    let result = encode_command_frame(&create_result_frame(
+        command_id(),
+        CreateOutcomeView::Refused(CreateRefusalView::Internal),
+    ))
+    .expect("create result encodes");
+    assert_eq!(decode_intent(&result), Err(SubmitDecodeError::NotAnIntent));
 
     // Deterministic fuzz-ish sweep: byte mutations and truncations never
     // panic, whatever they decode to.

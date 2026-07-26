@@ -11,7 +11,10 @@ use crate::identifiers::{DATA_MAGIC, DATA_WIRE_VERSION};
 pub const HEADER_LEN: usize = 12;
 pub const MAX_CHUNK_SIZE: usize = 16 * 1024 * 1024;
 pub const MAX_FRAME_SIZE: usize = MAX_CHUNK_SIZE + 64 * 1024;
-pub const MAX_OFFERED_NAME_SIZE: usize = 4 * 1024;
+/// The wire's bound on an offered name, taken from the layer that owns the
+/// type rather than restated: a name this frame cannot carry is one no peer
+/// could have written to disk in the first place.
+pub const MAX_OFFERED_NAME_SIZE: usize = OfferedName::MAX_BYTES;
 
 const TRANSFER_ID_LEN: usize = 16;
 const HASH_LEN: usize = 32;

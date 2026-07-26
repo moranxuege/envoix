@@ -34,6 +34,7 @@ fn create(direction: Direction, source: SourceDecision) -> (TransferRecord, Vec<
             offered_name: OfferedName::from_untrusted("quiescence.bin"),
             total: ByteCount::new(100),
             source,
+            pairing: None,
         },
         &mut DeterministicEntropy::default(),
     )

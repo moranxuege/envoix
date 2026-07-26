@@ -8,12 +8,12 @@ pub mod identifiers;
 
 pub use identifiers::PRODUCT_RECORD_SCHEMA_ID;
 
-/// The version written by this build. Version 2 added `command_ledger` (BN2);
-/// the body codec is self-describing, so every version back to
-/// [`OLDEST_READABLE_RECORD_VERSION`] decodes with absent fields defaulted.
-/// A pre-BN2 reader seeing version 2 takes the honest
+/// The version written by this build. Version 2 added `command_ledger` (BN2)
+/// and version 3 added `pairing` (F2b); the body codec is self-describing, so
+/// every version back to [`OLDEST_READABLE_RECORD_VERSION`] decodes with absent
+/// fields defaulted. An older reader seeing a newer version takes the honest
 /// [`RecordDecode::UnsupportedFuture`] quarantine, never the corrupt path.
-pub const PRODUCT_RECORD_VERSION: u32 = 2;
+pub const PRODUCT_RECORD_VERSION: u32 = 3;
 /// The oldest record version this build still decodes.
 pub const OLDEST_READABLE_RECORD_VERSION: u32 = 1;
 const MAX_RECORD_BODY_BYTES: usize = 1024 * 1024;

@@ -70,8 +70,13 @@ void expectEncodes(String label, void Function() body) {
   }
 }
 
-SubmitView submit(String card, int epoch, String id, CommandView command) =>
-    SubmitView(card: card, epoch: epoch, commandId: id, command: command);
+FrontendIntentView submit(String card, int epoch, String id, CommandView command) =>
+    FrontendIntentViewCommand(
+        SubmitView(card: card, epoch: epoch, commandId: id, command: command));
+
+FrontendIntentView create(String requestId, CreateIntentView intent) =>
+    FrontendIntentViewCreate(
+        CreateView(intent: intent, requestId: requestId));
 
 /// The Dart-side twin of the exported originable vectors. Building each body by
 /// hand is the point: this is the code a frontend writes.
@@ -85,10 +90,10 @@ const commandViews = <String, CommandView>{
   're_pick_source': CommandView.rePickSource,
 };
 
-Map<String, SubmitView> handBuiltSubmits() {
+Map<String, FrontendIntentView> handBuiltSubmits() {
   const card = '00000000000000ab';
   const id = '000102030405060708090a0b0c0d0e0f';
-  final bodies = <String, SubmitView>{};
+  final bodies = <String, FrontendIntentView>{};
 
   expectEq('every CommandView variant is swept', commandViews.length,
       CommandView.values.length);
@@ -109,6 +114,26 @@ Map<String, SubmitView> handBuiltSubmits() {
       submit('0000000000000000', 1, '0' * 32, CommandView.cancel);
   bodies['submit_ids_max'] =
       submit('ffffffffffffffff', 1, 'f' * 32, CommandView.cancel);
+
+  // The create half of the same originable body. A frontend hands the picked
+  // document's sanitized metadata, or opaque invite text it has not looked at.
+  bodies['create_send_narrowest'] = create(
+      id, CreateIntentViewSend(SendSourceView(displayName: '', total: 0)));
+  bodies['create_send_widest'] = create(
+      'f' * 32,
+      CreateIntentViewSend(SendSourceView(
+          displayName: '${'世' * 84}x', total: 9223372036854775807)));
+  const invites = <String, String>{
+    'empty': '',
+    'canonical': 'envoix://invite/v3/eyJ2ZXJzaW9uIjozfQ',
+    'bidirectional': '\u202eenvoix://invite',
+  };
+  invites.forEach((name, invite) {
+    bodies['create_join_$name'] =
+        create(id, CreateIntentViewJoin(JoinInviteView(invite: invite)));
+  });
+  bodies['create_join_at_bound'] =
+      create(id, CreateIntentViewJoin(JoinInviteView(invite: 'e' * 16384)));
   return bodies;
 }
 
@@ -132,16 +157,32 @@ void frontendToBackend() {
     // Stability: a body that made the round trip re-encodes identically, so a
     // frontend can forward what it decoded without drift.
     expectEq('$name re-encodes identically after a round trip',
-        encodeCommandFrame(submitOf(name)), vector);
+        encodeCommandFrame(intentOf(name)), vector);
   });
 }
 
-SubmitView submitOf(String name) {
+FrontendIntentView intentOf(String name) {
   final body = decodeCommandFrame(commandVectors[name]!).body;
-  if (body is! CommandBodySubmit) {
-    throw StateError('$name is not a submit');
+  if (body is! CommandBodyIntent) {
+    throw StateError('$name is not a frontend intent');
   }
   return body.value;
+}
+
+SubmitView submitOf(String name) {
+  final intent = intentOf(name);
+  if (intent is! FrontendIntentViewCommand) {
+    throw StateError('$name is not a submit');
+  }
+  return intent.value;
+}
+
+CreateView createOf(String name) {
+  final intent = intentOf(name);
+  if (intent is! FrontendIntentViewCreate) {
+    throw StateError('$name is not a create');
+  }
+  return intent.value;
 }
 
 AcceptanceView acceptanceOf(String name) {
@@ -426,7 +467,10 @@ void encoderHonesty() {
   final smuggled = decodeCommandFrame(duplicated).body;
   expect(
     'duplicate keys resolve last-wins on the Dart decode side',
-    smuggled is CommandBodySubmit && smuggled.value.command == CommandView.cancel,
+    smuggled is CommandBodyIntent &&
+        smuggled.value is FrontendIntentViewCommand &&
+        (smuggled.value as FrontendIntentViewCommand).value.command ==
+            CommandView.cancel,
   );
 
   // The envelope and the body arm are stamped by the codec: a frame cannot
@@ -437,8 +481,8 @@ void encoderHonesty() {
           as Map<String, Object?>;
   expectEq('the encoder stamps the schema envelope', stamped['schema'],
       commandSchemaId);
-  expectEq('the encoder stamps the submit arm',
-      (stamped['body']! as Map<String, Object?>)['kind'], 'submit');
+  expectEq('the encoder stamps the intent arm',
+      (stamped['body']! as Map<String, Object?>)['kind'], 'intent');
 }
 
 /// 2-, 3-, and 4-byte characters: 9 bytes, 4 UTF-16 units per group.
@@ -746,12 +790,16 @@ void directionPolicy(String artifacts) {
   expect('the read artifact still exposes its decoder',
       read.contains('ReadFrame decodeReadFrame(String text)'));
   expect('the command artifact encodes only the originable body',
-      command.contains('String encodeCommandFrame(SubmitView body)'));
+      command.contains('String encodeCommandFrame(FrontendIntentView body)'));
   expect('the command artifact still decodes every body',
       command.contains('CommandFrame decodeCommandFrame(String text)'));
   for (final observation in <String>[
     'CommandAcceptanceView',
     'CommandCompletionView',
+    'CreateResultView',
+    'CreateOutcomeView',
+    'CreateRefusalView',
+    'CardCreatedView',
     'AcceptanceView',
     'CompletionView',
     'DispositionView',

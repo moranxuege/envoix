@@ -4,9 +4,9 @@
 //! No unsafe BLOCK appears here; the module-level allow exists only for the
 //! edition-2024 `#[unsafe(no_mangle)]` export attributes.
 //!
-//! The slot is an `RwLock`: lane calls take it SHARED, so a submit awaiting the
-//! runtime never blocks the frame/work polls or another submit. Only boot and
-//! shutdown take it exclusively.
+//! The slot is an `RwLock`: lane calls take it SHARED, so an intent awaiting
+//! the runtime never blocks the frame/work polls or another intent. Only boot
+//! and shutdown take it exclusively.
 
 use std::path::Path;
 use std::sync::{OnceLock, RwLock};
@@ -117,9 +117,11 @@ pub extern "system" fn Java_app_envoix_host_NativeHost_pollWork(
     bytes_out(&mut env, order)
 }
 
-/// `NativeHost.submit(frame): ByteArray` — the encoded acceptance frame.
+/// `NativeHost.intent(frame): ByteArray` — one frontend-originated intent
+/// frame in, the authority's encoded answer out: an acceptance for a command
+/// on an existing card, or a create result for a request that one be made.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_app_envoix_host_NativeHost_submit(
+pub extern "system" fn Java_app_envoix_host_NativeHost_intent(
     mut env: JNIEnv<'_>,
     _class: JClass<'_>,
     frame: JByteArray<'_>,
@@ -127,8 +129,8 @@ pub extern "system" fn Java_app_envoix_host_NativeHost_submit(
     let Ok(bytes) = env.convert_byte_array(&frame) else {
         return std::ptr::null_mut();
     };
-    let acceptance = with_host(|host| host.submit(&bytes));
-    bytes_out(&mut env, acceptance)
+    let answer = with_host(|host| host.intent(&bytes));
+    bytes_out(&mut env, answer)
 }
 
 /// `NativeHost.reportDuty(report): Boolean`

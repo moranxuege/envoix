@@ -962,6 +962,7 @@ dependencies = [
  "envoix-bindings",
  "envoix-capabilities",
  "envoix-evidence",
+ "envoix-invite",
  "envoix-operation-store",
  "envoix-outcomes",
  "envoix-platform-android",
@@ -970,6 +971,7 @@ dependencies = [
  "envoix-storage-api",
  "envoix-storage-local",
  "envoix-types",
+ "getrandom 0.3.4",
  "jni 0.21.1",
  "tempfile",
  "tokio",
@@ -1054,6 +1056,7 @@ version = "0.2.0"
 dependencies = [
  "envoix-attempt-api",
  "envoix-capabilities",
+ "envoix-invite",
  "envoix-outcomes",
  "envoix-types",
  "getrandom 0.3.4",

@@ -130,7 +130,54 @@ String dutyKindLabel(DutyKindView kind) => switch (kind) {
 
 String capabilityActionLabel(CapabilityActionView action) => switch (action) {
       CapabilityActionView.postReceipt => 'post the receipt',
+      CapabilityActionView.selectSource => 'open the file you chose',
     };
+
+/// Why the authority would not create a card. Every one of these is ITS answer:
+/// this app never looks at an invite, so it has no opinion to render instead.
+String createRefusalLabel(CreateRefusalView refusal) => switch (refusal) {
+      CreateRefusalView.inviteNotRecognized =>
+        'That is not an Envoix invite.',
+      CreateRefusalView.inviteBareRoomCode =>
+        'That is only the room code. Paste the whole invite.',
+      CreateRefusalView.inviteMalformed =>
+        'That invite is damaged — some of it did not survive the copy.',
+      CreateRefusalView.inviteTooLong => 'That invite is too long to be one.',
+      CreateRefusalView.inviteUnsupported =>
+        'This version of Envoix cannot use that invite.',
+      CreateRefusalView.inviteRoleUnsupported =>
+        'That invite asks you to send a file. Start a send instead.',
+      CreateRefusalView.storageFault =>
+        'The transfer could not be written to storage, so nothing was created.',
+      CreateRefusalView.internal =>
+        'Something inside Envoix failed before the transfer was created.',
+    };
+
+/// The authority's answer to one create request, or the honest absence of one.
+String createAnswerLabel(CreateIntent request) {
+  final IntentFault? fault = request.fault;
+  if (fault != null) {
+    return switch (fault.origin) {
+      // Provably nothing to look for: the encoder refused this before the
+      // frame left, so no card can exist and sending the user hunting for one
+      // would be a lie the lane went out of its way to avoid telling.
+      FaultOrigin.unsent =>
+        'Not sent — Envoix could not put this request on the wire ($fault). '
+            'Nothing was created.',
+      // NOT a verdict: the request may or may not have made a card, and only
+      // the card list can say. Offering a guess here would be inventing one.
+      FaultOrigin.unanswered => 'No answer arrived ($fault). '
+          'If a transfer appears in the list, it was created.',
+    };
+  }
+  return switch (request.outcome) {
+    null => 'Asked — no answer yet.',
+    CreateOutcomeViewCreated(:final CardCreatedView value) =>
+      'Created — transfer ${value.card} exists.',
+    CreateOutcomeViewRefused(:final CreateRefusalView value) =>
+      'Refused — ${createRefusalLabel(value)}',
+  };
+}
 
 /// One evidence entry. The identifier case is deliberately thin: evidence
 /// carries the KIND of identifier that was involved and never its value.
@@ -277,6 +324,8 @@ String intentLabel(CommandIntent intent) {
     CommandPhase.settled => completion == null
         ? '$asked — ${acceptanceLabel(acceptance!)}'
         : '$asked — ${completionLabel(completion)}',
+    CommandPhase.refused =>
+      '$asked — not sent; Envoix could not put it on the wire (${intent.fault})',
     CommandPhase.undelivered =>
       '$asked — it never reached the host (${intent.fault})',
   };

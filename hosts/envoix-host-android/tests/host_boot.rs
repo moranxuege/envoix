@@ -239,6 +239,7 @@ fn commit_completed_receiver(root: &std::path::Path) -> RecordId {
         offered_name: OfferedName::from_untrusted("receipt.bin"),
         total: ByteCount::new(64),
         source: SourceDecision::Ready,
+        pairing: None,
     };
     let (mut session, outcome) = CommittedSession::create(
         transfer,

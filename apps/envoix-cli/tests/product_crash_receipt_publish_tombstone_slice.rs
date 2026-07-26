@@ -357,6 +357,7 @@ fn new_transfer(direction: Direction, offered_name: OfferedName, total: ByteCoun
         offered_name,
         total,
         source: SourceDecision::Ready,
+        pairing: None,
     }
 }
 

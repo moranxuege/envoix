@@ -101,9 +101,19 @@ pub struct ReleasePolicy {
     /// Recognised debug/instrumentation prefixes. Not the rule, just the
     /// friendlier half of the message when the allow-list rejects one.
     pub forbidden_native_symbols: Vec<String>,
-    /// The complete packaged surface of a release APK, as `*`-in-one-segment
-    /// patterns. Anything else in the archive is rejected by name.
+    /// The complete packaged surface of a release artifact, as
+    /// `*`-in-one-segment patterns. Anything else in the archive is rejected by
+    /// name. A bundle entry is mapped onto its APK spelling before it is judged
+    /// here — see [`ArtifactKind::surface_entry`] — so one reviewed list covers
+    /// both shapes.
     pub allowed_package_entries: Vec<String>,
+    /// The complete set of container entries an app bundle may carry: the ones
+    /// bundletool and AGP define, which have no APK counterpart to be judged
+    /// as. Everything else in a bundle is app content.
+    pub allowed_bundle_entries: Vec<String>,
+    /// What the payload is built from, as Ant-style globs. Both enforcers read
+    /// this one list, so neither can answer the question differently.
+    pub payload_sources: Vec<String>,
     /// Recognised debug markers in the packaged app manifest.
     pub forbidden_manifest_markers: Vec<String>,
     /// Class names a release dex may never define.
@@ -198,6 +208,15 @@ pub enum ArtifactKind {
     Bundle,
 }
 
+impl fmt::Display for ArtifactKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Apk => "apk",
+            Self::Bundle => "bundle",
+        })
+    }
+}
+
 impl ArtifactKind {
     /// Where this kind of archive keeps a packaged native library.
     fn library_path(self, abi: &str, soname: &str) -> String {
@@ -207,11 +226,30 @@ impl ArtifactKind {
         }
     }
 
-    /// The packaged-surface allow-list describes an APK. A bundle's layout is
-    /// bundletool's to define, so only its payload and trust content are
-    /// judged by name.
-    fn surface_is_allow_listed(self) -> bool {
-        matches!(self, Self::Apk)
+    /// The reviewed-surface name this archive entry carries, or `None` when the
+    /// entry belongs to the container rather than to the app.
+    ///
+    /// An APK IS the surface. A bundle keeps the same app content under
+    /// module-scoped prefixes — `base/dex/`, `base/manifest/` and `base/root/`
+    /// hold what an APK keeps at its root, and `base/assets/`, `base/lib/`,
+    /// `base/res/` keep their directory — so stripping the prefix is what lets
+    /// ONE allow-list judge both shapes. Anything else in a bundle is the
+    /// container's own metadata, and is held to
+    /// [`ReleasePolicy::allowed_bundle_entries`] instead: every entry is judged
+    /// by exactly one of the two lists, and nothing is judged by neither.
+    pub fn surface_entry(self, entry: &str) -> Option<&str> {
+        match self {
+            Self::Apk => Some(entry),
+            Self::Bundle => {
+                for prefix in ["base/dex/", "base/manifest/", "base/root/"] {
+                    if let Some(rest) = entry.strip_prefix(prefix) {
+                        return Some(rest);
+                    }
+                }
+                let rest = entry.strip_prefix("base/")?;
+                matches!(rest.split('/').next(), Some("assets" | "lib" | "res")).then_some(rest)
+            }
+        }
     }
 }
 
@@ -261,6 +299,117 @@ pub struct MeasuredArtifact {
     pub facts: PackagedFacts,
     /// `None` when the named artifact is missing or unreadable.
     pub observed_sha256: Option<String>,
+}
+
+/// One rule the release verdict is made of.
+///
+/// Naming them is what makes a clean verdict falsifiable. `disagreements=0` is
+/// produced identically by a run that evaluated everything and by one that
+/// evaluated nothing, which is how the packaged-surface allow-list stayed off
+/// for app bundles from the commit that wrote it: the summary looked the same.
+/// A verdict that lists what it ran cannot be produced by a run in which
+/// nothing did.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Invariant {
+    IdentityDrift,
+    PolicyProjection,
+    PayloadRecord,
+    ArtifactAnchor,
+    ReleasedVersions,
+    AppVersion,
+    Signers,
+    Abis,
+    PackagedPayload,
+    PackagedSurface,
+    ShippedManifest,
+    ManifestMarkers,
+    TrustMaterial,
+    ReleaseClasses,
+    TrustRoot,
+}
+
+impl Invariant {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::IdentityDrift => "identity_drift",
+            Self::PolicyProjection => "policy_projection",
+            Self::PayloadRecord => "payload_record",
+            Self::ArtifactAnchor => "artifact_anchor",
+            Self::ReleasedVersions => "released_versions",
+            Self::AppVersion => "app_version",
+            Self::Signers => "signers",
+            Self::Abis => "abis",
+            Self::PackagedPayload => "packaged_payload",
+            Self::PackagedSurface => "packaged_surface",
+            Self::ShippedManifest => "shipped_manifest",
+            Self::ManifestMarkers => "manifest_markers",
+            Self::TrustMaterial => "trust_material",
+            Self::ReleaseClasses => "release_classes",
+            Self::TrustRoot => "trust_root",
+        }
+    }
+}
+
+/// Whether an invariant ran, and over how much.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Evaluated {
+    /// It ran, over this many facts. Zero facts is not the same as clean: a
+    /// rule with nothing to look at reports exactly what a satisfied one does,
+    /// which is why the number is printed rather than a tick.
+    Judged(usize),
+    /// It deliberately did not run, and why. The reason is DATA, stated once
+    /// here, so a dormant rule cannot be spelled as a condition in two
+    /// enforcers that then drift apart.
+    Skipped(&'static str),
+}
+
+impl fmt::Display for Evaluated {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Judged(facts) => write!(formatter, "{facts}"),
+            Self::Skipped(reason) => write!(formatter, "skipped({reason})"),
+        }
+    }
+}
+
+/// One invariant's record for one artifact, or for the build when it judges no
+/// single artifact.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Evaluation {
+    pub artifact: Option<String>,
+    pub invariant: Invariant,
+    pub evaluated: Evaluated,
+}
+
+/// The whole verdict: every invariant that was evaluated, and everything that
+/// disagreed. The two halves are one value because a caller must not be able to
+/// read the second without the first.
+#[derive(Clone, Debug, Default)]
+pub struct ReleaseVerdict {
+    pub evaluations: Vec<Evaluation>,
+    pub disagreements: Vec<Disagreement>,
+}
+
+impl ReleaseVerdict {
+    fn judged(&mut self, artifact: Option<&str>, invariant: Invariant, facts: usize) {
+        self.record(artifact, invariant, Evaluated::Judged(facts));
+    }
+
+    fn skipped(&mut self, artifact: Option<&str>, invariant: Invariant, reason: &'static str) {
+        self.record(artifact, invariant, Evaluated::Skipped(reason));
+    }
+
+    fn record(&mut self, artifact: Option<&str>, invariant: Invariant, evaluated: Evaluated) {
+        self.evaluations.push(Evaluation {
+            artifact: artifact.map(ToOwned::to_owned),
+            invariant,
+            evaluated,
+        });
+    }
+
+    fn disagree(&mut self, disagreement: Disagreement) {
+        self.disagreements.push(disagreement);
+    }
 }
 
 /// One specific way a release-shaped build failed to agree with itself. Every
@@ -674,6 +823,11 @@ pub fn render_policy(
         policy.allowed_package_entries.join(","),
     );
     line(
+        "allowed_bundle_entries",
+        policy.allowed_bundle_entries.join(","),
+    );
+    line("payload_sources", policy.payload_sources.join(","));
+    line(
         "forbidden_manifest_markers",
         policy.forbidden_manifest_markers.join(","),
     );
@@ -726,11 +880,11 @@ pub fn check_release(
     ledger: &ReleaseLedger,
     build: &BuildIdentity,
     artifacts: &[MeasuredArtifact],
-) -> Vec<Disagreement> {
-    let mut disagreements = Vec::new();
-    check_identity_drift(build, &mut disagreements);
-    check_policy_projection(ledger, build, &mut disagreements);
-    check_payload_record(build, &mut disagreements);
+) -> ReleaseVerdict {
+    let mut verdict = ReleaseVerdict::default();
+    check_identity_drift(build, &mut verdict);
+    check_policy_projection(ledger, build, &mut verdict);
+    check_payload_record(build, &mut verdict);
 
     let package_version = build.compiled.get("package_version");
     let provisioned = build
@@ -744,14 +898,15 @@ pub fn check_release(
             artifact,
             package_version,
             provisioned,
-            &mut disagreements,
+            &mut verdict,
         );
     }
-    disagreements
+    verdict
 }
 
-fn check_identity_drift(build: &BuildIdentity, disagreements: &mut Vec<Disagreement>) {
+fn check_identity_drift(build: &BuildIdentity, verdict: &mut ReleaseVerdict) {
     let fields: BTreeSet<&String> = build.declared.keys().chain(build.compiled.keys()).collect();
+    verdict.judged(None, Invariant::IdentityDrift, fields.len());
     for field in fields {
         let declared = build.declared.get(field).cloned();
         let compiled = build.compiled.get(field).cloned();
@@ -759,7 +914,7 @@ fn check_identity_drift(build: &BuildIdentity, disagreements: &mut Vec<Disagreem
             continue;
         }
         let field = field.clone();
-        disagreements.push(if field.starts_with("protocol_") {
+        verdict.disagree(if field.starts_with("protocol_") {
             Disagreement::ProtocolIdDrift {
                 field,
                 declared,
@@ -784,7 +939,7 @@ fn check_identity_drift(build: &BuildIdentity, disagreements: &mut Vec<Disagreem
 fn check_policy_projection(
     ledger: &ReleaseLedger,
     build: &BuildIdentity,
-    disagreements: &mut Vec<Disagreement>,
+    verdict: &mut ReleaseVerdict,
 ) {
     let policy = &ledger.policy;
     for (key, values) in [
@@ -793,6 +948,8 @@ fn check_policy_projection(
         ("allowed_native_symbols", &policy.allowed_native_symbols),
         ("forbidden_native_symbols", &policy.forbidden_native_symbols),
         ("allowed_package_entries", &policy.allowed_package_entries),
+        ("allowed_bundle_entries", &policy.allowed_bundle_entries),
+        ("payload_sources", &policy.payload_sources),
         (
             "forbidden_manifest_markers",
             &policy.forbidden_manifest_markers,
@@ -804,7 +961,7 @@ fn check_policy_projection(
     ] {
         for value in values {
             if value.contains([',', '\\', '\n', '\r']) {
-                disagreements.push(Disagreement::PolicyValueAmbiguous {
+                verdict.disagree(Disagreement::PolicyValueAmbiguous {
                     key: key.to_owned(),
                     value: value.clone(),
                 });
@@ -813,6 +970,7 @@ fn check_policy_projection(
     }
 
     let expected = render_policy(ledger, &build.declared, &build.payload);
+    verdict.judged(None, Invariant::PolicyProjection, expected.lines().count());
     if expected == build.policy_projection {
         return;
     }
@@ -830,18 +988,21 @@ fn check_policy_projection(
             },
             |(expected, found)| format!("expected {expected:?}, found {found:?}"),
         );
-    disagreements.push(Disagreement::PolicyProjectionDrift { detail });
+    verdict.disagree(Disagreement::PolicyProjectionDrift { detail });
 }
 
-fn check_payload_record(build: &BuildIdentity, disagreements: &mut Vec<Disagreement>) {
+fn check_payload_record(build: &BuildIdentity, verdict: &mut ReleaseVerdict) {
+    // Two pins: the manifest the payload was compiled against, and the sources
+    // it was compiled from.
+    verdict.judged(None, Invariant::PayloadRecord, 2);
     if build.payload.build_manifest_sha256 != build.manifest_sha256 {
-        disagreements.push(Disagreement::PayloadManifestDrift {
+        verdict.disagree(Disagreement::PayloadManifestDrift {
             recorded: build.payload.build_manifest_sha256.clone(),
             compiled: build.manifest_sha256.clone(),
         });
     }
     if build.payload.sources_sha256 != build.sources_sha256 {
-        disagreements.push(Disagreement::PayloadSourcesDrift {
+        verdict.disagree(Disagreement::PayloadSourcesDrift {
             recorded: build.payload.sources_sha256.clone(),
             observed: build.sources_sha256.clone(),
         });
@@ -854,21 +1015,27 @@ fn check_artifact(
     artifact: &MeasuredArtifact,
     package_version: Option<&String>,
     provisioned: bool,
-    disagreements: &mut Vec<Disagreement>,
+    verdict: &mut ReleaseVerdict,
 ) {
     let policy = &ledger.policy;
     let facts = &artifact.facts;
     let variant = facts.variant.clone();
+    // The variant alone does not identify an artifact: one release build emits
+    // an APK and a bundle under the same variant, and it is the bundle whose
+    // rules went missing.
+    let label = format!("{variant} {}", facts.kind);
+    let label = Some(label.as_str());
 
     // Anchor first: a verdict about a file the gate could not read is not a
     // verdict, and neither is one about a file that has since changed.
+    verdict.judged(label, Invariant::ArtifactAnchor, 1);
     match &artifact.observed_sha256 {
-        None => disagreements.push(Disagreement::ArtifactMissing {
+        None => verdict.disagree(Disagreement::ArtifactMissing {
             variant: variant.clone(),
             artifact: facts.artifact.clone(),
         }),
         Some(observed) if observed != &facts.artifact_sha256 => {
-            disagreements.push(Disagreement::ArtifactDigestMismatch {
+            verdict.disagree(Disagreement::ArtifactDigestMismatch {
                 variant: variant.clone(),
                 artifact: facts.artifact.clone(),
                 recorded: facts.artifact_sha256.clone(),
@@ -878,11 +1045,12 @@ fn check_artifact(
         Some(_) => {}
     }
 
+    verdict.judged(label, Invariant::ReleasedVersions, ledger.released.len());
     if ledger.released.iter().any(|released| {
         released.application_id == facts.application_id
             && released.version_code == facts.version_code
     }) {
-        disagreements.push(Disagreement::VersionAlreadyReleased {
+        verdict.disagree(Disagreement::VersionAlreadyReleased {
             variant: variant.clone(),
             application_id: facts.application_id.clone(),
             version_code: facts.version_code,
@@ -896,30 +1064,37 @@ fn check_artifact(
         .max()
         && facts.version_code < last_released
     {
-        disagreements.push(Disagreement::VersionRegression {
+        verdict.disagree(Disagreement::VersionRegression {
             variant: variant.clone(),
             application_id: facts.application_id.clone(),
             version_code: facts.version_code,
             last_released,
         });
     }
+
+    verdict.judged(
+        label,
+        Invariant::AppVersion,
+        usize::from(package_version.is_some()),
+    );
     if package_version.is_some_and(|version| version != &facts.version_name) {
-        disagreements.push(Disagreement::AppVersionMismatch {
+        verdict.disagree(Disagreement::AppVersionMismatch {
             variant: variant.clone(),
             version_name: facts.version_name.clone(),
             package_version: package_version.cloned().unwrap_or_default(),
         });
     }
 
+    verdict.judged(label, Invariant::Signers, facts.signers.len());
     if facts.signers.len() != 1 {
-        disagreements.push(Disagreement::SignerCount {
+        verdict.disagree(Disagreement::SignerCount {
             variant: variant.clone(),
             signers: facts.signers.len(),
         });
     }
     for signer in &facts.signers {
         if signer != &policy.signer_sha256 {
-            disagreements.push(Disagreement::SignerMismatch {
+            verdict.disagree(Disagreement::SignerMismatch {
                 variant: variant.clone(),
                 expected: policy.signer_sha256.clone(),
                 observed: signer.clone(),
@@ -927,9 +1102,14 @@ fn check_artifact(
         }
     }
 
+    verdict.judged(
+        label,
+        Invariant::Abis,
+        policy.required_abis.len() + facts.abis.len(),
+    );
     for abi in &policy.required_abis {
         if !facts.abis.contains(abi) {
-            disagreements.push(Disagreement::MissingAbi {
+            verdict.disagree(Disagreement::MissingAbi {
                 variant: variant.clone(),
                 abi: abi.clone(),
             });
@@ -937,36 +1117,43 @@ fn check_artifact(
     }
     for abi in &facts.abis {
         if !policy.required_abis.contains(abi) {
-            disagreements.push(Disagreement::UnexpectedAbi {
+            verdict.disagree(Disagreement::UnexpectedAbi {
                 variant: variant.clone(),
                 abi: abi.clone(),
             });
         }
     }
 
-    check_payload(ledger, build, facts, &variant, disagreements);
+    check_payload(ledger, build, facts, &variant, label, verdict);
 
-    if facts.kind.surface_is_allow_listed() {
-        for entry in &facts.entries {
-            if !policy
-                .allowed_package_entries
-                .iter()
-                .any(|pattern| matches_pattern(entry, pattern))
-            {
-                disagreements.push(Disagreement::UnexpectedPackageEntry {
-                    variant: variant.clone(),
-                    entry: entry.clone(),
-                });
-            }
+    // Every entry, in every shape of archive. An entry is app content, judged
+    // against the reviewed surface under the name an APK would give it, or it
+    // is this container's own metadata, judged against the bundle list — and
+    // there is no third answer for one to fall into.
+    verdict.judged(label, Invariant::PackagedSurface, facts.entries.len());
+    for entry in &facts.entries {
+        let (claimed, patterns) = match facts.kind.surface_entry(entry) {
+            Some(surface) => (surface, &policy.allowed_package_entries),
+            None => (entry.as_str(), &policy.allowed_bundle_entries),
+        };
+        if !patterns
+            .iter()
+            .any(|pattern| matches_pattern(claimed, pattern))
+        {
+            verdict.disagree(Disagreement::UnexpectedPackageEntry {
+                variant: variant.clone(),
+                entry: entry.clone(),
+            });
         }
     }
 
+    verdict.judged(label, Invariant::ShippedManifest, 1);
     match &facts.build_manifest_sha256 {
-        None => disagreements.push(Disagreement::ShippedManifestMissing {
+        None => verdict.disagree(Disagreement::ShippedManifestMissing {
             variant: variant.clone(),
         }),
         Some(observed) if observed != &build.manifest_sha256 => {
-            disagreements.push(Disagreement::ShippedManifestMismatch {
+            verdict.disagree(Disagreement::ShippedManifestMismatch {
                 variant: variant.clone(),
                 expected: build.manifest_sha256.clone(),
                 observed: observed.clone(),
@@ -975,26 +1162,50 @@ fn check_artifact(
         Some(_) => {}
     }
 
+    // These two count the markers and classes the rule LOOKS for, not the ones
+    // it found: a deny-list emptied to nothing reports the same clean facts as
+    // an artifact that carries none.
+    verdict.judged(
+        label,
+        Invariant::ManifestMarkers,
+        policy.forbidden_manifest_markers.len(),
+    );
     for marker in &facts.manifest_markers {
-        disagreements.push(Disagreement::DebugManifestMarker {
+        verdict.disagree(Disagreement::DebugManifestMarker {
             variant: variant.clone(),
             marker: marker.clone(),
         });
     }
+    verdict.judged(label, Invariant::TrustMaterial, facts.entries.len());
     for entry in &facts.trust_material {
-        disagreements.push(Disagreement::TestTrustMaterial {
+        verdict.disagree(Disagreement::TestTrustMaterial {
             variant: variant.clone(),
             entry: entry.clone(),
         });
     }
+    verdict.judged(
+        label,
+        Invariant::ReleaseClasses,
+        policy.forbidden_release_classes.len(),
+    );
     for class in &facts.release_classes {
-        disagreements.push(Disagreement::DebugClassInRelease {
+        verdict.disagree(Disagreement::DebugClassInRelease {
             variant: variant.clone(),
             class: class.clone(),
         });
     }
-    if policy.distribution.requires_trust_root() && !provisioned {
-        disagreements.push(Disagreement::TrustRootUnprovisioned { variant });
+
+    if policy.distribution.requires_trust_root() {
+        verdict.judged(label, Invariant::TrustRoot, 1);
+        if !provisioned {
+            verdict.disagree(Disagreement::TrustRootUnprovisioned { variant });
+        }
+    } else {
+        verdict.skipped(
+            label,
+            Invariant::TrustRoot,
+            "only a distributed release needs a provisioned trust root",
+        );
     }
 }
 
@@ -1003,9 +1214,11 @@ fn check_payload(
     build: &BuildIdentity,
     facts: &PackagedFacts,
     variant: &str,
-    disagreements: &mut Vec<Disagreement>,
+    label: Option<&str>,
+    verdict: &mut ReleaseVerdict,
 ) {
     let policy = &ledger.policy;
+    verdict.judged(label, Invariant::PackagedPayload, facts.payload.len());
     let allowed: BTreeSet<&String> = policy.allowed_native_symbols.iter().collect();
     let expected_paths: Vec<String> = policy
         .required_abis
@@ -1033,7 +1246,7 @@ fn check_payload(
             .iter()
             .any(|library| &library.artifact == path)
         {
-            disagreements.push(Disagreement::MissingNativeLibrary {
+            verdict.disagree(Disagreement::MissingNativeLibrary {
                 variant: variant.to_owned(),
                 artifact: path.clone(),
             });
@@ -1052,12 +1265,12 @@ fn check_payload(
             // decision.
             let (abi, soname) = library_identity(&library.artifact);
             match build.payload.bundled_library(soname, abi) {
-                None => disagreements.push(Disagreement::UnaccountedBundledLibrary {
+                None => verdict.disagree(Disagreement::UnaccountedBundledLibrary {
                     variant: variant.to_owned(),
                     artifact: library.artifact.clone(),
                 }),
                 Some(recorded) if recorded.sha256 != library.sha256 => {
-                    disagreements.push(Disagreement::BundledLibraryMismatch {
+                    verdict.disagree(Disagreement::BundledLibraryMismatch {
                         variant: variant.to_owned(),
                         artifact: library.artifact.clone(),
                         recorded: recorded.sha256.clone(),
@@ -1068,7 +1281,7 @@ fn check_payload(
             }
             for symbol in &library.symbols {
                 if allowed.contains(symbol) {
-                    disagreements.push(Disagreement::ImpersonatedNativeSymbol {
+                    verdict.disagree(Disagreement::ImpersonatedNativeSymbol {
                         variant: variant.to_owned(),
                         artifact: library.artifact.clone(),
                         symbol: symbol.clone(),
@@ -1078,7 +1291,7 @@ fn check_payload(
                     .iter()
                     .any(|prefix| symbol.starts_with(prefix))
                 {
-                    disagreements.push(Disagreement::DebugTrustMaterial {
+                    verdict.disagree(Disagreement::DebugTrustMaterial {
                         variant: variant.to_owned(),
                         artifact: library.artifact.clone(),
                         symbol: symbol.clone(),
@@ -1090,7 +1303,7 @@ fn check_payload(
         // The full path, not a suffix: `assets/lib/x/libenvoix_host_android.so`
         // is not the payload, it is a smuggled library.
         if !expected_paths.contains(&library.artifact) {
-            disagreements.push(Disagreement::UnexpectedNativeLibrary {
+            verdict.disagree(Disagreement::UnexpectedNativeLibrary {
                 variant: variant.to_owned(),
                 artifact: library.artifact.clone(),
             });
@@ -1101,7 +1314,7 @@ fn check_payload(
             .and_then(|abi| build.payload.release_library(abi))
             && abi.sha256 != library.sha256
         {
-            disagreements.push(Disagreement::ShippedPayloadMismatch {
+            verdict.disagree(Disagreement::ShippedPayloadMismatch {
                 variant: variant.to_owned(),
                 artifact: library.artifact.clone(),
                 recorded: abi.sha256.clone(),
@@ -1113,7 +1326,7 @@ fn check_payload(
             if allowed.contains(symbol) {
                 continue;
             }
-            disagreements.push(
+            verdict.disagree(
                 if policy
                     .forbidden_native_symbols
                     .iter()
@@ -1135,7 +1348,7 @@ fn check_payload(
         }
         for symbol in &policy.allowed_native_symbols {
             if !library.symbols.contains(symbol) {
-                disagreements.push(Disagreement::MissingNativeSymbol {
+                verdict.disagree(Disagreement::MissingNativeSymbol {
                     variant: variant.to_owned(),
                     artifact: library.artifact.clone(),
                     symbol: symbol.clone(),
@@ -1157,6 +1370,29 @@ pub fn matches_pattern(entry: &str, pattern: &str) -> bool {
             _ => return false,
         }
     }
+}
+
+/// Does the repository-relative `path` match one `payload_sources` glob?
+///
+/// The Ant dialect gradle's `fileTree` already speaks, so the one enumeration
+/// in the ledger can be handed to both enforcers verbatim: `**` stands for any
+/// run of directories INCLUDING none, and `*` keeps the meaning it has in
+/// [`matches_pattern`] — any run of characters inside a single segment.
+pub fn matches_source_glob(path: &str, pattern: &str) -> bool {
+    fn walk(path: &[&str], pattern: &[&str]) -> bool {
+        match pattern.split_first() {
+            None => path.is_empty(),
+            Some((&"**", rest)) => (0..=path.len()).any(|skip| walk(&path[skip..], rest)),
+            Some((first, rest)) => match path.split_first() {
+                Some((segment, tail)) if segment_matches(segment, first) => walk(tail, rest),
+                _ => false,
+            },
+        }
+    }
+    walk(
+        &path.split('/').collect::<Vec<_>>(),
+        &pattern.split('/').collect::<Vec<_>>(),
+    )
 }
 
 fn segment_matches(segment: &str, pattern: &str) -> bool {
@@ -1191,11 +1427,15 @@ mod tests {
                 allowed_native_symbols: vec!["Java_probe_boot".to_owned()],
                 forbidden_native_symbols: vec!["Java_probe_E2e".to_owned()],
                 allowed_package_entries: vec![
+                    "AndroidManifest.xml".to_owned(),
                     "classes.dex".to_owned(),
                     "lib/*/libhost.so".to_owned(),
                     "lib/*/libthird.so".to_owned(),
                     "res/*.xml".to_owned(),
+                    "res/*/*.xml".to_owned(),
                 ],
+                allowed_bundle_entries: vec!["BundleConfig.pb".to_owned()],
+                payload_sources: vec!["Cargo.lock".to_owned()],
                 forbidden_manifest_markers: vec![":debuggable(".to_owned()],
                 forbidden_release_classes: vec!["E2eBridge".to_owned()],
                 distribution: Distribution::Internal,
@@ -1265,15 +1505,19 @@ mod tests {
         }
     }
 
-    fn verdict(
-        mutate: impl FnOnce(&mut ReleaseLedger, &mut MeasuredArtifact),
-    ) -> Vec<Disagreement> {
+    fn judge(mutate: impl FnOnce(&mut ReleaseLedger, &mut MeasuredArtifact)) -> ReleaseVerdict {
         let mut ledger = ledger();
         let mut artifact = artifact();
         mutate(&mut ledger, &mut artifact);
         let mut build = identity(&ledger);
         build.policy_projection = render_policy(&ledger, &build.declared, &build.payload);
         check_release(&ledger, &build, &[artifact])
+    }
+
+    fn verdict(
+        mutate: impl FnOnce(&mut ReleaseLedger, &mut MeasuredArtifact),
+    ) -> Vec<Disagreement> {
+        judge(mutate).disagreements
     }
 
     #[test]
@@ -1616,16 +1860,98 @@ mod tests {
                 "{entry} must not be allowed onto the release surface"
             );
         }
-        // A bundle's layout belongs to bundletool, so only its trust content
-        // and payload are judged by name.
-        assert_eq!(
-            verdict(|_, artifact| {
-                artifact.facts.kind = ArtifactKind::Bundle;
-                artifact.facts.payload[0].artifact = "base/lib/arm64-v8a/libhost.so".to_owned();
-                artifact.facts.entries.push("BUNDLE-METADATA/x".to_owned());
-            }),
-            Vec::new()
-        );
+    }
+
+    /// The bundle is the artifact that actually gets uploaded, and it is held
+    /// to the SAME reviewed surface: app content is judged under the name an
+    /// APK would give it, the container's own entries are named, and there is
+    /// no third answer an entry can fall into.
+    #[test]
+    fn a_bundle_is_held_to_the_same_reviewed_surface() {
+        fn bundle(artifact: &mut MeasuredArtifact) {
+            artifact.facts.kind = ArtifactKind::Bundle;
+            artifact.facts.payload[0].artifact = "base/lib/arm64-v8a/libhost.so".to_owned();
+            artifact.facts.entries = vec![
+                "BundleConfig.pb".to_owned(),
+                "base/dex/classes.dex".to_owned(),
+                "base/lib/arm64-v8a/libhost.so".to_owned(),
+                "base/manifest/AndroidManifest.xml".to_owned(),
+                "base/res/drawable-hdpi-v4/icon.xml".to_owned(),
+            ];
+        }
+        assert_eq!(verdict(|_, artifact| bundle(artifact)), Vec::new());
+
+        // App content under every module prefix, and container metadata under
+        // none: an unreviewed entry fails wherever a bundle can keep one.
+        for entry in [
+            "base/root/root.der",
+            "base/assets/ca",
+            "base/lib/arm64-v8a/libsmuggled.so",
+            "base/res/raw/evil.txt",
+            "base/evil.pb",
+            "BUNDLE-METADATA/whatever",
+        ] {
+            assert_eq!(
+                verdict(|_, artifact| {
+                    bundle(artifact);
+                    artifact.facts.entries.push(entry.to_owned());
+                }),
+                vec![Disagreement::UnexpectedPackageEntry {
+                    variant: "prodRelease".to_owned(),
+                    entry: entry.to_owned(),
+                }],
+                "{entry} must not be allowed onto the release surface"
+            );
+        }
+    }
+
+    /// A clean verdict has to say what it looked at. Both artifact kinds report
+    /// the surface rule over every entry they carry, and the one rule that
+    /// deliberately does not run says so with its reason.
+    #[test]
+    fn the_verdict_names_the_invariants_it_evaluated() {
+        for (kind, entries) in [
+            (ArtifactKind::Apk, 2),
+            // Same fixture, bundle spelling: five entries, all judged.
+            (ArtifactKind::Bundle, 5),
+        ] {
+            let judged = judge(|_, artifact| {
+                if kind == ArtifactKind::Bundle {
+                    artifact.facts.kind = ArtifactKind::Bundle;
+                    artifact.facts.payload[0].artifact = "base/lib/arm64-v8a/libhost.so".to_owned();
+                    artifact.facts.entries = vec![
+                        "BundleConfig.pb".to_owned(),
+                        "base/dex/classes.dex".to_owned(),
+                        "base/lib/arm64-v8a/libhost.so".to_owned(),
+                        "base/manifest/AndroidManifest.xml".to_owned(),
+                        "base/res/drawable-hdpi-v4/icon.xml".to_owned(),
+                    ];
+                }
+            });
+            let label = format!("prodRelease {kind}");
+            let evaluated = |invariant: Invariant| {
+                judged
+                    .evaluations
+                    .iter()
+                    .find(|record| {
+                        record.artifact.as_deref() == Some(label.as_str())
+                            && record.invariant == invariant
+                    })
+                    .map(|record| record.evaluated)
+            };
+            assert_eq!(
+                evaluated(Invariant::PackagedSurface),
+                Some(Evaluated::Judged(entries)),
+                "{label} must report the surface rule over every entry"
+            );
+            assert_eq!(
+                evaluated(Invariant::TrustRoot),
+                Some(Evaluated::Skipped(
+                    "only a distributed release needs a provisioned trust root"
+                )),
+                "{label} must say WHY the trust-root rule did not run"
+            );
+        }
     }
 
     #[test]
@@ -1635,7 +1961,7 @@ mod tests {
         build.sources_sha256 = "77".repeat(32);
         build.manifest_sha256 = "88".repeat(32);
         ledger.released.clear();
-        let disagreements = check_release(&ledger, &build, &[artifact()]);
+        let disagreements = check_release(&ledger, &build, &[artifact()]).disagreements;
         assert!(
             disagreements.contains(&Disagreement::PayloadSourcesDrift {
                 recorded: "22".repeat(32),
@@ -1657,7 +1983,7 @@ mod tests {
         build.policy_projection = build
             .policy_projection
             .replace(&"ab".repeat(32), &"ff".repeat(32));
-        let disagreements = check_release(&ledger, &build, &[artifact()]);
+        let disagreements = check_release(&ledger, &build, &[artifact()]).disagreements;
         assert!(
             disagreements
                 .iter()
@@ -1684,7 +2010,7 @@ mod tests {
             .insert("trust_root".to_owned(), "unprovisioned".to_owned());
         build.policy_projection = render_policy(&ledger, &build.declared, &build.payload);
         assert_eq!(
-            check_release(&ledger, &build, &[artifact()]),
+            check_release(&ledger, &build, &[artifact()]).disagreements,
             vec![Disagreement::TrustRootUnprovisioned {
                 variant: "prodRelease".to_owned(),
             }]
@@ -1697,7 +2023,10 @@ mod tests {
             .declared
             .insert("trust_root".to_owned(), "sha256".to_owned());
         build.policy_projection = render_policy(&ledger, &build.declared, &build.payload);
-        assert_eq!(check_release(&ledger, &build, &[artifact()]), Vec::new());
+        assert_eq!(
+            check_release(&ledger, &build, &[artifact()]).disagreements,
+            Vec::new()
+        );
     }
 
     #[test]
@@ -1719,11 +2048,13 @@ mod tests {
         ledger.policy.allowed_native_symbols.push("a,b".to_owned());
         let mut build = identity(&ledger);
         build.policy_projection = render_policy(&ledger, &build.declared, &build.payload);
-        assert!(check_release(&ledger, &build, &[artifact()]).contains(
-            &Disagreement::PolicyValueAmbiguous {
-                key: "allowed_native_symbols".to_owned(),
-                value: "a,b".to_owned(),
-            }
-        ));
+        assert!(
+            check_release(&ledger, &build, &[artifact()])
+                .disagreements
+                .contains(&Disagreement::PolicyValueAmbiguous {
+                    key: "allowed_native_symbols".to_owned(),
+                    value: "a,b".to_owned(),
+                })
+        );
     }
 }

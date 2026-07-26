@@ -58,15 +58,65 @@ void reportCard(CardRow row) {
 /// guessing: post-frame, because a widget does not know where it is until the
 /// frame it is in has been laid out.
 void reportAffordance(BuildContext context, String card, CommandView command) {
+  _reportPoint(
+    context,
+    'envoix-f2a affordance card=$card command=${command.name}',
+  );
+}
+
+/// Where the new-transfer sheet drew one of its controls.
+///
+/// The same reasoning as [reportAffordance], for the same reason: `Join` sits
+/// one row below `Start sending`, so a guessed coordinate is not a benign miss
+/// here either. The name is the CONTROL's, not its label, so re-wording a
+/// button cannot silently change what a harness taps.
+void reportSheetControl(BuildContext context, String control) {
+  _reportPoint(context, 'envoix-f2b sheet control=$control');
+}
+
+/// One widget's centre in device pixels, reported post-frame — a widget does
+/// not know where it is until the frame it is in has been laid out.
+///
+/// Laid out is not the same as landed. A control that animates in — the
+/// floating action button scaling up, a bottom sheet sliding into place — is
+/// mid-transform on the frame after its build, so `localToGlobal` answers with
+/// a point it will never occupy. On a screen with no cards nothing rebuilds
+/// afterwards to correct it, so that first answer would be the only one, and a
+/// harness would tap it and miss.
+///
+/// "On the screen" is not the test either: a sheet is on the screen for every
+/// frame of its slide. The test is that the centre STOPPED MOVING — the same
+/// point on two consecutive frames is a point the control has settled at.
+void _reportPoint(BuildContext context, String what) =>
+    _reportPointWhenSettled(context, what, 0, null);
+
+/// The frame budget a control gets to settle in. Material's entrance
+/// transitions are ~200-300 ms, so 40 frames is generous at 60 Hz while still
+/// answering for a control that never stops moving.
+const int _settlingFrames = 40;
+
+void _reportPointWhenSettled(
+  BuildContext context,
+  String what,
+  int frame,
+  Offset? previous,
+) {
   WidgetsBinding.instance.addPostFrameCallback((_) {
+    if (!context.mounted) {
+      return;
+    }
     final RenderObject? box = context.findRenderObject();
     if (box is! RenderBox || !box.hasSize) {
       return;
     }
     final double ratio = View.of(context).devicePixelRatio;
     final Offset centre = box.localToGlobal(box.size.center(Offset.zero));
-    _report('envoix-f2a affordance card=$card command=${command.name} '
-        'x=${(centre.dx * ratio).round()} y=${(centre.dy * ratio).round()}');
+    if (centre != previous && frame < _settlingFrames) {
+      _reportPointWhenSettled(context, what, frame + 1, centre);
+      return;
+    }
+    _report('$what x=${(centre.dx * ratio).round()} '
+        'y=${(centre.dy * ratio).round()}');
   });
 }
 
@@ -82,10 +132,49 @@ void reportIntent(CommandIntent intent) {
       'phase=${intent.phase.name} answer=${_answer(intent)}');
 }
 
+/// The same claim for a create request: this is what the authority answered
+/// when the app asked for a card. A harness needs the answer, not the asking —
+/// `refused:invite_bare_room_code` and `created:<card>` are different outcomes
+/// of the same tap.
+void reportCreate(CreateIntent request) {
+  _report('envoix-f2b create id=${request.id} kind=${request.kind.name} '
+      'answer=${_createAnswer(request)}');
+}
+
+/// The create answer as one machine token. Derived, never stored.
+String _createAnswer(CreateIntent request) {
+  final IntentFault? fault = request.fault;
+  if (fault != null) {
+    return switch (fault.origin) {
+      FaultOrigin.unsent => 'unsent',
+      FaultOrigin.unanswered => 'undelivered',
+    };
+  }
+  return switch (request.outcome) {
+    null => 'none',
+    CreateOutcomeViewCreated(:final CardCreatedView value) =>
+      'created:${value.card}',
+    CreateOutcomeViewRefused(:final CreateRefusalView value) =>
+      'refused:${value.name}',
+  };
+}
+
+/// The card's published invite, as it was DRAWN. The room code is what the user
+/// reads out, so instrumentation asserting a send flow needs to see that one
+/// actually reached the screen.
+void reportInvite(String card, InviteView invite) {
+  _report('envoix-f2b invite card=$card code=${invite.code} '
+      'link=${invite.link == null ? 'absent' : 'present'}');
+}
+
 /// The authority's answer as one machine token. Derived, never stored.
 String _answer(CommandIntent intent) {
-  if (intent.fault != null) {
-    return 'undelivered';
+  final IntentFault? fault = intent.fault;
+  if (fault != null) {
+    return switch (fault.origin) {
+      FaultOrigin.unsent => 'unsent',
+      FaultOrigin.unanswered => 'undelivered',
+    };
   }
   final CompletionView? completion = intent.completion;
   if (completion != null) {

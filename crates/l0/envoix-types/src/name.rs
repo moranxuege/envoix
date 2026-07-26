@@ -9,6 +9,16 @@ const FALLBACK_NAME: &str = "unnamed";
 pub struct OfferedName(String);
 
 impl OfferedName {
+    /// The longest an offered name may be, in UTF-8 bytes.
+    ///
+    /// This type's whole claim is that it is ONE leaf every filesystem the
+    /// transfer may land on can name, so its maximum is the narrowest
+    /// per-component limit among them: 255 bytes on ext4/F2FS (Android's own),
+    /// 255 UTF-16 units on exFAT and NTFS, 255 UTF-8 bytes on APFS. A longer
+    /// name is not a leaf anywhere, so no layer downstream has to decide what
+    /// to do with one — and none of them has to invent a number to say so.
+    pub const MAX_BYTES: usize = 255;
+
     /// Reduces an untrusted provider name to one filesystem-independent leaf.
     pub fn from_untrusted(provider_name: impl AsRef<str>) -> Self {
         Self(sanitize_leaf(provider_name.as_ref()))

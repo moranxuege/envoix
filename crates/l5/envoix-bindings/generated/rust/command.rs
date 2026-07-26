@@ -3,7 +3,7 @@
 
 use serde_json::{Map, Value};
 
-pub const COMMAND_SCHEMA_ID: &str = "envoix/binding/command/2";
+pub const COMMAND_SCHEMA_ID: &str = "envoix/binding/command/3";
 pub const COMMAND_MAX_FRAME_BYTES: usize = 1048576;
 
 // Contract rules frozen by schema/command.schema.
@@ -89,6 +89,35 @@ pub struct SubmitView {
     pub command: CommandView,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SendSourceView {
+    pub display_name: String,
+    pub total: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JoinInviteView {
+    pub invite: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CreateIntentView {
+    Send(SendSourceView),
+    Join(JoinInviteView),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreateView {
+    pub intent: CreateIntentView,
+    pub request_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FrontendIntentView {
+    Command(SubmitView),
+    Create(CreateView),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RejectionView {
     UnknownCard,
@@ -140,11 +169,54 @@ pub struct CommandCompletionView {
     pub completion: CompletionView,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CreateRefusalView {
+    InviteNotRecognized,
+    InviteBareRoomCode,
+    InviteMalformed,
+    InviteTooLong,
+    InviteUnsupported,
+    InviteRoleUnsupported,
+    StorageFault,
+    Internal,
+}
+
+impl CreateRefusalView {
+    pub const ALL: [Self; 8] = [
+        Self::InviteNotRecognized,
+        Self::InviteBareRoomCode,
+        Self::InviteMalformed,
+        Self::InviteTooLong,
+        Self::InviteUnsupported,
+        Self::InviteRoleUnsupported,
+        Self::StorageFault,
+        Self::Internal,
+    ];
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CardCreatedView {
+    pub card: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CreateOutcomeView {
+    Created(CardCreatedView),
+    Refused(CreateRefusalView),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreateResultView {
+    pub outcome: CreateOutcomeView,
+    pub request_id: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CommandBody {
-    Submit(SubmitView),
+    Intent(FrontendIntentView),
     Acceptance(CommandAcceptanceView),
     Completion(CommandCompletionView),
+    CreateResult(CreateResultView),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -289,6 +361,19 @@ fn hex_fixed(value: &Value, chars: usize, context: &'static str) -> Result<Strin
 
 fn encode_hex_fixed(text: &str, chars: usize, context: &'static str) -> Result<Value, CommandError> {
     if text.len() != chars || !hex_chars(text) {
+        return Err(CommandError::Bound { context });
+    }
+    Ok(Value::from(text))
+}
+
+fn utf8_bounded(value: &Value, max_bytes: usize, context: &'static str) -> Result<String, CommandError> {
+    let text = value.as_str().ok_or(CommandError::Shape { context })?;
+    encode_utf8_bounded(text, max_bytes, context)?;
+    Ok(text.to_owned())
+}
+
+fn encode_utf8_bounded(text: &str, max_bytes: usize, context: &'static str) -> Result<Value, CommandError> {
+    if text.len() > max_bytes {
         return Err(CommandError::Bound { context });
     }
     Ok(Value::from(text))
@@ -480,6 +565,113 @@ fn encode_submit_view_value(value: &SubmitView) -> Result<Value, CommandError> {
     Ok(Value::Object(map))
 }
 
+fn decode_send_source_view_value(value: &Value, context: &'static str) -> Result<SendSourceView, CommandError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["display_name", "total"], context)?;
+    let display_name = utf8_bounded(field(map, "display_name", "SendSourceView.display_name")?, 255, "SendSourceView.display_name")?;
+    let total = integer(field(map, "total", "SendSourceView.total")?, U63_MAX, "SendSourceView.total")?;
+    Ok(SendSourceView {
+        display_name,
+        total,
+    })
+}
+
+fn encode_send_source_view_value(value: &SendSourceView) -> Result<Value, CommandError> {
+    let mut map = Map::new();
+    map.insert("display_name".to_owned(), encode_utf8_bounded(&value.display_name, 255, "SendSourceView.display_name")?);
+    map.insert("total".to_owned(), encode_u63(value.total, "SendSourceView.total")?);
+    Ok(Value::Object(map))
+}
+
+fn decode_join_invite_view_value(value: &Value, context: &'static str) -> Result<JoinInviteView, CommandError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["invite"], context)?;
+    let invite = utf8_bounded(field(map, "invite", "JoinInviteView.invite")?, 16384, "JoinInviteView.invite")?;
+    Ok(JoinInviteView {
+        invite,
+    })
+}
+
+fn encode_join_invite_view_value(value: &JoinInviteView) -> Result<Value, CommandError> {
+    let mut map = Map::new();
+    map.insert("invite".to_owned(), encode_utf8_bounded(&value.invite, 16384, "JoinInviteView.invite")?);
+    Ok(Value::Object(map))
+}
+
+fn decode_create_intent_view_value(value: &Value, context: &'static str) -> Result<CreateIntentView, CommandError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["kind", "value"], context)?;
+    let kind = field(map, "kind", context)?
+        .as_str()
+        .ok_or(CommandError::Shape { context })?;
+    match kind {
+        "send" => Ok(CreateIntentView::Send(decode_send_source_view_value(payload(map, "CreateIntentView.send")?, "CreateIntentView.send")?)),
+        "join" => Ok(CreateIntentView::Join(decode_join_invite_view_value(payload(map, "CreateIntentView.join")?, "CreateIntentView.join")?)),
+        _ => Err(CommandError::UnknownVariant { context }),
+    }
+}
+
+fn encode_create_intent_view_value(value: &CreateIntentView) -> Result<Value, CommandError> {
+    let mut map = Map::new();
+    match value {
+        CreateIntentView::Send(payload) => {
+            map.insert("kind".to_owned(), Value::from("send"));
+            map.insert("value".to_owned(), encode_send_source_view_value(payload)?);
+        }
+        CreateIntentView::Join(payload) => {
+            map.insert("kind".to_owned(), Value::from("join"));
+            map.insert("value".to_owned(), encode_join_invite_view_value(payload)?);
+        }
+    }
+    Ok(Value::Object(map))
+}
+
+fn decode_create_view_value(value: &Value, context: &'static str) -> Result<CreateView, CommandError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["intent", "request_id"], context)?;
+    let intent = decode_create_intent_view_value(field(map, "intent", "CreateView.intent")?, "CreateView.intent")?;
+    let request_id = hex_fixed(field(map, "request_id", "CreateView.request_id")?, 32, "CreateView.request_id")?;
+    Ok(CreateView {
+        intent,
+        request_id,
+    })
+}
+
+fn encode_create_view_value(value: &CreateView) -> Result<Value, CommandError> {
+    let mut map = Map::new();
+    map.insert("intent".to_owned(), encode_create_intent_view_value(&value.intent)?);
+    map.insert("request_id".to_owned(), encode_hex_fixed(&value.request_id, 32, "CreateView.request_id")?);
+    Ok(Value::Object(map))
+}
+
+fn decode_frontend_intent_view_value(value: &Value, context: &'static str) -> Result<FrontendIntentView, CommandError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["kind", "value"], context)?;
+    let kind = field(map, "kind", context)?
+        .as_str()
+        .ok_or(CommandError::Shape { context })?;
+    match kind {
+        "command" => Ok(FrontendIntentView::Command(decode_submit_view_value(payload(map, "FrontendIntentView.command")?, "FrontendIntentView.command")?)),
+        "create" => Ok(FrontendIntentView::Create(decode_create_view_value(payload(map, "FrontendIntentView.create")?, "FrontendIntentView.create")?)),
+        _ => Err(CommandError::UnknownVariant { context }),
+    }
+}
+
+fn encode_frontend_intent_view_value(value: &FrontendIntentView) -> Result<Value, CommandError> {
+    let mut map = Map::new();
+    match value {
+        FrontendIntentView::Command(payload) => {
+            map.insert("kind".to_owned(), Value::from("command"));
+            map.insert("value".to_owned(), encode_submit_view_value(payload)?);
+        }
+        FrontendIntentView::Create(payload) => {
+            map.insert("kind".to_owned(), Value::from("create"));
+            map.insert("value".to_owned(), encode_create_view_value(payload)?);
+        }
+    }
+    Ok(Value::Object(map))
+}
+
 fn decode_rejection_view_value(value: &Value, context: &'static str) -> Result<RejectionView, CommandError> {
     let text = value.as_str().ok_or(CommandError::Shape { context })?;
     match text {
@@ -624,6 +816,95 @@ fn encode_command_completion_view_value(value: &CommandCompletionView) -> Result
     Ok(Value::Object(map))
 }
 
+fn decode_create_refusal_view_value(value: &Value, context: &'static str) -> Result<CreateRefusalView, CommandError> {
+    let text = value.as_str().ok_or(CommandError::Shape { context })?;
+    match text {
+        "invite_not_recognized" => Ok(CreateRefusalView::InviteNotRecognized),
+        "invite_bare_room_code" => Ok(CreateRefusalView::InviteBareRoomCode),
+        "invite_malformed" => Ok(CreateRefusalView::InviteMalformed),
+        "invite_too_long" => Ok(CreateRefusalView::InviteTooLong),
+        "invite_unsupported" => Ok(CreateRefusalView::InviteUnsupported),
+        "invite_role_unsupported" => Ok(CreateRefusalView::InviteRoleUnsupported),
+        "storage_fault" => Ok(CreateRefusalView::StorageFault),
+        "internal" => Ok(CreateRefusalView::Internal),
+        _ => Err(CommandError::UnknownVariant { context }),
+    }
+}
+
+fn encode_create_refusal_view_value(value: &CreateRefusalView) -> Value {
+    Value::from(match value {
+        CreateRefusalView::InviteNotRecognized => "invite_not_recognized",
+        CreateRefusalView::InviteBareRoomCode => "invite_bare_room_code",
+        CreateRefusalView::InviteMalformed => "invite_malformed",
+        CreateRefusalView::InviteTooLong => "invite_too_long",
+        CreateRefusalView::InviteUnsupported => "invite_unsupported",
+        CreateRefusalView::InviteRoleUnsupported => "invite_role_unsupported",
+        CreateRefusalView::StorageFault => "storage_fault",
+        CreateRefusalView::Internal => "internal",
+    })
+}
+
+fn decode_card_created_view_value(value: &Value, context: &'static str) -> Result<CardCreatedView, CommandError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["card"], context)?;
+    let card = hex_fixed(field(map, "card", "CardCreatedView.card")?, 16, "CardCreatedView.card")?;
+    Ok(CardCreatedView {
+        card,
+    })
+}
+
+fn encode_card_created_view_value(value: &CardCreatedView) -> Result<Value, CommandError> {
+    let mut map = Map::new();
+    map.insert("card".to_owned(), encode_hex_fixed(&value.card, 16, "CardCreatedView.card")?);
+    Ok(Value::Object(map))
+}
+
+fn decode_create_outcome_view_value(value: &Value, context: &'static str) -> Result<CreateOutcomeView, CommandError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["kind", "value"], context)?;
+    let kind = field(map, "kind", context)?
+        .as_str()
+        .ok_or(CommandError::Shape { context })?;
+    match kind {
+        "created" => Ok(CreateOutcomeView::Created(decode_card_created_view_value(payload(map, "CreateOutcomeView.created")?, "CreateOutcomeView.created")?)),
+        "refused" => Ok(CreateOutcomeView::Refused(decode_create_refusal_view_value(payload(map, "CreateOutcomeView.refused")?, "CreateOutcomeView.refused")?)),
+        _ => Err(CommandError::UnknownVariant { context }),
+    }
+}
+
+fn encode_create_outcome_view_value(value: &CreateOutcomeView) -> Result<Value, CommandError> {
+    let mut map = Map::new();
+    match value {
+        CreateOutcomeView::Created(payload) => {
+            map.insert("kind".to_owned(), Value::from("created"));
+            map.insert("value".to_owned(), encode_card_created_view_value(payload)?);
+        }
+        CreateOutcomeView::Refused(payload) => {
+            map.insert("kind".to_owned(), Value::from("refused"));
+            map.insert("value".to_owned(), encode_create_refusal_view_value(payload));
+        }
+    }
+    Ok(Value::Object(map))
+}
+
+fn decode_create_result_view_value(value: &Value, context: &'static str) -> Result<CreateResultView, CommandError> {
+    let map = frame_object(value, context)?;
+    known_keys(map, &["outcome", "request_id"], context)?;
+    let outcome = decode_create_outcome_view_value(field(map, "outcome", "CreateResultView.outcome")?, "CreateResultView.outcome")?;
+    let request_id = hex_fixed(field(map, "request_id", "CreateResultView.request_id")?, 32, "CreateResultView.request_id")?;
+    Ok(CreateResultView {
+        outcome,
+        request_id,
+    })
+}
+
+fn encode_create_result_view_value(value: &CreateResultView) -> Result<Value, CommandError> {
+    let mut map = Map::new();
+    map.insert("outcome".to_owned(), encode_create_outcome_view_value(&value.outcome)?);
+    map.insert("request_id".to_owned(), encode_hex_fixed(&value.request_id, 32, "CreateResultView.request_id")?);
+    Ok(Value::Object(map))
+}
+
 fn decode_command_body_value(value: &Value, context: &'static str) -> Result<CommandBody, CommandError> {
     let map = frame_object(value, context)?;
     known_keys(map, &["kind", "value"], context)?;
@@ -631,9 +912,10 @@ fn decode_command_body_value(value: &Value, context: &'static str) -> Result<Com
         .as_str()
         .ok_or(CommandError::Shape { context })?;
     match kind {
-        "submit" => Ok(CommandBody::Submit(decode_submit_view_value(payload(map, "CommandBody.submit")?, "CommandBody.submit")?)),
+        "intent" => Ok(CommandBody::Intent(decode_frontend_intent_view_value(payload(map, "CommandBody.intent")?, "CommandBody.intent")?)),
         "acceptance" => Ok(CommandBody::Acceptance(decode_command_acceptance_view_value(payload(map, "CommandBody.acceptance")?, "CommandBody.acceptance")?)),
         "completion" => Ok(CommandBody::Completion(decode_command_completion_view_value(payload(map, "CommandBody.completion")?, "CommandBody.completion")?)),
+        "create_result" => Ok(CommandBody::CreateResult(decode_create_result_view_value(payload(map, "CommandBody.create_result")?, "CommandBody.create_result")?)),
         _ => Err(CommandError::UnknownVariant { context }),
     }
 }
@@ -641,9 +923,9 @@ fn decode_command_body_value(value: &Value, context: &'static str) -> Result<Com
 fn encode_command_body_value(value: &CommandBody) -> Result<Value, CommandError> {
     let mut map = Map::new();
     match value {
-        CommandBody::Submit(payload) => {
-            map.insert("kind".to_owned(), Value::from("submit"));
-            map.insert("value".to_owned(), encode_submit_view_value(payload)?);
+        CommandBody::Intent(payload) => {
+            map.insert("kind".to_owned(), Value::from("intent"));
+            map.insert("value".to_owned(), encode_frontend_intent_view_value(payload)?);
         }
         CommandBody::Acceptance(payload) => {
             map.insert("kind".to_owned(), Value::from("acceptance"));
@@ -652,6 +934,10 @@ fn encode_command_body_value(value: &CommandBody) -> Result<Value, CommandError>
         CommandBody::Completion(payload) => {
             map.insert("kind".to_owned(), Value::from("completion"));
             map.insert("value".to_owned(), encode_command_completion_view_value(payload)?);
+        }
+        CommandBody::CreateResult(payload) => {
+            map.insert("kind".to_owned(), Value::from("create_result"));
+            map.insert("value".to_owned(), encode_create_result_view_value(payload)?);
         }
     }
     Ok(Value::Object(map))

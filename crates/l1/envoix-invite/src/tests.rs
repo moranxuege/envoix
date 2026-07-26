@@ -249,6 +249,73 @@ fn room_codes_and_invites_redact_the_pairing_secret() {
     assert!(crate::NamespacedRoomKey::parse("123456").is_err());
 }
 
+/// The published emit bound is the encoder's own maximum, in both directions.
+///
+/// Invites are grown against the grammar until it refuses one, so the longest
+/// link there is comes from the encoder rather than from arithmetic about it.
+/// The endpoints are padded with `"`, the character that costs two JSON bytes,
+/// because the payload ceiling is reached long before the endpoints' own
+/// length bounds are.
+///
+/// Equality, not `<=`: a bound above the maximum is a number nobody checked,
+/// and one below it is the defect this test exists for — a link the grammar
+/// happily emits that everything downstream sizes itself too small to carry.
+#[test]
+fn the_link_bound_is_the_longest_link_the_encoder_can_produce() {
+    let longest_code = format!("000123-{}-{}", "a".repeat(16), "b".repeat(16));
+    let mut longest = 0;
+    for role in [Role::Send, Role::Receive] {
+        // Payload lengths move in steps of two as the relay grows, so the
+        // broker walks the odd byte the relay cannot reach.
+        for broker_length in 1..=3 {
+            let broker = "\"".repeat(broker_length);
+            for relay_length in 1..=MAX_RELAY_LENGTH {
+                let relay = "\"".repeat(relay_length);
+                let Ok(invite) = Invite::new(&longest_code, &broker, &relay, role) else {
+                    panic!("the grammar admits {relay_length} quotes as a relay");
+                };
+                let Ok(link) = encode_deep_link(&invite) else {
+                    break;
+                };
+                assert!(
+                    encode_qr(&invite).unwrap().len() <= link.len(),
+                    "the deep link is the wider of the two outer forms"
+                );
+                longest = longest.max(link.len());
+            }
+        }
+    }
+    assert_eq!(
+        longest,
+        crate::MAX_INVITE_LINK_LENGTH,
+        "the published bound must be exactly what the encoder can produce"
+    );
+}
+
+/// The payload skeleton the emit bound is derived from is the one serde
+/// actually writes, so the derivation stays honest if the payload ever gains a
+/// field or the encoder's ceiling is raised above what the fields admit.
+#[test]
+fn the_payload_skeleton_is_the_one_serde_writes() {
+    let invite = Invite::new(CODE, BROKER, RELAY, Role::Send).unwrap();
+    let payload = encode_deep_link(&invite)
+        .unwrap()
+        .rsplit_once('/')
+        .map(|(_, payload)| payload.to_owned())
+        .unwrap();
+    let json = URL_SAFE_NO_PAD.decode(payload).unwrap();
+
+    assert_eq!(
+        json.len(),
+        crate::invite::PAYLOAD_SKELETON.len()
+            + INVITE_PAYLOAD_VERSION.to_string().len()
+            + CODE.len()
+            + BROKER.len()
+            + RELAY.len()
+            + "send".len()
+    );
+}
+
 fn encoded_json(json: &str) -> String {
     URL_SAFE_NO_PAD.encode(json.as_bytes())
 }

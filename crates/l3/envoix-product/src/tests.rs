@@ -48,6 +48,7 @@ fn create(direction: Direction, source: SourceDecision) -> (TransferRecord, Vec<
             offered_name: OfferedName::from_untrusted("a.zip"),
             total: ByteCount::new(100),
             source,
+            pairing: None,
         },
         &mut DeterministicEntropy::default(),
     )
@@ -213,6 +214,7 @@ fn product_mints_all_identity_before_the_first_attempt() {
             offered_name: OfferedName::from_untrusted("a.zip"),
             total: ByteCount::new(1),
             source: SourceDecision::Ready,
+            pairing: None,
         },
         &mut UnavailableEntropy,
     )
@@ -230,6 +232,7 @@ fn receiver_adopts_authenticated_transfer_identity_and_mints_local_identity() {
             offered_name: OfferedName::from_untrusted("authenticated.zip"),
             total: ByteCount::new(321),
             source: SourceDecision::Ready,
+            pairing: None,
         },
         transfer,
         artifact,
@@ -2092,6 +2095,146 @@ fn product_model_scenario_trace() {
     ));
 }
 
+/// Creating a card that still needs a source ASKS for one, and the ask is a
+/// post-commit effect: the record exists before the picker is ever consulted
+/// (`SF02`). A card whose source is already ready asks for nothing, because
+/// there is nothing to ask for.
+#[test]
+fn a_card_that_needs_a_source_asks_the_platform_for_one() {
+    let (record, effects) = create(
+        Direction::Send,
+        SourceDecision::Stage { recoverable: false },
+    );
+    assert_eq!(record.state, ProductState::Preparing);
+    let [ProductEffect::CapabilityDuty { duty, action }] = effects.as_slice() else {
+        panic!("a staged create asks for a source, got {effects:?}");
+    };
+    assert_eq!(*action, CapabilityAction::SelectSource);
+    assert_eq!(duty.kind, DutyKind::SourceHandle);
+    assert_eq!(duty.provenance.card, record.identity.card);
+    assert_eq!(duty.provenance.generation, record.generation);
+
+    // A duty is world-facing, so the commit barrier holds it until the record
+    // is durable — the whole reason the picker cannot be what decides a
+    // transfer exists.
+    let (session, outcome) = crate::CommittedSession::create_without_store(
+        NewTransfer {
+            direction: Direction::Send,
+            offered_name: OfferedName::from_untrusted("a.zip"),
+            total: ByteCount::new(100),
+            source: SourceDecision::Stage { recoverable: false },
+            pairing: None,
+        },
+        &mut DeterministicEntropy::default(),
+    )
+    .expect("deterministic identity source");
+    assert_eq!(session.record().state, ProductState::Preparing);
+    assert!(outcome.released_immediately.is_empty());
+    assert_eq!(outcome.released_after_commit.len(), 1);
+
+    // A ready source has nothing to pick, and a card created needing a re-pick
+    // is already failed — asking would be asking on behalf of a dead card.
+    for source in [SourceDecision::Ready, SourceDecision::NeedsRepick] {
+        let (_, effects) = create(Direction::Send, source);
+        assert!(
+            !effects.iter().any(|effect| matches!(
+                effect,
+                ProductEffect::CapabilityDuty {
+                    action: CapabilityAction::SelectSource,
+                    ..
+                }
+            )),
+            "{source:?} asked for a source it does not need"
+        );
+    }
+}
+
+/// The re-pick command is the recovery `RS04` says the old app stranded users
+/// without. It now actually asks, under a FRESH generation — so the C6 ledger
+/// sees a new duty rather than one it has already discharged.
+#[test]
+fn re_picking_a_source_asks_again_under_a_new_generation() {
+    let mut record = preparing(Direction::Send, false);
+    let stamp = record.stamp();
+    let _ = record.reduce(ProductInput::StageFailed { stamp });
+    let _ = record.reduce(ProductInput::StagingRetired { stamp });
+    assert_eq!(record.state, ProductState::Failed);
+    assert_eq!(
+        record.outcome.as_ref().and_then(|outcome| outcome.recovery),
+        Some(Recovery::RePickSource)
+    );
+
+    let effects = record
+        .reduce(ProductInput::Command(ProductCommand::RePickSource))
+        .expect("the re-pick reduces");
+    let [ProductEffect::CapabilityDuty { duty, action }] = effects.as_slice() else {
+        panic!("a re-pick asks for a source, got {effects:?}");
+    };
+    assert_eq!(*action, CapabilityAction::SelectSource);
+    assert_eq!(duty.provenance.generation, record.generation);
+    assert_ne!(duty.provenance.generation, stamp.generation);
+    assert_eq!(record.state, ProductState::Preparing);
+}
+
+/// The two duties one card can raise must never share a provenance: the C6
+/// ledger keys discharge by provenance, so a collision would make one admitted
+/// result answer for the other. The tag is a constant, so this is exhaustive
+/// over every identity the minter can produce.
+#[test]
+fn the_source_and_receipt_duties_never_share_an_identity() {
+    let mut seen = std::collections::HashSet::new();
+    for seed in 0..64u8 {
+        let mut record = ready(Direction::Send);
+        record.receipt_request = RequestId::from_bytes([seed; 16]);
+        let source = record.source_request();
+        assert_ne!(
+            source, record.receipt_request,
+            "the source duty reused the receipt's identity"
+        );
+        assert!(seen.insert(source), "two receipts produced one source id");
+    }
+}
+
+/// A card's channel survives the record codec and re-encodes to the invite it
+/// came from, so a restarted app publishes the same invite it published before.
+#[test]
+fn a_cards_channel_survives_the_record_and_re_encodes_to_its_invite() {
+    let invite = envoix_invite::Invite::new(
+        "000123-amber-brass",
+        "rendezvous.example",
+        "relay.example",
+        envoix_invite::Role::Send,
+    )
+    .expect("a well-formed invite");
+    let link = envoix_invite::encode_deep_link(&invite).expect("the invite encodes");
+
+    let (record, _) = TransferRecord::create(
+        NewTransfer {
+            direction: Direction::Send,
+            offered_name: OfferedName::from_untrusted("a.zip"),
+            total: ByteCount::new(100),
+            source: SourceDecision::Stage { recoverable: false },
+            pairing: Some(Box::new(crate::PairingChannel::from_invite(&invite))),
+        },
+        &mut DeterministicEntropy::default(),
+    )
+    .expect("deterministic identity source");
+
+    let encoded = encode_record(&record).expect("the record encodes");
+    let RecordDecode::Loaded(restored) = decode_record(&encoded).expect("the record decodes")
+    else {
+        panic!("a freshly written record is not a future version");
+    };
+    let channel = restored.pairing.expect("the channel survived");
+    assert_eq!(channel.code(), "000123-amber-brass");
+    assert_eq!(channel.shareable(), Some(link));
+    // The invite is re-derived, never stored twice: parsing the published text
+    // yields the channel it was published from.
+    let round_tripped = envoix_invite::route_invite(&channel.shareable().unwrap())
+        .expect("the published invite parses");
+    assert_eq!(round_tripped, invite);
+}
+
 fn fixture_record() -> TransferRecord {
     TransferRecord {
         identity: ProductIdentity {
@@ -2117,6 +2260,7 @@ fn fixture_record() -> TransferRecord {
             remove_requested: false,
         },
         source_recoverable: true,
+        pairing: None,
         receipt_request: RequestId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4]),
         command_ledger: crate::CommandLedger::default(),
     }
@@ -2133,12 +2277,12 @@ fn product_record_roundtrips() {
 }
 
 #[test]
-fn product_record_v2_has_a_byte_exact_fixture() {
-    let body = br#"{"identity":{"card":1,"transfer":"00000000000000000000000000000002","artifact":"00000000000000000000000000000003"},"direction":"send","offered_name":"a.txt","total":10,"state":{"state":"paused","origin":"local"},"quiescence":{"status":"quiescent"},"generation":7,"phase":"transferring","bytes":4,"bytes_resumed":2,"outcome":null,"facts":{"source_ready":true,"complete_sent":false,"proof_delivered":false,"receipt_mismatch":false,"remove_requested":false},"source_recoverable":true,"receipt_request":"00000000000000000000000000000004","command_ledger":[]}"#;
+fn product_record_v3_has_a_byte_exact_fixture() {
+    let body = br#"{"identity":{"card":1,"transfer":"00000000000000000000000000000002","artifact":"00000000000000000000000000000003"},"direction":"send","offered_name":"a.txt","total":10,"state":{"state":"paused","origin":"local"},"quiescence":{"status":"quiescent"},"generation":7,"phase":"transferring","bytes":4,"bytes_resumed":2,"outcome":null,"facts":{"source_ready":true,"complete_sent":false,"proof_delivered":false,"receipt_mismatch":false,"remove_requested":false},"source_recoverable":true,"pairing":null,"receipt_request":"00000000000000000000000000000004","command_ledger":[]}"#;
     let mut expected = Vec::new();
     expected.extend_from_slice(&23_u16.to_be_bytes());
     expected.extend_from_slice(b"envoix/product-record/1");
-    expected.extend_from_slice(&2_u32.to_be_bytes());
+    expected.extend_from_slice(&3_u32.to_be_bytes());
     expected.extend_from_slice(&(body.len() as u32).to_be_bytes());
     expected.extend_from_slice(body);
     assert_eq!(encode_record(&fixture_record()).unwrap(), expected);
@@ -2165,10 +2309,10 @@ fn product_record_v1_without_command_ledger_still_decodes() {
 fn product_record_future_version_is_quarantinable() {
     let mut encoded = encode_record(&fixture_record()).unwrap();
     let version_offset = 2 + b"envoix/product-record/1".len();
-    encoded[version_offset..version_offset + 4].copy_from_slice(&3_u32.to_be_bytes());
+    encoded[version_offset..version_offset + 4].copy_from_slice(&4_u32.to_be_bytes());
     assert_eq!(
         decode_record(&encoded).unwrap(),
-        RecordDecode::UnsupportedFuture { version: 3 }
+        RecordDecode::UnsupportedFuture { version: 4 }
     );
 }
 

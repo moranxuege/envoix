@@ -5,6 +5,7 @@
 mod commit;
 mod identity;
 mod model;
+mod pairing;
 mod reducer;
 mod source;
 
@@ -14,12 +15,17 @@ pub use commit::{
     ApplyOutcome, CommandApplied, CommitError, CommitFailure, CommitStatus, CommittedSession,
     NoRecordStore, RecordStore,
 };
+// The invite grammar's own published maxima, re-exported beside the channel
+// that carries them: an observer sizes its contract from the layer that owns
+// invites (`XI02`) instead of restating a number about somebody else's data.
+pub use envoix_invite::{MAX_INVITE_INPUT_LENGTH, MAX_INVITE_LINK_LENGTH, MAX_ROOM_CODE_LENGTH};
 pub use identity::{IdentityError, IdentitySource, ProductIdentity, SystemIdentitySource};
 pub use model::{
     AppliedCommand, CapabilityAction, CommandLedger, Facts, LedgerHit, NewTransfer, PauseOrigin,
     ProductCommand, ProductEffect, ProductInput, ProductState, Quiescence, SourceDecision,
     StorageAction, TransferRecord, WorkerKind,
 };
+pub use pairing::PairingChannel;
 pub use record::{
     OLDEST_READABLE_RECORD_VERSION, PRODUCT_RECORD_VERSION, RecordCodecError, RecordDecode,
     decode_record, encode_record,

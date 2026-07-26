@@ -21,10 +21,10 @@ use envoix_evidence::{
 };
 use envoix_outcomes::{Outcome, OutcomeCode, Phase, Retryability, SafeDisplay};
 use envoix_runtime::{
-    CardUpdateKind, Duty, DutyKind, DutyProvenance, LosslessUpdateKind, SubscribeError,
-    TransferRecord,
+    CardUpdateKind, Duty, DutyKind, DutyProvenance, LosslessUpdateKind, MAX_INVITE_LINK_LENGTH,
+    MAX_ROOM_CODE_LENGTH, SubscribeError, TransferRecord,
 };
-use envoix_types::{AttemptGen, RecordId, RequestId, TransferId};
+use envoix_types::{AttemptGen, OfferedName, RecordId, RequestId, TransferId};
 
 fn artifacts(doc: &envoix_bindings::SchemaDoc) -> [(&'static str, String); 4] {
     [
@@ -99,6 +99,99 @@ fn generated_artifacts_match_schema() {
 
 /// Fabricates a durable-authority record through its serde contract; the
 /// binding never constructs records in production, only projects them.
+///
+/// The card's published channel, exercised at the widest the grammar admits:
+/// an invite the authority holds REACHES the frontend, whole, however long the
+/// grammar let it be. F2b shipped the opposite — a 1 KiB bound restated from
+/// nowhere meant a legal invite over that length was published as absent, so
+/// the sender saw no link, could not share it, and nothing errored anywhere.
+///
+/// The bound is the grammar's own now, so the only absence left is a channel
+/// that no longer spells an invite at all.
+#[test]
+fn an_invite_reaches_the_frontend_however_long_the_grammar_let_it_be() {
+    // Built the way this suite builds every other durable value: from the
+    // record's own encoding. L5 sees the channel through L4's facade and has no
+    // dependency on the invite grammar, which is the point — the projection
+    // calls the channel's own encoder rather than re-implementing one.
+    let channel = |broker: &str, relay: &str| -> envoix_runtime::PairingChannel {
+        serde_json::from_value(serde_json::json!({
+            "code": "000123-amber-brass",
+            "broker": broker,
+            "relay": relay,
+            "role": "send",
+        }))
+        .expect("a well-formed channel")
+    };
+    let published = |broker: &str, relay: &str| {
+        let mut held = record(
+            serde_json::json!({"state": "waiting"}),
+            serde_json::json!({"status": "quiescent"}),
+            serde_json::Value::Null,
+        );
+        held.pairing = Some(Box::new(channel(broker, relay)));
+        let frame = card_update_frame(1, card(), &CardUpdateKind::Snapshot(held));
+        let ReadBody::CardUpdate(update) = frame.body else {
+            panic!("card update expected");
+        };
+        let CardUpdateKindView::Snapshot(view) = update.kind else {
+            panic!("snapshot expected");
+        };
+        view.invite.expect("a channel publishes an invite")
+    };
+
+    let short = published("broker.example", "relay.example");
+    let link = short.link.expect("a short channel publishes its link");
+    assert!(
+        link.starts_with("envoix://"),
+        "the link is the grammar's own encoding, not a fragment"
+    );
+    assert_eq!(short.code, "000123-amber-brass");
+
+    // The widest endpoints the grammar admits — an invite far past the bound
+    // F2b restated, and one the frontend must still be handed whole.
+    let widest = published(&"b".repeat(1024), &"r".repeat(2048));
+    let link = widest.link.expect("a maximal channel publishes its link");
+    assert!(
+        link.len() > 1024 && link.len() <= MAX_INVITE_LINK_LENGTH,
+        "a maximal invite is {} bytes and must cross whole",
+        link.len()
+    );
+    assert_eq!(
+        widest.code, "000123-amber-brass",
+        "the code crosses beside it"
+    );
+
+    // And it survives the codec: the schema's bound admits what the grammar
+    // emits, so the frame carrying it encodes and decodes byte for byte.
+    let mut held = record(
+        serde_json::json!({"state": "waiting"}),
+        serde_json::json!({"status": "quiescent"}),
+        serde_json::Value::Null,
+    );
+    held.pairing = Some(Box::new(channel(&"b".repeat(1024), &"r".repeat(2048))));
+    let frame = card_update_frame(1, card(), &CardUpdateKind::Snapshot(held));
+    let bytes = encode_read_frame(&frame).expect("a maximal invite encodes");
+    let decoded = decode_read_frame(&bytes).expect("a maximal invite decodes");
+    let ReadBody::CardUpdate(update) = decoded.body else {
+        panic!("card update expected");
+    };
+    let CardUpdateKindView::Snapshot(view) = update.kind else {
+        panic!("snapshot expected");
+    };
+    assert_eq!(
+        view.invite.expect("the invite survives the codec").link,
+        Some(link)
+    );
+
+    // The one absence left: fields that no longer spell an invite.
+    let unspellable = published("broker.example", " relay.example ");
+    assert_eq!(
+        unspellable.link, None,
+        "a channel the grammar cannot re-read has no link to publish"
+    );
+}
+
 fn record(
     state: serde_json::Value,
     quiescence: serde_json::Value,
@@ -379,7 +472,7 @@ fn generated_read_schema_roundtrip_and_containment() {
 
     // Unknown or missing schema versions fail explicitly.
     let future = tamper(&base, |value| {
-        value["schema"] = serde_json::json!("envoix/binding/read/4");
+        value["schema"] = serde_json::json!("envoix/binding/read/5");
     });
     assert_eq!(decode_read_frame(&future), Err(ReadError::UnknownSchema));
     let missing = tamper(&base, |value| {
@@ -559,32 +652,146 @@ fn generated_read_schema_roundtrip_and_containment() {
         panic!("card update expected");
     }
 
-    // The schema grammar itself cannot express bulk bytes or OS handles:
-    // the scalar vocabulary is closed and every string/list is bounded.
+    // The schema grammar itself cannot express bulk bytes or OS handles: the
+    // scalar vocabulary is closed and every string/list is bounded.
+    //
+    // A string's bound is one of two things and never a third. Either it is
+    // this contract's own containment choice about text it MINTS — schema ids,
+    // a package version, a protocol set id — and 1 KiB is more of that than any
+    // observer renders; or the value belongs to another layer, and then the
+    // bound must EQUAL that layer's published maximum. The second kind is where
+    // F2b shipped a silent failure: a 1 KiB link bound restated a grammar whose
+    // encoder emits up to 5481 bytes, so every longer invite the authority held
+    // was published as absent. Equality is what makes that unrepresentable
+    // rather than gated.
+    //
+    // The FALLBACK is the rule, not a detail of it. A field nobody classified
+    // is not contract-local, it is UNEXAMINED — and "unexamined" defaulting to
+    // "ours" is exactly how `display` and `offered_name` sat here restating two
+    // L0 facts whose owner had never published them. So an unclassified text
+    // bound stops the build and asks which of the two it is.
+    const CONTRACT_LOCAL_TEXT_BYTES: u32 = 1024;
+    enum TextBound {
+        /// Another layer's value: this bound must be that layer's maximum.
+        Derived(usize),
+        /// Text this contract mints, so the bound is this contract's call.
+        ContractLocal,
+    }
+    let classified: [(&str, &str, TextBound); 13] = [
+        (
+            "OutcomeView",
+            "display",
+            TextBound::Derived(SafeDisplay::MAX_BYTES),
+        ),
+        (
+            "InviteView",
+            "code",
+            TextBound::Derived(MAX_ROOM_CODE_LENGTH),
+        ),
+        (
+            "InviteView",
+            "link",
+            TextBound::Derived(MAX_INVITE_LINK_LENGTH),
+        ),
+        (
+            "CardView",
+            "offered_name",
+            TextBound::Derived(OfferedName::MAX_BYTES),
+        ),
+        ("ProtocolManifestView", "set_id", TextBound::ContractLocal),
+        (
+            "AbiSchemaManifestView",
+            "read_binding_schema_id",
+            TextBound::ContractLocal,
+        ),
+        (
+            "AbiSchemaManifestView",
+            "command_binding_schema_id",
+            TextBound::ContractLocal,
+        ),
+        (
+            "AbiSchemaManifestView",
+            "evidence_rust_abi_id",
+            TextBound::ContractLocal,
+        ),
+        (
+            "AbiSchemaManifestView",
+            "evidence_timeline_schema_id",
+            TextBound::ContractLocal,
+        ),
+        (
+            "AbiSchemaManifestView",
+            "mailbox_receipt_schema_id",
+            TextBound::ContractLocal,
+        ),
+        (
+            "AbiSchemaManifestView",
+            "operation_envelope_schema_id",
+            TextBound::ContractLocal,
+        ),
+        (
+            "BuildManifestView",
+            "package_version",
+            TextBound::ContractLocal,
+        ),
+        ("ReadFrame", "schema", TextBound::ContractLocal),
+    ];
     let doc = parse_schema(read_schema_text()).expect("schema parses");
-    fn assert_contained(ty: &FieldTy) {
+    /// Returns how many text bounds this type carries, so the caller can prove
+    /// the classification covers every one of them and nothing else.
+    fn assert_contained(ty: &FieldTy, bound: Option<&TextBound>, context: &str) -> usize {
         match ty {
-            FieldTy::U16 | FieldTy::U32 | FieldTy::U63 => {}
-            FieldTy::Hex16 | FieldTy::Hex32 | FieldTy::Hex64 => {}
-            FieldTy::HexVar { max_chars } => assert!(*max_chars > 0),
-            FieldTy::Str { max_bytes } | FieldTy::Ascii { max_bytes } => {
-                assert!(*max_bytes > 0 && *max_bytes <= 1024);
+            FieldTy::U16 | FieldTy::U32 | FieldTy::U63 => 0,
+            FieldTy::Hex16 | FieldTy::Hex32 | FieldTy::Hex64 => 0,
+            FieldTy::HexVar { max_chars } => {
+                assert!(*max_chars > 0);
+                0
             }
-            FieldTy::Named(_) => {}
-            FieldTy::Option(inner) => assert_contained(inner),
+            FieldTy::Str { max_bytes } | FieldTy::Ascii { max_bytes } => {
+                match bound {
+                    Some(TextBound::Derived(published)) => assert_eq!(
+                        *max_bytes as usize, *published,
+                        "{context} carries another layer's value, so its bound must be that \
+                         layer's published maximum"
+                    ),
+                    Some(TextBound::ContractLocal) => assert!(
+                        *max_bytes > 0 && *max_bytes <= CONTRACT_LOCAL_TEXT_BYTES,
+                        "{context}: a contract-local bound above {CONTRACT_LOCAL_TEXT_BYTES} \
+                         bytes is a number this contract invented about somebody else's data"
+                    ),
+                    None => panic!(
+                        "{context} carries a text bound nobody classified: say whether it is \
+                         text this contract mints or another layer's published maximum"
+                    ),
+                }
+                1
+            }
+            FieldTy::Named(_) => 0,
+            FieldTy::Option(inner) => assert_contained(inner, bound, context),
             FieldTy::List { element, max_len } => {
                 assert!(*max_len > 0);
-                assert_contained(element);
+                assert_contained(element, bound, context)
             }
         }
     }
+    let mut judged = 0;
     for decl in &doc.decls {
         if let envoix_bindings::Decl::Struct(decl) = decl {
             for field in &decl.fields {
-                assert_contained(&field.ty);
+                let bound = classified
+                    .iter()
+                    .find(|(owner, name, _)| *owner == decl.name && *name == field.name)
+                    .map(|(_, _, bound)| bound);
+                judged +=
+                    assert_contained(&field.ty, bound, &format!("{}.{}", decl.name, field.name));
             }
         }
     }
+    assert_eq!(
+        judged,
+        classified.len(),
+        "every classification must name a field that carries a text bound"
+    );
 }
 
 #[test]

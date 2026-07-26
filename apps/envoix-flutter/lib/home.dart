@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'attachment.dart';
 import 'bindings/envoix_command.dart';
@@ -44,7 +45,7 @@ class HomeScreen extends StatelessWidget {
         if (cards.isEmpty && fault == null)
           const Padding(
             padding: EdgeInsets.symmetric(vertical: 24),
-            child: Text('No transfers yet.'),
+            child: Text('No transfers yet. Use New transfer to start one.'),
           ),
         for (final CardRow row in cards)
           CardTile(
@@ -161,6 +162,8 @@ class CardTile extends StatelessWidget {
                 ].join(' · '),
                 style: theme.textTheme.bodySmall,
               ),
+              if (view.invite != null)
+                _Invite(card: row.card, invite: view.invite!),
               if (view.outcome != null) _Outcome(outcome: view.outcome!),
               _Actions(
                 row: row,
@@ -310,6 +313,59 @@ class _Intent extends StatelessWidget {
               TextButton(
                 onPressed: () => commander.reissue(row, intent),
                 child: const Text('Ask again'),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// The card's invite, exactly as the authority published it.
+///
+/// The app renders it and can put it on the clipboard; it does not build one,
+/// parse one, or judge one. The link is sized by the invite grammar itself, so
+/// an invite the authority holds always arrives whole; a card whose stored
+/// channel no longer spells one still shows its code, because the code is what
+/// a user reads out.
+class _Invite extends StatelessWidget {
+  const _Invite({required this.card, required this.invite});
+
+  final String card;
+  final InviteView invite;
+
+  @override
+  Widget build(BuildContext context) {
+    reportInvite(card, invite);
+    final ColorScheme colors = Theme.of(context).colorScheme;
+    final String? link = invite.link;
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(8),
+        decoration: BoxDecoration(
+          color: colors.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            _Fact(label: 'Room code', value: invite.code),
+            if (link != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: TextButton(
+                  onPressed: () =>
+                      Clipboard.setData(ClipboardData(text: link)),
+                  child: const Text('Copy invite'),
+                ),
+              )
+            else
+              const _Fact(
+                label: 'Invite link',
+                value: 'This card has no shareable link — read out the code.',
+                warn: true,
               ),
           ],
         ),

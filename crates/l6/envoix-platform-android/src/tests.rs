@@ -97,6 +97,12 @@ fn platform_duty_crash_matrix() {
         if kind == DutyKind::Publication {
             pin_publication_crash_windows(duty.provenance);
         }
+        // The source handle became a LIVE kind in F2b, so its own lane gets the
+        // same treatment: the platform holds the pick, the card claims it, and
+        // a process death is an honest "re-pick" rather than a silent stall.
+        if kind == DutyKind::SourceHandle {
+            pin_source_pick_crash_windows(duty.provenance);
+        }
     }
 }
 
@@ -300,6 +306,81 @@ fn pin_publication_crash_windows(provenance: DutyProvenance) {
     assert!(world.committed_row_exists(&other));
 }
 
+/// A model of the Kotlin source-pick lane: one slot for the document the user
+/// picked, and a per-card binding once a card has claimed it. It mirrors
+/// `SourcePicks`: claiming is idempotent per card, a card that claims when no
+/// pick is outstanding gets nothing, and a process death loses both.
+#[derive(Default)]
+struct PickWorld {
+    offered: Option<&'static str>,
+    bound: HashMap<String, &'static str>,
+}
+
+impl PickWorld {
+    fn offer(&mut self, document: &'static str) {
+        self.offered = Some(document);
+    }
+
+    fn claim(&mut self, card: &str) -> Option<&'static str> {
+        if let Some(bound) = self.bound.get(card) {
+            return Some(bound);
+        }
+        let picked = self.offered.take()?;
+        self.bound.insert(card.to_owned(), picked);
+        Some(picked)
+    }
+
+    /// The outcome the executor reports for one delivery of the duty.
+    fn execute(&mut self, card: &str) -> OutcomeCode {
+        match self.claim(card) {
+            Some(_) => OutcomeCode::Completed,
+            None => OutcomeCode::SourceUnreadable,
+        }
+    }
+}
+
+fn pin_source_pick_crash_windows(provenance: DutyProvenance) {
+    let card = String::from(WireProvenance::from_provenance(provenance).card);
+    let other = format!("{card}-other");
+
+    // Window 1 — the duty is delivered twice in one process (a re-attach
+    // replays the outstanding duty). The second delivery must resolve to the
+    // SAME document rather than eat whatever the user picked next.
+    let mut world = PickWorld::default();
+    world.offer("holiday.mp4");
+    assert_eq!(world.execute(&card), OutcomeCode::Completed);
+    world.offer("something-else.bin");
+    assert_eq!(world.execute(&card), OutcomeCode::Completed);
+    assert_eq!(world.bound[&card], "holiday.mp4", "a re-delivery re-binds");
+    // ...and the newer pick is still there for the card that asked for it.
+    assert_eq!(world.execute(&other), OutcomeCode::Completed);
+    assert_eq!(world.bound[&other], "something-else.bin");
+
+    // Window 2 — a crash between the pick and the card claiming it. The
+    // platform slot is memory, so the honest report is that no source can be
+    // read: exactly the outcome whose recovery is "re-pick the source".
+    let mut world = PickWorld::default();
+    world.offer("holiday.mp4");
+    let mut crashed = PickWorld::default();
+    assert_eq!(crashed.execute(&card), OutcomeCode::SourceUnreadable);
+    assert_eq!(world.claim(&card), Some("holiday.mp4"), "the model is live");
+
+    // Window 3 — a card that never had a pick reports the same thing, so a
+    // frontend that asked for a send without one is refused by the platform
+    // rather than left waiting.
+    let mut world = PickWorld::default();
+    assert_eq!(world.execute(&card), OutcomeCode::SourceUnreadable);
+
+    // The report crosses the lane and the ledger admits it exactly once,
+    // whichever outcome it carried.
+    for outcome in [OutcomeCode::Completed, OutcomeCode::SourceUnreadable] {
+        let report = WorkReport::new(provenance, outcome);
+        let decoded = WorkReport::decode(&report.encode().unwrap()).unwrap();
+        assert_eq!(decoded, report);
+        assert_eq!(decoded.to_result().outcome, outcome);
+    }
+}
+
 /// `payload.bin` -> `payload.bin`, `payload (2).bin`, ... mirroring the Kotlin
 /// executor's deterministic uniquifier.
 fn uniquified(display_name: &str, attempt: u32) -> String {
@@ -358,11 +439,63 @@ fn frontend_lane_channel_is_one_name() {
         literal(DART, "const String commandChannel = ", '\''),
         commands
     );
-    // And one method name, spelled the same on both sides.
+    // And each method name, spelled the same on both sides. The pick is a
+    // platform capability rather than a transfer verb, but a typo in either
+    // literal is a "Choose a file" button that silently does nothing.
     assert_eq!(
-        literal(KOTLIN, "const val SUBMIT = ", '"'),
-        literal(DART, "const String submitMethod = ", '\'')
+        literal(KOTLIN, "const val INTENT = ", '"'),
+        literal(DART, "const String intentMethod = ", '\'')
     );
+    assert_eq!(
+        literal(KOTLIN, "const val PICK_SOURCE = ", '"'),
+        literal(DART, "const String pickSourceMethod = ", '\'')
+    );
+    assert_ne!(
+        literal(KOTLIN, "const val PICK_SOURCE = ", '"'),
+        literal(KOTLIN, "const val INTENT = ", '"'),
+        "two methods, two names"
+    );
+    // The pick's reply keys, which the Dart side reads back by name. A key the
+    // platform sends under one name and Dart reads under another is a picked
+    // file that always looks unnamed and zero bytes long.
+    for declaration in ["const val DISPLAY_NAME = ", "const val SIZE_BYTES = "] {
+        let key = literal(KOTLIN, declaration, '"');
+        assert!(
+            DART.contains(&format!("granted['{key}']")),
+            "the Dart lane never reads the `{key}` the platform sends"
+        );
+    }
+    // And the reply carries THOSE TWO KEYS AND NOTHING ELSE. This is what makes
+    // "Dart never holds a URI" a checked property rather than a promise: the
+    // only thing that could hand one over is this map, and its shape is pinned
+    // to the two scalars the frontend is allowed to know.
+    let reply = code_only(KOTLIN)
+        .split_once("mapOf(")
+        .expect("the pick answers with a map")
+        .1
+        .split_once(')')
+        .expect("the map literal closes")
+        .0
+        .to_owned();
+    let pairs: Vec<&str> = reply.split(" to ").collect();
+    // `a to x, b to y` splits into [a, "x, b", y]: every segment but the last
+    // ends with the NEXT key, and the first segment is a key on its own.
+    let keys: Vec<&str> = pairs[..pairs.len() - 1]
+        .iter()
+        .map(|segment| segment.rsplit(',').next().unwrap_or(segment).trim())
+        .collect();
+    assert_eq!(
+        keys.len(),
+        2,
+        "the pick reply carries {} values, not two: {reply}",
+        keys.len()
+    );
+    for key in keys {
+        assert!(
+            ["DISPLAY_NAME", "SIZE_BYTES"].contains(&key),
+            "the pick reply carries {key}; only sanitized metadata may cross"
+        );
+    }
 }
 
 /// The frontend Kotlin sources: the shim between the Dart lane and the JNI
@@ -466,14 +599,14 @@ fn the_frontend_kotlin_speaks_only_the_observer_vocabulary() {
         "../../../../apps/envoix-flutter/android/app/src/main/kotlin/app/envoix/host/",
         "NativeHost.kt"
     ));
-    /// Open an attachment, drain its frames, and submit ONE frontend-originated
-    /// command frame. Everything else on the lane is a lifetime verb — `boot`
-    /// and `shutdown` decide whether transfers exist at all, `pollWork` and
-    /// `reportDuty` are the service's own duty loop — and a frontend has none
-    /// of those. `submit` is a mutation the AUTHORITY resolves: the frontend
-    /// hands over bytes and is told what happened, which is the opposite of
-    /// deciding.
-    const PERMITTED_VERBS: [&str; 3] = ["attach", "pollFrame", "submit"];
+    /// Open an attachment, drain its frames, and hand over ONE
+    /// frontend-originated intent frame. Everything else on the lane is a
+    /// lifetime verb — `boot` and `shutdown` decide whether transfers exist at
+    /// all, `pollWork` and `reportDuty` are the service's own duty loop — and a
+    /// frontend has none of those. `intent` is a mutation the AUTHORITY
+    /// resolves: the frontend hands over bytes and is told what happened, which
+    /// is the opposite of deciding.
+    const PERMITTED_VERBS: [&str; 3] = ["attach", "pollFrame", "intent"];
     /// The token constant the lane compares against; not a verb.
     const PERMITTED_CONSTANTS: [&str; 1] = ["NO_ATTACHMENT"];
     /// A cold launch has to start something and this is the only entry point a
@@ -620,6 +753,41 @@ fn kotlin_executor_handles_exactly_the_executed_kinds() {
         .collect();
     executed.sort();
     assert_eq!(handled, executed, "Kotlin executor vs EXECUTED_KINDS");
+
+    // Handling a kind is not executing it honestly. The source duty's whole
+    // job is to answer whether a readable source is actually held for the card,
+    // so its arm must consult the platform rather than report success on
+    // arrival — the difference between "the file is there" and "we were asked".
+    // A device is what proves the Android calls behave; this proves the Kotlin
+    // asks the question at all, which is the half that can rot silently.
+    let bind = KOTLIN_EXECUTOR
+        .split_once("private fun bindSource(")
+        .expect("the executor binds a picked source")
+        .1
+        .split_once("\n    }")
+        .expect("the function body ends")
+        .0;
+    for required in ["SourcePicks.claim(", "SourcePicks.readable("] {
+        assert!(
+            bind.contains(required),
+            "bindSource never reaches {required}: it reports without asking"
+        );
+    }
+    // Both ways of not holding a readable source — no pick at all, and a pick
+    // whose grant has gone — answer `source_unreadable`, and exactly one path
+    // answers `completed`. Counting rather than matching a shape, so reformatting
+    // the arm is free while collapsing a failure into success is not.
+    assert_eq!(
+        bind.matches("\"source_unreadable\"").count(),
+        2,
+        "bindSource has {} unreadable answers, not two: {bind}",
+        bind.matches("\"source_unreadable\"").count()
+    );
+    assert_eq!(
+        bind.matches("\"completed\"").count(),
+        1,
+        "bindSource claims success on more than the one path that earns it"
+    );
 
     // What the host pump can dispatch is a subset of what Kotlin executes,
     // and every payload it builds matches its duty kind.

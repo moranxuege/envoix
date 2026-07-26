@@ -74,8 +74,18 @@ fun jsonEquals(left: Any?, right: Any?): Boolean = when {
 
 fun parse(text: String): Any = JSONTokener(text).nextValue()
 
-fun submit(card: String, epoch: Long, id: String, command: CommandView) =
-    SubmitView(card, epoch, id, command)
+fun submit(card: String, epoch: Long, id: String, command: CommandView): FrontendIntentView =
+    FrontendIntentView.Command(SubmitView(card, epoch, id, command))
+
+fun create(requestId: String, intent: CreateIntentView): FrontendIntentView =
+    FrontendIntentView.Create(CreateView(intent, requestId))
+
+fun createResult(outcome: CreateOutcomeView) =
+    CommandFrame(
+        body = CommandBody.CreateResult(
+            CreateResultView(outcome, "11111111111111111111111111111111"),
+        ),
+    )
 
 fun acceptance(value: AcceptanceView) =
     CommandFrame(
@@ -118,10 +128,10 @@ val commandViews = linkedMapOf(
 )
 
 /// Every body a frontend may originate, by vector name.
-fun handBuiltSubmits(): Map<String, SubmitView> {
+fun handBuiltSubmits(): Map<String, FrontendIntentView> {
     val card = "00000000000000ab"
     val id = "000102030405060708090a0b0c0d0e0f"
-    val bodies = linkedMapOf<String, SubmitView>()
+    val bodies = linkedMapOf<String, FrontendIntentView>()
 
     expectEq("every CommandView variant is swept", commandViews.size, CommandView.entries.size)
     commandViews.forEach { (name, command) -> bodies["submit_$name"] = submit(card, 7, id, command) }
@@ -137,6 +147,20 @@ fun handBuiltSubmits(): Map<String, SubmitView> {
     }
     bodies["submit_ids_min"] = submit("0".repeat(16), 1, "0".repeat(32), CommandView.CANCEL)
     bodies["submit_ids_max"] = submit("f".repeat(16), 1, "f".repeat(32), CommandView.CANCEL)
+
+    bodies["create_send_narrowest"] =
+        create(id, CreateIntentView.Send(SendSourceView("", 0)))
+    bodies["create_send_widest"] =
+        create("f".repeat(32), CreateIntentView.Send(SendSourceView("世".repeat(84) + "x", Long.MAX_VALUE)))
+    val invites = linkedMapOf(
+        "empty" to "",
+        "canonical" to "envoix://invite/v3/eyJ2ZXJzaW9uIjozfQ",
+        "bidirectional" to "\u202eenvoix://invite",
+        "at_bound" to "e".repeat(16384),
+    )
+    invites.forEach { (name, invite) ->
+        bodies["create_join_$name"] = create(id, CreateIntentView.Join(JoinInviteView(invite)))
+    }
     return bodies
 }
 
@@ -144,7 +168,7 @@ fun handBuiltSubmits(): Map<String, SubmitView> {
 fun handBuiltCommands(): Map<String, CommandFrame> {
     val frames = linkedMapOf<String, CommandFrame>()
     handBuiltSubmits().forEach { (name, body) ->
-        frames[name] = CommandFrame(body = CommandBody.Submit(body))
+        frames[name] = CommandFrame(body = CommandBody.Intent(body))
     }
     frames["acceptance_accepted"] = acceptance(AcceptanceView.Accepted)
     val rejections = linkedMapOf(
@@ -172,6 +196,12 @@ fun handBuiltCommands(): Map<String, CommandFrame> {
     )
     frames["completion_interrupted"] = completion(CompletionView.Interrupted)
     frames["completion_internal"] = completion(CompletionView.Internal)
+    val refusals = CreateRefusalView.entries
+    refusals.forEachIndexed { index, refusal ->
+        frames["create_refused_$index"] = createResult(CreateOutcomeView.Refused(refusal))
+    }
+    frames["create_created"] =
+        createResult(CreateOutcomeView.Created(CardCreatedView("00000000000000ab")))
     return frames
 }
 
@@ -197,14 +227,14 @@ fun frontendToBackend(vectors: Map<String, String>, originable: Set<String>) {
         expectEq(
             "$name round-trips through its own bytes",
             EnvoixCommandCodec.decode(encoded),
-            CommandFrame(CommandBody.Submit(body)),
+            CommandFrame(CommandBody.Intent(body)),
         )
         val roundTripped = EnvoixCommandCodec.decode(vector).body
-        expect("$name decodes to a submit", roundTripped is CommandBody.Submit)
+        expect("$name decodes to a frontend intent", roundTripped is CommandBody.Intent)
         expect(
             "$name re-encodes to the same value after a round trip",
             jsonEquals(
-                parse(EnvoixCommandCodec.encode((roundTripped as CommandBody.Submit).value)),
+                parse(EnvoixCommandCodec.encode((roundTripped as CommandBody.Intent).value)),
                 parse(vector),
             ),
         )
@@ -225,7 +255,10 @@ fun backendToFrontend(command: Map<String, String>, read: Map<String, String>) {
     }
 
     fun epochOf(name: String): Long =
-        ((EnvoixCommandCodec.decode(command[name]!!).body) as CommandBody.Submit).value.epoch
+        (
+            ((EnvoixCommandCodec.decode(command[name]!!).body) as CommandBody.Intent).value
+                as FrontendIntentView.Command
+        ).value.epoch
     expectEq("epoch 2^53 survives", epochOf("submit_epoch_two_pow_53"), 9007199254740992L)
     expectEq("epoch 2^63-1 survives", epochOf("submit_epoch_u63_max"), Long.MAX_VALUE)
     expectEq("epoch zero survives", epochOf("submit_epoch_zero"), 0L)
@@ -318,7 +351,7 @@ fun encoderHonesty() {
     }
     val stamped = parse(EnvoixCommandCodec.encode(submit(card, 1, id, CommandView.PAUSE))) as JSONObject
     expectEq("the encoder stamps the schema envelope", stamped.getString("schema"), COMMAND_SCHEMA_ID)
-    expectEq("the encoder stamps the submit arm", stamped.getJSONObject("body").getString("kind"), "submit")
+    expectEq("the encoder stamps the intent arm", stamped.getJSONObject("body").getString("kind"), "intent")
 }
 
 /// 2-, 3-, and 4-byte characters: 9 bytes, 4 UTF-16 units per group.

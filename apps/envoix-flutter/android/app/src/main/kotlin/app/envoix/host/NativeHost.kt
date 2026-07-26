@@ -39,8 +39,13 @@ object NativeHost {
     /** One encoded platform work order, or null when drained. */
     external fun pollWork(): ByteArray?
 
-    /** Submits a command frame; returns the encoded acceptance frame. */
-    external fun submit(frame: ByteArray): ByteArray?
+    /**
+     * Hands one frontend-originated intent frame to the authority and returns
+     * its encoded answer: an acceptance for a command on an existing card, or
+     * a create result for a request that one be made. The frontend decides
+     * neither — it asks, and is told what happened.
+     */
+    external fun intent(frame: ByteArray): ByteArray?
 
     /** Reports one executed work order; true when admitted fresh. */
     external fun reportDuty(report: ByteArray): Boolean

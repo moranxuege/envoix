@@ -4,7 +4,7 @@ use envoix_attempt_api::{
 };
 use envoix_capabilities::{AdmittedDutyResult, Duty, DutyKind, DutyProvenance};
 use envoix_outcomes::{Outcome, OutcomeCode, Phase, Recovery, Retryability, SafeDisplay};
-use envoix_types::{ArtifactId, ByteCount, Direction, TransferId};
+use envoix_types::{ArtifactId, ByteCount, Direction, RequestId, TransferId};
 
 use crate::identity::next_generation;
 use crate::{
@@ -12,6 +12,10 @@ use crate::{
     ProductCommand, ProductEffect, ProductIdentity, ProductInput, ProductState, Quiescence,
     SourceDecision, StorageAction, TransferRecord, WorkerKind,
 };
+
+/// The domain tag that separates a card's source-duty request identity from its
+/// receipt-duty one. Any non-zero tag works; this one names itself.
+const SOURCE_REQUEST_DOMAIN: [u8; 16] = *b"envoix/source/v1";
 
 /// Every command, in the order the authority publishes them: the constructive
 /// affordances first, the destructive ones last. `allowed_commands` filters
@@ -100,13 +104,17 @@ impl TransferRecord {
             outcome,
             facts,
             source_recoverable,
+            pairing: transfer.pairing,
             receipt_request,
             command_ledger: crate::CommandLedger::default(),
         };
-        let effects = if record.facts.source_ready {
-            vec![record.start_attempt(false)]
-        } else {
-            Vec::new()
+        // Both are post-commit effects, so the card is durable before either
+        // the first attempt starts or the platform is asked for a source
+        // (`SF02`): identity comes before work, including the picker.
+        let effects = match (record.facts.source_ready, record.state) {
+            (true, _) => vec![record.start_attempt(false)],
+            (false, ProductState::Preparing) => vec![record.select_source()],
+            (false, _) => Vec::new(),
         };
         Ok((record, effects))
     }
@@ -367,7 +375,11 @@ impl TransferRecord {
         self.clear_progress();
         self.outcome = None;
         self.source_recoverable = true;
-        Ok(Vec::new())
+        // RS04's missing half: the command that says "the source needs
+        // re-picking" now actually asks for one. The generation moved, so this
+        // is a fresh duty provenance rather than a re-presentation of the one
+        // the failed attempt already discharged.
+        Ok(vec![self.select_source()])
     }
 
     fn on_restore(&mut self) -> Vec<ProductEffect> {
@@ -1030,6 +1042,13 @@ impl TransferRecord {
         }
     }
 
+    fn select_source(&self) -> ProductEffect {
+        ProductEffect::CapabilityDuty {
+            duty: self.source_duty(),
+            action: CapabilityAction::SelectSource,
+        }
+    }
+
     fn receipt_duty(&self) -> Duty {
         Duty {
             provenance: DutyProvenance {
@@ -1039,6 +1058,32 @@ impl TransferRecord {
             },
             kind: DutyKind::Courier,
         }
+    }
+
+    fn source_duty(&self) -> Duty {
+        Duty {
+            provenance: DutyProvenance {
+                card: self.identity.card,
+                generation: self.generation,
+                request: self.source_request(),
+            },
+            kind: DutyKind::SourceHandle,
+        }
+    }
+
+    /// The source duty's request identity, domain-separated from the receipt's.
+    ///
+    /// The C6 ledger keys discharge by provenance, so two duties of one card
+    /// and generation sharing a request would make the first admitted result
+    /// answer for both. One minted secret with a domain tag is injective and
+    /// can never collide with the untagged value, so a second minted field —
+    /// and a second thing a record could be missing — is not needed.
+    pub(crate) fn source_request(&self) -> RequestId {
+        let mut bytes = self.receipt_request.to_bytes();
+        for (byte, tag) in bytes.iter_mut().zip(SOURCE_REQUEST_DOMAIN) {
+            *byte ^= tag;
+        }
+        RequestId::from_bytes(bytes)
     }
 
     fn exit_effects(&self) -> Vec<ProductEffect> {

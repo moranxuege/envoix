@@ -11,7 +11,7 @@
 
 import 'dart:convert';
 
-const String commandSchemaId = 'envoix/binding/command/2';
+const String commandSchemaId = 'envoix/binding/command/3';
 const int commandMaxFrameBytes = 1048576;
 // Contract rules frozen by schema/command.schema.
 const bool newestAttachmentCommands = true;
@@ -127,6 +127,66 @@ final class SubmitView {
   final CommandView command;
 }
 
+final class SendSourceView {
+  const SendSourceView({
+    required this.displayName,
+    required this.total,
+  });
+
+  final String displayName;
+  final int total;
+}
+
+final class JoinInviteView {
+  const JoinInviteView({
+    required this.invite,
+  });
+
+  final String invite;
+}
+
+sealed class CreateIntentView {
+  const CreateIntentView();
+}
+
+final class CreateIntentViewSend extends CreateIntentView {
+  const CreateIntentViewSend(this.value);
+
+  final SendSourceView value;
+}
+
+final class CreateIntentViewJoin extends CreateIntentView {
+  const CreateIntentViewJoin(this.value);
+
+  final JoinInviteView value;
+}
+
+final class CreateView {
+  const CreateView({
+    required this.intent,
+    required this.requestId,
+  });
+
+  final CreateIntentView intent;
+  final String requestId;
+}
+
+sealed class FrontendIntentView {
+  const FrontendIntentView();
+}
+
+final class FrontendIntentViewCommand extends FrontendIntentView {
+  const FrontendIntentViewCommand(this.value);
+
+  final SubmitView value;
+}
+
+final class FrontendIntentViewCreate extends FrontendIntentView {
+  const FrontendIntentViewCreate(this.value);
+
+  final CreateView value;
+}
+
 enum RejectionView {
   unknownCard,
   staleEpoch,
@@ -207,14 +267,59 @@ final class CommandCompletionView {
   final CompletionView completion;
 }
 
+enum CreateRefusalView {
+  inviteNotRecognized,
+  inviteBareRoomCode,
+  inviteMalformed,
+  inviteTooLong,
+  inviteUnsupported,
+  inviteRoleUnsupported,
+  storageFault,
+  internal,
+}
+
+final class CardCreatedView {
+  const CardCreatedView({
+    required this.card,
+  });
+
+  final String card;
+}
+
+sealed class CreateOutcomeView {
+  const CreateOutcomeView();
+}
+
+final class CreateOutcomeViewCreated extends CreateOutcomeView {
+  const CreateOutcomeViewCreated(this.value);
+
+  final CardCreatedView value;
+}
+
+final class CreateOutcomeViewRefused extends CreateOutcomeView {
+  const CreateOutcomeViewRefused(this.value);
+
+  final CreateRefusalView value;
+}
+
+final class CreateResultView {
+  const CreateResultView({
+    required this.outcome,
+    required this.requestId,
+  });
+
+  final CreateOutcomeView outcome;
+  final String requestId;
+}
+
 sealed class CommandBody {
   const CommandBody();
 }
 
-final class CommandBodySubmit extends CommandBody {
-  const CommandBodySubmit(this.value);
+final class CommandBodyIntent extends CommandBody {
+  const CommandBodyIntent(this.value);
 
-  final SubmitView value;
+  final FrontendIntentView value;
 }
 
 final class CommandBodyAcceptance extends CommandBody {
@@ -227,6 +332,12 @@ final class CommandBodyCompletion extends CommandBody {
   const CommandBodyCompletion(this.value);
 
   final CommandCompletionView value;
+}
+
+final class CommandBodyCreateResult extends CommandBody {
+  const CommandBodyCreateResult(this.value);
+
+  final CreateResultView value;
 }
 
 final class CommandFrame {
@@ -261,14 +372,14 @@ CommandFrame decodeCommandFrame(String text) {
 }
 
 /// Encodes the one frame a frontend may originate, stamping the schema
-/// envelope and the `submit` body around it and enforcing every bound
+/// envelope and the `intent` body around it and enforcing every bound
 /// [decodeCommandFrame] checks. Every failure is a typed
 /// [CommandContractException]; an over-bound frame never leaves the process.
-String encodeCommandFrame(SubmitView body) {
+String encodeCommandFrame(FrontendIntentView body) {
   final text = jsonEncode(<String, Object?>{
     'body': <String, Object?>{
-      'kind': 'submit',
-      'value': _encodeSubmitView(body),
+      'kind': 'intent',
+      'value': _encodeFrontendIntentView(body),
     },
     'schema': commandSchemaId,
   });
@@ -331,6 +442,36 @@ String _hexFixed(Object? value, int chars, String context) {
   return value;
 }
 
+String _utf8Bounded(Object? value, int maxBytes, String context) {
+  if (value is! String) {
+    throw CommandContractException(CommandErrorKind.shape, context);
+  }
+  // Unpaired surrogates parse here but not in the Rust reference codec;
+  // reject them so every language accepts the same strings.
+  var index = 0;
+  while (index < value.length) {
+    final unit = value.codeUnitAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      if (index + 1 == value.length) {
+        throw CommandContractException(CommandErrorKind.shape, context);
+      }
+      final next = value.codeUnitAt(index + 1);
+      if (next < 0xdc00 || next > 0xdfff) {
+        throw CommandContractException(CommandErrorKind.shape, context);
+      }
+      index += 2;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      throw CommandContractException(CommandErrorKind.shape, context);
+    } else {
+      index += 1;
+    }
+  }
+  if (utf8.encode(value).length > maxBytes) {
+    throw CommandContractException(CommandErrorKind.bound, context);
+  }
+  return value;
+}
+
 Object? _payload(Map<String, Object?> map, String context) {
   final value = map['value'];
   if (value == null) {
@@ -350,6 +491,9 @@ int _encodeInteger(int value, int max, String context) =>
 
 String _encodeHexFixed(String value, int chars, String context) =>
     _hexFixed(value, chars, context);
+
+String _encodeUtf8Bounded(String value, int maxBytes, String context) =>
+    _utf8Bounded(value, maxBytes, context);
 
 CommandView _decodeCommandView(Object? value, String context) {
   return switch (value) {
@@ -460,6 +604,120 @@ Map<String, Object?> _encodeSubmitView(SubmitView value) {
   };
 }
 
+SendSourceView _decodeSendSourceView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'display_name', 'total'}, context);
+  return SendSourceView(
+    displayName: _utf8Bounded(_field(map, 'display_name', 'SendSourceView.display_name'), 255, 'SendSourceView.display_name'),
+    total: _integer(_field(map, 'total', 'SendSourceView.total'), _u63Max, 'SendSourceView.total'),
+  );
+}
+
+Map<String, Object?> _encodeSendSourceView(SendSourceView value) {
+  return <String, Object?>{
+    'display_name': _encodeUtf8Bounded(value.displayName, 255, 'SendSourceView.display_name'),
+    'total': _encodeInteger(value.total, _u63Max, 'SendSourceView.total'),
+  };
+}
+
+JoinInviteView _decodeJoinInviteView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'invite'}, context);
+  return JoinInviteView(
+    invite: _utf8Bounded(_field(map, 'invite', 'JoinInviteView.invite'), 16384, 'JoinInviteView.invite'),
+  );
+}
+
+Map<String, Object?> _encodeJoinInviteView(JoinInviteView value) {
+  return <String, Object?>{
+    'invite': _encodeUtf8Bounded(value.invite, 16384, 'JoinInviteView.invite'),
+  };
+}
+
+CreateIntentView _decodeCreateIntentView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'kind', 'value'}, context);
+  final kind = _field(map, 'kind', context);
+  if (kind is! String) {
+    throw CommandContractException(CommandErrorKind.shape, context);
+  }
+  switch (kind) {
+    case 'send':
+      return CreateIntentViewSend(
+        _decodeSendSourceView(_payload(map, 'CreateIntentView.send'), 'CreateIntentView.send'),
+      );
+    case 'join':
+      return CreateIntentViewJoin(
+        _decodeJoinInviteView(_payload(map, 'CreateIntentView.join'), 'CreateIntentView.join'),
+      );
+    default:
+      throw CommandContractException(CommandErrorKind.unknownVariant, context);
+  }
+}
+
+Map<String, Object?> _encodeCreateIntentView(CreateIntentView value) {
+  return switch (value) {
+    CreateIntentViewSend(value: final payload) => <String, Object?>{
+        'kind': 'send',
+        'value': _encodeSendSourceView(payload),
+      },
+    CreateIntentViewJoin(value: final payload) => <String, Object?>{
+        'kind': 'join',
+        'value': _encodeJoinInviteView(payload),
+      },
+  };
+}
+
+CreateView _decodeCreateView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'intent', 'request_id'}, context);
+  return CreateView(
+    intent: _decodeCreateIntentView(_field(map, 'intent', 'CreateView.intent'), 'CreateView.intent'),
+    requestId: _hexFixed(_field(map, 'request_id', 'CreateView.request_id'), 32, 'CreateView.request_id'),
+  );
+}
+
+Map<String, Object?> _encodeCreateView(CreateView value) {
+  return <String, Object?>{
+    'intent': _encodeCreateIntentView(value.intent),
+    'request_id': _encodeHexFixed(value.requestId, 32, 'CreateView.request_id'),
+  };
+}
+
+FrontendIntentView _decodeFrontendIntentView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'kind', 'value'}, context);
+  final kind = _field(map, 'kind', context);
+  if (kind is! String) {
+    throw CommandContractException(CommandErrorKind.shape, context);
+  }
+  switch (kind) {
+    case 'command':
+      return FrontendIntentViewCommand(
+        _decodeSubmitView(_payload(map, 'FrontendIntentView.command'), 'FrontendIntentView.command'),
+      );
+    case 'create':
+      return FrontendIntentViewCreate(
+        _decodeCreateView(_payload(map, 'FrontendIntentView.create'), 'FrontendIntentView.create'),
+      );
+    default:
+      throw CommandContractException(CommandErrorKind.unknownVariant, context);
+  }
+}
+
+Map<String, Object?> _encodeFrontendIntentView(FrontendIntentView value) {
+  return switch (value) {
+    FrontendIntentViewCommand(value: final payload) => <String, Object?>{
+        'kind': 'command',
+        'value': _encodeSubmitView(payload),
+      },
+    FrontendIntentViewCreate(value: final payload) => <String, Object?>{
+        'kind': 'create',
+        'value': _encodeCreateView(payload),
+      },
+  };
+}
+
 RejectionView _decodeRejectionView(Object? value, String context) {
   return switch (value) {
     'unknown_card' => RejectionView.unknownCard,
@@ -548,6 +806,60 @@ CommandCompletionView _decodeCommandCompletionView(Object? value, String context
   );
 }
 
+CreateRefusalView _decodeCreateRefusalView(Object? value, String context) {
+  return switch (value) {
+    'invite_not_recognized' => CreateRefusalView.inviteNotRecognized,
+    'invite_bare_room_code' => CreateRefusalView.inviteBareRoomCode,
+    'invite_malformed' => CreateRefusalView.inviteMalformed,
+    'invite_too_long' => CreateRefusalView.inviteTooLong,
+    'invite_unsupported' => CreateRefusalView.inviteUnsupported,
+    'invite_role_unsupported' => CreateRefusalView.inviteRoleUnsupported,
+    'storage_fault' => CreateRefusalView.storageFault,
+    'internal' => CreateRefusalView.internal,
+    String() =>
+      throw CommandContractException(CommandErrorKind.unknownVariant, context),
+    _ => throw CommandContractException(CommandErrorKind.shape, context),
+  };
+}
+
+CardCreatedView _decodeCardCreatedView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'card'}, context);
+  return CardCreatedView(
+    card: _hexFixed(_field(map, 'card', 'CardCreatedView.card'), 16, 'CardCreatedView.card'),
+  );
+}
+
+CreateOutcomeView _decodeCreateOutcomeView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'kind', 'value'}, context);
+  final kind = _field(map, 'kind', context);
+  if (kind is! String) {
+    throw CommandContractException(CommandErrorKind.shape, context);
+  }
+  switch (kind) {
+    case 'created':
+      return CreateOutcomeViewCreated(
+        _decodeCardCreatedView(_payload(map, 'CreateOutcomeView.created'), 'CreateOutcomeView.created'),
+      );
+    case 'refused':
+      return CreateOutcomeViewRefused(
+        _decodeCreateRefusalView(_payload(map, 'CreateOutcomeView.refused'), 'CreateOutcomeView.refused'),
+      );
+    default:
+      throw CommandContractException(CommandErrorKind.unknownVariant, context);
+  }
+}
+
+CreateResultView _decodeCreateResultView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'outcome', 'request_id'}, context);
+  return CreateResultView(
+    outcome: _decodeCreateOutcomeView(_field(map, 'outcome', 'CreateResultView.outcome'), 'CreateResultView.outcome'),
+    requestId: _hexFixed(_field(map, 'request_id', 'CreateResultView.request_id'), 32, 'CreateResultView.request_id'),
+  );
+}
+
 CommandBody _decodeCommandBody(Object? value, String context) {
   final map = _object(value, context);
   _knownKeys(map, const {'kind', 'value'}, context);
@@ -556,9 +868,9 @@ CommandBody _decodeCommandBody(Object? value, String context) {
     throw CommandContractException(CommandErrorKind.shape, context);
   }
   switch (kind) {
-    case 'submit':
-      return CommandBodySubmit(
-        _decodeSubmitView(_payload(map, 'CommandBody.submit'), 'CommandBody.submit'),
+    case 'intent':
+      return CommandBodyIntent(
+        _decodeFrontendIntentView(_payload(map, 'CommandBody.intent'), 'CommandBody.intent'),
       );
     case 'acceptance':
       return CommandBodyAcceptance(
@@ -567,6 +879,10 @@ CommandBody _decodeCommandBody(Object? value, String context) {
     case 'completion':
       return CommandBodyCompletion(
         _decodeCommandCompletionView(_payload(map, 'CommandBody.completion'), 'CommandBody.completion'),
+      );
+    case 'create_result':
+      return CommandBodyCreateResult(
+        _decodeCreateResultView(_payload(map, 'CommandBody.create_result'), 'CommandBody.create_result'),
       );
     default:
       throw CommandContractException(CommandErrorKind.unknownVariant, context);

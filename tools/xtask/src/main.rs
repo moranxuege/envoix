@@ -41,8 +41,11 @@ fn main() -> ExitCode {
                 report.artifacts,
                 report.identities,
                 report.distribution.as_str(),
-                report.disagreements.len()
+                report.verdict.disagreements.len()
             );
+            for line in report.invariant_summary() {
+                println!("evaluated: {line}");
+            }
             report.ensure_success()
         }),
         "record-payload" => record_payload(&root).map(|record| {

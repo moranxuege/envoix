@@ -19,7 +19,7 @@
 //! the ledger, and the gate re-derives that text and rejects any divergence —
 //! so the two enforcers cannot read different values out of the same policy.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -27,8 +27,9 @@ use envoix_bindings::build_manifest_frame;
 use envoix_bindings::read::encode_read_frame;
 use envoix_evidence::BUILD_TRUST_MANIFEST;
 use envoix_evidence::release::{
-    BuildIdentity, BundledLibrary, Disagreement, Distribution, MeasuredArtifact, PackagedFacts,
-    PayloadLibrary, PayloadRecord, ReleaseLedger, check_release, render_policy,
+    BuildIdentity, BundledLibrary, Distribution, Evaluation, MeasuredArtifact, PackagedFacts,
+    PayloadLibrary, PayloadRecord, ReleaseLedger, ReleaseVerdict, check_release,
+    matches_source_glob, render_policy,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -73,16 +74,49 @@ pub struct ReleaseGateReport {
     pub artifacts: usize,
     pub identities: usize,
     pub distribution: Distribution,
-    pub disagreements: Vec<Disagreement>,
+    pub verdict: ReleaseVerdict,
 }
 
 impl ReleaseGateReport {
     pub fn ensure_success(&self) -> CheckResult<()> {
-        if self.disagreements.is_empty() {
+        if self.verdict.disagreements.is_empty() {
             return Ok(());
         }
-        let rendered: Vec<String> = self.disagreements.iter().map(ToString::to_string).collect();
+        let rendered: Vec<String> = self
+            .verdict
+            .disagreements
+            .iter()
+            .map(ToString::to_string)
+            .collect();
         Err(format_violations("release-gate", &rendered))
+    }
+
+    /// What was actually evaluated, one line per artifact plus one for the
+    /// build-wide rules, in the order the verdict ran them. A clean summary
+    /// that names nothing is indistinguishable from a gate that did nothing;
+    /// this is the half that makes the other half mean something.
+    pub fn invariant_summary(&self) -> Vec<String> {
+        let mut lines: Vec<(Option<&str>, String)> = Vec::new();
+        for Evaluation {
+            artifact,
+            invariant,
+            evaluated,
+        } in &self.verdict.evaluations
+        {
+            let artifact = artifact.as_deref();
+            let entry = format!("{}={evaluated}", invariant.as_str());
+            match lines.last_mut() {
+                Some((subject, rendered)) if *subject == artifact => {
+                    rendered.push(' ');
+                    rendered.push_str(&entry);
+                }
+                _ => lines.push((
+                    artifact,
+                    format!("{}: {entry}", artifact.unwrap_or("build")),
+                )),
+            }
+        }
+        lines.into_iter().map(|(_, line)| line).collect()
     }
 }
 
@@ -100,7 +134,7 @@ pub fn release_gate(root: &Path) -> CheckResult<ReleaseGateReport> {
         artifacts: artifacts.len(),
         identities: build.compiled.len(),
         distribution: ledger.policy.distribution,
-        disagreements: check_release(&ledger, &build, &artifacts),
+        verdict: check_release(&ledger, &build, &artifacts),
     })
 }
 
@@ -126,7 +160,7 @@ pub fn build_identity(root: &Path, ledger: &ReleaseLedger) -> CheckResult<BuildI
         declared,
         compiled,
         manifest_sha256: sha256_hex(&frame),
-        sources_sha256: sources_digest(root)?,
+        sources_sha256: sources_digest(root, ledger)?,
         payload,
     })
 }
@@ -235,7 +269,7 @@ pub fn record_payload(root: &Path) -> CheckResult<PayloadRecord> {
     }
     let record = PayloadRecord {
         build_manifest_sha256: sha256_hex(&frame),
-        sources_sha256: sources_digest(root)?,
+        sources_sha256: sources_digest(root, &ledger)?,
         library,
         // Cross-compiling the payload says nothing about the libraries the
         // release only packages, so what was already accepted is carried
@@ -418,48 +452,67 @@ fn load_artifacts(root: &Path) -> CheckResult<Vec<MeasuredArtifact>> {
         .collect()
 }
 
-/// The digest that pins the payload to the contract surface it was compiled
-/// from: every crate manifest, the resolved lockfile, the binding schemas and
-/// every generated artifact. An ordinary source edit does not move it — the
-/// packaging side's own timestamp guard covers those — but a dependency,
-/// feature or contract change does, and then the recorded payload is stale.
-fn sources_digest(root: &Path) -> CheckResult<String> {
-    let mut files = vec![root.join("Cargo.toml"), root.join("Cargo.lock")];
-    for directory in ["crates", "hosts"] {
-        collect(
-            &root.join(directory),
-            &|path| path.file_name().is_some_and(|name| name == "Cargo.toml"),
-            &mut files,
-        );
+/// The digest that pins the payload to the sources it was compiled from: every
+/// file the ledger's `payload_sources` globs name — the whole compiled tree,
+/// its manifests, the resolved lockfile, the binding contracts, and the cargo
+/// configuration that decides the payload's exported symbol surface. Edit any
+/// of them without rebuilding and the recorded payload is stale, which is what
+/// `PayloadSourcesDrift` has always claimed and now covers.
+///
+/// The globs are the ONE enumeration: gradle's freshness guard reads the same
+/// list out of the flat projection, so the two enforcers cannot disagree about
+/// what a payload is built from. A glob that names no file is an error rather
+/// than an empty contribution — a source set can go wrong by matching nothing.
+fn sources_digest(root: &Path, ledger: &ReleaseLedger) -> CheckResult<String> {
+    let mut files = BTreeSet::new();
+    for pattern in &ledger.policy.payload_sources {
+        let base: PathBuf = pattern
+            .split('/')
+            .take_while(|segment| !segment.contains('*'))
+            .collect();
+        let mut candidates = Vec::new();
+        collect(&root.join(&base), &mut candidates);
+        let mut matched = 0;
+        for candidate in candidates {
+            let relative = candidate
+                .strip_prefix(root)
+                .map_err(|error| format!("{}: {error}", candidate.display()))?
+                .to_string_lossy()
+                .into_owned();
+            if matches_source_glob(&relative, pattern) {
+                matched += 1;
+                files.insert(relative);
+            }
+        }
+        if matched == 0 {
+            return Err(format!(
+                "{LEDGER_FILE}: payload_sources pattern {pattern:?} names no file, \
+                 so it contributes nothing to the payload digest"
+            ));
+        }
     }
-    let bindings = root.join("crates/l5/envoix-bindings");
-    collect(&bindings.join("schema"), &|_| true, &mut files);
-    collect(&bindings.join("generated"), &|_| true, &mut files);
-    files.sort();
 
     let mut index = String::new();
     for file in &files {
-        let relative = file.strip_prefix(root).unwrap_or(file);
         index.push_str(&format!(
-            "{} {}\n",
-            relative.display(),
-            sha256_hex(&read_file(file)?)
+            "{file} {}\n",
+            sha256_hex(&read_file(&root.join(file))?)
         ));
     }
     Ok(sha256_hex(index.as_bytes()))
 }
 
-fn collect(directory: &Path, keep: &dyn Fn(&Path) -> bool, files: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(directory) else {
+/// Every file under `path`, or `path` itself when it names one.
+fn collect(path: &Path, files: &mut Vec<PathBuf>) {
+    if path.is_file() {
+        files.push(path.to_owned());
+        return;
+    }
+    let Ok(entries) = fs::read_dir(path) else {
         return;
     };
     for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect(&path, keep, files);
-        } else if keep(&path) {
-            files.push(path);
-        }
+        collect(&entry.path(), files);
     }
 }
 

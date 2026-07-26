@@ -56,6 +56,16 @@ val bundledLibraries = policyList("bundled_libraries")
 val allowedNativeSymbols = policyList("allowed_native_symbols").toSet()
 val forbiddenNativeSymbols = policyList("forbidden_native_symbols")
 val allowedPackageEntries = policyList("allowed_package_entries")
+
+/** The container entries an app bundle may carry; its app content is judged as an APK's. */
+val allowedBundleEntries = policyList("allowed_bundle_entries")
+
+/**
+ * What the packaged payload is built from. The Rust gate digests exactly these
+ * globs into `sources_sha256`; this build reads the same list so the two cannot
+ * answer "what determines the payload" differently.
+ */
+val payloadSources = policyList("payload_sources")
 val forbiddenManifestMarkers = policyList("forbidden_manifest_markers")
 val forbiddenReleaseClasses = policyList("forbidden_release_classes")
 
@@ -258,19 +268,8 @@ fun registerJniLibsGuard(buildType: String) =
         inputs.file(policyFile)
         doLast {
             val newestSource =
-                fileTree(repositoryRoot) {
-                    include(
-                        "Cargo.toml",
-                        "Cargo.lock",
-                        "crates/**/*.rs",
-                        "crates/**/Cargo.toml",
-                        "crates/l5/envoix-bindings/schema/*.schema",
-                        "crates/l5/envoix-bindings/generated/**",
-                        "hosts/**/*.rs",
-                        "hosts/**/Cargo.toml",
-                    )
-                    exclude("target/**", "legacy/**", ".git/**")
-                }.files
+                fileTree(repositoryRoot) { include(payloadSources) }
+                    .files
                     .maxOfOrNull { it.lastModified() } ?: 0L
             for (abi in requiredAbis) {
                 val directory = file("src/$buildType/jniLibs/$abi")
@@ -407,15 +406,56 @@ fun packagedSigners(
     }
 
 /** `*` stands for any run of characters inside one path segment. */
-fun entryAllowed(entry: String): Boolean =
-    allowedPackageEntries.any { pattern ->
-        val segments = entry.split('/')
-        val globs = pattern.split('/')
-        segments.size == globs.size &&
-            segments.zip(globs).all { (segment, glob) ->
-                Regex(glob.split('*').joinToString(".*") { Regex.escape(it) }).matches(segment)
-            }
+fun matchesPattern(
+    entry: String,
+    pattern: String,
+): Boolean {
+    val segments = entry.split('/')
+    val globs = pattern.split('/')
+    return segments.size == globs.size &&
+        segments.zip(globs).all { (segment, glob) ->
+            Regex(glob.split('*').joinToString(".*") { Regex.escape(it) }).matches(segment)
+        }
+}
+
+/**
+ * The reviewed-surface name an archive entry carries, or null when the entry
+ * belongs to the container rather than to the app.
+ *
+ * An APK is the surface. A bundle keeps the same app content under
+ * module-scoped prefixes, so the prefix is stripped and ONE reviewed list judges
+ * both shapes; anything else in a bundle is bundletool's own metadata. The Rust
+ * gate states the same mapping and re-judges every artifact this task writes
+ * facts about, so it is the authority and this is the fail-early mirror.
+ */
+fun surfaceEntry(
+    entry: String,
+    kind: String,
+): String? {
+    if (kind == "apk") {
+        return entry
     }
+    for (prefix in listOf("base/dex/", "base/manifest/", "base/root/")) {
+        if (entry.startsWith(prefix)) {
+            return entry.removePrefix(prefix)
+        }
+    }
+    if (!entry.startsWith("base/")) {
+        return null
+    }
+    val rest = entry.removePrefix("base/")
+    return rest.takeIf { it.substringBefore('/') in listOf("assets", "lib", "res") }
+}
+
+/** Is this entry claimed by the list that governs the shape it is in? */
+fun entryAllowed(
+    entry: String,
+    kind: String,
+): Boolean {
+    val surface = surfaceEntry(entry, kind)
+    val patterns = if (surface == null) allowedBundleEntries else allowedPackageEntries
+    return patterns.any { pattern -> matchesPattern(surface ?: entry, pattern) }
+}
 
 /**
  * Wraps a packaged app manifest in the one-entry container aapt2 insists on, so
@@ -757,10 +797,8 @@ fun verifyReleaseArtifact(
             failures += "$variant packages $entry, which does not export the required entry point $symbol"
         }
     }
-    if (kind == "apk") {
-        for (entry in entries.filterNot(::entryAllowed)) {
-            failures += "$variant packages $entry, which the release surface does not allow"
-        }
+    for (entry in entries.filterNot { entryAllowed(it, kind) }) {
+        failures += "$variant packages $entry, which the release surface does not allow"
     }
     when (shippedManifest) {
         null -> failures += "$variant carries no build-manifest asset to identify itself by"
@@ -784,6 +822,13 @@ fun verifyReleaseArtifact(
     if (failures.isNotEmpty()) {
         throw GradleException(failures.joinToString(separator = "\n- ", prefix = "release trust failed:\n- "))
     }
+    // What was judged, not just that nothing failed: a rule that silently
+    // stopped running reads exactly like a rule that passed.
+    logger.lifecycle(
+        "release trust: $variant $kind judged ${entries.size} entries, ${payload.size} libraries, " +
+            "${signers.size} signers, ${abis.size} abis, ${forbiddenManifestMarkers.size} manifest markers, " +
+            "${forbiddenReleaseClasses.size} release classes",
+    )
 }
 
 /**

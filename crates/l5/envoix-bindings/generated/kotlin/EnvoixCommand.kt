@@ -21,7 +21,7 @@ import org.json.JSONException
 import org.json.JSONObject
 import org.json.JSONTokener
 
-const val COMMAND_SCHEMA_ID: String = "envoix/binding/command/2"
+const val COMMAND_SCHEMA_ID: String = "envoix/binding/command/3"
 const val COMMAND_MAX_FRAME_BYTES: Int = 1048576
 
 // Contract rules frozen by schema/command.schema.
@@ -83,6 +83,30 @@ data class SubmitView(
     val command: CommandView,
 )
 
+data class SendSourceView(
+    val displayName: String,
+    val total: Long,
+)
+
+data class JoinInviteView(
+    val invite: String,
+)
+
+sealed interface CreateIntentView {
+    data class Send(val value: SendSourceView) : CreateIntentView
+    data class Join(val value: JoinInviteView) : CreateIntentView
+}
+
+data class CreateView(
+    val intent: CreateIntentView,
+    val requestId: String,
+)
+
+sealed interface FrontendIntentView {
+    data class Command(val value: SubmitView) : FrontendIntentView
+    data class Create(val value: CreateView) : FrontendIntentView
+}
+
 enum class RejectionView {
     UNKNOWN_CARD,
     STALE_EPOCH,
@@ -117,10 +141,36 @@ data class CommandCompletionView(
     val completion: CompletionView,
 )
 
+enum class CreateRefusalView {
+    INVITE_NOT_RECOGNIZED,
+    INVITE_BARE_ROOM_CODE,
+    INVITE_MALFORMED,
+    INVITE_TOO_LONG,
+    INVITE_UNSUPPORTED,
+    INVITE_ROLE_UNSUPPORTED,
+    STORAGE_FAULT,
+    INTERNAL,
+}
+
+data class CardCreatedView(
+    val card: String,
+)
+
+sealed interface CreateOutcomeView {
+    data class Created(val value: CardCreatedView) : CreateOutcomeView
+    data class Refused(val value: CreateRefusalView) : CreateOutcomeView
+}
+
+data class CreateResultView(
+    val outcome: CreateOutcomeView,
+    val requestId: String,
+)
+
 sealed interface CommandBody {
-    data class Submit(val value: SubmitView) : CommandBody
+    data class Intent(val value: FrontendIntentView) : CommandBody
     data class Acceptance(val value: CommandAcceptanceView) : CommandBody
     data class Completion(val value: CommandCompletionView) : CommandBody
+    data class CreateResult(val value: CreateResultView) : CommandBody
 }
 
 data class CommandFrame(
@@ -161,16 +211,16 @@ object EnvoixCommandCodec {
 
     /**
      * Encodes the one frame a frontend may originate, stamping the schema
-     * envelope and the `submit` body around it and enforcing every bound
+     * envelope and the `intent` body around it and enforcing every bound
      * [decode] checks. Every failure is a typed [CommandContractException]; an
      * over-bound frame never leaves the process.
      */
-    fun encode(body: SubmitView): String {
+    fun encode(body: FrontendIntentView): String {
         val map = JSONObject()
         map.put("schema", COMMAND_SCHEMA_ID)
         map.put(
             "body",
-            JSONObject().put("kind", "submit").put("value", encodeSubmitView(body)),
+            JSONObject().put("kind", "intent").put("value", encodeFrontendIntentView(body)),
         )
         val text = map.toString()
         if (text.toByteArray(Charsets.UTF_8).size > COMMAND_MAX_FRAME_BYTES) {
@@ -223,6 +273,32 @@ object EnvoixCommandCodec {
         return value
     }
 
+    private fun utf8Bounded(value: Any?, maxBytes: Int, context: String): String {
+        if (value !is String) {
+            throw CommandContractException(CommandErrorKind.SHAPE, context)
+        }
+        // Unpaired surrogates parse here but not in the Rust reference codec;
+        // reject them so every language accepts the same strings.
+        var index = 0
+        while (index < value.length) {
+            val unit = value[index]
+            if (unit.isHighSurrogate()) {
+                if (index + 1 == value.length || !value[index + 1].isLowSurrogate()) {
+                    throw CommandContractException(CommandErrorKind.SHAPE, context)
+                }
+                index += 2
+            } else if (unit.isLowSurrogate()) {
+                throw CommandContractException(CommandErrorKind.SHAPE, context)
+            } else {
+                index += 1
+            }
+        }
+        if (value.toByteArray(Charsets.UTF_8).size > maxBytes) {
+            throw CommandContractException(CommandErrorKind.BOUND, context)
+        }
+        return value
+    }
+
     private fun payload(map: JSONObject, context: String): Any {
         val value = field(map, "value", context)
             ?: throw CommandContractException(CommandErrorKind.SHAPE, context)
@@ -240,6 +316,9 @@ object EnvoixCommandCodec {
 
     private fun encodeHexFixed(value: String, chars: Int, context: String): String =
         hexFixed(value, chars, context)
+
+    private fun encodeUtf8Bounded(value: String, maxBytes: Int, context: String): String =
+        utf8Bounded(value, maxBytes, context)
 
     private fun decodeCommandView(value: Any?, context: String): CommandView = when (value) {
         "pause" -> CommandView.PAUSE
@@ -348,6 +427,98 @@ object EnvoixCommandCodec {
         return map
     }
 
+    private fun decodeSendSourceView(value: Any?, context: String): SendSourceView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("display_name", "total"), context)
+        return SendSourceView(
+            displayName = utf8Bounded(field(map, "display_name", "SendSourceView.display_name"), 255, "SendSourceView.display_name"),
+            total = integer(field(map, "total", "SendSourceView.total"), Long.MAX_VALUE, "SendSourceView.total"),
+        )
+    }
+
+    private fun encodeSendSourceView(value: SendSourceView): JSONObject {
+        val map = JSONObject()
+        map.put("display_name", encodeUtf8Bounded(value.displayName, 255, "SendSourceView.display_name"))
+        map.put("total", encodeInteger(value.total, Long.MAX_VALUE, "SendSourceView.total"))
+        return map
+    }
+
+    private fun decodeJoinInviteView(value: Any?, context: String): JoinInviteView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("invite"), context)
+        return JoinInviteView(
+            invite = utf8Bounded(field(map, "invite", "JoinInviteView.invite"), 16384, "JoinInviteView.invite"),
+        )
+    }
+
+    private fun encodeJoinInviteView(value: JoinInviteView): JSONObject {
+        val map = JSONObject()
+        map.put("invite", encodeUtf8Bounded(value.invite, 16384, "JoinInviteView.invite"))
+        return map
+    }
+
+    private fun decodeCreateIntentView(value: Any?, context: String): CreateIntentView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("kind", "value"), context)
+        val kind = field(map, "kind", context) as? String
+            ?: throw CommandContractException(CommandErrorKind.SHAPE, context)
+        return when (kind) {
+            "send" -> CreateIntentView.Send(
+                decodeSendSourceView(payload(map, "CreateIntentView.send"), "CreateIntentView.send"),
+            )
+            "join" -> CreateIntentView.Join(
+                decodeJoinInviteView(payload(map, "CreateIntentView.join"), "CreateIntentView.join"),
+            )
+            else -> throw CommandContractException(CommandErrorKind.UNKNOWN_VARIANT, context)
+        }
+    }
+
+    private fun encodeCreateIntentView(value: CreateIntentView): JSONObject = when (value) {
+        is CreateIntentView.Send ->
+            JSONObject().put("kind", "send").put("value", encodeSendSourceView(value.value))
+        is CreateIntentView.Join ->
+            JSONObject().put("kind", "join").put("value", encodeJoinInviteView(value.value))
+    }
+
+    private fun decodeCreateView(value: Any?, context: String): CreateView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("intent", "request_id"), context)
+        return CreateView(
+            intent = decodeCreateIntentView(field(map, "intent", "CreateView.intent"), "CreateView.intent"),
+            requestId = hexFixed(field(map, "request_id", "CreateView.request_id"), 32, "CreateView.request_id"),
+        )
+    }
+
+    private fun encodeCreateView(value: CreateView): JSONObject {
+        val map = JSONObject()
+        map.put("intent", encodeCreateIntentView(value.intent))
+        map.put("request_id", encodeHexFixed(value.requestId, 32, "CreateView.request_id"))
+        return map
+    }
+
+    private fun decodeFrontendIntentView(value: Any?, context: String): FrontendIntentView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("kind", "value"), context)
+        val kind = field(map, "kind", context) as? String
+            ?: throw CommandContractException(CommandErrorKind.SHAPE, context)
+        return when (kind) {
+            "command" -> FrontendIntentView.Command(
+                decodeSubmitView(payload(map, "FrontendIntentView.command"), "FrontendIntentView.command"),
+            )
+            "create" -> FrontendIntentView.Create(
+                decodeCreateView(payload(map, "FrontendIntentView.create"), "FrontendIntentView.create"),
+            )
+            else -> throw CommandContractException(CommandErrorKind.UNKNOWN_VARIANT, context)
+        }
+    }
+
+    private fun encodeFrontendIntentView(value: FrontendIntentView): JSONObject = when (value) {
+        is FrontendIntentView.Command ->
+            JSONObject().put("kind", "command").put("value", encodeSubmitView(value.value))
+        is FrontendIntentView.Create ->
+            JSONObject().put("kind", "create").put("value", encodeCreateView(value.value))
+    }
+
     private fun decodeRejectionView(value: Any?, context: String): RejectionView = when (value) {
         "unknown_card" -> RejectionView.UNKNOWN_CARD
         "stale_epoch" -> RejectionView.STALE_EPOCH
@@ -425,20 +596,69 @@ object EnvoixCommandCodec {
         )
     }
 
+    private fun decodeCreateRefusalView(value: Any?, context: String): CreateRefusalView = when (value) {
+        "invite_not_recognized" -> CreateRefusalView.INVITE_NOT_RECOGNIZED
+        "invite_bare_room_code" -> CreateRefusalView.INVITE_BARE_ROOM_CODE
+        "invite_malformed" -> CreateRefusalView.INVITE_MALFORMED
+        "invite_too_long" -> CreateRefusalView.INVITE_TOO_LONG
+        "invite_unsupported" -> CreateRefusalView.INVITE_UNSUPPORTED
+        "invite_role_unsupported" -> CreateRefusalView.INVITE_ROLE_UNSUPPORTED
+        "storage_fault" -> CreateRefusalView.STORAGE_FAULT
+        "internal" -> CreateRefusalView.INTERNAL
+        is String -> throw CommandContractException(CommandErrorKind.UNKNOWN_VARIANT, context)
+        else -> throw CommandContractException(CommandErrorKind.SHAPE, context)
+    }
+
+    private fun decodeCardCreatedView(value: Any?, context: String): CardCreatedView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("card"), context)
+        return CardCreatedView(
+            card = hexFixed(field(map, "card", "CardCreatedView.card"), 16, "CardCreatedView.card"),
+        )
+    }
+
+    private fun decodeCreateOutcomeView(value: Any?, context: String): CreateOutcomeView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("kind", "value"), context)
+        val kind = field(map, "kind", context) as? String
+            ?: throw CommandContractException(CommandErrorKind.SHAPE, context)
+        return when (kind) {
+            "created" -> CreateOutcomeView.Created(
+                decodeCardCreatedView(payload(map, "CreateOutcomeView.created"), "CreateOutcomeView.created"),
+            )
+            "refused" -> CreateOutcomeView.Refused(
+                decodeCreateRefusalView(payload(map, "CreateOutcomeView.refused"), "CreateOutcomeView.refused"),
+            )
+            else -> throw CommandContractException(CommandErrorKind.UNKNOWN_VARIANT, context)
+        }
+    }
+
+    private fun decodeCreateResultView(value: Any?, context: String): CreateResultView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("outcome", "request_id"), context)
+        return CreateResultView(
+            outcome = decodeCreateOutcomeView(field(map, "outcome", "CreateResultView.outcome"), "CreateResultView.outcome"),
+            requestId = hexFixed(field(map, "request_id", "CreateResultView.request_id"), 32, "CreateResultView.request_id"),
+        )
+    }
+
     private fun decodeCommandBody(value: Any?, context: String): CommandBody {
         val map = obj(value, context)
         knownKeys(map, setOf("kind", "value"), context)
         val kind = field(map, "kind", context) as? String
             ?: throw CommandContractException(CommandErrorKind.SHAPE, context)
         return when (kind) {
-            "submit" -> CommandBody.Submit(
-                decodeSubmitView(payload(map, "CommandBody.submit"), "CommandBody.submit"),
+            "intent" -> CommandBody.Intent(
+                decodeFrontendIntentView(payload(map, "CommandBody.intent"), "CommandBody.intent"),
             )
             "acceptance" -> CommandBody.Acceptance(
                 decodeCommandAcceptanceView(payload(map, "CommandBody.acceptance"), "CommandBody.acceptance"),
             )
             "completion" -> CommandBody.Completion(
                 decodeCommandCompletionView(payload(map, "CommandBody.completion"), "CommandBody.completion"),
+            )
+            "create_result" -> CommandBody.CreateResult(
+                decodeCreateResultView(payload(map, "CommandBody.create_result"), "CommandBody.create_result"),
             )
             else -> throw CommandContractException(CommandErrorKind.UNKNOWN_VARIANT, context)
         }

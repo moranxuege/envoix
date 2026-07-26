@@ -19,6 +19,7 @@
 // this crate — the exception covers exported-symbol attributes only.
 #![deny(unsafe_code)]
 
+mod create;
 mod executor;
 mod host;
 mod provider;

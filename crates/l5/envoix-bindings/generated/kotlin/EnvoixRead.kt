@@ -13,7 +13,7 @@ import org.json.JSONException
 import org.json.JSONObject
 import org.json.JSONTokener
 
-const val READ_SCHEMA_ID: String = "envoix/binding/read/3"
+const val READ_SCHEMA_ID: String = "envoix/binding/read/4"
 const val READ_MAX_FRAME_BYTES: Int = 1048576
 
 enum class ReadErrorKind {
@@ -104,6 +104,7 @@ enum class DutyKindView {
 
 enum class CapabilityActionView {
     POST_RECEIPT,
+    SELECT_SOURCE,
 }
 
 enum class CommandKindView {
@@ -179,6 +180,11 @@ data class IdentityView(
     val artifact: String,
 )
 
+data class InviteView(
+    val code: String,
+    val link: String?,
+)
+
 data class CardView(
     val identity: IdentityView,
     val direction: DirectionView,
@@ -192,6 +198,7 @@ data class CardView(
     val bytesResumed: Long,
     val outcome: OutcomeView?,
     val allowedActions: List<CommandKindView>,
+    val invite: InviteView?,
 )
 
 data class DutyProvenanceView(
@@ -620,6 +627,7 @@ object EnvoixReadCodec {
 
     private fun decodeCapabilityActionView(value: Any?, context: String): CapabilityActionView = when (value) {
         "post_receipt" -> CapabilityActionView.POST_RECEIPT
+        "select_source" -> CapabilityActionView.SELECT_SOURCE
         is String -> throw ReadContractException(ReadErrorKind.UNKNOWN_VARIANT, context)
         else -> throw ReadContractException(ReadErrorKind.SHAPE, context)
     }
@@ -778,9 +786,18 @@ object EnvoixReadCodec {
         )
     }
 
+    private fun decodeInviteView(value: Any?, context: String): InviteView {
+        val map = obj(value, context)
+        knownKeys(map, setOf("code", "link"), context)
+        return InviteView(
+            code = utf8Bounded(field(map, "code", "InviteView.code"), 64, "InviteView.code"),
+            link = field(map, "link", "InviteView.link")?.let { utf8Bounded(it, 5481, "InviteView.link") },
+        )
+    }
+
     private fun decodeCardView(value: Any?, context: String): CardView {
         val map = obj(value, context)
-        knownKeys(map, setOf("identity", "direction", "offered_name", "total", "state", "quiescence", "generation", "phase", "bytes", "bytes_resumed", "outcome", "allowed_actions"), context)
+        knownKeys(map, setOf("identity", "direction", "offered_name", "total", "state", "quiescence", "generation", "phase", "bytes", "bytes_resumed", "outcome", "allowed_actions", "invite"), context)
         return CardView(
             identity = decodeIdentityView(field(map, "identity", "CardView.identity"), "CardView.identity"),
             direction = decodeDirectionView(field(map, "direction", "CardView.direction"), "CardView.direction"),
@@ -794,6 +811,7 @@ object EnvoixReadCodec {
             bytesResumed = integer(field(map, "bytes_resumed", "CardView.bytes_resumed"), Long.MAX_VALUE, "CardView.bytes_resumed"),
             outcome = field(map, "outcome", "CardView.outcome")?.let { decodeOutcomeView(it, "CardView.outcome") },
             allowedActions = decodeList(field(map, "allowed_actions", "CardView.allowed_actions"), 5, "CardView.allowed_actions", ::decodeCommandKindView),
+            invite = field(map, "invite", "CardView.invite")?.let { decodeInviteView(it, "CardView.invite") },
         )
     }
 

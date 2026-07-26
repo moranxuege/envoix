@@ -11,24 +11,27 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use envoix_bindings::command::{
-    AcceptanceView, CommandAcceptanceView, CommandBody, CommandCompletionView, CommandError,
-    CommandFrame, CommandView, CompletionView, DispositionView, PauseCauseView, PausedStateView,
-    RejectionView, SubmitView, decode_command_frame, encode_command_frame,
+    AcceptanceView, CardCreatedView, CommandAcceptanceView, CommandBody, CommandCompletionView,
+    CommandError, CommandFrame, CommandView, CompletionView, CreateIntentView, CreateOutcomeView,
+    CreateRefusalView, CreateResultView, CreateView, DispositionView, FrontendIntentView,
+    JoinInviteView, PauseCauseView, PausedStateView, RejectionView, SendSourceView, SubmitView,
+    decode_command_frame, encode_command_frame,
 };
 use envoix_bindings::read::{
     AbiSchemaManifestView, BuildManifestView, CardUpdateKindView, CardUpdateView, CardView,
     ClosedView, CommandKindView, DegradedView, DiagnosticsStatusView, DirectionView,
-    EvidenceProgressView, EvidenceTimelineView, EvidenceValueView, IdentityView, LagView,
-    LosslessKindView, OutcomeCodeView, OutcomeView, PauseOriginView, PausedView, PhaseView,
-    ProductStateView, ProtocolManifestView, QuiescenceView, ReadBody, ReadError, ReadFrame,
-    RecoveryView, RedactedIdKindView, RedactedIdView, RetirementIntentView, RetiringView,
-    RetryabilityView, RunningView, SessionKeyView, SubscribeRejectedView, SubscribeRejectionView,
-    TimelineEntryView, TrustRootSha256View, TrustRootView, WorkerKindView, decode_read_frame,
-    encode_read_frame,
+    EvidenceProgressView, EvidenceTimelineView, EvidenceValueView, IdentityView, InviteView,
+    LagView, LosslessKindView, OutcomeCodeView, OutcomeView, PauseOriginView, PausedView,
+    PhaseView, ProductStateView, ProtocolManifestView, QuiescenceView, ReadBody, ReadError,
+    ReadFrame, RecoveryView, RedactedIdKindView, RedactedIdView, RetirementIntentView,
+    RetiringView, RetryabilityView, RunningView, SessionKeyView, SubscribeRejectedView,
+    SubscribeRejectionView, TimelineEntryView, TrustRootSha256View, TrustRootView, WorkerKindView,
+    decode_read_frame, encode_read_frame,
 };
 use envoix_bindings::{
     Decl, Direction, SchemaDoc, command_schema_text, emit, parse_schema, read_schema_text,
 };
+use envoix_runtime::{MAX_INVITE_LINK_LENGTH, MAX_ROOM_CODE_LENGTH};
 
 /// A schema that exercises every scalar, wrapper, and declaration kind in the
 /// grammar, in the direction that needs encoders. The two shipped contracts
@@ -103,7 +106,15 @@ fields = [
 /// statement of intent have to agree.
 fn originable_decls(id: &str) -> &'static [&'static str] {
     match id {
-        "envoix/binding/command/2" => &["CommandView", "SubmitView"],
+        "envoix/binding/command/3" => &[
+            "CommandView",
+            "SubmitView",
+            "CreateIntentView",
+            "CreateView",
+            "FrontendIntentView",
+            "JoinInviteView",
+            "SendSourceView",
+        ],
         "envoix/binding/probe/1" => &["ProbeTone", "ProbeLeaf", "ProbeChoice", "ProbeScalars"],
         _ => &[],
     }
@@ -417,11 +428,29 @@ fn dart_and_swift_emit_object_keys_in_the_reference_order() {
 
 fn submit(card: &str, epoch: u64, command_id: &str, command: CommandView) -> CommandFrame {
     CommandFrame {
-        body: CommandBody::Submit(SubmitView {
+        body: CommandBody::Intent(FrontendIntentView::Command(SubmitView {
             card: card.to_owned(),
             epoch,
             command_id: command_id.to_owned(),
             command,
+        })),
+    }
+}
+
+fn create(request_id: &str, intent: CreateIntentView) -> CommandFrame {
+    CommandFrame {
+        body: CommandBody::Intent(FrontendIntentView::Create(CreateView {
+            intent,
+            request_id: request_id.to_owned(),
+        })),
+    }
+}
+
+fn create_result(outcome: CreateOutcomeView) -> CommandFrame {
+    CommandFrame {
+        body: CommandBody::CreateResult(CreateResultView {
+            outcome,
+            request_id: "11111111111111111111111111111111".to_owned(),
         }),
     }
 }
@@ -519,6 +548,58 @@ fn command_vectors() -> Vec<(String, CommandFrame)> {
     vectors.push((
         "submit_ids_max".to_owned(),
         submit("ffffffffffffffff", 1, &"f".repeat(32), CommandView::Cancel),
+    ));
+
+    // The create intent, at the edges a native encoder is most likely to get
+    // wrong: an empty name and a zero total, a name at its byte bound, and
+    // invite text that is deliberately not an invite — carried verbatim,
+    // because nothing on this path may interpret it.
+    vectors.push((
+        "create_send_narrowest".to_owned(),
+        create(
+            id,
+            CreateIntentView::Send(SendSourceView {
+                display_name: String::new(),
+                total: 0,
+            }),
+        ),
+    ));
+    vectors.push((
+        "create_send_widest".to_owned(),
+        create(
+            &"f".repeat(32),
+            CreateIntentView::Send(SendSourceView {
+                // 255 bytes exactly, in three-byte characters plus one ASCII.
+                display_name: format!("{}x", "世".repeat(84)),
+                total: u64::MAX >> 1,
+            }),
+        ),
+    ));
+    for (name, invite) in [
+        ("empty", String::new()),
+        (
+            "canonical",
+            "envoix://invite/v3/eyJ2ZXJzaW9uIjozfQ".to_owned(),
+        ),
+        ("bidirectional", "\u{202e}envoix://invite".to_owned()),
+        ("at_bound", "e".repeat(16_384)),
+    ] {
+        vectors.push((
+            format!("create_join_{name}"),
+            create(id, CreateIntentView::Join(JoinInviteView { invite })),
+        ));
+    }
+    for (index, refusal) in CreateRefusalView::ALL.into_iter().enumerate() {
+        vectors.push((
+            format!("create_refused_{index}"),
+            create_result(CreateOutcomeView::Refused(refusal)),
+        ));
+    }
+    vectors.push((
+        "create_created".to_owned(),
+        create_result(CreateOutcomeView::Created(CardCreatedView {
+            card: card.to_owned(),
+        })),
     ));
 
     vectors.push((
@@ -625,6 +706,16 @@ fn read_vectors() -> Vec<(String, ReadFrame)> {
             CommandKindView::Remove,
             CommandKindView::RePickSource,
         ],
+        invite: Some(InviteView {
+            code: "0".repeat(MAX_ROOM_CODE_LENGTH),
+            // The link bound exactly, reached in ASCII — and it is the invite
+            // grammar's own emit maximum, so this vector is a real invite's
+            // worst case rather than a number the contract chose.
+            link: Some(format!(
+                "envoix://invite/v3/{}",
+                "A".repeat(MAX_INVITE_LINK_LENGTH - "envoix://invite/v3/".len())
+            )),
+        }),
     };
     let narrowest = CardView {
         identity,
@@ -643,6 +734,8 @@ fn read_vectors() -> Vec<(String, ReadFrame)> {
         // A card the authority will admit nothing for: the empty list, which is
         // a legality fact and not an absence.
         allowed_actions: Vec::new(),
+        // A card with no channel at all — the absent optional.
+        invite: None,
     };
     let entry = |sequence, value| TimelineEntryView { sequence, value };
     let session = SessionKeyView {
@@ -650,7 +743,20 @@ fn read_vectors() -> Vec<(String, ReadFrame)> {
         generation: u32::MAX,
     };
 
+    // A channel whose link the contract cannot carry: the code still crosses.
+    let linkless = CardView {
+        invite: Some(InviteView {
+            code: "000000-amber-brass".to_owned(),
+            link: None,
+        }),
+        ..widest.clone()
+    };
+
     vec![
+        (
+            "read_card_update_linkless_invite".to_owned(),
+            card_update(1, CardUpdateKindView::State(linkless)),
+        ),
         (
             "read_card_update_widest".to_owned(),
             card_update(u64::MAX >> 1, CardUpdateKindView::Snapshot(widest)),
@@ -767,7 +873,7 @@ fn write_bundle(directory: &Path) {
             "{name} round-trips"
         );
         let text = String::from_utf8(bytes).expect("utf8 frame");
-        let originable = matches!(frame.body, CommandBody::Submit(_));
+        let originable = matches!(frame.body, CommandBody::Intent(_));
         command.push(serde_json::json!({
             "name": name,
             "frame": text,

@@ -3,17 +3,19 @@
 # catalog extracts the schema id from the `id` key; regenerate artifacts with
 # `ENVOIX_BINDINGS_REGEN=1 cargo test -p envoix-bindings generated_artifacts`.
 #
-# Direction: native frontends ENCODE `submit` bodies; the Rust host decodes
-# them (hostile input) and ENCODES `acceptance`/`completion` bodies, which
-# frontends decode. The host bridge rejects a non-submit body arriving from a
-# frontend; the frame type is shared so both directions stay in one versioned
-# contract.
+# Direction: native frontends ENCODE `intent` bodies — a command on a card that
+# already exists, or a request that one be created — and the Rust host decodes
+# them (hostile input). The host ENCODES `acceptance`/`completion`/
+# `create_result` bodies, which frontends decode. The host bridge rejects a
+# non-intent body arriving from a frontend; the frame type is shared so BOTH
+# frontend-to-authority intents stay in ONE versioned contract with one encoder,
+# one lane and one native verb.
 #
 # The scalar vocabulary and grammar are identical to schema/read.schema: no
 # bytes/blob type and no handle/path/URI type, so a command can never carry
 # file bytes or an OS handle.
 
-id = "envoix/binding/command/2"
+id = "envoix/binding/command/3"
 root = "CommandFrame"
 # Frontends originate frames on this contract, so every native artifact carries
 # an encoder that enforces the same bounds its decoder checks. Which frames is
@@ -78,6 +80,60 @@ fields = [
   { name = "command", type = "CommandView" },
 ]
 
+# Creating a card is not a command on one: there is no card to name, no epoch to
+# stamp and no per-card ledger to deduplicate against (the ledger rides INSIDE
+# the record). So creation is a second intent on the same contract rather than a
+# sixth `CommandView` — which would be a command with no card — or a second
+# contract, which would be a second intake model.
+[[decl]]
+kind = "struct"
+name = "SendSourceView"
+fields = [
+  # The picked document's provider name and size, as the platform reported them
+  # to the frontend. Sanitized metadata, never an artifact key (`SF09`): the
+  # authority re-sanitizes the name, and staging's own completion is what
+  # authors the real byte count. No URI or handle can be spelled here — the
+  # scalar vocabulary has no type for one.
+  { name = "display_name", type = "str(255)" },
+  { name = "total", type = "u63" },
+]
+
+[[decl]]
+kind = "struct"
+name = "JoinInviteView"
+fields = [
+  # OPAQUE invite text, exactly as the user typed or pasted it. The frontend
+  # neither parses nor validates it and does not decide the local role; the
+  # invite grammar in Rust does all three and answers typed (`XI02`). The bound
+  # is deliberately wider than the grammar's own input limit so an over-long
+  # paste is refused BY the authority instead of by the encoder.
+  { name = "invite", type = "str(16384)" },
+]
+
+[[decl]]
+kind = "union"
+name = "CreateIntentView"
+variants = [
+  { name = "send", payload = "SendSourceView" },
+  { name = "join", payload = "JoinInviteView" },
+]
+
+[[decl]]
+kind = "struct"
+name = "CreateView"
+fields = [
+  { name = "intent", type = "CreateIntentView" },
+  { name = "request_id", type = "hex32" },
+]
+
+[[decl]]
+kind = "union"
+name = "FrontendIntentView"
+variants = [
+  { name = "command", payload = "SubmitView" },
+  { name = "create", payload = "CreateView" },
+]
+
 [[decl]]
 kind = "enum"
 name = "RejectionView"
@@ -132,16 +188,61 @@ fields = [
   { name = "completion", type = "CompletionView" },
 ]
 
+# Why a create is answered ONCE rather than accepted and then completed: the
+# durability barrier is inside the creation itself. `CommittedSession::create`
+# mints the identity, writes the record and only then releases the post-commit
+# effects, so there is no window in which a create is admitted but not yet
+# durable. Reporting a two-phase answer over a one-phase fact would invent an
+# in-flight state that does not exist — the opposite of BN2's discipline, which
+# is that nothing is called committed before it is.
+[[decl]]
+kind = "enum"
+name = "CreateRefusalView"
+variants = [
+  "invite_not_recognized",
+  "invite_bare_room_code",
+  "invite_malformed",
+  "invite_too_long",
+  "invite_unsupported",
+  "invite_role_unsupported",
+  "storage_fault",
+  "internal",
+]
+
+[[decl]]
+kind = "struct"
+name = "CardCreatedView"
+fields = [{ name = "card", type = "hex16" }]
+
+[[decl]]
+kind = "union"
+name = "CreateOutcomeView"
+variants = [
+  # The card's record is on disk. Whether it is observable yet is the read
+  # contract's business, not this answer's.
+  { name = "created", payload = "CardCreatedView" },
+  { name = "refused", payload = "CreateRefusalView" },
+]
+
+[[decl]]
+kind = "struct"
+name = "CreateResultView"
+fields = [
+  { name = "outcome", type = "CreateOutcomeView" },
+  { name = "request_id", type = "hex32" },
+]
+
 [[decl]]
 kind = "union"
 name = "CommandBody"
 variants = [
-  # The one body a frontend originates. `acceptance` and `completion` are
-  # host observations: no native artifact gets an encoder for them, so a
-  # frontend cannot build one to send, only decode one it was sent.
-  { name = "submit", payload = "SubmitView", originator = "frontend" },
+  # The one body a frontend originates, and it carries BOTH intents. The
+  # answers below are host observations: no native artifact gets an encoder for
+  # them, so a frontend cannot build one to send, only decode one it was sent.
+  { name = "intent", payload = "FrontendIntentView", originator = "frontend" },
   { name = "acceptance", payload = "CommandAcceptanceView" },
   { name = "completion", payload = "CommandCompletionView" },
+  { name = "create_result", payload = "CreateResultView" },
 ]
 
 [[decl]]

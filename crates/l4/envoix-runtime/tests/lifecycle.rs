@@ -16,15 +16,15 @@ use envoix_evidence::EvidenceRecord;
 use envoix_operation_store::OperationStore;
 use envoix_outcomes::{OutcomeCode, Phase};
 use envoix_product::{
-    CommitError, CommittedSession, IdentityError, IdentitySource, NewTransfer, ProductCommand,
-    ProductState, Quiescence, RecordDecode, RecordStore, SourceDecision, TransferRecord,
-    decode_record,
+    CapabilityAction, CommitError, CommittedSession, IdentityError, IdentitySource, NewTransfer,
+    ProductCommand, ProductState, Quiescence, RecordDecode, RecordStore, SourceDecision,
+    TransferRecord, decode_record,
 };
 use envoix_runtime::{
     AcquireError, AttemptExecution, AttemptExecutor, CardUpdateKind, CommandCompletion,
-    CommandVerdict, EvidenceSink, EvidenceSinkError, ExecutorSignal, LosslessUpdateKind, Runtime,
-    RuntimeConfig, SessionProvider, ShutdownReport, StopSignal, SubscribeError, TryRecvError,
-    stop_channel,
+    CommandVerdict, DutyKind, EvidenceSink, EvidenceSinkError, ExecutorSignal, LosslessUpdateKind,
+    Runtime, RuntimeConfig, SessionProvider, ShutdownReport, StopSignal, SubscribeError,
+    TryRecvError, stop_channel,
 };
 use envoix_storage_api::Durability;
 use envoix_storage_local::LocalStorage;
@@ -284,6 +284,24 @@ fn create_session(
         offered_name: OfferedName::from_untrusted("payload.bin"),
         total: ByteCount::new(1024),
         source: SourceDecision::Ready,
+        pairing: None,
+    };
+    CommittedSession::create(
+        transfer,
+        &mut FixedIdentity::new(seed),
+        OpStoreRecords::deferred(root),
+        NonZeroUsize::new(3).unwrap(),
+    )
+    .unwrap()
+}
+
+fn create_staged_session(root: &Path, seed: u8) -> (Session, envoix_product::ApplyOutcome) {
+    let transfer = NewTransfer {
+        direction: Direction::Send,
+        offered_name: OfferedName::from_untrusted("payload.bin"),
+        total: ByteCount::new(1024),
+        source: SourceDecision::Stage { recoverable: false },
+        pairing: None,
     };
     CommittedSession::create(
         transfer,
@@ -783,6 +801,80 @@ async fn terminal_events_and_duties_never_dropped() {
         CardUpdateKind::CapabilityDuty { duty, .. } if duty.provenance.card == card
     ));
     assert_eq!(reattached.try_recv(), Err(TryRecvError::Empty));
+
+    runtime.shutdown().await;
+}
+
+/// A card still waiting for its source is still ASKING for one.
+///
+/// The source duty is discharged by the source becoming ready, not by having
+/// been raised: until then every fresh attachment is re-told about it, which is
+/// what makes a duty the service dropped — or one raised while nothing was
+/// listening — recoverable rather than lost. A discharge rule that fired on
+/// issue would make the ask a one-shot that no reattach can replay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_outstanding_source_duty_is_replayed_to_every_attachment() {
+    let directory = TempDir::new().unwrap();
+    let root = directory.path();
+    let runtime = Runtime::start(
+        config(8),
+        OpStoreProvider { root: root.into() },
+        ScriptedExecutor::new(Script::RunUntilStop),
+    );
+    let (session, initial) = create_staged_session(root, 0x2b);
+    let card = session.record().identity.card;
+    assert_eq!(session.record().state, ProductState::Preparing);
+    runtime.admit(session, initial).unwrap();
+
+    for attachment in 0..3 {
+        let mut subscription = runtime
+            .subscribe(card, NonZeroUsize::new(4).unwrap())
+            .unwrap();
+        // Bounded on purpose: a duty that never arrives must FAIL this test,
+        // not park it. An unbounded await turns a lost ask into a hang, which
+        // is the least useful way a gate can report one.
+        let mut next = async || {
+            tokio::time::timeout(Duration::from_secs(5), subscription.recv())
+                .await
+                .expect("the attachment was told nothing within its bound")
+                .unwrap()
+                .unwrap()
+        };
+        assert!(matches!(
+            next().await.kind,
+            CardUpdateKind::Snapshot(record) if record.state == ProductState::Preparing
+        ));
+        let update = next().await;
+        let CardUpdateKind::CapabilityDuty { duty, action } = update.kind else {
+            panic!("attachment {attachment} was not told the card needs a source");
+        };
+        assert_eq!(action, CapabilityAction::SelectSource);
+        assert_eq!(duty.kind, DutyKind::SourceHandle);
+        assert_eq!(duty.provenance.card, card);
+        assert_eq!(
+            duty.provenance.generation,
+            durable_state(root, card).generation
+        );
+    }
+
+    // The other direction — a card whose source IS ready — raises no such duty
+    // in the first place, so an attachment to one is never told to pick a file.
+    let (ready, initial) = create_session(root, Direction::Send, 0x2c);
+    let ready_card = ready.record().identity.card;
+    runtime.admit(ready, initial).unwrap();
+    let mut watching = runtime
+        .subscribe(ready_card, NonZeroUsize::new(4).unwrap())
+        .unwrap();
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(5), watching.recv())
+            .await
+            .expect("the attachment opens with its snapshot")
+            .unwrap()
+            .unwrap()
+            .kind,
+        CardUpdateKind::Snapshot(record) if record.state == ProductState::Connecting
+    ));
+    assert_eq!(watching.try_recv(), Err(TryRecvError::Empty));
 
     runtime.shutdown().await;
 }

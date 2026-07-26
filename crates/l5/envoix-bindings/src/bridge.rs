@@ -17,8 +17,9 @@ use envoix_types::{CommandId, RecordId};
 
 use crate::command::{
     AcceptanceView, CommandAcceptanceView, CommandBody, CommandCompletionView, CommandError,
-    CommandFrame, CommandView, CompletionView, DispositionView, PausedStateView, RejectionView,
-    decode_command_frame,
+    CommandFrame, CommandView, CompletionView, CreateIntentView, CreateOutcomeView,
+    CreateResultView, CreateView, DispositionView, FrontendIntentView, PausedStateView,
+    RejectionView, SubmitView, decode_command_frame,
 };
 
 /// A decoded, validated submit request. The host resolves `card` to the live
@@ -34,40 +35,105 @@ pub struct SubmitSpec {
     pub command: ProductCommand,
 }
 
-/// Why frontend bytes did not yield a [`SubmitSpec`].
+/// A decoded, validated request that a card be created.
+///
+/// The invite text stays a `String` all the way to the host, which hands it to
+/// the invite grammar: this layer neither parses nor inspects it, so there is
+/// no second reader of an invite anywhere in the system.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreateSpec {
+    pub request_id: CommandId,
+    pub intent: CreateIntent,
+}
+
+/// What kind of card a frontend asked for.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CreateIntent {
+    /// Send the document the platform granted, described by the sanitized
+    /// metadata the picker reported.
+    Send { display_name: String, total: u64 },
+    /// Join whatever this opaque text turns out to be.
+    Join { invite: String },
+}
+
+/// One decoded frontend-originated intent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FrontendIntent {
+    Command(SubmitSpec),
+    Create(CreateSpec),
+}
+
+/// Why frontend bytes did not yield a [`FrontendIntent`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SubmitDecodeError {
     /// The generated decoder rejected the frame (malformed, hostile,
     /// oversized, wrong schema, unknown variant, …).
     Frame(CommandError),
-    /// A well-formed frame whose body is not `submit`. Acceptance/completion
-    /// bodies flow host→frontend only; one arriving FROM a frontend is a
-    /// contract violation, not a command.
-    NotASubmit,
+    /// A well-formed frame whose body is not `intent`. Acceptance, completion
+    /// and create-result bodies flow host→frontend only; one arriving FROM a
+    /// frontend is a contract violation, not a request.
+    NotAnIntent,
 }
 
-/// Decodes hostile frontend bytes into a typed submit request.
-pub fn decode_submit(bytes: &[u8]) -> Result<SubmitSpec, SubmitDecodeError> {
+/// Decodes hostile frontend bytes into a typed intent.
+pub fn decode_intent(bytes: &[u8]) -> Result<FrontendIntent, SubmitDecodeError> {
     let frame = decode_command_frame(bytes).map_err(SubmitDecodeError::Frame)?;
-    let CommandBody::Submit(submit) = frame.body else {
-        return Err(SubmitDecodeError::NotASubmit);
+    let CommandBody::Intent(intent) = frame.body else {
+        return Err(SubmitDecodeError::NotAnIntent);
     };
+    match intent {
+        FrontendIntentView::Command(submit) => submit_spec(submit).map(FrontendIntent::Command),
+        FrontendIntentView::Create(create) => create_spec(create).map(FrontendIntent::Create),
+    }
+}
+
+fn submit_spec(submit: SubmitView) -> Result<SubmitSpec, SubmitDecodeError> {
     let card = u64::from_str_radix(&submit.card, 16).map_err(|_| {
         SubmitDecodeError::Frame(CommandError::Shape {
             context: "SubmitView.card",
         })
     })?;
-    let command_id = u128::from_str_radix(&submit.command_id, 16).map_err(|_| {
-        SubmitDecodeError::Frame(CommandError::Shape {
-            context: "SubmitView.command_id",
-        })
-    })?;
     Ok(SubmitSpec {
         card: RecordId::new(card),
         epoch: submit.epoch,
-        command_id: CommandId::from_bytes(command_id.to_be_bytes()),
+        command_id: command_id(&submit.command_id, "SubmitView.command_id")?,
         command: live_command(submit.command),
     })
+}
+
+fn create_spec(create: CreateView) -> Result<CreateSpec, SubmitDecodeError> {
+    Ok(CreateSpec {
+        request_id: command_id(&create.request_id, "CreateView.request_id")?,
+        intent: match create.intent {
+            CreateIntentView::Send(source) => CreateIntent::Send {
+                display_name: source.display_name,
+                total: source.total,
+            },
+            CreateIntentView::Join(join) => CreateIntent::Join {
+                invite: join.invite,
+            },
+        },
+    })
+}
+
+fn command_id(text: &str, context: &'static str) -> Result<CommandId, SubmitDecodeError> {
+    u128::from_str_radix(text, 16)
+        .map(|value| CommandId::from_bytes(value.to_be_bytes()))
+        .map_err(|_| SubmitDecodeError::Frame(CommandError::Shape { context }))
+}
+
+/// The encoded answer to one create request.
+///
+/// It is a RESULT, not an acceptance: `created` means the card's record is on
+/// disk, because that write is what creation is. A refusal means no card was
+/// made at all.
+pub fn create_result_frame(request_id: CommandId, outcome: CreateOutcomeView) -> CommandFrame {
+    CommandFrame {
+        body: CommandBody::CreateResult(CreateResultView {
+            outcome,
+            request_id: hex32(request_id),
+        }),
+    }
 }
 
 /// The encoded acceptance answer for one submitted command, correlated by its

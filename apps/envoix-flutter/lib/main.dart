@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'attachment.dart';
+import 'create.dart';
 import 'home.dart';
 import 'instrumentation.dart';
 import 'lane.dart';
@@ -15,17 +16,19 @@ class EnvoixApp extends StatelessWidget {
     super.key,
     this.lane = platformLane,
     this.commands = platformCommands,
+    this.picker = platformPickSource,
   });
 
   final LaneSource lane;
   final CommandSink commands;
+  final SourcePicker picker;
 
   @override
   Widget build(BuildContext context) => MaterialApp(
         title: 'Envoix',
         theme: envoixTheme(Brightness.light),
         darkTheme: envoixTheme(Brightness.dark),
-        home: Shell(lane: lane, commands: commands),
+        home: Shell(lane: lane, commands: commands, picker: picker),
       );
 }
 
@@ -53,10 +56,16 @@ ThemeData envoixTheme(Brightness brightness) => ThemeData(
 /// without [PopScope] it would pop the only route there is and leave the app,
 /// which is not "return from a secondary screen".
 class Shell extends StatefulWidget {
-  const Shell({required this.lane, required this.commands, super.key});
+  const Shell({
+    required this.lane,
+    required this.commands,
+    required this.picker,
+    super.key,
+  });
 
   final LaneSource lane;
   final CommandSink commands;
+  final SourcePicker picker;
 
   @override
   State<Shell> createState() => _ShellState();
@@ -81,6 +90,20 @@ class _ShellState extends State<Shell> {
   void _attach() => setState(() => _lane = _open());
 
   void _showHome() => _show(0);
+
+  /// Opens the new-transfer sheet. Asking for a card is not a lifetime verb:
+  /// the authority makes one or refuses, and this attachment finds out the same
+  /// way it finds out about every other card — on the lane.
+  void _newTransfer() {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (BuildContext context) => NewTransferSheet(
+        creator: _lane.creator,
+        picker: widget.picker,
+      ),
+    );
+  }
 
   /// Moving to a destination re-renders what is there, so the report ledger
   /// clears with the move.
@@ -132,6 +155,18 @@ class _ShellState extends State<Shell> {
                 fault: fault,
               )
             : LogsScreen(attachment: _lane.attachment),
+        floatingActionButton: home
+            ? Builder(
+                builder: (BuildContext context) {
+                  reportSheetControl(context, 'new-transfer');
+                  return FloatingActionButton.extended(
+                    onPressed: _newTransfer,
+                    label: const Text('New transfer'),
+                    icon: const _Plus(),
+                  );
+                },
+              )
+            : null,
         bottomNavigationBar: NavigationBar(
           selectedIndex: _destination,
           onDestinationSelected: _show,
@@ -151,6 +186,49 @@ class _ShellState extends State<Shell> {
       ),
     );
   }
+}
+
+/// The new-transfer affordance's icon, drawn rather than set in a font — the
+/// same reason as [_Dot]: no icon font is packaged.
+class _Plus extends StatelessWidget {
+  const _Plus();
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+        width: 16,
+        height: 16,
+        child: CustomPaint(
+          painter: _PlusPainter(
+            Theme.of(context).colorScheme.onPrimaryContainer,
+          ),
+        ),
+      );
+}
+
+class _PlusPainter extends CustomPainter {
+  const _PlusPainter(this.color);
+
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final Paint stroke = Paint()
+      ..color = color
+      ..strokeWidth = 2;
+    canvas.drawLine(
+      Offset(size.width / 2, 0),
+      Offset(size.width / 2, size.height),
+      stroke,
+    );
+    canvas.drawLine(
+      Offset(0, size.height / 2),
+      Offset(size.width, size.height / 2),
+      stroke,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_PlusPainter old) => old.color != color;
 }
 
 /// A destination's indicator, drawn rather than set in a font.

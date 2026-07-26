@@ -4,20 +4,80 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 
-use crate::code::{RoomCode, looks_like_bare_room_code};
+use crate::code::{MAX_ROOM_CODE_LENGTH, RoomCode, looks_like_bare_room_code};
 use crate::identifiers::{
     DEEP_LINK_OUTER_PREFIX, INVITE_PAYLOAD_VERSION, QR_OUTER_PREFIX, URI_SCHEME,
 };
 use crate::{InviteError, InviteField, RecognizedInvalid};
 
+/// The parser's permissive INTAKE bound: how much pasted text `route_invite`
+/// will look at before refusing it as too long. It answers "what will we try to
+/// parse", never "what can we emit" — the emitted maximum is
+/// [`MAX_INVITE_LINK_LENGTH`], and anything carrying an invite we produced
+/// should be sized from that one.
 pub const MAX_INVITE_INPUT_LENGTH: usize = 8 * 1024;
 pub const MAX_ENCODED_PAYLOAD_LENGTH: usize = 6 * 1024;
 pub const MAX_DECODED_PAYLOAD_LENGTH: usize = 4 * 1024;
 pub const MAX_BROKER_LENGTH: usize = 1024;
 pub const MAX_RELAY_LENGTH: usize = 2048;
 
+/// The longest text this crate can EMIT for an invite: the widest
+/// `encode_deep_link` output, which is also the wider of the two encoders
+/// (`encode_qr`'s outer form is shorter and its payload identical).
+///
+/// Derived from the encoder's own pieces rather than asserted, so a change to
+/// the outer form, the payload version, or any field bound moves it:
+/// `the_link_bound_is_the_longest_link_the_encoder_can_produce` grows invites
+/// against the grammar until it refuses one and proves the last it accepted is
+/// exactly this long, so the number can be neither short nor loose.
+pub const MAX_INVITE_LINK_LENGTH: usize = DEEP_LINK_OUTER_PREFIX.len()
+    + DEEP_LINK_VERSION_PATH.len()
+    + decimal_digits(INVITE_PAYLOAD_VERSION)
+    + 1
+    + base64_no_pad_length(MAX_ENCODABLE_PAYLOAD_LENGTH);
+
 const DEEP_LINK_VERSION_PATH: &str = "invite/v";
 const LEGACY_PAIR_PATH: &str = "pair/";
+
+/// The JSON `encode_payload` serialises, with every value removed. Pinned
+/// against a real encoding by `the_payload_skeleton_is_the_one_serde_writes`.
+pub const PAYLOAD_SKELETON: &str = r#"{"version":,"code":"","broker":"","relay":"","role":""}"#;
+
+/// The widest payload `encode_payload` can serialise. Two limits meet here and
+/// the smaller wins: what the fields admit — an endpoint byte may need a JSON
+/// escape, and the escapes longer than two bytes are exactly the control
+/// characters `validate_endpoint_field` already rejects — and the length
+/// `encode_payload` itself refuses to exceed.
+pub const MAX_ENCODABLE_PAYLOAD_LENGTH: usize = {
+    let widest = PAYLOAD_SKELETON.len()
+        + decimal_digits(INVITE_PAYLOAD_VERSION)
+        + MAX_ROOM_CODE_LENGTH
+        + 2 * MAX_BROKER_LENGTH
+        + 2 * MAX_RELAY_LENGTH
+        + MAX_ROLE_LENGTH;
+    if widest < MAX_DECODED_PAYLOAD_LENGTH {
+        widest
+    } else {
+        MAX_DECODED_PAYLOAD_LENGTH
+    }
+};
+
+/// The longer of the two `Role` spellings serde writes.
+const MAX_ROLE_LENGTH: usize = "receive".len();
+
+const fn decimal_digits(value: u32) -> usize {
+    let mut digits = 1;
+    let mut remaining = value;
+    while remaining >= 10 {
+        remaining /= 10;
+        digits += 1;
+    }
+    digits
+}
+
+const fn base64_no_pad_length(bytes: usize) -> usize {
+    (bytes * 4).div_ceil(3)
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]

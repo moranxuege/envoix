@@ -1,12 +1,13 @@
 use std::fmt;
 
 use envoix_attempt_api::AttemptStamp;
-use envoix_outcomes::{Outcome, OutcomeCode, Phase, Recovery, Retryability};
+use envoix_outcomes::{Outcome, OutcomeCode, Phase, Recovery, Retryability, SafeDisplay};
 use envoix_types::{ArtifactId, ByteCount, RecordId, RequestId, TransferId};
 use serde::Serialize;
 
-/// The largest safe-display payload retained in one timeline entry.
-pub const MAX_SAFE_DISPLAY_BYTES: usize = 160;
+/// The largest safe-display payload retained in one timeline entry — the
+/// owner's published maximum, not a retention number invented beside it.
+pub const MAX_SAFE_DISPLAY_BYTES: usize = SafeDisplay::MAX_BYTES;
 
 /// The logging-ledger correlation key for one attempt generation.
 pub type SessionKey = AttemptStamp;

@@ -6,7 +6,7 @@
 
 import 'dart:convert';
 
-const String readSchemaId = 'envoix/binding/read/3';
+const String readSchemaId = 'envoix/binding/read/4';
 const int readMaxFrameBytes = 1048576;
 const int _u63Max = 9223372036854775807;
 
@@ -105,6 +105,7 @@ enum DutyKindView {
 
 enum CapabilityActionView {
   postReceipt,
+  selectSource,
 }
 
 enum CommandKindView {
@@ -257,6 +258,16 @@ final class IdentityView {
   final String artifact;
 }
 
+final class InviteView {
+  const InviteView({
+    required this.code,
+    required this.link,
+  });
+
+  final String code;
+  final String? link;
+}
+
 final class CardView {
   const CardView({
     required this.identity,
@@ -271,6 +282,7 @@ final class CardView {
     required this.bytesResumed,
     required this.outcome,
     required this.allowedActions,
+    required this.invite,
   });
 
   final IdentityView identity;
@@ -285,6 +297,7 @@ final class CardView {
   final int bytesResumed;
   final OutcomeView? outcome;
   final List<CommandKindView> allowedActions;
+  final InviteView? invite;
 }
 
 final class DutyProvenanceView {
@@ -945,6 +958,7 @@ DutyKindView _decodeDutyKindView(Object? value, String context) {
 CapabilityActionView _decodeCapabilityActionView(Object? value, String context) {
   return switch (value) {
     'post_receipt' => CapabilityActionView.postReceipt,
+    'select_source' => CapabilityActionView.selectSource,
     String() =>
       throw ReadContractException(ReadErrorKind.unknownVariant, context),
     _ => throw ReadContractException(ReadErrorKind.shape, context),
@@ -1118,9 +1132,21 @@ IdentityView _decodeIdentityView(Object? value, String context) {
   );
 }
 
+InviteView _decodeInviteView(Object? value, String context) {
+  final map = _object(value, context);
+  _knownKeys(map, const {'code', 'link'}, context);
+  return InviteView(
+    code: _utf8Bounded(_field(map, 'code', 'InviteView.code'), 64, 'InviteView.code'),
+    link: switch (_field(map, 'link', 'InviteView.link')) {
+      null => null,
+      final present => _utf8Bounded(present, 5481, 'InviteView.link'),
+    },
+  );
+}
+
 CardView _decodeCardView(Object? value, String context) {
   final map = _object(value, context);
-  _knownKeys(map, const {'identity', 'direction', 'offered_name', 'total', 'state', 'quiescence', 'generation', 'phase', 'bytes', 'bytes_resumed', 'outcome', 'allowed_actions'}, context);
+  _knownKeys(map, const {'identity', 'direction', 'offered_name', 'total', 'state', 'quiescence', 'generation', 'phase', 'bytes', 'bytes_resumed', 'outcome', 'allowed_actions', 'invite'}, context);
   return CardView(
     identity: _decodeIdentityView(_field(map, 'identity', 'CardView.identity'), 'CardView.identity'),
     direction: _decodeDirectionView(_field(map, 'direction', 'CardView.direction'), 'CardView.direction'),
@@ -1137,6 +1163,10 @@ CardView _decodeCardView(Object? value, String context) {
       final present => _decodeOutcomeView(present, 'CardView.outcome'),
     },
     allowedActions: _list(_field(map, 'allowed_actions', 'CardView.allowed_actions'), 5, 'CardView.allowed_actions', _decodeCommandKindView),
+    invite: switch (_field(map, 'invite', 'CardView.invite')) {
+      null => null,
+      final present => _decodeInviteView(present, 'CardView.invite'),
+    },
   );
 }
 

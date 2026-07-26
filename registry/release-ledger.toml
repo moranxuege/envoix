@@ -68,14 +68,30 @@ bundled_libraries = ["libapp.so", "libflutter.so"]
 # epoch) and can start nothing, stop nothing and write nothing. There is
 # deliberately no `detach` — a frontend that goes away stops polling, so
 # leaving is not a verb it can spell.
+#
+# `intent` is the ONE door a frontend originates anything through, and it is
+# named for what it carries rather than for one of the things it carries: a
+# generated command-contract intent frame, which is either a command on a card
+# that already exists or a request that one be made. F2b added creation to it
+# and the name moved with it (BN4's `submit` under-described the door the
+# moment it stopped carrying only submissions).
+#
+# One door rather than two, on design merits: this list guards a hand-written
+# `extern "C"` surface with no exhaustiveness and no drift gate, while the
+# contract behind it is generated, exhaustively switched, drift-gated and
+# mutation-tested across four languages. So the command/create distinction
+# lives in the contract, where the machinery is strongest, and the JNI stays as
+# narrow as it was. Both intents are the same act — a frontend asking the
+# authority for something and being told what happened — and the authority
+# answers each in its own arm.
 allowed_native_symbols = [
     "Java_app_envoix_host_NativeHost_attach",
     "Java_app_envoix_host_NativeHost_boot",
+    "Java_app_envoix_host_NativeHost_intent",
     "Java_app_envoix_host_NativeHost_pollFrame",
     "Java_app_envoix_host_NativeHost_pollWork",
     "Java_app_envoix_host_NativeHost_reportDuty",
     "Java_app_envoix_host_NativeHost_shutdown",
-    "Java_app_envoix_host_NativeHost_submit",
 ]
 
 # Recognised debug/instrumentation exports. NOT the rule — the allow-list above
@@ -86,8 +102,8 @@ allowed_native_symbols = [
 # for that reason alone.
 forbidden_native_symbols = ["Java_app_envoix_host_E2eBridge_"]
 
-# The COMPLETE packaged surface of a release APK, as patterns where `*` stands
-# for any run of characters inside one path segment. Anything else in the
+# The COMPLETE packaged surface of a release artifact, as patterns where `*`
+# stands for any run of characters inside one path segment. Anything else in the
 # archive is rejected by name, which is what a deny-list of certificate
 # extensions can never do: an extension-less trust root, a `.der`, a `.pfx` or
 # a PEM hidden in a text asset all fail here simply for not being claimed.
@@ -96,6 +112,13 @@ forbidden_native_symbols = ["Java_app_envoix_host_E2eBridge_"]
 # additions, each named rather than waved through by an `assets/**` wildcard:
 # the whole point of this list is that a file nobody reviewed has no pattern to
 # hide under, and a directory wildcard would give every future asset one.
+#
+# ONE list judges both shapes. An app bundle carries the same app content under
+# module-scoped prefixes, so a bundle entry is mapped back onto the name it
+# would have inside an APK and judged HERE; only the container's own metadata is
+# judged by `allowed_bundle_entries`. Two spellings of one resource are the only
+# residue of that: aapt2 flattens `res/` into one segment for an APK and keeps
+# the qualifier directory in a bundle, so both shapes are named.
 allowed_package_entries = [
     "AndroidManifest.xml",
     "DebugProbesKt.bin",
@@ -131,6 +154,66 @@ allowed_package_entries = [
     "META-INF/versions/9/OSGI-INF/MANIFEST.MF",
     "res/*.png",
     "res/*.xml",
+    # The same two, as a bundle spells them: `res/<type>-<qualifiers>/<name>`.
+    "res/*/*.png",
+    "res/*/*.xml",
+]
+
+# The COMPLETE set of entries an app bundle carries that are the CONTAINER's
+# rather than the app's: bundletool's module descriptors, AGP's bundle metadata
+# and the JAR signature block. Everything else in an `.aab` is app content and
+# is judged against `allowed_package_entries` above, after its module prefix is
+# stripped (`base/dex/`, `base/manifest/` and `base/root/` map onto the archive
+# root; `base/assets/`, `base/lib/` and `base/res/` keep their directory).
+#
+# This list exists because the surface rule used to be OFF for bundles — the
+# artifact D2 uploads — on the argument that a bundle's layout is bundletool's
+# to define. Its layout is, and that is all this names; the payload inside it is
+# ours, reviewed once, in one place. An entry that is neither app content nor
+# named here fails exactly as it does in an APK.
+#
+# `*` is the ABI in the debug-symbol paths (the payload itself ships no `.sym`:
+# it is stripped at link) and the signer alias in the signature block, which is
+# a keystore fact this repository never writes down. The signer is judged by
+# certificate fingerprint, not by the name of its block file.
+allowed_bundle_entries = [
+    "BUNDLE-METADATA/com.android.tools.build.debugsymbols/*/libapp.so.sym",
+    "BUNDLE-METADATA/com.android.tools.build.debugsymbols/*/libflutter.so.sym",
+    "BUNDLE-METADATA/com.android.tools.build.gradle/app-metadata.properties",
+    "BUNDLE-METADATA/com.android.tools.build.libraries/dependencies.pb",
+    "BUNDLE-METADATA/com.android.tools.build.profiles/baseline.prof",
+    "BUNDLE-METADATA/com.android.tools.build.profiles/baseline.profm",
+    "BundleConfig.pb",
+    "META-INF/*.RSA",
+    "META-INF/*.SF",
+    "META-INF/MANIFEST.MF",
+    "base/assets.pb",
+    "base/native.pb",
+    "base/resources.pb",
+]
+
+# What the packaged payload is BUILT FROM, as Ant-style globs relative to the
+# repository root. `cargo run -p xtask -- record-payload` digests exactly these
+# files into `sources_sha256`, and the app's `verify<BuildType>JniLibs` task
+# feeds the same list to its freshness check — one enumeration, two consumers,
+# so the two enforcers cannot answer "what determines the payload" differently.
+#
+# It is the whole compiled tree and not a contract surface: every crate and host
+# source, their manifests, the resolved lockfile, the binding schemas and their
+# generated artifacts, and `.cargo/config.toml`, which carries the link flag
+# (`--exclude-libs`) that produces the exported-symbol surface the gate then
+# holds the payload to. A pattern that matches no file is an error, so this list
+# cannot go quietly inert.
+payload_sources = [
+    ".cargo/config.toml",
+    "Cargo.lock",
+    "Cargo.toml",
+    "crates/**/*.rs",
+    "crates/**/Cargo.toml",
+    "crates/l5/envoix-bindings/generated/**",
+    "crates/l5/envoix-bindings/schema/*.schema",
+    "hosts/**/*.rs",
+    "hosts/**/Cargo.toml",
 ]
 
 # Substrings of the packaged app manifest, as `aapt2 dump xmltree` renders it,

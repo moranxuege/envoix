@@ -14,7 +14,7 @@
 # There is deliberately no bytes/blob type and no handle/path/URI type, so bulk
 # payload bytes and OS handles cannot be represented in a read frame.
 
-id = "envoix/binding/read/3"
+id = "envoix/binding/read/4"
 root = "ReadFrame"
 # Only the host originates read frames, so the native artifacts are decode-only:
 # a frontend cannot fabricate an observation.
@@ -104,7 +104,7 @@ variants = [
 [[decl]]
 kind = "enum"
 name = "CapabilityActionView"
-variants = ["post_receipt"]
+variants = ["post_receipt", "select_source"]
 
 # Which commands the authority will currently admit for a card. This is the
 # product reducer's own `TransferRecord::allowed_commands`, PUBLISHED rather
@@ -200,6 +200,29 @@ fields = [
   { name = "artifact", type = "hex32" },
 ]
 
+# The rendezvous channel the card was frozen to at creation, as the authority
+# holds it: the room code the user reads out and the canonical link the invite
+# grammar (`envoix-invite`, C4) encodes for it. A frontend renders these; it
+# never builds, parses or validates an invite (R0 `XI02`/`XI03`).
+#
+# Both bounds are the grammar's own published maxima rather than numbers
+# invented here about its data: 64 is `MAX_ROOM_CODE_LENGTH` and 5481 is
+# `MAX_INVITE_LINK_LENGTH`, the longest text `encode_deep_link` can produce.
+# `generated_read_schema_roundtrip_and_containment` fails if either drifts from
+# the constant it derives from, because the schema language cannot name a Rust
+# const. Sized this way, an invite the authority holds always fits, so the link
+# is never truncated and never silently withheld.
+#
+# It stays optional for the one reason left: a record whose stored fields no
+# longer spell an invite the grammar can encode has no link to publish.
+[[decl]]
+kind = "struct"
+name = "InviteView"
+fields = [
+  { name = "code", type = "str(64)" },
+  { name = "link", type = "option(str(5481))" },
+]
+
 [[decl]]
 kind = "struct"
 name = "CardView"
@@ -216,6 +239,7 @@ fields = [
   { name = "bytes_resumed", type = "u63" },
   { name = "outcome", type = "option(OutcomeView)" },
   { name = "allowed_actions", type = "list(CommandKindView, 5)" },
+  { name = "invite", type = "option(InviteView)" },
 ]
 
 # ---- capability duties ----

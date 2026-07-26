@@ -1,9 +1,10 @@
 //! Projection from live L4 values into generated read views.
 //!
-//! Bounds that the codec enforces are guaranteed here: safe-display text is
-//! truncated to 160 bytes and offered names to 255 bytes on char boundaries,
-//! monotonic counters saturate into the u63 carrier, and identifiers cross as
-//! fixed-length lowercase hex. Epoch parameters are plain `u64` values taken
+//! Bounds that the codec enforces are guaranteed here: safe-display text and
+//! offered names are held to their owners' published maxima on char
+//! boundaries, monotonic counters saturate into the u63 carrier, and
+//! identifiers cross as fixed-length lowercase hex. Epoch parameters are plain
+//! `u64` values taken
 //! from `SubscriptionEpoch::get` / `CardUpdate::epoch` so hosts can project
 //! without holding a live subscription type.
 
@@ -11,31 +12,36 @@ use envoix_evidence::{
     AbiSchemaManifest, BuildTrustManifest, DiagnosticsStatus, EvidenceValue, RedactedIdKind,
     SessionTimeline, TrustRootFingerprintSlot,
 };
-use envoix_outcomes::{Outcome, OutcomeCode, Phase, Recovery, Retryability};
+use envoix_outcomes::{Outcome, OutcomeCode, Phase, Recovery, Retryability, SafeDisplay};
 use envoix_runtime::{
-    CapabilityAction, CardUpdateKind, Duty, DutyKind, LosslessUpdateKind, PauseOrigin,
-    ProductCommand, ProductState, Quiescence, RetirementIntent, SubscribeError, TransferRecord,
-    WorkerKind,
+    CapabilityAction, CardUpdateKind, Duty, DutyKind, LosslessUpdateKind, MAX_ROOM_CODE_LENGTH,
+    PairingChannel, PauseOrigin, ProductCommand, ProductState, Quiescence, RetirementIntent,
+    SubscribeError, TransferRecord, WorkerKind,
 };
-use envoix_types::{Direction, RecordId};
+use envoix_types::{Direction, OfferedName, RecordId};
 
 use crate::command::COMMAND_SCHEMA_ID;
 use crate::read::{
     AbiSchemaManifestView, BuildManifestView, CapabilityActionView, CardUpdateKindView,
     CardUpdateView, CardView, ClosedView, CommandKindView, DegradedView, DiagnosticsStatusView,
     DirectionView, DutyFrameView, DutyKindView, DutyProvenanceView, DutyView, EvidenceProgressView,
-    EvidenceTimelineView, EvidenceValueView, IdentityView, LagView, LosslessKindView, OutcomeView,
-    PausedView, PhaseView, ProductStateView, ProtocolManifestView, QuiescenceView, READ_SCHEMA_ID,
-    ReadBody, ReadFrame, RecoveryView, RedactedIdKindView, RedactedIdView, RetirementIntentView,
-    RetiringView, RetryabilityView, RunningView, SessionKeyView, SubscribeRejectedView,
-    SubscribeRejectionView, TimelineEntryView, TrustRootSha256View, TrustRootView, WorkerKindView,
+    EvidenceTimelineView, EvidenceValueView, IdentityView, InviteView, LagView, LosslessKindView,
+    OutcomeView, PausedView, PhaseView, ProductStateView, ProtocolManifestView, QuiescenceView,
+    READ_SCHEMA_ID, ReadBody, ReadFrame, RecoveryView, RedactedIdKindView, RedactedIdView,
+    RetirementIntentView, RetiringView, RetryabilityView, RunningView, SessionKeyView,
+    SubscribeRejectedView, SubscribeRejectionView, TimelineEntryView, TrustRootSha256View,
+    TrustRootView, WorkerKindView,
 };
 
-/// The codec bound on safe-display text, mirrored from evidence.
-const MAX_DISPLAY_BYTES: usize = 160;
-/// The codec bound on offered names (the filesystem leaf convention).
-const MAX_NAME_BYTES: usize = 255;
-/// The codec bound on evidence timeline entries per frame.
+/// The codec bound on safe-display text and on offered names: L0 owns both
+/// types and now publishes both maxima, so this contract derives them instead
+/// of choosing what may cross to an observer on their behalf.
+const MAX_DISPLAY_BYTES: usize = SafeDisplay::MAX_BYTES;
+const MAX_NAME_BYTES: usize = OfferedName::MAX_BYTES;
+/// The codec bound on evidence timeline entries per frame. Contract-local, and
+/// about a frame rather than a store: a host configures its own ring capacity,
+/// and `evidence_frame` keeps the newest entries with the sequence gaps left
+/// visible.
 const MAX_TIMELINE_ENTRIES: usize = 1024;
 
 const U63_MAX: u64 = 9_223_372_036_854_775_807;
@@ -198,7 +204,24 @@ fn card_view(record: &TransferRecord) -> CardView {
             .into_iter()
             .map(command_kind_view)
             .collect(),
+        // The card's frozen channel, rendered by the invite grammar that owns
+        // it. A card with no channel, or one whose stored fields no longer
+        // spell a valid invite, publishes nothing rather than a partial one.
+        invite: record.pairing.as_deref().and_then(invite_view),
     }
+}
+
+fn invite_view(pairing: &PairingChannel) -> Option<InviteView> {
+    Some(InviteView {
+        code: truncate_utf8(pairing.code(), MAX_ROOM_CODE_LENGTH),
+        // Nothing measures the link here. The schema's bound IS the grammar's
+        // published emit maximum, so a link this contract cannot carry is not a
+        // thing the encoder can produce; were the two ever to disagree, the
+        // read codec refuses the whole frame as `Bound` rather than quietly
+        // dropping the field. Absence therefore means one thing only: the
+        // stored fields no longer spell an invite the grammar can encode.
+        link: pairing.shareable(),
+    })
 }
 
 const fn command_kind_view(command: ProductCommand) -> CommandKindView {
@@ -337,6 +360,7 @@ fn duty_view(duty: Duty) -> DutyView {
 fn action_view(action: CapabilityAction) -> CapabilityActionView {
     match action {
         CapabilityAction::PostReceipt => CapabilityActionView::PostReceipt,
+        CapabilityAction::SelectSource => CapabilityActionView::SelectSource,
     }
 }
 

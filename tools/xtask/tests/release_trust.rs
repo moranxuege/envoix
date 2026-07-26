@@ -90,7 +90,7 @@ fn release_package_trust_and_metadata_agreement() {
         observed_sha256: Some(facts.artifact_sha256.clone()),
         facts,
     };
-    let clean = check_release(&ledger, &build, std::slice::from_ref(&measured));
+    let clean = check_release(&ledger, &build, std::slice::from_ref(&measured)).disagreements;
     assert!(
         clean.is_empty(),
         "an agreeing release must pass, got {clean:#?}"
@@ -146,13 +146,13 @@ fn release_package_trust_and_metadata_agreement() {
         )
         .expect("the declaration names the command contract");
     assert!(
-        check_release(&ledger, &drifted, std::slice::from_ref(&measured)).contains(
-            &Disagreement::SchemaIdDrift {
+        check_release(&ledger, &drifted, std::slice::from_ref(&measured))
+            .disagreements
+            .contains(&Disagreement::SchemaIdDrift {
                 field: "abi_schema_command_binding_schema_id".to_owned(),
                 declared: Some("envoix/binding/command/0".to_owned()),
                 compiled: Some(compiled),
-            }
-        )
+            })
     );
 
     // And a declaration naming an identity this build no longer compiles.
@@ -162,11 +162,38 @@ fn release_package_trust_and_metadata_agreement() {
         "envoix/binding/retired/1".to_owned(),
     );
     assert!(
-        check_release(&ledger, &drifted, &[measured]).contains(&Disagreement::SchemaIdDrift {
-            field: "abi_schema_retired_schema_id".to_owned(),
-            declared: Some("envoix/binding/retired/1".to_owned()),
-            compiled: None,
-        })
+        check_release(&ledger, &drifted, &[measured])
+            .disagreements
+            .contains(&Disagreement::SchemaIdDrift {
+                field: "abi_schema_retired_schema_id".to_owned(),
+                declared: Some("envoix/binding/retired/1".to_owned()),
+                compiled: None,
+            })
+    );
+}
+
+/// The bundle list is for the CONTAINER, and the hole it closed can be
+/// re-opened by putting app content in it: an entry named there is never
+/// mapped onto the reviewed surface, so `base/root/anything` listed as
+/// "bundletool's" would ship unreviewed exactly as 139 entries used to.
+///
+/// The two lists are disjoint by construction — `surface_entry` answers `Some`
+/// or `None` and never both — so the property to hold the LEDGER to is that
+/// every bundle-list pattern really is a container path.
+#[test]
+fn the_bundle_container_list_never_claims_app_content() {
+    let ledger = load_ledger(&xtask::workspace_root()).expect("the release ledger parses");
+    for pattern in &ledger.policy.allowed_bundle_entries {
+        assert_eq!(
+            ArtifactKind::Bundle.surface_entry(pattern),
+            None,
+            "{pattern} is app content: it belongs in allowed_package_entries, \
+             where the reviewed surface can see it"
+        );
+    }
+    assert!(
+        !ledger.policy.allowed_bundle_entries.is_empty(),
+        "a bundle carries container entries; an empty list would fail every bundle"
     );
 }
 
@@ -224,6 +251,63 @@ fn release_cdylib_omits_debug_instrumentation() {
                 .iter()
                 .any(|prefix| symbol.starts_with(prefix))),
         "the instrumented build must export the debug lane and nothing else, got {extra:?}"
+    );
+}
+
+/// The Kotlin lane and the released surface are ONE vocabulary, spelled in two
+/// places that no compiler relates: `NativeHost` declares `external fun`s, the
+/// ledger names exported symbols, and the two agree only because someone typed
+/// them the same way. A verb renamed on one side and not the other passes every
+/// other gate in this repository and fails at the first call, in a release
+/// build, as an `UnsatisfiedLinkError` — the class of hole F2b's `submit` ->
+/// `intent` rename would otherwise have to be walked across by hand.
+///
+/// Both directions: a declaration the release does not export is a dead binding,
+/// and an exported entry point nothing declares is a door with no lock on the
+/// Kotlin side. The cdylib test above pins the ledger to the compiled artifact,
+/// so pinning the declaration to the ledger closes the triangle.
+#[test]
+fn the_kotlin_lane_declares_exactly_the_released_symbols() {
+    const NATIVE_HOST: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../apps/envoix-flutter/android/app/src/main/kotlin/app/envoix/host/NativeHost.kt"
+    ));
+    const PREFIX: &str = "Java_app_envoix_host_NativeHost_";
+
+    let ledger = load_ledger(&xtask::workspace_root()).expect("the release ledger parses");
+    let declared: BTreeSet<String> = NATIVE_HOST
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("external fun "))
+        .map(|declaration| {
+            declaration
+                .chars()
+                .take_while(|character| character.is_alphanumeric() || *character == '_')
+                .collect()
+        })
+        .collect();
+    assert!(!declared.is_empty(), "the JNI lane declares no verb at all");
+    for verb in &declared {
+        // JNI mangles `_` in a Java method name to `_1`, so a verb spelled with
+        // one would not be the symbol this concatenation builds.
+        assert!(
+            !verb.contains('_'),
+            "{verb} would be mangled; this mapping only holds for unmangled names"
+        );
+    }
+
+    let bound: BTreeSet<String> = declared
+        .iter()
+        .map(|verb| format!("{PREFIX}{verb}"))
+        .collect();
+    let released: BTreeSet<String> = ledger
+        .policy
+        .allowed_native_symbols
+        .iter()
+        .cloned()
+        .collect();
+    assert_eq!(
+        bound, released,
+        "the Kotlin lane and the released symbol surface are not the same vocabulary"
     );
 }
 

@@ -25,10 +25,13 @@ import kotlin.concurrent.thread
  * WHICH pump was meant. The host settles it regardless — a superseded token
  * consumes nothing — so the flag here only ends the thread promptly.
  *
- * The other direction is one method: [COMMAND_CHANNEL]'s [SUBMIT], which hands
- * a submit frame to the host and returns the encoded acceptance frame. It is
- * not a transfer verb — the host decides what the command does, and the
- * committed completion arrives later on the frame lane above.
+ * The other direction is two methods on [COMMAND_CHANNEL]. [INTENT] hands an
+ * intent frame to the host and returns the host's encoded answer; it is not a
+ * transfer verb — the host decides what the intent does, and a committed
+ * completion arrives later on the frame lane above. [PICK_SOURCE] opens the
+ * platform document picker and answers with the provider's display name and
+ * size; the URI itself stays in [SourcePicks] and is never part of the reply,
+ * so the frontend can describe a chosen file without ever holding one.
  *
  * Kotlin never looks inside a frame. It moves `ByteArray`s between the JNI lane
  * and the message channels; the generated Dart codec is the only thing that
@@ -36,18 +39,19 @@ import kotlin.concurrent.thread
  */
 class FrontendLane(
     messenger: BinaryMessenger,
+    private val pickSource: () -> Unit,
 ) : EventChannel.StreamHandler {
     private val channel = EventChannel(messenger, CHANNEL)
     private val commands = MethodChannel(messenger, COMMAND_CHANNEL)
     private val main = Handler(Looper.getMainLooper())
 
     /**
-     * Submits run off the platform thread: the host blocks on the runtime to
-     * resolve an acceptance, and blocking the platform thread for that is an
-     * ANR. One thread, so a burst of taps queues instead of spawning a thread
-     * each; the reply is posted back where a `MethodChannel` result belongs.
+     * Intents run off the platform thread: the host blocks on the runtime to
+     * resolve an answer, and blocking the platform thread for that is an ANR.
+     * One thread, so a burst of taps queues instead of spawning a thread each;
+     * the reply is posted back where a `MethodChannel` result belongs.
      */
-    private val submissions = Executors.newSingleThreadExecutor()
+    private val intents = Executors.newSingleThreadExecutor()
 
     /** The pump the current attachment owns; every earlier one is superseded. */
     private var current: Pump? = null
@@ -57,26 +61,64 @@ class FrontendLane(
         commands.setMethodCallHandler(::onCommand)
     }
 
+    /** The pick in flight, answered when the Activity reports its result. */
+    private var picking: MethodChannel.Result? = null
+
     private fun onCommand(
         call: MethodCall,
         result: MethodChannel.Result,
     ) {
-        if (call.method != SUBMIT) {
-            result.notImplemented()
+        when (call.method) {
+            INTENT -> onIntent(call, result)
+            PICK_SOURCE -> onPickSource(result)
+            else -> result.notImplemented()
+        }
+    }
+
+    /**
+     * Opens the picker. One at a time: a second request while one is open would
+     * leave the first `Result` unanswered, which a `MethodChannel` treats as a
+     * leak.
+     */
+    private fun onPickSource(result: MethodChannel.Result) {
+        if (picking != null) {
+            result.error(PICK_IN_FLIGHT, "a source pick is already open", null)
             return
         }
+        picking = result
+        pickSource()
+    }
+
+    /**
+     * The Activity's answer: the sanitized metadata for the picked document, or
+     * null when the user cancelled. Never a URI.
+     */
+    fun sourcePicked(granted: SourcePicks.Granted?) {
+        val result = picking ?: return
+        picking = null
+        result.success(
+            granted?.let {
+                mapOf(DISPLAY_NAME to it.displayName, SIZE_BYTES to it.sizeBytes)
+            },
+        )
+    }
+
+    private fun onIntent(
+        call: MethodCall,
+        result: MethodChannel.Result,
+    ) {
         val frame = call.arguments as? ByteArray
         if (frame == null) {
-            result.error(NOT_A_FRAME, "submit takes the encoded command frame", null)
+            result.error(NOT_A_FRAME, "intent takes the encoded intent frame", null)
             return
         }
-        submissions.execute {
-            val acceptance = NativeHost.submit(frame)
+        intents.execute {
+            val answer = NativeHost.intent(frame)
             main.post {
-                if (acceptance == null) {
+                if (answer == null) {
                     result.error(HOST_UNAVAILABLE, "the transfer host is not running", null)
                 } else {
-                    result.success(acceptance)
+                    result.success(answer)
                 }
             }
         }
@@ -103,10 +145,12 @@ class FrontendLane(
 
     /** Releases the channels when the engine that owns them goes away. */
     fun dispose() {
+        picking?.error(HOST_UNAVAILABLE, "the frontend went away", null)
+        picking = null
         onCancel(null)
         channel.setStreamHandler(null)
         commands.setMethodCallHandler(null)
-        submissions.shutdown()
+        intents.shutdown()
     }
 
     /** One attachment's pump: its own token, its own thread, its own stop. */
@@ -149,13 +193,23 @@ class FrontendLane(
         /** Mirrors the catalogued `android.frontend_command_channel`. */
         const val COMMAND_CHANNEL = "app.envoix.host/frontend-commands"
 
-        /** The one method that channel carries. */
-        const val SUBMIT = "submit"
+        /** The intent method that channel carries. */
+        const val INTENT = "intent"
+
+        /** The platform-capability method: open the document picker. */
+        const val PICK_SOURCE = "pickSource"
+
+        /** Keys of the pick reply. Sanitized metadata only — never a URI. */
+        const val DISPLAY_NAME = "displayName"
+        const val SIZE_BYTES = "sizeBytes"
+
+        /** A pick was requested while one was already open. */
+        const val PICK_IN_FLIGHT = "pick-in-flight"
 
         /** No host to observe; the Dart side surfaces it and may re-listen. */
         const val HOST_UNAVAILABLE = "host-unavailable"
 
-        /** The call carried something that is not an encoded command frame. */
+        /** The call carried something that is not an encoded intent frame. */
         const val NOT_A_FRAME = "not-a-frame"
 
         const val POLL_MILLIS = 50L

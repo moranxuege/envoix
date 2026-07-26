@@ -230,6 +230,7 @@ fn create_card(
             offered_name: OfferedName::from_untrusted("payload.bin"),
             total: ByteCount::new(1024),
             source: SourceDecision::Ready,
+            pairing: None,
         },
         &mut FixedIdentity { next: seed },
         ScriptedStore::deferred(root, script.clone()),

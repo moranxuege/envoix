@@ -6,7 +6,7 @@ use envoix_outcomes::{Outcome, Phase};
 use envoix_types::{AttemptGen, ByteCount, CommandId, Direction, OfferedName, RequestId};
 use serde::{Deserialize, Serialize};
 
-use crate::ProductIdentity;
+use crate::{PairingChannel, ProductIdentity};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -105,6 +105,10 @@ pub struct NewTransfer {
     pub offered_name: OfferedName,
     pub total: ByteCount,
     pub source: SourceDecision,
+    /// The rendezvous channel this card is frozen to, minted for a send or
+    /// adopted from the invite a join was created with. `None` is a card with
+    /// no channel yet — the shape every pre-F2b creation path had.
+    pub pairing: Option<Box<PairingChannel>>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -167,6 +171,10 @@ pub enum ProductInput {
 #[serde(rename_all = "snake_case")]
 pub enum CapabilityAction {
     PostReceipt,
+    /// Ask the platform for the send source the user chose. It is minted only
+    /// once the card is durable, so the picker is never the thing that decides
+    /// a transfer exists (`SF02`).
+    SelectSource,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -306,6 +314,15 @@ pub struct TransferRecord {
     pub outcome: Option<Outcome>,
     pub facts: Facts,
     pub source_recoverable: bool,
+    /// The channel this card was frozen to at creation. Defaulted so pre-F2b
+    /// records still decode.
+    ///
+    /// Boxed because the record is CLONED five times per published read frame
+    /// (`allowed_commands` probes each command on a throwaway copy), and a
+    /// channel is four strings: one pointer in the hot structure costs less
+    /// than four in every probe.
+    #[serde(default)]
+    pub pairing: Option<Box<PairingChannel>>,
     pub(crate) receipt_request: RequestId,
     /// Durable frontend-command dedup, committed atomically with each effect.
     /// Defaulted so pre-BN2 dev records still decode.

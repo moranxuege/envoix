@@ -15,7 +15,7 @@
 
 import Foundation
 
-public let commandSchemaId = "envoix/binding/command/2"
+public let commandSchemaId = "envoix/binding/command/3"
 public let commandMaxFrameBytes = 1048576
 // Contract rules frozen by schema/command.schema.
 public let newestAttachmentCommands = true
@@ -86,6 +86,44 @@ public struct SubmitView: Equatable {
     }
 }
 
+public struct SendSourceView: Equatable {
+    public let displayName: String
+    public let total: Int64
+
+    public init(displayName: String, total: Int64) {
+        self.displayName = displayName
+        self.total = total
+    }
+}
+
+public struct JoinInviteView: Equatable {
+    public let invite: String
+
+    public init(invite: String) {
+        self.invite = invite
+    }
+}
+
+public enum CreateIntentView: Equatable {
+    case send(SendSourceView)
+    case join(JoinInviteView)
+}
+
+public struct CreateView: Equatable {
+    public let intent: CreateIntentView
+    public let requestId: String
+
+    public init(intent: CreateIntentView, requestId: String) {
+        self.intent = intent
+        self.requestId = requestId
+    }
+}
+
+public enum FrontendIntentView: Equatable {
+    case command(SubmitView)
+    case create(CreateView)
+}
+
 public enum RejectionView: String, Equatable {
     case unknownCard = "unknown_card"
     case staleEpoch = "stale_epoch"
@@ -120,10 +158,36 @@ public struct CommandCompletionView: Equatable {
     public let completion: CompletionView
 }
 
+public enum CreateRefusalView: String, Equatable {
+    case inviteNotRecognized = "invite_not_recognized"
+    case inviteBareRoomCode = "invite_bare_room_code"
+    case inviteMalformed = "invite_malformed"
+    case inviteTooLong = "invite_too_long"
+    case inviteUnsupported = "invite_unsupported"
+    case inviteRoleUnsupported = "invite_role_unsupported"
+    case storageFault = "storage_fault"
+    case `internal` = "internal"
+}
+
+public struct CardCreatedView: Equatable {
+    public let card: String
+}
+
+public enum CreateOutcomeView: Equatable {
+    case created(CardCreatedView)
+    case refused(CreateRefusalView)
+}
+
+public struct CreateResultView: Equatable {
+    public let outcome: CreateOutcomeView
+    public let requestId: String
+}
+
 public enum CommandBody: Equatable {
-    case submit(SubmitView)
+    case intent(FrontendIntentView)
     case acceptance(CommandAcceptanceView)
     case completion(CommandCompletionView)
+    case createResult(CreateResultView)
 }
 
 public struct CommandFrame: Equatable {
@@ -154,14 +218,14 @@ public enum EnvoixCommandCodec {
     }
 
     /// Encodes the one frame a frontend may originate, stamping the schema
-    /// envelope and the `submit` body around it and enforcing every bound
+    /// envelope and the `intent` body around it and enforcing every bound
     /// `decode` checks. Every failure is a typed `CommandContractError`; an
     /// over-bound frame never leaves the process.
-    public static func encode(_ body: SubmitView) throws -> Data {
-        let encoded = try encodeSubmitView(body)
+    public static func encode(_ body: FrontendIntentView) throws -> Data {
+        let encoded = try encodeFrontendIntentView(body)
         let object: [String: Any] = [
             "schema": commandSchemaId,
-            "body": ["kind": "submit", "value": encoded],
+            "body": ["kind": "intent", "value": encoded],
         ]
         guard let data = try? JSONSerialization.data(
             withJSONObject: object,
@@ -231,6 +295,16 @@ public enum EnvoixCommandCodec {
         return text
     }
 
+    private static func utf8Bounded(_ value: Any?, _ maxBytes: Int, _ context: String) throws -> String {
+        guard let text = value as? String else {
+            throw CommandContractError(kind: .shape, context: context)
+        }
+        guard text.utf8.count <= maxBytes else {
+            throw CommandContractError(kind: .bound, context: context)
+        }
+        return text
+    }
+
     private static func payload(_ map: [String: Any], _ context: String) throws -> Any {
         guard let value = map["value"], !(value is NSNull) else {
             throw CommandContractError(kind: .shape, context: context)
@@ -250,6 +324,10 @@ public enum EnvoixCommandCodec {
 
     private static func encodeHexFixed(_ value: String, _ chars: Int, _ context: String) throws -> String {
         return try hexFixed(value, chars, context)
+    }
+
+    private static func encodeUtf8Bounded(_ value: String, _ maxBytes: Int, _ context: String) throws -> String {
+        return try utf8Bounded(value, maxBytes, context)
     }
 
     private static func decodeCommandView(_ value: Any?, _ context: String) throws -> CommandView {
@@ -353,6 +431,111 @@ public enum EnvoixCommandCodec {
         return map
     }
 
+    private static func decodeSendSourceView(_ value: Any?, _ context: String) throws -> SendSourceView {
+        let map = try object(value, context)
+        try knownKeys(map, ["display_name", "total"], context)
+        let displayName = try utf8Bounded(try field(map, "display_name", "SendSourceView.display_name"), 255, "SendSourceView.display_name")
+        let total = try integer(try field(map, "total", "SendSourceView.total"), u63Max, "SendSourceView.total")
+        return SendSourceView(
+            displayName: displayName,
+            total: total
+        )
+    }
+
+    private static func encodeSendSourceView(_ value: SendSourceView) throws -> [String: Any] {
+        var map: [String: Any] = [:]
+        map["display_name"] = try encodeUtf8Bounded(value.displayName, 255, "SendSourceView.display_name")
+        map["total"] = try encodeInteger(value.total, u63Max, "SendSourceView.total")
+        return map
+    }
+
+    private static func decodeJoinInviteView(_ value: Any?, _ context: String) throws -> JoinInviteView {
+        let map = try object(value, context)
+        try knownKeys(map, ["invite"], context)
+        let invite = try utf8Bounded(try field(map, "invite", "JoinInviteView.invite"), 16384, "JoinInviteView.invite")
+        return JoinInviteView(
+            invite: invite
+        )
+    }
+
+    private static func encodeJoinInviteView(_ value: JoinInviteView) throws -> [String: Any] {
+        var map: [String: Any] = [:]
+        map["invite"] = try encodeUtf8Bounded(value.invite, 16384, "JoinInviteView.invite")
+        return map
+    }
+
+    private static func decodeCreateIntentView(_ value: Any?, _ context: String) throws -> CreateIntentView {
+        let map = try object(value, context)
+        try knownKeys(map, ["kind", "value"], context)
+        guard let kind = try field(map, "kind", context) as? String else {
+            throw CommandContractError(kind: .shape, context: context)
+        }
+        switch kind {
+        case "send":
+            return .send(try decodeSendSourceView(payload(map, "CreateIntentView.send"), "CreateIntentView.send"))
+        case "join":
+            return .join(try decodeJoinInviteView(payload(map, "CreateIntentView.join"), "CreateIntentView.join"))
+        default:
+            throw CommandContractError(kind: .unknownVariant, context: context)
+        }
+    }
+
+    private static func encodeCreateIntentView(_ value: CreateIntentView) throws -> [String: Any] {
+        switch value {
+        case .send(let payload):
+            let encoded = try encodeSendSourceView(payload)
+            return ["kind": "send", "value": encoded]
+        case .join(let payload):
+            let encoded = try encodeJoinInviteView(payload)
+            return ["kind": "join", "value": encoded]
+        }
+    }
+
+    private static func decodeCreateView(_ value: Any?, _ context: String) throws -> CreateView {
+        let map = try object(value, context)
+        try knownKeys(map, ["intent", "request_id"], context)
+        let intent = try decodeCreateIntentView(try field(map, "intent", "CreateView.intent"), "CreateView.intent")
+        let requestId = try hexFixed(try field(map, "request_id", "CreateView.request_id"), 32, "CreateView.request_id")
+        return CreateView(
+            intent: intent,
+            requestId: requestId
+        )
+    }
+
+    private static func encodeCreateView(_ value: CreateView) throws -> [String: Any] {
+        var map: [String: Any] = [:]
+        map["intent"] = try encodeCreateIntentView(value.intent)
+        map["request_id"] = try encodeHexFixed(value.requestId, 32, "CreateView.request_id")
+        return map
+    }
+
+    private static func decodeFrontendIntentView(_ value: Any?, _ context: String) throws -> FrontendIntentView {
+        let map = try object(value, context)
+        try knownKeys(map, ["kind", "value"], context)
+        guard let kind = try field(map, "kind", context) as? String else {
+            throw CommandContractError(kind: .shape, context: context)
+        }
+        switch kind {
+        case "command":
+            return .command(try decodeSubmitView(payload(map, "FrontendIntentView.command"), "FrontendIntentView.command"))
+        case "create":
+            return .create(try decodeCreateView(payload(map, "FrontendIntentView.create"), "FrontendIntentView.create"))
+        default:
+            throw CommandContractError(kind: .unknownVariant, context: context)
+        }
+    }
+
+    private static func encodeFrontendIntentView(_ value: FrontendIntentView) throws -> [String: Any] {
+        switch value {
+        case .command(let payload):
+            let encoded = try encodeSubmitView(payload)
+            return ["kind": "command", "value": encoded]
+        case .create(let payload):
+            let encoded = try encodeCreateView(payload)
+            return ["kind": "create", "value": encoded]
+        }
+    }
+
     private static func decodeRejectionView(_ value: Any?, _ context: String) throws -> RejectionView {
         guard let text = value as? String else {
             throw CommandContractError(kind: .shape, context: context)
@@ -428,6 +611,52 @@ public enum EnvoixCommandCodec {
         )
     }
 
+    private static func decodeCreateRefusalView(_ value: Any?, _ context: String) throws -> CreateRefusalView {
+        guard let text = value as? String else {
+            throw CommandContractError(kind: .shape, context: context)
+        }
+        guard let decoded = CreateRefusalView(rawValue: text) else {
+            throw CommandContractError(kind: .unknownVariant, context: context)
+        }
+        return decoded
+    }
+
+    private static func decodeCardCreatedView(_ value: Any?, _ context: String) throws -> CardCreatedView {
+        let map = try object(value, context)
+        try knownKeys(map, ["card"], context)
+        let card = try hexFixed(try field(map, "card", "CardCreatedView.card"), 16, "CardCreatedView.card")
+        return CardCreatedView(
+            card: card
+        )
+    }
+
+    private static func decodeCreateOutcomeView(_ value: Any?, _ context: String) throws -> CreateOutcomeView {
+        let map = try object(value, context)
+        try knownKeys(map, ["kind", "value"], context)
+        guard let kind = try field(map, "kind", context) as? String else {
+            throw CommandContractError(kind: .shape, context: context)
+        }
+        switch kind {
+        case "created":
+            return .created(try decodeCardCreatedView(payload(map, "CreateOutcomeView.created"), "CreateOutcomeView.created"))
+        case "refused":
+            return .refused(try decodeCreateRefusalView(payload(map, "CreateOutcomeView.refused"), "CreateOutcomeView.refused"))
+        default:
+            throw CommandContractError(kind: .unknownVariant, context: context)
+        }
+    }
+
+    private static func decodeCreateResultView(_ value: Any?, _ context: String) throws -> CreateResultView {
+        let map = try object(value, context)
+        try knownKeys(map, ["outcome", "request_id"], context)
+        let outcome = try decodeCreateOutcomeView(try field(map, "outcome", "CreateResultView.outcome"), "CreateResultView.outcome")
+        let requestId = try hexFixed(try field(map, "request_id", "CreateResultView.request_id"), 32, "CreateResultView.request_id")
+        return CreateResultView(
+            outcome: outcome,
+            requestId: requestId
+        )
+    }
+
     private static func decodeCommandBody(_ value: Any?, _ context: String) throws -> CommandBody {
         let map = try object(value, context)
         try knownKeys(map, ["kind", "value"], context)
@@ -435,12 +664,14 @@ public enum EnvoixCommandCodec {
             throw CommandContractError(kind: .shape, context: context)
         }
         switch kind {
-        case "submit":
-            return .submit(try decodeSubmitView(payload(map, "CommandBody.submit"), "CommandBody.submit"))
+        case "intent":
+            return .intent(try decodeFrontendIntentView(payload(map, "CommandBody.intent"), "CommandBody.intent"))
         case "acceptance":
             return .acceptance(try decodeCommandAcceptanceView(payload(map, "CommandBody.acceptance"), "CommandBody.acceptance"))
         case "completion":
             return .completion(try decodeCommandCompletionView(payload(map, "CommandBody.completion"), "CommandBody.completion"))
+        case "create_result":
+            return .createResult(try decodeCreateResultView(payload(map, "CommandBody.create_result"), "CommandBody.create_result"))
         default:
             throw CommandContractError(kind: .unknownVariant, context: context)
         }

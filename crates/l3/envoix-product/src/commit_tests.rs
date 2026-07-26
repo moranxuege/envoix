@@ -126,6 +126,7 @@ fn transfer(direction: Direction) -> NewTransfer {
         offered_name: OfferedName::from_untrusted("barrier.bin"),
         total: ByteCount::new(100),
         source: SourceDecision::Ready,
+        pairing: None,
     }
 }
 
@@ -135,6 +136,7 @@ fn staged_transfer(direction: Direction) -> NewTransfer {
         offered_name: OfferedName::from_untrusted("barrier.bin"),
         total: ByteCount::new(100),
         source: SourceDecision::Stage { recoverable: true },
+        pairing: None,
     }
 }
 

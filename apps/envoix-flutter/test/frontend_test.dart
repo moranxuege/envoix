@@ -45,6 +45,7 @@ CardView cardView({
     RunningView(worker: WorkerKindView.attempt),
   ),
   OutcomeView? outcome,
+  InviteView? invite,
   List<CommandKindView> allowedActions = const <CommandKindView>[
     CommandKindView.pause,
     CommandKindView.cancel,
@@ -68,6 +69,7 @@ CardView cardView({
       bytes: bytes,
       bytesResumed: bytesResumed,
       outcome: outcome,
+      invite: invite,
     );
 
 ReadFrame update(int epoch, CardUpdateKindView kind, {String id = card}) =>
@@ -134,12 +136,51 @@ class RecordingSink {
 
   Future<List<int>?> call(List<int> frame) async {
     final CommandFrame decoded = decodeCommandFrame(utf8.decode(frame));
-    final CommandBodySubmit body = decoded.body as CommandBodySubmit;
-    submitted.add(body.value);
-    final CommandFrame? answer = reply(body.value);
+    final CommandBodyIntent body = decoded.body as CommandBodyIntent;
+    final FrontendIntentViewCommand intent =
+        body.value as FrontendIntentViewCommand;
+    submitted.add(intent.value);
+    final CommandFrame? answer = reply(intent.value);
     return answer == null ? null : utf8.encode(_encoded(answer));
   }
 }
+
+/// A sink for the CREATE half: it records the request the app originated and
+/// answers with whatever verdict the test wants the authority to have given.
+class RecordingCreateSink {
+  RecordingCreateSink(this.reply);
+
+  CommandFrame? Function(CreateView create) reply;
+  final List<CreateView> requested = <CreateView>[];
+
+  Future<List<int>?> call(List<int> frame) async {
+    final CommandFrame decoded = decodeCommandFrame(utf8.decode(frame));
+    final CommandBodyIntent body = decoded.body as CommandBodyIntent;
+    final FrontendIntentViewCreate intent =
+        body.value as FrontendIntentViewCreate;
+    requested.add(intent.value);
+    final CommandFrame? answer = reply(intent.value);
+    return answer == null ? null : utf8.encode(_encoded(answer));
+  }
+}
+
+CommandFrame createdOf(String id, String createdCard) => CommandFrame(
+      body: CommandBodyCreateResult(
+        CreateResultView(
+          outcome: CreateOutcomeViewCreated(CardCreatedView(card: createdCard)),
+          requestId: id,
+        ),
+      ),
+    );
+
+CommandFrame refusedOf(String id, CreateRefusalView refusal) => CommandFrame(
+      body: CommandBodyCreateResult(
+        CreateResultView(
+          outcome: CreateOutcomeViewRefused(refusal),
+          requestId: id,
+        ),
+      ),
+    );
 
 /// The one place this suite writes contract text, and it has to.
 ///
@@ -154,24 +195,64 @@ class RecordingSink {
 String _encoded(CommandFrame frame) {
   final CommandBody body = frame.body;
   final String kind = switch (body) {
-    CommandBodySubmit() => 'submit',
+    CommandBodyIntent() => 'intent',
     CommandBodyAcceptance() => 'acceptance',
     CommandBodyCompletion() => 'completion',
+    CommandBodyCreateResult() => 'create_result',
   };
   return '{"body":{"kind":"$kind","value":${_body(body)}},'
       '"schema":"$commandSchemaId"}';
 }
 
 String _body(CommandBody body) => switch (body) {
-      CommandBodySubmit(:final SubmitView value) =>
-        '{"card":"${value.card}","command":"${_command(value.command)}",'
-            '"command_id":"${value.commandId}","epoch":${value.epoch}}',
+      CommandBodyIntent(:final FrontendIntentView value) => _intent(value),
       CommandBodyAcceptance(:final CommandAcceptanceView value) =>
         '{"acceptance":${_acceptance(value.acceptance)},'
             '"command_id":"${value.commandId}"}',
       CommandBodyCompletion(:final CommandCompletionView value) =>
         '{"command_id":"${value.commandId}",'
             '"completion":${_completion(value.completion)}}',
+      CommandBodyCreateResult(:final CreateResultView value) =>
+        '{"outcome":${_createOutcome(value.outcome)},'
+            '"request_id":"${value.requestId}"}',
+    };
+
+String _intent(FrontendIntentView intent) => switch (intent) {
+      FrontendIntentViewCommand(:final SubmitView value) =>
+        '{"kind":"command","value":'
+            '{"card":"${value.card}","command":"${_command(value.command)}",'
+            '"command_id":"${value.commandId}","epoch":${value.epoch}}}',
+      FrontendIntentViewCreate(:final CreateView value) =>
+        '{"kind":"create","value":'
+            '{"intent":${_createIntent(value.intent)},'
+            '"request_id":"${value.requestId}"}}',
+    };
+
+String _createIntent(CreateIntentView intent) => switch (intent) {
+      CreateIntentViewSend(:final SendSourceView value) =>
+        '{"kind":"send","value":'
+            '{"display_name":${jsonEncode(value.displayName)},'
+            '"total":${value.total}}}',
+      CreateIntentViewJoin(:final JoinInviteView value) =>
+        '{"kind":"join","value":{"invite":${jsonEncode(value.invite)}}}',
+    };
+
+String _createOutcome(CreateOutcomeView outcome) => switch (outcome) {
+      CreateOutcomeViewCreated(:final CardCreatedView value) =>
+        '{"kind":"created","value":{"card":"${value.card}"}}',
+      CreateOutcomeViewRefused(:final CreateRefusalView value) =>
+        '{"kind":"refused","value":"${_refusal(value)}"}',
+    };
+
+String _refusal(CreateRefusalView refusal) => switch (refusal) {
+      CreateRefusalView.inviteNotRecognized => 'invite_not_recognized',
+      CreateRefusalView.inviteBareRoomCode => 'invite_bare_room_code',
+      CreateRefusalView.inviteMalformed => 'invite_malformed',
+      CreateRefusalView.inviteTooLong => 'invite_too_long',
+      CreateRefusalView.inviteUnsupported => 'invite_unsupported',
+      CreateRefusalView.inviteRoleUnsupported => 'invite_role_unsupported',
+      CreateRefusalView.storageFault => 'storage_fault',
+      CreateRefusalView.internal => 'internal',
     };
 
 String _command(CommandView command) => switch (command) {
@@ -826,7 +907,7 @@ void main() {
         EnvoixApp(lane: () => const Stream<List<int>>.empty()),
       );
       await tester.pump();
-      expect(find.text('No transfers yet.'), findsOneWidget);
+      expect(find.text('No transfers yet. Use New transfer to start one.'), findsOneWidget);
       expect(find.text('Re-attach'), findsOneWidget);
     });
 
@@ -907,7 +988,7 @@ void main() {
         EnvoixApp(lane: () => const Stream<List<int>>.empty()),
       );
       await tester.pump();
-      expect(find.text('No transfers yet.'), findsOneWidget);
+      expect(find.text('No transfers yet. Use New transfer to start one.'), findsOneWidget);
 
       await tester.tap(find.text('Logs'));
       await tester.pumpAndSettle();
@@ -915,7 +996,7 @@ void main() {
 
       await tester.tap(find.text('Transfers'));
       await tester.pumpAndSettle();
-      expect(find.text('No transfers yet.'), findsOneWidget);
+      expect(find.text('No transfers yet. Use New transfer to start one.'), findsOneWidget);
     });
 
     testWidgets('the system back button leaves the logs, not the app', (
@@ -947,7 +1028,7 @@ void main() {
 
       await tester.binding.handlePopRoute();
       await tester.pumpAndSettle();
-      expect(find.text('No transfers yet.'), findsOneWidget);
+      expect(find.text('No transfers yet. Use New transfer to start one.'), findsOneWidget);
       expect(
         platform,
         isNot(contains('SystemNavigator.pop')),
@@ -1225,7 +1306,7 @@ void main() {
           EnvoixApp(lane: () => const Stream<List<int>>.empty()),
         );
         await tester.pump();
-        expect(find.text('No transfers yet.'), findsOneWidget);
+        expect(find.text('No transfers yet. Use New transfer to start one.'), findsOneWidget);
         expect(
           Theme.of(tester.element(find.byType(HomeScreen))).colorScheme
               .brightness,
@@ -1271,17 +1352,46 @@ void main() {
         completionOf(id, const CompletionViewInterrupted()),
         completionOf(id, const CompletionViewInternal()),
         CommandFrame(
-          body: CommandBodySubmit(
-            SubmitView(
-              card: card,
-              epoch: 7,
-              commandId: id,
-              command: CommandView.pause,
+          body: CommandBodyIntent(
+            FrontendIntentViewCommand(
+              SubmitView(
+                card: card,
+                epoch: 7,
+                commandId: id,
+                command: CommandView.pause,
+              ),
             ),
           ),
         ),
+        CommandFrame(
+          body: CommandBodyIntent(
+            FrontendIntentViewCreate(
+              CreateView(
+                intent: const CreateIntentViewSend(
+                  SendSourceView(displayName: 'a"quoted\\name.bin', total: 0),
+                ),
+                requestId: id,
+              ),
+            ),
+          ),
+        ),
+        CommandFrame(
+          body: CommandBodyIntent(
+            FrontendIntentViewCreate(
+              CreateView(
+                intent: const CreateIntentViewJoin(
+                  JoinInviteView(invite: 'envoix://invite/v3/AAAA'),
+                ),
+                requestId: id,
+              ),
+            ),
+          ),
+        ),
+        createdOf(id, other),
+        for (final CreateRefusalView refusal in CreateRefusalView.values)
+          refusedOf(id, refusal),
       ];
-      expect(frames.length, 55);
+      expect(frames.length, 66);
       for (final CommandFrame frame in frames) {
         final CommandFrame decoded = decodeCommandFrame(_encoded(frame));
         // Re-spelling what the decoder produced must give the same text: the
@@ -1550,7 +1660,25 @@ void main() {
       expect(intent.phase, CommandPhase.undelivered);
       expect(intent.acceptance, isNull);
       expect(intent.completion, isNull);
+      expect(intent.fault?.origin, FaultOrigin.unanswered);
       expect(intentLabel(intent), contains('never reached the host'));
+    });
+
+    // The two are opposite facts. An intent the encoder refused reached
+    // nothing, so "it never reached the host" — true of a lane failure — would
+    // be the only thing the user is told about a request that was never made.
+    test('an intent the encoder refused is not one whose fate is unknown', () {
+      final Attachment attachment = attachedAt(11);
+      final CommandIntent intent =
+          attachment.commands.open(card, CommandView.pause);
+      attachment.commands.faulted(
+        intent.id,
+        const IntentFault(FaultOrigin.unsent, 'bound at SubmitView.card'),
+      );
+      expect(intent.phase, CommandPhase.refused);
+      expect(intent.unsettled, isFalse);
+      expect(intentLabel(intent), contains('not sent'));
+      expect(intentLabel(intent), isNot(contains('never reached the host')));
     });
 
     test('an answer to a command nobody issued is counted, not invented', () {
@@ -1590,22 +1718,34 @@ void main() {
       expect(mine.phase, CommandPhase.submitted);
     });
 
-    test('a submit body arriving AT the frontend breaks the contract', () {
+    test('an intent body arriving AT the frontend breaks the contract', () {
       final Attachment attachment = attachedAt(11);
       attachment.admitCommand(
         CommandFrame(
-          body: CommandBodySubmit(
-            SubmitView(
-              card: card,
-              epoch: 11,
-              commandId: id,
-              command: CommandView.pause,
+          body: CommandBodyIntent(
+            FrontendIntentViewCommand(
+              SubmitView(
+                card: card,
+                epoch: 11,
+                commandId: id,
+                command: CommandView.pause,
+              ),
             ),
           ),
         ),
       );
       expect(attachment.rejected(FrameRejection.contractBreach), 1);
       expect(attachment.commands.unaddressed, 0);
+    });
+
+    test('a create result arriving on the frame lane answers nobody', () {
+      final Attachment attachment = attachedAt(11);
+      expect(
+        attachment.admitCommand(createdOf(id, other)),
+        CommandAdmission.unaddressed,
+      );
+      expect(attachment.commands.unaddressed, 1);
+      expect(attachment.rejected(FrameRejection.contractBreach), 0);
     });
 
     test('the lane carries both contracts and splits them by schema', () {
@@ -1918,7 +2058,261 @@ void main() {
       expect(sink.submitted.last.epoch, 4);
     });
   });
+
+  group('create', () {
+    const String invite = 'envoix://invite/v3/eyJ2ZXJzaW9uIjozfQ';
+
+    Future<void> openSheet(
+      WidgetTester tester,
+      RecordingCreateSink sink, {
+      SourcePicker picker = _noPick,
+    }) async {
+      await tester.pumpWidget(EnvoixApp(
+        lane: () => const Stream<List<int>>.empty(),
+        commands: sink.call,
+        picker: picker,
+      ));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('New transfer'));
+      await tester.pumpAndSettle();
+    }
+
+    test('a join carries the text VERBATIM, whatever it looks like', () async {
+      final RecordingCreateSink sink =
+          RecordingCreateSink((CreateView create) => null);
+      final Creator creator = Creator(sink: sink.call);
+      // Text with no dash at all, and text that is only a room code: the old
+      // app guessed readiness with `contains("-")` (XI03). Both must reach the
+      // authority untouched, leading and trailing whitespace included — an app
+      // that trimmed would be deciding what an invite may look like.
+      const List<String> texts = <String>[
+        '',
+        'nonsense',
+        '000123-amber-brass',
+        '   $invite   ',
+        'envoix://pair/legacy',
+      ];
+      for (final String text in texts) {
+        await creator.join(text);
+      }
+      expect(sink.requested.length, texts.length);
+      for (int index = 0; index < texts.length; index += 1) {
+        final CreateIntentView intent = sink.requested[index].intent;
+        expect(intent, isA<CreateIntentViewJoin>());
+        expect(
+          (intent as CreateIntentViewJoin).value.invite,
+          texts[index],
+          reason: 'the app must not interpret, trim or judge invite text',
+        );
+      }
+    });
+
+    test('a send carries the metadata the platform reported', () async {
+      final RecordingCreateSink sink =
+          RecordingCreateSink((CreateView create) => null);
+      await Creator(sink: sink.call)
+          .send(displayName: 'quarterly report.pdf', sizeBytes: 4096);
+      final CreateIntentView intent = sink.requested.single.intent;
+      expect(intent, isA<CreateIntentViewSend>());
+      final SendSourceView source = (intent as CreateIntentViewSend).value;
+      expect(source.displayName, 'quarterly report.pdf');
+      expect(source.total, 4096);
+    });
+
+    test('one identity per request, and never reused', () async {
+      final RecordingCreateSink sink =
+          RecordingCreateSink((CreateView create) => null);
+      final Creator creator = Creator(sink: sink.call);
+      await creator.join(invite);
+      await creator.join(invite);
+      await creator.send(displayName: 'a.bin', sizeBytes: 1);
+      final Set<String> ids =
+          sink.requested.map((CreateView create) => create.requestId).toSet();
+      expect(ids.length, 3);
+      for (final String id in ids) {
+        expect(id, matches(RegExp(r'^[0-9a-f]{32}$')));
+      }
+    });
+
+    test('the authority decides, and its refusal is what is shown', () async {
+      for (final CreateRefusalView refusal in CreateRefusalView.values) {
+        final RecordingCreateSink sink = RecordingCreateSink(
+          (CreateView create) => refusedOf(create.requestId, refusal),
+        );
+        // The text is a perfectly well-formed invite; the answer is still the
+        // authority's, because the app never looked at it.
+        final CreateIntent request = await Creator(sink: sink.call).join(invite);
+        expect(request.outcome, isA<CreateOutcomeViewRefused>());
+        expect(request.card, isNull);
+        expect(createAnswerLabel(request), startsWith('Refused'));
+      }
+      // Every refusal has its own words: a shared string would leave a user
+      // told "no" with no idea which "no" it was.
+      final Set<String> words = <String>{
+        for (final CreateRefusalView refusal in CreateRefusalView.values)
+          createRefusalLabel(refusal),
+      };
+      expect(words.length, CreateRefusalView.values.length);
+    });
+
+    test('a created answer names the card the authority made', () async {
+      final RecordingCreateSink sink = RecordingCreateSink(
+        (CreateView create) => createdOf(create.requestId, other),
+      );
+      final CreateIntent request = await Creator(sink: sink.call).join(invite);
+      expect(request.card, other);
+      expect(createAnswerLabel(request), contains(other));
+    });
+
+    test('an answer for a different request is not this one\'s', () async {
+      final RecordingCreateSink sink = RecordingCreateSink(
+        (CreateView create) => createdOf('9' * 32, other),
+      );
+      final CreateIntent request = await Creator(sink: sink.call).join(invite);
+      expect(request.outcome, isNull);
+      expect(request.card, isNull);
+      expect(request.fault, isNotNull);
+    });
+
+    test('a lane that never answers is not a verdict', () async {
+      final RecordingCreateSink sink =
+          RecordingCreateSink((CreateView create) => null);
+      final CreateIntent request = await Creator(sink: sink.call).join(invite);
+      expect(request.outcome, isNull);
+      expect(request.pending, isFalse);
+      expect(request.fault?.origin, FaultOrigin.unanswered);
+      // Not "it failed": the request may or may not have made a card, and only
+      // the card list can say.
+      expect(createAnswerLabel(request), contains('If a transfer appears'));
+    });
+
+    test('a request the encoder refused never left, and never says it might',
+        () async {
+      final RecordingCreateSink sink = RecordingCreateSink(
+        (CreateView create) => createdOf(create.requestId, other),
+      );
+      final CreateIntent request = await Creator(sink: sink.call)
+          .send(displayName: 'n' * 256, sizeBytes: 1);
+      // The frame never reached the sink, so no card can be in the list.
+      expect(sink.requested, isEmpty);
+      expect(request.outcome, isNull);
+      expect(request.fault?.origin, FaultOrigin.unsent);
+      expect(createAnswerLabel(request), contains('Not sent'));
+      expect(createAnswerLabel(request), contains('Nothing was created'));
+      expect(
+        createAnswerLabel(request),
+        isNot(contains('If a transfer appears')),
+      );
+    });
+
+    testWidgets('the send button waits for the platform, not for a rule',
+        (WidgetTester tester) async {
+      bool picked = false;
+      final RecordingCreateSink sink = RecordingCreateSink(
+        (CreateView create) => createdOf(create.requestId, other),
+      );
+      await openSheet(
+        tester,
+        sink,
+        picker: () async {
+          picked = true;
+          return const PickedSource(
+            displayName: 'holiday.mp4',
+            sizeBytes: 2048,
+          );
+        },
+      );
+      final Finder start = find.widgetWithText(FilledButton, 'Start sending');
+      expect(tester.widget<FilledButton>(start).onPressed, isNull);
+
+      await tester.tap(find.widgetWithText(OutlinedButton, 'Choose a file'));
+      await tester.pumpAndSettle();
+      expect(picked, isTrue);
+      expect(find.textContaining('holiday.mp4'), findsOneWidget);
+      expect(tester.widget<FilledButton>(start).onPressed, isNotNull);
+
+      await tester.tap(start);
+      await tester.pumpAndSettle();
+      final CreateIntentView intent = sink.requested.single.intent;
+      expect((intent as CreateIntentViewSend).value.displayName, 'holiday.mp4');
+      expect(find.textContaining('Created'), findsOneWidget);
+      expect(find.textContaining(other), findsOneWidget);
+    });
+
+    testWidgets('join is always offered; the answer is the authority\'s',
+        (WidgetTester tester) async {
+      final RecordingCreateSink sink = RecordingCreateSink(
+        (CreateView create) =>
+            refusedOf(create.requestId, CreateRefusalView.inviteBareRoomCode),
+      );
+      await openSheet(tester, sink);
+      // Deliberately something the old app would have called "ready" — six
+      // digits and two words, with a dash — and padded, so the WHOLE path from
+      // the field to the encoder is held to the verbatim rule rather than only
+      // the `Creator` the unit test drives.
+      await tester.enterText(find.byType(TextField), '  000123-amber-brass  ');
+      final Finder join = find.widgetWithText(FilledButton, 'Join');
+      expect(tester.widget<FilledButton>(join).onPressed, isNotNull);
+      await tester.tap(join);
+      await tester.pumpAndSettle();
+      expect(
+        (sink.requested.single.intent as CreateIntentViewJoin).value.invite,
+        '  000123-amber-brass  ',
+      );
+      expect(
+        find.text('Refused — That is only the room code. '
+            'Paste the whole invite.'),
+        findsOneWidget,
+      );
+    });
+
+    test('the source duty is rendered as an observation, not a task', () {
+      // The read contract can carry it, so the words for it exist. Nothing in
+      // this app acts on a duty; it says the host asked for one.
+      expect(dutyKindLabel(DutyKindView.sourceHandle), 'open the source');
+      expect(
+        capabilityActionLabel(CapabilityActionView.selectSource),
+        'open the file you chose',
+      );
+    });
+
+    testWidgets('a card shows the invite the authority published',
+        (WidgetTester tester) async {
+      final Attachment attachment = Attachment()
+        ..admit(update(
+          1,
+          CardUpdateKindViewSnapshot(cardView(
+            invite: const InviteView(code: '000123-amber-brass', link: invite),
+          )),
+        ));
+      await pumpHome(tester, attachment);
+      expect(find.text('000123-amber-brass'), findsOneWidget);
+      expect(find.widgetWithText(TextButton, 'Copy invite'), findsOneWidget);
+    });
+
+    testWidgets('a channel that no longer spells an invite still shows its code',
+        (WidgetTester tester) async {
+      final Attachment attachment = Attachment()
+        ..admit(update(
+          1,
+          CardUpdateKindViewSnapshot(cardView(
+            invite: const InviteView(code: '000999-cedar-onyx', link: null),
+          )),
+        ));
+      await pumpHome(tester, attachment);
+      expect(find.text('000999-cedar-onyx'), findsOneWidget);
+      expect(find.widgetWithText(TextButton, 'Copy invite'), findsNothing);
+      expect(
+        find.text('This card has no shareable link — read out the code.'),
+        findsOneWidget,
+      );
+    });
+  });
 }
+
+/// A picker the user never used. The sheet must still build and still refuse to
+/// send, because nothing has been granted.
+Future<PickedSource?> _noPick() async => null;
 
 /// The 13 shapes a `DispositionView` can take (11 variants, 3 pause causes).
 const List<DispositionView> dispositions = <DispositionView>[

@@ -18,10 +18,11 @@ import java.io.File
  * repeat-safe platform call (re-posting a notification, re-acquiring a held
  * lock, re-asserting foreground state). Publication is repeat-safe too — its
  * recovery journal reuses one deterministic MediaStore row and never loses the
- * last copy (see [publish]). The remaining F2-payload kinds (source picks,
- * grants, staging roots, courier hand-off, share sheets) are deliberately NOT
- * reported — an unreported duty stays outstanding and is re-delivered, which is
- * the honest state until F2 can execute it.
+ * last copy (see [publish]). Binding a picked source is repeat-safe by the same
+ * standard: [SourcePicks] resolves a card to the SAME document however often
+ * the duty is delivered. The remaining kinds (grants, staging roots, share
+ * sheets) are deliberately NOT reported — an unreported duty stays outstanding
+ * and is re-delivered, which is the honest state until F3 can execute it.
  */
 class DutyExecutor(
     private val context: Context,
@@ -44,6 +45,7 @@ class DutyExecutor(
                 "foreground" -> "completed" // the service asserts foreground on boot
                 "publication" -> publish(work, provenance) ?: return null
                 "courier" -> carryReceipt()
+                "source_handle" -> bindSource(provenance)
                 else -> return null
             }
         val report = JSONObject()
@@ -82,6 +84,22 @@ class DutyExecutor(
      * tell the reducer a receipt was delivered when none was.
      */
     private fun carryReceipt(): String = "internal"
+
+    /**
+     * Binds the document the user picked to the card that asked for it and
+     * proves it can still be read through its grant.
+     *
+     * The URI never leaves this side: the report carries an outcome and the
+     * duty's own provenance, and the lane's vocabulary has no type that could
+     * carry a handle even if this wanted to. A card with no outstanding pick —
+     * a process death lost it, or nothing was ever chosen — reports the honest
+     * `source_unreadable`, which is the outcome that means "re-pick".
+     */
+    private fun bindSource(provenance: JSONObject): String {
+        val card = provenance.optString("card")
+        val source = SourcePicks.claim(card) ?: return "source_unreadable"
+        return if (SourcePicks.readable(context, source)) "completed" else "source_unreadable"
+    }
 
     private fun holdLock(hold: Boolean): String {
         if (hold) {

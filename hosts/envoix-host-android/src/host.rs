@@ -5,9 +5,12 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use envoix_bindings::bridge::{
-    SubmitDecodeError, acceptance_frame, completion_frame, decode_submit,
+    CreateSpec, FrontendIntent, SubmitDecodeError, SubmitSpec, acceptance_frame, completion_frame,
+    create_result_frame, decode_intent,
 };
-use envoix_bindings::command::encode_command_frame;
+use envoix_bindings::command::{
+    CardCreatedView, CreateOutcomeView, CreateRefusalView, encode_command_frame,
+};
 use envoix_bindings::read::encode_read_frame;
 use envoix_bindings::{
     card_update_frame, closed_frame, evidence_frame, lag_frame, subscribe_rejected_frame,
@@ -16,7 +19,7 @@ use envoix_capabilities::{Admission, DutyLedger, Registration};
 use envoix_evidence::{EvidenceRecord, EvidenceSink, EvidenceSinkError, SessionKey, TimelineStore};
 use envoix_platform_android::{DutyAdapter, IssueDecision, WorkOrder, WorkReport, platform_work};
 use envoix_product::{
-    ApplyOutcome, CommittedSession, IdentityError, NewTransfer, SystemIdentitySource,
+    ApplyOutcome, CommitStatus, CommittedSession, IdentityError, NewTransfer, SystemIdentitySource,
 };
 #[cfg(feature = "e2e-instrumentation")]
 use envoix_product::{ProductState, RecordDecode, decode_record};
@@ -27,6 +30,7 @@ use envoix_runtime::{
 use envoix_storage_local::LocalStorage;
 use envoix_types::{ByteCount, Direction, OfferedName, RecordId};
 
+use crate::create;
 use crate::executor::PreparedIrohExecutor;
 use crate::provider::HostProvider;
 use crate::store::HostStore;
@@ -92,8 +96,8 @@ pub enum FramePoll {
 ///
 /// The Kotlin foreground service constructs exactly one `Host` per process
 /// and drives it over the JNI lane: contract frames out (`poll_frame`),
-/// platform work orders out (`poll_work`), command submissions in
-/// (`submit`), duty reports in (`report_duty`).
+/// platform work orders out (`poll_work`), frontend intents in
+/// (`intent`), duty reports in (`report_duty`).
 pub struct Host {
     tokio: tokio::runtime::Runtime,
     runtime: Arc<Runtime<HostProvider, PreparedIrohExecutor>>,
@@ -365,18 +369,64 @@ impl Host {
         self.shared.lock().work.pop_front()
     }
 
-    /// Submits one frontend command frame. Returns the encoded acceptance
-    /// frame; for accepted commands the committed completion follows on the
-    /// frame lane (acceptance is never proof of effect — Pillar 3).
-    pub fn submit(&self, bytes: &[u8]) -> Vec<u8> {
-        let spec = match decode_submit(bytes) {
-            Ok(spec) => spec,
-            Err(SubmitDecodeError::Frame(_) | SubmitDecodeError::NotASubmit) => {
-                // Hostile or non-submit bytes carry no usable command id; the
-                // caller violated the contract and gets nothing correlatable.
-                return Vec::new();
-            }
+    /// Takes one frontend-originated intent frame and returns the encoded
+    /// answer: an acceptance for a command on an existing card, or a create
+    /// result for a request that one be made.
+    ///
+    /// Both intents ride ONE contract, one lane and one native verb, because
+    /// both are the same thing — a frontend asking the authority for something
+    /// and being told what happened.
+    pub fn intent(&self, bytes: &[u8]) -> Vec<u8> {
+        match decode_intent(bytes) {
+            Ok(FrontendIntent::Command(spec)) => self.submit_command(spec),
+            Ok(FrontendIntent::Create(spec)) => self.create(&spec),
+            // Hostile or non-intent bytes carry no usable request id; the
+            // caller violated the contract and gets nothing correlatable.
+            Err(SubmitDecodeError::Frame(_) | SubmitDecodeError::NotAnIntent) => Vec::new(),
+        }
+    }
+
+    /// Creates one card from a validated intent and answers with its durable
+    /// verdict.
+    ///
+    /// The order is the whole point (`SF02`, Pillar 5): the invite is judged,
+    /// the identity is minted, the record is COMMITTED, and only then is the
+    /// card brought live — so the first attempt, or the request for a source
+    /// handle, is authorized by a write that already landed. `created` is
+    /// therefore a claim about the disk, not about intake.
+    ///
+    /// A card that commits but cannot be admitted (a stopped or full runtime)
+    /// is still created: the record exists, and the lane says so in its own
+    /// words by refusing the subscription rather than by unmaking the card.
+    fn create(&self, spec: &CreateSpec) -> Vec<u8> {
+        let outcome = match create::plan(spec) {
+            Ok(transfer) => self.commit_new_card(transfer),
+            Err(refusal) => CreateOutcomeView::Refused(refusal),
         };
+        encode_command_frame(&create_result_frame(spec.request_id, outcome)).unwrap_or_default()
+    }
+
+    fn commit_new_card(&self, transfer: NewTransfer) -> CreateOutcomeView {
+        let store = HostStore::deferred(self.stores.clone());
+        let created = CommittedSession::create(
+            transfer,
+            &mut SystemIdentitySource,
+            store,
+            NonZeroUsize::new(3).expect("nonzero"),
+        );
+        let Ok((session, initial)) = created else {
+            return CreateOutcomeView::Refused(CreateRefusalView::Internal);
+        };
+        let card = session.record().identity.card;
+        let outcome = create_outcome(initial.commit, card);
+        if matches!(outcome, CreateOutcomeView::Created(_)) {
+            self.runtime.admit(session, initial).ok();
+            self.attach(card);
+        }
+        outcome
+    }
+
+    fn submit_command(&self, spec: SubmitSpec) -> Vec<u8> {
         let shared = Arc::clone(&self.shared);
         let runtime = Arc::clone(&self.runtime);
         self.tokio.block_on(async move {
@@ -447,6 +497,7 @@ impl Host {
             offered_name: OfferedName::from_untrusted(name),
             total: ByteCount::new(total),
             source: envoix_product::SourceDecision::Ready,
+            pairing: None,
         };
         let store = HostStore::deferred(self.stores.clone());
         let (session, initial): (CommittedSession<HostStore>, ApplyOutcome) =
@@ -506,6 +557,22 @@ impl Host {
         self.tokio.block_on(async move {
             runtime.shutdown().await;
         });
+    }
+}
+
+/// What a create request is told, given how its record write ended.
+///
+/// `created` is a claim about the DISK, so it is made only by a barrier that
+/// actually crossed. An escalated write means no card exists: answering with a
+/// card id would hand the frontend an identity for something no reboot will
+/// ever find. Stated once, here, so there is one rule to hold to that.
+fn create_outcome(commit: CommitStatus, card: RecordId) -> CreateOutcomeView {
+    if commit.authorizing_commit_succeeded() {
+        CreateOutcomeView::Created(CardCreatedView {
+            card: format!("{:016x}", card.get()),
+        })
+    } else {
+        CreateOutcomeView::Refused(CreateRefusalView::StorageFault)
     }
 }
 
@@ -649,10 +716,65 @@ const fn observed_record(kind: &CardUpdateKind) -> Option<&TransferRecord> {
 
 #[cfg(test)]
 mod tests {
+    use envoix_product::CommitFailure;
+
     use super::*;
 
-    /// `submit` takes the card's subscription out for its await so no lock is
-    /// held across it. If the frontend reopens the lane in that window, the
+    /// A card is "created" only when its record write crossed the barrier.
+    ///
+    /// The sweep is exhaustive over `CommitStatus`, including the escalated
+    /// arm's `failed_state_persisted` both ways: a best-effort write of the
+    /// FAILURE state is not the record that was asked for, so it is still not
+    /// a card. Nothing else in this crate can exercise a failing store, which
+    /// is exactly why the decision is one function with its own gate.
+    #[test]
+    fn a_create_is_only_created_when_its_record_committed() {
+        let card = RecordId::new(0xf2b);
+        let hex = "0000000000000f2b";
+        for commit in [
+            CommitStatus::Vacuous,
+            CommitStatus::Committed { attempts: 1 },
+            CommitStatus::Committed { attempts: 3 },
+        ] {
+            assert_eq!(
+                create_outcome(commit, card),
+                CreateOutcomeView::Created(CardCreatedView {
+                    card: hex.to_owned()
+                }),
+                "{commit:?} committed, so a card exists"
+            );
+        }
+        let mut refused = 0;
+        for failed_state_persisted in [false, true] {
+            for failure in [
+                CommitFailure::Store(envoix_product::CommitError),
+                CommitFailure::Encode(envoix_product::RecordCodecError::MalformedBody),
+            ] {
+                let commit = CommitStatus::Escalated {
+                    attempts: 3,
+                    failure,
+                    failed_state_persisted,
+                };
+                assert_eq!(
+                    create_outcome(commit, card),
+                    CreateOutcomeView::Refused(CreateRefusalView::StorageFault),
+                    "{commit:?} never landed the record, so nothing was created"
+                );
+                refused += 1;
+            }
+        }
+        assert_eq!(refused, 4, "both escalation axes were swept");
+        // `NotRequired` cannot arise from a create — creation always changes
+        // durable state — but the rule still has to answer, and refusing is the
+        // answer that cannot invent a card.
+        assert_eq!(
+            create_outcome(CommitStatus::NotRequired, card),
+            CreateOutcomeView::Refused(CreateRefusalView::StorageFault)
+        );
+    }
+
+    /// `submit_command` takes the card's subscription out for its await so no
+    /// lock is held across it. If the frontend reopens the lane in that window, the
     /// subscription put back afterwards is the SUPERSEDED one: the fresh
     /// epoch's snapshot is lost and the card freezes at an epoch nothing feeds.
     /// F1b made `open_lane` frontend-triggerable at any instant, so the window

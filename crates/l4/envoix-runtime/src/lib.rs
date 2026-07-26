@@ -68,8 +68,9 @@ pub use envoix_attempt_api::RetirementIntent;
 pub use envoix_capabilities::{Duty, DutyKind, DutyProvenance};
 pub use envoix_evidence::{EvidenceSink, EvidenceSinkError};
 pub use envoix_product::{
-    CapabilityAction, CommandLedger, PauseOrigin, ProductCommand, ProductIdentity, ProductState,
-    Quiescence, TransferRecord, WorkerKind,
+    CapabilityAction, CommandLedger, MAX_INVITE_INPUT_LENGTH, MAX_INVITE_LINK_LENGTH,
+    MAX_ROOM_CODE_LENGTH, PairingChannel, PauseOrigin, ProductCommand, ProductIdentity,
+    ProductState, Quiescence, TransferRecord, WorkerKind,
 };
 pub use error::{AcquireError, CommandRejected};
 pub use port::{
