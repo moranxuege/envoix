@@ -11,10 +11,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use envoix_bindings::command::{COMMAND_SCHEMA_ID, CommandBody, decode_command_frame};
 use envoix_bindings::lag_frame;
 use envoix_bindings::read::{
-    CardUpdateKindView, CardUpdateView, DiagnosticsStatusView, EvidenceTimelineView, ReadBody,
-    ReadFrame, decode_read_frame, encode_read_frame,
+    CardUpdateKindView, CardUpdateView, CardView, CommandKindView, DiagnosticsStatusView,
+    EvidenceTimelineView, ProductStateView, QuiescenceView, READ_SCHEMA_ID, ReadBody, ReadFrame,
+    decode_read_frame, encode_read_frame,
 };
 use envoix_host_android::{AttachmentToken, FramePoll, Host};
 use envoix_runtime::LosslessUpdateKind;
@@ -28,6 +30,12 @@ const SKIP_DART: &str = "ENVOIX_FLUTTER_SKIP_DART";
 /// The one card this test and the on-device instrumentation both create.
 const OFFERED_NAME: &str = "f1b-card.bin";
 const TOTAL_BYTES: u64 = 4096;
+
+/// How long a drain waits for the frame it asserts about. A satisfied drain
+/// returns at once, so this only bounds a FAILING one — generous on purpose,
+/// because the whole workspace's tests share this machine and a command's
+/// commit crosses a real barrier and a real worker teardown.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A frontend attaches to a running host and renders live truth.
 ///
@@ -221,6 +229,154 @@ fn a_fresh_attachment_is_told_the_diagnostics_it_missed() {
     );
 }
 
+/// F2a's invariant test: a gesture becomes a durable effect, and the app can
+/// still tell the truth about it after the isolate that made it is gone.
+///
+/// Everything here is real. The host is a real `Host` over real durable
+/// storage; the affordances come from the authority's own `allowed_commands`,
+/// published in the read contract; the submit frames are encoded by the APP's
+/// encoder in a Dart VM; the acceptance, the completion, the duplicate, the
+/// conflict and the stale-epoch refusal are what the running host answered; and
+/// the hot restart is a fresh attachment, which is exactly what a restarted
+/// isolate opens. The app's own view model then reports what it surfaced.
+#[test]
+fn flutter_mutating_hot_restart_preserves_cards() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let host = Host::boot(root.path()).expect("the host boots");
+    let card = host
+        .create_for_e2e(OFFERED_NAME, TOTAL_BYTES)
+        .expect("a durable card is created");
+    let hex = format!("{:016x}", card.get());
+
+    let work = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("command-lane");
+    let _ = fs::remove_dir_all(&work);
+    fs::create_dir_all(&work).expect("create the replay directory");
+
+    // What the store holds for this card BEFORE anything commands it. The debug
+    // probe is the only thing that can tell the device instrumentation a write
+    // landed rather than merely happened in memory, so it is read twice here and
+    // has to give two different answers — a probe that returned a constant would
+    // satisfy the assertion below on its own.
+    #[cfg(feature = "e2e-instrumentation")]
+    let uncommanded = host.durable_state_for_e2e(card);
+
+    let token = host.open_lane();
+    let live = drain(&host, token);
+    fs::write(work.join("live.frames"), live.join("\n")).expect("write the live frames");
+
+    if std::env::var_os(SKIP_DART).is_some() {
+        eprintln!("{SKIP_DART} is set: the command replay did NOT run");
+        return;
+    }
+    let dart = dart_sdk();
+    let driver = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/native/command_replay.dart");
+    let replay = |mode: &str| {
+        let output = Command::new(&dart)
+            .arg("run")
+            .arg(&driver)
+            .arg(mode)
+            .arg(&work)
+            .arg(&hex)
+            .output()
+            .unwrap_or_else(|error| panic!("{} did not start: {error}", dart.display()));
+        assert!(
+            output.status.success(),
+            "the Dart command replay ({mode}) failed ({}):\n{}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        print!("{}", String::from_utf8_lossy(&output.stdout));
+    };
+    // The frontend reads the published legality and encodes what it may send.
+    replay("issue");
+    let submit = fs::read(work.join("submit.frame")).expect("the app encoded a submit");
+    let conflict = fs::read(work.join("conflict.frame")).expect("the app encoded a conflict");
+
+    // Acceptance first, and it is NOT the effect: the committed completion
+    // arrives separately, on the frame lane.
+    fs::write(work.join("accepted.frame"), host.submit(&submit)).expect("write the acceptance");
+    let settled = drain_until(&host, token, |frames| {
+        frames.iter().any(|frame| is_completion(frame))
+    });
+    let completion = settled
+        .iter()
+        .find(|frame| is_completion(frame))
+        .expect("the completion arrived");
+    fs::write(work.join("completed.frame"), completion).expect("write the completion");
+
+    // "Committed truth" is a claim about the STORE, so read the store.
+    #[cfg(feature = "e2e-instrumentation")]
+    {
+        assert_ne!(
+            uncommanded, "paused",
+            "the card began paused; prove nothing"
+        );
+        assert_eq!(
+            host.durable_state_for_e2e(card),
+            "paused",
+            "the completion committed, so the record on disk must say so"
+        );
+    }
+
+    // The same identity again, now that its effect is in committed truth.
+    fs::write(work.join("duplicate.frame"), host.submit(&submit)).expect("write the duplicate");
+    fs::write(work.join("conflict.frame"), host.submit(&conflict)).expect("write the conflict");
+
+    // The hot restart: the isolate dies, the host does not. The next attachment
+    // is a new epoch, and the frame the OLD one encoded is refused typed.
+    let restarted = host.open_lane();
+    assert_ne!(restarted, token);
+    fs::write(work.join("stale.frame"), host.submit(&submit)).expect("write the refusal");
+    // The card may still have been retiring its worker when this attachment
+    // opened, in which case the rest of the story arrives as `state` updates
+    // rather than inside the opening snapshot. Both are the same truth.
+    let reseeded = drain_until(&host, restarted, |frames| {
+        frames
+            .iter()
+            .filter_map(|frame| card_view(frame))
+            .any(|view| {
+                matches!(view.state, ProductStateView::Paused(_))
+                    && view.quiescence == QuiescenceView::Quiescent
+            })
+    });
+    fs::write(work.join("restart.frames"), reseeded.join("\n")).expect("write the restart frames");
+
+    replay("render");
+
+    // The frontend restart above proves the FRONTEND kept nothing. This proves
+    // the other half, which no restart of a surviving process can: the
+    // command's effect is on disk, not in the process that applied it. A fresh
+    // host over the same root reconstitutes the card from bytes alone — paused,
+    // and offering exactly what a paused card may be asked.
+    host.shutdown();
+    let rebooted = Host::boot(root.path()).expect("the host boots again");
+    let reboot_token = rebooted.open_lane();
+    let restored = drain(&rebooted, reboot_token)
+        .iter()
+        .find_map(|frame| card_view(frame))
+        .expect("the rebooted host reseeds the card");
+    assert!(
+        matches!(restored.state, ProductStateView::Paused(_)),
+        "a rebooted host restored the card as {:?}, not paused",
+        restored.state
+    );
+    assert!(
+        restored.allowed_actions.contains(&CommandKindView::Resume),
+        "a restored paused card must still be offered resume, got {:?}",
+        restored.allowed_actions
+    );
+}
+
+/// Whether a frame is a command completion. Read frames share this lane, so a
+/// command decode that fails is one of those, not a fault.
+fn is_completion(frame: &str) -> bool {
+    matches!(
+        decode_command_frame(frame.as_bytes()).map(|frame| frame.body),
+        Ok(CommandBody::Completion(_))
+    )
+}
+
 /// Every frame the attachment has queued, as UTF-8 text, drained until the
 /// epoch's opening snapshot has arrived.
 fn drain(host: &Host, token: AttachmentToken) -> Vec<String> {
@@ -237,7 +393,7 @@ fn drain_until(
     token: AttachmentToken,
     ready: impl Fn(&[String]) -> bool,
 ) -> Vec<String> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + DRAIN_TIMEOUT;
     let mut frames = Vec::new();
     while Instant::now() < deadline {
         match host.poll_frame(token) {
@@ -251,23 +407,42 @@ fn drain_until(
     }
     assert!(
         ready(&frames),
-        "the lane never delivered what this attachment was waiting for"
+        "the lane never delivered what this attachment was waiting for; it did deliver:\n{}",
+        frames.join("\n")
     );
     frames
 }
 
 fn is_snapshot(frame: &str) -> bool {
     matches!(
-        decoded(frame).body,
-        ReadBody::CardUpdate(CardUpdateView {
+        decode_read_frame(frame.as_bytes()).map(|frame| frame.body),
+        Ok(ReadBody::CardUpdate(CardUpdateView {
             kind: CardUpdateKindView::Snapshot(_),
             ..
-        })
+        }))
     )
 }
 
+/// The card as a frame describes it, whichever update kind carried it. An
+/// attachment that opens while the card is still settling is told the rest as
+/// `state` updates, so a test waiting for a settled card must read those too.
+/// The lane multiplexes both contracts, so a read decode that fails is a
+/// command frame, not a fault.
+fn card_view(frame: &str) -> Option<CardView> {
+    let ReadBody::CardUpdate(update) = decode_read_frame(frame.as_bytes()).ok()?.body else {
+        return None;
+    };
+    match update.kind {
+        CardUpdateKindView::Snapshot(view)
+        | CardUpdateKindView::Progress(view)
+        | CardUpdateKindView::State(view)
+        | CardUpdateKindView::Terminal(view) => Some(view),
+        CardUpdateKindView::CapabilityDuty(_) => None,
+    }
+}
+
 fn timeline(frame: &str) -> Option<EvidenceTimelineView> {
-    match decoded(frame).body {
+    match decode_read_frame(frame.as_bytes()).ok()?.body {
         ReadBody::Evidence(timeline) => Some(timeline),
         _ => None,
     }
@@ -302,59 +477,139 @@ fn dart_sdk() -> PathBuf {
         })
 }
 
-/// The app consumes the generated binding BY REFERENCE. A copy would compile
+/// The app consumes BOTH generated bindings BY REFERENCE. A copy would compile
 /// and then rot: the point of a generated contract is that there is one of it,
-/// and `flutter analyze` must be analysing the artifact this workspace emits
-/// rather than a snapshot of it.
+/// and `flutter analyze` must be analysing the artifacts this workspace emits
+/// rather than snapshots of them.
 #[test]
 fn the_flutter_app_reads_the_generated_binding_itself() {
     let repository = repository_root();
-    let linked = repository.join("apps/envoix-flutter/lib/bindings/envoix_read.dart");
-    assert!(
-        fs::symlink_metadata(&linked)
-            .expect("the app links the generated read binding")
-            .file_type()
-            .is_symlink(),
-        "{} must be a link to the generated artifact, not a copy",
-        linked.display()
-    );
-    assert_eq!(
-        fs::canonicalize(&linked).expect("the link resolves"),
-        fs::canonicalize(
-            repository.join("crates/l5/envoix-bindings/generated/dart/envoix_read.dart")
-        )
-        .expect("the generated artifact exists"),
-    );
+    for artifact in ["envoix_read.dart", "envoix_command.dart"] {
+        let linked = repository
+            .join("apps/envoix-flutter/lib/bindings")
+            .join(artifact);
+        assert!(
+            fs::symlink_metadata(&linked)
+                .unwrap_or_else(|_| panic!("the app links {artifact}"))
+                .file_type()
+                .is_symlink(),
+            "{} must be a link to the generated artifact, not a copy",
+            linked.display()
+        );
+        assert_eq!(
+            fs::canonicalize(&linked).expect("the link resolves"),
+            fs::canonicalize(
+                repository
+                    .join("crates/l5/envoix-bindings/generated/dart")
+                    .join(artifact)
+            )
+            .expect("the generated artifact exists"),
+        );
+    }
 }
 
-/// F1b is an observer. The command contract is generated for Dart and stays
-/// out of the app: a frontend with no encoder cannot issue a command by
-/// accident, which is a stronger statement than a rule saying it must not.
+/// F2a's frontend commands, so it legitimately carries an encoder — the ONE
+/// encoder the command contract emits for a native, because `submit` is the one
+/// body a frontend originates (BN3b). This replaces F1b's "no encoder at all"
+/// sweep with what actually has to hold now: it carries that encoder and
+/// nothing else, and it keeps no durable command state.
+///
+/// The durable half is gated at the door: a retry ledger or a command journal
+/// that outlives the process needs `dart:io` or a storage package, and the
+/// app's imports are an allow-list that admits neither. A retry TIMER is the
+/// one thing the door lets through — `Timer` lives in `dart:async`, which the
+/// lane legitimately imports for its stream — so that one is named. R0 gives
+/// the frontend no transfer truth to keep, and the host's own ledger — 256
+/// completions per card — is the memory a re-issue is answered from.
 #[test]
-fn the_read_only_frontend_carries_no_command_encoder() {
-    let sources = repository_root().join("apps/envoix-flutter/lib");
-    assert!(
-        !sources.join("bindings/envoix_command.dart").exists(),
-        "the command binding stays out of the app until F2"
-    );
+fn the_mutating_frontend_carries_only_the_submit_encoder() {
+    /// Everything the app may import. Anything else is a door to state, to a
+    /// second lane onto the host, or to a clock.
+    const ALLOWED_IMPORTS: [&str; 3] = ["dart:async", "dart:convert", "dart:math"];
+
+    let repository = repository_root();
+    let sources = repository.join("apps/envoix-flutter/lib");
     let mut checked = 0;
+    let mut encoders = Vec::new();
     for entry in fs::read_dir(&sources).expect("the app has sources") {
         let path = entry.expect("a directory entry").path();
         if path.extension().is_none_or(|extension| extension != "dart") {
             continue;
         }
+        let name = path
+            .file_name()
+            .expect("a file name")
+            .to_string_lossy()
+            .into_owned();
         let text = fs::read_to_string(&path).expect("a Dart source reads");
+        if text.contains("encodeCommandFrame") {
+            encoders.push(name.clone());
+        }
+        // The generated encoder writes the JSON. A frontend that writes its own
+        // is a second, unversioned dialect of the command contract.
+        for forbidden in [
+            "jsonEncode(",
+            "jsonDecode(",
+            READ_SCHEMA_ID,
+            COMMAND_SCHEMA_ID,
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "{name} spells `{forbidden}`: frames are the generated codec's, \
+                 not this app's"
+            );
+        }
+        // The import allow-list cannot exclude this one: `dart:async` is on it.
+        // A frontend that re-presents a command on a clock owns a retry policy,
+        // which is the authority's (BN2 R4).
         assert!(
-            !text.contains("encodeCommandFrame") && !text.contains("envoix_command"),
-            "{} reaches for the command contract; F1b observes",
-            path.display()
+            !text.contains("Timer("),
+            "{name} builds a Timer: a re-issue is a user's tap, not a schedule"
         );
+        for import in text
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("import '"))
+            .filter_map(|line| line.split_once('\''))
+            .map(|(uri, _)| uri)
+        {
+            let allowed = ALLOWED_IMPORTS.contains(&import)
+                || import.starts_with("package:flutter/")
+                || !import.contains(':');
+            assert!(allowed, "{name} imports {import}, which is not on the list");
+        }
         checked += 1;
     }
     assert!(
-        checked >= 3,
+        checked >= 8,
         "the app's sources were not swept, {checked} seen"
     );
+    // Non-vacuity in both directions: the app must be able to command at all,
+    // and the encoder must live in ONE place rather than wherever a widget felt
+    // like building a frame.
+    assert_eq!(
+        encoders,
+        vec!["commands.dart".to_owned()],
+        "the submit encoder must be reached from exactly one file"
+    );
+
+    // The only third-party code in this app is the Flutter SDK. A dependency is
+    // how a durable store gets in, so the manifest is part of the same gate.
+    let pubspec = fs::read_to_string(repository.join("apps/envoix-flutter/pubspec.yaml"))
+        .expect("the app has a pubspec");
+    let declared: Vec<&str> = pubspec
+        .lines()
+        .skip_while(|line| !line.starts_with("dependencies:"))
+        .skip(1)
+        .take_while(|line| line.starts_with(' ') || line.trim().is_empty())
+        .filter_map(|line| {
+            // A dependency is a two-space-indented key, with or without a
+            // version after it; anything deeper belongs to the entry above.
+            let entry = line.strip_prefix("  ")?;
+            (!entry.starts_with([' ', '#']))
+                .then(|| entry.split(':').next().unwrap_or(entry).trim())
+        })
+        .collect();
+    assert_eq!(declared, vec!["flutter"], "{pubspec}");
 }
 
 fn repository_root() -> PathBuf {

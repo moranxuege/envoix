@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
 
 import 'attachment.dart';
+import 'bindings/envoix_command.dart';
 import 'bindings/envoix_read.dart';
+import 'commands.dart';
 import 'instrumentation.dart';
 import 'labels.dart';
+import 'lane.dart';
 
 /// UI01 — every card this attachment can see, and how healthy the lane that
 /// fed them is.
@@ -12,9 +15,17 @@ import 'labels.dart';
 /// first — not recency of creation, which the read contract carries no fact
 /// about (see [Attachment.cards]). The screen makes no claim about age.
 class HomeScreen extends StatelessWidget {
-  const HomeScreen({required this.attachment, this.fault, super.key});
+  const HomeScreen({
+    required this.attachment,
+    required this.commander,
+    this.fault,
+    super.key,
+  });
 
   final Attachment attachment;
+
+  /// Speaks for this attachment, at its epochs.
+  final Commander commander;
 
   /// Why the lane is not delivering, when it is not.
   final Object? fault;
@@ -35,7 +46,12 @@ class HomeScreen extends StatelessWidget {
             padding: EdgeInsets.symmetric(vertical: 24),
             child: Text('No transfers yet.'),
           ),
-        for (final CardRow row in cards) CardTile(row: row),
+        for (final CardRow row in cards)
+          CardTile(
+            row: row,
+            commander: commander,
+            intents: attachment.commands.forCard(row.card),
+          ),
         LaneHealth(attachment: attachment),
       ],
     );
@@ -83,16 +99,26 @@ class ActivitySummary extends StatelessWidget {
   }
 }
 
-/// One card, as the host last described it.
+/// One card, as the host last described it — and what may be asked of it.
 class CardTile extends StatelessWidget {
-  const CardTile({required this.row, super.key});
+  const CardTile({
+    required this.row,
+    required this.commander,
+    this.intents = const <CommandIntent>[],
+    super.key,
+  });
 
   final CardRow row;
+  final Commander commander;
+
+  /// This card's intents, newest first.
+  final List<CommandIntent> intents;
 
   @override
   Widget build(BuildContext context) {
     final CardView? view = row.view;
     reportRendered(row);
+    reportCard(row);
     final ThemeData theme = Theme.of(context);
     return Card(
       child: Padding(
@@ -136,7 +162,15 @@ class CardTile extends StatelessWidget {
                 style: theme.textTheme.bodySmall,
               ),
               if (view.outcome != null) _Outcome(outcome: view.outcome!),
+              _Actions(
+                row: row,
+                view: view,
+                commander: commander,
+                intents: intents,
+              ),
             ],
+            for (final CommandIntent intent in intents)
+              _Intent(row: row, intent: intent, commander: commander),
             if (row.status != StreamStatus.live)
               _Fact(label: 'Stream', value: streamLabel(row), warn: true),
             if (row.duty != null)
@@ -158,8 +192,135 @@ class CardTile extends StatelessWidget {
   }
 }
 
+/// Exactly the commands the authority currently admits for this card, and
+/// nothing else.
+///
+/// `allowedActions` is the product reducer's own `allowed_commands`, published
+/// in the read contract. Rendering that list verbatim is what makes an illegal
+/// affordance unrepresentable here: this widget has no rule about states,
+/// because owning one would be the frontend owning transfer truth (R0).
+class _Actions extends StatelessWidget {
+  const _Actions({
+    required this.row,
+    required this.view,
+    required this.commander,
+    required this.intents,
+  });
+
+  final CardRow row;
+  final CardView view;
+  final Commander commander;
+  final List<CommandIntent> intents;
+
+  @override
+  Widget build(BuildContext context) {
+    if (view.allowedActions.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.only(top: 8),
+        child: _Fact(
+          label: 'Actions',
+          value: 'Nothing can be asked of this card right now.',
+        ),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Wrap(
+        spacing: 8,
+        children: <Widget>[
+          for (final CommandKindView kind in view.allowedActions)
+            _Action(
+              row: row,
+              command: commandOf(kind),
+              commander: commander,
+              waiting: commandInFlight(intents, commandOf(kind)),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _Action extends StatelessWidget {
+  const _Action({
+    required this.row,
+    required this.command,
+    required this.commander,
+    required this.waiting,
+  });
+
+  final CardRow row;
+  final CommandView command;
+  final Commander commander;
+  final bool waiting;
+
+  @override
+  Widget build(BuildContext context) {
+    reportAffordance(context, row.card, command);
+    return FilledButton.tonal(
+      onPressed: waiting ? null : () => commander.issue(row, command),
+      child: Text(commandLabel(command)),
+    );
+  }
+}
+
+/// One command this app issued, and every answer the authority gave it.
+///
+/// In-flight and committed are drawn differently on purpose: an accepted
+/// command has not crossed the durability barrier, and a screen that showed the
+/// two the same way would be claiming an effect nobody committed.
+class _Intent extends StatelessWidget {
+  const _Intent({
+    required this.row,
+    required this.intent,
+    required this.commander,
+  });
+
+  final CardRow row;
+  final CommandIntent intent;
+  final Commander commander;
+
+  @override
+  Widget build(BuildContext context) {
+    reportIntent(intent);
+    final ColorScheme colors = Theme.of(context).colorScheme;
+    final bool waiting = intent.unsettled;
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(8),
+        decoration: BoxDecoration(
+          color: waiting
+              ? colors.secondaryContainer
+              : colors.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(8),
+          // The in-flight border is the second carrier: colour alone must not
+          // be what says "this has not committed".
+          border: waiting ? Border.all(color: colors.secondary) : null,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            _Fact(label: 'Command', value: intentLabel(intent)),
+            if (intent.mayDisambiguate)
+              // The disambiguation, and the only way to run it: the SAME
+              // identity again. Duplicate means it had committed, a fresh
+              // acceptance means it had not — the app never decides which.
+              TextButton(
+                onPressed: () => commander.reissue(row, intent),
+                child: const Text('Ask again'),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 /// The typed outcome, with the recovery the authority suggested. It is shown as
-/// a fact, never as a button: acting on it is a command, and commands are F2.
+/// a fact, never as a button: acting on it is a command whose legality the
+/// authority publishes in `allowedActions`.
 class _Outcome extends StatelessWidget {
   const _Outcome({required this.outcome});
 
@@ -295,6 +456,10 @@ class LaneHealth extends StatelessWidget {
                 <String>[
                   for (final FrameRejection kind in FrameRejection.values)
                     '${rejectionLabel(kind)} ${attachment.rejected(kind)}',
+                  // An answer to a command a PREVIOUS attachment issued: the
+                  // host resolves it whenever its barrier does, and this
+                  // attachment has no intent to put it against.
+                  'unaddressed answers ${attachment.commands.unaddressed}',
                 ].join(' · '),
                 style: theme.textTheme.bodySmall,
               ),

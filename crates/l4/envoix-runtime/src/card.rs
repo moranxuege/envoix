@@ -223,8 +223,8 @@ impl<R: RecordStore + Send + 'static, E: AttemptExecutor> CardActor<R, E> {
                 let _ = completion.send(CommandCompletion::Committed { state });
                 return;
             }
-            Some(LedgerHit::Conflict { .. }) => {
-                let _ = acceptance.send(Err(CommandRejected::Conflict));
+            Some(LedgerHit::Conflict { applied }) => {
+                let _ = acceptance.send(Ok(FrontendVerdict::Conflict { applied }));
                 return;
             }
             None => {}

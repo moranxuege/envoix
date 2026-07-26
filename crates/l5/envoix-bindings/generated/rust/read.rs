@@ -3,7 +3,7 @@
 
 use serde_json::{Map, Value};
 
-pub const READ_SCHEMA_ID: &str = "envoix/binding/read/2";
+pub const READ_SCHEMA_ID: &str = "envoix/binding/read/3";
 pub const READ_MAX_FRAME_BYTES: usize = 1048576;
 
 const U63_MAX: u64 = 9_223_372_036_854_775_807;
@@ -203,6 +203,25 @@ impl CapabilityActionView {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommandKindView {
+    Pause,
+    Cancel,
+    Resume,
+    Remove,
+    RePickSource,
+}
+
+impl CommandKindView {
+    pub const ALL: [Self; 5] = [
+        Self::Pause,
+        Self::Cancel,
+        Self::Resume,
+        Self::Remove,
+        Self::RePickSource,
+    ];
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RedactedIdKindView {
     Record,
     Transfer,
@@ -314,6 +333,7 @@ pub struct CardView {
     pub bytes: u64,
     pub bytes_resumed: u64,
     pub outcome: Option<OutcomeView>,
+    pub allowed_actions: Vec<CommandKindView>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -957,6 +977,28 @@ fn encode_capability_action_view_value(value: &CapabilityActionView) -> Value {
     })
 }
 
+fn decode_command_kind_view_value(value: &Value, context: &'static str) -> Result<CommandKindView, ReadError> {
+    let text = value.as_str().ok_or(ReadError::Shape { context })?;
+    match text {
+        "pause" => Ok(CommandKindView::Pause),
+        "cancel" => Ok(CommandKindView::Cancel),
+        "resume" => Ok(CommandKindView::Resume),
+        "remove" => Ok(CommandKindView::Remove),
+        "re_pick_source" => Ok(CommandKindView::RePickSource),
+        _ => Err(ReadError::UnknownVariant { context }),
+    }
+}
+
+fn encode_command_kind_view_value(value: &CommandKindView) -> Value {
+    Value::from(match value {
+        CommandKindView::Pause => "pause",
+        CommandKindView::Cancel => "cancel",
+        CommandKindView::Resume => "resume",
+        CommandKindView::Remove => "remove",
+        CommandKindView::RePickSource => "re_pick_source",
+    })
+}
+
 fn decode_redacted_id_kind_view_value(value: &Value, context: &'static str) -> Result<RedactedIdKindView, ReadError> {
     let text = value.as_str().ok_or(ReadError::Shape { context })?;
     match text {
@@ -1246,7 +1288,7 @@ fn encode_identity_view_value(value: &IdentityView) -> Result<Value, ReadError> 
 
 fn decode_card_view_value(value: &Value, context: &'static str) -> Result<CardView, ReadError> {
     let map = frame_object(value, context)?;
-    known_keys(map, &["identity", "direction", "offered_name", "total", "state", "quiescence", "generation", "phase", "bytes", "bytes_resumed", "outcome"], context)?;
+    known_keys(map, &["identity", "direction", "offered_name", "total", "state", "quiescence", "generation", "phase", "bytes", "bytes_resumed", "outcome", "allowed_actions"], context)?;
     let identity = decode_identity_view_value(field(map, "identity", "CardView.identity")?, "CardView.identity")?;
     let direction = decode_direction_view_value(field(map, "direction", "CardView.direction")?, "CardView.direction")?;
     let offered_name = utf8_bounded(field(map, "offered_name", "CardView.offered_name")?, 255, "CardView.offered_name")?;
@@ -1261,6 +1303,17 @@ fn decode_card_view_value(value: &Value, context: &'static str) -> Result<CardVi
         Value::Null => None,
         present => Some(decode_outcome_view_value(present, "CardView.outcome")?),
     };
+    let allowed_actions = {
+        let items = field(map, "allowed_actions", "CardView.allowed_actions")?.as_array().ok_or(ReadError::Shape { context: "CardView.allowed_actions" })?;
+        if items.len() > 5 {
+            return Err(ReadError::Bound { context: "CardView.allowed_actions" });
+        }
+        let mut collected = Vec::with_capacity(items.len());
+        for item in items {
+            collected.push(decode_command_kind_view_value(item, "CardView.allowed_actions")?);
+        }
+        collected
+    };
     Ok(CardView {
         identity,
         direction,
@@ -1273,6 +1326,7 @@ fn decode_card_view_value(value: &Value, context: &'static str) -> Result<CardVi
         bytes,
         bytes_resumed,
         outcome,
+        allowed_actions,
     })
 }
 
@@ -1295,6 +1349,16 @@ fn encode_card_view_value(value: &CardView) -> Result<Value, ReadError> {
             Some(inner) => encode_outcome_view_value(inner)?,
         },
     );
+    map.insert("allowed_actions".to_owned(), {
+        if value.allowed_actions.len() > 5 {
+            return Err(ReadError::Bound { context: "CardView.allowed_actions" });
+        }
+        let mut items = Vec::with_capacity(value.allowed_actions.len());
+        for item in &value.allowed_actions {
+            items.push(encode_command_kind_view_value(item));
+        }
+        Value::Array(items)
+    });
     Ok(Value::Object(map))
 }
 

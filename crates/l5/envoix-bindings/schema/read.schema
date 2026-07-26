@@ -14,7 +14,7 @@
 # There is deliberately no bytes/blob type and no handle/path/URI type, so bulk
 # payload bytes and OS handles cannot be represented in a read frame.
 
-id = "envoix/binding/read/2"
+id = "envoix/binding/read/3"
 root = "ReadFrame"
 # Only the host originates read frames, so the native artifacts are decode-only:
 # a frontend cannot fabricate an observation.
@@ -105,6 +105,17 @@ variants = [
 kind = "enum"
 name = "CapabilityActionView"
 variants = ["post_receipt"]
+
+# Which commands the authority will currently admit for a card. This is the
+# product reducer's own `TransferRecord::allowed_commands`, PUBLISHED rather
+# than re-derived: a frontend that computed legality from state would be owning
+# transfer truth (R0). The variants mirror schema/command.schema's `CommandView`
+# one for one, which `the_read_contract_publishes_every_command_a_frontend_can_send`
+# pins against both schema files.
+[[decl]]
+kind = "enum"
+name = "CommandKindView"
+variants = ["pause", "cancel", "resume", "remove", "re_pick_source"]
 
 [[decl]]
 kind = "enum"
@@ -204,6 +215,7 @@ fields = [
   { name = "bytes", type = "u63" },
   { name = "bytes_resumed", type = "u63" },
   { name = "outcome", type = "option(OutcomeView)" },
+  { name = "allowed_actions", type = "list(CommandKindView, 5)" },
 ]
 
 # ---- capability duties ----

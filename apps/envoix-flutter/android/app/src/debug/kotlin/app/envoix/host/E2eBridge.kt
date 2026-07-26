@@ -25,7 +25,12 @@ object E2eBridge {
                 Log.i(TAG, "created=%016x".format(createForE2e(name, total)))
             }
 
-            "$packageName.action.e2e-probe" -> Log.i(TAG, "restored=${liveCards()}")
+            "$packageName.action.e2e-probe" ->
+                Log.i(TAG, "restored=${liveCards().substringBefore(DURABLE_SEPARATOR)}")
+
+            // What is actually ON DISK, not what the runtime is holding.
+            "$packageName.action.e2e-durable" ->
+                Log.i(TAG, "durable=${liveCards().substringAfter(DURABLE_SEPARATOR, "")}")
 
             else -> return false
         }
@@ -38,8 +43,13 @@ object E2eBridge {
         totalBytes: Long,
     ): Long
 
-    /** The cards this process generation restored, as comma-separated hex ids. */
+    /**
+     * The restored card ids, then `;durable=` and each card's latest committed
+     * state read off disk. [handle] splits it so the restore probe's own output
+     * stays exactly what BN4 and F1b already assert.
+     */
     private external fun liveCards(): String
 
     const val TAG = "EnvoixE2e"
+    private const val DURABLE_SEPARATOR = ";durable="
 }

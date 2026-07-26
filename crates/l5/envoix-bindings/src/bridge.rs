@@ -80,6 +80,9 @@ pub fn acceptance_frame(
     let acceptance = match acceptance {
         Ok(CommandVerdict::Accepted(_)) => AcceptanceView::Accepted,
         Ok(CommandVerdict::Duplicate { state }) => AcceptanceView::Duplicate(state_view(*state)),
+        Ok(CommandVerdict::Conflict { applied }) => {
+            AcceptanceView::Conflict(command_view(*applied))
+        }
         Err(rejected) => AcceptanceView::Rejected(rejection_view(*rejected)),
     };
     CommandFrame {
@@ -138,7 +141,6 @@ fn rejection_view(rejected: CommandRejected) -> RejectionView {
         CommandRejected::AtCapacity => RejectionView::AtCapacity,
         CommandRejected::RuntimeStopped => RejectionView::RuntimeStopped,
         CommandRejected::Interrupted => RejectionView::Interrupted,
-        CommandRejected::Conflict => RejectionView::Conflict,
         CommandRejected::Internal => RejectionView::Internal,
     }
 }

@@ -5,16 +5,17 @@ use envoix_attempt_api::{
 use envoix_capabilities::{
     Admission, DutyKind, DutyLedger, DutyProvenance, DutyResult, GenerationUpdate, Registration,
 };
-use envoix_outcomes::{OutcomeCode, Phase, Recovery};
+use envoix_outcomes::{Outcome, OutcomeCode, Phase, Recovery, Retryability, SafeDisplay};
 use envoix_types::{
     ArtifactId, AttemptGen, ByteCount, CommandId, Direction, OfferedName, RecordId, RequestId,
     TransferId,
 };
 
 use crate::{
-    CapabilityAction, IdentityError, IdentitySource, NewTransfer, PauseOrigin, ProductCommand,
-    ProductEffect, ProductIdentity, ProductInput, ProductState, RecordCodecError, RecordDecode,
-    SourceDecision, StorageAction, TransferRecord, decode_record, encode_record, resolve_source,
+    CapabilityAction, Facts, IdentityError, IdentitySource, NewTransfer, PauseOrigin,
+    ProductCommand, ProductEffect, ProductIdentity, ProductInput, ProductState, Quiescence,
+    RecordCodecError, RecordDecode, SourceDecision, StorageAction, TransferRecord, WorkerKind,
+    decode_record, encode_record, resolve_source,
 };
 
 #[derive(Default)]
@@ -1556,6 +1557,284 @@ fn legal_commands_come_only_from_product_state() {
         .reduce(ProductInput::Command(ProductCommand::Remove))
         .unwrap();
     assert!(removed.allowed_commands().is_empty());
+}
+
+/// The offer is DERIVED from the handlers, so the biconditional sweep below
+/// cannot catch a handler whose guard is simply wrong — a broken `on_pause`
+/// would withhold Pause and stay perfectly self-consistent. This pins the
+/// policy itself: the exact list, in order, for every distinct offer the
+/// authority makes, on records built by real reductions.
+#[test]
+fn the_offer_at_each_resting_state_is_pinned() {
+    let mut needs_repick = preparing(Direction::Send, false);
+    let repick_stamp = needs_repick.stamp();
+    needs_repick
+        .reduce(ProductInput::StageFailed {
+            stamp: repick_stamp,
+        })
+        .unwrap();
+    needs_repick
+        .reduce(ProductInput::StagingRetired {
+            stamp: repick_stamp,
+        })
+        .unwrap();
+
+    let mut paused = ready(Direction::Send);
+    paused
+        .reduce(ProductInput::Command(ProductCommand::Pause))
+        .unwrap();
+    quiesce(&mut paused, RetirementIntent::Pause);
+
+    let mut completed = ready(Direction::Receive);
+    completed
+        .reduce(event(
+            &completed,
+            AttemptEventKind::Terminal(OutcomeCode::Completed),
+        ))
+        .unwrap();
+    completed
+        .reduce(ProductInput::AttemptRetired(retirement_ack(
+            &completed,
+            RetirementIntent::Finalize,
+            true,
+        )))
+        .unwrap();
+
+    let mut cancelled = ready(Direction::Send);
+    cancelled
+        .reduce(ProductInput::Command(ProductCommand::Cancel))
+        .unwrap();
+    quiesce(&mut cancelled, RetirementIntent::Cancel);
+
+    let mut retiring = ready(Direction::Send);
+    retiring
+        .reduce(ProductInput::Command(ProductCommand::Pause))
+        .unwrap();
+
+    let mut removed = ready(Direction::Send);
+    removed
+        .reduce(ProductInput::Command(ProductCommand::Remove))
+        .unwrap();
+
+    let expected: [(&str, TransferRecord, Vec<ProductCommand>); 8] = [
+        (
+            "connecting",
+            ready(Direction::Send),
+            vec![
+                ProductCommand::Pause,
+                ProductCommand::Cancel,
+                ProductCommand::Remove,
+            ],
+        ),
+        (
+            "preparing",
+            preparing(Direction::Send, true),
+            vec![ProductCommand::Cancel, ProductCommand::Remove],
+        ),
+        (
+            "needs a re-pick",
+            needs_repick,
+            vec![ProductCommand::RePickSource, ProductCommand::Remove],
+        ),
+        (
+            "paused",
+            paused,
+            vec![
+                ProductCommand::Resume,
+                ProductCommand::Cancel,
+                ProductCommand::Remove,
+            ],
+        ),
+        ("completed", completed, vec![ProductCommand::Remove]),
+        (
+            "cancelled",
+            cancelled,
+            vec![ProductCommand::Resume, ProductCommand::Remove],
+        ),
+        ("retiring", retiring, Vec::new()),
+        ("removed", removed, Vec::new()),
+    ];
+
+    for (what, record, offer) in &expected {
+        assert_eq!(record.allowed_commands(), *offer, "the offer for {what}");
+    }
+}
+
+/// F2a publishes `allowed_commands` in the read contract so a frontend renders
+/// the authority's own legality instead of re-deriving one (R0). That makes
+/// this list a PROMISE rather than a hint, and a promise has two halves: a
+/// command it offers must do something, and one it withholds must do nothing.
+///
+/// Without the first half a frontend draws a button whose command is accepted,
+/// committed, and changes nothing — the most expensive way to say no. Without
+/// the second half the offer is not the boundary it claims to be.
+///
+/// The sweep is exhaustive over the CONSTRUCTIBLE record space — every field a
+/// command handler reads, in every combination, not only the ones a reduction
+/// can reach. That matters because `decode_record` validates three invariants
+/// and none of them constrains `state` against `quiescence`, so every shape
+/// below can arrive from durable storage. Against the hand-written offer this
+/// list replaced, 17,056 of these checks disagreed; the offer is now derived
+/// from the handlers, so agreement is by construction and what this sweep
+/// still proves is that the derivation is total (no record makes it panic),
+/// bounded, order-stable, and non-vacuous.
+#[test]
+fn every_published_command_moves_the_card_and_the_rest_are_inert() {
+    let commands = [
+        ProductCommand::Pause,
+        ProductCommand::Resume,
+        ProductCommand::RePickSource,
+        ProductCommand::Cancel,
+        ProductCommand::Remove,
+    ];
+    // The offer filters `ALL_COMMANDS`, so a command missing from it could
+    // never be offered however its handler behaves — and the published order
+    // is the order a frontend renders.
+    assert_eq!(crate::reducer::ALL_COMMANDS, commands);
+
+    let states = [
+        ProductState::Preparing,
+        ProductState::Waiting,
+        ProductState::Connecting,
+        ProductState::Verifying,
+        ProductState::Transferring,
+        ProductState::Confirming,
+        ProductState::Paused(PauseOrigin::Local),
+        ProductState::Paused(PauseOrigin::Peer),
+        ProductState::Paused(PauseOrigin::Lost),
+        ProductState::Unconfirmed,
+        ProductState::Completed,
+        ProductState::Failed,
+        ProductState::Cancelled,
+    ];
+    let quiescences = [
+        Quiescence::Running {
+            worker: WorkerKind::Attempt,
+        },
+        Quiescence::Running {
+            worker: WorkerKind::Staging,
+        },
+        Quiescence::Retiring {
+            worker: WorkerKind::Attempt,
+            intent: RetirementIntent::Pause,
+        },
+        Quiescence::Retiring {
+            worker: WorkerKind::Attempt,
+            intent: RetirementIntent::Cancel,
+        },
+        Quiescence::Retiring {
+            worker: WorkerKind::Attempt,
+            intent: RetirementIntent::Finalize,
+        },
+        Quiescence::Retiring {
+            worker: WorkerKind::Staging,
+            intent: RetirementIntent::Pause,
+        },
+        Quiescence::Retiring {
+            worker: WorkerKind::Staging,
+            intent: RetirementIntent::Cancel,
+        },
+        Quiescence::Retiring {
+            worker: WorkerKind::Staging,
+            intent: RetirementIntent::Finalize,
+        },
+        Quiescence::Quiescent,
+    ];
+    // Legality reads `retry` and `recovery`; the rest of an outcome is display.
+    let mut outcomes: Vec<Option<Outcome>> = vec![None];
+    for retry in [
+        Retryability::Retryable,
+        Retryability::Terminal,
+        Retryability::NeedsUser,
+    ] {
+        for recovery in [
+            None,
+            Some(Recovery::RePickSource),
+            Some(Recovery::RetryLater),
+            Some(Recovery::ReconnectPeer),
+        ] {
+            let outcome = Outcome::new(
+                OutcomeCode::Internal,
+                Phase::Transferring,
+                retry,
+                SafeDisplay::new("swept"),
+            );
+            outcomes.push(Some(match recovery {
+                Some(recovery) => outcome.with_recovery(recovery),
+                None => outcome,
+            }));
+        }
+    }
+
+    let base = ready(Direction::Send);
+    let mut swept = 0usize;
+    let mut offered = [0usize; 5];
+    let mut withheld = [0usize; 5];
+    for state in states {
+        for quiescence in quiescences {
+            // All five facts, so a fact that starts gating a command tomorrow is
+            // already inside the sweep.
+            for bits in 0..32u8 {
+                for source_recoverable in [false, true] {
+                    for outcome in &outcomes {
+                        let mut record = base.clone();
+                        record.state = state;
+                        record.quiescence = quiescence;
+                        record.facts = Facts {
+                            source_ready: bits & 1 != 0,
+                            complete_sent: bits & 2 != 0,
+                            proof_delivered: bits & 4 != 0,
+                            receipt_mismatch: bits & 8 != 0,
+                            remove_requested: bits & 16 != 0,
+                        };
+                        record.source_recoverable = source_recoverable;
+                        record.outcome = outcome.clone();
+                        swept += 1;
+
+                        let allowed = record.allowed_commands();
+                        // The published field is `list(CommandKindView, 5)`, and
+                        // a repeated affordance would draw twice.
+                        assert!(allowed.len() <= commands.len());
+                        assert!(
+                            allowed.is_sorted_by_key(|command| commands
+                                .iter()
+                                .position(|published| published == command)),
+                            "the offer is not in published order: {allowed:?}"
+                        );
+
+                        for (slot, command) in commands.into_iter().enumerate() {
+                            let mut candidate = record.clone();
+                            let effects = candidate
+                                .reduce(ProductInput::Command(command))
+                                .expect("a command reduces");
+                            let moved = candidate != record || !effects.is_empty();
+                            assert_eq!(
+                                allowed.contains(&command),
+                                moved,
+                                "{command:?} is offered={} but moves the card={moved} for \
+                                 {state:?} / {quiescence:?} / {:?} / {outcome:?}",
+                                allowed.contains(&command),
+                                record.facts,
+                            );
+                            if moved {
+                                offered[slot] += 1;
+                            } else {
+                                withheld[slot] += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Vacuity: a sweep that never offers a command, or never withholds one,
+    // satisfies that command's half of the biconditional while proving nothing
+    // about it. Every command must appear on both sides.
+    assert_eq!(swept, 97_344, "the constructible space changed shape");
+    for (slot, command) in commands.into_iter().enumerate() {
+        assert!(offered[slot] > 0, "{command:?} is never offered");
+        assert!(withheld[slot] > 0, "{command:?} is never withheld");
+    }
 }
 
 #[test]

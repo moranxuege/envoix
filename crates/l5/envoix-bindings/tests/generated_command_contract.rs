@@ -113,7 +113,7 @@ fn generated_command_schema_exhaustiveness() {
         assert!(SUPERSESSION_INERT_PRE_ACCEPTANCE_ONLY);
         assert!(RETRY_HORIZON_COMPLETIONS as usize == CommandLedger::RETENTION);
     }
-    assert_eq!(COMMAND_SCHEMA_ID, "envoix/binding/command/1");
+    assert_eq!(COMMAND_SCHEMA_ID, "envoix/binding/command/2");
 
     // Every command variant, swept from the generated ALL array: view -> live
     // -> view is identity, and a full submit frame round-trips into the typed
@@ -140,7 +140,6 @@ fn generated_command_schema_exhaustiveness() {
         CommandRejected::AtCapacity,
         CommandRejected::RuntimeStopped,
         CommandRejected::Interrupted,
-        CommandRejected::Conflict,
         CommandRejected::Internal,
     ];
     assert_eq!(rejections.len(), RejectionView::ALL.len());
@@ -153,6 +152,17 @@ fn generated_command_schema_exhaustiveness() {
         roundtrip(&acceptance_frame(
             command_id(),
             &Ok(CommandVerdict::Duplicate { state }),
+        ));
+    }
+
+    // A conflict names the command that owns the reused identity, so every
+    // command has to cross as a conflict payload too.
+    for view in CommandView::ALL {
+        roundtrip(&acceptance_frame(
+            command_id(),
+            &Ok(CommandVerdict::Conflict {
+                applied: live_command(view),
+            }),
         ));
     }
 
@@ -189,10 +199,10 @@ fn generated_command_schema_exhaustiveness() {
         _ => panic!("union {name} expected"),
     };
     assert_eq!(union_len("CommandBody"), 3);
-    assert_eq!(union_len("AcceptanceView"), 3);
+    assert_eq!(union_len("AcceptanceView"), 4);
     assert_eq!(union_len("CompletionView"), completions.len());
     assert_eq!(union_len("DispositionView"), 11);
-    assert_eq!(RejectionView::ALL.len(), 8);
+    assert_eq!(RejectionView::ALL.len(), 7);
     assert_eq!(CommandView::ALL.len(), 5);
 }
 
@@ -221,7 +231,7 @@ fn command_frames_reject_hostile_input() {
     );
 
     let future_version = tamper(&base, |value| {
-        value["schema"] = serde_json::json!("envoix/binding/command/2");
+        value["schema"] = serde_json::json!("envoix/binding/command/3");
     });
     assert_eq!(
         decode_command_frame(&future_version),
@@ -393,7 +403,7 @@ fn duplicate_json_keys_are_rejected() {
 
     let dup_schema = text.replacen(
         "\"schema\":",
-        "\"schema\":\"envoix/binding/command/1\",\"schema\":",
+        &format!("\"schema\":\"{COMMAND_SCHEMA_ID}\",\"schema\":"),
         1,
     );
     assert_ne!(dup_schema, text, "schema key found");
@@ -418,7 +428,9 @@ fn native_command_artifacts_carry_schema_and_rules() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     for (path, _) in artifacts(&doc()) {
         let content = std::fs::read_to_string(root.join(path)).expect("read artifact");
-        assert!(content.contains("envoix/binding/command/1"), "{path}");
+        // Taken from the schema rather than written out: the artifact is
+        // generated from that id, and a literal here only rots at the next bump.
+        assert!(content.contains(&doc().id), "{path}");
     }
     let dart = std::fs::read_to_string(root.join("generated/dart/envoix_command.dart"))
         .expect("dart artifact");

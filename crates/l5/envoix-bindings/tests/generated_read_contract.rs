@@ -12,8 +12,8 @@ use envoix_bindings::read::{
     RunningView, SubscribeRejectionView, WorkerKindView, decode_read_frame, encode_read_frame,
 };
 use envoix_bindings::{
-    FieldTy, build_manifest_frame, card_update_frame, closed_frame, emit, evidence_frame,
-    lag_frame, parse_schema, read_schema_text, subscribe_rejected_frame,
+    FieldTy, build_manifest_frame, card_update_frame, closed_frame, command_schema_text, emit,
+    evidence_frame, lag_frame, parse_schema, read_schema_text, subscribe_rejected_frame,
 };
 use envoix_evidence::{
     BUILD_TRUST_MANIFEST, EvidenceRecord, EvidenceSink, EvidenceValue, RedactedId, SessionKey,
@@ -379,7 +379,7 @@ fn generated_read_schema_roundtrip_and_containment() {
 
     // Unknown or missing schema versions fail explicitly.
     let future = tamper(&base, |value| {
-        value["schema"] = serde_json::json!("envoix/binding/read/3");
+        value["schema"] = serde_json::json!("envoix/binding/read/4");
     });
     assert_eq!(decode_read_frame(&future), Err(ReadError::UnknownSchema));
     let missing = tamper(&base, |value| {
@@ -854,7 +854,9 @@ fn schema_parser_rejects_unbounded_or_malformed_grammar() {
 fn native_artifacts_carry_schema_and_types() {
     let doc = parse_schema(read_schema_text()).expect("schema parses");
     for (path, content) in artifacts(&doc) {
-        assert!(content.contains("envoix/binding/read/2"), "{path}");
+        // Taken from the schema rather than written out: the artifact is
+        // generated from that id, and a literal here only rots at the next bump.
+        assert!(content.contains(&doc.id), "{path}");
         assert!(!content.contains("TODO"), "{path}");
     }
     let dart = emit::dart::module(&doc);
@@ -866,6 +868,60 @@ fn native_artifacts_carry_schema_and_types() {
     let swift = emit::swift::module(&doc);
     assert!(swift.contains("public enum ReadBody"));
     assert!(swift.contains("public static func decode(_ data: Data) throws -> ReadFrame"));
+}
+
+/// F2a: the read contract's `allowed_actions` is an OFFER, and the command
+/// contract is what the frontend may then send. A command the read side offers
+/// but the command side cannot express is an affordance that encodes to
+/// nothing; a command the command side accepts but the read side never offers
+/// is one a compliant frontend can never reach. Neither is representable while
+/// the two vocabularies are equal, and they live in two schema files precisely
+/// because the generator has no cross-schema reference — so the equality is
+/// asserted here, from the schema sources themselves, in both directions.
+#[test]
+fn the_read_contract_publishes_every_command_a_frontend_can_send() {
+    let variants = |text: &str, name: &str| -> Vec<String> {
+        let doc = parse_schema(text).expect("schema parses");
+        doc.decls
+            .iter()
+            .find_map(|decl| match decl {
+                envoix_bindings::Decl::Enum(decl) if decl.name == name => {
+                    Some(decl.variants.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{name} is an enum of this schema"))
+    };
+    let offered = variants(read_schema_text(), "CommandKindView");
+    let sendable = variants(command_schema_text(), "CommandView");
+    assert_eq!(
+        offered, sendable,
+        "the read contract's offer and the command contract's vocabulary drifted"
+    );
+    // Vacuity: an equality between two empty lists proves nothing, and the
+    // bound on `CardView.allowed_actions` has to admit the whole set.
+    assert_eq!(offered.len(), 5, "{offered:?}");
+    let card = parse_schema(read_schema_text())
+        .expect("schema parses")
+        .decls
+        .iter()
+        .find_map(|decl| match decl {
+            envoix_bindings::Decl::Struct(decl) if decl.name == "CardView" => Some(decl.clone()),
+            _ => None,
+        })
+        .expect("CardView is a struct of the read schema");
+    let actions = card
+        .fields
+        .iter()
+        .find(|field| field.name == "allowed_actions")
+        .expect("CardView publishes allowed_actions");
+    assert_eq!(
+        actions.ty,
+        FieldTy::List {
+            element: Box::new(FieldTy::Named("CommandKindView".to_owned())),
+            max_len: 5,
+        }
+    );
 }
 
 /// Manifest coherence: the projected manifest names EVERY identity this build

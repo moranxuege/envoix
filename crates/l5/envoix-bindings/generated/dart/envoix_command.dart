@@ -11,7 +11,7 @@
 
 import 'dart:convert';
 
-const String commandSchemaId = 'envoix/binding/command/1';
+const String commandSchemaId = 'envoix/binding/command/2';
 const int commandMaxFrameBytes = 1048576;
 // Contract rules frozen by schema/command.schema.
 const bool newestAttachmentCommands = true;
@@ -134,7 +134,6 @@ enum RejectionView {
   atCapacity,
   runtimeStopped,
   interrupted,
-  conflict,
   internal,
 }
 
@@ -150,6 +149,12 @@ final class AcceptanceViewDuplicate extends AcceptanceView {
   const AcceptanceViewDuplicate(this.value);
 
   final DispositionView value;
+}
+
+final class AcceptanceViewConflict extends AcceptanceView {
+  const AcceptanceViewConflict(this.value);
+
+  final CommandView value;
 }
 
 final class AcceptanceViewRejected extends AcceptanceView {
@@ -463,7 +468,6 @@ RejectionView _decodeRejectionView(Object? value, String context) {
     'at_capacity' => RejectionView.atCapacity,
     'runtime_stopped' => RejectionView.runtimeStopped,
     'interrupted' => RejectionView.interrupted,
-    'conflict' => RejectionView.conflict,
     'internal' => RejectionView.internal,
     String() =>
       throw CommandContractException(CommandErrorKind.unknownVariant, context),
@@ -485,6 +489,10 @@ AcceptanceView _decodeAcceptanceView(Object? value, String context) {
     case 'duplicate':
       return AcceptanceViewDuplicate(
         _decodeDispositionView(_payload(map, 'AcceptanceView.duplicate'), 'AcceptanceView.duplicate'),
+      );
+    case 'conflict':
+      return AcceptanceViewConflict(
+        _decodeCommandView(_payload(map, 'AcceptanceView.conflict'), 'AcceptanceView.conflict'),
       );
     case 'rejected':
       return AcceptanceViewRejected(

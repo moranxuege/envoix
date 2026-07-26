@@ -1,4 +1,4 @@
-use envoix_product::ProductState;
+use envoix_product::{ProductCommand, ProductState};
 use tokio::sync::oneshot;
 
 /// The intake's prompt answer for an admitted command. Acceptance is NOT proof
@@ -10,6 +10,11 @@ pub enum CommandVerdict {
     /// This command identity was already applied and committed; `state` is its
     /// recorded disposition. Nothing was reduced or written.
     Duplicate { state: ProductState },
+    /// This command identity is owned by a DIFFERENT committed command, named
+    /// by `applied`. The submission was not reduced or written; answering the
+    /// recorded disposition would silently swallow it behind a plausible
+    /// duplicate. Mint a fresh identity.
+    Conflict { applied: ProductCommand },
 }
 
 /// How an accepted command's application actually ended.
@@ -54,4 +59,5 @@ impl CommandTicket {
 pub(crate) enum FrontendVerdict {
     Accepted,
     Duplicate { state: ProductState },
+    Conflict { applied: ProductCommand },
 }

@@ -6,7 +6,7 @@
 
 import 'dart:convert';
 
-const String readSchemaId = 'envoix/binding/read/2';
+const String readSchemaId = 'envoix/binding/read/3';
 const int readMaxFrameBytes = 1048576;
 const int _u63Max = 9223372036854775807;
 
@@ -105,6 +105,14 @@ enum DutyKindView {
 
 enum CapabilityActionView {
   postReceipt,
+}
+
+enum CommandKindView {
+  pause,
+  cancel,
+  resume,
+  remove,
+  rePickSource,
 }
 
 enum RedactedIdKindView {
@@ -262,6 +270,7 @@ final class CardView {
     required this.bytes,
     required this.bytesResumed,
     required this.outcome,
+    required this.allowedActions,
   });
 
   final IdentityView identity;
@@ -275,6 +284,7 @@ final class CardView {
   final int bytes;
   final int bytesResumed;
   final OutcomeView? outcome;
+  final List<CommandKindView> allowedActions;
 }
 
 final class DutyProvenanceView {
@@ -941,6 +951,19 @@ CapabilityActionView _decodeCapabilityActionView(Object? value, String context) 
   };
 }
 
+CommandKindView _decodeCommandKindView(Object? value, String context) {
+  return switch (value) {
+    'pause' => CommandKindView.pause,
+    'cancel' => CommandKindView.cancel,
+    'resume' => CommandKindView.resume,
+    'remove' => CommandKindView.remove,
+    're_pick_source' => CommandKindView.rePickSource,
+    String() =>
+      throw ReadContractException(ReadErrorKind.unknownVariant, context),
+    _ => throw ReadContractException(ReadErrorKind.shape, context),
+  };
+}
+
 RedactedIdKindView _decodeRedactedIdKindView(Object? value, String context) {
   return switch (value) {
     'record' => RedactedIdKindView.record,
@@ -1097,7 +1120,7 @@ IdentityView _decodeIdentityView(Object? value, String context) {
 
 CardView _decodeCardView(Object? value, String context) {
   final map = _object(value, context);
-  _knownKeys(map, const {'identity', 'direction', 'offered_name', 'total', 'state', 'quiescence', 'generation', 'phase', 'bytes', 'bytes_resumed', 'outcome'}, context);
+  _knownKeys(map, const {'identity', 'direction', 'offered_name', 'total', 'state', 'quiescence', 'generation', 'phase', 'bytes', 'bytes_resumed', 'outcome', 'allowed_actions'}, context);
   return CardView(
     identity: _decodeIdentityView(_field(map, 'identity', 'CardView.identity'), 'CardView.identity'),
     direction: _decodeDirectionView(_field(map, 'direction', 'CardView.direction'), 'CardView.direction'),
@@ -1113,6 +1136,7 @@ CardView _decodeCardView(Object? value, String context) {
       null => null,
       final present => _decodeOutcomeView(present, 'CardView.outcome'),
     },
+    allowedActions: _list(_field(map, 'allowed_actions', 'CardView.allowed_actions'), 5, 'CardView.allowed_actions', _decodeCommandKindView),
   );
 }
 

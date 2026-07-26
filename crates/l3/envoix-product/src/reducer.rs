@@ -13,6 +13,18 @@ use crate::{
     SourceDecision, StorageAction, TransferRecord, WorkerKind,
 };
 
+/// Every command, in the order the authority publishes them: the constructive
+/// affordances first, the destructive ones last. `allowed_commands` filters
+/// this list, so a new [`ProductCommand`] variant must be added here or it
+/// would never be offered however its handler behaves.
+pub(crate) const ALL_COMMANDS: [ProductCommand; 5] = [
+    ProductCommand::Pause,
+    ProductCommand::Resume,
+    ProductCommand::RePickSource,
+    ProductCommand::Cancel,
+    ProductCommand::Remove,
+];
+
 impl TransferRecord {
     pub fn create(
         transfer: NewTransfer,
@@ -106,44 +118,36 @@ impl TransferRecord {
         }
     }
 
+    /// Which commands the authority will currently admit, DERIVED from the
+    /// handlers instead of declared beside them.
+    ///
+    /// F2a publishes this list and the frontend renders it verbatim (R0), so it
+    /// is a promise: an offered command must move the card, and a withheld one
+    /// must be inert. A second, declarative statement of the same policy cannot
+    /// be held to that promise, because it reads different facts — `on_pause`
+    /// also requires a live attempt worker, `on_resume` and `on_repick_source`
+    /// require quiescence, and `on_cancel` branches on the worker kind, none of
+    /// which a state-only declaration can see. So the offer is computed by
+    /// asking each handler, on a throwaway clone, whether it would do anything.
+    /// Drift between the offer and the answer is then unrepresentable rather
+    /// than merely tested for.
+    ///
+    /// Cost: one record clone and one reduction per command per projection.
     pub fn allowed_commands(&self) -> Vec<ProductCommand> {
-        if self.facts.remove_requested || matches!(self.quiescence, Quiescence::Retiring { .. }) {
-            return Vec::new();
+        ALL_COMMANDS
+            .into_iter()
+            .filter(|command| self.command_would_move(*command))
+            .collect()
+    }
+
+    /// Whether applying `command` would change the record or authorize an
+    /// effect. A command that cannot even mint its generation moves nothing.
+    fn command_would_move(&self, command: ProductCommand) -> bool {
+        let mut probe = self.clone();
+        match probe.reduce(ProductInput::Command(command)) {
+            Ok(effects) => probe != *self || !effects.is_empty(),
+            Err(_) => false,
         }
-        let mut commands = match self.state {
-            ProductState::Preparing => vec![ProductCommand::Cancel],
-            state if state.is_active() => {
-                vec![ProductCommand::Pause, ProductCommand::Cancel]
-            }
-            ProductState::Paused(_) | ProductState::Unconfirmed => {
-                vec![ProductCommand::Resume, ProductCommand::Cancel]
-            }
-            ProductState::Failed
-                if self
-                    .outcome
-                    .as_ref()
-                    .is_some_and(|outcome| outcome.retry == Retryability::Retryable) =>
-            {
-                vec![ProductCommand::Resume]
-            }
-            ProductState::Failed
-                if self.outcome.as_ref().and_then(|outcome| outcome.recovery)
-                    == Some(Recovery::RePickSource) =>
-            {
-                vec![ProductCommand::RePickSource]
-            }
-            ProductState::Cancelled => vec![ProductCommand::Resume],
-            ProductState::Completed | ProductState::Failed => Vec::new(),
-            ProductState::Waiting
-            | ProductState::Connecting
-            | ProductState::Verifying
-            | ProductState::Transferring
-            | ProductState::Confirming => {
-                unreachable!("active states are handled by the guard")
-            }
-        };
-        commands.push(ProductCommand::Remove);
-        commands
     }
 
     pub fn reduce(&mut self, input: ProductInput) -> Result<Vec<ProductEffect>, IdentityError> {

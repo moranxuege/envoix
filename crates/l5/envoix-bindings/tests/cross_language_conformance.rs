@@ -17,13 +17,14 @@ use envoix_bindings::command::{
 };
 use envoix_bindings::read::{
     AbiSchemaManifestView, BuildManifestView, CardUpdateKindView, CardUpdateView, CardView,
-    ClosedView, DegradedView, DiagnosticsStatusView, DirectionView, EvidenceProgressView,
-    EvidenceTimelineView, EvidenceValueView, IdentityView, LagView, LosslessKindView,
-    OutcomeCodeView, OutcomeView, PauseOriginView, PausedView, PhaseView, ProductStateView,
-    ProtocolManifestView, QuiescenceView, ReadBody, ReadError, ReadFrame, RecoveryView,
-    RedactedIdKindView, RedactedIdView, RetirementIntentView, RetiringView, RetryabilityView,
-    RunningView, SessionKeyView, SubscribeRejectedView, SubscribeRejectionView, TimelineEntryView,
-    TrustRootSha256View, TrustRootView, WorkerKindView, decode_read_frame, encode_read_frame,
+    ClosedView, CommandKindView, DegradedView, DiagnosticsStatusView, DirectionView,
+    EvidenceProgressView, EvidenceTimelineView, EvidenceValueView, IdentityView, LagView,
+    LosslessKindView, OutcomeCodeView, OutcomeView, PauseOriginView, PausedView, PhaseView,
+    ProductStateView, ProtocolManifestView, QuiescenceView, ReadBody, ReadError, ReadFrame,
+    RecoveryView, RedactedIdKindView, RedactedIdView, RetirementIntentView, RetiringView,
+    RetryabilityView, RunningView, SessionKeyView, SubscribeRejectedView, SubscribeRejectionView,
+    TimelineEntryView, TrustRootSha256View, TrustRootView, WorkerKindView, decode_read_frame,
+    encode_read_frame,
 };
 use envoix_bindings::{
     Decl, Direction, SchemaDoc, command_schema_text, emit, parse_schema, read_schema_text,
@@ -102,7 +103,7 @@ fields = [
 /// statement of intent have to agree.
 fn originable_decls(id: &str) -> &'static [&'static str] {
     match id {
-        "envoix/binding/command/1" => &["CommandView", "SubmitView"],
+        "envoix/binding/command/2" => &["CommandView", "SubmitView"],
         "envoix/binding/probe/1" => &["ProbeTone", "ProbeLeaf", "ProbeChoice", "ProbeScalars"],
         _ => &[],
     }
@@ -485,7 +486,6 @@ fn command_vectors() -> Vec<(String, CommandFrame)> {
         ("at_capacity", RejectionView::AtCapacity),
         ("runtime_stopped", RejectionView::RuntimeStopped),
         ("interrupted", RejectionView::Interrupted),
-        ("conflict", RejectionView::Conflict),
         ("internal", RejectionView::Internal),
     ];
     assert_eq!(
@@ -529,6 +529,14 @@ fn command_vectors() -> Vec<(String, CommandFrame)> {
         vectors.push((
             format!("acceptance_duplicate_{name}"),
             acceptance(AcceptanceView::Duplicate(disposition)),
+        ));
+    }
+    // A conflict names the command that owns the reused identity, so the whole
+    // command vocabulary has to cross as a conflict payload.
+    for (name, command) in commands {
+        vectors.push((
+            format!("acceptance_conflict_{name}"),
+            acceptance(AcceptanceView::Conflict(command)),
         ));
     }
     for (name, rejection) in rejections {
@@ -609,6 +617,14 @@ fn read_vectors() -> Vec<(String, ReadFrame)> {
             recovery: Some(RecoveryView::ReconnectPeer),
             display,
         }),
+        // The list at its cap, which is also every command the contract has.
+        allowed_actions: vec![
+            CommandKindView::Pause,
+            CommandKindView::Cancel,
+            CommandKindView::Resume,
+            CommandKindView::Remove,
+            CommandKindView::RePickSource,
+        ],
     };
     let narrowest = CardView {
         identity,
@@ -624,6 +640,9 @@ fn read_vectors() -> Vec<(String, ReadFrame)> {
         bytes: 0,
         bytes_resumed: 0,
         outcome: None,
+        // A card the authority will admit nothing for: the empty list, which is
+        // a legality fact and not an absence.
+        allowed_actions: Vec::new(),
     };
     let entry = |sequence, value| TimelineEntryView { sequence, value };
     let session = SessionKeyView {
@@ -719,7 +738,7 @@ fn read_vectors() -> Vec<(String, ReadFrame)> {
                     },
                     abi_schema: AbiSchemaManifestView {
                         read_binding_schema_id: "envoix/binding/read/2".to_owned(),
-                        command_binding_schema_id: "envoix/binding/command/1".to_owned(),
+                        command_binding_schema_id: "envoix/binding/command/2".to_owned(),
                         evidence_rust_abi_id: "envoix/evidence/abi/1".to_owned(),
                         evidence_timeline_schema_id: "envoix/evidence/timeline/1".to_owned(),
                         mailbox_receipt_schema_id: "envoix/mailbox/receipt/1".to_owned(),

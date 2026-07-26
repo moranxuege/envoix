@@ -1,16 +1,19 @@
 import 'dart:convert';
 
+import 'bindings/envoix_command.dart';
 import 'bindings/envoix_read.dart';
+import 'commands.dart';
 
 /// Why a frame the lane delivered changed nothing.
 enum FrameRejection {
   /// It belongs to an attachment this one superseded.
   staleEpoch,
 
-  /// The stream broke its own contract: no opening snapshot, or a second one.
+  /// The stream broke its own contract: no opening snapshot, a second one, or
+  /// a body only a frontend may originate arriving AT one.
   contractBreach,
 
-  /// The bytes are not a frame of the read contract this app speaks.
+  /// The bytes are not a frame of either contract this app speaks.
   undecodable,
 }
 
@@ -62,6 +65,12 @@ class Attachment {
   final Map<String, CardRow> _rows = <String, CardRow>{};
   final Map<String, SubscribeRejectionView> _refusals =
       <String, SubscribeRejectionView>{};
+
+  /// The commands this attachment issued and what the authority answered. It
+  /// belongs to the attachment because the answers do: `open_lane` discards the
+  /// frames the superseded attachment never drained, so an intent carried
+  /// across would wait for a completion that can no longer arrive.
+  final CommandJournal commands = CommandJournal();
   final Map<(String, int), EvidenceTimelineView> _timelines =
       <(String, int), EvidenceTimelineView>{};
   BuildManifestView? _build;
@@ -110,18 +119,52 @@ class Attachment {
 
   /// Decodes one frame off the lane and admits it. Returns whether the view
   /// changed.
+  ///
+  /// The lane carries both contracts, so this splits them — on the schema
+  /// envelope the codec itself reports, never on a guess about the bytes. Only
+  /// `unknownSchema` is worth a second decoder: any other read failure means
+  /// the frame claimed to be a read frame and was not one.
   bool ingest(List<int> bytes) {
-    final ReadFrame frame;
+    final String text;
     try {
-      frame = decodeReadFrame(utf8.decode(bytes));
+      text = utf8.decode(bytes);
     } on FormatException {
       return _reject(FrameRejection.undecodable);
-    } on ReadContractException {
-      // Includes a frame of the COMMAND contract, which shares this lane and
-      // belongs to F2's conversation, not to an observer.
+    }
+    try {
+      return admit(decodeReadFrame(text));
+    } on FormatException {
+      return _reject(FrameRejection.undecodable);
+    } on ReadContractException catch (error) {
+      if (error.kind != ReadErrorKind.unknownSchema) {
+        return _reject(FrameRejection.undecodable);
+      }
+    }
+    final CommandFrame command;
+    try {
+      command = decodeCommandFrame(text);
+    } on FormatException {
+      return _reject(FrameRejection.undecodable);
+    } on CommandContractException {
       return _reject(FrameRejection.undecodable);
     }
-    return admit(frame);
+    admitCommand(command);
+    // Whatever it was, something on screen changed: an intent's answer, the
+    // unaddressed count, or the out-of-contract count.
+    return true;
+  }
+
+  /// Admits one decoded command frame — an acceptance or a completion the
+  /// authority addressed to an intent this attachment issued. The caller is
+  /// told which, because a submitter and an observer act on it differently.
+  CommandAdmission admitCommand(CommandFrame frame) {
+    final CommandAdmission admission = commands.admit(frame);
+    if (admission == CommandAdmission.notAnAnswer) {
+      // A `submit` body has exactly one legitimate direction, and it is not
+      // this one.
+      _reject(FrameRejection.contractBreach);
+    }
+    return admission;
   }
 
   /// Admits one decoded frame. Split from [ingest] because decoding and

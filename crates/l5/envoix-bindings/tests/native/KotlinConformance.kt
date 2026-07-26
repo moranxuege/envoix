@@ -107,21 +107,24 @@ fun dispositions(): Map<String, DispositionView> = linkedMapOf(
     "cancelled" to DispositionView.Cancelled,
 )
 
+/// The command vocabulary by vector name: submitted, and named back by a
+/// conflict.
+val commandViews = linkedMapOf(
+    "pause" to CommandView.PAUSE,
+    "cancel" to CommandView.CANCEL,
+    "resume" to CommandView.RESUME,
+    "remove" to CommandView.REMOVE,
+    "re_pick_source" to CommandView.RE_PICK_SOURCE,
+)
+
 /// Every body a frontend may originate, by vector name.
 fun handBuiltSubmits(): Map<String, SubmitView> {
     val card = "00000000000000ab"
     val id = "000102030405060708090a0b0c0d0e0f"
     val bodies = linkedMapOf<String, SubmitView>()
 
-    val commands = linkedMapOf(
-        "pause" to CommandView.PAUSE,
-        "cancel" to CommandView.CANCEL,
-        "resume" to CommandView.RESUME,
-        "remove" to CommandView.REMOVE,
-        "re_pick_source" to CommandView.RE_PICK_SOURCE,
-    )
-    expectEq("every CommandView variant is swept", commands.size, CommandView.entries.size)
-    commands.forEach { (name, command) -> bodies["submit_$name"] = submit(card, 7, id, command) }
+    expectEq("every CommandView variant is swept", commandViews.size, CommandView.entries.size)
+    commandViews.forEach { (name, command) -> bodies["submit_$name"] = submit(card, 7, id, command) }
 
     val epochs = linkedMapOf(
         "zero" to 0L,
@@ -151,12 +154,14 @@ fun handBuiltCommands(): Map<String, CommandFrame> {
         "at_capacity" to RejectionView.AT_CAPACITY,
         "runtime_stopped" to RejectionView.RUNTIME_STOPPED,
         "interrupted" to RejectionView.INTERRUPTED,
-        "conflict" to RejectionView.CONFLICT,
         "internal" to RejectionView.INTERNAL,
     )
     expectEq("every RejectionView variant is swept", rejections.size, RejectionView.entries.size)
     rejections.forEach { (name, rejection) ->
         frames["acceptance_rejected_$name"] = acceptance(AcceptanceView.Rejected(rejection))
+    }
+    commandViews.forEach { (name, command) ->
+        frames["acceptance_conflict_$name"] = acceptance(AcceptanceView.Conflict(command))
     }
     dispositions().forEach { (name, disposition) ->
         frames["acceptance_duplicate_$name"] = acceptance(AcceptanceView.Duplicate(disposition))

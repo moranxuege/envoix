@@ -8,7 +8,7 @@
 
 import Foundation
 
-public let readSchemaId = "envoix/binding/read/2"
+public let readSchemaId = "envoix/binding/read/3"
 public let readMaxFrameBytes = 1048576
 private let u63Max: Int64 = 9_223_372_036_854_775_807
 
@@ -104,6 +104,14 @@ public enum CapabilityActionView: String, Equatable {
     case postReceipt = "post_receipt"
 }
 
+public enum CommandKindView: String, Equatable {
+    case pause = "pause"
+    case cancel = "cancel"
+    case resume = "resume"
+    case remove = "remove"
+    case rePickSource = "re_pick_source"
+}
+
 public enum RedactedIdKindView: String, Equatable {
     case record = "record"
     case transfer = "transfer"
@@ -181,6 +189,7 @@ public struct CardView: Equatable {
     public let bytes: Int64
     public let bytesResumed: Int64
     public let outcome: OutcomeView?
+    public let allowedActions: [CommandKindView]
 }
 
 public struct DutyProvenanceView: Equatable {
@@ -606,6 +615,16 @@ public enum EnvoixReadCodec {
         return decoded
     }
 
+    private static func decodeCommandKindView(_ value: Any?, _ context: String) throws -> CommandKindView {
+        guard let text = value as? String else {
+            throw ReadContractError(kind: .shape, context: context)
+        }
+        guard let decoded = CommandKindView(rawValue: text) else {
+            throw ReadContractError(kind: .unknownVariant, context: context)
+        }
+        return decoded
+    }
+
     private static func decodeRedactedIdKindView(_ value: Any?, _ context: String) throws -> RedactedIdKindView {
         guard let text = value as? String else {
             throw ReadContractError(kind: .shape, context: context)
@@ -765,7 +784,7 @@ public enum EnvoixReadCodec {
 
     private static func decodeCardView(_ value: Any?, _ context: String) throws -> CardView {
         let map = try object(value, context)
-        try knownKeys(map, ["identity", "direction", "offered_name", "total", "state", "quiescence", "generation", "phase", "bytes", "bytes_resumed", "outcome"], context)
+        try knownKeys(map, ["identity", "direction", "offered_name", "total", "state", "quiescence", "generation", "phase", "bytes", "bytes_resumed", "outcome", "allowed_actions"], context)
         let identity = try decodeIdentityView(try field(map, "identity", "CardView.identity"), "CardView.identity")
         let direction = try decodeDirectionView(try field(map, "direction", "CardView.direction"), "CardView.direction")
         let offeredName = try utf8Bounded(try field(map, "offered_name", "CardView.offered_name"), 255, "CardView.offered_name")
@@ -782,6 +801,7 @@ public enum EnvoixReadCodec {
         } else {
             outcome = nil
         }
+        let allowedActions = try decodeList(try field(map, "allowed_actions", "CardView.allowed_actions"), 5, "CardView.allowed_actions", decodeCommandKindView)
         return CardView(
             identity: identity,
             direction: direction,
@@ -793,7 +813,8 @@ public enum EnvoixReadCodec {
             phase: phase,
             bytes: bytes,
             bytesResumed: bytesResumed,
-            outcome: outcome
+            outcome: outcome,
+            allowedActions: allowedActions
         )
     }
 

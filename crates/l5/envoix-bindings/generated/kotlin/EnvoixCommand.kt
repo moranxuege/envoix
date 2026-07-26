@@ -21,7 +21,7 @@ import org.json.JSONException
 import org.json.JSONObject
 import org.json.JSONTokener
 
-const val COMMAND_SCHEMA_ID: String = "envoix/binding/command/1"
+const val COMMAND_SCHEMA_ID: String = "envoix/binding/command/2"
 const val COMMAND_MAX_FRAME_BYTES: Int = 1048576
 
 // Contract rules frozen by schema/command.schema.
@@ -90,13 +90,13 @@ enum class RejectionView {
     AT_CAPACITY,
     RUNTIME_STOPPED,
     INTERRUPTED,
-    CONFLICT,
     INTERNAL,
 }
 
 sealed interface AcceptanceView {
     object Accepted : AcceptanceView
     data class Duplicate(val value: DispositionView) : AcceptanceView
+    data class Conflict(val value: CommandView) : AcceptanceView
     data class Rejected(val value: RejectionView) : AcceptanceView
 }
 
@@ -355,7 +355,6 @@ object EnvoixCommandCodec {
         "at_capacity" -> RejectionView.AT_CAPACITY
         "runtime_stopped" -> RejectionView.RUNTIME_STOPPED
         "interrupted" -> RejectionView.INTERRUPTED
-        "conflict" -> RejectionView.CONFLICT
         "internal" -> RejectionView.INTERNAL
         is String -> throw CommandContractException(CommandErrorKind.UNKNOWN_VARIANT, context)
         else -> throw CommandContractException(CommandErrorKind.SHAPE, context)
@@ -373,6 +372,9 @@ object EnvoixCommandCodec {
             }
             "duplicate" -> AcceptanceView.Duplicate(
                 decodeDispositionView(payload(map, "AcceptanceView.duplicate"), "AcceptanceView.duplicate"),
+            )
+            "conflict" -> AcceptanceView.Conflict(
+                decodeCommandView(payload(map, "AcceptanceView.conflict"), "AcceptanceView.conflict"),
             )
             "rejected" -> AcceptanceView.Rejected(
                 decodeRejectionView(payload(map, "AcceptanceView.rejected"), "AcceptanceView.rejected"),

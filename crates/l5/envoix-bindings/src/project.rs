@@ -14,15 +14,16 @@ use envoix_evidence::{
 use envoix_outcomes::{Outcome, OutcomeCode, Phase, Recovery, Retryability};
 use envoix_runtime::{
     CapabilityAction, CardUpdateKind, Duty, DutyKind, LosslessUpdateKind, PauseOrigin,
-    ProductState, Quiescence, RetirementIntent, SubscribeError, TransferRecord, WorkerKind,
+    ProductCommand, ProductState, Quiescence, RetirementIntent, SubscribeError, TransferRecord,
+    WorkerKind,
 };
 use envoix_types::{Direction, RecordId};
 
 use crate::command::COMMAND_SCHEMA_ID;
 use crate::read::{
     AbiSchemaManifestView, BuildManifestView, CapabilityActionView, CardUpdateKindView,
-    CardUpdateView, CardView, ClosedView, DegradedView, DiagnosticsStatusView, DirectionView,
-    DutyFrameView, DutyKindView, DutyProvenanceView, DutyView, EvidenceProgressView,
+    CardUpdateView, CardView, ClosedView, CommandKindView, DegradedView, DiagnosticsStatusView,
+    DirectionView, DutyFrameView, DutyKindView, DutyProvenanceView, DutyView, EvidenceProgressView,
     EvidenceTimelineView, EvidenceValueView, IdentityView, LagView, LosslessKindView, OutcomeView,
     PausedView, PhaseView, ProductStateView, ProtocolManifestView, QuiescenceView, READ_SCHEMA_ID,
     ReadBody, ReadFrame, RecoveryView, RedactedIdKindView, RedactedIdView, RetirementIntentView,
@@ -189,6 +190,24 @@ fn card_view(record: &TransferRecord) -> CardView {
         bytes: u63(record.bytes.get()),
         bytes_resumed: u63(record.bytes_resumed.get()),
         outcome: record.outcome.as_ref().map(outcome_view),
+        // Legality is the reducer's, not the observer's: this publishes
+        // `allowed_commands` verbatim so a frontend renders the authority's
+        // answer instead of re-deriving one from the state beside it (R0).
+        allowed_actions: record
+            .allowed_commands()
+            .into_iter()
+            .map(command_kind_view)
+            .collect(),
+    }
+}
+
+const fn command_kind_view(command: ProductCommand) -> CommandKindView {
+    match command {
+        ProductCommand::Pause => CommandKindView::Pause,
+        ProductCommand::Cancel => CommandKindView::Cancel,
+        ProductCommand::Resume => CommandKindView::Resume,
+        ProductCommand::Remove => CommandKindView::Remove,
+        ProductCommand::RePickSource => CommandKindView::RePickSource,
     }
 }
 

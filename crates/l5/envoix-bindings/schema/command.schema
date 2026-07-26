@@ -13,7 +13,7 @@
 # bytes/blob type and no handle/path/URI type, so a command can never carry
 # file bytes or an OS handle.
 
-id = "envoix/binding/command/1"
+id = "envoix/binding/command/2"
 root = "CommandFrame"
 # Frontends originate frames on this contract, so every native artifact carries
 # an encoder that enforces the same bounds its decoder checks. Which frames is
@@ -88,7 +88,6 @@ variants = [
   "at_capacity",
   "runtime_stopped",
   "interrupted",
-  "conflict",
   "internal",
 ]
 
@@ -98,6 +97,12 @@ name = "AcceptanceView"
 variants = [
   { name = "accepted" },
   { name = "duplicate", payload = "DispositionView" },
+  # The authority knows WHICH command owns a reused identity, so the contract
+  # carries it: a conflict means something has gone wrong and naming the
+  # applied command is the whole diagnostic value. It sits beside `duplicate`
+  # because both are ledger answers about the identity; `rejected` is the
+  # intake-refusal family.
+  { name = "conflict", payload = "CommandView" },
   { name = "rejected", payload = "RejectionView" },
 ]
 

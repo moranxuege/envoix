@@ -374,6 +374,16 @@ owner_path = "crates/l6/envoix-platform-android/src/identifiers.rs"
 collision_scope = "android-platform-channel"
 extract = "rust-function:frontend_lane_channel"
 
+# The channel a frontend submits commands on. Same namespace, same uniqueness
+# requirement; a separate slot because an EventChannel and a MethodChannel
+# cannot share a name.
+[[identifier]]
+key = "android.frontend_command_channel"
+owner = "crate:envoix-platform-android"
+owner_path = "crates/l6/envoix-platform-android/src/identifiers.rs"
+collision_scope = "android-platform-channel"
+extract = "rust-function:frontend_command_channel"
+
 [[identifier]]
 key = "android.file_provider_authority"
 owner = "manifest:flutter-android"

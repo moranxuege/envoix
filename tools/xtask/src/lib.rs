@@ -562,7 +562,11 @@ fn extract_compiled_owner(root: &Path, entry: &CatalogIdentifier) -> CheckResult
             }
             values
         }
-        ("crate:envoix-platform-android", "rust-function:frontend_lane_channel") => {
+        (
+            "crate:envoix-platform-android",
+            extract @ ("rust-function:frontend_lane_channel"
+            | "rust-function:frontend_command_channel"),
+        ) => {
             let gradle = root.join("apps/envoix-flutter/android/app/build.gradle.kts");
             if !gradle.exists() {
                 return Ok(Extraction::Pending(
@@ -573,11 +577,14 @@ fn extract_compiled_owner(root: &Path, entry: &CatalogIdentifier) -> CheckResult
             else {
                 return Err("gradle namespace unexpectedly pending".into());
             };
+            let derive = if extract == "rust-function:frontend_lane_channel" {
+                envoix_platform_android::identifiers::frontend_lane_channel
+            } else {
+                envoix_platform_android::identifiers::frontend_command_channel
+            };
             namespaces
                 .iter()
-                .map(|namespace| {
-                    envoix_platform_android::identifiers::frontend_lane_channel(namespace)
-                })
+                .map(|namespace| derive(namespace))
                 .collect()
         }
         ("crate:envoix-platform-android", "rust-const:PRIVATE_STORAGE_ROOT") => {

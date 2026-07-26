@@ -341,9 +341,28 @@ fn frontend_lane_channel_is_one_name() {
             .to_owned()
     }
 
-    let expected = crate::identifiers::frontend_lane_channel(&literal(GRADLE, "namespace = ", '"'));
+    let namespace = literal(GRADLE, "namespace = ", '"');
+    let expected = crate::identifiers::frontend_lane_channel(&namespace);
     assert_eq!(literal(KOTLIN, "const val CHANNEL = ", '"'), expected);
     assert_eq!(literal(DART, "const String laneChannel = ", '\''), expected);
+
+    // The command direction is a second slot in the same namespace, and a typo
+    // in either literal is a tap that silently never reaches the host.
+    let commands = crate::identifiers::frontend_command_channel(&namespace);
+    assert_ne!(commands, expected, "two directions, two slots");
+    assert_eq!(
+        literal(KOTLIN, "const val COMMAND_CHANNEL = ", '"'),
+        commands
+    );
+    assert_eq!(
+        literal(DART, "const String commandChannel = ", '\''),
+        commands
+    );
+    // And one method name, spelled the same on both sides.
+    assert_eq!(
+        literal(KOTLIN, "const val SUBMIT = ", '"'),
+        literal(DART, "const String submitMethod = ", '\'')
+    );
 }
 
 /// The frontend Kotlin sources: the shim between the Dart lane and the JNI
@@ -447,9 +466,14 @@ fn the_frontend_kotlin_speaks_only_the_observer_vocabulary() {
         "../../../../apps/envoix-flutter/android/app/src/main/kotlin/app/envoix/host/",
         "NativeHost.kt"
     ));
-    /// Open an attachment, drain its frames. Everything else on the lane is a
-    /// lifetime verb or a mutation, and an observer has neither.
-    const PERMITTED_VERBS: [&str; 2] = ["attach", "pollFrame"];
+    /// Open an attachment, drain its frames, and submit ONE frontend-originated
+    /// command frame. Everything else on the lane is a lifetime verb — `boot`
+    /// and `shutdown` decide whether transfers exist at all, `pollWork` and
+    /// `reportDuty` are the service's own duty loop — and a frontend has none
+    /// of those. `submit` is a mutation the AUTHORITY resolves: the frontend
+    /// hands over bytes and is told what happened, which is the opposite of
+    /// deciding.
+    const PERMITTED_VERBS: [&str; 3] = ["attach", "pollFrame", "submit"];
     /// The token constant the lane compares against; not a verb.
     const PERMITTED_CONSTANTS: [&str; 1] = ["NO_ATTACHMENT"];
     /// A cold launch has to start something and this is the only entry point a
@@ -467,7 +491,7 @@ fn the_frontend_kotlin_speaks_only_the_observer_vocabulary() {
         })
         .collect();
     // Vacuity: the set this test denies from has to be the real lane.
-    for verb in ["boot", "shutdown", "submit", "reportDuty", "pollWork"] {
+    for verb in ["boot", "shutdown", "reportDuty", "pollWork"] {
         assert!(
             declared.contains(verb),
             "{verb} is no longer a NativeHost verb; this test denies from the wrong set"

@@ -18,6 +18,8 @@ use envoix_platform_android::{DutyAdapter, IssueDecision, WorkOrder, WorkReport,
 use envoix_product::{
     ApplyOutcome, CommittedSession, IdentityError, NewTransfer, SystemIdentitySource,
 };
+#[cfg(feature = "e2e-instrumentation")]
+use envoix_product::{ProductState, RecordDecode, decode_record};
 use envoix_runtime::{
     CardSubscription, CardUpdateKind, CommandRejected, CommandVerdict, Runtime, RuntimeConfig,
     SubscribeError, TransferRecord, TryRecvError,
@@ -465,6 +467,37 @@ impl Host {
     /// reads it to prove a card came back from durable storage.
     pub fn live_cards(&self) -> Vec<RecordId> {
         self.shared.lock().subscriptions.keys().copied().collect()
+    }
+
+    /// Debug/e2e only: the card's LATEST COMMITTED state, read back out of the
+    /// operation store rather than out of the runtime. Instrumentation that
+    /// asserts against a projection cannot tell a durable write from a change
+    /// that only ever existed in memory; this can.
+    #[cfg(feature = "e2e-instrumentation")]
+    pub fn durable_state_for_e2e(&self, card: RecordId) -> &'static str {
+        let Some(operation) = self.stores.open(card) else {
+            return "absent";
+        };
+        let operation = operation.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(encoded) = operation.latest_record() else {
+            return "absent";
+        };
+        let Ok(RecordDecode::Loaded(record)) = decode_record(encoded) else {
+            return "unreadable";
+        };
+        match record.state {
+            ProductState::Preparing => "preparing",
+            ProductState::Waiting => "waiting",
+            ProductState::Connecting => "connecting",
+            ProductState::Verifying => "verifying",
+            ProductState::Transferring => "transferring",
+            ProductState::Confirming => "confirming",
+            ProductState::Paused(_) => "paused",
+            ProductState::Unconfirmed => "unconfirmed",
+            ProductState::Completed => "completed",
+            ProductState::Failed => "failed",
+            ProductState::Cancelled => "cancelled",
+        }
     }
 
     /// Stops the runtime; durable truth is on disk, the process may die.

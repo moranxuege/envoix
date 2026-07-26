@@ -400,8 +400,8 @@ impl<P: SessionProvider, E: AttemptExecutor> Runtime<P, E> {
                 Some(LedgerHit::Duplicate { state }) => {
                     return Ok(CommandVerdict::Duplicate { state });
                 }
-                Some(LedgerHit::Conflict { .. }) => {
-                    return Err(CommandRejected::Conflict);
+                Some(LedgerHit::Conflict { applied }) => {
+                    return Ok(CommandVerdict::Conflict { applied });
                 }
                 None => {}
             }
@@ -437,6 +437,9 @@ impl<P: SessionProvider, E: AttemptExecutor> Runtime<P, E> {
                     Ok(Err(rejected)) => return Err(rejected),
                     Ok(Ok(FrontendVerdict::Duplicate { state })) => {
                         return Ok(CommandVerdict::Duplicate { state });
+                    }
+                    Ok(Ok(FrontendVerdict::Conflict { applied })) => {
+                        return Ok(CommandVerdict::Conflict { applied });
                     }
                     Ok(Ok(FrontendVerdict::Accepted)) => {
                         return Ok(CommandVerdict::Accepted(CommandTicket {

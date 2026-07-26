@@ -16,9 +16,13 @@ import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:envoix/attachment.dart';
+import 'package:envoix/bindings/envoix_command.dart';
 import 'package:envoix/bindings/envoix_read.dart';
+import 'package:envoix/commands.dart';
 import 'package:envoix/home.dart';
 import 'package:envoix/instrumentation.dart';
+import 'package:envoix/labels.dart';
+import 'package:envoix/lane.dart';
 import 'package:envoix/logs.dart';
 import 'package:envoix/main.dart';
 import 'package:flutter/material.dart';
@@ -41,8 +45,14 @@ CardView cardView({
     RunningView(worker: WorkerKindView.attempt),
   ),
   OutcomeView? outcome,
+  List<CommandKindView> allowedActions = const <CommandKindView>[
+    CommandKindView.pause,
+    CommandKindView.cancel,
+    CommandKindView.remove,
+  ],
 }) =>
     CardView(
+      allowedActions: allowedActions,
       identity: IdentityView(
         card: card,
         transfer: 'ab' * 16,
@@ -103,18 +113,164 @@ EvidenceTimelineView timelineOf({
       entries: entries,
     );
 
-Future<void> pumpTile(WidgetTester tester, CardRow row) => tester.pumpWidget(
-      MaterialApp(
-        theme: envoixTheme(Brightness.light),
-        home: Scaffold(body: CardTile(row: row)),
+/// A commander whose host refuses everything. Enough to draw the affordances a
+/// card publishes; the tests that care what the authority said drive the sink.
+Commander commanderOf(
+  Attachment attachment, {
+  CommandSink sink = _noHost,
+}) =>
+    Commander(attachment: attachment, sink: sink, announce: () {});
+
+Future<List<int>?> _noHost(List<int> frame) async => null;
+
+/// A sink that records what it was handed and answers with the frame given.
+class RecordingSink {
+  RecordingSink(this.reply);
+
+  /// The acceptance the fake authority answers with, built from the generated
+  /// view types — no JSON is written in this file.
+  CommandFrame? Function(SubmitView submit) reply;
+  final List<SubmitView> submitted = <SubmitView>[];
+
+  Future<List<int>?> call(List<int> frame) async {
+    final CommandFrame decoded = decodeCommandFrame(utf8.decode(frame));
+    final CommandBodySubmit body = decoded.body as CommandBodySubmit;
+    submitted.add(body.value);
+    final CommandFrame? answer = reply(body.value);
+    return answer == null ? null : utf8.encode(_encoded(answer));
+  }
+}
+
+/// The one place this suite writes contract text, and it has to.
+///
+/// A frontend cannot encode an acceptance or a completion: BN3b emits no such
+/// encoder in any native artifact, which is the guarantee F2a must not weaken.
+/// A test that needs one must therefore spell it — and the generated DECODER is
+/// what judges the spelling, because every byte written here goes back through
+/// `decodeCommandFrame` before anything asserts about it
+/// (`the fake authority's frames are the contract's`). Real host-produced
+/// acceptance and completion bytes are replayed against this same app model by
+/// `flutter_mutating_hot_restart_preserves_cards` under `cargo test`.
+String _encoded(CommandFrame frame) {
+  final CommandBody body = frame.body;
+  final String kind = switch (body) {
+    CommandBodySubmit() => 'submit',
+    CommandBodyAcceptance() => 'acceptance',
+    CommandBodyCompletion() => 'completion',
+  };
+  return '{"body":{"kind":"$kind","value":${_body(body)}},'
+      '"schema":"$commandSchemaId"}';
+}
+
+String _body(CommandBody body) => switch (body) {
+      CommandBodySubmit(:final SubmitView value) =>
+        '{"card":"${value.card}","command":"${_command(value.command)}",'
+            '"command_id":"${value.commandId}","epoch":${value.epoch}}',
+      CommandBodyAcceptance(:final CommandAcceptanceView value) =>
+        '{"acceptance":${_acceptance(value.acceptance)},'
+            '"command_id":"${value.commandId}"}',
+      CommandBodyCompletion(:final CommandCompletionView value) =>
+        '{"command_id":"${value.commandId}",'
+            '"completion":${_completion(value.completion)}}',
+    };
+
+String _command(CommandView command) => switch (command) {
+      CommandView.pause => 'pause',
+      CommandView.cancel => 'cancel',
+      CommandView.resume => 'resume',
+      CommandView.remove => 'remove',
+      CommandView.rePickSource => 're_pick_source',
+    };
+
+String _acceptance(AcceptanceView acceptance) => switch (acceptance) {
+      AcceptanceViewAccepted() => '{"kind":"accepted"}',
+      AcceptanceViewDuplicate(:final DispositionView value) =>
+        '{"kind":"duplicate","value":${_disposition(value)}}',
+      AcceptanceViewConflict(:final CommandView value) =>
+        '{"kind":"conflict","value":"${_command(value)}"}',
+      AcceptanceViewRejected(:final RejectionView value) =>
+        '{"kind":"rejected","value":"${_rejection(value)}"}',
+    };
+
+String _completion(CompletionView completion) => switch (completion) {
+      CompletionViewCommitted(:final DispositionView value) =>
+        '{"kind":"committed","value":${_disposition(value)}}',
+      CompletionViewCommitFailed(:final DispositionView value) =>
+        '{"kind":"commit_failed","value":${_disposition(value)}}',
+      CompletionViewInterrupted() => '{"kind":"interrupted"}',
+      CompletionViewInternal() => '{"kind":"internal"}',
+    };
+
+String _disposition(DispositionView state) => switch (state) {
+      DispositionViewPreparing() => '{"kind":"preparing"}',
+      DispositionViewWaiting() => '{"kind":"waiting"}',
+      DispositionViewConnecting() => '{"kind":"connecting"}',
+      DispositionViewVerifying() => '{"kind":"verifying"}',
+      DispositionViewTransferring() => '{"kind":"transferring"}',
+      DispositionViewConfirming() => '{"kind":"confirming"}',
+      DispositionViewPaused(:final PausedStateView value) =>
+        '{"kind":"paused","value":{"origin":"${value.origin.name}"}}',
+      DispositionViewUnconfirmed() => '{"kind":"unconfirmed"}',
+      DispositionViewCompleted() => '{"kind":"completed"}',
+      DispositionViewFailed() => '{"kind":"failed"}',
+      DispositionViewCancelled() => '{"kind":"cancelled"}',
+    };
+
+String _rejection(RejectionView reason) => switch (reason) {
+      RejectionView.unknownCard => 'unknown_card',
+      RejectionView.staleEpoch => 'stale_epoch',
+      RejectionView.superseded => 'superseded',
+      RejectionView.atCapacity => 'at_capacity',
+      RejectionView.runtimeStopped => 'runtime_stopped',
+      RejectionView.interrupted => 'interrupted',
+      RejectionView.internal => 'internal',
+    };
+
+CommandFrame acceptanceOf(String id, AcceptanceView acceptance) => CommandFrame(
+      body: CommandBodyAcceptance(
+        CommandAcceptanceView(commandId: id, acceptance: acceptance),
       ),
     );
 
-Future<void> pumpHome(WidgetTester tester, Attachment attachment) =>
+CommandFrame completionOf(String id, CompletionView completion) => CommandFrame(
+      body: CommandBodyCompletion(
+        CommandCompletionView(commandId: id, completion: completion),
+      ),
+    );
+
+Future<void> pumpTile(
+  WidgetTester tester,
+  CardRow row, {
+  Commander? commander,
+  List<CommandIntent> intents = const <CommandIntent>[],
+}) =>
     tester.pumpWidget(
       MaterialApp(
         theme: envoixTheme(Brightness.light),
-        home: Scaffold(body: HomeScreen(attachment: attachment)),
+        home: Scaffold(
+          body: CardTile(
+            row: row,
+            commander: commander ?? commanderOf(Attachment()),
+            intents: intents,
+          ),
+        ),
+      ),
+    );
+
+Future<void> pumpHome(
+  WidgetTester tester,
+  Attachment attachment, {
+  Commander? commander,
+}) =>
+    tester.pumpWidget(
+      MaterialApp(
+        theme: envoixTheme(Brightness.light),
+        home: Scaffold(
+          body: HomeScreen(
+            attachment: attachment,
+            commander: commander ?? commanderOf(attachment),
+          ),
+        ),
       ),
     );
 
@@ -361,8 +517,16 @@ void main() {
       expect(find.textContaining('epoch 7'), findsOneWidget);
       // The screen says what it drew, and the last frame is what it drew.
       expect(
-        rendered.single,
-        'envoix-f1b rendered card=$card epoch=7 status=live',
+        rendered,
+        contains('envoix-f1b rendered card=$card epoch=7 status=live'),
+      );
+      // …including the offer the authority publishes for it, which is the
+      // on-device proof that legality is the host's answer and not a rule here.
+      expect(
+        rendered,
+        contains(
+          'envoix-f2a card=$card actions=pause,cancel,remove state=Completed',
+        ),
       );
       expect(
         tester.getSemantics(find.bySemanticsLabel('Transfer progress')).value,
@@ -1086,7 +1250,695 @@ void main() {
       }
     });
   });
+
+  group('commands', () {
+    test('the fake authority\'s frames are the contract\'s', () {
+      // Anti-vacuity for every other test in this group: the text this file
+      // writes is judged by the generated decoder, arm by arm, so a frame this
+      // suite invents cannot be one the app would never really be sent.
+      final List<CommandFrame> frames = <CommandFrame>[
+        acceptanceOf(id, const AcceptanceViewAccepted()),
+        for (final DispositionView state in dispositions)
+          acceptanceOf(id, AcceptanceViewDuplicate(state)),
+        for (final CommandView command in CommandView.values)
+          acceptanceOf(id, AcceptanceViewConflict(command)),
+        for (final RejectionView reason in RejectionView.values)
+          acceptanceOf(id, AcceptanceViewRejected(reason)),
+        for (final DispositionView state in dispositions)
+          completionOf(id, CompletionViewCommitted(state)),
+        for (final DispositionView state in dispositions)
+          completionOf(id, CompletionViewCommitFailed(state)),
+        completionOf(id, const CompletionViewInterrupted()),
+        completionOf(id, const CompletionViewInternal()),
+        CommandFrame(
+          body: CommandBodySubmit(
+            SubmitView(
+              card: card,
+              epoch: 7,
+              commandId: id,
+              command: CommandView.pause,
+            ),
+          ),
+        ),
+      ];
+      expect(frames.length, 55);
+      for (final CommandFrame frame in frames) {
+        final CommandFrame decoded = decodeCommandFrame(_encoded(frame));
+        // Re-spelling what the decoder produced must give the same text: the
+        // writer and the contract agree on every field, not just on parsing.
+        expect(_encoded(decoded), _encoded(frame));
+      }
+    });
+
+    test('every command variant round-trips from tap to host', () async {
+      for (final CommandKindView kind in CommandKindView.values) {
+        final Attachment attachment = attachedAt(11);
+        final RecordingSink sink =
+            RecordingSink((SubmitView submit) => null);
+        final Commander commander =
+            commanderOf(attachment, sink: sink.call);
+        await commander.issue(attachment.cards.single, commandOf(kind));
+
+        // The frame the host would receive, read back with the generated
+        // decoder — the encoder is the generated one, so this is the whole
+        // path from a tap to bytes a host decodes.
+        expect(sink.submitted.single.command, commandOf(kind));
+        expect(sink.submitted.single.card, card);
+        expect(sink.submitted.single.epoch, 11);
+        expect(sink.submitted.single.commandId, hasLength(32));
+        expect(sink.submitted.single.commandId, matches(RegExp(r'^[0-9a-f]+$')));
+      }
+    });
+
+    test('one identity per intent, and it is never reused', () async {
+      final Attachment attachment = attachedAt(11);
+      final RecordingSink sink = RecordingSink((SubmitView submit) => null);
+      final Commander commander = commanderOf(attachment, sink: sink.call);
+      final CardRow row = attachment.cards.single;
+      await commander.issue(row, CommandView.pause);
+      await commander.issue(row, CommandView.pause);
+      expect(
+        sink.submitted[0].commandId,
+        isNot(sink.submitted[1].commandId),
+        reason: 'a second intent is a second command',
+      );
+
+      // Asking again about ONE intent re-presents its identity: that is the
+      // whole disambiguation, and a fresh id would ask a different question.
+      final CommandIntent intent =
+          attachment.commands.forCard(card).last;
+      await commander.reissue(row, intent);
+      expect(sink.submitted[2].commandId, intent.id);
+      expect(intent.attempts, 2);
+    });
+
+    test('acceptance is never shown as a committed effect', () async {
+      final Attachment attachment = attachedAt(11);
+      final RecordingSink sink = RecordingSink(
+        (SubmitView submit) =>
+            acceptanceOf(submit.commandId, const AcceptanceViewAccepted()),
+      );
+      final Commander commander = commanderOf(attachment, sink: sink.call);
+      await commander.issue(attachment.cards.single, CommandView.pause);
+
+      final CommandIntent intent = attachment.commands.forCard(card).single;
+      expect(intent.phase, CommandPhase.accepted);
+      expect(intentLabel(intent), 'Pause — Accepted — not committed yet');
+
+      // The committed completion arrives separately, on the frame lane.
+      attachment.admitCommand(
+        completionOf(
+          intent.id,
+          const CompletionViewCommitted(
+            DispositionViewPaused(PausedStateView(origin: PauseCauseView.local)),
+          ),
+        ),
+      );
+      expect(intent.phase, CommandPhase.settled);
+      expect(
+        intentLabel(intent),
+        'Pause — Committed — the card is paused by you',
+      );
+    });
+
+    test('every acceptance verdict and completion outcome is rendered', () {
+      final Map<AcceptanceView, String> verdicts = <AcceptanceView, String>{
+        const AcceptanceViewAccepted(): 'Accepted — not committed yet',
+        const AcceptanceViewDuplicate(DispositionViewCancelled()):
+            'Already applied — the card was cancelled',
+        // A conflict names the command that owns the identity: the diagnostic
+        // detail IS the value of the arm.
+        const AcceptanceViewConflict(CommandView.pause):
+            'Refused — that request id already belongs to Pause',
+        const AcceptanceViewConflict(CommandView.rePickSource):
+            'Refused — that request id already belongs to Pick the source '
+                'again',
+        const AcceptanceViewRejected(RejectionView.staleEpoch):
+            'Refused — a newer view of this app is in charge — re-attach and '
+                'try again',
+        const AcceptanceViewRejected(RejectionView.superseded):
+            'Refused — a newer view of this app took over while it was queued',
+        const AcceptanceViewRejected(RejectionView.unknownCard):
+            'Refused — the host holds no such card',
+        const AcceptanceViewRejected(RejectionView.atCapacity):
+            'Refused — the host has no room to run this card',
+        const AcceptanceViewRejected(RejectionView.runtimeStopped):
+            'Refused — the transfer runtime has stopped',
+        // Not "Refused": the authority does not know whether it applied, and
+        // the words are the completion arm's because it is the same question.
+        const AcceptanceViewRejected(RejectionView.interrupted):
+            'Unknown — the host died before it could say. Ask again with the '
+                'same request to find out.',
+        const AcceptanceViewRejected(RejectionView.internal):
+            'Refused — an internal fault',
+      };
+      for (final MapEntry<AcceptanceView, String> verdict in verdicts.entries) {
+        expect(acceptanceLabel(verdict.key), verdict.value);
+      }
+      // Every rejection reason the contract has, so a new one cannot arrive
+      // unworded.
+      expect(verdicts.length, 4 + RejectionView.values.length);
+
+      final Map<CompletionView, String> outcomes = <CompletionView, String>{
+        const CompletionViewCommitted(DispositionViewCompleted()):
+            'Committed — the card is completed',
+        const CompletionViewCommitFailed(DispositionViewTransferring()):
+            'Not durable — it was rolled back and the card stays transferring',
+        const CompletionViewInterrupted():
+            'Unknown — the host died before it could say. Ask again with the '
+                'same request to find out.',
+        const CompletionViewInternal(): 'An internal fault ended it',
+      };
+      for (final MapEntry<CompletionView, String> outcome in outcomes.entries) {
+        expect(completionLabel(outcome.key), outcome.value);
+      }
+
+      // And every disposition a verdict can carry.
+      final List<String> said = <String>[
+        for (final DispositionView state in dispositions)
+          dispositionLabel(state),
+      ];
+      expect(said, <String>[
+        'preparing',
+        'waiting for a peer',
+        'connecting',
+        'verifying',
+        'transferring',
+        'confirming',
+        'paused by you',
+        'paused by the peer',
+        'paused after losing the connection',
+        'delivery unconfirmed',
+        'completed',
+        'failed',
+        'cancelled',
+      ]);
+    });
+
+    test('a command from a superseded attachment is refused, and says so',
+        () async {
+      // The submit carries the epoch that delivered the card's last update, so
+      // an attachment the host has replaced sends an epoch the host refuses.
+      final Attachment attachment = attachedAt(4);
+      final RecordingSink sink = RecordingSink(
+        (SubmitView submit) => acceptanceOf(
+          submit.commandId,
+          const AcceptanceViewRejected(RejectionView.staleEpoch),
+        ),
+      );
+      final Commander commander = commanderOf(attachment, sink: sink.call);
+      await commander.issue(attachment.cards.single, CommandView.pause);
+
+      expect(sink.submitted.single.epoch, 4);
+      final CommandIntent intent = attachment.commands.forCard(card).single;
+      expect(intent.phase, CommandPhase.settled);
+      expect(
+        intentLabel(intent),
+        contains('a newer view of this app is in charge'),
+      );
+      expect(intent.completion, isNull, reason: 'it never reached a barrier');
+    });
+
+    test('interrupted is not guessed at: the same identity asks again',
+        () async {
+      final Attachment attachment = attachedAt(11);
+      final RecordingSink sink = RecordingSink(
+        (SubmitView submit) =>
+            acceptanceOf(submit.commandId, const AcceptanceViewAccepted()),
+      );
+      final Commander commander = commanderOf(attachment, sink: sink.call);
+      final CardRow row = attachment.cards.single;
+      await commander.issue(row, CommandView.cancel);
+      final CommandIntent intent = attachment.commands.forCard(card).single;
+      attachment.admitCommand(
+        completionOf(intent.id, const CompletionViewInterrupted()),
+      );
+      expect(intentLabel(intent), contains('Unknown'));
+
+      // Duplicate on the re-issue ⇒ it HAD committed.
+      sink.reply = (SubmitView submit) => acceptanceOf(
+            submit.commandId,
+            const AcceptanceViewDuplicate(DispositionViewCancelled()),
+          );
+      await commander.reissue(row, intent);
+      expect(attachment.commands.forCard(card).single.id, intent.id);
+      expect(
+        intentLabel(intent),
+        'Cancel (asked again) — Already applied — the card was cancelled',
+      );
+
+      // A fresh acceptance on the re-issue ⇒ it had NOT.
+      final Attachment second = attachedAt(11);
+      final RecordingSink other = RecordingSink(
+        (SubmitView submit) =>
+            acceptanceOf(submit.commandId, const AcceptanceViewAccepted()),
+      );
+      final Commander again = commanderOf(second, sink: other.call);
+      await again.issue(second.cards.single, CommandView.cancel);
+      final CommandIntent lost = second.commands.forCard(card).single;
+      second.admitCommand(
+        completionOf(lost.id, const CompletionViewInterrupted()),
+      );
+      await again.reissue(second.cards.single, lost);
+      expect(lost.phase, CommandPhase.accepted);
+      expect(
+        intentLabel(lost),
+        'Cancel (asked again) — Accepted — not committed yet',
+      );
+    });
+
+    test('an interrupted ACCEPTANCE is unknown too, not a refusal', () async {
+      // The actor can die before it answers the acceptance as well as after
+      // it. The contract calls both `interrupted` and means the same thing by
+      // it: nobody knows whether the command applied. An app that worded this
+      // arm as a refusal would be deciding, and would then have no way back.
+      final Attachment attachment = attachedAt(11);
+      final RecordingSink sink = RecordingSink(
+        (SubmitView submit) => acceptanceOf(
+          submit.commandId,
+          const AcceptanceViewRejected(RejectionView.interrupted),
+        ),
+      );
+      final Commander commander = commanderOf(attachment, sink: sink.call);
+      final CardRow row = attachment.cards.single;
+      await commander.issue(row, CommandView.cancel);
+      final CommandIntent intent = attachment.commands.forCard(card).single;
+      expect(intent.phase, CommandPhase.settled);
+      expect(intentLabel(intent), contains('Unknown'));
+      expect(intentLabel(intent), isNot(contains('Refused')));
+      expect(intent.mayDisambiguate, isTrue);
+
+      // And the way out is the documented one: the SAME identity again.
+      sink.reply = (SubmitView submit) => acceptanceOf(
+            submit.commandId,
+            const AcceptanceViewDuplicate(DispositionViewCancelled()),
+          );
+      await commander.reissue(row, intent);
+      expect(attachment.commands.forCard(card).single.id, intent.id);
+      expect(
+        intentLabel(intent),
+        'Cancel (asked again) — Already applied — the card was cancelled',
+      );
+      expect(intent.mayDisambiguate, isFalse);
+    });
+
+    test('a lane that never answers leaves no verdict at all', () async {
+      final Attachment attachment = attachedAt(11);
+      final Commander commander = commanderOf(attachment);
+      await commander.issue(attachment.cards.single, CommandView.pause);
+      final CommandIntent intent = attachment.commands.forCard(card).single;
+      expect(intent.phase, CommandPhase.undelivered);
+      expect(intent.acceptance, isNull);
+      expect(intent.completion, isNull);
+      expect(intentLabel(intent), contains('never reached the host'));
+    });
+
+    test('an answer to a command nobody issued is counted, not invented', () {
+      final Attachment attachment = attachedAt(11);
+      attachment.admitCommand(
+        completionOf(id, const CompletionViewCommitted(DispositionViewFailed())),
+      );
+      expect(attachment.commands.forCard(card), isEmpty);
+      expect(attachment.commands.unaddressed, 1);
+
+      // And it is not quietly attached to whatever intent happens to be open:
+      // the completion of a command the PREVIOUS attachment issued can still
+      // arrive here, and putting it against this one's would be an answer the
+      // authority never gave about it.
+      final CommandIntent mine =
+          attachment.commands.open(card, CommandView.pause);
+      attachment.admitCommand(
+        completionOf(
+          'ffffffffffffffffffffffffffffffff',
+          const CompletionViewCommitted(DispositionViewCancelled()),
+        ),
+      );
+      expect(attachment.commands.unaddressed, 2);
+      expect(mine.completion, isNull);
+      expect(mine.phase, CommandPhase.submitted);
+
+      // Acceptances are addressed exactly the same way, and a gate that swept
+      // only one arm of that would pass on the other drifting.
+      attachment.admitCommand(
+        acceptanceOf(
+          'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+          const AcceptanceViewAccepted(),
+        ),
+      );
+      expect(attachment.commands.unaddressed, 3);
+      expect(mine.acceptance, isNull);
+      expect(mine.phase, CommandPhase.submitted);
+    });
+
+    test('a submit body arriving AT the frontend breaks the contract', () {
+      final Attachment attachment = attachedAt(11);
+      attachment.admitCommand(
+        CommandFrame(
+          body: CommandBodySubmit(
+            SubmitView(
+              card: card,
+              epoch: 11,
+              commandId: id,
+              command: CommandView.pause,
+            ),
+          ),
+        ),
+      );
+      expect(attachment.rejected(FrameRejection.contractBreach), 1);
+      expect(attachment.commands.unaddressed, 0);
+    });
+
+    test('the lane carries both contracts and splits them by schema', () {
+      final Attachment attachment = attachedAt(11);
+      final String frame = _encoded(
+        acceptanceOf(id, const AcceptanceViewAccepted()),
+      );
+      // Bytes, exactly as they arrive on the frame lane: the read decoder sees
+      // a schema it does not speak and hands them to the command decoder.
+      attachment.ingest(utf8.encode(frame));
+      expect(attachment.commands.unaddressed, 1);
+      expect(attachment.rejected(FrameRejection.undecodable), 0);
+
+      // Bytes of neither contract stay undecodable.
+      attachment.ingest(utf8.encode('{"schema":"envoix/binding/other/1"}'));
+      expect(attachment.rejected(FrameRejection.undecodable), 1);
+    });
+  });
+
+  group('affordances', () {
+    testWidgets('a card offers exactly what the authority admits', (
+      WidgetTester tester,
+    ) async {
+      await pumpTile(
+        tester,
+        rowOf(
+          cardView(
+            allowedActions: const <CommandKindView>[
+              CommandKindView.resume,
+              CommandKindView.remove,
+            ],
+          ),
+        ),
+      );
+      expect(find.widgetWithText(FilledButton, 'Resume'), findsOneWidget);
+      expect(find.widgetWithText(FilledButton, 'Remove'), findsOneWidget);
+      expect(find.widgetWithText(FilledButton, 'Pause'), findsNothing);
+      expect(find.widgetWithText(FilledButton, 'Cancel'), findsNothing);
+    });
+
+    testWidgets('a card the authority admits nothing for offers nothing', (
+      WidgetTester tester,
+    ) async {
+      await pumpTile(
+        tester,
+        rowOf(cardView(allowedActions: const <CommandKindView>[])),
+      );
+      expect(find.byType(FilledButton), findsNothing);
+      expect(
+        find.text('Nothing can be asked of this card right now.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('every command the contract has is offerable and labelled', (
+      WidgetTester tester,
+    ) async {
+      await pumpTile(
+        tester,
+        rowOf(cardView(allowedActions: CommandKindView.values)),
+      );
+      for (final String label in <String>[
+        'Pause',
+        'Cancel',
+        'Resume',
+        'Remove',
+        'Pick the source again',
+      ]) {
+        expect(find.widgetWithText(FilledButton, label), findsOneWidget);
+      }
+      expect(find.byType(FilledButton), findsNWidgets(5));
+    });
+
+    testWidgets('tapping an affordance submits it, and the screen says so', (
+      WidgetTester tester,
+    ) async {
+      final Attachment attachment = attachedAt(11);
+      final RecordingSink sink = RecordingSink(
+        (SubmitView submit) =>
+            acceptanceOf(submit.commandId, const AcceptanceViewAccepted()),
+      );
+      final Commander commander = commanderOf(attachment, sink: sink.call);
+      await pumpHome(tester, attachment, commander: commander);
+
+      await tester.tap(find.widgetWithText(FilledButton, 'Pause'));
+      await tester.pumpAndSettle();
+      await pumpHome(tester, attachment, commander: commander);
+
+      expect(sink.submitted.single.command, CommandView.pause);
+      expect(find.text('Pause — Accepted — not committed yet'), findsOneWidget);
+      // A second tap would be a second command; the affordance waits for the
+      // answer to the first.
+      expect(
+        tester.widget<FilledButton>(find.widgetWithText(FilledButton, 'Pause'))
+            .onPressed,
+        isNull,
+      );
+      expect(
+        tester.widget<FilledButton>(find.widgetWithText(FilledButton, 'Cancel'))
+            .onPressed,
+        isNotNull,
+        reason: 'the debounce is per command, not a lock on the card',
+      );
+    });
+
+    testWidgets('an in-flight command does not read like a committed one', (
+      WidgetTester tester,
+    ) async {
+      final Attachment attachment = attachedAt(11);
+      final CommandIntent intent =
+          attachment.commands.open(card, CommandView.pause);
+      attachment.admitCommand(
+        acceptanceOf(intent.id, const AcceptanceViewAccepted()),
+      );
+      await pumpHome(tester, attachment);
+      final Container waiting = tester.widget<Container>(
+        find
+            .ancestor(
+              of: find.text('Pause — Accepted — not committed yet'),
+              matching: find.byType(Container),
+            )
+            .first,
+      );
+      final BoxDecoration inFlight = waiting.decoration! as BoxDecoration;
+      expect(inFlight.border, isNotNull, reason: 'colour is not the only cue');
+
+      attachment.admitCommand(
+        completionOf(
+          intent.id,
+          const CompletionViewCommitted(DispositionViewPaused(
+            PausedStateView(origin: PauseCauseView.local),
+          )),
+        ),
+      );
+      await pumpHome(tester, attachment);
+      final Container settled = tester.widget<Container>(
+        find
+            .ancestor(
+              of: find.text('Pause — Committed — the card is paused by you'),
+              matching: find.byType(Container),
+            )
+            .first,
+      );
+      expect((settled.decoration! as BoxDecoration).border, isNull);
+      expect(
+        (settled.decoration! as BoxDecoration).color,
+        isNot(inFlight.color),
+      );
+    });
+
+    testWidgets('an interrupted command offers the disambiguation, and runs it',
+        (WidgetTester tester) async {
+      final Attachment attachment = attachedAt(11);
+      final RecordingSink sink = RecordingSink(
+        (SubmitView submit) =>
+            acceptanceOf(submit.commandId, const AcceptanceViewAccepted()),
+      );
+      final Commander commander = commanderOf(attachment, sink: sink.call);
+      final CommandIntent intent =
+          attachment.commands.open(card, CommandView.cancel);
+      attachment.admitCommand(
+        completionOf(intent.id, const CompletionViewInterrupted()),
+      );
+      await pumpHome(tester, attachment, commander: commander);
+      expect(find.text('Ask again'), findsOneWidget);
+
+      sink.reply = (SubmitView submit) => acceptanceOf(
+            submit.commandId,
+            const AcceptanceViewDuplicate(DispositionViewCancelled()),
+          );
+      await tester.tap(find.text('Ask again'));
+      await tester.pumpAndSettle();
+      await pumpHome(tester, attachment, commander: commander);
+      expect(sink.submitted.single.commandId, intent.id);
+      expect(
+        find.text(
+          'Cancel (asked again) — Already applied — the card was cancelled',
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('Ask again'), findsNothing);
+
+      // The acceptance arm carries the same unknown, so it must carry the same
+      // way out — an intent stranded without one is the app's guess by default.
+      final Attachment stranded = attachedAt(11);
+      final CommandIntent early =
+          stranded.commands.open(card, CommandView.pause);
+      stranded.admitCommand(
+        acceptanceOf(
+          early.id,
+          const AcceptanceViewRejected(RejectionView.interrupted),
+        ),
+      );
+      await pumpHome(tester, stranded, commander: commanderOf(stranded));
+      expect(find.text('Ask again'), findsOneWidget);
+    });
+
+    testWidgets('the command line is instrumented by the widget that drew it', (
+      WidgetTester tester,
+    ) async {
+      final Attachment attachment = attachedAt(11);
+      final CommandIntent intent =
+          attachment.commands.open(card, CommandView.remove);
+      await pumpHome(tester, attachment);
+      expect(
+        rendered,
+        contains(
+          'envoix-f2a command card=$card id=${intent.id} '
+          'command=remove attempts=1 phase=submitted answer=none',
+        ),
+      );
+
+      // `settled` alone cannot tell a committed command from a refused one, so
+      // the line carries the authority's own answer beside it.
+      attachment.admitCommand(
+        acceptanceOf(intent.id, const AcceptanceViewAccepted()),
+      );
+      attachment.admitCommand(
+        completionOf(
+          intent.id,
+          const CompletionViewCommitted(
+            DispositionViewPaused(PausedStateView(origin: PauseCauseView.local)),
+          ),
+        ),
+      );
+      await pumpHome(tester, attachment);
+      expect(
+        rendered,
+        contains(
+          'envoix-f2a command card=$card id=${intent.id} '
+          'command=remove attempts=1 phase=settled answer=committed:paused:local',
+        ),
+      );
+
+      final CommandIntent refused =
+          attachment.commands.open(card, CommandView.cancel);
+      attachment.admitCommand(
+        acceptanceOf(
+          refused.id,
+          const AcceptanceViewRejected(RejectionView.staleEpoch),
+        ),
+      );
+      await pumpHome(tester, attachment);
+      expect(
+        rendered,
+        contains(
+          'envoix-f2a command card=$card id=${refused.id} '
+          'command=cancel attempts=1 phase=settled answer=rejected:staleEpoch',
+        ),
+      );
+    });
+
+    testWidgets('a restart forgets every command and keeps the card\'s truth', (
+      WidgetTester tester,
+    ) async {
+      // A hot restart throws the Dart isolate away and runs `main` again; the
+      // host, its runtime and the card's durable truth are untouched. What
+      // comes back is a NEW attachment at a NEW epoch, re-seeded with the card
+      // as the authority now holds it and knowing nothing about any command —
+      // because the frontend keeps nothing. (The whole-app version of this,
+      // over bytes a real host emitted, is
+      // `flutter_mutating_hot_restart_preserves_cards` under `cargo test`.)
+      final Attachment before = attachedAt(3);
+      final RecordingSink sink = RecordingSink(
+        (SubmitView submit) =>
+            acceptanceOf(submit.commandId, const AcceptanceViewAccepted()),
+      );
+      final Commander commander = commanderOf(before, sink: sink.call);
+      await pumpHome(tester, before, commander: commander);
+      await tester.tap(find.widgetWithText(FilledButton, 'Pause'));
+      await tester.pumpAndSettle();
+      await pumpHome(tester, before, commander: commander);
+      expect(find.text('Pause — Accepted — not committed yet'), findsOneWidget);
+      final String issued = sink.submitted.single.commandId;
+
+      final Attachment after = Attachment()
+        ..admit(
+          update(
+            4,
+            CardUpdateKindViewSnapshot(
+              cardView(
+                state: const ProductStateViewPaused(
+                  PausedView(origin: PauseOriginView.local),
+                ),
+                quiescence: const QuiescenceViewQuiescent(),
+                allowedActions: const <CommandKindView>[
+                  CommandKindView.resume,
+                  CommandKindView.cancel,
+                  CommandKindView.remove,
+                ],
+              ),
+            ),
+          ),
+        );
+      final Commander restarted = commanderOf(after, sink: sink.call);
+      await pumpHome(tester, after, commander: restarted);
+
+      expect(find.text('Pause — Accepted — not committed yet'), findsNothing);
+      expect(after.commands.forCard(card), isEmpty);
+      expect(find.textContaining('Sending · Paused by you'), findsOneWidget);
+      expect(find.widgetWithText(FilledButton, 'Resume'), findsOneWidget);
+      expect(find.widgetWithText(FilledButton, 'Pause'), findsNothing);
+
+      // The identity died with the isolate: a new tap is a new intent at the
+      // new epoch, and the card's own committed truth is what decided what the
+      // old one did.
+      await tester.tap(find.widgetWithText(FilledButton, 'Resume'));
+      await tester.pumpAndSettle();
+      expect(sink.submitted.last.commandId, isNot(issued));
+      expect(sink.submitted.last.epoch, 4);
+    });
+  });
 }
+
+/// The 13 shapes a `DispositionView` can take (11 variants, 3 pause causes).
+const List<DispositionView> dispositions = <DispositionView>[
+  DispositionViewPreparing(),
+  DispositionViewWaiting(),
+  DispositionViewConnecting(),
+  DispositionViewVerifying(),
+  DispositionViewTransferring(),
+  DispositionViewConfirming(),
+  DispositionViewPaused(PausedStateView(origin: PauseCauseView.local)),
+  DispositionViewPaused(PausedStateView(origin: PauseCauseView.peer)),
+  DispositionViewPaused(PausedStateView(origin: PauseCauseView.lost)),
+  DispositionViewUnconfirmed(),
+  DispositionViewCompleted(),
+  DispositionViewFailed(),
+  DispositionViewCancelled(),
+];
+
+/// A command identity of the shape the contract accepts.
+const String id = 'a1b2c3d4e5f60718293a4b5c6d7e8f90';
 
 /// A duty frame: the host telling the service to do platform work.
 CardUpdateKindView dutyOf(DutyKindView kind) => CardUpdateKindViewCapabilityDuty(

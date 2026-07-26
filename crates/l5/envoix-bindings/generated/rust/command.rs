@@ -3,7 +3,7 @@
 
 use serde_json::{Map, Value};
 
-pub const COMMAND_SCHEMA_ID: &str = "envoix/binding/command/1";
+pub const COMMAND_SCHEMA_ID: &str = "envoix/binding/command/2";
 pub const COMMAND_MAX_FRAME_BYTES: usize = 1048576;
 
 // Contract rules frozen by schema/command.schema.
@@ -97,19 +97,17 @@ pub enum RejectionView {
     AtCapacity,
     RuntimeStopped,
     Interrupted,
-    Conflict,
     Internal,
 }
 
 impl RejectionView {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 7] = [
         Self::UnknownCard,
         Self::StaleEpoch,
         Self::Superseded,
         Self::AtCapacity,
         Self::RuntimeStopped,
         Self::Interrupted,
-        Self::Conflict,
         Self::Internal,
     ];
 }
@@ -118,6 +116,7 @@ impl RejectionView {
 pub enum AcceptanceView {
     Accepted,
     Duplicate(DispositionView),
+    Conflict(CommandView),
     Rejected(RejectionView),
 }
 
@@ -490,7 +489,6 @@ fn decode_rejection_view_value(value: &Value, context: &'static str) -> Result<R
         "at_capacity" => Ok(RejectionView::AtCapacity),
         "runtime_stopped" => Ok(RejectionView::RuntimeStopped),
         "interrupted" => Ok(RejectionView::Interrupted),
-        "conflict" => Ok(RejectionView::Conflict),
         "internal" => Ok(RejectionView::Internal),
         _ => Err(CommandError::UnknownVariant { context }),
     }
@@ -504,7 +502,6 @@ fn encode_rejection_view_value(value: &RejectionView) -> Value {
         RejectionView::AtCapacity => "at_capacity",
         RejectionView::RuntimeStopped => "runtime_stopped",
         RejectionView::Interrupted => "interrupted",
-        RejectionView::Conflict => "conflict",
         RejectionView::Internal => "internal",
     })
 }
@@ -521,6 +518,7 @@ fn decode_acceptance_view_value(value: &Value, context: &'static str) -> Result<
             Ok(AcceptanceView::Accepted)
         }
         "duplicate" => Ok(AcceptanceView::Duplicate(decode_disposition_view_value(payload(map, "AcceptanceView.duplicate")?, "AcceptanceView.duplicate")?)),
+        "conflict" => Ok(AcceptanceView::Conflict(decode_command_view_value(payload(map, "AcceptanceView.conflict")?, "AcceptanceView.conflict")?)),
         "rejected" => Ok(AcceptanceView::Rejected(decode_rejection_view_value(payload(map, "AcceptanceView.rejected")?, "AcceptanceView.rejected")?)),
         _ => Err(CommandError::UnknownVariant { context }),
     }
@@ -535,6 +533,10 @@ fn encode_acceptance_view_value(value: &AcceptanceView) -> Result<Value, Command
         AcceptanceView::Duplicate(payload) => {
             map.insert("kind".to_owned(), Value::from("duplicate"));
             map.insert("value".to_owned(), encode_disposition_view_value(payload)?);
+        }
+        AcceptanceView::Conflict(payload) => {
+            map.insert("kind".to_owned(), Value::from("conflict"));
+            map.insert("value".to_owned(), encode_command_view_value(payload));
         }
         AcceptanceView::Rejected(payload) => {
             map.insert("kind".to_owned(), Value::from("rejected"));

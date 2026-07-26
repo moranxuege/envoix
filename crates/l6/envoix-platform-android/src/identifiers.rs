@@ -16,6 +16,7 @@ const ACTIONS: &[&str] = &[
     // are reserved here so nothing else can claim them.
     "e2e-create",
     "e2e-probe",
+    "e2e-durable",
 ];
 
 /// Android actions are derived from the variant application ID owned by Gradle.
@@ -31,4 +32,12 @@ pub fn internal_action_identifiers(application_id: &str) -> Vec<String> {
 /// process's message-channel namespace, which a plugin could otherwise claim.
 pub fn frontend_lane_channel(namespace: &str) -> String {
     format!("{namespace}/frontend-lane")
+}
+
+/// The platform channel a frontend submits commands on — the one direction in
+/// which it originates anything. Separate from the lane above because a
+/// channel name is a slot: an `EventChannel` and a `MethodChannel` cannot share
+/// one, and the two directions are answered by different handlers.
+pub fn frontend_command_channel(namespace: &str) -> String {
+    format!("{namespace}/frontend-commands")
 }

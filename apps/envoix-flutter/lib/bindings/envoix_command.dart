@@ -1,0 +1,1 @@
+../../../../crates/l5/envoix-bindings/generated/dart/envoix_command.dart

@@ -602,7 +602,14 @@ async fn reused_identity_with_different_command_conflicts() {
         script.set(CommitScript::Healthy);
     };
     let (racing, ()) = tokio::join!(racing, release);
-    assert!(matches!(racing, Err(CommandRejected::Conflict)));
+    // The verdict names the command that owns the identity, so a frontend can
+    // say WHICH command it collided with rather than only that it collided.
+    assert!(matches!(
+        racing,
+        Ok(CommandVerdict::Conflict {
+            applied: ProductCommand::Pause
+        })
+    ));
     assert!(matches!(
         ticket.completed().await,
         CommandCompletion::Committed { .. }
@@ -613,7 +620,12 @@ async fn reused_identity_with_different_command_conflicts() {
     let gate = runtime
         .submit_command(&commander, reused, ProductCommand::Cancel)
         .await;
-    assert_eq!(gate.map(|_| ()), Err(CommandRejected::Conflict));
+    assert!(matches!(
+        gate,
+        Ok(CommandVerdict::Conflict {
+            applied: ProductCommand::Pause
+        })
+    ));
     runtime.shutdown().await;
 }
 

@@ -48,9 +48,6 @@ pub enum CommandRejected {
     /// The actor died before answering; whether the command committed is
     /// unknown here — re-issue with the same identity to find out.
     Interrupted,
-    /// The command identity is already owned by a DIFFERENT committed
-    /// command. The submission was dropped; mint a fresh identity.
-    Conflict,
     /// Restoring the card or reducing the command failed internally.
     Internal,
 }
@@ -68,9 +65,6 @@ impl fmt::Display for CommandRejected {
             Self::AtCapacity => formatter.write_str("the live-card admission bound is exhausted"),
             Self::RuntimeStopped => formatter.write_str("the runtime has stopped"),
             Self::Interrupted => formatter.write_str("the card actor died before answering"),
-            Self::Conflict => {
-                formatter.write_str("the command identity is owned by a different command")
-            }
             Self::Internal => formatter.write_str("restoring or reducing the command failed"),
         }
     }

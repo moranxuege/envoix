@@ -15,7 +15,7 @@
 
 import Foundation
 
-public let commandSchemaId = "envoix/binding/command/1"
+public let commandSchemaId = "envoix/binding/command/2"
 public let commandMaxFrameBytes = 1048576
 // Contract rules frozen by schema/command.schema.
 public let newestAttachmentCommands = true
@@ -93,13 +93,13 @@ public enum RejectionView: String, Equatable {
     case atCapacity = "at_capacity"
     case runtimeStopped = "runtime_stopped"
     case interrupted = "interrupted"
-    case conflict = "conflict"
     case `internal` = "internal"
 }
 
 public enum AcceptanceView: Equatable {
     case accepted
     case duplicate(DispositionView)
+    case conflict(CommandView)
     case rejected(RejectionView)
 }
 
@@ -375,6 +375,8 @@ public enum EnvoixCommandCodec {
             return .accepted
         case "duplicate":
             return .duplicate(try decodeDispositionView(payload(map, "AcceptanceView.duplicate"), "AcceptanceView.duplicate"))
+        case "conflict":
+            return .conflict(try decodeCommandView(payload(map, "AcceptanceView.conflict"), "AcceptanceView.conflict"))
         case "rejected":
             return .rejected(try decodeRejectionView(payload(map, "AcceptanceView.rejected"), "AcceptanceView.rejected"))
         default:

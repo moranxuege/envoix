@@ -75,21 +75,24 @@ SubmitView submit(String card, int epoch, String id, CommandView command) =>
 
 /// The Dart-side twin of the exported originable vectors. Building each body by
 /// hand is the point: this is the code a frontend writes.
+/// The command vocabulary by vector name: submitted, and named back by a
+/// conflict.
+const commandViews = <String, CommandView>{
+  'pause': CommandView.pause,
+  'cancel': CommandView.cancel,
+  'resume': CommandView.resume,
+  'remove': CommandView.remove,
+  're_pick_source': CommandView.rePickSource,
+};
+
 Map<String, SubmitView> handBuiltSubmits() {
   const card = '00000000000000ab';
   const id = '000102030405060708090a0b0c0d0e0f';
   final bodies = <String, SubmitView>{};
 
-  const commands = <String, CommandView>{
-    'pause': CommandView.pause,
-    'cancel': CommandView.cancel,
-    'resume': CommandView.resume,
-    'remove': CommandView.remove,
-    're_pick_source': CommandView.rePickSource,
-  };
-  expectEq('every CommandView variant is swept', commands.length,
+  expectEq('every CommandView variant is swept', commandViews.length,
       CommandView.values.length);
-  commands.forEach((name, command) {
+  commandViews.forEach((name, command) {
     bodies['submit_$name'] = submit(card, 7, id, command);
   });
 
@@ -182,7 +185,6 @@ const rejectionLabels = <RejectionView, String>{
   RejectionView.atCapacity: 'at_capacity',
   RejectionView.runtimeStopped: 'runtime_stopped',
   RejectionView.interrupted: 'interrupted',
-  RejectionView.conflict: 'conflict',
   RejectionView.internal: 'internal',
 };
 
@@ -214,6 +216,16 @@ void backendToFrontend() {
     expect(
       'acceptance_rejected_$label decodes to its rejection',
       decoded is AcceptanceViewRejected && decoded.value == rejection,
+    );
+  });
+
+  // A conflict names the command that owns the reused identity — the whole
+  // point of the arm, so every command has to survive the crossing.
+  commandViews.forEach((name, command) {
+    final decoded = acceptanceOf('acceptance_conflict_$name');
+    expect(
+      'acceptance_conflict_$name names its applied command',
+      decoded is AcceptanceViewConflict && decoded.value == command,
     );
   });
 

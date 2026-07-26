@@ -13,7 +13,9 @@
 library;
 
 import 'attachment.dart';
+import 'bindings/envoix_command.dart';
 import 'bindings/envoix_read.dart';
+import 'commands.dart';
 
 /// The card's lifecycle state, including which side rested it.
 String stateLabel(ProductStateView state) => switch (state) {
@@ -178,6 +180,107 @@ String rejectionLabel(FrameRejection kind) => switch (kind) {
       FrameRejection.contractBreach => 'out of contract',
       FrameRejection.undecodable => 'undecodable',
     };
+
+/// What one command asks for. The button says this, and so does the account of
+/// what happened to it.
+String commandLabel(CommandView command) => switch (command) {
+      CommandView.pause => 'Pause',
+      CommandView.cancel => 'Cancel',
+      CommandView.resume => 'Resume',
+      CommandView.remove => 'Remove',
+      CommandView.rePickSource => 'Pick the source again',
+    };
+
+/// The state the authority recorded against a command. It is the card's
+/// disposition at that moment, not a claim about the command's success.
+String dispositionLabel(DispositionView state) => switch (state) {
+      DispositionViewPreparing() => 'preparing',
+      DispositionViewWaiting() => 'waiting for a peer',
+      DispositionViewConnecting() => 'connecting',
+      DispositionViewVerifying() => 'verifying',
+      DispositionViewTransferring() => 'transferring',
+      DispositionViewConfirming() => 'confirming',
+      DispositionViewPaused(:final PausedStateView value) =>
+        'paused ${pauseCauseLabel(value.origin)}',
+      DispositionViewUnconfirmed() => 'delivery unconfirmed',
+      DispositionViewCompleted() => 'completed',
+      DispositionViewFailed() => 'failed',
+      DispositionViewCancelled() => 'cancelled',
+    };
+
+String pauseCauseLabel(PauseCauseView cause) => switch (cause) {
+      PauseCauseView.local => 'by you',
+      PauseCauseView.peer => 'by the peer',
+      PauseCauseView.lost => 'after losing the connection',
+    };
+
+/// Why the authority refused a command at intake. Every reason is typed, and
+/// none of them means the command quietly did nothing.
+String rejectionReasonLabel(RejectionView reason) => switch (reason) {
+      RejectionView.unknownCard => 'the host holds no such card',
+      RejectionView.staleEpoch =>
+        'a newer view of this app is in charge — re-attach and try again',
+      RejectionView.superseded =>
+        'a newer view of this app took over while it was queued',
+      RejectionView.atCapacity => 'the host has no room to run this card',
+      RejectionView.runtimeStopped => 'the transfer runtime has stopped',
+      RejectionView.interrupted =>
+        'the host died before it could say whether it applied',
+      RejectionView.internal => 'an internal fault',
+    };
+
+/// The intake verdict. Acceptance is NOT completion: an accepted command has
+/// not crossed the durability barrier, and this must never read as if it had.
+String acceptanceLabel(AcceptanceView acceptance) => switch (acceptance) {
+      AcceptanceViewAccepted() => 'Accepted — not committed yet',
+      AcceptanceViewDuplicate(:final DispositionView value) =>
+        'Already applied — the card was ${dispositionLabel(value)}',
+      // The authority knows WHICH command owns the reused identity, so this
+      // names it. "Conflict" alone tells a user nothing they can act on.
+      AcceptanceViewConflict(:final CommandView value) =>
+        'Refused — that request id already belongs to ${commandLabel(value)}',
+      // `interrupted` is the one intake answer that is NOT a refusal: the
+      // authority does not know whether the command applied, so calling it
+      // refused would be the app deciding. Same words as the completion arm,
+      // because it is the same question.
+      AcceptanceViewRejected(value: RejectionView.interrupted) =>
+        'Unknown — the host died before it could say. Ask again with the same '
+            'request to find out.',
+      AcceptanceViewRejected(:final RejectionView value) =>
+        'Refused — ${rejectionReasonLabel(value)}',
+    };
+
+/// The committed completion: what actually became durable, or honestly why not.
+String completionLabel(CompletionView completion) => switch (completion) {
+      CompletionViewCommitted(:final DispositionView value) =>
+        'Committed — the card is ${dispositionLabel(value)}',
+      CompletionViewCommitFailed(:final DispositionView value) =>
+        'Not durable — it was rolled back and the card stays '
+            '${dispositionLabel(value)}',
+      CompletionViewInterrupted() =>
+        'Unknown — the host died before it could say. Ask again with the same '
+            'request to find out.',
+      CompletionViewInternal() => 'An internal fault ended it',
+    };
+
+/// One intent, as one line. The phase is derived from the answers, so this
+/// cannot say "committed" about something nothing committed.
+String intentLabel(CommandIntent intent) {
+  final CompletionView? completion = intent.completion;
+  final AcceptanceView? acceptance = intent.acceptance;
+  final String asked = intent.attempts > 1
+      ? '${commandLabel(intent.command)} (asked again)'
+      : commandLabel(intent.command);
+  return switch (intent.phase) {
+    CommandPhase.submitted => '$asked — sent, no answer yet',
+    CommandPhase.accepted => '$asked — ${acceptanceLabel(acceptance!)}',
+    CommandPhase.settled => completion == null
+        ? '$asked — ${acceptanceLabel(acceptance!)}'
+        : '$asked — ${completionLabel(completion)}',
+    CommandPhase.undelivered =>
+      '$asked — it never reached the host (${intent.fault})',
+  };
+}
 
 /// How far the transfer has got, or null when the total makes that unanswerable.
 /// Two authoritative numbers presented together; nothing here is a status.

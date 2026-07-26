@@ -172,7 +172,6 @@ mod e2e {
     use jni::sys::{jlong, jstring};
 
     use super::with_host;
-    use crate::host::Host;
 
     /// `E2eBridge.createForE2e(name, totalBytes): Long` — gives the packaged
     /// instrumentation real durable state. Returns 0 on failure (a real
@@ -198,21 +197,33 @@ mod e2e {
         .unwrap_or(0)
     }
 
-    /// `E2eBridge.liveCards(): String` — the restore probe: the cards this
-    /// process generation actually brought back, as comma-separated 16-digit
-    /// hex ids (empty when none).
+    /// `E2eBridge.liveCards(): String` — one debug report, in two sections
+    /// separated by `;durable=`: the cards this process generation actually
+    /// brought back as comma-separated 16-digit hex ids, then each card's
+    /// latest COMMITTED state read back off disk as `id:state`. One JNI symbol
+    /// answers both, because BN5 pins the dynamic symbol table to seven names.
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_app_envoix_host_E2eBridge_liveCards(
         env: JNIEnv<'_>,
         _class: JClass<'_>,
     ) -> jstring {
-        let mut cards: Vec<String> = with_host(Host::live_cards)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|card| format!("{:016x}", card.get()))
-            .collect();
-        cards.sort();
-        env.new_string(cards.join(","))
+        let report = with_host(|host| {
+            let mut cards = host.live_cards();
+            cards.sort();
+            let ids = cards
+                .iter()
+                .map(|card| format!("{:016x}", card.get()))
+                .collect::<Vec<_>>()
+                .join(",");
+            let durable = cards
+                .into_iter()
+                .map(|card| format!("{:016x}:{}", card.get(), host.durable_state_for_e2e(card)))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{ids};durable={durable}")
+        })
+        .unwrap_or_else(|| ";durable=".to_owned());
+        env.new_string(report)
             .map(|text| text.into_raw())
             .unwrap_or(std::ptr::null_mut())
     }

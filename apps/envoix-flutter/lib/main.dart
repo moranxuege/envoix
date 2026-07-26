@@ -2,23 +2,30 @@ import 'package:flutter/material.dart';
 
 import 'attachment.dart';
 import 'home.dart';
+import 'instrumentation.dart';
 import 'lane.dart';
 import 'logs.dart';
 
 void main() => runApp(const EnvoixApp());
 
-/// The read-only Envoix frontend: it observes the host and shows what it says.
+/// The Envoix frontend: it observes the host, shows what it says, and asks it
+/// for exactly the commands it publishes as admissible.
 class EnvoixApp extends StatelessWidget {
-  const EnvoixApp({super.key, this.lane = platformLane});
+  const EnvoixApp({
+    super.key,
+    this.lane = platformLane,
+    this.commands = platformCommands,
+  });
 
   final LaneSource lane;
+  final CommandSink commands;
 
   @override
   Widget build(BuildContext context) => MaterialApp(
         title: 'Envoix',
         theme: envoixTheme(Brightness.light),
         darkTheme: envoixTheme(Brightness.dark),
-        home: Shell(lane: lane),
+        home: Shell(lane: lane, commands: commands),
       );
 }
 
@@ -46,16 +53,20 @@ ThemeData envoixTheme(Brightness brightness) => ThemeData(
 /// without [PopScope] it would pop the only route there is and leave the app,
 /// which is not "return from a secondary screen".
 class Shell extends StatefulWidget {
-  const Shell({required this.lane, super.key});
+  const Shell({required this.lane, required this.commands, super.key});
 
   final LaneSource lane;
+  final CommandSink commands;
 
   @override
   State<Shell> createState() => _ShellState();
 }
 
 class _ShellState extends State<Shell> {
-  late LaneAttachment _lane = LaneAttachment.open(widget.lane);
+  late LaneAttachment _lane = _open();
+
+  LaneAttachment _open() =>
+      LaneAttachment.open(widget.lane, commands: widget.commands);
 
   /// Which destination is on screen. It belongs to the state rather than to the
   /// build, so a frame arriving cannot move the reader off what they are
@@ -67,9 +78,16 @@ class _ShellState extends State<Shell> {
   /// — which is why [LaneAttachment.open] builds its own rather than taking
   /// one. Replacing the stream is also what cancels the old subscription, so
   /// the platform side hears exactly one detach per re-attach.
-  void _attach() => setState(() => _lane = LaneAttachment.open(widget.lane));
+  void _attach() => setState(() => _lane = _open());
 
-  void _showHome() => setState(() => _destination = 0);
+  void _showHome() => _show(0);
+
+  /// Moving to a destination re-renders what is there, so the report ledger
+  /// clears with the move.
+  void _show(int destination) {
+    forgetRendered();
+    setState(() => _destination = destination);
+  }
 
   /// The screen is a function of the lane: [StreamBuilder] rebuilds on every
   /// frame the attachment accepted, so "ingested but never rendered" is not a
@@ -108,12 +126,15 @@ class _ShellState extends State<Shell> {
           ],
         ),
         body: home
-            ? HomeScreen(attachment: _lane.attachment, fault: fault)
+            ? HomeScreen(
+                attachment: _lane.attachment,
+                commander: _lane.commander,
+                fault: fault,
+              )
             : LogsScreen(attachment: _lane.attachment),
         bottomNavigationBar: NavigationBar(
           selectedIndex: _destination,
-          onDestinationSelected: (int value) =>
-              setState(() => _destination = value),
+          onDestinationSelected: _show,
           destinations: const <NavigationDestination>[
             NavigationDestination(
               icon: _Dot(filled: false),
