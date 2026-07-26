@@ -5,6 +5,10 @@ struct EnvoixApp: App {
     @StateObject private var model = AppModel.shared
     @AppStorage("envoix.language") private var language = "en"
 
+    init() {
+        UserDefaults.standard.removeObject(forKey: "envoix.token")
+    }
+
     var body: some Scene {
         #if os(macOS)
         WindowGroup(id: "main") {

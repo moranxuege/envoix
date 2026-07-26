@@ -30,6 +30,12 @@ internal enum class RoomLifetimePolicy {
     UntilForegroundEnds,
 }
 
+internal data class RoomLifetimeSnapshot(
+    val revision: Long,
+    val policy: RoomLifetimePolicy,
+    val idleDeadlineEpochMs: Long?,
+)
+
 internal enum class RoomCloseReason {
     UserEnded,
     IdleExpired,
@@ -50,7 +56,7 @@ internal sealed interface RoomControlEvent {
     data class Connected(
         val peerName: String?,
         val creator: Boolean,
-        val policy: RoomLifetimePolicy,
+        val lifetime: RoomLifetimeSnapshot,
     ) : RoomControlEvent
 
     data class IncomingOffer(
@@ -72,8 +78,8 @@ internal sealed interface RoomControlEvent {
         val message: String,
     ) : RoomControlEvent
 
-    data class PolicyChanged(
-        val policy: RoomLifetimePolicy,
+    data class LifetimeChanged(
+        val lifetime: RoomLifetimeSnapshot,
     ) : RoomControlEvent
 
     data class Closed(
@@ -117,6 +123,8 @@ internal interface RoomControlGateway {
 
     suspend fun updatePolicy(policy: RoomLifetimePolicy)
 
+    suspend fun updateTransferActive(active: Boolean)
+
     suspend fun close(reason: RoomCloseReason)
 }
 
@@ -145,6 +153,8 @@ internal object UnavailableRoomControlGateway : RoomControlGateway {
     ) = Unit
 
     override suspend fun updatePolicy(policy: RoomLifetimePolicy) = Unit
+
+    override suspend fun updateTransferActive(active: Boolean) = Unit
 
     override suspend fun close(reason: RoomCloseReason) = Unit
 }

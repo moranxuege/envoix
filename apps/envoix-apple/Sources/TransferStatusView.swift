@@ -56,8 +56,8 @@ struct TransferStatusView: View {
 
             if let state = viewModel.presentationState {
                 let progress = TransferPresentationPolicy.progress(for: state)
-                if progress != .hidden, viewModel.total > 0 {
-                    ProgressBar(value: progress == .complete ? 1 : viewModel.progressFraction)
+                if state != .delivered, progress != .hidden, viewModel.total > 0 {
+                    ProgressBar(value: viewModel.progressFraction)
                     transferProgressLine
                 }
                 if progress == .active || progress == .retained,
@@ -386,7 +386,9 @@ struct TransferStatusView: View {
         case .paused?:
             return AppText.value("Transfer paused", "传输已暂停", language: language)
         case .delivered?:
-            return AppText.value("Delivered", "已送达", language: language)
+            return viewModel.transferActivity?.direction == .receive
+                ? AppText.value("Received", "已接收", language: language)
+                : AppText.value("Delivered", "已送达", language: language)
         case .canceled?:
             return AppText.value("Transfer canceled", "传输已取消", language: language)
         case .failed?:

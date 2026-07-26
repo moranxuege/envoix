@@ -4,6 +4,7 @@ import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.envoix.app.InviteCodec
+import dev.envoix.app.ParsedInvite
 import dev.envoix.app.Settings
 import dev.envoix.app.SettingsStore
 import dev.envoix.app.discovery.DiscoverySource
@@ -12,10 +13,9 @@ import dev.envoix.app.discovery.NearbyRendezvousOffer
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import java.util.concurrent.TimeUnit
 
 /**
- * Navigation and legacy Invite v1 adapter around one foreground room-control
+ * Navigation and direct InviteV2 adapter around one foreground room-control
  * workflow. File-transfer lifetime remains owned by TransferRepository.
  */
 internal class ConnectionWorkflowViewModel(
@@ -23,9 +23,7 @@ internal class ConnectionWorkflowViewModel(
     private val currentSettings: () -> Settings = {
         SettingsStore.settings.value
     },
-    nowMs: () -> Long = {
-        TimeUnit.NANOSECONDS.toMillis(System.nanoTime())
-    },
+    clockEpochMs: () -> Long = System::currentTimeMillis,
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(ConnectionWorkflowUiState())
     val uiState: StateFlow<ConnectionWorkflowUiState> = _uiState.asStateFlow()
@@ -35,14 +33,18 @@ internal class ConnectionWorkflowViewModel(
     private var pendingNearbyDelivery: (((String?) -> Unit) -> Unit)? = null
     private var foreground = true
     private var externalActivityLeases = 0
+    private var incomingOfferAttempt = 0L
 
     private val controlWorkflow =
         RoomControlWorkflow(
             gateway = gateway,
             scope = viewModelScope,
-            nowMs = nowMs,
+            clockEpochMs = clockEpochMs,
             onStateChanged = { control ->
                 val current = _uiState.value
+                val incomingOfferChanged =
+                    current.control.incomingOffer?.id != control.incomingOffer?.id
+                if (incomingOfferChanged) incomingOfferAttempt += 1
                 val terminal =
                     control.phase == RoomControlPhase.Closed ||
                         control.phase == RoomControlPhase.Failed
@@ -58,9 +60,13 @@ internal class ConnectionWorkflowViewModel(
                     current.copy(
                         control = control,
                         // A terminal control room must never expose its setup
-                        // as a legacy standalone transfer. Started repository
+                        // as a direct standalone transfer. Started repository
                         // jobs are independent and continue in Activity.
                         transferDraft = if (terminal) null else transferDraft,
+                        incomingOfferBusy =
+                            if (incomingOfferChanged) false else current.incomingOfferBusy,
+                        incomingOfferError =
+                            if (incomingOfferChanged) null else current.incomingOfferError,
                     )
             },
             onHosting = { invite ->
@@ -132,7 +138,7 @@ internal class ConnectionWorkflowViewModel(
     ) {
         val normalized = input.trim()
         if (!RoomControlInviteFormat.looksLikeRoomInvite(normalized)) {
-            openLegacyInvite(normalized, peerName ?: "Device from invite")
+            openTransferInvite(normalized, peerName ?: "Device from invite")
             return
         }
         requestRoomAction {
@@ -202,9 +208,9 @@ internal class ConnectionWorkflowViewModel(
         }
     }
 
-    /** Legacy Invite v1 room retained so existing links and old clients work. */
+    /** Direct InviteV2 room used when no long-lived control tunnel is involved. */
     fun openRoom(draft: DeviceRoomDraft) {
-        requestRoomAction { openLegacyRoomNow(draft) }
+        requestRoomAction { openDirectRoomNow(draft) }
     }
 
     fun openActivity() {
@@ -318,42 +324,118 @@ internal class ConnectionWorkflowViewModel(
         controlWorkflow.offer(draft, completion)
     }
 
-    fun acceptIncomingRoomOffer() {
-        val offer = controlWorkflow.state.incomingOffer ?: return
-        val parsed = InviteCodec.parse(offer.transferInvite)
-        if (parsed == null || InviteCodec.oppositeRole(parsed.role) != "receive") {
-            rejectIncomingRoomOffer()
-            controlWorkflow.showError("The file invitation is invalid")
+    fun acceptIncomingRoomOffer(
+        parseInvitation: (String) -> ParsedInvite?,
+        onPrepareReceive: PrepareReceiveBeforeDecision,
+        onCancelReceive: (Long) -> Unit,
+    ) {
+        val offer = controlWorkflow.state.incomingOffer
+        if (offer == null) {
             return
         }
-        val room = _uiState.value.room ?: return
+        if (_uiState.value.incomingOfferBusy) return
+        val invitation =
+            runCatching { parseInvitation(offer.transferInvite) }
+                .getOrNull()
+        val transferReference = invitation?.reference
+        if (invitation == null || transferReference.isNullOrBlank()) {
+            setIncomingOfferAcceptance(
+                busy = false,
+                error =
+                    AppText.value(
+                        "This file invitation is invalid or expired.",
+                        "此文件邀请无效或已过期。",
+                        currentSettings().language,
+                    ),
+            )
+            return
+        }
+        val attempt = ++incomingOfferAttempt
+        setIncomingOfferAcceptance(busy = true, error = null)
+        var receiveCompletionInvoked = false
+        val receiveCompletion = receiveCompletion@{ receiveId: Long, startError: String? ->
+            receiveCompletionInvoked = true
+            if (attempt != incomingOfferAttempt ||
+                controlWorkflow.state.incomingOffer?.id != offer.id
+            ) {
+                if (receiveId >= 0L) onCancelReceive(receiveId)
+                return@receiveCompletion
+            }
+            if (startError != null) {
+                if (receiveId >= 0L) onCancelReceive(receiveId)
+                setIncomingOfferAcceptance(busy = false, error = startError)
+                return@receiveCompletion
+            }
+            confirmIncomingRoomOffer(
+                offer = offer,
+                transferReference = transferReference,
+                receiveId = receiveId,
+                onCancelReceive = onCancelReceive,
+                attempt = attempt,
+            )
+        }
+        runCatching {
+            onPrepareReceive(
+                transferReference,
+                invitation.broker,
+                invitation.relay.orEmpty(),
+                null,
+                true,
+                receiveCompletion,
+            )
+        }.onFailure { error ->
+            if (!receiveCompletionInvoked && attempt == incomingOfferAttempt) {
+                setIncomingOfferAcceptance(
+                    busy = false,
+                    error = error.message ?: "The receiver could not start",
+                )
+            }
+        }
+    }
+
+    private fun setIncomingOfferAcceptance(
+        busy: Boolean,
+        error: String?,
+    ) {
         _uiState.value =
             _uiState.value.copy(
-                room =
-                    room.copy(
-                        pairingInput = offer.transferInvite,
-                        pairingCode = parsed.code,
-                        pendingRoleAdapter = "receive",
-                        transferCodes = room.transferCodes + parsed.code,
-                    ),
-                transferDraft =
-                    RoomTransferDraft(
-                        roleAdapter = "receive",
-                        usesPendingAction = true,
-                    ),
+                incomingOfferBusy = busy,
+                incomingOfferError = error,
             )
     }
 
-    fun confirmIncomingRoomOffer(completion: (String?) -> Unit) {
-        val offer = controlWorkflow.state.incomingOffer
-        if (offer == null) {
-            completion("The file offer is no longer available")
-            return
+    private fun attachIncomingTransfer(transferReference: String) {
+        _uiState.value.room?.let { room ->
+            _uiState.value =
+                _uiState.value.copy(
+                    room =
+                        room.copy(
+                            transferCodes = room.transferCodes + transferReference,
+                        ),
+                )
         }
+    }
+
+    private fun confirmIncomingRoomOffer(
+        offer: RoomTransferOffer,
+        transferReference: String,
+        receiveId: Long,
+        onCancelReceive: (Long) -> Unit,
+        attempt: Long,
+    ) {
         controlWorkflow.respondToOffer(
             offerId = offer.id,
             accept = true,
-            completion = completion,
+            onAcceptedLocally = { attachIncomingTransfer(transferReference) },
+            completion = { decisionError ->
+                if (decisionError != null) onCancelReceive(receiveId)
+                if (attempt == incomingOfferAttempt) {
+                    setIncomingOfferAcceptance(
+                        busy = false,
+                        error = decisionError,
+                    )
+                }
+            },
         )
     }
 
@@ -404,16 +486,13 @@ internal class ConnectionWorkflowViewModel(
         }
     }
 
-    fun acceptIncomingOffer(
-        offer: NearbyRendezvousOffer,
-        fallbackRole: String,
-    ): Boolean {
+    fun acceptIncomingOffer(offer: NearbyRendezvousOffer): Boolean {
         if (RoomControlInviteFormat.looksLikeRoomInvite(offer.invite)) {
             if (!controlWorkflow.available) return false
             joinRoom(offer.invite, offer.senderDisplayName)
             return true
         }
-        return acceptLegacyNearbyOffer(offer, fallbackRole)
+        return acceptTransferNearbyOffer(offer)
     }
 
     private fun requestRoomAction(action: () -> Unit) {
@@ -492,11 +571,11 @@ internal class ConnectionWorkflowViewModel(
             )
     }
 
-    private fun openLegacyInvite(
+    private fun openTransferInvite(
         input: String,
         displayName: String,
     ) {
-        val parsed = InviteCodec.parse(input)
+        val parsed = InviteCodec.parseForRouting(input)
         if (parsed == null) {
             controlWorkflow.showError("That is not a valid Envoix invitation")
             return
@@ -505,17 +584,12 @@ internal class ConnectionWorkflowViewModel(
             DeviceRoomDraft(
                 displayName = displayName,
                 pairingInput = input,
-                pairingCode = parsed.code,
-                directionAdapter =
-                    InviteCodec.oppositeRole(parsed.role)
-                        ?: currentSettings()
-                            .defaultRole
-                            .validDirection(),
+                directionAdapter = parsed.joinerRole.validDirection(),
             ),
         )
     }
 
-    private fun openLegacyRoomNow(draft: DeviceRoomDraft) {
+    private fun openDirectRoomNow(draft: DeviceRoomDraft) {
         discardTransferDraft()
         val pendingRole =
             when {
@@ -524,26 +598,21 @@ internal class ConnectionWorkflowViewModel(
                 draft.pairingInput != null || draft.hostedPayload != null -> draft.directionAdapter.validDirection()
                 else -> null
             }
-        val initialCode = draft.hostedCode ?: draft.pairingCode
         _uiState.value =
             _uiState.value.copy(
                 screen = WorkflowScreen.Room,
                 room =
                     draft.copy(
                         pendingRoleAdapter = pendingRole,
-                        transferCodes = draft.transferCodes + listOfNotNull(initialCode),
                     ),
                 transferDraft = null,
             )
         controlWorkflow.setLegacy(draft.displayName)
     }
 
-    private fun acceptLegacyNearbyOffer(
-        offer: NearbyRendezvousOffer,
-        fallbackRole: String,
-    ): Boolean {
-        val parsed = InviteCodec.parse(offer.invite) ?: return false
-        val role = InviteCodec.oppositeRole(parsed.role) ?: fallbackRole.validDirection()
+    private fun acceptTransferNearbyOffer(offer: NearbyRendezvousOffer): Boolean {
+        val parsed = InviteCodec.parseForRouting(offer.invite) ?: return false
+        val role = parsed.joinerRole.validDirection()
         val selection =
             NearbyPairingSelection(
                 discoveryPeerKey = offer.senderPeerKey,
@@ -559,12 +628,11 @@ internal class ConnectionWorkflowViewModel(
                     room =
                         currentRoom.copy(
                             pairingInput = offer.invite,
-                            pairingCode = parsed.code,
+                            pairingCode = null,
                             hostedCode = null,
                             hostedPayload = null,
                             directionAdapter = role,
                             pendingRoleAdapter = role,
-                            transferCodes = currentRoom.transferCodes + parsed.code,
                         ),
                 )
         } else {
@@ -572,7 +640,6 @@ internal class ConnectionWorkflowViewModel(
                 DeviceRoomDraft(
                     displayName = offer.senderDisplayName ?: "Nearby Envoix device",
                     pairingInput = offer.invite,
-                    pairingCode = parsed.code,
                     directionAdapter = role,
                     nearbySelection = selection,
                     pendingRoleAdapter = role,

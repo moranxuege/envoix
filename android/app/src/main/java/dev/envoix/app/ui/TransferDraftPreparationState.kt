@@ -2,6 +2,7 @@ package dev.envoix.app.ui
 
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import dev.envoix.app.CreatedInvite
 import dev.envoix.app.Native
 import dev.envoix.app.PreparedManifestV2Source
 import kotlinx.coroutines.CoroutineScope
@@ -33,7 +34,8 @@ internal class TransferDraftPreparationState(
     val startSubmitted = mutableStateOf(false)
     val role = mutableStateOf(initialRole)
     val typedCode = mutableStateOf("")
-    val generatedInvite = mutableStateOf<Pair<String, String>?>(null)
+    val invitationInput = mutableStateOf<String?>(null)
+    val generatedInvite = mutableStateOf<CreatedInvite?>(null)
     val generatedInviteRole = mutableStateOf<String?>(null)
     val scannedBroker = mutableStateOf<String?>(null)
     val scannedRelay = mutableStateOf<String?>(null)

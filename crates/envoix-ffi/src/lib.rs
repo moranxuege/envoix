@@ -1,14 +1,19 @@
 //! UniFFI bridge for the canonical Manifest v2 job and session APIs.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::task::{Context, Poll};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use envoix_client::PeerDescriptor;
-use envoix_client::api::{Client, Invite, PathPolicy, PeerSource, Role, TransferOptions};
-use envoix_rendezvous_iroh::generate_code;
+use envoix_client::api::{
+    Capabilities, Client, CreatedInvitation, InvitationBootstrap, InvitationError,
+    InvitationErrorCode, InviteV2, PathPolicy, PeerSource, RememberedCredentialRef, RoomCode,
+    TransferOptions, TransferRole, ValidatedInvitation, register_remembered_credential,
+};
 
 uniffi::setup_scaffolding!();
 
@@ -22,10 +27,11 @@ pub use room_control::*;
 const DEFAULT_RENDEZVOUS_BROKER: &str =
     "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445";
 const DEFAULT_RELAY_URL: &str = "https://envoix.chkxwlyh.us:8444";
-const INVITE_TTL_SECS: u64 = 300;
-const ENVOIX_FFI_API_VERSION: u32 = 6;
+const ENVOIX_FFI_API_VERSION: u32 = 8;
 
 static FFI_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+static CREATED_INVITATIONS: OnceLock<Mutex<HashMap<(String, TransferRole), InvitationBootstrap>>> =
+    OnceLock::new();
 
 fn ffi_runtime() -> &'static tokio::runtime::Runtime {
     FFI_RUNTIME.get_or_init(|| {
@@ -81,10 +87,33 @@ impl<F: Future> Future for RuntimeContextFuture<F> {
 pub enum EnvoixError {
     #[error("{reason}")]
     Operation { reason: String },
+    #[error("{reason}")]
+    Invitation {
+        code: FfiInvitationErrorCode,
+        reason: String,
+    },
 }
 
 pub(crate) fn op_err(error: impl std::fmt::Display) -> EnvoixError {
     EnvoixError::Operation {
+        reason: error.to_string(),
+    }
+}
+
+fn invitation_err(error: InvitationError) -> EnvoixError {
+    let code = match error.code() {
+        InvitationErrorCode::Malformed => FfiInvitationErrorCode::Malformed,
+        InvitationErrorCode::Oversized => FfiInvitationErrorCode::Oversized,
+        InvitationErrorCode::Expired => FfiInvitationErrorCode::Expired,
+        InvitationErrorCode::UnsupportedVersion => FfiInvitationErrorCode::UnsupportedVersion,
+        InvitationErrorCode::UnsupportedCapability => FfiInvitationErrorCode::UnsupportedCapability,
+        InvitationErrorCode::RoleConflict => FfiInvitationErrorCode::RoleConflict,
+        InvitationErrorCode::AuthenticationFailed => FfiInvitationErrorCode::AuthenticationFailure,
+        InvitationErrorCode::Replay => FfiInvitationErrorCode::Replay,
+        _ => FfiInvitationErrorCode::Malformed,
+    };
+    EnvoixError::Invitation {
+        code,
         reason: error.to_string(),
     }
 }
@@ -116,16 +145,44 @@ impl Default for EnvoixRuntimeSettings {
 pub enum FfiInviteRole {
     Send,
     Receive,
-    Unknown,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum FfiInvitationErrorCode {
+    Malformed,
+    Oversized,
+    Expired,
+    UnsupportedVersion,
+    UnsupportedCapability,
+    RoleConflict,
+    AuthenticationFailure,
+    Replay,
+}
+
+#[derive(Clone, Eq, PartialEq, uniffi::Record)]
 pub struct FfiPairingInvite {
-    pub code: String,
+    pub room_code: String,
     pub payload: String,
     pub broker: String,
-    pub relay: String,
-    pub role: FfiInviteRole,
+    pub relay_urls: Vec<String>,
+    pub creator_role: FfiInviteRole,
+    pub joiner_role: FfiInviteRole,
+    pub expires_at: u64,
+}
+
+impl std::fmt::Debug for FfiPairingInvite {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FfiPairingInvite")
+            .field("room_code", &"<redacted>")
+            .field("payload", &"<redacted>")
+            .field("broker", &self.broker)
+            .field("relay_urls", &self.relay_urls)
+            .field("creator_role", &self.creator_role)
+            .field("joiner_role", &self.joiner_role)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -138,6 +195,7 @@ pub enum FfiTransferDirection {
 pub enum FfiTransferMode {
     Manual,
     Invite,
+    Remembered,
     ShowManual,
     ShowInvite,
     Mdns,
@@ -170,7 +228,7 @@ impl Default for FfiRendezvousPlan {
 
 /// Session-only inputs. Source paths and destination paths live in the job or
 /// destination request, never in this rendezvous record.
-#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+#[derive(Clone, Eq, PartialEq, uniffi::Record)]
 pub struct FfiTransferRequest {
     pub direction: FfiTransferDirection,
     pub mode: FfiTransferMode,
@@ -178,11 +236,41 @@ pub struct FfiTransferRequest {
     pub invite: String,
     pub code: String,
     pub token: String,
+    pub remember_consent: bool,
+    pub remembered_credential_ref: String,
+    pub remembered_generation: u64,
+    pub remembered_previous_generation: Option<u64>,
     pub broker: String,
     pub relay: String,
     pub config_path: String,
     pub path_policy: FfiPathPolicy,
     pub rendezvous: FfiRendezvousPlan,
+}
+
+impl std::fmt::Debug for FfiTransferRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FfiTransferRequest")
+            .field("direction", &self.direction)
+            .field("mode", &self.mode)
+            .field("peer_descriptor", &self.peer_descriptor)
+            .field("invite", &"<redacted>")
+            .field("code", &"<redacted>")
+            .field("token", &"<redacted>")
+            .field("remember_consent", &self.remember_consent)
+            .field("remembered_credential_ref", &"<redacted>")
+            .field("remembered_generation", &self.remembered_generation)
+            .field(
+                "remembered_previous_generation",
+                &self.remembered_previous_generation,
+            )
+            .field("broker", &self.broker)
+            .field("relay", &self.relay)
+            .field("config_path", &self.config_path)
+            .field("path_policy", &self.path_policy)
+            .field("rendezvous", &self.rendezvous)
+            .finish()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -307,6 +395,10 @@ pub trait TransferObserver: Send + Sync {
     fn on_transfer_failed(&self, failure: FfiTransferFailure);
     fn on_connection_path(&self, event: FfiConnectionPathEvent);
     fn on_diagnostic(&self, message: String);
+    /// Called only on the native worker at the authenticated persistence
+    /// boundary. Implementations store these bytes immediately and must never
+    /// project or log them.
+    fn on_remembered_credential(&self, opaque_credential: Vec<u8>, generation: u64) -> bool;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
@@ -327,14 +419,17 @@ pub fn envoix_core_info() -> FfiCoreInfo {
             "paged_transfer_inventory_v2".into(),
             "delivery_proof_v2".into(),
             "structured_connection_path".into(),
-            "foreground_room_control_v1".into(),
+            "foreground_room_control_v3".into(),
+            "remembered_devices_v1".into(),
         ],
     }
 }
 
 #[uniffi::export]
 pub fn generate_room_code() -> Result<String, EnvoixError> {
-    generate_code(2).map_err(op_err)
+    RoomCode::generate()
+        .map(|code| code.to_string())
+        .map_err(invitation_err)
 }
 
 #[uniffi::export]
@@ -343,34 +438,81 @@ pub fn make_pairing_invite(
     broker: String,
     relay: String,
 ) -> Result<FfiPairingInvite, EnvoixError> {
-    let broker = non_empty(&broker).unwrap_or(DEFAULT_RENDEZVOUS_BROKER);
-    let relay = non_empty(&relay).or(Some(DEFAULT_RELAY_URL));
-    let mut invite = Invite::room(broker.to_string(), relay.map(str::to_string)).map_err(op_err)?;
-    invite = match role {
-        FfiInviteRole::Send => invite.with_role(Role::Send),
-        FfiInviteRole::Receive => invite.with_role(Role::Receive),
-        FfiInviteRole::Unknown => invite,
-    };
-    Ok(project_invite(&invite))
+    let broker_input = broker.trim();
+    let relay = relay_for_pairing_invite(broker_input, &relay);
+    let broker = broker_for_pairing_invite(broker_input);
+    let invitation = InviteV2::create(
+        broker,
+        relay.into_iter().collect(),
+        core_invite_role(role),
+        Capabilities::current(),
+        now_unix_seconds(),
+    )
+    .map_err(invitation_err)?;
+    register_created_invitation(&invitation);
+    Ok(FfiPairingInvite::from_created(&invitation))
 }
 
 #[uniffi::export]
 pub fn parse_pairing_invite(input: String) -> Result<FfiPairingInvite, EnvoixError> {
-    let invite = Invite::parse(&input).map_err(op_err)?;
-    Ok(project_invite(&invite))
+    let invitation = InviteV2::parse(&input, now_unix_seconds()).map_err(invitation_err)?;
+    Ok(FfiPairingInvite::from_validated(&invitation))
 }
 
-fn project_invite(invite: &Invite) -> FfiPairingInvite {
-    FfiPairingInvite {
-        code: invite.code().to_string(),
-        payload: invite.payload(),
-        broker: invite.broker().unwrap_or_default().to_string(),
-        relay: invite.relay().unwrap_or_default().to_string(),
-        role: match invite.role() {
-            Some(Role::Send) => FfiInviteRole::Send,
-            Some(Role::Receive) => FfiInviteRole::Receive,
-            None => FfiInviteRole::Unknown,
-        },
+#[uniffi::export]
+pub fn parse_pairing_invite_for_role(
+    input: String,
+    local_role: FfiInviteRole,
+) -> Result<FfiPairingInvite, EnvoixError> {
+    let invitation =
+        InviteV2::parse_for_role(&input, core_invite_role(local_role), now_unix_seconds())
+            .map_err(invitation_err)?;
+    Ok(FfiPairingInvite::from_validated(&invitation))
+}
+
+#[uniffi::export]
+pub fn normalize_room_code(input: String) -> Result<String, EnvoixError> {
+    RoomCode::parse(&input)
+        .map(|code| code.to_string())
+        .map_err(invitation_err)
+}
+
+/// Validate protected bytes loaded by the platform and retain them behind a
+/// process-only handle for subsequent transfer requests.
+#[uniffi::export]
+pub fn register_protected_remembered_credential(
+    opaque_credential: Vec<u8>,
+) -> Result<String, EnvoixError> {
+    register_remembered_credential(&opaque_credential)
+        .map(|reference| reference.as_str().to_string())
+        .map_err(op_err)
+}
+
+impl FfiPairingInvite {
+    fn from_created(invite: &CreatedInvitation) -> Self {
+        let public = &invite.invitation().public_context;
+        Self {
+            room_code: invite.room_code.to_string(),
+            payload: invite.payload.clone(),
+            broker: public.broker.clone(),
+            relay_urls: public.relay_urls.clone(),
+            creator_role: ffi_invite_role(invite.creator_role),
+            joiner_role: ffi_invite_role(invite.joiner_role),
+            expires_at: invite.expires_at,
+        }
+    }
+
+    fn from_validated(invite: &ValidatedInvitation) -> Self {
+        let public = &invite.invitation().public_context;
+        Self {
+            room_code: String::new(),
+            payload: String::new(),
+            broker: public.broker.clone(),
+            relay_urls: public.relay_urls.clone(),
+            creator_role: ffi_invite_role(public.creator_transfer_role),
+            joiner_role: ffi_invite_role(public.joiner_transfer_role),
+            expires_at: public.expires_at,
+        }
     }
 }
 
@@ -424,53 +566,92 @@ pub(crate) fn peer_sources_for_request(
         }])
     };
     match request.mode {
-        FfiTransferMode::Manual => single(PeerSource::Manual {
-            peer: required(&request.peer_descriptor, "peer_descriptor")?
-                .parse::<PeerDescriptor>()
-                .map_err(op_err)?,
-            token: required(&request.token, "token")?.to_string(),
-        }),
-        FfiTransferMode::Invite => single(PeerSource::Invite {
-            invite: required(&request.invite, "invite")?.to_string(),
-        }),
-        FfiTransferMode::ShowManual => single(PeerSource::ShowManual {
-            token: non_empty(&request.token).map(str::to_string),
-        }),
-        FfiTransferMode::ShowInvite => single(PeerSource::ShowInvite {
-            ttl_secs: INVITE_TTL_SECS,
-            token: non_empty(&request.token).map(str::to_string),
-        }),
-        FfiTransferMode::Mdns => single(PeerSource::Mdns {
-            token: non_empty(&request.token).map(str::to_string),
-        }),
-        FfiTransferMode::Room => {
-            let code = required(&request.code, "code")?.to_string();
+        FfiTransferMode::Manual => single(
+            PeerSource::manual(
+                required(&request.peer_descriptor, "peer_descriptor")?
+                    .parse::<PeerDescriptor>()
+                    .map_err(op_err)?,
+                required(&request.token, "token")?.to_string(),
+            )
+            .map_err(op_err)?,
+        ),
+        FfiTransferMode::Invite => {
+            let invite = InviteV2::parse_for_role(
+                required(&request.invite, "invite")?,
+                transfer_role(request.direction),
+                now_unix_seconds(),
+            )
+            .map_err(invitation_err)?;
+            let broker = invite.invitation().public_context.broker.clone();
+            single(PeerSource::invitation(invite.into_bootstrap(), broker).map_err(op_err)?)
+        }
+        FfiTransferMode::Remembered => {
+            if !request.rendezvous.use_room || !request.rendezvous.internet_available {
+                return Err(EnvoixError::Operation {
+                    reason: "remembered devices require an available rendezvous broker".into(),
+                });
+            }
+            let credential_ref = RememberedCredentialRef::from_process_handle(
+                required(
+                    &request.remembered_credential_ref,
+                    "remembered_credential_ref",
+                )?
+                .to_string(),
+            );
             let broker = non_empty(&request.broker)
                 .or_else(|| non_empty(&settings.server_url))
                 .unwrap_or(DEFAULT_RENDEZVOUS_BROKER)
                 .to_string();
-            let mut routes = Vec::new();
-            if request.rendezvous.use_room && request.rendezvous.internet_available {
-                routes.push(RouteAttempt {
-                    source: PeerSource::Room {
-                        code: code.clone(),
-                        broker,
-                    },
-                    path_policy_override: None,
-                });
-            }
-            if request.rendezvous.use_mdns {
-                routes.push(RouteAttempt {
-                    source: PeerSource::Mdns { token: Some(code) },
-                    path_policy_override: Some(PathPolicy::Auto),
-                });
-            }
-            if routes.is_empty() {
+            single(PeerSource::remembered_registered(
+                credential_ref,
+                request.remembered_generation,
+                request.remembered_previous_generation,
+                broker,
+            ))
+        }
+        FfiTransferMode::ShowManual => single(
+            PeerSource::show_manual(non_empty(&request.token).map(str::to_string))
+                .map_err(op_err)?,
+        ),
+        FfiTransferMode::ShowInvite => {
+            let broker = non_empty(&request.broker)
+                .or_else(|| non_empty(&settings.server_url))
+                .unwrap_or(DEFAULT_RENDEZVOUS_BROKER)
+                .to_string();
+            let relay_urls = non_empty(&request.relay)
+                .or_else(|| non_empty(&settings.relay_url))
+                .map(str::to_string)
+                .into_iter()
+                .collect();
+            let created = InviteV2::create(
+                broker.clone(),
+                relay_urls,
+                transfer_role(request.direction),
+                Capabilities::current(),
+                now_unix_seconds(),
+            )
+            .map_err(invitation_err)?;
+            single(PeerSource::invitation(created.into_bootstrap(), broker).map_err(op_err)?)
+        }
+        FfiTransferMode::Mdns => {
+            single(PeerSource::mdns(non_empty(&request.token).map(str::to_string)).map_err(op_err)?)
+        }
+        FfiTransferMode::Room => {
+            let room_code =
+                RoomCode::parse(required(&request.code, "code")?).map_err(invitation_err)?;
+            let broker = non_empty(&request.broker)
+                .or_else(|| non_empty(&settings.server_url))
+                .unwrap_or(DEFAULT_RENDEZVOUS_BROKER)
+                .to_string();
+            if !request.rendezvous.use_room || !request.rendezvous.internet_available {
                 return Err(EnvoixError::Operation {
-                    reason: "room request has no enabled rendezvous route".into(),
+                    reason: "Room-Code invitations require an available rendezvous broker".into(),
                 });
             }
-            Ok(routes)
+            let role = transfer_role(request.direction);
+            let bootstrap = take_created_invitation(&room_code, role)
+                .unwrap_or_else(|| InvitationBootstrap::room_code_joiner(room_code, role));
+            single(PeerSource::invitation(bootstrap, broker).map_err(op_err)?)
         }
     }
 }
@@ -484,6 +665,70 @@ fn required<'a>(value: &'a str, field: &str) -> Result<&'a str, EnvoixError> {
 fn non_empty(value: &str) -> Option<&str> {
     let value = value.trim();
     (!value.is_empty()).then_some(value)
+}
+
+fn register_created_invitation(invitation: &CreatedInvitation) {
+    CREATED_INVITATIONS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("created invitation store poisoned")
+        .insert(
+            (invitation.room_code.to_string(), invitation.creator_role),
+            invitation.clone().into_bootstrap(),
+        );
+}
+
+fn take_created_invitation(
+    room_code: &RoomCode,
+    local_role: TransferRole,
+) -> Option<InvitationBootstrap> {
+    CREATED_INVITATIONS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("created invitation store poisoned")
+        .remove(&(room_code.to_string(), local_role))
+}
+
+fn broker_for_pairing_invite(broker: &str) -> String {
+    non_empty(broker)
+        .unwrap_or(DEFAULT_RENDEZVOUS_BROKER)
+        .to_string()
+}
+
+fn relay_for_pairing_invite(broker: &str, relay: &str) -> Option<String> {
+    non_empty(relay).map(str::to_string).or_else(|| {
+        broker
+            .trim()
+            .is_empty()
+            .then(|| DEFAULT_RELAY_URL.to_string())
+    })
+}
+
+fn core_invite_role(role: FfiInviteRole) -> TransferRole {
+    match role {
+        FfiInviteRole::Send => TransferRole::Sender,
+        FfiInviteRole::Receive => TransferRole::Receiver,
+    }
+}
+
+fn ffi_invite_role(role: TransferRole) -> FfiInviteRole {
+    match role {
+        TransferRole::Sender => FfiInviteRole::Send,
+        TransferRole::Receiver => FfiInviteRole::Receive,
+    }
+}
+
+fn transfer_role(direction: FfiTransferDirection) -> TransferRole {
+    match direction {
+        FfiTransferDirection::Send => TransferRole::Sender,
+        FfiTransferDirection::Receive => TransferRole::Receiver,
+    }
+}
+
+fn now_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
 }
 
 #[cfg(target_os = "android")]

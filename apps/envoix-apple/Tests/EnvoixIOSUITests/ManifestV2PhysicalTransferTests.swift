@@ -106,7 +106,7 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
         let completion = try await sendTransferJobV2(
             job: job,
             settings: Self.settings,
-            request: Self.request(direction: .send),
+            request: try Self.request(direction: .send),
             stateDirectory: stateDirectory.path,
             cancellation: FfiManifestV2Cancellation(),
             observer: observer
@@ -140,11 +140,21 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
             collisionURL = url
         }
 
+        let invitation = try makePairingInvite(
+            role: .receive,
+            broker: Self.settings.serverUrl,
+            relay: Self.settings.relayUrl
+        )
+        defer { withExtendedLifetime(invitation) {} }
+        Self.marker("invitation=\(invitation.roomCode)")
         let observer = ManifestV2PhysicalObserver()
         Self.marker("\(Self.platformName) receiver ready scenario=\(fixture.scenario.rawValue)")
         let pending = try await receiveTransferOfferV2(
             settings: Self.settings,
-            request: Self.request(direction: .receive),
+            request: try Self.request(
+                direction: .receive,
+                roomCode: invitation.roomCode
+            ),
             stateDirectory: stateDirectory.path,
             cancellation: FfiManifestV2Cancellation(),
             observer: observer
@@ -218,14 +228,21 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
         return UInt64(capacity)
     }
 
-    private static func request(direction: FfiTransferDirection) -> FfiTransferRequest {
+    private static func request(
+        direction: FfiTransferDirection,
+        roomCode: String? = nil
+    ) throws -> FfiTransferRequest {
         FfiTransferRequest(
             direction: direction,
             mode: .room,
             peerDescriptor: "",
             invite: "",
-            code: scenarioCode,
-            token: scenarioCode,
+            code: try normalizeRoomCode(input: roomCode ?? scenarioCode),
+            token: "",
+            rememberConsent: false,
+            rememberedCredentialRef: "",
+            rememberedGeneration: 0,
+            rememberedPreviousGeneration: nil,
             broker: defaultRendezvousBroker,
             relay: defaultRelayURL,
             configPath: "",
@@ -267,7 +284,10 @@ final class ManifestV2PhysicalTransferTests: XCTestCase {
     private static let enabledEnvironment = "ENVOIX_CROSS_DEVICE"
     private static let runID = environmentString("ENVOIX_CROSS_DEVICE_RUN_ID", default: "manual")
     private static let scenarioName = environmentString("ENVOIX_CROSS_DEVICE_SCENARIO", default: "single_file")
-    private static let scenarioCode = environmentString("ENVOIX_CROSS_DEVICE_CODE", default: "741203-amber-comet")
+    private static let scenarioCode = environmentString(
+        "ENVOIX_CROSS_DEVICE_CODE",
+        default: "741203-ambe-come"
+    )
     private static let largeBytes = environmentUInt64("ENVOIX_CROSS_DEVICE_LARGE_BYTES", default: 128 * 1_024 * 1_024)
     private static let collisionSentinel = Data("pre-existing destination must remain unchanged\n".utf8)
     private static let shareRecoveryBytes = Data("valid source after an unreadable Share item\n".utf8)
@@ -565,6 +585,7 @@ private final class ManifestV2PhysicalObserver: TransferObserver, @unchecked Sen
         marker("path=\(event.pathKind) event=\(event.eventKind)")
     }
     func onDiagnostic(message: String) { marker("diagnostic=\(message)") }
+    func onRememberedCredential(opaqueCredential _: Data, generation _: UInt64) -> Bool { false }
 
     @discardableResult
     private func locked<T>(_ operation: () -> T) -> T {

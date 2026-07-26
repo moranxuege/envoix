@@ -42,6 +42,7 @@ class MainActivity : ComponentActivity() {
         }
         TransferService.restoreAll(this)
         captureSharedUris(intent)
+        captureInvite(intent)
         setContent {
             val settings by SettingsStore.settings.collectAsState()
             CompositionLocalProvider(LocalAppLanguage provides settings.language) {
@@ -93,12 +94,7 @@ class MainActivity : ComponentActivity() {
                                 onReturnToRoom = workflowVm::returnToCurrentRoom,
                                 onActivity = workflowVm::openActivity,
                                 onSettings = workflowVm::openSettings,
-                                onAcceptIncomingOffer = { offer ->
-                                    workflowVm.acceptIncomingOffer(
-                                        offer,
-                                        SettingsStore.settings.value.defaultRole,
-                                    )
-                                },
+                                onAcceptIncomingOffer = workflowVm::acceptIncomingOffer,
                                 onCancelReplacement = workflowVm::cancelReplacement,
                                 onConfirmReplacement = workflowVm::confirmReplacement,
                                 onExternalActivityChanged = workflowVm::setExternalActivityActive,
@@ -119,12 +115,7 @@ class MainActivity : ComponentActivity() {
                                     onReturnToRoom = workflowVm::returnToCurrentRoom,
                                     onActivity = workflowVm::openActivity,
                                     onSettings = workflowVm::openSettings,
-                                    onAcceptIncomingOffer = { offer ->
-                                        workflowVm.acceptIncomingOffer(
-                                            offer,
-                                            SettingsStore.settings.value.defaultRole,
-                                        )
-                                    },
+                                    onAcceptIncomingOffer = workflowVm::acceptIncomingOffer,
                                     onCancelReplacement = workflowVm::cancelReplacement,
                                     onConfirmReplacement = workflowVm::confirmReplacement,
                                     onExternalActivityChanged = workflowVm::setExternalActivityActive,
@@ -146,36 +137,79 @@ class MainActivity : ComponentActivity() {
                                     onDismissTransfer = workflowVm::dismissTransferDraft,
                                     onTransferStarted = workflowVm::completeTransferDraft,
                                     onOfferRoomTransfer = workflowVm::offerRoomTransfer,
-                                    onPrepareIncomingRoomOffer = workflowVm::acceptIncomingRoomOffer,
-                                    onConfirmIncomingRoomOffer = workflowVm::confirmIncomingRoomOffer,
+                                    incomingOfferBusy = workflow.incomingOfferBusy,
+                                    incomingOfferError = workflow.incomingOfferError,
+                                    onAcceptIncomingRoomOffer = {
+                                        workflowVm.acceptIncomingRoomOffer(
+                                            parseInvitation = {
+                                                InviteCodec.parseForRole(it, "receive")
+                                            },
+                                            onPrepareReceive = {
+                                                c,
+                                                b,
+                                                r,
+                                                qr,
+                                                copyApproved,
+                                                completion,
+                                                ->
+                                                vm.startReceiveWhenReady(
+                                                    c,
+                                                    b,
+                                                    r,
+                                                    qr,
+                                                    copyApproved,
+                                                    completion,
+                                                )
+                                            },
+                                            onCancelReceive = vm::cancel,
+                                        )
+                                    },
                                     onRejectIncomingRoomOffer = workflowVm::rejectIncomingRoomOffer,
                                     onKeepOpen = workflowVm::setKeepOpen,
                                     onEndRoom = { workflowVm.endRoom() },
                                     onDismissEndedRoom = workflowVm::dismissEndedRoom,
                                     onRoomActiveTransfers = workflowVm::updateRoomTransferActivity,
                                     onExternalActivityChanged = workflowVm::setExternalActivityActive,
-                                    onAcceptIncomingOffer = { offer ->
-                                        workflowVm.acceptIncomingOffer(
-                                            offer,
-                                            SettingsStore.settings.value.defaultRole,
-                                        )
-                                    },
-                                    onReceive = { c, b, r, qr, copyApproved ->
-                                        vm.startReceive(c, b, r, qr, copyApproved)
-                                    },
-                                    onPrepareReceive = { c, b, r, qr, copyApproved, completion ->
-                                        vm.startReceiveWhenReady(
+                                    onAcceptIncomingOffer = workflowVm::acceptIncomingOffer,
+                                    onReceive = {
+                                        c,
+                                        b,
+                                        r,
+                                        qr,
+                                        copyApproved,
+                                        rememberLabel,
+                                        rememberedRelationshipId,
+                                        ->
+                                        vm.startReceive(
                                             c,
                                             b,
                                             r,
                                             qr,
                                             copyApproved,
-                                            completion,
+                                            rememberLabel,
+                                            rememberedRelationshipId,
                                         )
                                     },
-                                    onCancelReceive = vm::cancel,
-                                    onSend = { c, b, r, jobId, qr ->
-                                        vm.startSend(c, jobId, b, r, qr)
+                                    onOpenReceived = ::openReceived,
+                                    onShareReceived = ::shareReceived,
+                                    onSend = {
+                                        c,
+                                        b,
+                                        r,
+                                        jobId,
+                                        qr,
+                                        rememberLabel,
+                                        rememberedRelationshipId,
+                                        ->
+                                        vm.startSend(
+                                            c,
+                                            jobId,
+                                            b,
+                                            r,
+                                            qr,
+                                            rememberLabel,
+                                            rememberedRelationshipId,
+                                        )
                                     },
                                     discoveryViewModel = discoveryVm,
                                 )
@@ -203,6 +237,16 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         captureSharedUris(intent)
+        captureInvite(intent)
+    }
+
+    private fun captureInvite(intent: Intent?) {
+        val value = intent?.dataString ?: return
+        if (value.startsWith("envoix://invite/v2/") &&
+            InviteCodec.parseForRouting(value) != null
+        ) {
+            workflowVm.joinRoom(value)
+        }
     }
 
     override fun onStart() {

@@ -20,6 +20,12 @@ enum RoomControlLifetimePolicy: Equatable {
     case untilForegroundEnds
 }
 
+struct RoomControlLifetimeState: Equatable {
+    let revision: UInt64
+    let policy: RoomControlLifetimePolicy
+    let idleDeadline: Date?
+}
+
 enum RoomControlCloseReason: Equatable {
     case userEnded
     case idleExpired
@@ -31,11 +37,15 @@ enum RoomControlCloseReason: Equatable {
 }
 
 enum RoomControlEvent: Equatable {
-    case connected(peerDisplayName: String, creator: Bool)
+    case connected(
+        peerDisplayName: String,
+        creator: Bool,
+        lifetime: RoomControlLifetimeState
+    )
     case incomingOffer(RoomControlTransferOffer)
     case offerAccepted(id: String)
     case offerRejected(id: String)
-    case policyChanged(RoomControlLifetimePolicy)
+    case lifetimeChanged(RoomControlLifetimeState)
     case closed(RoomControlCloseReason)
 }
 
@@ -62,10 +72,15 @@ protocol RoomControlGateway: AnyObject {
         identityPath: String,
         onEvent: @escaping (RoomControlEvent) -> Void
     ) async throws
-    func offerTransfer(_ offer: RoomControlTransferOffer) async throws
-    func acceptOffer(id: String) async throws
-    func rejectOffer(id: String) async throws
-    func setLifetimePolicy(_ policy: RoomControlLifetimePolicy) async throws
+    func offerTransfer(_ offer: RoomControlTransferOffer) async throws -> RoomControlLifetimeState?
+    func acceptOffer(id: String) async throws -> RoomControlLifetimeState?
+    func rejectOffer(id: String) async throws -> RoomControlLifetimeState?
+    func setLifetimePolicy(
+        _ policy: RoomControlLifetimePolicy
+    ) async throws -> RoomControlLifetimeState?
+    func setLocalTransferActive(_ active: Bool) async throws -> RoomControlLifetimeState?
+    func lifetimeSnapshot() -> RoomControlLifetimeState?
+    func expireIdleDeadline() async throws
     func close(reason: RoomControlCloseReason)
 }
 
@@ -108,19 +123,33 @@ final class UnavailableRoomControlGateway: RoomControlGateway {
         throw RoomControlUnavailableError()
     }
 
-    func offerTransfer(_ offer: RoomControlTransferOffer) async throws {
+    func offerTransfer(
+        _ offer: RoomControlTransferOffer
+    ) async throws -> RoomControlLifetimeState? {
         throw RoomControlUnavailableError()
     }
 
-    func acceptOffer(id: String) async throws {
+    func acceptOffer(id: String) async throws -> RoomControlLifetimeState? {
         throw RoomControlUnavailableError()
     }
 
-    func rejectOffer(id: String) async throws {
+    func rejectOffer(id: String) async throws -> RoomControlLifetimeState? {
         throw RoomControlUnavailableError()
     }
 
-    func setLifetimePolicy(_ policy: RoomControlLifetimePolicy) async throws {
+    func setLifetimePolicy(
+        _ policy: RoomControlLifetimePolicy
+    ) async throws -> RoomControlLifetimeState? {
+        throw RoomControlUnavailableError()
+    }
+
+    func setLocalTransferActive(_ active: Bool) async throws -> RoomControlLifetimeState? {
+        throw RoomControlUnavailableError()
+    }
+
+    func lifetimeSnapshot() -> RoomControlLifetimeState? { nil }
+
+    func expireIdleDeadline() async throws {
         throw RoomControlUnavailableError()
     }
 
@@ -183,30 +212,58 @@ final class LiveRoomControlGateway: RoomControlGateway {
         )
     }
 
-    func offerTransfer(_ offer: RoomControlTransferOffer) async throws {
+    func offerTransfer(
+        _ offer: RoomControlTransferOffer
+    ) async throws -> RoomControlLifetimeState? {
         guard let session else { throw RoomControlUnavailableError() }
-        try await session.offerTransfer(offer: FfiRoomTransferOffer(
+        return try await session.offerTransfer(offer: FfiRoomTransferOffer(
             offerId: offer.id,
             transferInvite: offer.transferInvite,
             rootNames: Array(offer.rootNames.prefix(3)),
             itemCount: offer.itemCount,
             totalBytes: offer.totalBytes
-        ))
+        )).map(project)
     }
 
-    func acceptOffer(id: String) async throws {
+    func acceptOffer(id: String) async throws -> RoomControlLifetimeState? {
         guard let session else { throw RoomControlUnavailableError() }
-        try await session.acceptOffer(offerId: id)
+        return try await session.acceptOffer(offerId: id).map(project)
     }
 
-    func rejectOffer(id: String) async throws {
+    func rejectOffer(id: String) async throws -> RoomControlLifetimeState? {
         guard let session else { throw RoomControlUnavailableError() }
-        try await session.rejectOffer(offerId: id, reason: .declined)
+        return try await session.rejectOffer(
+            offerId: id,
+            reason: .declined
+        ).map(project)
     }
 
-    func setLifetimePolicy(_ policy: RoomControlLifetimePolicy) async throws {
+    func setLifetimePolicy(
+        _ policy: RoomControlLifetimePolicy
+    ) async throws -> RoomControlLifetimeState? {
         guard let session else { throw RoomControlUnavailableError() }
-        try await session.setPolicy(policy: ffiPolicy(policy))
+        return try await session.setPolicy(policy: ffiPolicy(policy)).map(project)
+    }
+
+    func setLocalTransferActive(_ active: Bool) async throws -> RoomControlLifetimeState? {
+        guard let session else { throw RoomControlUnavailableError() }
+        return try await session.setLocalTransferActive(active: active).map(project)
+    }
+
+    func lifetimeSnapshot() -> RoomControlLifetimeState? {
+        session.map { project($0.snapshot().lifetime) }
+    }
+
+    func expireIdleDeadline() async throws {
+        guard let activeSession = session else { throw RoomControlUnavailableError() }
+        let activeCancellation = cancellation
+        try await activeSession.close(reason: .idleExpired)
+        activeCancellation?.cancel()
+        if let activeCancellation {
+            clearIfCurrent(activeCancellation)
+        } else if session === activeSession {
+            session = nil
+        }
     }
 
     func close(reason: RoomControlCloseReason) {
@@ -254,7 +311,8 @@ final class LiveRoomControlGateway: RoomControlGateway {
             let snapshot = connectedSession.snapshot()
             onEvent(.connected(
                 peerDisplayName: snapshot.peerName,
-                creator: snapshot.creator
+                creator: snapshot.creator,
+                lifetime: project(snapshot.lifetime)
             ))
 
             while cancellation === token, !Task.isCancelled {
@@ -308,9 +366,9 @@ final class LiveRoomControlGateway: RoomControlGateway {
             return .offerAccepted(id: event.offerId)
         case .offerRejected:
             return .offerRejected(id: event.offerId)
-        case .policyChanged:
-            guard let policy = event.policy else { return nil }
-            return .policyChanged(project(policy))
+        case .lifetimeChanged:
+            guard let lifetime = event.lifetime else { return nil }
+            return .lifetimeChanged(project(lifetime))
         case .peerClosed:
             let reason = project(event.closeReason ?? .protocolFailure)
             return .closed(reason == .userEnded ? .peerEnded : reason)
@@ -331,6 +389,16 @@ final class LiveRoomControlGateway: RoomControlGateway {
         case .idle15Minutes: return .idleFifteenMinutes
         case .untilForegroundEnds: return .untilForegroundEnds
         }
+    }
+
+    private func project(_ state: FfiRoomLifetimeState) -> RoomControlLifetimeState {
+        RoomControlLifetimeState(
+            revision: state.revision,
+            policy: project(state.policy),
+            idleDeadline: state.idleDeadlineEpochMs.map {
+                Date(timeIntervalSince1970: TimeInterval($0) / 1_000)
+            }
+        )
     }
 
     private func ffiCloseReason(_ reason: RoomControlCloseReason) -> FfiRoomCloseReason {
@@ -374,6 +442,11 @@ enum RoomControlGatewayFactory {
 @MainActor
 private final class FixtureRoomControlGateway: RoomControlGateway {
     private var onEvent: ((RoomControlEvent) -> Void)?
+    private var lifetime = RoomControlLifetimeState(
+        revision: 0,
+        policy: .idleFifteenMinutes,
+        idleDeadline: Date().addingTimeInterval(15 * 60)
+    )
 
     func makeInvitation(broker: String, relay: String, now: Date) throws -> RoomControlInvitation {
         RoomControlInvitation(
@@ -399,7 +472,11 @@ private final class FixtureRoomControlGateway: RoomControlGateway {
         onEvent: @escaping (RoomControlEvent) -> Void
     ) async throws {
         self.onEvent = onEvent
-        onEvent(.connected(peerDisplayName: "Nearby test device", creator: true))
+        onEvent(.connected(
+            peerDisplayName: "Nearby test device",
+            creator: true,
+            lifetime: lifetime
+        ))
     }
 
     func join(
@@ -409,18 +486,44 @@ private final class FixtureRoomControlGateway: RoomControlGateway {
         onEvent: @escaping (RoomControlEvent) -> Void
     ) async throws {
         self.onEvent = onEvent
-        onEvent(.connected(peerDisplayName: "Nearby test device", creator: false))
+        onEvent(.connected(
+            peerDisplayName: "Nearby test device",
+            creator: false,
+            lifetime: lifetime
+        ))
     }
 
-    func offerTransfer(_ offer: RoomControlTransferOffer) async throws {
+    func offerTransfer(
+        _ offer: RoomControlTransferOffer
+    ) async throws -> RoomControlLifetimeState? {
         onEvent?(.offerAccepted(id: offer.id))
+        return nil
     }
 
-    func acceptOffer(id: String) async throws {}
-    func rejectOffer(id: String) async throws {}
-    func setLifetimePolicy(_ policy: RoomControlLifetimePolicy) async throws {
-        onEvent?(.policyChanged(policy))
+    func acceptOffer(id: String) async throws -> RoomControlLifetimeState? { nil }
+    func rejectOffer(id: String) async throws -> RoomControlLifetimeState? { nil }
+    func setLifetimePolicy(
+        _ policy: RoomControlLifetimePolicy
+    ) async throws -> RoomControlLifetimeState? {
+        lifetime = RoomControlLifetimeState(
+            revision: lifetime.revision + 1,
+            policy: policy,
+            idleDeadline: policy == .idleFifteenMinutes
+                ? Date().addingTimeInterval(15 * 60)
+                : nil
+        )
+        return lifetime
     }
+    func setLocalTransferActive(_ active: Bool) async throws -> RoomControlLifetimeState? {
+        lifetime = RoomControlLifetimeState(
+            revision: lifetime.revision + 1,
+            policy: lifetime.policy,
+            idleDeadline: active ? nil : Date().addingTimeInterval(15 * 60)
+        )
+        return lifetime
+    }
+    func lifetimeSnapshot() -> RoomControlLifetimeState? { lifetime }
+    func expireIdleDeadline() async throws {}
     func close(reason: RoomControlCloseReason) {}
 }
 #endif

@@ -1,5 +1,6 @@
 package dev.envoix.app.ui
 
+import dev.envoix.app.CreatedInvite
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -61,12 +62,24 @@ class TransferDraftPreparationStateTest {
                 onDiscard = {},
             )
         state.typedCode.value = "1234-river-stone"
-        state.generatedInvite.value = "4321-cloud-field" to "envoix://pair/fixture"
+        state.invitationInput.value = "envoix://invite/v2/incoming"
+        state.generatedInvite.value =
+            CreatedInvite(
+                roomCode = "abcd12-ef34-5678",
+                payload = "envoix://invite/v2/fixture",
+                reference = "invite:fixture",
+                broker = "broker",
+                relay = null,
+                creatorRole = "receive",
+                joinerRole = "send",
+                expiresAt = 1L,
+            )
         state.generatedInviteRole.value = "receive"
 
         assertEquals("receive", state.role.value)
         assertEquals("show", state.topMode.value)
         assertEquals("1234-river-stone", state.typedCode.value)
-        assertEquals("4321-cloud-field", state.generatedInvite.value?.first)
+        assertEquals("envoix://invite/v2/incoming", state.invitationInput.value)
+        assertEquals("abcd12-ef34-5678", state.generatedInvite.value?.roomCode)
     }
 }

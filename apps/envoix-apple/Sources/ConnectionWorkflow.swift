@@ -63,16 +63,42 @@ enum ConnectionWorkflowPolicy {
     static let roomInvitationLifetime: TimeInterval = 5 * 60
     static let roomIdleLifetime: TimeInterval = 15 * 60
 
-    static func localAction(for remoteRole: FfiInviteRole) -> OneTimeRoomAction {
-        switch remoteRole {
-        case .send: return .receiveFiles
-        case .receive: return .offerFiles
-        case .unknown: return .choose
+    static func localAction(forLocalRole role: FfiInviteRole) -> OneTimeRoomAction {
+        switch role {
+        case .send: return .offerFiles
+        case .receive: return .receiveFiles
         }
     }
 
     static func isExpired(_ offer: PendingNearbyInvitation, now: Date) -> Bool {
         now.timeIntervalSince(offer.receivedAt) >= offerLifetime
+    }
+}
+
+enum RoomOfferAcceptanceResult: Equatable {
+    case accepted(activityID: String)
+    case receiverDidNotStart
+    case offerUnavailable(activityID: String)
+}
+
+/// Keeps the control-channel acknowledgement behind receiver startup. The
+/// sender must not begin until the receiving transfer owns an activity and is
+/// waiting for its peer.
+@MainActor
+enum RoomOfferAcceptanceCoordinator {
+    static func startReceiverThenAccept(
+        startReceiver: () async -> String?,
+        acceptOffer: () async -> Bool,
+        cancelReceiver: (String) -> Void
+    ) async -> RoomOfferAcceptanceResult {
+        guard let activityID = await startReceiver() else {
+            return .receiverDidNotStart
+        }
+        guard await acceptOffer() else {
+            cancelReceiver(activityID)
+            return .offerUnavailable(activityID: activityID)
+        }
+        return .accepted(activityID: activityID)
     }
 }
 
@@ -104,6 +130,13 @@ final class ConnectionWorkflowState: ObservableObject {
     private var baselineActivityIDs: Set<String> = []
     private var outgoingDecisions: [String: (Bool) -> Void] = [:]
     private var incomingRoomOfferDeadline: Date?
+    private var lifetimeRevision: UInt64?
+    private var requestedLocalTransferActive: Bool?
+    private var reportedLocalTransferActive: Bool?
+    private var localTransferSyncTask: Task<Void, Never>?
+    private var idleExpiryTask: Task<Void, Never>?
+    private var idleExpiryRevision: UInt64?
+    private var deferredControlFailure: String?
 
     init(
         gateway: RoomControlGateway? = nil,
@@ -115,6 +148,8 @@ final class ConnectionWorkflowState: ObservableObject {
 
     deinit {
         controlTask?.cancel()
+        localTransferSyncTask?.cancel()
+        idleExpiryTask?.cancel()
     }
 
     var nextPendingOffer: PendingNearbyInvitation? {
@@ -176,8 +211,6 @@ final class ConnectionWorkflowState: ObservableObject {
         guard let gateway else {
             return "Room control is unavailable in this build."
         }
-        gateway.close(reason: .userEnded)
-        endLocalState()
         do {
             let now = clock()
             let invitation = try gateway.makeInvitation(
@@ -185,6 +218,11 @@ final class ConnectionWorkflowState: ObservableObject {
                 relay: relay,
                 now: now
             )
+            // Generate the replacement before touching the active host. A
+            // refresh failure must not invalidate a room code that still
+            // works on the other device.
+            gateway.close(reason: .userEnded)
+            endLocalState()
             roomInvitation = invitation
             controlPhase = .hosting
             isRoomCreator = true
@@ -206,13 +244,14 @@ final class ConnectionWorkflowState: ObservableObject {
                 } catch where Task.isCancelled {
                     return
                 } catch {
-                    guard self.controlGeneration == generation else { return }
-                    self.failControl(error.localizedDescription)
+                    self.handleControlFailure(
+                        error.localizedDescription,
+                        generation: generation
+                    )
                 }
             }
             return nil
         } catch {
-            failControl(error.localizedDescription)
             return error.localizedDescription
         }
     }
@@ -259,8 +298,10 @@ final class ConnectionWorkflowState: ObservableObject {
                 } catch where Task.isCancelled {
                     return
                 } catch {
-                    guard self.controlGeneration == generation else { return }
-                    self.failControl(error.localizedDescription)
+                    self.handleControlFailure(
+                        error.localizedDescription,
+                        generation: generation
+                    )
                 }
             }
             return nil
@@ -298,10 +339,11 @@ final class ConnectionWorkflowState: ObservableObject {
             return
         }
         outgoingDecisions[offer.id] = onDecision
-        noteRoomActivity()
         Task { @MainActor [weak self] in
             do {
-                try await gateway.offerTransfer(offer)
+                if let lifetime = try await gateway.offerTransfer(offer) {
+                    self?.applyLifetime(lifetime)
+                }
             } catch {
                 self?.outgoingDecisions.removeValue(forKey: offer.id)?(false)
                 self?.failControl(error.localizedDescription)
@@ -316,9 +358,10 @@ final class ConnectionWorkflowState: ObservableObject {
         // and race an automatic rejection against this acceptance.
         incomingRoomOffer = nil
         incomingRoomOfferDeadline = nil
-        noteRoomActivity()
         do {
-            try await gateway.acceptOffer(id: offer.id)
+            if let lifetime = try await gateway.acceptOffer(id: offer.id) {
+                applyLifetime(lifetime)
+            }
             return offer
         } catch {
             failControl(error.localizedDescription)
@@ -330,10 +373,11 @@ final class ConnectionWorkflowState: ObservableObject {
         guard let gateway, let offer = incomingRoomOffer else { return }
         incomingRoomOffer = nil
         incomingRoomOfferDeadline = nil
-        noteRoomActivity()
         Task { @MainActor [weak self] in
             do {
-                try await gateway.rejectOffer(id: offer.id)
+                if let lifetime = try await gateway.rejectOffer(id: offer.id) {
+                    self?.applyLifetime(lifetime)
+                }
             } catch {
                 self?.failControl(error.localizedDescription)
             }
@@ -345,25 +389,21 @@ final class ConnectionWorkflowState: ObservableObject {
         let policy: RoomControlLifetimePolicy = keepOpen
             ? .untilForegroundEnds
             : .idleFifteenMinutes
-        roomLifetimePolicy = policy
-        idleDeadline = keepOpen ? nil : clock().addingTimeInterval(
-            ConnectionWorkflowPolicy.roomIdleLifetime
-        )
         Task { @MainActor [weak self] in
             do {
-                try await gateway.setLifetimePolicy(policy)
+                if let lifetime = try await gateway.setLifetimePolicy(policy) {
+                    self?.applyLifetime(lifetime)
+                }
             } catch {
                 self?.failControl(error.localizedDescription)
             }
         }
     }
 
-    func noteRoomActivity(now: Date? = nil) {
-        guard controlPhase == .connected,
-              roomLifetimePolicy == .idleFifteenMinutes else { return }
-        idleDeadline = (now ?? clock()).addingTimeInterval(
-            ConnectionWorkflowPolicy.roomIdleLifetime
-        )
+    func setLocalTransferActive(_ active: Bool) {
+        guard controlPhase == .connected, gateway != nil else { return }
+        requestedLocalTransferActive = active
+        startLocalTransferSyncIfNeeded()
     }
 
     func tick(now: Date? = nil, hasActiveTransfer: Bool) {
@@ -380,40 +420,62 @@ final class ConnectionWorkflowState: ObservableObject {
             return
         }
         guard controlPhase == .connected,
+              isRoomCreator,
               roomLifetimePolicy == .idleFifteenMinutes,
               !hasActiveTransfer,
+              localTransferSyncTask == nil,
               incomingRoomOffer == nil,
               let idleDeadline,
-              now >= idleDeadline else {
+              now >= idleDeadline,
+              let lifetimeRevision,
+              idleExpiryTask == nil else {
             return
         }
-        endControl(reason: .idleExpired)
+        attemptIdleExpiry(revision: lifetimeRevision)
     }
 
     func endControl(reason: RoomControlCloseReason) {
+        finishControl(reason: reason, notifyGateway: true)
+    }
+
+    private func finishControl(
+        reason: RoomControlCloseReason,
+        notifyGateway: Bool
+    ) {
         let keepEndedRoom = room != nil
             && reason != .userEnded
             && reason != .invitationExpired
         controlGeneration &+= 1
         controlTask?.cancel()
         controlTask = nil
+        localTransferSyncTask?.cancel()
+        localTransferSyncTask = nil
+        idleExpiryTask?.cancel()
+        idleExpiryTask = nil
+        idleExpiryRevision = nil
+        deferredControlFailure = nil
         outgoingDecisions.values.forEach { $0(false) }
         outgoingDecisions.removeAll()
         incomingRoomOffer = nil
         incomingRoomOfferDeadline = nil
         roomInvitation = nil
         idleDeadline = nil
+        lifetimeRevision = nil
+        requestedLocalTransferActive = nil
+        reportedLocalTransferActive = nil
         controlPhase = .ended(reason)
         if !keepEndedRoom {
             room = nil
         }
-        gateway?.close(reason: reason)
+        if notifyGateway {
+            gateway?.close(reason: reason)
+        }
     }
 
     private func handle(_ event: RoomControlEvent, generation: Int) {
         guard controlGeneration == generation else { return }
         switch event {
-        case .connected(let name, let creator):
+        case .connected(let name, let creator, let lifetime):
             guard controlPhase == .hosting || controlPhase == .joining else { return }
             peerDisplayName = NearbyDiscoveryPeerRegistry.sanitizeDisplayName(name)
                 ?? "Nearby device"
@@ -424,35 +486,129 @@ final class ConnectionWorkflowState: ObservableObject {
                 origin: .roomControl,
                 baselineActivityIDs: baselineActivityIDs
             )
-            noteRoomActivity()
+            applyLifetime(lifetime)
         case .incomingOffer(let offer):
             guard controlPhase == .connected, incomingRoomOffer == nil else { return }
             incomingRoomOffer = offer
             incomingRoomOfferDeadline = clock().addingTimeInterval(
                 ConnectionWorkflowPolicy.roomOfferLifetime
             )
-            noteRoomActivity()
         case .offerAccepted(let id):
             outgoingDecisions.removeValue(forKey: id)?(true)
-            noteRoomActivity()
         case .offerRejected(let id):
             outgoingDecisions.removeValue(forKey: id)?(false)
-            noteRoomActivity()
-        case .policyChanged(let policy):
-            roomLifetimePolicy = policy
-            idleDeadline = policy == .idleFifteenMinutes
-                ? clock().addingTimeInterval(ConnectionWorkflowPolicy.roomIdleLifetime)
-                : nil
+        case .lifetimeChanged(let lifetime):
+            applyLifetime(lifetime)
         case .closed(let reason):
             controlGeneration &+= 1
+            localTransferSyncTask?.cancel()
+            localTransferSyncTask = nil
+            idleExpiryTask?.cancel()
+            idleExpiryTask = nil
+            idleExpiryRevision = nil
+            deferredControlFailure = nil
             outgoingDecisions.values.forEach { $0(false) }
             outgoingDecisions.removeAll()
             incomingRoomOffer = nil
             incomingRoomOfferDeadline = nil
             roomInvitation = nil
             idleDeadline = nil
+            lifetimeRevision = nil
+            requestedLocalTransferActive = nil
+            reportedLocalTransferActive = nil
             controlPhase = .ended(reason)
         }
+    }
+
+    private func applyLifetime(_ lifetime: RoomControlLifetimeState) {
+        guard controlPhase == .connected else { return }
+        if let lifetimeRevision, lifetime.revision <= lifetimeRevision { return }
+        lifetimeRevision = lifetime.revision
+        roomLifetimePolicy = lifetime.policy
+        idleDeadline = lifetime.idleDeadline
+    }
+
+    private func startLocalTransferSyncIfNeeded() {
+        guard localTransferSyncTask == nil,
+              requestedLocalTransferActive != reportedLocalTransferActive,
+              let gateway else {
+            return
+        }
+        let generation = controlGeneration
+        localTransferSyncTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            while self.controlGeneration == generation,
+                  self.controlPhase == .connected,
+                  let requested = self.requestedLocalTransferActive,
+                  requested != self.reportedLocalTransferActive {
+                do {
+                    let lifetime = try await gateway.setLocalTransferActive(requested)
+                    guard self.controlGeneration == generation,
+                          self.controlPhase == .connected else {
+                        return
+                    }
+                    self.reportedLocalTransferActive = requested
+                    if let lifetime {
+                        self.applyLifetime(lifetime)
+                    }
+                } catch {
+                    guard self.controlGeneration == generation else { return }
+                    self.localTransferSyncTask = nil
+                    self.failControl(error.localizedDescription)
+                    return
+                }
+            }
+            self.localTransferSyncTask = nil
+        }
+    }
+
+    private func attemptIdleExpiry(revision: UInt64) {
+        guard let gateway else { return }
+        let generation = controlGeneration
+        idleExpiryRevision = revision
+        idleExpiryTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await gateway.expireIdleDeadline()
+                guard self.controlGeneration == generation,
+                      self.idleExpiryRevision == revision else {
+                    return
+                }
+                self.idleExpiryTask = nil
+                self.idleExpiryRevision = nil
+                self.deferredControlFailure = nil
+                self.finishControl(reason: .idleExpired, notifyGateway: false)
+            } catch {
+                guard self.controlGeneration == generation,
+                      self.idleExpiryRevision == revision else {
+                    return
+                }
+                // A transfer-active update may win the race after the UI's
+                // transmitted deadline expires. Rust then rejects the close;
+                // retain the channel and reduce its newer authoritative state.
+                let snapshot = gateway.lifetimeSnapshot()
+                self.idleExpiryTask = nil
+                self.idleExpiryRevision = nil
+                if let snapshot {
+                    self.applyLifetime(snapshot)
+                }
+                if let deferredControlFailure = self.deferredControlFailure {
+                    self.deferredControlFailure = nil
+                    self.failControl(deferredControlFailure)
+                }
+                // With the same revision, the next tick may retry. A newer
+                // revision carries its own deadline (or pauses it entirely).
+            }
+        }
+    }
+
+    private func handleControlFailure(_ message: String, generation: Int) {
+        guard controlGeneration == generation else { return }
+        if idleExpiryTask != nil {
+            deferredControlFailure = message
+            return
+        }
+        failControl(message)
     }
 
     private func failControl(_ message: String) {
@@ -461,12 +617,21 @@ final class ConnectionWorkflowState: ObservableObject {
         controlGeneration &+= 1
         controlTask?.cancel()
         controlTask = nil
+        localTransferSyncTask?.cancel()
+        localTransferSyncTask = nil
+        idleExpiryTask?.cancel()
+        idleExpiryTask = nil
+        idleExpiryRevision = nil
+        deferredControlFailure = nil
         outgoingDecisions.values.forEach { $0(false) }
         outgoingDecisions.removeAll()
         incomingRoomOffer = nil
         incomingRoomOfferDeadline = nil
         roomInvitation = nil
         idleDeadline = nil
+        lifetimeRevision = nil
+        requestedLocalTransferActive = nil
+        reportedLocalTransferActive = nil
         if !keepFailedRoom {
             room = nil
         }
@@ -477,6 +642,12 @@ final class ConnectionWorkflowState: ObservableObject {
         controlGeneration &+= 1
         controlTask?.cancel()
         controlTask = nil
+        localTransferSyncTask?.cancel()
+        localTransferSyncTask = nil
+        idleExpiryTask?.cancel()
+        idleExpiryTask = nil
+        idleExpiryRevision = nil
+        deferredControlFailure = nil
         room = nil
         pendingOffers.removeAll()
         incomingRoomOffer = nil
@@ -484,6 +655,9 @@ final class ConnectionWorkflowState: ObservableObject {
         roomInvitation = nil
         peerDisplayName = nil
         idleDeadline = nil
+        lifetimeRevision = nil
+        requestedLocalTransferActive = nil
+        reportedLocalTransferActive = nil
         roomLifetimePolicy = .idleFifteenMinutes
         outgoingDecisions.values.forEach { $0(false) }
         outgoingDecisions.removeAll()

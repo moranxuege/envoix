@@ -1,14 +1,18 @@
 //! Foreground, direction-neutral room control over one authenticated QUIC stream.
 //!
 //! The room carries offers and decisions only. Every accepted offer still uses
-//! a fresh legacy pairing invitation and the unchanged Manifest data plane.
+//! a fresh directional InviteV2 and the unchanged Manifest data plane.
 
 use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use envoix_error::CoreError;
-use envoix_rendezvous::Role;
-use envoix_rendezvous_iroh::{RoomPairing, drive_pairing, generate_code, join_room_with_intent};
+use envoix_invite::{
+    BootstrapKind, InvitationControlContext, InvitationSide, InviteV2, ROOM_CONTROL_LOCATOR_PREFIX,
+    TransferRole,
+};
+use envoix_rendezvous::{Join, RENDEZVOUS_PROTOCOL_VERSION, Role};
+use envoix_rendezvous_iroh::{RoomPairing, drive_pairing, generate_code, join_invitation};
 use iroh::endpoint::{Connection, RecvStream, SendStream, VarInt};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -19,12 +23,12 @@ use crate::{
     BindAddrs, BoundEndpoint, SessionConfig, SessionError, TransferCancelToken, parse_broker_addr,
 };
 
-pub const ROOM_CONTROL_ALPN: &[u8] = b"envoix-room-control/1";
-const ROOM_CONTROL_VERSION: u16 = 1;
+pub const ROOM_CONTROL_ALPN: &[u8] = b"envoix-room-control/3";
+const ROOM_CONTROL_VERSION: u16 = 3;
 const ROOM_CODE_PREFIX: char = 'R';
 const ROOM_URI_PREFIX: &str = "envoix://room/";
-const ROOM_BROKER_NAMESPACE: &str = "control-v1:";
 const ROOM_INVITE_TTL: Duration = Duration::from_secs(300);
+const ROOM_IDLE_TIMEOUT_MS: u64 = 15 * 60 * 1_000;
 const PAIRING_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(8);
 const CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const CONTROL_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -157,7 +161,7 @@ impl RoomControlInvite {
             .strip_prefix(ROOM_CODE_PREFIX)
             .and_then(|code| code.split('-').next())
             .expect("validated room code");
-        format!("{ROOM_BROKER_NAMESPACE}{nameplate}")
+        format!("{ROOM_CONTROL_LOCATOR_PREFIX}{nameplate}")
     }
 
     fn ensure_fresh(&self) -> Result<(), SessionError> {
@@ -175,6 +179,39 @@ impl RoomControlInvite {
 pub enum RoomLifetimePolicy {
     Idle15Minutes,
     UntilForegroundEnds,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RoomLifetimeState {
+    pub revision: u64,
+    pub policy: RoomLifetimePolicy,
+    pub idle_deadline_unix_ms: Option<u64>,
+}
+
+impl RoomLifetimeState {
+    fn initial(now_unix_ms: u64) -> Self {
+        Self {
+            revision: 1,
+            policy: RoomLifetimePolicy::Idle15Minutes,
+            idle_deadline_unix_ms: Some(now_unix_ms.saturating_add(ROOM_IDLE_TIMEOUT_MS)),
+        }
+    }
+
+    fn validate(&self) -> Result<(), SessionError> {
+        if self.revision == 0 {
+            return Err(CoreError::Protocol(
+                "room lifetime revision must be positive".into(),
+            ));
+        }
+        if self.policy == RoomLifetimePolicy::UntilForegroundEnds
+            && self.idle_deadline_unix_ms.is_some()
+        {
+            return Err(CoreError::Protocol(
+                "foreground room lifetime cannot have an idle deadline".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -220,17 +257,21 @@ impl RoomTransferOffer {
                 "room offer id must be 1-128 ASCII letters, digits, '-' or '_'".into(),
             ));
         }
-        if self.transfer_invite.len() > MAX_TRANSFER_INVITE_BYTES
-            || !self.transfer_invite.starts_with("envoix://pair/")
-            || !self
-                .transfer_invite
-                .split_once('?')
-                .is_some_and(|(_, query)| query.split('&').any(|part| part == "role=send"))
-        {
+        if self.transfer_invite.len() > MAX_TRANSFER_INVITE_BYTES {
             return Err(CoreError::InvalidInput(
                 "room offer needs a bounded directional sender invitation".into(),
             ));
         }
+        InviteV2::parse_for_role(
+            &self.transfer_invite,
+            TransferRole::Receiver,
+            now_unix_secs()?,
+        )
+        .map_err(|error| {
+            CoreError::InvalidInput(format!(
+                "room offer needs a valid directional InviteV2: {error}"
+            ))
+        })?;
         if self.root_names.len() > MAX_ROOT_PREVIEWS {
             return Err(CoreError::InvalidInput(
                 "room offer has more than three root previews".into(),
@@ -263,7 +304,7 @@ pub enum RoomControlEvent {
         offer_id: String,
         reason: RoomOfferRejection,
     },
-    PolicyChanged(RoomLifetimePolicy),
+    LifetimeChanged(RoomLifetimeState),
     PeerClosed(RoomCloseReason),
     Pong {
         nonce: u64,
@@ -276,7 +317,8 @@ enum ControlMessage {
         protocol_version: u16,
         display_name: String,
         creator: bool,
-        pairing_binding: String,
+        pairing_binding: Vec<u8>,
+        lifetime: Option<RoomLifetimeState>,
     },
     TransferOffer(RoomTransferOffer),
     OfferAccepted {
@@ -286,7 +328,11 @@ enum ControlMessage {
         offer_id: String,
         reason: RoomOfferRejection,
     },
-    PolicyChanged(RoomLifetimePolicy),
+    LifetimeChanged(RoomLifetimeState),
+    Activity,
+    TransferActive {
+        active: bool,
+    },
     Close(RoomCloseReason),
     Ping {
         nonce: u64,
@@ -317,12 +363,129 @@ impl OfferState {
     }
 }
 
+struct RoomLifetimeMachine {
+    state: RoomLifetimeState,
+    local_transfer_active: bool,
+    peer_transfer_active: bool,
+}
+
+impl RoomLifetimeMachine {
+    fn new(state: RoomLifetimeState) -> Self {
+        Self {
+            state,
+            local_transfer_active: false,
+            peer_transfer_active: false,
+        }
+    }
+
+    fn note_activity(
+        &mut self,
+        now_unix_ms: u64,
+    ) -> Result<Option<RoomLifetimeState>, SessionError> {
+        if self.state.policy != RoomLifetimePolicy::Idle15Minutes || self.any_transfer_active() {
+            return Ok(None);
+        }
+        self.advance(Some(now_unix_ms.saturating_add(ROOM_IDLE_TIMEOUT_MS)))
+            .map(Some)
+    }
+
+    fn set_local_transfer_active(
+        &mut self,
+        active: bool,
+        now_unix_ms: u64,
+    ) -> Result<Option<RoomLifetimeState>, SessionError> {
+        if self.local_transfer_active == active {
+            return Ok(None);
+        }
+        let was_active = self.any_transfer_active();
+        self.local_transfer_active = active;
+        self.apply_transfer_edge(was_active, now_unix_ms)
+    }
+
+    fn set_peer_transfer_active(
+        &mut self,
+        active: bool,
+        now_unix_ms: u64,
+    ) -> Result<Option<RoomLifetimeState>, SessionError> {
+        if self.peer_transfer_active == active {
+            return Ok(None);
+        }
+        let was_active = self.any_transfer_active();
+        self.peer_transfer_active = active;
+        self.apply_transfer_edge(was_active, now_unix_ms)
+    }
+
+    fn set_policy(
+        &mut self,
+        policy: RoomLifetimePolicy,
+        now_unix_ms: u64,
+    ) -> Result<Option<RoomLifetimeState>, SessionError> {
+        if self.state.policy == policy {
+            return Ok(None);
+        }
+        self.state.policy = policy;
+        let deadline = match policy {
+            RoomLifetimePolicy::Idle15Minutes if !self.any_transfer_active() => {
+                Some(now_unix_ms.saturating_add(ROOM_IDLE_TIMEOUT_MS))
+            }
+            RoomLifetimePolicy::Idle15Minutes | RoomLifetimePolicy::UntilForegroundEnds => None,
+        };
+        self.advance(deadline).map(Some)
+    }
+
+    fn apply_authoritative(
+        &mut self,
+        state: RoomLifetimeState,
+    ) -> Result<RoomLifetimeState, SessionError> {
+        state.validate()?;
+        if state.revision <= self.state.revision {
+            return Err(CoreError::Protocol(
+                "room lifetime revision did not advance".into(),
+            ));
+        }
+        self.state = state.clone();
+        Ok(state)
+    }
+
+    fn apply_transfer_edge(
+        &mut self,
+        was_active: bool,
+        now_unix_ms: u64,
+    ) -> Result<Option<RoomLifetimeState>, SessionError> {
+        let is_active = self.any_transfer_active();
+        if was_active == is_active || self.state.policy != RoomLifetimePolicy::Idle15Minutes {
+            return Ok(None);
+        }
+        let deadline = (!is_active).then(|| now_unix_ms.saturating_add(ROOM_IDLE_TIMEOUT_MS));
+        self.advance(deadline).map(Some)
+    }
+
+    fn any_transfer_active(&self) -> bool {
+        self.local_transfer_active || self.peer_transfer_active
+    }
+
+    fn advance(
+        &mut self,
+        idle_deadline_unix_ms: Option<u64>,
+    ) -> Result<RoomLifetimeState, SessionError> {
+        self.state.revision = self
+            .state
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| CoreError::Protocol("room lifetime revision exhausted".into()))?;
+        self.state.idle_deadline_unix_ms = idle_deadline_unix_ms;
+        Ok(self.state.clone())
+    }
+}
+
 pub struct RoomControlSession {
     _endpoint: iroh::Endpoint,
     connection: Connection,
     send: Mutex<SendStream>,
     recv: Mutex<RecvStream>,
     offers: std::sync::Mutex<OfferState>,
+    lifetime_updates: Mutex<()>,
+    lifetime: std::sync::Mutex<RoomLifetimeMachine>,
     peer_name: String,
     creator: bool,
 }
@@ -336,7 +499,18 @@ impl RoomControlSession {
         self.creator
     }
 
-    pub async fn offer_transfer(&self, offer: RoomTransferOffer) -> Result<(), SessionError> {
+    pub fn lifetime_state(&self) -> RoomLifetimeState {
+        self.lifetime
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state
+            .clone()
+    }
+
+    pub async fn offer_transfer(
+        &self,
+        offer: RoomTransferOffer,
+    ) -> Result<Option<RoomLifetimeState>, SessionError> {
         offer.validate()?;
         {
             let mut state = self
@@ -356,43 +530,101 @@ impl RoomControlSession {
             state.pending_local = Some(offer.offer_id.clone());
             state.remember(offer.offer_id.clone());
         }
+        let lifetime = match self.note_activity().await {
+            Ok(lifetime) => lifetime,
+            Err(error) => {
+                if let Ok(mut state) = self.offers.lock() {
+                    state.pending_local = None;
+                }
+                return Err(error);
+            }
+        };
         if let Err(error) = self.send(ControlMessage::TransferOffer(offer)).await {
             if let Ok(mut state) = self.offers.lock() {
                 state.pending_local = None;
             }
             return Err(error);
         }
-        Ok(())
+        Ok(lifetime)
     }
 
-    pub async fn accept_offer(&self, offer_id: &str) -> Result<(), SessionError> {
+    pub async fn accept_offer(
+        &self,
+        offer_id: &str,
+    ) -> Result<Option<RoomLifetimeState>, SessionError> {
         self.resolve_remote_offer(offer_id)?;
+        let lifetime = self.note_activity().await?;
         self.send_offer_response(ControlMessage::OfferAccepted {
             offer_id: offer_id.to_string(),
         })
-        .await
+        .await?;
+        Ok(lifetime)
     }
 
     pub async fn reject_offer(
         &self,
         offer_id: &str,
         reason: RoomOfferRejection,
-    ) -> Result<(), SessionError> {
+    ) -> Result<Option<RoomLifetimeState>, SessionError> {
         self.resolve_remote_offer(offer_id)?;
+        let lifetime = self.note_activity().await?;
         self.send_offer_response(ControlMessage::OfferRejected {
             offer_id: offer_id.to_string(),
             reason,
         })
-        .await
+        .await?;
+        Ok(lifetime)
     }
 
-    pub async fn set_policy(&self, policy: RoomLifetimePolicy) -> Result<(), SessionError> {
+    pub async fn set_policy(
+        &self,
+        policy: RoomLifetimePolicy,
+    ) -> Result<Option<RoomLifetimeState>, SessionError> {
         if !self.creator {
             return Err(CoreError::InvalidInput(
                 "only the room creator can change its lifetime".into(),
             ));
         }
-        self.send(ControlMessage::PolicyChanged(policy)).await
+        self.update_creator_lifetime(|lifetime, now| lifetime.set_policy(policy, now))
+            .await
+    }
+
+    pub async fn set_local_transfer_active(
+        &self,
+        active: bool,
+    ) -> Result<Option<RoomLifetimeState>, SessionError> {
+        if self.creator {
+            return self
+                .update_creator_lifetime(|lifetime, now| {
+                    lifetime.set_local_transfer_active(active, now)
+                })
+                .await;
+        }
+
+        let _update = self.lifetime_updates.lock().await;
+        let changed = {
+            let mut lifetime = self.lock_lifetime()?;
+            if lifetime.local_transfer_active == active {
+                false
+            } else {
+                lifetime.local_transfer_active = active;
+                true
+            }
+        };
+        if changed {
+            self.send(ControlMessage::TransferActive { active }).await?;
+        }
+        Ok(None)
+    }
+
+    pub async fn note_activity(&self) -> Result<Option<RoomLifetimeState>, SessionError> {
+        if self.creator {
+            return self
+                .update_creator_lifetime(RoomLifetimeMachine::note_activity)
+                .await;
+        }
+        self.send(ControlMessage::Activity).await?;
+        Ok(None)
     }
 
     pub async fn ping(&self, nonce: u64) -> Result<(), SessionError> {
@@ -400,6 +632,31 @@ impl RoomControlSession {
     }
 
     pub async fn close(&self, reason: RoomCloseReason) -> Result<(), SessionError> {
+        let _lifetime_update = if reason == RoomCloseReason::IdleExpired {
+            if !self.creator {
+                return Err(CoreError::InvalidInput(
+                    "only the room creator can expire its idle deadline".into(),
+                ));
+            }
+            let update = self.lifetime_updates.lock().await;
+            let now = now_unix_millis()?;
+            let lifetime = self.lock_lifetime()?;
+            let expired = lifetime.state.policy == RoomLifetimePolicy::Idle15Minutes
+                && !lifetime.any_transfer_active()
+                && lifetime
+                    .state
+                    .idle_deadline_unix_ms
+                    .is_some_and(|deadline| now >= deadline);
+            if !expired {
+                return Err(CoreError::InvalidInput(
+                    "room idle deadline has not expired".into(),
+                ));
+            }
+            drop(lifetime);
+            Some(update)
+        } else {
+            None
+        };
         let mut send = self.send.lock().await;
         let result = write_control_message(&mut *send, &ControlMessage::Close(reason)).await;
         if result.is_ok() {
@@ -459,15 +716,49 @@ impl RoomControlSession {
                     self.resolve_local_offer(&offer_id)?;
                     return Ok(RoomControlEvent::OfferRejected { offer_id, reason });
                 }
-                ControlMessage::PolicyChanged(policy) => {
+                ControlMessage::LifetimeChanged(state) => {
                     if self.creator {
                         return Err(CoreError::Protocol(
-                            "the room joiner cannot change its lifetime".into(),
+                            "the room joiner cannot publish lifetime state".into(),
                         ));
                     }
-                    return Ok(RoomControlEvent::PolicyChanged(policy));
+                    let state = self.apply_authoritative_lifetime(state).await?;
+                    return Ok(RoomControlEvent::LifetimeChanged(state));
+                }
+                ControlMessage::Activity => {
+                    if !self.creator {
+                        return Err(CoreError::Protocol(
+                            "the room creator cannot send an activity hint".into(),
+                        ));
+                    }
+                    if let Some(state) = self
+                        .update_creator_lifetime(RoomLifetimeMachine::note_activity)
+                        .await?
+                    {
+                        return Ok(RoomControlEvent::LifetimeChanged(state));
+                    }
+                }
+                ControlMessage::TransferActive { active } => {
+                    if !self.creator {
+                        return Err(CoreError::Protocol(
+                            "the room creator cannot send a transfer activity hint".into(),
+                        ));
+                    }
+                    if let Some(state) = self
+                        .update_creator_lifetime(|lifetime, now| {
+                            lifetime.set_peer_transfer_active(active, now)
+                        })
+                        .await?
+                    {
+                        return Ok(RoomControlEvent::LifetimeChanged(state));
+                    }
                 }
                 ControlMessage::Close(reason) => {
+                    if self.creator && reason == RoomCloseReason::IdleExpired {
+                        return Err(CoreError::Protocol(
+                            "the room joiner cannot expire the idle deadline".into(),
+                        ));
+                    }
                     self.connection
                         .close(VarInt::from_u32(0), b"peer closed room");
                     return Ok(RoomControlEvent::PeerClosed(reason));
@@ -508,6 +799,42 @@ impl RoomControlSession {
         }
         state.pending_local = None;
         Ok(())
+    }
+
+    fn lock_lifetime(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, RoomLifetimeMachine>, SessionError> {
+        self.lifetime
+            .lock()
+            .map_err(|_| CoreError::Transport("room lifetime state unavailable".into()))
+    }
+
+    async fn update_creator_lifetime(
+        &self,
+        transition: impl FnOnce(
+            &mut RoomLifetimeMachine,
+            u64,
+        ) -> Result<Option<RoomLifetimeState>, SessionError>,
+    ) -> Result<Option<RoomLifetimeState>, SessionError> {
+        debug_assert!(self.creator);
+        let _update = self.lifetime_updates.lock().await;
+        let state = {
+            let mut lifetime = self.lock_lifetime()?;
+            transition(&mut lifetime, now_unix_millis()?)?
+        };
+        if let Some(state) = &state {
+            self.send(ControlMessage::LifetimeChanged(state.clone()))
+                .await?;
+        }
+        Ok(state)
+    }
+
+    async fn apply_authoritative_lifetime(
+        &self,
+        state: RoomLifetimeState,
+    ) -> Result<RoomLifetimeState, SessionError> {
+        let _update = self.lifetime_updates.lock().await;
+        self.lock_lifetime()?.apply_authoritative(state)
     }
 
     async fn send(&self, message: ControlMessage) -> Result<(), SessionError> {
@@ -580,17 +907,25 @@ pub async fn connect_room_control(
         broker,
         &invite.room_id(),
         invite.code(),
+        creator,
         &my_addr,
         cancel,
     )
     .await?;
+    let pairing_binding = pairing.control_transcript_hash.as_bytes().to_vec();
     let (connection, mut send, mut recv) =
         establish_control_connection(&bound.local_endpoint, role, pairing.peer, cancel).await?;
+    let local_lifetime = if creator {
+        Some(RoomLifetimeState::initial(now_unix_millis()?))
+    } else {
+        None
+    };
     let hello = ControlMessage::Hello {
         protocol_version: ROOM_CONTROL_VERSION,
         display_name,
         creator,
-        pairing_binding: pairing.token.clone(),
+        pairing_binding: pairing_binding.clone(),
+        lifetime: local_lifetime.clone(),
     };
     let peer_hello = run_control_phase(
         async {
@@ -602,15 +937,16 @@ pub async fn connect_room_control(
         "room control hello",
     )
     .await?;
-    let (peer_name, peer_creator, peer_binding) = match peer_hello {
+    let (peer_name, peer_creator, peer_binding, peer_lifetime) = match peer_hello {
         ControlMessage::Hello {
             protocol_version,
             display_name,
             creator,
             pairing_binding,
+            lifetime,
         } if protocol_version == ROOM_CONTROL_VERSION => {
             validate_display_name(&display_name)?;
-            (display_name, creator, pairing_binding)
+            (display_name, creator, pairing_binding, lifetime)
         }
         ControlMessage::Hello {
             protocol_version, ..
@@ -630,17 +966,31 @@ pub async fn connect_room_control(
             "room control needs exactly one creator".into(),
         ));
     }
-    if peer_binding != pairing.token {
+    if peer_binding != pairing_binding {
         return Err(CoreError::Crypto(
             "room control channel is not bound to its pairing".into(),
         ));
     }
+    let lifetime = match (creator, local_lifetime, peer_lifetime) {
+        (true, Some(state), None) => state,
+        (false, None, Some(state)) => {
+            validate_initial_lifetime(&state)?;
+            state
+        }
+        _ => {
+            return Err(CoreError::Protocol(
+                "only the room creator can establish its lifetime".into(),
+            ));
+        }
+    };
     Ok(RoomControlSession {
         _endpoint: bound.local_endpoint,
         connection,
         send: Mutex::new(send),
         recv: Mutex::new(recv),
         offers: std::sync::Mutex::new(OfferState::default()),
+        lifetime_updates: Mutex::new(()),
+        lifetime: std::sync::Mutex::new(RoomLifetimeMachine::new(lifetime)),
         peer_name,
         creator,
     })
@@ -651,14 +1001,39 @@ async fn pair_control(
     broker: iroh::EndpointAddr,
     room_id: &str,
     password: &str,
+    creator: bool,
     my_addr: &iroh::EndpointAddr,
     cancel: &TransferCancelToken,
 ) -> Result<(Role, RoomPairing<iroh::EndpointAddr>), SessionError> {
     const ATTEMPTS: usize = 4;
+    let invitation_side = if creator {
+        InvitationSide::Creator
+    } else {
+        InvitationSide::Joiner
+    };
+    let transfer_role = if creator {
+        TransferRole::Receiver
+    } else {
+        TransferRole::Sender
+    };
+    let bootstrap_methods = creator
+        .then_some(vec![BootstrapKind::RoomCode])
+        .unwrap_or_default();
+    let selected_bootstrap_method = (!creator).then_some(BootstrapKind::RoomCode);
+    let context = InvitationControlContext::room_control(room_id.to_string())
+        .map_err(|error| CoreError::InvalidInput(error.to_string()))?;
     let mut last = None;
     for _ in 0..ATTEMPTS {
+        let join = Join {
+            version: RENDEZVOUS_PROTOCOL_VERSION,
+            room_id: room_id.to_string(),
+            invitation_side,
+            transfer_role,
+            bootstrap_methods: bootstrap_methods.clone(),
+            selected_bootstrap_method,
+        };
         let session = tokio::select! {
-            result = join_room_with_intent(endpoint, broker.clone(), room_id, None) => {
+            result = join_invitation(endpoint, broker.clone(), join) => {
                 result.map_err(|error| CoreError::Transport(error.to_string()))?
             }
             _ = cancel.cancelled() => return Err(CoreError::Cancelled),
@@ -667,7 +1042,7 @@ async fn pair_control(
         let pairing = tokio::select! {
             result = tokio::time::timeout(
                 PAIRING_EXCHANGE_TIMEOUT,
-                drive_pairing(session, password, my_addr),
+                drive_pairing(session, password, &context, my_addr, None),
             ) => result,
             _ = cancel.cancelled() => return Err(CoreError::Cancelled),
         };
@@ -865,6 +1240,26 @@ fn validate_display_name(name: &str) -> Result<(), SessionError> {
         ));
     }
     Ok(())
+}
+
+fn validate_initial_lifetime(state: &RoomLifetimeState) -> Result<(), SessionError> {
+    state.validate()?;
+    if state.revision != 1
+        || state.policy != RoomLifetimePolicy::Idle15Minutes
+        || state.idle_deadline_unix_ms.is_none()
+    {
+        return Err(CoreError::Protocol(
+            "room creator sent an invalid initial lifetime".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn now_unix_millis() -> Result<u64, SessionError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+        .map_err(|_| CoreError::InvalidInput("system clock precedes Unix epoch".into()))
 }
 
 fn now_unix_secs() -> Result<u64, SessionError> {

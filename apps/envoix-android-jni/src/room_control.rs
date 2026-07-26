@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use envoix_client::api::{
     Client, IdentityConfig, RoomCloseReason, RoomControlEvent, RoomControlInvite,
-    RoomControlSession, RoomLifetimePolicy, RoomOfferRejection, RoomTransferOffer,
-    TransferCancelToken, TransferOptions, connect_room_control,
+    RoomControlSession, RoomLifetimePolicy, RoomLifetimeState, RoomOfferRejection,
+    RoomTransferOffer, TransferCancelToken, TransferOptions, connect_room_control,
 };
 use envoix_error::CoreError;
 use jni::JNIEnv;
@@ -65,6 +65,9 @@ enum RoomCommand {
     },
     Policy {
         policy: String,
+    },
+    TransferActive {
+        active: bool,
     },
     Close {
         reason: String,
@@ -201,6 +204,7 @@ pub extern "system" fn Java_dev_envoix_app_Native_startRoomControlSession(
             id,
             session.clone(),
             command_receiver,
+            accepting_commands.clone(),
             closing.clone(),
             vm.clone(),
             callback.clone(),
@@ -213,7 +217,7 @@ pub extern "system" fn Java_dev_envoix_app_Native_startRoomControlSession(
                 "state":"connected",
                 "peer_name":session.peer_name(),
                 "creator":session.is_creator(),
-                "policy":"idle_15_minutes",
+                "lifetime":lifetime_json(&session.lifetime_state()),
             })
             .to_string(),
         );
@@ -308,6 +312,7 @@ async fn run_command_fifo(
     id: i64,
     session: Arc<RoomControlSession>,
     mut commands: mpsc::UnboundedReceiver<RoomCommand>,
+    accepting_commands: Arc<AtomicBool>,
     closing: Arc<AtomicBool>,
     vm: Arc<jni::JavaVM>,
     callback: Arc<GlobalRef>,
@@ -325,20 +330,44 @@ async fn run_command_fifo(
         }
         let result = execute_command(&session, &command).await;
         if let Some(reason) = requested_close {
-            if let Err(error) = result {
-                tracing::debug!(%error, "room control peer close notification failed");
+            match settle_close_result(result, &accepting_commands, &closing) {
+                CloseSettlement::Closed => {
+                    emit(vm.as_ref(), callback.as_ref(), &closed_event(reason));
+                    remove_room_if(id, &closing);
+                    break;
+                }
+                CloseSettlement::Rejected(error) => {
+                    emit(
+                        vm.as_ref(),
+                        callback.as_ref(),
+                        &command_failed_event(&command, error),
+                    );
+                    continue;
+                }
+                CloseSettlement::Failed(error) => {
+                    emit(vm.as_ref(), callback.as_ref(), &failed_event(error));
+                    remove_room_if(id, &closing);
+                    break;
+                }
             }
-            emit(vm.as_ref(), callback.as_ref(), &closed_event(reason));
-            remove_room_if(id, &closing);
-            break;
         }
-        if let Err(error) = result {
+        let lifetime = match result {
+            Ok(lifetime) => lifetime,
+            Err(error) => {
+                emit(
+                    vm.as_ref(),
+                    callback.as_ref(),
+                    &command_failed_event(&command, error),
+                );
+                continue;
+            }
+        };
+        if let Some(lifetime) = lifetime {
             emit(
                 vm.as_ref(),
                 callback.as_ref(),
-                &command_failed_event(&command, error),
+                &lifetime_changed_event(&lifetime),
             );
-            continue;
         }
         match command {
             RoomCommand::Respond { offer_id, accept } => {
@@ -348,21 +377,32 @@ async fn run_command_fifo(
                     &offer_response_sent_event(&offer_id, accept),
                 );
             }
-            RoomCommand::Policy { policy } => {
-                emit(
-                    vm.as_ref(),
-                    callback.as_ref(),
-                    &json!({
-                        "notice":"room_control",
-                        "state":"policy_changed",
-                        "policy":policy,
-                    })
-                    .to_string(),
-                );
-            }
+            RoomCommand::Policy { .. } | RoomCommand::TransferActive { .. } => {}
             RoomCommand::Close { .. } => unreachable!("valid closes return above"),
             _ => {}
         }
+    }
+}
+
+enum CloseSettlement {
+    Closed,
+    Rejected(CoreError),
+    Failed(CoreError),
+}
+
+fn settle_close_result(
+    result: Result<Option<RoomLifetimeState>, CoreError>,
+    accepting_commands: &AtomicBool,
+    closing: &AtomicBool,
+) -> CloseSettlement {
+    match result {
+        Ok(_) => CloseSettlement::Closed,
+        Err(error @ CoreError::InvalidInput(_)) => {
+            closing.store(false, Ordering::Release);
+            accepting_commands.store(true, Ordering::Release);
+            CloseSettlement::Rejected(error)
+        }
+        Err(error) => CloseSettlement::Failed(error),
     }
 }
 
@@ -414,7 +454,7 @@ async fn connect_from_params(
 async fn execute_command(
     session: &RoomControlSession,
     command: &RoomCommand,
-) -> Result<(), CoreError> {
+) -> Result<Option<RoomLifetimeState>, CoreError> {
     match command {
         RoomCommand::Offer {
             offer_id,
@@ -442,8 +482,15 @@ async fn execute_command(
                 .await
         }
         RoomCommand::Policy { policy } => session.set_policy(parse_policy(policy)?).await,
-        RoomCommand::Close { reason } => session.close(parse_close_reason(reason)?).await,
-        RoomCommand::Ping { nonce } => session.ping(*nonce).await,
+        RoomCommand::TransferActive { active } => session.set_local_transfer_active(*active).await,
+        RoomCommand::Close { reason } => {
+            session.close(parse_close_reason(reason)?).await?;
+            Ok(None)
+        }
+        RoomCommand::Ping { nonce } => {
+            session.ping(*nonce).await?;
+            Ok(None)
+        }
     }
 }
 
@@ -481,10 +528,10 @@ fn event_json(event: RoomControlEvent) -> Value {
             "offer_id":offer_id,
             "reason":rejection_wire(reason),
         }),
-        RoomControlEvent::PolicyChanged(policy) => json!({
+        RoomControlEvent::LifetimeChanged(lifetime) => json!({
             "notice":"room_control",
-            "state":"policy_changed",
-            "policy":policy_wire(policy),
+            "state":"lifetime_changed",
+            "lifetime":lifetime_json(&lifetime),
         }),
         RoomControlEvent::PeerClosed(reason) => json!({
             "notice":"room_control",
@@ -513,6 +560,7 @@ fn command_failed_event(command: &RoomCommand, error: impl std::fmt::Display) ->
         RoomCommand::Offer { offer_id, .. } => ("offer", Some(offer_id.as_str())),
         RoomCommand::Respond { offer_id, .. } => ("respond", Some(offer_id.as_str())),
         RoomCommand::Policy { .. } => ("policy", None),
+        RoomCommand::TransferActive { .. } => ("transfer_active", None),
         RoomCommand::Close { .. } => ("close", None),
         RoomCommand::Ping { .. } => ("ping", None),
     };
@@ -524,6 +572,23 @@ fn command_failed_event(command: &RoomCommand, error: impl std::fmt::Display) ->
         "message":error.to_string(),
     })
     .to_string()
+}
+
+fn lifetime_changed_event(lifetime: &RoomLifetimeState) -> String {
+    json!({
+        "notice":"room_control",
+        "state":"lifetime_changed",
+        "lifetime":lifetime_json(lifetime),
+    })
+    .to_string()
+}
+
+fn lifetime_json(lifetime: &RoomLifetimeState) -> Value {
+    json!({
+        "revision":lifetime.revision,
+        "policy":policy_wire(lifetime.policy),
+        "idle_deadline_epoch_ms":lifetime.idle_deadline_unix_ms,
+    })
 }
 
 fn offer_response_sent_event(offer_id: &str, accepted: bool) -> String {
@@ -648,6 +713,107 @@ mod tests {
             command,
             RoomCommand::Offer { offer_id, .. } if offer_id == "opaque_7"
         ));
+    }
+
+    #[test]
+    fn transfer_activity_command_is_boolean_only() {
+        let command: RoomCommand =
+            serde_json::from_str(r#"{"command":"transfer_active","active":true}"#).unwrap();
+        assert!(matches!(
+            command,
+            RoomCommand::TransferActive { active: true }
+        ));
+    }
+
+    #[test]
+    fn lifetime_json_is_exact_and_contains_no_manifest_data() {
+        let lifetime = RoomLifetimeState {
+            revision: 9,
+            policy: RoomLifetimePolicy::Idle15Minutes,
+            idle_deadline_unix_ms: Some(987_654),
+        };
+        let event: Value = serde_json::from_str(&lifetime_changed_event(&lifetime)).unwrap();
+        assert_eq!(event["state"], "lifetime_changed");
+        assert_eq!(event["lifetime"]["revision"], 9);
+        assert_eq!(event["lifetime"]["policy"], "idle_15_minutes");
+        assert_eq!(event["lifetime"]["idle_deadline_epoch_ms"], 987_654);
+        assert!(event.get("offer").is_none());
+        assert!(event.get("manifest").is_none());
+
+        let paused: Value = serde_json::from_str(&lifetime_changed_event(&RoomLifetimeState {
+            revision: 10,
+            policy: RoomLifetimePolicy::Idle15Minutes,
+            idle_deadline_unix_ms: None,
+        }))
+        .unwrap();
+        assert!(paused["lifetime"]["idle_deadline_epoch_ms"].is_null());
+    }
+
+    #[test]
+    fn rejected_close_reopens_the_fifo_and_stays_command_correlated() {
+        let accepting_commands = Arc::new(AtomicBool::new(false));
+        let closing = Arc::new(AtomicBool::new(true));
+        let command = RoomCommand::Close {
+            reason: "idle_expired".into(),
+        };
+        let settlement = settle_close_result(
+            Err(CoreError::InvalidInput(
+                "room idle deadline has not expired".into(),
+            )),
+            &accepting_commands,
+            &closing,
+        );
+
+        let error = match settlement {
+            CloseSettlement::Rejected(error) => error,
+            _ => panic!("validation rejection must remain non-terminal"),
+        };
+        assert!(accepting_commands.load(Ordering::Acquire));
+        assert!(!closing.load(Ordering::Acquire));
+        let failure: Value = serde_json::from_str(&command_failed_event(&command, error)).unwrap();
+        assert_eq!(failure["state"], "command_failed");
+        assert_eq!(failure["command"], "close");
+
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let entry = ActiveRoom {
+            cancel: TransferCancelToken::new(),
+            session: None,
+            commands: Some(sender),
+            accepting_commands,
+            closing,
+        };
+        enqueue_room_command(
+            &entry,
+            RoomCommand::Policy {
+                policy: "idle_15_minutes".into(),
+            },
+        )
+        .expect("later command remains admissible");
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            RoomCommand::Policy { .. }
+        ));
+    }
+
+    #[test]
+    fn transport_close_failure_remains_terminal() {
+        let accepting_commands = AtomicBool::new(false);
+        let closing = AtomicBool::new(true);
+        let settlement = settle_close_result(
+            Err(CoreError::Transport("connection lost".into())),
+            &accepting_commands,
+            &closing,
+        );
+
+        let error = match settlement {
+            CloseSettlement::Failed(error) => error,
+            _ => panic!("transport close failure must remain terminal"),
+        };
+        assert!(!accepting_commands.load(Ordering::Acquire));
+        assert!(closing.load(Ordering::Acquire));
+        let failed: Value = serde_json::from_str(&failed_event(error)).unwrap();
+        assert_eq!(failed["state"], "failed");
+        assert_eq!(failed["message"], "transport error: connection lost");
     }
 
     #[test]

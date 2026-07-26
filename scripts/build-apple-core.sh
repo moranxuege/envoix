@@ -15,9 +15,9 @@ generated_package_copies=(
 )
 
 case "$core_target" in
-  ""|aarch64-apple-darwin|aarch64-apple-ios-sim) ;;
+  ""|aarch64-apple-darwin|aarch64-apple-ios|aarch64-apple-ios-sim) ;;
   *)
-    echo "error: ENVOIX_APPLE_CORE_TARGET must be empty, aarch64-apple-darwin, or aarch64-apple-ios-sim" >&2
+    echo "error: ENVOIX_APPLE_CORE_TARGET must be empty, aarch64-apple-darwin, aarch64-apple-ios, or aarch64-apple-ios-sim" >&2
     exit 2
     ;;
 esac
@@ -166,6 +166,10 @@ validate_apple_package_minimum_versions() {
     validate_single_apple_library 13.0
     return
   fi
+  if [[ "$core_target" == "aarch64-apple-ios" ]]; then
+    validate_target_apple_library ios-arm64 16.0
+    return
+  fi
   if [[ "$core_target" == "aarch64-apple-ios-sim" ]]; then
     validate_single_apple_library 16.0
     return
@@ -192,6 +196,22 @@ validate_single_apple_library() {
     return 1
   fi
   validate_library_minimum_versions "${libraries[0]}" "$maximum"
+}
+
+validate_target_apple_library() {
+  local slice="$1"
+  local maximum="$2"
+  local expected="$package_dir/envoix_ffiFFI.xcframework/$slice/libenvoix_ffi.a"
+  local -a libraries=()
+  local library
+  while IFS= read -r library; do
+    libraries+=("$library")
+  done < <(find "$package_dir/envoix_ffiFFI.xcframework" -type f -name 'libenvoix_ffi.a' -print)
+  if [[ "${#libraries[@]}" -ne 1 || "${libraries[0]}" != "$expected" ]]; then
+    echo "error: expected only $expected for $core_target" >&2
+    return 1
+  fi
+  validate_library_minimum_versions "$expected" "$maximum"
 }
 
 clean_blake3_apple_targets() {

@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -307,26 +308,29 @@ internal fun MainRoomInviteCard(
 @Composable
 private fun BlurredQrPlaceholder() {
     val colors = Envoix.colors
-    Canvas(
+    Box(
         Modifier
             .size(190.dp)
-            .clip(RoundedCornerShape(18.dp))
-            .background(colors.bg),
+            .clip(RoundedCornerShape(14.dp))
+            .background(Color.White)
+            .padding(10.dp),
     ) {
-        val cells = 23
-        val cell = size.width / cells
-        for (row in 0 until cells) {
-            for (column in 0 until cells) {
-                if ((row * 31 + column * 17 + row * column) % 5 < 2) {
-                    drawRect(
-                        color = colors.muted.copy(alpha = 0.22f),
-                        topLeft = Offset(column * cell, row * cell),
-                        size = Size(cell * 1.5f, cell * 1.5f),
-                    )
+        Canvas(Modifier.fillMaxSize()) {
+            val cells = 23
+            val cell = size.width / cells
+            for (row in 0 until cells) {
+                for (column in 0 until cells) {
+                    if ((row * 31 + column * 17 + row * column) % 5 < 2) {
+                        drawRect(
+                            color = colors.muted.copy(alpha = 0.22f),
+                            topLeft = Offset(column * cell, row * cell),
+                            size = Size(cell * 1.5f, cell * 1.5f),
+                        )
+                    }
                 }
             }
+            drawRect(Color.White.copy(alpha = 0.62f))
         }
-        drawRect(colors.surface.copy(alpha = 0.55f))
     }
 }
 

@@ -70,6 +70,7 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
@@ -81,6 +82,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.envoix.app.Diagnostics
 import dev.envoix.app.Direction
+import dev.envoix.app.InviteCodec
 import dev.envoix.app.LogUpload
 import dev.envoix.app.R
 import dev.envoix.app.Room
@@ -102,8 +104,24 @@ fun HomeScreen(
     transfers: List<Transfer>,
     initialSharedUris: List<android.net.Uri> = emptyList(),
     onSharedUrisConsumed: () -> Unit = {},
-    onReceive: (code: String, broker: String, relay: String, qrPayload: String?, copyApproved: Boolean) -> Unit,
-    onSend: (code: String, broker: String, relay: String, jobId: String, qrPayload: String?) -> Unit,
+    onReceive: (
+        code: String,
+        broker: String,
+        relay: String,
+        qrPayload: String?,
+        copyApproved: Boolean,
+        rememberLabel: String?,
+        rememberedRelationshipId: String?,
+    ) -> Unit,
+    onSend: (
+        code: String,
+        broker: String,
+        relay: String,
+        jobId: String,
+        qrPayload: String?,
+        rememberLabel: String?,
+        rememberedRelationshipId: String?,
+    ) -> Unit,
     onPauseResume: (Long) -> Unit,
     onApproveReceive: (Long) -> Unit,
     onCancel: (Long) -> Unit,
@@ -113,6 +131,7 @@ fun HomeScreen(
     onOpenSettings: () -> Unit,
     onOpen: (Transfer) -> Unit,
     onShare: (Transfer) -> Unit,
+    initialPairingInput: String? = null,
 ) {
     val colors = Envoix.colors
     var sheetRole by remember { mutableStateOf<String?>(null) }
@@ -126,6 +145,12 @@ fun HomeScreen(
     }
     LaunchedEffect(initialSharedUris) {
         if (initialSharedUris.isNotEmpty()) sheetRole = "send"
+    }
+    LaunchedEffect(initialPairingInput) {
+        initialPairingInput
+            ?.takeIf(String::isNotBlank)
+            ?.let(InviteCodec::parseForRouting)
+            ?.let { sheetRole = it.joinerRole }
     }
     val active =
         transfers.count { !it.status.isTerminal }
@@ -218,14 +243,15 @@ fun HomeScreen(
             NewTransferSheet(
                 initialRole = initialRole,
                 initialSources = initialSharedUris,
-                onReceive = { c, b, r, qr, copyApproved ->
+                initialPairingInput = initialPairingInput,
+                onReceive = { c, b, r, qr, copyApproved, rememberLabel, rememberedRelationshipId ->
                     sheetRole = null
-                    onReceive(c, b, r, qr, copyApproved)
+                    onReceive(c, b, r, qr, copyApproved, rememberLabel, rememberedRelationshipId)
                 },
-                onSend = { c, b, r, jobId, qr ->
+                onSend = { c, b, r, jobId, qr, rememberLabel, rememberedRelationshipId ->
                     sheetRole = null
                     onSharedUrisConsumed()
-                    onSend(c, b, r, jobId, qr)
+                    onSend(c, b, r, jobId, qr, rememberLabel, rememberedRelationshipId)
                 },
             )
         }
@@ -385,6 +411,11 @@ internal fun TransferCard(
 ) {
     val colors = Envoix.colors
     val language = LocalAppLanguage.current
+    val saveLocation =
+        resolvedSavedDestinationLabel(
+            recordedDestinationLabel = t.savedDestinationLabel,
+            fallbackDestinationLabel = SettingsStore.saveLabel(LocalContext.current),
+        )
     val failed = t.status == Status.Failed
     val canceled = t.status == Status.Canceled
     val progressPresentation = TransferPresentationPolicy.progress(t.status)
@@ -451,7 +482,7 @@ internal fun TransferCard(
                             PathBadge(t)
                         }
                         Text(
-                            subtitle(t, language),
+                            subtitle(t, language, saveLocation),
                             color = colors.muted,
                             fontSize = 13.sp,
                             fontFamily = FontFamily.Monospace,
@@ -1032,15 +1063,37 @@ private fun itemTitle(
 private fun subtitle(
     t: Transfer,
     language: String,
+    saveLocation: String,
 ): String =
     when {
         t.status == Status.Delivered && t.savedUri != null ->
-            AppText.value("Saved to Downloads · tap to open", "已保存到 Downloads · 点击打开", language)
+            savedDestinationSubtitle(saveLocation, language)
         t.pathAddr != null ->
             connectionPathLabel(t.pathAddr, language)
                 ?: AppText.value("One-time transfer", "一次性传输", language)
         else -> AppText.value("One-time transfer", "一次性传输", language)
     }
+
+internal fun savedDestinationSubtitle(
+    destinationLabel: String,
+    language: String,
+): String {
+    val destination = destinationLabel.trim().ifEmpty { "Downloads" }
+    return AppText.value(
+        "Saved to $destination · tap to open",
+        "已保存到 $destination · 点击打开",
+        language,
+    )
+}
+
+internal fun resolvedSavedDestinationLabel(
+    recordedDestinationLabel: String?,
+    fallbackDestinationLabel: String,
+): String =
+    recordedDestinationLabel
+        ?.trim()
+        ?.takeIf(String::isNotEmpty)
+        ?: fallbackDestinationLabel.trim().ifEmpty { "Downloads" }
 
 private fun fraction(t: Transfer): Float {
     if (TransferPresentationPolicy.progress(t.status) == TransferProgressPresentation.Complete) return 1f

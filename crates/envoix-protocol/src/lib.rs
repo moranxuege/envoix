@@ -167,17 +167,20 @@ pub struct Spake2Start {
     pub role: PeerRole,
     pub nonce: Vec<u8>,
     pub message: Vec<u8>,
+    pub remember_consent: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Spake2Message {
     pub nonce: Vec<u8>,
     pub message: Vec<u8>,
+    pub remember_consent: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Spake2Confirm {
     pub proof: Vec<u8>,
+    pub remember_contribution: Option<Vec<u8>>,
 }
 
 pub async fn read_frame<R>(reader: &mut R) -> Result<Frame, ProtocolError>
@@ -250,15 +253,21 @@ fn encode_auth_frame(frame: &Frame) -> Result<Vec<u8>, ProtocolError> {
             write_peer_role(&mut payload, start.role);
             write_bytes(&mut payload, &start.nonce)?;
             write_bytes(&mut payload, &start.message)?;
+            payload.push(u8::from(start.remember_consent));
         }
         Frame::Auth(AuthFrame::Spake2Message(message)) => {
             payload.push(AuthFrameType::Message as u8);
             write_bytes(&mut payload, &message.nonce)?;
             write_bytes(&mut payload, &message.message)?;
+            payload.push(u8::from(message.remember_consent));
         }
         Frame::Auth(AuthFrame::Spake2Confirm(confirm)) => {
             payload.push(AuthFrameType::Confirm as u8);
             write_bytes(&mut payload, &confirm.proof)?;
+            payload.push(u8::from(confirm.remember_contribution.is_some()));
+            if let Some(contribution) = &confirm.remember_contribution {
+                write_bytes(&mut payload, contribution)?;
+            }
         }
     }
     Ok(payload)
@@ -274,13 +283,20 @@ fn decode_auth_frame(payload: &[u8]) -> Result<Frame, ProtocolError> {
             role: reader.read_peer_role()?,
             nonce: reader.read_bytes()?,
             message: reader.read_bytes()?,
+            remember_consent: reader.read_bool()?,
         }),
         AuthFrameType::Message => AuthFrame::Spake2Message(Spake2Message {
             nonce: reader.read_bytes()?,
             message: reader.read_bytes()?,
+            remember_consent: reader.read_bool()?,
         }),
         AuthFrameType::Confirm => AuthFrame::Spake2Confirm(Spake2Confirm {
             proof: reader.read_bytes()?,
+            remember_contribution: if reader.read_bool()? {
+                Some(reader.read_bytes()?)
+            } else {
+                None
+            },
         }),
     };
     reader.finish()?;
@@ -327,6 +343,16 @@ impl<'a> PayloadReader<'a> {
             1 => Ok(PeerRole::Sender),
             2 => Ok(PeerRole::Receiver),
             role => Err(CoreError::Protocol(format!("unknown peer role {role}"))),
+        }
+    }
+
+    fn read_bool(&mut self) -> Result<bool, ProtocolError> {
+        match self.read_u8()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            value => Err(CoreError::Protocol(format!(
+                "invalid authentication boolean {value}"
+            ))),
         }
     }
 

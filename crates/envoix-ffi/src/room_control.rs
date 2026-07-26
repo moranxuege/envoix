@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use envoix_client::api::{
     Client, IdentityConfig, RoomCloseReason, RoomControlEvent, RoomControlInvite,
-    RoomControlSession, RoomLifetimePolicy, RoomOfferRejection, RoomTransferOffer,
-    TransferCancelToken, TransferOptions, connect_room_control,
+    RoomControlSession, RoomLifetimePolicy, RoomLifetimeState, RoomOfferRejection,
+    RoomTransferOffer, TransferCancelToken, TransferOptions, connect_room_control,
 };
 
 use crate::{
@@ -31,6 +31,13 @@ pub enum FfiRoomConnectMode {
 pub enum FfiRoomLifetimePolicy {
     Idle15Minutes,
     UntilForegroundEnds,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct FfiRoomLifetimeState {
+    pub revision: u64,
+    pub policy: FfiRoomLifetimePolicy,
+    pub idle_deadline_epoch_ms: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
@@ -66,7 +73,7 @@ pub enum FfiRoomControlEventKind {
     IncomingOffer,
     OfferAccepted,
     OfferRejected,
-    PolicyChanged,
+    LifetimeChanged,
     PeerClosed,
     Pong,
 }
@@ -77,7 +84,7 @@ pub struct FfiRoomControlEvent {
     pub offer: Option<FfiRoomTransferOffer>,
     pub offer_id: String,
     pub rejection: Option<FfiRoomOfferRejection>,
-    pub policy: Option<FfiRoomLifetimePolicy>,
+    pub lifetime: Option<FfiRoomLifetimeState>,
     pub close_reason: Option<FfiRoomCloseReason>,
     pub nonce: u64,
 }
@@ -86,6 +93,7 @@ pub struct FfiRoomControlEvent {
 pub struct FfiRoomControlSnapshot {
     pub peer_name: String,
     pub creator: bool,
+    pub lifetime: FfiRoomLifetimeState,
 }
 
 #[derive(uniffi::Object)]
@@ -122,6 +130,7 @@ impl FfiRoomControlSession {
         FfiRoomControlSnapshot {
             peer_name: self.session.peer_name().to_string(),
             creator: self.session.is_creator(),
+            lifetime: ffi_lifetime(self.session.lifetime_state()),
         }
     }
 
@@ -137,44 +146,77 @@ impl FfiRoomControlSession {
         .await
     }
 
-    pub async fn offer_transfer(&self, offer: FfiRoomTransferOffer) -> Result<(), EnvoixError> {
+    pub async fn offer_transfer(
+        &self,
+        offer: FfiRoomTransferOffer,
+    ) -> Result<Option<FfiRoomLifetimeState>, EnvoixError> {
         let session = self.session.clone();
         spawn_on_ffi_runtime(async move {
             session
                 .offer_transfer(core_offer(offer))
                 .await
+                .map(|state| state.map(ffi_lifetime))
                 .map_err(op_err)
         })
         .await
     }
 
-    pub async fn accept_offer(&self, offer_id: String) -> Result<(), EnvoixError> {
+    pub async fn accept_offer(
+        &self,
+        offer_id: String,
+    ) -> Result<Option<FfiRoomLifetimeState>, EnvoixError> {
         let session = self.session.clone();
-        spawn_on_ffi_runtime(async move { session.accept_offer(&offer_id).await.map_err(op_err) })
-            .await
+        spawn_on_ffi_runtime(async move {
+            session
+                .accept_offer(&offer_id)
+                .await
+                .map(|state| state.map(ffi_lifetime))
+                .map_err(op_err)
+        })
+        .await
     }
 
     pub async fn reject_offer(
         &self,
         offer_id: String,
         reason: FfiRoomOfferRejection,
-    ) -> Result<(), EnvoixError> {
+    ) -> Result<Option<FfiRoomLifetimeState>, EnvoixError> {
         let session = self.session.clone();
         spawn_on_ffi_runtime(async move {
             session
                 .reject_offer(&offer_id, core_rejection(reason))
                 .await
+                .map(|state| state.map(ffi_lifetime))
                 .map_err(op_err)
         })
         .await
     }
 
-    pub async fn set_policy(&self, policy: FfiRoomLifetimePolicy) -> Result<(), EnvoixError> {
+    pub async fn set_policy(
+        &self,
+        policy: FfiRoomLifetimePolicy,
+    ) -> Result<Option<FfiRoomLifetimeState>, EnvoixError> {
         let session = self.session.clone();
         spawn_on_ffi_runtime(async move {
             session
                 .set_policy(core_policy(policy))
                 .await
+                .map(|state| state.map(ffi_lifetime))
+                .map_err(op_err)
+        })
+        .await
+    }
+
+    pub async fn set_local_transfer_active(
+        &self,
+        active: bool,
+    ) -> Result<Option<FfiRoomLifetimeState>, EnvoixError> {
+        let session = self.session.clone();
+        spawn_on_ffi_runtime(async move {
+            session
+                .set_local_transfer_active(active)
+                .await
+                .map(|state| state.map(ffi_lifetime))
                 .map_err(op_err)
         })
         .await
@@ -301,7 +343,7 @@ fn project_event(event: RoomControlEvent) -> FfiRoomControlEvent {
         offer: None,
         offer_id: String::new(),
         rejection: None,
-        policy: None,
+        lifetime: None,
         close_reason: None,
         nonce: 0,
     };
@@ -319,9 +361,9 @@ fn project_event(event: RoomControlEvent) -> FfiRoomControlEvent {
             projected.offer_id = offer_id;
             projected.rejection = Some(ffi_rejection(reason));
         }
-        RoomControlEvent::PolicyChanged(policy) => {
-            projected.kind = FfiRoomControlEventKind::PolicyChanged;
-            projected.policy = Some(ffi_policy(policy));
+        RoomControlEvent::LifetimeChanged(lifetime) => {
+            projected.kind = FfiRoomControlEventKind::LifetimeChanged;
+            projected.lifetime = Some(ffi_lifetime(lifetime));
         }
         RoomControlEvent::PeerClosed(reason) => {
             projected.kind = FfiRoomControlEventKind::PeerClosed;
@@ -332,6 +374,14 @@ fn project_event(event: RoomControlEvent) -> FfiRoomControlEvent {
         }
     }
     projected
+}
+
+fn ffi_lifetime(state: RoomLifetimeState) -> FfiRoomLifetimeState {
+    FfiRoomLifetimeState {
+        revision: state.revision,
+        policy: ffi_policy(state.policy),
+        idle_deadline_epoch_ms: state.idle_deadline_unix_ms,
+    }
 }
 
 fn core_policy(policy: FfiRoomLifetimePolicy) -> RoomLifetimePolicy {
@@ -430,5 +480,42 @@ mod tests {
         });
         assert_eq!(event.kind, FfiRoomControlEventKind::OfferAccepted);
         assert_eq!(event.offer_id, "opaque_7");
+    }
+
+    #[test]
+    fn lifetime_projection_preserves_revision_policy_and_nullable_deadline() {
+        let state = RoomLifetimeState {
+            revision: 7,
+            policy: RoomLifetimePolicy::Idle15Minutes,
+            idle_deadline_unix_ms: Some(123_456),
+        };
+        let event = project_event(RoomControlEvent::LifetimeChanged(state));
+        assert_eq!(event.kind, FfiRoomControlEventKind::LifetimeChanged);
+        assert_eq!(
+            event.lifetime,
+            Some(FfiRoomLifetimeState {
+                revision: 7,
+                policy: FfiRoomLifetimePolicy::Idle15Minutes,
+                idle_deadline_epoch_ms: Some(123_456),
+            })
+        );
+
+        let paused = ffi_lifetime(RoomLifetimeState {
+            revision: 8,
+            policy: RoomLifetimePolicy::Idle15Minutes,
+            idle_deadline_unix_ms: None,
+        });
+        assert_eq!(paused.idle_deadline_epoch_ms, None);
+    }
+
+    #[test]
+    fn core_info_advertises_room_control_v3_ffi_v8() {
+        let info = crate::envoix_core_info();
+        assert_eq!(info.ffi_api_version, 8);
+        assert!(
+            info.capabilities
+                .iter()
+                .any(|capability| capability == "foreground_room_control_v3")
+        );
     }
 }

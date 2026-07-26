@@ -24,6 +24,8 @@ class TransferViewModel(
         relay: String,
         qrPayload: String?,
         destinationCopyApproved: Boolean,
+        rememberLabel: String? = null,
+        rememberedRelationshipId: String? = null,
     ) = TransferService.startReceive(
         getApplication(),
         room,
@@ -31,6 +33,8 @@ class TransferViewModel(
         relay,
         qrPayload,
         destinationCopyApproved,
+        rememberLabel,
+        rememberedRelationshipId,
     )
 
     /**
@@ -85,7 +89,18 @@ class TransferViewModel(
         broker: String,
         relay: String,
         qrPayload: String?,
-    ) = TransferService.startSend(getApplication(), room, broker, relay, jobId, qrPayload)
+        rememberLabel: String? = null,
+        rememberedRelationshipId: String? = null,
+    ) = TransferService.startSend(
+        getApplication(),
+        room,
+        broker,
+        relay,
+        jobId,
+        qrPayload,
+        rememberLabel,
+        rememberedRelationshipId,
+    )
 
     fun cancel(id: Long) = TransferService.cancel(getApplication(), id)
 

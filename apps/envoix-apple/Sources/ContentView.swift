@@ -42,6 +42,9 @@ private enum TransferRole: String, CaseIterable {
 
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
+    #if os(iOS)
+    @Environment(\.scenePhase) private var scenePhase
+    #endif
     @AppStorage("envoix.appearance") private var appearance: Appearance = .system
     @AppStorage("envoix.language") private var language = "en"
     #if os(macOS)
@@ -55,6 +58,12 @@ struct ContentView: View {
             MobileConnectionFlowView()
             #else
             desktopContent
+            #endif
+
+            #if os(iOS)
+            if scenePhase != .active {
+                Theme.bg.ignoresSafeArea()
+            }
             #endif
         }
         .toastHost()

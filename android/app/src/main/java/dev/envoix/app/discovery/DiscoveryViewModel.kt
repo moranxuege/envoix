@@ -278,7 +278,7 @@ internal class DiscoveryViewModel(
                     if (!started || generation != activeGeneration || offer.senderPeerKey == identity.peerKey) {
                         return@launch
                     }
-                    if (InviteCodec.parse(offer.invite) == null &&
+                    if (InviteCodec.parseForRouting(offer.invite) == null &&
                         !RoomControlInviteFormat.looksLikeRoomInvite(offer.invite)
                     ) {
                         OpLog.add("DISCOVERY provider=bluetooth state=invalid_offer")

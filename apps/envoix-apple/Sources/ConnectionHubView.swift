@@ -172,11 +172,13 @@ struct ConnectionHubView: View {
                         .resizable()
                         .scaledToFit()
                         .padding(14)
+                        .frame(width: 196, height: 196)
                         .blur(radius: roomInvitationIsRevealed ? 0 : 13)
                 } else {
                     Image(systemName: "qrcode")
                         .font(.system(size: 112, weight: .regular))
                         .foregroundStyle(Theme.text)
+                        .frame(width: 196, height: 196)
                         .blur(radius: roomInvitationIsRevealed ? 0 : 10)
                 }
 
@@ -203,6 +205,8 @@ struct ConnectionHubView: View {
                     .accessibilityIdentifier("room_qr_reveal")
                 }
             }
+            .frame(width: 196, height: 196)
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
 
             HStack(spacing: 10) {
                 Text(roomCodeText)

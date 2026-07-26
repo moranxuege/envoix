@@ -182,7 +182,11 @@ struct SettingsStageView: View {
 
                 Text(coreBuildLabel)
                     .font(.caption.monospaced())
-                    .foregroundStyle(coreInfo.ffiApiVersion == expectedCoreFFIAPIVersion ? Theme.muted : Theme.danger)
+                    .foregroundStyle(
+                        coreMatchesExpectedRoomControlContract(coreInfo)
+                            ? Theme.muted
+                            : Theme.danger
+                    )
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.top, 2)
                     .accessibilityIdentifier("settings_core_version")

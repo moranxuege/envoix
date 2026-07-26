@@ -41,14 +41,14 @@ class RoomControlWorkflowTest {
                 RoomControlEvent.Connected(
                     peerName = "iPhone",
                     creator = true,
-                    policy = RoomLifetimePolicy.Idle15Minutes,
+                    lifetime = lifetime(),
                 ),
             )
             runCurrent()
 
             assertTrue(workflow.state.connected)
             assertEquals("iPhone", connectedPeer)
-            assertNotNull(workflow.state.idleDeadlineMs)
+            assertEquals(900_000L, workflow.state.idleDeadlineEpochMs)
         }
 
     @Test
@@ -59,8 +59,7 @@ class RoomControlWorkflowTest {
                 RoomControlWorkflow(
                     gateway = gateway,
                     scope = backgroundScope,
-                    nowMs = { testScheduler.currentTime },
-                    wallClockMs = { testScheduler.currentTime },
+                    clockEpochMs = { testScheduler.currentTime },
                     onStateChanged = {},
                     onHosting = {},
                     onConnected = { _, _ -> },
@@ -161,7 +160,7 @@ class RoomControlWorkflowTest {
                 RoomControlEvent.Connected(
                     peerName = "iPhone",
                     creator = false,
-                    policy = RoomLifetimePolicy.Idle15Minutes,
+                    lifetime = lifetime(),
                 ),
             )
             gateway.emit(RoomControlEvent.IncomingOffer(TEST_OFFER))
@@ -189,7 +188,7 @@ class RoomControlWorkflowTest {
         }
 
     @Test
-    fun `active transfer pauses idle expiry and completion starts a fresh window`() =
+    fun `creator uses only transmitted lifetime snapshots and reports transfer activity edges`() =
         runTest {
             val gateway = FakeRoomControlGateway()
             val workflow = workflow(gateway)
@@ -201,27 +200,125 @@ class RoomControlWorkflowTest {
                 RoomControlEvent.Connected(
                     peerName = "iPhone",
                     creator = true,
-                    policy = RoomLifetimePolicy.Idle15Minutes,
+                    lifetime = lifetime(),
                 ),
             )
             runCurrent()
-            assertEquals(RoomControlWorkflow.ROOM_IDLE_TIMEOUT_MS, workflow.state.idleDeadlineMs)
+            assertEquals(900_000L, workflow.state.idleDeadlineEpochMs)
 
-            advanceTimeBy(60_000L)
             workflow.updateActiveTransfers(1)
-            assertNull(workflow.state.idleDeadlineMs)
-            advanceTimeBy(RoomControlWorkflow.ROOM_IDLE_TIMEOUT_MS)
+            runCurrent()
+            assertEquals(listOf(true), gateway.transferActivity)
+            assertEquals(900_000L, workflow.state.idleDeadlineEpochMs)
+            gateway.emit(RoomControlEvent.LifetimeChanged(lifetime(revision = 2, deadlineEpochMs = null)))
+            runCurrent()
+            assertNull(workflow.state.idleDeadlineEpochMs)
+
+            workflow.updateActiveTransfers(2)
+            workflow.updateActiveTransfers(0)
+            runCurrent()
+            assertEquals(listOf(true, false), gateway.transferActivity)
+            assertNull(workflow.state.idleDeadlineEpochMs)
+
+            gateway.emit(RoomControlEvent.LifetimeChanged(lifetime(revision = 3, deadlineEpochMs = 5_000L)))
+            runCurrent()
+            assertEquals(5_000L, workflow.state.idleDeadlineEpochMs)
+            advanceTimeBy(5_000L)
             runCurrent()
             assertTrue(workflow.state.connected)
+            assertEquals(listOf(RoomCloseReason.IdleExpired), gateway.closeReasons)
 
-            workflow.updateActiveTransfers(0)
-            val freshDeadline = testScheduler.currentTime + RoomControlWorkflow.ROOM_IDLE_TIMEOUT_MS
-            assertEquals(freshDeadline, workflow.state.idleDeadlineMs)
-            advanceTimeBy(RoomControlWorkflow.ROOM_IDLE_TIMEOUT_MS)
+            gateway.emit(RoomControlEvent.Closed(RoomCloseReason.IdleExpired))
             runCurrent()
-
             assertEquals(RoomControlPhase.Closed, workflow.state.phase)
             assertEquals(RoomCloseReason.IdleExpired, gateway.closedWith)
+        }
+
+    @Test
+    fun `failed creator expiry stays connected until a newer lifetime permits one new attempt`() =
+        runTest {
+            val gateway = FakeRoomControlGateway()
+            val workflow = workflow(gateway)
+            workflow.start()
+            runCurrent()
+            workflow.host("Android", "broker", "relay")
+            runCurrent()
+            gateway.emit(
+                RoomControlEvent.Connected(
+                    peerName = "iPhone",
+                    creator = true,
+                    lifetime = lifetime(deadlineEpochMs = 1_000L),
+                ),
+            )
+            runCurrent()
+
+            advanceTimeBy(1_000L)
+            runCurrent()
+            assertEquals(listOf(RoomCloseReason.IdleExpired), gateway.closeReasons)
+            assertTrue(workflow.state.connected)
+
+            gateway.emit(
+                RoomControlEvent.CommandFailed(
+                    command = "close",
+                    offerId = null,
+                    message = "authoritative deadline changed",
+                ),
+            )
+            runCurrent()
+            assertTrue(workflow.state.connected)
+            gateway.emit(RoomControlEvent.LifetimeChanged(lifetime(revision = 2, deadlineEpochMs = 3_000L)))
+            runCurrent()
+
+            advanceTimeBy(2_000L)
+            runCurrent()
+            assertEquals(
+                listOf(RoomCloseReason.IdleExpired, RoomCloseReason.IdleExpired),
+                gateway.closeReasons,
+            )
+            assertTrue(workflow.state.connected)
+        }
+
+    @Test
+    fun `joiner ignores stale lifetime revisions and never expires the creator deadline`() =
+        runTest {
+            val gateway = FakeRoomControlGateway()
+            val workflow = workflow(gateway)
+            workflow.start()
+            runCurrent()
+            workflow.join(TEST_OFFER.transferInvite, "Android", "iPhone")
+            runCurrent()
+            gateway.emit(
+                RoomControlEvent.Connected(
+                    peerName = "iPhone",
+                    creator = false,
+                    lifetime = lifetime(revision = 7, deadlineEpochMs = 5_000L),
+                ),
+            )
+            runCurrent()
+
+            gateway.emit(
+                RoomControlEvent.LifetimeChanged(
+                    lifetime(
+                        revision = 6,
+                        deadlineEpochMs = null,
+                        policy = RoomLifetimePolicy.UntilForegroundEnds,
+                    ),
+                ),
+            )
+            runCurrent()
+            assertEquals(7L, workflow.state.lifetimeRevision)
+            assertEquals(RoomLifetimePolicy.Idle15Minutes, workflow.state.policy)
+            assertEquals(5_000L, workflow.state.idleDeadlineEpochMs)
+
+            advanceTimeBy(5_000L)
+            runCurrent()
+            assertTrue(workflow.state.connected)
+            assertNull(gateway.closedWith)
+
+            gateway.emit(RoomControlEvent.LifetimeChanged(lifetime(revision = 8, deadlineEpochMs = null)))
+            runCurrent()
+            assertEquals(8L, workflow.state.lifetimeRevision)
+            assertNull(workflow.state.idleDeadlineEpochMs)
         }
 
     @Test
@@ -237,7 +334,7 @@ class RoomControlWorkflowTest {
                 RoomControlEvent.Connected(
                     peerName = "iPhone",
                     creator = true,
-                    policy = RoomLifetimePolicy.Idle15Minutes,
+                    lifetime = lifetime(),
                 ),
             )
             runCurrent()
@@ -270,7 +367,7 @@ class RoomControlWorkflowTest {
                 RoomControlEvent.Connected(
                     peerName = "iPhone",
                     creator = false,
-                    policy = RoomLifetimePolicy.Idle15Minutes,
+                    lifetime = lifetime(),
                 ),
             )
             gateway.emit(RoomControlEvent.IncomingOffer(TEST_OFFER))
@@ -290,8 +387,7 @@ class RoomControlWorkflowTest {
     ) = RoomControlWorkflow(
         gateway = gateway,
         scope = backgroundScope,
-        nowMs = { testScheduler.currentTime },
-        wallClockMs = { testScheduler.currentTime },
+        clockEpochMs = { testScheduler.currentTime },
         onStateChanged = states::add,
         onHosting = {},
         onConnected = onConnected,
@@ -299,6 +395,16 @@ class RoomControlWorkflowTest {
     )
 
     private companion object {
+        fun lifetime(
+            revision: Long = 1,
+            deadlineEpochMs: Long? = 900_000L,
+            policy: RoomLifetimePolicy = RoomLifetimePolicy.Idle15Minutes,
+        ) = RoomLifetimeSnapshot(
+            revision = revision,
+            policy = policy,
+            idleDeadlineEpochMs = deadlineEpochMs,
+        )
+
         val TEST_OFFER =
             RoomTransferOffer(
                 id = "offer-1",
@@ -326,8 +432,10 @@ private class FakeRoomControlGateway : RoomControlGateway {
     var hostError: String? = null
     var refreshError: String? = null
     var closedWith: RoomCloseReason? = null
+    val closeReasons = mutableListOf<RoomCloseReason>()
     val offered = mutableListOf<RoomTransferOfferDraft>()
     val responses = mutableListOf<Pair<String, Boolean>>()
+    val transferActivity = mutableListOf<Boolean>()
 
     suspend fun emit(event: RoomControlEvent) {
         mutableEvents.emit(event)
@@ -364,7 +472,12 @@ private class FakeRoomControlGateway : RoomControlGateway {
 
     override suspend fun updatePolicy(policy: RoomLifetimePolicy) = Unit
 
+    override suspend fun updateTransferActive(active: Boolean) {
+        transferActivity += active
+    }
+
     override suspend fun close(reason: RoomCloseReason) {
+        closeReasons += reason
         closedWith = reason
     }
 }

@@ -152,6 +152,14 @@ internal class NativeRoomControlGateway(
         )
     }
 
+    override suspend fun updateTransferActive(active: Boolean) {
+        sendCommand(
+            JSONObject()
+                .put("command", "transfer_active")
+                .put("active", active),
+        )
+    }
+
     override suspend fun close(reason: RoomCloseReason) {
         val localCloseGeneration =
             synchronized(sessionLock) {
@@ -257,13 +265,19 @@ internal class NativeRoomControlGateway(
                 }
         when (value.optString("state")) {
             "connected" -> {
+                val lifetime =
+                    runCatching { value.roomLifetime() }
+                        .getOrElse {
+                            failInvalidLifetimeLocked(id)
+                            return@synchronized
+                        }
                 connected = true
                 emit(
                     id,
                     RoomControlEvent.Connected(
                         peerName = value.optString("peer_name").takeIf(String::isNotBlank),
                         creator = value.optBoolean("creator"),
-                        policy = value.optString("policy").roomPolicy(),
+                        lifetime = lifetime,
                     ),
                 )
             }
@@ -294,12 +308,28 @@ internal class NativeRoomControlGateway(
                     ?.complete(Unit)
             }
             "command_failed" -> {
-                if (localCloseReason != null) return@synchronized
+                val command = value.optString("command")
                 val message =
                     value.optString("message").ifBlank {
                         "Room-control command failed"
                     }
-                if (value.optString("command") == "respond") {
+                if (command == "close") {
+                    // A validated close can be rejected while the session
+                    // remains live (for example, activity cleared its idle
+                    // deadline). Release correlation and let the workflow
+                    // retain the room.
+                    localCloseReason = null
+                    emit(
+                        id,
+                        RoomControlEvent.CommandFailed(
+                            command = command,
+                            offerId = null,
+                            message = message,
+                        ),
+                    )
+                } else if (localCloseReason != null) {
+                    return@synchronized
+                } else if (command == "respond") {
                     pendingOfferResponses[value.optString("offer_id")]
                         ?.delivered
                         ?.completeExceptionally(IllegalStateException(message))
@@ -307,15 +337,22 @@ internal class NativeRoomControlGateway(
                     emit(
                         id,
                         RoomControlEvent.CommandFailed(
-                            command = value.optString("command"),
+                            command = command,
                             offerId = value.optString("offer_id").takeIf(String::isNotBlank),
                             message = message,
                         ),
                     )
                 }
             }
-            "policy_changed" ->
-                emit(id, RoomControlEvent.PolicyChanged(value.optString("policy").roomPolicy()))
+            "lifetime_changed" -> {
+                val lifetime =
+                    runCatching { value.roomLifetime() }
+                        .getOrElse {
+                            failInvalidLifetimeLocked(id)
+                            return@synchronized
+                        }
+                emit(id, RoomControlEvent.LifetimeChanged(lifetime))
+            }
             "closed" -> {
                 failPendingResponses("The room closed before the response was delivered")
                 connected = false
@@ -361,6 +398,11 @@ internal class NativeRoomControlGateway(
             connected = false
             localCloseReason = null
         }
+    }
+
+    private fun failInvalidLifetimeLocked(id: Long) {
+        cancelGenerationLocked(id)
+        emit(id, RoomControlEvent.Failed("Room control returned an invalid lifetime"))
     }
 
     private fun cancelGenerationLocked(id: Long) {
@@ -427,11 +469,33 @@ private fun JSONObject.roomOffer(): RoomTransferOffer {
     )
 }
 
+private fun JSONObject.roomLifetime(): RoomLifetimeSnapshot {
+    val lifetime = getJSONObject("lifetime")
+    val revision = lifetime.getLong("revision")
+    require(revision > 0L) { "Room lifetime revision is invalid" }
+    val deadline =
+        if (lifetime.isNull("idle_deadline_epoch_ms")) {
+            null
+        } else {
+            lifetime.getLong("idle_deadline_epoch_ms")
+        }
+    val policy = lifetime.getString("policy").roomPolicy()
+    require(deadline == null || deadline > 0L) { "Room lifetime deadline is invalid" }
+    require(policy != RoomLifetimePolicy.UntilForegroundEnds || deadline == null) {
+        "Foreground room lifetime cannot have an idle deadline"
+    }
+    return RoomLifetimeSnapshot(
+        revision = revision,
+        policy = policy,
+        idleDeadlineEpochMs = deadline,
+    )
+}
+
 private fun String.roomPolicy(): RoomLifetimePolicy =
-    if (this == "until_foreground_ends") {
-        RoomLifetimePolicy.UntilForegroundEnds
-    } else {
-        RoomLifetimePolicy.Idle15Minutes
+    when (this) {
+        "idle_15_minutes" -> RoomLifetimePolicy.Idle15Minutes
+        "until_foreground_ends" -> RoomLifetimePolicy.UntilForegroundEnds
+        else -> error("Room lifetime policy is invalid")
     }
 
 private fun RoomLifetimePolicy.wireValue(): String =

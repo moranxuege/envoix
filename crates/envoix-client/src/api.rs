@@ -1,5 +1,6 @@
 //! Canonical Manifest v2 application facade.
 
+mod credential_store;
 mod error;
 mod invite;
 mod options;
@@ -13,10 +14,20 @@ pub use envoix_protocol::manifest_v2::{
 pub use envoix_protocol::manifest_v2_frames::RootPlanV2;
 pub use envoix_session::*;
 
+pub use credential_store::DesktopCredentialStore;
 pub use error::TransferError;
-pub use invite::{Invite, Role};
+pub use invite::{
+    BootstrapKind, Capabilities, CreatedInvitation, InvitationAuthContext, InvitationBootstrap,
+    InvitationError, InvitationErrorCode, InvitationPublicContext, InvitationSide, InviteV2,
+    RoomCode, TransferRole, ValidatedInvitation, create_invitation, parse_invitation_for_role,
+    parse_invitation_for_routing, parse_room_code,
+};
 pub use options::{PathPolicy, TransferOptions};
-pub use source::{PeerSource, TransferMode};
+pub use source::{
+    InvitationLease, InviteSecretRef, PeerSource, RememberedCredentialRef, SharedTokenRef,
+    TransferMode, acquire_invitation, acquire_remembered_credential, acquire_shared_token,
+    register_remembered_credential,
+};
 
 /// Runtime settings shared by every Manifest v2 route.
 #[derive(Clone, Debug)]

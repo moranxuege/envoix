@@ -1,7 +1,8 @@
 //! Room rendezvous broker.
 //!
-//! Two peers that share a short code both connect to the broker and present the
-//! same room id. The broker matches them, tells each its SPAKE2 role
+//! Two peers connect to the broker and present the same room locator. The broker
+//! matches an invitation creator to a joiner with complementary transfer roles,
+//! tells each its fixed SPAKE2 role
 //! ([`Role::Initiator`] / [`Role::Responder`]), then **blindly relays raw bytes**
 //! between them. The end-to-end pairing (SPAKE2 + sealed peer descriptors, see
 //! `envoix-pairing`) runs *through* this relay, so the broker never sees
@@ -17,9 +18,10 @@ mod peer;
 mod protocol;
 
 pub use broker::RoomRegistry;
+pub use envoix_invite::{BootstrapKind, InvitationSide, TransferRole};
 pub use io::{read_framed, write_framed};
 pub use peer::{CloseWaiter, PeerConn};
-pub use protocol::{Join, JoinIntent, Paired, Reply, Role};
+pub use protocol::{Join, Paired, RENDEZVOUS_PROTOCOL_VERSION, Reply, Role};
 
 /// Errors from the rendezvous broker.
 #[derive(Debug, thiserror::Error)]

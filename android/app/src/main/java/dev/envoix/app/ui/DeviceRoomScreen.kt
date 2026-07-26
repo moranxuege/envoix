@@ -53,8 +53,9 @@ internal fun DeviceRoomScreen(
     onDismissTransfer: () -> Unit,
     onTransferStarted: (code: String, consumePendingShares: Boolean) -> Unit,
     onOfferRoomTransfer: (RoomTransferOfferDraft, (String?) -> Unit) -> Unit,
-    onPrepareIncomingRoomOffer: () -> Unit,
-    onConfirmIncomingRoomOffer: ((String?) -> Unit) -> Unit,
+    incomingOfferBusy: Boolean,
+    incomingOfferError: String?,
+    onAcceptIncomingRoomOffer: () -> Unit,
     onRejectIncomingRoomOffer: () -> Unit,
     onKeepOpen: (Boolean) -> Unit,
     onEndRoom: () -> Unit,
@@ -62,10 +63,10 @@ internal fun DeviceRoomScreen(
     onRoomActiveTransfers: (Int) -> Unit,
     onExternalActivityChanged: (Boolean) -> Unit,
     onAcceptIncomingOffer: (NearbyRendezvousOffer) -> Boolean,
-    onReceive: (String, String, String, String?, Boolean) -> Unit,
-    onPrepareReceive: PrepareReceiveBeforeDecision,
-    onCancelReceive: (Long) -> Unit,
-    onSend: (String, String, String, String, String?) -> Unit,
+    onReceive: (String, String, String, String?, Boolean, String?, String?) -> Unit,
+    onSend: (String, String, String, String, String?, String?, String?) -> Unit,
+    onOpenReceived: (Transfer) -> Unit,
+    onShareReceived: (Transfer) -> Unit,
     initialSources: List<Uri> = emptyList(),
     discoveryViewModel: DiscoveryViewModel,
 ) {
@@ -152,7 +153,9 @@ internal fun DeviceRoomScreen(
                 item {
                     IncomingRoomOfferCard(
                         offer = offer,
-                        onAccept = onPrepareIncomingRoomOffer,
+                        busy = incomingOfferBusy,
+                        error = incomingOfferError,
+                        onAccept = onAcceptIncomingRoomOffer,
                         onReject = onRejectIncomingRoomOffer,
                     )
                 }
@@ -170,7 +173,11 @@ internal fun DeviceRoomScreen(
                 item { EmptyRoomTimeline() }
             } else {
                 items(roomTransfers.sortedByDescending(Transfer::id), key = Transfer::id) { transfer ->
-                    RoomTransferSummary(transfer)
+                    RoomTransferSummary(
+                        transfer = transfer,
+                        onOpen = onOpenReceived,
+                        onShare = onShareReceived,
+                    )
                 }
             }
         }
@@ -231,22 +238,8 @@ internal fun DeviceRoomScreen(
                 roomMode = true,
                 connectedRoom = connectedRoom,
                 onExternalActivityChanged = onExternalActivityChanged,
-                onBeforeStart =
-                    onConfirmIncomingRoomOffer.takeIf {
-                        connectedRoom &&
-                            role == "receive" &&
-                            setupUsesPending
-                    },
-                onPrepareReceiveBeforeDecision =
-                    onPrepareReceive.takeIf {
-                        connectedRoom &&
-                            role == "receive" &&
-                            setupUsesPending
-                    },
-                onCancelPreparedReceive = onCancelReceive,
-                onPreparedReceiveCommitted = { code ->
-                    onTransferStarted(code, false)
-                },
+                onBeforeStart = null,
+                onPrepareReceiveBeforeDecision = null,
                 onOfferInvite =
                     when {
                         connectedRoom && role == "send" -> onOfferRoomTransfer
@@ -263,12 +256,44 @@ internal fun DeviceRoomScreen(
                                     }
                                 }
                     },
-                onReceive = { code, broker, relay, qrPayload, copyApproved ->
-                    onReceive(code, broker, relay, qrPayload, copyApproved)
+                onReceive = {
+                    code,
+                    broker,
+                    relay,
+                    qrPayload,
+                    copyApproved,
+                    rememberLabel,
+                    rememberedRelationshipId,
+                    ->
+                    onReceive(
+                        code,
+                        broker,
+                        relay,
+                        qrPayload,
+                        copyApproved,
+                        rememberLabel,
+                        rememberedRelationshipId,
+                    )
                     onTransferStarted(code, false)
                 },
-                onSend = { code, broker, relay, jobId, qrPayload ->
-                    onSend(code, broker, relay, jobId, qrPayload)
+                onSend = {
+                    code,
+                    broker,
+                    relay,
+                    jobId,
+                    qrPayload,
+                    rememberLabel,
+                    rememberedRelationshipId,
+                    ->
+                    onSend(
+                        code,
+                        broker,
+                        relay,
+                        jobId,
+                        qrPayload,
+                        rememberLabel,
+                        rememberedRelationshipId,
+                    )
                     onTransferStarted(code, setupUsesPending && initialSources.isNotEmpty())
                 },
             )

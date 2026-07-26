@@ -3,8 +3,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 mod args;
 
 use args::{Cli, Command, SaveModeArg, SourceIssueActionArg, TransferPlan};
@@ -12,10 +13,9 @@ use clap::Parser;
 use envoix_client::api::{
     self, CanonicalTransferJob, DestinationDecisionV2, DestinationRequestV2, EventSink,
     PairingConfig, PeerSource, PendingManifestV2Receive, SourceDecision, SourceSelectionState,
-    TransferEvent, TransferJobStore,
+    TransferEvent, TransferJobStore, acquire_invitation,
 };
 use envoix_client::{IdentityConfig, SPAKE2_EXPERIMENTAL_WARNING, TransferCancelToken};
-use envoix_qr::{QrInvitePayload, generate_token, render_terminal_qr};
 
 type CliResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -233,8 +233,10 @@ async fn send_job(
     relay: Option<&str>,
 ) -> Result<api::SenderManifestV2SessionSummary, api::SessionError> {
     match source {
-        PeerSource::Manual { peer, token } => {
-            let pairing = PairingConfig::spake2_shared_token(token.clone())?;
+        PeerSource::Manual { peer, token_ref } => {
+            let token = api::acquire_shared_token(token_ref)
+                .map_err(|error| api::SessionError::InvalidInput(error.to_string()))?;
+            let pairing = PairingConfig::spake2_shared_token(token)?;
             api::send_manifest_v2_manual(
                 peer.clone(),
                 job,
@@ -246,29 +248,33 @@ async fn send_job(
             )
             .await
         }
-        PeerSource::Invite { invite } => {
-            let payload = QrInvitePayload::decode(invite)
+        PeerSource::Invitation {
+            secret_ref, broker, ..
+        } => {
+            let mut lease = acquire_invitation(secret_ref)
                 .map_err(|error| api::SessionError::InvalidInput(error.to_string()))?;
-            payload
-                .validate(now_unix_seconds())
-                .map_err(|error| api::SessionError::InvalidInput(error.to_string()))?;
-            let pairing = PairingConfig::spake2_shared_token(payload.token.clone())?;
-            let endpoint = payload
-                .endpoint_addr()
-                .map_err(|error| api::SessionError::InvalidInput(error.to_string()))?;
-            api::send_manifest_v2_to_endpoint_addr(
-                endpoint,
+            let broker = api::parse_broker_addr(broker, relay)?;
+            let result = api::send_manifest_v2_via_room(
+                broker,
+                lease.bootstrap().clone(),
                 job,
                 state_directory,
                 config,
-                &pairing,
                 events,
                 cancel,
             )
-            .await
+            .await;
+            if result.is_ok() {
+                lease.consume();
+            }
+            result
         }
-        PeerSource::Mdns { token: Some(token) } => {
-            let pairing = PairingConfig::spake2_shared_token(token.clone())?;
+        PeerSource::Mdns {
+            token_ref: Some(token_ref),
+        } => {
+            let token = api::acquire_shared_token(token_ref)
+                .map_err(|error| api::SessionError::InvalidInput(error.to_string()))?;
+            let pairing = PairingConfig::spake2_shared_token(token)?;
             api::send_manifest_v2_enable_mdns(
                 job.clone(),
                 state_directory,
@@ -276,19 +282,6 @@ async fn send_job(
                 &pairing,
                 events,
                 cancel.clone(),
-            )
-            .await
-        }
-        PeerSource::Room { code, broker } => {
-            let broker = api::parse_broker_addr(broker, relay)?;
-            api::send_manifest_v2_via_room(
-                broker,
-                code,
-                job,
-                state_directory,
-                config,
-                events,
-                cancel,
             )
             .await
         }
@@ -307,12 +300,14 @@ async fn receive_offer(
     relay: Option<&str>,
 ) -> Result<PendingManifestV2Receive, api::SessionError> {
     match source {
-        PeerSource::ShowManual { token } => {
-            let token = token
-                .clone()
-                .map(Ok)
-                .unwrap_or_else(generate_token)
-                .map_err(|error| api::SessionError::InvalidInput(error.to_string()))?;
+        PeerSource::ShowManual { token_ref } => {
+            let token = token_ref
+                .as_ref()
+                .map(|token_ref| {
+                    api::acquire_shared_token(token_ref)
+                        .map_err(|error| api::SessionError::InvalidInput(error.to_string()))
+                })
+                .unwrap_or_else(generate_token)?;
             let pairing = PairingConfig::spake2_shared_token(token.clone())?;
             api::receive_manifest_v2_offer_with_bound_peer(
                 listen_addrs.clone(),
@@ -324,53 +319,44 @@ async fn receive_offer(
             )
             .await
         }
-        PeerSource::ShowInvite { token, ttl_secs } => {
-            let token = token
-                .clone()
-                .map(Ok)
-                .unwrap_or_else(generate_token)
-                .map_err(|error| api::SessionError::InvalidInput(error.to_string()))?;
+        PeerSource::Mdns { token_ref } => {
+            let token = token_ref
+                .as_ref()
+                .map(|token_ref| {
+                    api::acquire_shared_token(token_ref)
+                        .map_err(|error| api::SessionError::InvalidInput(error.to_string()))
+                })
+                .unwrap_or_else(generate_token)?;
             let pairing = PairingConfig::spake2_shared_token(token.clone())?;
-            let expires_at = now_unix_seconds().saturating_add(*ttl_secs);
-            api::receive_manifest_v2_offer_with_bound_peer(
-                listen_addrs.clone(),
-                config,
-                &pairing,
-                events,
-                move |peer, relay_urls| print_invite(peer, relay_urls, token, expires_at),
-                cancel,
-            )
-            .await
-        }
-        PeerSource::Mdns { token } => {
-            let token = token
-                .clone()
-                .map(Ok)
-                .unwrap_or_else(generate_token)
-                .map_err(|error| api::SessionError::InvalidInput(error.to_string()))?;
-            let pairing = PairingConfig::spake2_shared_token(token.clone())?;
-            let expires_at = now_unix_seconds().saturating_add(300);
             api::receive_manifest_v2_offer_enable_mdns(
                 listen_addrs.clone(),
                 config,
                 &pairing,
                 events,
-                move |peer, relay_urls| print_invite(peer, relay_urls, token, expires_at),
+                move |peer, _relay_urls| eprintln!("receiver: {peer}\ntoken: {token}"),
                 cancel,
             )
             .await
         }
-        PeerSource::Room { code, broker } => {
+        PeerSource::Invitation {
+            secret_ref, broker, ..
+        } => {
+            let mut lease = acquire_invitation(secret_ref)
+                .map_err(|error| api::SessionError::InvalidInput(error.to_string()))?;
             let broker = api::parse_broker_addr(broker, relay)?;
-            api::receive_manifest_v2_offer_via_room(
+            let result = api::receive_manifest_v2_offer_via_room(
                 broker,
-                code,
+                lease.bootstrap().clone(),
                 listen_addrs,
                 config,
                 events,
                 cancel,
             )
-            .await
+            .await;
+            if result.is_ok() {
+                lease.consume();
+            }
+            result
         }
         _ => Err(api::SessionError::InvalidInput(
             "this route cannot listen for a sender".into(),
@@ -392,28 +378,6 @@ fn print_offer(pending: &PendingManifestV2Receive) {
     }
 }
 
-fn print_invite(
-    peer: envoix_client::PeerDescriptor,
-    relay_urls: Vec<String>,
-    token: String,
-    expires_at: u64,
-) {
-    let invite = QrInvitePayload {
-        version: envoix_qr::PAYLOAD_VERSION,
-        protocol_version: envoix_client::PROTOCOL_VERSION,
-        token,
-        peer,
-        relay_urls,
-        expires_at,
-        flags: 0,
-    }
-    .encode();
-    eprintln!("invite: {invite}");
-    if let Some(qr) = render_terminal_qr(&invite) {
-        eprintln!("{qr}");
-    }
-}
-
 fn sender_state_directory() -> io::Result<PathBuf> {
     Ok(std::env::current_dir()?.join(".envoix-state-v2"))
 }
@@ -425,11 +389,12 @@ fn api_client(config_path: Option<&Path>, identity: IdentityConfig) -> CliResult
     Ok(client)
 }
 
-fn now_unix_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+fn generate_token() -> Result<String, api::SessionError> {
+    let mut bytes = [0_u8; 18];
+    getrandom::fill(&mut bytes).map_err(|error| {
+        api::SessionError::Crypto(format!("token entropy unavailable: {error}"))
+    })?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
 struct CliEvents {

@@ -1,13 +1,15 @@
-//! The small control protocol between a peer and the broker: a peer sends
-//! [`Join`], the broker replies with [`Paired`]. Everything after that is the
-//! opaque end-to-end pairing traffic the broker relays without parsing.
+//! Strict V2 control protocol between a peer and the broker.
 
+use envoix_invite::{BootstrapKind, InvitationSide, TransferRole};
 use serde::{Deserialize, Serialize};
 
-/// SPAKE2 role assigned by the broker, decided by join order (first = initiator).
-/// The handshake role (who speaks first in SPAKE2), orthogonal to the transfer
-/// direction (`envoix_types::PeerRole`, who sends the file): a sender may be
-/// either the initiator or the responder, depending on who joined the room first.
+/// Current rendezvous join protocol version.
+pub const RENDEZVOUS_PROTOCOL_VERSION: u32 = 2;
+
+/// SPAKE2 connection role assigned from invitation side.
+///
+/// The invitation joiner is always the initiator and the creator is always the
+/// responder, independent of arrival order and transfer direction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
@@ -15,40 +17,31 @@ pub enum Role {
     Responder,
 }
 
-/// The transfer direction a peer intends to use after rendezvous.
-///
-/// This is deliberately independent of [`Role`]: the broker still assigns the
-/// SPAKE2 role from join order. `None` on [`Join`] is retained for clients that
-/// predate intent-aware matching.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum JoinIntent {
-    Send,
-    Receive,
-}
-
-/// A peer's opening message: which room it wants to pair in.
+/// A peer's strict V2 opening message.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Join {
+    pub version: u32,
     pub room_id: String,
-    /// New clients always set an intent. The optional field keeps deserialization
-    /// compatible with pre-intent clients during a rolling upgrade.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub intent: Option<JoinIntent>,
+    pub invitation_side: InvitationSide,
+    pub transfer_role: TransferRole,
+    /// Creator advertisement. Joiners send an empty list.
+    pub bootstrap_methods: Vec<BootstrapKind>,
+    /// Carrier selection. Creators send `None`.
+    pub selected_bootstrap_method: Option<BootstrapKind>,
 }
 
-/// The broker's reply once a partner is present: the peer's assigned role.
+/// The broker's reply once a compatible partner is present.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Paired {
     pub role: Role,
+    pub selected_bootstrap_method: BootstrapKind,
 }
 
-/// The broker's reply to a [`Join`]: either a partner arrived (pairing traffic
-/// follows) or the room's wait window elapsed with no partner.
+/// The broker's reply to a [`Join`].
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub enum Reply {
-    /// A partner is present; here is the peer's assigned role.
     Paired(Paired),
-    /// No partner joined within the room's TTL; the broker is closing.
     Expired,
 }

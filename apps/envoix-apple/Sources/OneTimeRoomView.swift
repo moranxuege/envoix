@@ -3,6 +3,7 @@ import SwiftUI
 
 struct OneTimeRoomView: View {
     @Environment(\.appLanguage) private var language
+    @Environment(\.openURL) private var openURL
     @AppStorage("envoix.outputDirDisplayName") private var outputDirDisplayName = ""
 
     let room: OneTimeRoomSession
@@ -10,6 +11,7 @@ struct OneTimeRoomView: View {
     let controlPhase: RoomControlPhase
     let peerDisplayName: String?
     let incomingOffer: RoomControlTransferOffer?
+    let isAcceptingOffer: Bool
     let isRoomCreator: Bool
     let lifetimePolicy: RoomControlLifetimePolicy
     let idleDeadline: Date?
@@ -30,7 +32,6 @@ struct OneTimeRoomView: View {
                 if let incomingOffer {
                     incomingOfferCard(incomingOffer)
                 }
-                composer
                 timeline
                 if let endedMessage {
                     endedNotice(endedMessage)
@@ -60,14 +61,19 @@ struct OneTimeRoomView: View {
                         .font(.title2.bold())
                         .foregroundStyle(Theme.text)
                         .lineLimit(1)
-                    Label(trustLabel, systemImage: "exclamationmark.shield")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Theme.warning)
-                    .accessibilityIdentifier(
-                        roomWasAuthenticated
-                            ? "room_context_authenticated"
-                            : "room_context_unverified"
+                    Label(
+                        trustLabel,
+                        systemImage: roomWasAuthenticated
+                            ? "checkmark.shield.fill"
+                            : "exclamationmark.shield"
                     )
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(roomWasAuthenticated ? Theme.success : Theme.warning)
+                        .accessibilityIdentifier(
+                            roomWasAuthenticated
+                                ? "room_context_authenticated"
+                                : "room_context_unverified"
+                        )
                 }
                 Spacer(minLength: 8)
             }
@@ -83,31 +89,6 @@ struct OneTimeRoomView: View {
             .accessibilityIdentifier("room_availability")
         }
         .card(raised: true, padding: 16)
-    }
-
-    private var composer: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(AppText.value("Transfer in this room", "在此房间中传输", language: language))
-                .font(.headline)
-                .foregroundStyle(Theme.text)
-
-            Button(action: onAddFiles) {
-                Label(
-                    AppText.value("Add files", "添加文件", language: language),
-                    systemImage: "plus"
-                )
-                .frame(maxWidth: .infinity, minHeight: 44)
-            }
-            .buttonStyle(PrimaryActionButtonStyle())
-            .disabled(!canOfferFiles)
-            .accessibilityIdentifier("room_add_files")
-
-            Text(composerMessage)
-            .font(.footnote)
-            .foregroundStyle(Theme.muted)
-            .fixedSize(horizontal: false, vertical: true)
-        }
-        .card(padding: 16)
     }
 
     private var timeline: some View {
@@ -190,13 +171,21 @@ struct OneTimeRoomView: View {
                         .frame(maxWidth: .infinity, minHeight: 42)
                 }
                 .buttonStyle(.bordered)
+                .disabled(isAcceptingOffer)
                 .accessibilityIdentifier("room_offer_reject")
 
                 Button(action: onAcceptOffer) {
-                    Text(AppText.value("Accept", "接受", language: language))
-                        .frame(maxWidth: .infinity, minHeight: 42)
+                    Group {
+                        if isAcceptingOffer {
+                            ProgressView()
+                        } else {
+                            Text(AppText.value("Accept", "接受", language: language))
+                        }
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 42)
                 }
                 .buttonStyle(PrimaryActionButtonStyle())
+                .disabled(isAcceptingOffer)
                 .accessibilityIdentifier("room_offer_accept")
             }
         }
@@ -221,8 +210,8 @@ struct OneTimeRoomView: View {
                 }
                 Spacer(minLength: 8)
                 Text(record.direction == .send
-                     ? AppText.value("Sent", "发送", language: language)
-                     : AppText.value("Received", "接收", language: language))
+                     ? AppText.value("Send", "发送", language: language)
+                     : AppText.value("Receive", "接收", language: language))
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(Theme.muted)
             }
@@ -234,11 +223,45 @@ struct OneTimeRoomView: View {
             }
 
             if record.totalBytes > 0,
+               record.state != .delivered,
                TransferPresentationPolicy.progress(for: record.state) != .hidden {
                 ProgressView(
-                    value: Double(record.state == .delivered ? record.totalBytes : record.bytesTransferred),
+                    value: Double(record.bytesTransferred),
                     total: Double(record.totalBytes)
                 )
+            }
+
+            if record.direction == .receive,
+               record.state == .delivered,
+               !record.savedPaths.isEmpty {
+                let urls = record.savedPaths.map { URL(fileURLWithPath: $0) }
+                HStack(spacing: 8) {
+                    Label(roomSavedDestination(record), systemImage: "folder.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Theme.text)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+
+                    Spacer(minLength: 8)
+
+                    Button {
+                        if let first = urls.first {
+                            openURL(first)
+                        }
+                    } label: {
+                        Text(AppText.value("Open", "打开", language: language))
+                            .font(.caption.weight(.semibold))
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("room_open_received_\(record.activityId)")
+
+                    ShareLink(items: urls) {
+                        Text(AppText.value("Share", "分享", language: language))
+                            .font(.caption.weight(.semibold))
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("room_share_received_\(record.activityId)")
+                }
             }
         }
         .padding(.vertical, 5)
@@ -256,10 +279,22 @@ struct OneTimeRoomView: View {
 
     private var roomControls: some View {
         VStack(spacing: 10) {
+            Button(action: onAddFiles) {
+                Label(
+                    AppText.value("Add files", "添加文件", language: language),
+                    systemImage: "plus"
+                )
+                .frame(maxWidth: .infinity, minHeight: 44)
+            }
+            .buttonStyle(PrimaryActionButtonStyle())
+            .disabled(!canOfferFiles)
+            .accessibilityIdentifier("room_add_files")
+
             HStack {
                 Label(roomLifetimeText, systemImage: lifetimePolicy == .untilForegroundEnds ? "infinity" : "timer")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(Theme.text)
+                    .accessibilityIdentifier("room_lifetime_status")
                 Spacer()
                 if isRoomCreator && controlPhase == .connected {
                     Toggle(
@@ -277,7 +312,7 @@ struct OneTimeRoomView: View {
 
             Button(role: .destructive, action: onClose) {
                 Label(
-                    AppText.value("End room", "结束房间", language: language),
+                    roomCloseTitle,
                     systemImage: "xmark.circle"
                 )
                 .frame(maxWidth: .infinity, minHeight: 42)
@@ -372,42 +407,56 @@ struct OneTimeRoomView: View {
         return true
     }
 
-    private var composerMessage: String {
-        if controlPhase == .connected {
-            return AppText.value(
-                "Either device can offer files. Every incoming offer requires confirmation.",
-                "任一设备都可以发送文件；每个收到的邀请都需要确认。",
-                language: language
-            )
-        }
-        if room.origin == .roomControl {
-            return AppText.value(
-                "File offers become available after the room connection is authenticated.",
-                "房间连接完成认证后即可发送文件。",
-                language: language
-            )
-        }
-        return AppText.value(
-            "This legacy transfer uses a one-time connection.",
-            "此旧版传输使用一次性连接。",
-            language: language
-        )
-    }
-
     private var roomLifetimeText: String {
         guard room.origin == .roomControl else {
             return AppText.value("One-time transfer", "一次性传输", language: language)
         }
+        switch controlPhase {
+        case .ended, .failed:
+            return AppText.value("Room closed", "房间已关闭", language: language)
+        case .idle, .hosting, .joining, .connected:
+            break
+        }
         if lifetimePolicy == .untilForegroundEnds {
             return AppText.value("Kept open while Envoix is open", "Envoix 打开时保持房间", language: language)
         }
-        guard controlPhase == .connected, let idleDeadline else {
-            return AppText.value("15-minute idle limit", "空闲 15 分钟后结束", language: language)
+        guard let idleDeadline else {
+            return AppText.value(
+                "Idle timer paused during transfer",
+                "传输期间空闲计时暂停",
+                language: language
+            )
         }
-        let seconds = max(0, Int(idleDeadline.timeIntervalSince(now)))
+        let seconds = max(0, Int(ceil(idleDeadline.timeIntervalSince(now))))
         return AppText.value(
-            "Ends after \(seconds / 60):\(String(format: "%02d", seconds % 60)) idle",
-            "空闲 \(seconds / 60):\(String(format: "%02d", seconds % 60)) 后结束",
+            "Ends in \(seconds / 60):\(String(format: "%02d", seconds % 60)) if idle",
+            "空闲时将在 \(seconds / 60):\(String(format: "%02d", seconds % 60)) 后结束",
+            language: language
+        )
+    }
+
+    private var roomCloseTitle: String {
+        switch controlPhase {
+        case .ended, .failed:
+            return AppText.value("Close room", "关闭房间", language: language)
+        case .idle, .hosting, .joining, .connected:
+            return AppText.value("End room", "结束房间", language: language)
+        }
+    }
+
+    private func roomSavedDestination(_ record: TransferActivityRecord) -> String {
+        let urls = record.savedPaths.map { URL(fileURLWithPath: $0) }
+        let parentPaths = Set(urls.map { $0.deletingLastPathComponent().path })
+        if parentPaths.count == 1, let parent = urls.first?.deletingLastPathComponent() {
+            return AppText.value(
+                "Saved in \(parent.lastPathComponent)",
+                "已保存到 \(parent.lastPathComponent)",
+                language: language
+            )
+        }
+        return AppText.value(
+            "Saved \(urls.count) items",
+            "已保存 \(urls.count) 个项目",
             language: language
         )
     }

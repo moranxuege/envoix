@@ -1,5 +1,6 @@
 package dev.envoix.app.ui
 
+import dev.envoix.app.ParsedInvite
 import dev.envoix.app.Settings
 import dev.envoix.app.discovery.DiscoverySource
 import dev.envoix.app.discovery.NearbyPairingSelection
@@ -144,7 +145,7 @@ class ConnectionWorkflowViewModelTest {
                 ?.pendingRoleAdapter,
         )
         assertEquals(
-            setOf("4321-alpha-beta"),
+            emptySet<String>(),
             viewModel.uiState.value.room
                 ?.transferCodes,
         )
@@ -255,6 +256,139 @@ class ConnectionWorkflowViewModelTest {
         }
 
     @Test
+    fun `connected joiner closes the foreground room when Android backgrounds`() =
+        runTest(dispatcher) {
+            val gateway = HostedInviteGateway()
+            val viewModel =
+                ConnectionWorkflowViewModel(
+                    gateway = gateway,
+                    currentSettings = { TEST_SETTINGS },
+                )
+            runCurrent()
+            viewModel.joinRoom(TEST_INVITE.payload)
+            runCurrent()
+            gateway.emit(
+                RoomControlEvent.Connected(
+                    peerName = "iPhone",
+                    creator = false,
+                    lifetime =
+                        RoomLifetimeSnapshot(
+                            revision = 1,
+                            policy = RoomLifetimePolicy.Idle15Minutes,
+                            idleDeadlineEpochMs = 900_000,
+                        ),
+                ),
+            )
+            runCurrent()
+
+            viewModel.setForeground(false)
+            runCurrent()
+
+            assertEquals(RoomCloseReason.Backgrounded, gateway.closedWith)
+            assertEquals(RoomControlPhase.Closed, viewModel.uiState.value.control.phase)
+        }
+
+    @Test
+    fun `connected creator closes the foreground room when Android backgrounds`() =
+        runTest(dispatcher) {
+            val gateway = HostedInviteGateway()
+            val viewModel =
+                ConnectionWorkflowViewModel(
+                    gateway = gateway,
+                    currentSettings = { TEST_SETTINGS },
+                )
+            runCurrent()
+            viewModel.revealRoomInvite()
+            runCurrent()
+            gateway.emit(
+                RoomControlEvent.Connected(
+                    peerName = "iPhone",
+                    creator = true,
+                    lifetime =
+                        RoomLifetimeSnapshot(
+                            revision = 1,
+                            policy = RoomLifetimePolicy.Idle15Minutes,
+                            idleDeadlineEpochMs = 900_000,
+                        ),
+                ),
+            )
+            runCurrent()
+
+            viewModel.setForeground(false)
+            runCurrent()
+
+            assertEquals(RoomCloseReason.Backgrounded, gateway.closedWith)
+            assertEquals(RoomControlPhase.Closed, viewModel.uiState.value.control.phase)
+        }
+
+    @Test
+    fun `accepting an incoming offer attaches its prepared receiver to the room`() =
+        runTest(dispatcher) {
+            val gateway = HostedInviteGateway()
+            val viewModel =
+                ConnectionWorkflowViewModel(
+                    gateway = gateway,
+                    currentSettings = { TEST_SETTINGS },
+                )
+            runCurrent()
+            viewModel.revealRoomInvite()
+            runCurrent()
+            gateway.emit(
+                RoomControlEvent.Connected(
+                    peerName = "Nearby phone",
+                    creator = false,
+                    lifetime =
+                        RoomLifetimeSnapshot(
+                            revision = 1,
+                            policy = RoomLifetimePolicy.Idle15Minutes,
+                            idleDeadlineEpochMs = 900_000,
+                        ),
+                ),
+            )
+            runCurrent()
+            gateway.emit(RoomControlEvent.IncomingOffer(TEST_TRANSFER_OFFER))
+            runCurrent()
+
+            var preparedReceivers = 0
+            var canceledReceiver: Long? = null
+            viewModel.acceptIncomingRoomOffer(
+                parseInvitation = {
+                    ParsedInvite(
+                        reference = "private-transfer-reference",
+                        broker = "https://broker.example",
+                        relay = null,
+                        creatorRole = "send",
+                        joinerRole = "receive",
+                        expiresAt = Long.MAX_VALUE,
+                    )
+                },
+                onPrepareReceive = { _, _, _, _, _, completion ->
+                    preparedReceivers += 1
+                    completion(42L, null)
+                },
+                onCancelReceive = { canceledReceiver = it },
+            )
+            viewModel.acceptIncomingRoomOffer(
+                parseInvitation = { error("a busy offer must not be parsed twice") },
+                onPrepareReceive = { _, _, _, _, _, _ ->
+                    error("a busy offer must not start a second receiver")
+                },
+                onCancelReceive = { canceledReceiver = it },
+            )
+            runCurrent()
+
+            assertEquals(1, preparedReceivers)
+            assertNull(canceledReceiver)
+            assertEquals(TEST_TRANSFER_OFFER.id to true, gateway.respondedOffer)
+            assertEquals(
+                setOf("private-transfer-reference"),
+                viewModel.uiState.value.room
+                    ?.transferCodes,
+            )
+            assertNull(viewModel.uiState.value.control.incomingOffer)
+        }
+
+    @Test
     fun `legacy replacement request moves to its dialog and can return`() =
         runTest(dispatcher) {
             val gateway = HostedInviteGateway()
@@ -292,6 +426,14 @@ class ConnectionWorkflowViewModelTest {
                 displayName = "Nearby phone",
                 sources = setOf(DiscoverySource.Bluetooth),
             )
+        val TEST_TRANSFER_OFFER =
+            RoomTransferOffer(
+                id = "offer-1",
+                transferInvite = "envoix://invite/v2/redacted",
+                rootNames = listOf("notes.txt"),
+                itemCount = 1,
+                totalBytes = 42,
+            )
         val TEST_SETTINGS = Settings(nearbyDisplayName = "Android phone")
     }
 }
@@ -302,6 +444,11 @@ private class HostedInviteGateway : RoomControlGateway {
     override val events: Flow<RoomControlEvent> = mutableEvents
     var hostCalls = 0
     var closedWith: RoomCloseReason? = null
+    var respondedOffer: Pair<String, Boolean>? = null
+
+    fun emit(event: RoomControlEvent) {
+        check(mutableEvents.tryEmit(event))
+    }
 
     override suspend fun host(
         displayName: String,
@@ -332,9 +479,13 @@ private class HostedInviteGateway : RoomControlGateway {
     override suspend fun respondToOffer(
         offerId: String,
         accept: Boolean,
-    ) = Unit
+    ) {
+        respondedOffer = offerId to accept
+    }
 
     override suspend fun updatePolicy(policy: RoomLifetimePolicy) = Unit
+
+    override suspend fun updateTransferActive(active: Boolean) = Unit
 
     override suspend fun close(reason: RoomCloseReason) {
         closedWith = reason

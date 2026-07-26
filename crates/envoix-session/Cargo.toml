@@ -9,6 +9,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 envoix-auth.workspace = true
 envoix-error.workspace = true
+envoix-invite.workspace = true
 envoix-protocol.workspace = true
 envoix-rendezvous.workspace = true
 envoix-rendezvous-iroh.workspace = true

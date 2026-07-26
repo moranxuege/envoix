@@ -16,4 +16,6 @@ internal data class ConnectionWorkflowUiState(
     val transferDraft: RoomTransferDraft? = null,
     val pendingShares: List<Uri> = emptyList(),
     val control: RoomControlUiState = RoomControlUiState(),
+    val incomingOfferBusy: Boolean = false,
+    val incomingOfferError: String? = null,
 )

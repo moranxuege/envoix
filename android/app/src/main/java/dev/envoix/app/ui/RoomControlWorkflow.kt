@@ -23,9 +23,10 @@ internal data class RoomControlUiState(
     val inviteRevealed: Boolean = false,
     val peerName: String? = null,
     val creator: Boolean = false,
+    val lifetimeRevision: Long = -1L,
     val policy: RoomLifetimePolicy = RoomLifetimePolicy.Idle15Minutes,
-    val idleDeadlineMs: Long? = null,
-    val nowMs: Long = 0L,
+    val idleDeadlineEpochMs: Long? = null,
+    val nowEpochMs: Long = 0L,
     val incomingOffer: RoomTransferOffer? = null,
     val outgoingOfferPending: Boolean = false,
     val replacementRequested: Boolean = false,
@@ -43,20 +44,19 @@ internal data class RoomControlUiState(
 }
 
 /**
- * Owns the native control-session lifecycle. Navigation and legacy Invite v1
+ * Owns the native control-session lifecycle. Navigation and direct InviteV2
  * adaptation stay in [ConnectionWorkflowViewModel].
  */
 internal class RoomControlWorkflow(
     private val gateway: RoomControlGateway,
     private val scope: CoroutineScope,
-    private val nowMs: () -> Long,
-    private val wallClockMs: () -> Long = System::currentTimeMillis,
+    private val clockEpochMs: () -> Long = System::currentTimeMillis,
     private val onStateChanged: (RoomControlUiState) -> Unit,
     private val onHosting: (RoomControlInvite) -> Unit,
     private val onConnected: (peerName: String, creator: Boolean) -> Unit,
     private val onCloseAcknowledged: (RoomCloseReason) -> Unit,
 ) {
-    var state = RoomControlUiState(nowMs = nowMs())
+    var state = RoomControlUiState(nowEpochMs = clockEpochMs())
         private set
 
     val available: Boolean
@@ -68,6 +68,7 @@ internal class RoomControlWorkflow(
     private var incomingOfferExpiry: Job? = null
     private var outgoingOfferCompletion: ((String?) -> Unit)? = null
     private var outgoingOfferId: String? = null
+    private var idleCloseRequestedRevision: Long? = null
 
     fun start() {
         if (!gateway.available) return
@@ -102,7 +103,7 @@ internal class RoomControlWorkflow(
             RoomControlUiState(
                 phase = RoomControlPhase.Hosting,
                 inviteRevealed = true,
-                nowMs = nowMs(),
+                nowEpochMs = clockEpochMs(),
             )
         }
         launchGateway(onError = ::failLifecycle) {
@@ -123,7 +124,7 @@ internal class RoomControlWorkflow(
             RoomControlUiState(
                 phase = RoomControlPhase.Joining,
                 peerName = peerName,
-                nowMs = nowMs(),
+                nowEpochMs = clockEpochMs(),
             )
         }
         launchGateway(onError = ::failLifecycle) {
@@ -149,7 +150,6 @@ internal class RoomControlWorkflow(
         }
         outgoingOfferId = draft.id
         outgoingOfferCompletion = completion
-        suspendIdle()
         update { it.copy(outgoingOfferPending = true, error = null) }
         launchGateway(onError = ::completeOutgoingOffer) {
             gateway.offerTransfer(draft)
@@ -175,7 +175,6 @@ internal class RoomControlWorkflow(
                 if (accept) update { it.copy(incomingOffer = null) }
                 showError(error)
                 completion(error)
-                resetIdleDeadline()
             },
         ) {
             gateway.respondToOffer(offerId, accept)
@@ -184,7 +183,6 @@ internal class RoomControlWorkflow(
                 onAcceptedLocally()
             }
             completion(null)
-            resetIdleDeadline()
         }
     }
 
@@ -202,12 +200,15 @@ internal class RoomControlWorkflow(
     fun updateActiveTransfers(count: Int) {
         val normalized = count.coerceAtLeast(0)
         if (activeTransferCount == normalized) return
-        val hadActive = activeTransferCount > 0
+        if (!state.connected) {
+            activeTransferCount = normalized
+            return
+        }
+        val wasActive = activeTransferCount > 0
         activeTransferCount = normalized
-        if (normalized > 0) {
-            suspendIdle()
-        } else if (hadActive) {
-            resetIdleDeadline()
+        val isActive = normalized > 0
+        if (wasActive != isActive) {
+            launchGateway { gateway.updateTransferActive(isActive) }
         }
     }
 
@@ -217,6 +218,25 @@ internal class RoomControlWorkflow(
             return
         }
         if (!state.live) return
+        if (reason == RoomCloseReason.IdleExpired) {
+            if (
+                !state.connected ||
+                !state.creator ||
+                idleCloseRequestedRevision == state.lifetimeRevision
+            ) {
+                return
+            }
+            idleCloseRequestedRevision = state.lifetimeRevision
+            launchGateway(
+                onError = { error ->
+                    idleCloseRequestedRevision = null
+                    showError(error)
+                },
+            ) {
+                gateway.close(reason)
+            }
+            return
+        }
         markClosed(reason)
         launchGateway { gateway.close(reason) }
     }
@@ -227,7 +247,7 @@ internal class RoomControlWorkflow(
             RoomControlUiState(
                 phase = RoomControlPhase.Legacy,
                 peerName = peerName,
-                nowMs = nowMs(),
+                nowEpochMs = clockEpochMs(),
             )
         }
     }
@@ -240,9 +260,10 @@ internal class RoomControlWorkflow(
         hostingExpiry = null
         incomingOfferExpiry = null
         activeTransferCount = 0
+        idleCloseRequestedRevision = null
         outgoingOfferCompletion = null
         outgoingOfferId = null
-        update { RoomControlUiState(nowMs = nowMs()) }
+        update { RoomControlUiState(nowEpochMs = clockEpochMs()) }
     }
 
     fun showError(message: String) {
@@ -283,6 +304,7 @@ internal class RoomControlWorkflow(
                 }
                 val peerName = event.peerName?.takeIf(String::isNotBlank) ?: "Connected device"
                 activeTransferCount = 0
+                idleCloseRequestedRevision = null
                 hostingExpiry?.cancel()
                 hostingExpiry = null
                 update {
@@ -290,16 +312,17 @@ internal class RoomControlWorkflow(
                         phase = RoomControlPhase.Connected,
                         peerName = peerName,
                         creator = event.creator,
-                        policy = event.policy,
-                        nowMs = nowMs(),
+                        lifetimeRevision = event.lifetime.revision,
+                        policy = event.lifetime.policy,
+                        idleDeadlineEpochMs = event.lifetime.idleDeadlineEpochMs,
+                        nowEpochMs = clockEpochMs(),
                     )
                 }
-                resetIdleDeadline()
+                startLifetimeTicker()
                 onConnected(peerName, event.creator)
             }
             is RoomControlEvent.IncomingOffer -> {
                 if (!state.connected) return
-                suspendIdle()
                 update { it.copy(incomingOffer = event.offer) }
                 scheduleIncomingOfferExpiry(event.offer)
             }
@@ -314,14 +337,16 @@ internal class RoomControlWorkflow(
             is RoomControlEvent.CommandFailed -> {
                 if (event.command == "offer" && event.offerId == outgoingOfferId) {
                     completeOutgoingOffer(event.message)
+                } else if (event.command == "close") {
+                    idleCloseRequestedRevision = null
+                    showError(event.message)
                 } else {
                     showError(event.message)
                 }
             }
-            is RoomControlEvent.PolicyChanged -> {
+            is RoomControlEvent.LifetimeChanged -> {
                 if (!state.connected) return
-                update { it.copy(policy = event.policy) }
-                resetIdleDeadline()
+                applyLifetime(event.lifetime)
             }
             is RoomControlEvent.Closed -> {
                 if (state.phase == RoomControlPhase.None ||
@@ -343,6 +368,7 @@ internal class RoomControlWorkflow(
                 outgoingOfferCompletion?.invoke(event.message)
                 outgoingOfferCompletion = null
                 outgoingOfferId = null
+                idleCloseRequestedRevision = null
                 idleTicker?.cancel()
                 hostingExpiry?.cancel()
                 incomingOfferExpiry?.cancel()
@@ -352,7 +378,7 @@ internal class RoomControlWorkflow(
                         invite = null,
                         incomingOffer = null,
                         outgoingOfferPending = false,
-                        idleDeadlineMs = null,
+                        idleDeadlineEpochMs = null,
                         error = event.message,
                     )
                 }
@@ -368,7 +394,6 @@ internal class RoomControlWorkflow(
         outgoingOfferCompletion = null
         outgoingOfferId = null
         update { it.copy(outgoingOfferPending = false) }
-        resetIdleDeadline()
     }
 
     private fun failLifecycle(message: String) {
@@ -382,7 +407,7 @@ internal class RoomControlWorkflow(
                 inviteRevealed = false,
                 incomingOffer = null,
                 outgoingOfferPending = false,
-                idleDeadlineMs = null,
+                idleDeadlineEpochMs = null,
                 error = message,
             )
         }
@@ -398,6 +423,7 @@ internal class RoomControlWorkflow(
         outgoingOfferCompletion?.invoke("The room closed before the offer was accepted")
         outgoingOfferCompletion = null
         outgoingOfferId = null
+        idleCloseRequestedRevision = null
         update {
             it.copy(
                 phase = RoomControlPhase.Closed,
@@ -405,33 +431,49 @@ internal class RoomControlWorkflow(
                 inviteRevealed = false,
                 incomingOffer = null,
                 outgoingOfferPending = false,
-                idleDeadlineMs = null,
+                idleDeadlineEpochMs = null,
                 closeReason = reason,
             )
         }
     }
 
-    private fun resetIdleDeadline() {
-        if (!state.connected ||
-            state.policy != RoomLifetimePolicy.Idle15Minutes ||
-            activeTransferCount > 0 ||
-            state.incomingOffer != null ||
-            state.outgoingOfferPending
-        ) {
-            suspendIdle()
-            return
+    private fun applyLifetime(lifetime: RoomLifetimeSnapshot) {
+        if (lifetime.revision <= state.lifetimeRevision) return
+        idleCloseRequestedRevision = null
+        update {
+            it.copy(
+                lifetimeRevision = lifetime.revision,
+                policy = lifetime.policy,
+                idleDeadlineEpochMs = lifetime.idleDeadlineEpochMs,
+                nowEpochMs = clockEpochMs(),
+            )
         }
-        val now = nowMs()
-        update { it.copy(nowMs = now, idleDeadlineMs = now + ROOM_IDLE_TIMEOUT_MS) }
+        startLifetimeTicker()
+    }
+
+    /**
+     * This ticker renders the creator-stamped epoch deadline. At zero the
+     * creator asks Rust to close against that authoritative snapshot; a joiner
+     * only stops the countdown and never expires the room itself.
+     */
+    private fun startLifetimeTicker() {
         idleTicker?.cancel()
+        idleTicker = null
+        val revision = state.lifetimeRevision
+        val deadline = state.idleDeadlineEpochMs ?: return
         idleTicker =
             scope.launch {
-                while (isActive && state.connected) {
-                    val current = nowMs()
-                    val deadline = state.idleDeadlineMs ?: return@launch
-                    update { it.copy(nowMs = current) }
+                while (isActive &&
+                    state.connected &&
+                    state.lifetimeRevision == revision &&
+                    state.idleDeadlineEpochMs == deadline
+                ) {
+                    val current = clockEpochMs()
+                    update { it.copy(nowEpochMs = current) }
                     if (current >= deadline) {
-                        close(RoomCloseReason.IdleExpired)
+                        if (state.creator && activeTransferCount == 0) {
+                            close(RoomCloseReason.IdleExpired)
+                        }
                         return@launch
                     }
                     delay(IDLE_TICK_MS)
@@ -439,17 +481,11 @@ internal class RoomControlWorkflow(
             }
     }
 
-    private fun suspendIdle() {
-        idleTicker?.cancel()
-        idleTicker = null
-        update { it.copy(idleDeadlineMs = null, nowMs = nowMs()) }
-    }
-
     private fun scheduleHostingExpiry(invite: RoomControlInvite) {
         hostingExpiry?.cancel()
         hostingExpiry =
             scope.launch {
-                val remaining = invite.expiresAtEpochMs - wallClockMs()
+                val remaining = invite.expiresAtEpochMs - clockEpochMs()
                 if (remaining > 0) delay(remaining)
                 if (state.phase == RoomControlPhase.Hosting && state.invite == invite) {
                     close(RoomCloseReason.InvitationExpired)
@@ -486,7 +522,6 @@ internal class RoomControlWorkflow(
     }
 
     companion object {
-        internal const val ROOM_IDLE_TIMEOUT_MS = 15L * 60L * 1_000L
         internal const val INCOMING_OFFER_TIMEOUT_MS = 60L * 1_000L
         private const val IDLE_TICK_MS = 1_000L
     }

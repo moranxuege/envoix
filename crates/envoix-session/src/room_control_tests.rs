@@ -22,7 +22,7 @@ fn room_invitation_has_a_distinct_uri_code_and_broker_namespace() {
     )
     .unwrap();
     assert!(invite.payload().starts_with("envoix://room/R123456-"));
-    assert_eq!(invite.room_id(), "control-v1:123456");
+    assert_eq!(invite.room_id(), "c1_123456");
     assert!(!invite.payload().starts_with("envoix://pair/"));
 }
 
@@ -121,6 +121,95 @@ fn failed_offer_response_terminates_the_session() {
     assert!(!terminated.load(std::sync::atomic::Ordering::Acquire));
 }
 
+#[test]
+fn creator_lifetime_pauses_until_both_transfer_edges_clear() {
+    let initial = RoomLifetimeState::initial(1_000);
+    assert_eq!(initial.idle_deadline_unix_ms, Some(901_000));
+    let mut lifetime = RoomLifetimeMachine::new(initial);
+
+    let paused = lifetime
+        .set_local_transfer_active(true, 2_000)
+        .unwrap()
+        .expect("first active edge pauses");
+    assert_eq!(paused.revision, 2);
+    assert_eq!(paused.idle_deadline_unix_ms, None);
+
+    assert!(
+        lifetime
+            .set_peer_transfer_active(true, 3_000)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        lifetime
+            .set_local_transfer_active(false, 4_000)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(lifetime.state, paused);
+
+    let resumed = lifetime
+        .set_peer_transfer_active(false, 5_000)
+        .unwrap()
+        .expect("last inactive edge resumes");
+    assert_eq!(resumed.revision, 3);
+    assert_eq!(resumed.idle_deadline_unix_ms, Some(905_000));
+}
+
+#[test]
+fn creator_activity_and_policy_transitions_stamp_one_authoritative_state() {
+    let mut lifetime = RoomLifetimeMachine::new(RoomLifetimeState::initial(10));
+
+    let active = lifetime.note_activity(20).unwrap().expect("activity");
+    assert_eq!(active.revision, 2);
+    assert_eq!(active.idle_deadline_unix_ms, Some(900_020));
+
+    let kept_open = lifetime
+        .set_policy(RoomLifetimePolicy::UntilForegroundEnds, 30)
+        .unwrap()
+        .expect("policy change");
+    assert_eq!(kept_open.revision, 3);
+    assert_eq!(kept_open.idle_deadline_unix_ms, None);
+    assert!(lifetime.note_activity(40).unwrap().is_none());
+
+    lifetime
+        .set_peer_transfer_active(true, 50)
+        .expect("track peer while kept open");
+    let idle_while_active = lifetime
+        .set_policy(RoomLifetimePolicy::Idle15Minutes, 60)
+        .unwrap()
+        .expect("restore idle policy");
+    assert_eq!(idle_while_active.revision, 4);
+    assert_eq!(idle_while_active.idle_deadline_unix_ms, None);
+
+    let resumed = lifetime
+        .set_peer_transfer_active(false, 70)
+        .unwrap()
+        .expect("last transfer ended");
+    assert_eq!(resumed.revision, 5);
+    assert_eq!(resumed.idle_deadline_unix_ms, Some(900_070));
+}
+
+#[test]
+fn authoritative_lifetime_requires_a_strictly_new_revision() {
+    let mut lifetime = RoomLifetimeMachine::new(RoomLifetimeState::initial(100));
+    let stale = lifetime.state.clone();
+    assert!(matches!(
+        lifetime.apply_authoritative(stale),
+        Err(CoreError::Protocol(_))
+    ));
+
+    let invalid = RoomLifetimeState {
+        revision: 2,
+        policy: RoomLifetimePolicy::UntilForegroundEnds,
+        idle_deadline_unix_ms: Some(123),
+    };
+    assert!(matches!(
+        lifetime.apply_authoritative(invalid),
+        Err(CoreError::Protocol(_))
+    ));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn room_control_loopback_supports_alternating_offers_and_close() {
     match UdpSocket::bind(("127.0.0.1", 0)) {
@@ -199,35 +288,132 @@ async fn room_control_loopback_supports_alternating_offers_and_close() {
     assert_eq!(joiner.peer_name(), "Alice's iPhone");
     assert!(host.is_creator());
     assert!(!joiner.is_creator());
+    assert_eq!(host.lifetime_state(), joiner.lifetime_state());
+    assert_eq!(host.lifetime_state().revision, 1);
+    assert!(
+        joiner
+            .set_policy(RoomLifetimePolicy::UntilForegroundEnds)
+            .await
+            .is_err()
+    );
+    assert!(joiner.close(RoomCloseReason::IdleExpired).await.is_err());
+    assert!(host.close(RoomCloseReason::IdleExpired).await.is_err());
 
-    host.offer_transfer(offer("from_host", "123456-amber-comet"))
+    let paused = host
+        .set_local_transfer_active(true)
         .await
-        .unwrap();
+        .unwrap()
+        .expect("creator active edge");
+    assert_eq!(
+        joiner.next_event().await.unwrap(),
+        RoomControlEvent::LifetimeChanged(paused.clone())
+    );
+    assert_eq!(paused.idle_deadline_unix_ms, None);
+    let resumed = host
+        .set_local_transfer_active(false)
+        .await
+        .unwrap()
+        .expect("creator inactive edge");
+    assert_eq!(resumed.revision, paused.revision + 1);
+    assert!(resumed.idle_deadline_unix_ms.is_some());
+    assert_eq!(
+        joiner.next_event().await.unwrap(),
+        RoomControlEvent::LifetimeChanged(resumed)
+    );
+
+    assert!(
+        joiner
+            .set_local_transfer_active(true)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let peer_paused = match host.next_event().await.unwrap() {
+        RoomControlEvent::LifetimeChanged(state) => state,
+        other => panic!("expected peer-paused lifetime, got {other:?}"),
+    };
+    assert_eq!(peer_paused.idle_deadline_unix_ms, None);
+    assert_eq!(
+        joiner.next_event().await.unwrap(),
+        RoomControlEvent::LifetimeChanged(peer_paused)
+    );
+
+    assert!(
+        joiner
+            .set_local_transfer_active(false)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let peer_resumed = match host.next_event().await.unwrap() {
+        RoomControlEvent::LifetimeChanged(state) => state,
+        other => panic!("expected resumed lifetime, got {other:?}"),
+    };
+    assert!(peer_resumed.idle_deadline_unix_ms.is_some());
+    assert_eq!(
+        joiner.next_event().await.unwrap(),
+        RoomControlEvent::LifetimeChanged(peer_resumed)
+    );
+
+    let from_host_lifetime = host
+        .offer_transfer(offer("from_host", "123456-amber-comet"))
+        .await
+        .unwrap()
+        .expect("creator offer activity");
+    assert_eq!(
+        joiner.next_event().await.unwrap(),
+        RoomControlEvent::LifetimeChanged(from_host_lifetime)
+    );
     assert!(matches!(
         joiner.next_event().await.unwrap(),
         RoomControlEvent::IncomingOffer(RoomTransferOffer { offer_id, .. })
             if offer_id == "from_host"
     ));
-    joiner.accept_offer("from_host").await.unwrap();
+    assert!(joiner.accept_offer("from_host").await.unwrap().is_none());
+    let accepted_lifetime = match host.next_event().await.unwrap() {
+        RoomControlEvent::LifetimeChanged(state) => state,
+        other => panic!("expected accepted lifetime, got {other:?}"),
+    };
     assert_eq!(
         host.next_event().await.unwrap(),
         RoomControlEvent::OfferAccepted {
             offer_id: "from_host".into()
         }
     );
+    assert_eq!(
+        joiner.next_event().await.unwrap(),
+        RoomControlEvent::LifetimeChanged(accepted_lifetime)
+    );
 
-    joiner
-        .offer_transfer(offer("from_joiner", "654321-river-slate"))
-        .await
-        .unwrap();
+    assert!(
+        joiner
+            .offer_transfer(offer("from_joiner", "654321-river-slate"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let from_joiner_lifetime = match host.next_event().await.unwrap() {
+        RoomControlEvent::LifetimeChanged(state) => state,
+        other => panic!("expected joiner-offer lifetime, got {other:?}"),
+    };
+    assert_eq!(
+        joiner.next_event().await.unwrap(),
+        RoomControlEvent::LifetimeChanged(from_joiner_lifetime)
+    );
     assert!(matches!(
         host.next_event().await.unwrap(),
         RoomControlEvent::IncomingOffer(RoomTransferOffer { offer_id, .. })
             if offer_id == "from_joiner"
     ));
-    host.reject_offer("from_joiner", RoomOfferRejection::Declined)
+    let rejected_lifetime = host
+        .reject_offer("from_joiner", RoomOfferRejection::Declined)
         .await
-        .unwrap();
+        .unwrap()
+        .expect("creator rejection activity");
+    assert_eq!(
+        joiner.next_event().await.unwrap(),
+        RoomControlEvent::LifetimeChanged(rejected_lifetime)
+    );
     assert_eq!(
         joiner.next_event().await.unwrap(),
         RoomControlEvent::OfferRejected {
@@ -236,12 +422,14 @@ async fn room_control_loopback_supports_alternating_offers_and_close() {
         }
     );
 
-    host.set_policy(RoomLifetimePolicy::UntilForegroundEnds)
+    let kept_open = host
+        .set_policy(RoomLifetimePolicy::UntilForegroundEnds)
         .await
-        .unwrap();
+        .unwrap()
+        .expect("creator policy change");
     assert_eq!(
         joiner.next_event().await.unwrap(),
-        RoomControlEvent::PolicyChanged(RoomLifetimePolicy::UntilForegroundEnds)
+        RoomControlEvent::LifetimeChanged(kept_open)
     );
     host.close(RoomCloseReason::UserEnded).await.unwrap();
     assert_eq!(
@@ -264,10 +452,20 @@ fn test_config() -> SessionConfig {
     }
 }
 
-fn offer(offer_id: &str, code: &str) -> RoomTransferOffer {
+fn offer(offer_id: &str, _code: &str) -> RoomTransferOffer {
+    let transfer_invite = InviteV2::create(
+        "e946a31a2207efcd68b9dbf409c4bf241aa02a0cbc0028af2e1ed11472064eff@67.230.187.238:8445"
+            .into(),
+        Vec::new(),
+        TransferRole::Sender,
+        envoix_invite::Capabilities::current(),
+        now_unix_secs().expect("current time"),
+    )
+    .expect("sender invitation")
+    .payload;
     RoomTransferOffer {
         offer_id: offer_id.into(),
-        transfer_invite: format!("envoix://pair/{code}?role=send"),
+        transfer_invite,
         root_names: vec!["Photos".into(), "report.pdf".into()],
         item_count: 2,
         total_bytes: 42,

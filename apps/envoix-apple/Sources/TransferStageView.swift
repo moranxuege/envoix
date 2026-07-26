@@ -1,4 +1,7 @@
 import SwiftUI
+#if os(iOS)
+import QuickLook
+#endif
 
 struct TransferStageView: View {
     let records: [TransferActivityRecord]
@@ -18,6 +21,10 @@ struct TransferStageView: View {
     @Environment(\.appLanguage) private var language
     @AppStorage("envoix.developerMode") private var developerMode = false
     @State private var expandedActivityIDs: Set<String> = []
+    #if os(iOS)
+    @State private var previewFileURL: URL?
+    @State private var receivedItemsPresentation: ReceivedItemsPresentation?
+    #endif
 
     var body: some View {
         ScrollView {
@@ -60,6 +67,12 @@ struct TransferStageView: View {
             }
             .padding(.vertical, 4)
         }
+        #if os(iOS)
+        .quickLookPreview($previewFileURL)
+        .sheet(item: $receivedItemsPresentation) { presentation in
+            ReceivedItemsSheet(urls: presentation.urls)
+        }
+        #endif
     }
 
     @ViewBuilder
@@ -119,9 +132,9 @@ struct TransferStageView: View {
             .buttonStyle(.plain)
             .accessibilityIdentifier("activity_\(record.activityId)")
 
-            if progress != .hidden, record.totalBytes > 0 {
+            if record.state != .delivered, progress != .hidden, record.totalBytes > 0 {
                 ProgressView(
-                    value: Double(progress == .complete ? record.totalBytes : record.bytesTransferred),
+                    value: Double(record.bytesTransferred),
                     total: Double(record.totalBytes)
                 )
                 HStack {
@@ -136,6 +149,12 @@ struct TransferStageView: View {
                 }
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(Theme.muted)
+            }
+
+            if record.direction == .receive,
+               record.state == .delivered,
+               !record.savedPaths.isEmpty {
+                completedReceiveControls(record)
             }
 
             if isExpanded {
@@ -154,17 +173,6 @@ struct TransferStageView: View {
                         .font(.footnote)
                         .foregroundStyle(record.state == .failed ? Theme.danger : Theme.muted)
                         .textSelection(.enabled)
-                }
-
-                if record.state == .delivered, !record.savedPaths.isEmpty {
-                    VStack(alignment: .leading, spacing: 5) {
-                        ForEach(record.savedPaths.prefix(8), id: \.self) { path in
-                            Text(path)
-                                .font(.caption.monospaced())
-                                .lineLimit(1)
-                                .textSelection(.enabled)
-                        }
-                    }
                 }
 
                 HStack(spacing: 8) {
@@ -244,10 +252,74 @@ struct TransferStageView: View {
         .card(padding: 14)
     }
 
+    private func completedReceiveControls(_ record: TransferActivityRecord) -> some View {
+        let urls = record.savedPaths.map { URL(fileURLWithPath: $0) }
+        return VStack(alignment: .leading, spacing: 8) {
+            Label(completedDestinationText(urls), systemImage: "folder.fill")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Theme.text)
+
+            Text(urls.prefix(3).map(\.lastPathComponent).joined(separator: " · "))
+                .font(.caption)
+                .foregroundStyle(Theme.muted)
+                .lineLimit(2)
+                .truncationMode(.middle)
+
+            HStack(spacing: 8) {
+                #if os(macOS)
+                Button(platformRevealTitle(language: language)) {
+                    revealInFinder(urls)
+                }
+                #elseif os(iOS)
+                if urls.count == 1, let firstURL = urls.first, isRegularFileURL(firstURL) {
+                    Button(platformRevealTitle(language: language)) {
+                        previewFileURL = firstURL
+                    }
+                    ShareLink(item: firstURL) {
+                        Label(
+                            AppText.value("Share", "分享", language: language),
+                            systemImage: "square.and.arrow.up"
+                        )
+                    }
+                } else {
+                    Button {
+                        receivedItemsPresentation = ReceivedItemsPresentation(urls: urls)
+                    } label: {
+                        Label(
+                            AppText.value("View received items", "查看已接收项目", language: language),
+                            systemImage: "square.stack"
+                        )
+                    }
+                }
+                #endif
+            }
+            .buttonStyle(.bordered)
+        }
+        .accessibilityIdentifier("activity_saved_items_\(record.activityId)")
+    }
+
+    private func completedDestinationText(_ urls: [URL]) -> String {
+        let parentPaths = Set(urls.map { $0.deletingLastPathComponent().path })
+        if parentPaths.count == 1, let parent = urls.first?.deletingLastPathComponent() {
+            return AppText.value(
+                "Saved in \(parent.lastPathComponent)",
+                "已保存到 \(parent.lastPathComponent)",
+                language: language
+            )
+        }
+        return AppText.value(
+            "Saved \(urls.count) items",
+            "已保存 \(urls.count) 个项目",
+            language: language
+        )
+    }
+
     private func icon(for record: TransferActivityRecord) -> String {
         switch record.state {
         case .delivered:
-            return "envelope.badge.fill"
+            return record.direction == .send
+                ? "envelope.badge.fill"
+                : "tray.and.arrow.down.fill"
         case .failed:
             return "exclamationmark.triangle.fill"
         case .canceled:
@@ -292,7 +364,10 @@ struct TransferStageView: View {
         case .waitingForReceiverSave: return AppText.value("Waiting for receiver to save", "等待接收方完成保存", language: language)
         case .finalizingDelivery: return AppText.value("Saved; finalizing delivery", "已保存，正在完成交付确认", language: language)
         case .paused: return AppText.value("Paused", "已暂停", language: language)
-        case .delivered: return AppText.value("Delivered", "已送达", language: language)
+        case .delivered:
+            return record.direction == .send
+                ? AppText.value("Delivered", "已送达", language: language)
+                : AppText.value("Received", "已接收", language: language)
         case .failed: return AppText.value("Failed", "失败", language: language)
         case .canceled: return AppText.value("Canceled", "已取消", language: language)
         }

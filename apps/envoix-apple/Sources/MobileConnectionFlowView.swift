@@ -24,6 +24,10 @@ struct MobileConnectionFlowView: View {
     @AppStorage("envoix.language") private var language = "en"
     @AppStorage("envoix.serverURL") private var serverURL = ""
     @AppStorage("envoix.relayURL") private var relayURL = ""
+    @AppStorage("envoix.concurrentTransfers") private var concurrentTransfers = true
+    @AppStorage("envoix.candidatesAllow") private var candidatesAllow = ""
+    @AppStorage("envoix.candidatesDeny") private var candidatesDeny = ""
+    @AppStorage("envoix.speedLimit") private var speedLimit = 40
 
     @StateObject private var nearbyCoordinator = NearbyDiscoveryCoordinator()
     @StateObject private var presence = NearbyPresencePreferences()
@@ -57,7 +61,7 @@ struct MobileConnectionFlowView: View {
     @State private var now = Date()
     @State private var pendingRoomReplacement: (() -> Void)?
     @State private var isRoomReplacementPresented = false
-    @State private var lastRoomActivityUpdate: Date?
+    @State private var acceptingRoomOfferID: String?
     #if DEBUG
     @State private var didStageBackgroundShareFixture = false
     @State private var openInUITestFixtureURL: URL?
@@ -212,20 +216,8 @@ struct MobileConnectionFlowView: View {
             }
             workflow.tick(now: date, hasActiveTransfer: roomHasActiveTransfers)
         }
-        .onReceive(model.$activities) { records in
-            guard let room = workflow.room else { return }
-            let latestUpdate = records
-                .filter { room.activityIDs.contains($0.activityId) }
-                .map(\.updatedAt)
-                .max()
-            guard latestUpdate != lastRoomActivityUpdate else { return }
-            lastRoomActivityUpdate = latestUpdate
-            if latestUpdate != nil {
-                workflow.noteRoomActivity()
-            }
-        }
-        .onChange(of: workflow.room?.id) { _ in
-            lastRoomActivityUpdate = nil
+        .onReceive(model.$activities) { _ in
+            workflow.setLocalTransferActive(roomHasActiveTransfers)
         }
         .onChange(of: presence.displayName) { _ in updateDiscoveryLease() }
         .onChange(of: presence.visibility) { _ in updateDiscoveryLease() }
@@ -233,6 +225,7 @@ struct MobileConnectionFlowView: View {
             if phase == .connected, workflow.room != nil {
                 roomInvitationIsRevealed = false
                 page = .room
+                workflow.setLocalTransferActive(roomHasActiveTransfers)
             } else if phase != .hosting {
                 roomInvitationIsRevealed = false
             }
@@ -254,7 +247,7 @@ struct MobileConnectionFlowView: View {
             transferHasStarted = true
             preservedSendSelection = SendSelectionSnapshot()
             workflow.captureActivity(activityID)
-            workflow.noteRoomActivity()
+            workflow.setLocalTransferActive(roomHasActiveTransfers)
             if transferRoute == .send {
                 transferRoute = nil
             }
@@ -264,7 +257,7 @@ struct MobileConnectionFlowView: View {
                   transferRoomID == workflow.room?.id else { return }
             transferHasStarted = true
             workflow.captureActivity(activityID)
-            workflow.noteRoomActivity()
+            workflow.setLocalTransferActive(roomHasActiveTransfers)
             if transferRoute == .receive {
                 transferRoute = nil
             }
@@ -312,6 +305,7 @@ struct MobileConnectionFlowView: View {
                     controlPhase: workflow.controlPhase,
                     peerDisplayName: workflow.peerDisplayName,
                     incomingOffer: workflow.incomingRoomOffer,
+                    isAcceptingOffer: acceptingRoomOfferID != nil,
                     isRoomCreator: workflow.isRoomCreator,
                     lifetimePolicy: workflow.roomLifetimePolicy,
                     idleDeadline: workflow.idleDeadline,
@@ -571,21 +565,23 @@ struct MobileConnectionFlowView: View {
         }
 
         let action: OneTimeRoomAction
-        if pairingInput.lowercased().hasPrefix("envoix:")
-            && !pairingInput.lowercased().hasPrefix("envoix://pair/") {
-            action = .offerFiles
-        } else {
-            do {
+        do {
+            if pairingInput.lowercased().hasPrefix("envoix:") {
+                let invitation = try parsePairingInvite(input: pairingInput)
+                applyRuntimeSettings(from: invitation)
                 action = ConnectionWorkflowPolicy.localAction(
-                    for: try parsePairingInvite(input: pairingInput).role
+                    forLocalRole: invitation.joinerRole
                 )
-            } catch {
-                return AppText.value(
-                    "This is not a valid Envoix pairing code.",
-                    "这不是有效的 Envoix 配对码。",
-                    language: language
-                )
+            } else {
+                _ = try normalizeRoomCode(input: pairingInput)
+                action = .choose
             }
+        } catch {
+            return AppText.value(
+                "This is not a valid Envoix InviteV2 link or Room Code.",
+                "这不是有效的 Envoix InviteV2 链接或房间码。",
+                language: language
+            )
         }
 
         workflow.discardAllPendingOffers()
@@ -768,9 +764,9 @@ struct MobileConnectionFlowView: View {
 
     private func acceptPendingOffer(_ pending: PendingNearbyInvitation) {
         workflow.discardAllPendingOffers()
-        let continuesCurrentLegacyRoom = !isRoomControlInput(pending.offer.invite)
+        let continuesCurrentNearbyRoom = !isRoomControlInput(pending.offer.invite)
             && workflow.room?.nearbySelection?.discoveryPeerKey == pending.offer.senderPeerKey
-        if continuesCurrentLegacyRoom {
+        if continuesCurrentNearbyRoom {
             acceptPendingOfferNow(pending)
         } else {
             guardRoomReplacement {
@@ -800,7 +796,10 @@ struct MobileConnectionFlowView: View {
             displayName: pending.offer.senderDisplayName,
             sources: [.bluetooth]
         )
-        let action = ConnectionWorkflowPolicy.localAction(for: parsed.role)
+        applyRuntimeSettings(from: parsed)
+        let action = ConnectionWorkflowPolicy.localAction(
+            forLocalRole: parsed.joinerRole
+        )
         workflow.acceptNearbyOffer(
             selection: selection,
             pairingInput: pending.offer.invite,
@@ -824,6 +823,14 @@ struct MobileConnectionFlowView: View {
             return
         }
         let input = url.absoluteString
+        if input.lowercased().hasPrefix("envoix://invite/v2/") {
+            guardRoomReplacement {
+                if let error = openPairingRoom(input: input) {
+                    ToastCenter.shared.show(error)
+                }
+            }
+            return
+        }
         if isRoomControlInput(input) {
             guardRoomReplacement {
                 if let error = openPairingRoom(input: input) {
@@ -1011,12 +1018,134 @@ struct MobileConnectionFlowView: View {
 
     private func acceptIncomingRoomOffer() {
         guard let offer = workflow.incomingRoomOffer,
-              let room = workflow.room else { return }
+              let room = workflow.room,
+              acceptingRoomOfferID == nil else { return }
+        guard !model.receive.isBusy else {
+            ToastCenter.shared.show(AppText.value(
+                "Finish the current receive before accepting another offer.",
+                "请先完成当前接收任务，再接受新的文件邀请。",
+                language: language
+            ))
+            return
+        }
+        let invitation: FfiPairingInvite
+        let settings: EnvoixRuntimeSettings
+        do {
+            invitation = try parsePairingInviteForRole(
+                input: offer.transferInvite,
+                localRole: .receive
+            )
+            applyRuntimeSettings(from: invitation)
+            settings = try RuntimeSettingsProvider.make(
+                concurrentTransfers: concurrentTransfers,
+                language: language,
+                serverURL: invitation.broker.trimmed.isEmpty
+                    ? serverURL
+                    : invitation.broker,
+                relayURL: invitation.relayUrls.first.flatMap {
+                    $0.trimmed.isEmpty ? nil : $0
+                } ?? relayURL,
+                candidatesAllow: candidatesAllow,
+                candidatesDeny: candidatesDeny,
+                speedLimit: speedLimit
+            )
+        } catch {
+            ToastCenter.shared.show(error.localizedDescription)
+            return
+        }
+
+        let destination: (url: URL, access: AnyObject?)
+        do {
+            destination = try prepareAutomaticRoomDestination()
+        } catch {
+            presentRoomReceiveSheet(offer: offer, room: room)
+            return
+        }
+
+        acceptingRoomOfferID = offer.id
+        Task { @MainActor in
+            transferRoomID = room.id
+            transferHasStarted = false
+            transferUsesInboundInvite = true
+            transferUsesRoomControl = true
+            let result = await RoomOfferAcceptanceCoordinator.startReceiverThenAccept(
+                startReceiver: {
+                    await model.receive.startReceivingRoomControlInvite(
+                        outputDir: destination.url.path,
+                        invite: offer.transferInvite,
+                        settings: settings,
+                        destinationAccess: destination.access
+                    )
+                },
+                acceptOffer: {
+                    await workflow.acceptIncomingRoomOffer() != nil
+                },
+                cancelReceiver: { activityID in
+                    if model.receive.transferActivity?.activityId == activityID {
+                        _ = model.receive.cancel()
+                    }
+                }
+            )
+            acceptingRoomOfferID = nil
+            switch result {
+            case .accepted:
+                break
+            case .receiverDidNotStart:
+                resetRoomTransferHandoff()
+            case .offerUnavailable:
+                resetRoomTransferHandoff()
+                ToastCenter.shared.show(AppText.value(
+                    "The file offer is no longer available.",
+                    "此文件邀请已不可用。",
+                    language: language
+                ))
+            }
+        }
+    }
+
+    private func presentRoomReceiveSheet(
+        offer: RoomControlTransferOffer,
+        room: OneTimeRoomSession
+    ) {
         transferRoomID = room.id
+        transferHasStarted = false
         transferUsesInboundInvite = true
-        transferUsesRoomControl = room.origin == .roomControl
+        transferUsesRoomControl = true
         pendingReceivePairingInput = offer.transferInvite
         transferRoute = .receive
+    }
+
+    private func prepareAutomaticRoomDestination() throws -> (url: URL, access: AnyObject?) {
+        let bookmarkKey = "envoix.outputDirBookmark"
+        if let bookmark = UserDefaults.standard.data(forKey: bookmarkKey) {
+            let url = try resolveSecurityScopedFolderBookmark(bookmark)
+            let access = SecurityScopedResourceAccess(url: url)
+            guard access.isActive || FileManager.default.isWritableFile(atPath: url.path) else {
+                throw RuntimeSettingsError("The selected save folder permission expired.")
+            }
+            try validateWritableDirectoryAccess(url)
+            return (url, access)
+        }
+
+        let documents = FileManager.default.urls(
+            for: .documentDirectory,
+            in: .userDomainMask
+        ).first ?? URL(
+            fileURLWithPath: NSHomeDirectory(),
+            isDirectory: true
+        ).appendingPathComponent("Documents", isDirectory: true)
+        let destination = documents.appendingPathComponent("Downloads", isDirectory: true)
+        try validateWritableDirectoryAccess(destination)
+        return (destination, nil)
+    }
+
+    private func applyRuntimeSettings(from invitation: FfiPairingInvite) {
+        if !invitation.broker.trimmed.isEmpty {
+            serverURL = invitation.broker.trimmed
+        }
+        if let relay = invitation.relayUrls.first, !relay.trimmed.isEmpty {
+            relayURL = relay.trimmed
+        }
     }
 
     private func openedSendFileErrorMessage(_ error: OpenedSendFileError) -> String {

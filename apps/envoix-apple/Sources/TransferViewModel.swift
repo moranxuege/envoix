@@ -118,15 +118,16 @@ private struct StoredTransferRequestV2: Codable {
         switch request.mode {
         case .manual: mode = "manual"
         case .invite: mode = "invite"
+        case .remembered: mode = "remembered"
         case .showManual: mode = "show_manual"
         case .showInvite: mode = "show_invite"
         case .mdns: mode = "mdns"
         case .room: mode = "room"
         }
         peerDescriptor = request.peerDescriptor
-        invite = request.invite
-        code = request.code
-        token = request.token
+        invite = ""
+        code = ""
+        token = ""
         broker = request.broker
         relay = request.relay
         configPath = request.configPath
@@ -151,6 +152,7 @@ private struct StoredTransferRequestV2: Codable {
         switch self.mode {
         case "manual": mode = .manual
         case "invite": mode = .invite
+        case "remembered": mode = .remembered
         case "show_manual": mode = .showManual
         case "show_invite": mode = .showInvite
         case "mdns": mode = .mdns
@@ -171,6 +173,10 @@ private struct StoredTransferRequestV2: Codable {
             invite: invite,
             code: code,
             token: token,
+            rememberConsent: false,
+            rememberedCredentialRef: "",
+            rememberedGeneration: 0,
+            rememberedPreviousGeneration: nil,
             broker: broker,
             relay: relay,
             configPath: configPath,
@@ -472,6 +478,7 @@ final class TransferViewModel: ObservableObject {
         let request: FfiTransferRequest
         let stateDirectory: String
         let sourceAccess: AnyObject?
+        let rememberPersistence: RememberPersistenceContext?
     }
 
     private struct ReceiveOperation {
@@ -480,6 +487,21 @@ final class TransferViewModel: ObservableObject {
         let stateDirectory: String
         let targetDirectory: String
         let destinationAccess: AnyObject?
+        let rememberPersistence: RememberPersistenceContext?
+    }
+
+    @MainActor
+    private final class ReceiveLaunchSignal {
+        private var continuation: CheckedContinuation<String?, Never>?
+
+        init(_ continuation: CheckedContinuation<String?, Never>) {
+            self.continuation = continuation
+        }
+
+        func resolve(_ activityID: String?) {
+            continuation?.resume(returning: activityID)
+            continuation = nil
+        }
     }
 
     /// The one lifecycle state rendered by setup, Activity, and menu-bar
@@ -615,9 +637,19 @@ final class TransferViewModel: ObservableObject {
         do {
             guard let value = try storedManifestSession(direction: direction) else { return }
             stored = value
+            guard value.request.invite.isEmpty,
+                  value.request.code.isEmpty,
+                  value.request.token.isEmpty else {
+                throw RuntimeSettingsError("Stored transfer contains obsolete authentication data.")
+            }
             request = try value.request.value()
             guard request.direction == direction else {
                 throw RuntimeSettingsError("Stored transfer direction does not match its session slot.")
+            }
+            if requiresProcessAuthenticationState(request.mode) {
+                clearStoredManifestSession(direction: direction)
+                eventLog.append("discarded transfer whose authentication state ended with the app process")
+                return
             }
         } catch {
             clearStoredManifestSession(direction: direction)
@@ -672,7 +704,8 @@ final class TransferViewModel: ObservableObject {
                         settings: stored.settings.value,
                         request: request,
                         stateDirectory: stored.stateDirectory,
-                        sourceAccess: sourceAccess
+                        sourceAccess: sourceAccess,
+                        rememberPersistence: nil
                     ))
                 } else {
                     guard let targetDirectory = stored.targetDirectory else {
@@ -688,7 +721,8 @@ final class TransferViewModel: ObservableObject {
                         request: request,
                         stateDirectory: stored.stateDirectory,
                         targetDirectory: restored.path,
-                        destinationAccess: restored.access
+                        destinationAccess: restored.access,
+                        rememberPersistence: nil
                     ))
                 }
             } catch {
@@ -750,14 +784,24 @@ final class TransferViewModel: ObservableObject {
         selectedPaths: [String],
         code: String,
         settings: EnvoixRuntimeSettings,
-        sourceAccess: AnyObject? = nil
+        sourceAccess: AnyObject? = nil,
+        rememberLabel: String? = nil
     ) {
+        let persistence = prepareRememberPersistence(label: rememberLabel, settings: settings)
+        if rememberLabel?.trimmed.isEmpty == false, persistence == nil { return }
         startSend(
             selectedPaths: selectedPaths,
             settings: settings,
-            request: request(direction: .send, mode: .room, settings: settings, code: code),
+            request: request(
+                direction: .send,
+                mode: .room,
+                settings: settings,
+                code: code,
+                rememberConsent: persistence != nil
+            ),
             sourceAccess: sourceAccess,
-            roomCode: code
+            roomCode: code,
+            rememberPersistence: persistence
         )
     }
 
@@ -766,8 +810,11 @@ final class TransferViewModel: ObservableObject {
         invite: String,
         settings: EnvoixRuntimeSettings,
         pathPolicy: FfiPathPolicy = .auto,
-        sourceAccess: AnyObject? = nil
+        sourceAccess: AnyObject? = nil,
+        rememberLabel: String? = nil
     ) {
+        let persistence = prepareRememberPersistence(label: rememberLabel, settings: settings)
+        if rememberLabel?.trimmed.isEmpty == false, persistence == nil { return }
         startSend(
             selectedPaths: selectedPaths,
             settings: settings,
@@ -776,10 +823,46 @@ final class TransferViewModel: ObservableObject {
                 mode: .invite,
                 settings: settings,
                 invite: invite,
+                rememberConsent: persistence != nil,
                 pathPolicy: pathPolicy
             ),
-            sourceAccess: sourceAccess
+            sourceAccess: sourceAccess,
+            rememberPersistence: persistence
         )
+    }
+
+    func startSendingManifestToRememberedPeer(
+        selectedPaths: [String],
+        peer: RememberedPeerSummary,
+        settings: EnvoixRuntimeSettings,
+        sourceAccess: AnyObject? = nil
+    ) {
+        do {
+            let persistence = try RememberPersistenceContext(peer: peer)
+            do {
+                let credential = try RememberedPeerStore.shared.credential(for: peer)
+                let handle = try registerProtectedRememberedCredential(opaqueCredential: credential)
+                startSend(
+                    selectedPaths: selectedPaths,
+                    settings: settings,
+                    request: request(
+                        direction: .send,
+                        mode: .remembered,
+                        settings: settings,
+                        rememberedCredentialRef: handle,
+                        rememberedGeneration: peer.generation,
+                        rememberedPreviousGeneration: peer.previousGeneration
+                    ),
+                    sourceAccess: sourceAccess,
+                    rememberPersistence: persistence
+                )
+            } catch {
+                RememberedPeerStore.shared.delete(relationshipID: peer.relationshipID)
+                handleFailed(error.localizedDescription)
+            }
+        } catch {
+            handleFailed(error.localizedDescription)
+        }
     }
 
     func startReceivingWithToken(
@@ -800,28 +883,125 @@ final class TransferViewModel: ObservableObject {
         outputDir: String,
         code: String,
         settings: EnvoixRuntimeSettings,
-        destinationAccess: AnyObject? = nil
+        destinationAccess: AnyObject? = nil,
+        rememberLabel: String? = nil
     ) {
+        let persistence = prepareRememberPersistence(label: rememberLabel, settings: settings)
+        if rememberLabel?.trimmed.isEmpty == false, persistence == nil { return }
         startReceive(
             targetDirectory: outputDir,
             settings: settings,
-            request: request(direction: .receive, mode: .room, settings: settings, code: code),
+            request: request(
+                direction: .receive,
+                mode: .room,
+                settings: settings,
+                code: code,
+                rememberConsent: persistence != nil
+            ),
             destinationAccess: destinationAccess,
-            roomCode: code
+            roomCode: code,
+            rememberPersistence: persistence
         )
     }
 
     func startReceivingWithInvite(
         outputDir: String,
+        invite: String,
         settings: EnvoixRuntimeSettings,
-        destinationAccess: AnyObject? = nil
+        destinationAccess: AnyObject? = nil,
+        rememberLabel: String? = nil
     ) {
+        let persistence = prepareRememberPersistence(label: rememberLabel, settings: settings)
+        if rememberLabel?.trimmed.isEmpty == false, persistence == nil { return }
         startReceive(
             targetDirectory: outputDir,
             settings: settings,
-            request: request(direction: .receive, mode: .showInvite, settings: settings),
-            destinationAccess: destinationAccess
+            request: request(
+                direction: .receive,
+                mode: .invite,
+                settings: settings,
+                invite: invite,
+                rememberConsent: persistence != nil
+            ),
+            destinationAccess: destinationAccess,
+            rememberPersistence: persistence
         )
+    }
+
+    /// Starts a receiver for a room-control offer and returns only when its
+    /// launch task has persisted the operation and is entering the FFI wait.
+    func startReceivingRoomControlInvite(
+        outputDir: String,
+        invite: String,
+        settings: EnvoixRuntimeSettings,
+        destinationAccess: AnyObject? = nil
+    ) async -> String? {
+        displayLanguage = settings.language
+        let request = request(
+            direction: .receive,
+            mode: .invite,
+            settings: settings,
+            invite: invite
+        )
+        beginActivity(direction: .receive, mode: request.mode, roomCode: nil)
+        do {
+            guard let activityID = transferActivity?.activityId else {
+                throw RuntimeSettingsError("Cannot start a receiver without an activity.")
+            }
+            let operation = ReceiveOperation(
+                settings: settings,
+                request: request,
+                stateDirectory: try receiveStateDirectory(activityID: activityID),
+                targetDirectory: outputDir,
+                destinationAccess: destinationAccess,
+                rememberPersistence: nil
+            )
+            activeReceive = operation
+            activeSend = nil
+            return await withCheckedContinuation { continuation in
+                launchReceive(
+                    operation,
+                    launchSignal: ReceiveLaunchSignal(continuation)
+                )
+            }
+        } catch {
+            handleFailed(error.localizedDescription)
+            return nil
+        }
+    }
+
+    func startReceivingFromRememberedPeer(
+        outputDir: String,
+        peer: RememberedPeerSummary,
+        settings: EnvoixRuntimeSettings,
+        destinationAccess: AnyObject? = nil
+    ) {
+        do {
+            let persistence = try RememberPersistenceContext(peer: peer)
+            do {
+                let credential = try RememberedPeerStore.shared.credential(for: peer)
+                let handle = try registerProtectedRememberedCredential(opaqueCredential: credential)
+                startReceive(
+                    targetDirectory: outputDir,
+                    settings: settings,
+                    request: request(
+                        direction: .receive,
+                        mode: .remembered,
+                        settings: settings,
+                        rememberedCredentialRef: handle,
+                        rememberedGeneration: peer.generation,
+                        rememberedPreviousGeneration: peer.previousGeneration
+                    ),
+                    destinationAccess: destinationAccess,
+                    rememberPersistence: persistence
+                )
+            } catch {
+                RememberedPeerStore.shared.delete(relationshipID: peer.relationshipID)
+                handleFailed(error.localizedDescription)
+            }
+        } catch {
+            handleFailed(error.localizedDescription)
+        }
     }
 
     @discardableResult
@@ -897,6 +1077,11 @@ final class TransferViewModel: ObservableObject {
         updateActivity(state: .canceled, diagnostic: localized("Canceled", "已取消"))
         if let direction = transferActivity?.direction {
             clearStoredManifestSession(direction: direction)
+            if direction == .send {
+                activeSend = nil
+            } else {
+                activeReceive = nil
+            }
         }
         resourceAccess = nil
         return true
@@ -1011,6 +1196,11 @@ final class TransferViewModel: ObservableObject {
         #if os(iOS)
         (activeSend?.sourceAccess as? ShareDraftLease)?.acknowledge()
         #endif
+        if transferActivity?.direction == .send {
+            activeSend = nil
+        } else {
+            activeReceive = nil
+        }
         resourceAccess = nil
     }
 
@@ -1030,6 +1220,13 @@ final class TransferViewModel: ObservableObject {
             updateActivity(state: .canceled, diagnostic: statusText)
         } else {
             updateActivity(state: .failed, diagnostic: statusText)
+        }
+        if !value.retryable {
+            if transferActivity?.direction == .send {
+                activeSend = nil
+            } else {
+                activeReceive = nil
+            }
         }
         resourceAccess = nil
     }
@@ -1052,7 +1249,8 @@ final class TransferViewModel: ObservableObject {
         settings: EnvoixRuntimeSettings,
         request: FfiTransferRequest,
         sourceAccess: AnyObject?,
-        roomCode: String? = nil
+        roomCode: String? = nil,
+        rememberPersistence: RememberPersistenceContext? = nil
     ) {
         let paths = normalizedPaths(selectedPaths)
         guard !paths.isEmpty else {
@@ -1079,7 +1277,8 @@ final class TransferViewModel: ObservableObject {
                     settings: settings,
                     request: request,
                     stateDirectory: preparedSelection.sessionStateDirectory,
-                    sourceAccess: sourceAccess ?? preparedSelection.sourceAccess
+                    sourceAccess: sourceAccess ?? preparedSelection.sourceAccess,
+                    rememberPersistence: rememberPersistence
                 ))
             }
             return
@@ -1095,7 +1294,8 @@ final class TransferViewModel: ObservableObject {
             settings: settings,
             request: request,
             stateDirectory: preparedSelection.sessionStateDirectory,
-            sourceAccess: sourceAccess ?? preparedSelection.sourceAccess
+            sourceAccess: sourceAccess ?? preparedSelection.sourceAccess,
+            rememberPersistence: rememberPersistence
         ))
     }
 
@@ -1111,7 +1311,11 @@ final class TransferViewModel: ObservableObject {
         } else {
             updateActivity(state: .connecting, diagnostic: localized("Connecting", "正在连接"))
         }
-        let observer = Observer(viewModel: self, operationID: operationID)
+        let observer = Observer(
+            viewModel: self,
+            operationID: operationID,
+            rememberPersistence: operation.rememberPersistence
+        )
         task = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
@@ -1149,7 +1353,8 @@ final class TransferViewModel: ObservableObject {
         settings: EnvoixRuntimeSettings,
         request: FfiTransferRequest,
         destinationAccess: AnyObject?,
-        roomCode: String? = nil
+        roomCode: String? = nil,
+        rememberPersistence: RememberPersistenceContext? = nil
     ) {
         displayLanguage = settings.language
         beginActivity(direction: .receive, mode: request.mode, roomCode: roomCode)
@@ -1159,7 +1364,8 @@ final class TransferViewModel: ObservableObject {
                 request: request,
                 stateDirectory: try receiveStateDirectory(activityID: transferActivity!.activityId),
                 targetDirectory: targetDirectory,
-                destinationAccess: destinationAccess
+                destinationAccess: destinationAccess,
+                rememberPersistence: rememberPersistence
             )
             activeReceive = operation
             activeSend = nil
@@ -1169,17 +1375,35 @@ final class TransferViewModel: ObservableObject {
         }
     }
 
-    private func launchReceive(_ operation: ReceiveOperation) {
+    private func launchReceive(
+        _ operation: ReceiveOperation,
+        launchSignal: ReceiveLaunchSignal? = nil
+    ) {
         resourceAccess = operation.destinationAccess
         let token = FfiManifestV2Cancellation()
         cancellation = token
         pausedByUser = false
         updateActivity(state: .waitingForPeer, diagnostic: localized("Waiting for sender", "等待发送方"))
-        let observer = Observer(viewModel: self, operationID: operationID)
+        let observer = Observer(
+            viewModel: self,
+            operationID: operationID,
+            rememberPersistence: operation.rememberPersistence
+        )
+        let expectedOperationID = operationID
+        let activityID = transferActivity?.activityId
         task = Task { @MainActor [weak self] in
-            guard let self else { return }
+            guard let self else {
+                launchSignal?.resolve(nil)
+                return
+            }
+            if launchSignal != nil,
+               expectedOperationID != operationID || transferActivity?.activityId != activityID {
+                launchSignal?.resolve(nil)
+                return
+            }
             do {
                 try persistActiveReceive(operation)
+                launchSignal?.resolve(activityID)
                 let pending = try await receiveTransferOfferV2(
                     settings: operation.settings,
                     request: operation.request,
@@ -1207,6 +1431,7 @@ final class TransferViewModel: ObservableObject {
                     continueReceive(pending, operation: operation, exceptionalApproved: false)
                 }
             } catch {
+                launchSignal?.resolve(nil)
                 if !pausedByUser { handleFailed(error.localizedDescription) }
             }
         }
@@ -1400,6 +1625,10 @@ final class TransferViewModel: ObservableObject {
     }
 
     private func persistActiveSend(_ operation: SendOperation) throws {
+        if requiresProcessAuthenticationState(operation.request.mode) {
+            clearStoredManifestSession(direction: .send)
+            return
+        }
         guard let activity = transferActivity else {
             throw RuntimeSettingsError("Cannot persist a sender session without an activity.")
         }
@@ -1436,6 +1665,10 @@ final class TransferViewModel: ObservableObject {
     }
 
     private func persistActiveReceive(_ operation: ReceiveOperation) throws {
+        if requiresProcessAuthenticationState(operation.request.mode) {
+            clearStoredManifestSession(direction: .receive)
+            return
+        }
         guard let activity = transferActivity else {
             throw RuntimeSettingsError("Cannot persist a receiver session without an activity.")
         }
@@ -1493,6 +1726,15 @@ final class TransferViewModel: ObservableObject {
             ? Self.activeSendSessionFileName
             : Self.activeReceiveSessionFileName
         return try manifestRootDirectory().appendingPathComponent(fileName, isDirectory: false)
+    }
+
+    private func requiresProcessAuthenticationState(_ mode: FfiTransferMode) -> Bool {
+        // Transfer authentication material is intentionally never serialized.
+        // Every current route therefore needs a fresh pairing after relaunch.
+        switch mode {
+        case .manual, .invite, .remembered, .showManual, .showInvite, .mdns, .room:
+            return true
+        }
     }
 
     private func restoreSourceAccess(_ stored: StoredAppleManifestSessionV2) throws -> AnyObject? {
@@ -1561,6 +1803,10 @@ final class TransferViewModel: ObservableObject {
         invite: String = "",
         code: String = "",
         token: String = "",
+        rememberConsent: Bool = false,
+        rememberedCredentialRef: String = "",
+        rememberedGeneration: UInt64 = 0,
+        rememberedPreviousGeneration: UInt64? = nil,
         pathPolicy: FfiPathPolicy = .auto
     ) -> FfiTransferRequest {
         let effectiveToken = direction == .receive
@@ -1575,12 +1821,35 @@ final class TransferViewModel: ObservableObject {
             invite: invite,
             code: code,
             token: effectiveToken,
+            rememberConsent: rememberConsent,
+            rememberedCredentialRef: rememberedCredentialRef,
+            rememberedGeneration: rememberedGeneration,
+            rememberedPreviousGeneration: rememberedPreviousGeneration,
             broker: settings.serverUrl,
             relay: settings.relayUrl,
             configPath: settings.configPath,
             pathPolicy: pathPolicy,
             rendezvous: rendezvousPlan(for: mode)
         )
+    }
+
+    private func prepareRememberPersistence(
+        label: String?,
+        settings: EnvoixRuntimeSettings
+    ) -> RememberPersistenceContext? {
+        guard let label, !label.trimmed.isEmpty else { return nil }
+        do {
+            return try RememberPersistenceContext(
+                pending: RememberedPeerStore.shared.prepare(
+                    label: label,
+                    broker: settings.serverUrl,
+                    relay: settings.relayUrl
+                )
+            )
+        } catch {
+            handleFailed(error.localizedDescription)
+            return nil
+        }
     }
 
     private func rendezvousPlan(for mode: FfiTransferMode) -> FfiRendezvousPlan {
@@ -1593,6 +1862,8 @@ final class TransferViewModel: ObservableObject {
             )
         case .mdns:
             return FfiRendezvousPlan(useRoom: false, useMdns: true, internetAvailable: true)
+        case .remembered:
+            return FfiRendezvousPlan(useRoom: true, useMdns: false, internetAvailable: true)
         default:
             return FfiRendezvousPlan(useRoom: false, useMdns: false, internetAvailable: true)
         }
@@ -1671,10 +1942,16 @@ final class TransferViewModel: ObservableObject {
 final class Observer: TransferObserver, @unchecked Sendable {
     private weak var viewModel: TransferViewModel?
     private let operationID: UUID
+    private let rememberPersistence: RememberPersistenceContext?
 
-    init(viewModel: TransferViewModel, operationID: UUID) {
+    init(
+        viewModel: TransferViewModel,
+        operationID: UUID,
+        rememberPersistence: RememberPersistenceContext? = nil
+    ) {
         self.viewModel = viewModel
         self.operationID = operationID
+        self.rememberPersistence = rememberPersistence
     }
 
     func onInviteReady(invite: String) { hop { $0.handleInvite(invite) } }
@@ -1689,6 +1966,9 @@ final class Observer: TransferObserver, @unchecked Sendable {
     func onTransferFailed(failure: FfiTransferFailure) { hop { $0.handleTransferFailed(failure) } }
     func onConnectionPath(event: FfiConnectionPathEvent) { hop { $0.handleConnectionPath(event) } }
     func onDiagnostic(message: String) { hop { $0.handleDiagnostic(message) } }
+    func onRememberedCredential(opaqueCredential: Data, generation: UInt64) -> Bool {
+        rememberPersistence?.persist(opaqueCredential, generation: generation) ?? false
+    }
 
     private func hop(_ body: @escaping @MainActor (TransferViewModel) -> Void) {
         Task { @MainActor [weak viewModel, operationID] in

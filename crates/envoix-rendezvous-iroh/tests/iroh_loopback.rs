@@ -8,8 +8,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use envoix_protocol::PeerDescriptor;
-use envoix_rendezvous::RoomRegistry;
-use envoix_rendezvous_iroh::{build_endpoint, endpoint_addr, pair_in_room, serve_endpoint};
+use envoix_rendezvous::{
+    BootstrapKind, InvitationSide, Join, RENDEZVOUS_PROTOCOL_VERSION, RoomRegistry, TransferRole,
+};
+use envoix_rendezvous_iroh::{
+    InvitationControlContext, build_endpoint, drive_pairing, endpoint_addr, join_invitation,
+    serve_endpoint,
+};
 use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 
 /// Loopback bind, fresh identity.
@@ -72,13 +77,47 @@ async fn two_iroh_peers_pair_through_the_rendezvous() {
 
     let (broker_a, broker_b) = (broker.clone(), broker.clone());
     let (mine_a, mine_b) = (desc_a.clone(), desc_b.clone());
+    let joiner_context = InvitationControlContext::new(
+        "700007".to_string(),
+        BootstrapKind::RoomCode,
+        TransferRole::Receiver,
+        TransferRole::Sender,
+    )
+    .unwrap();
+    let creator_context = joiner_context.clone();
     let a = tokio::spawn(async move {
-        pair_in_room(&ca, broker_a, "room-7", "7-amber-comet", &mine_a).await
+        let session = join_invitation(
+            &ca,
+            broker_a,
+            Join {
+                version: RENDEZVOUS_PROTOCOL_VERSION,
+                room_id: "700007".to_string(),
+                invitation_side: InvitationSide::Joiner,
+                transfer_role: TransferRole::Sender,
+                bootstrap_methods: Vec::new(),
+                selected_bootstrap_method: Some(BootstrapKind::RoomCode),
+            },
+        )
+        .await?;
+        drive_pairing(session, "700007-abcd-1234", &joiner_context, &mine_a, None).await
     });
-    // Small stagger; the SPAKE2 role is by arrival but pair_in_room handles either.
+    // Arrival order does not select the PAKE role.
     tokio::time::sleep(Duration::from_millis(100)).await;
     let b = tokio::spawn(async move {
-        pair_in_room(&cb, broker_b, "room-7", "7-amber-comet", &mine_b).await
+        let session = join_invitation(
+            &cb,
+            broker_b,
+            Join {
+                version: RENDEZVOUS_PROTOCOL_VERSION,
+                room_id: "700007".to_string(),
+                invitation_side: InvitationSide::Creator,
+                transfer_role: TransferRole::Receiver,
+                bootstrap_methods: vec![BootstrapKind::FullTicket, BootstrapKind::RoomCode],
+                selected_bootstrap_method: None,
+            },
+        )
+        .await?;
+        drive_pairing(session, "700007-abcd-1234", &creator_context, &mine_b, None).await
     });
 
     let join = Duration::from_secs(20);
@@ -96,7 +135,6 @@ async fn two_iroh_peers_pair_through_the_rendezvous() {
     // Each recovered the OTHER peer's iroh descriptor, sealed under the shared key.
     assert_eq!(a_got.peer, desc_b);
     assert_eq!(b_got.peer, desc_a);
-    // Both sides derived the same data-plane token from the shared key.
-    assert_eq!(a_got.token, b_got.token);
-    assert!(a_got.token.len() >= 12 && a_got.token.is_ascii());
+    assert_eq!(a_got.control_key(), b_got.control_key());
+    assert_eq!(a_got.control_transcript_hash, b_got.control_transcript_hash);
 }
