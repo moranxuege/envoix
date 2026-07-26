@@ -7,6 +7,8 @@
             <intent-filter>
                 <action android:name="dev.envoix.app.NAT_TEST_CREATE_RECEIVER_INVITE" />
                 <action android:name="dev.envoix.app.NAT_TEST_START_SENDER" />
+                <action android:name="dev.envoix.app.NAT_TEST_START_REMEMBERED_RECEIVER" />
+                <action android:name="dev.envoix.app.NAT_TEST_QUERY_REMEMBERED" />
                 <action android:name="dev.envoix.app.NAT_TEST_QUERY_TRANSFER" />
             </intent-filter>
         </receiver>
